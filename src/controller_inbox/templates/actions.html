@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Action items · CloseDesk{% endblock %}
+{% block heading %}Action items{% endblock %}
+{% block body %}
+<section class="toolbar">
+  <div class="tabs">
+    <a class="{{ 'on' if status == 'open' else '' }}" href="/actions?status=open">Open</a>
+    <a class="{{ 'on' if status == 'done' else '' }}" href="/actions?status=done">Done</a>
+    <a class="{{ 'on' if status == 'all' else '' }}" href="/actions?status=all">All</a>
+  </div>
+  <p class="muted">{{ overdue_count }} overdue · open items stay here until you mark them done.</p>
+  <a class="ghost" href="/export/actions.csv">Download CSV</a>
+</section>
+<section class="table-wrap">
+  <table class="mail">
+    <thead>
+      <tr>
+        <th></th>
+        <th>Priority</th>
+        <th>Due</th>
+        <th>Action</th>
+        <th>From email</th>
+        <th>Category</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for action, email in rows %}
+      <tr class="{{ action.priority.value }}">
+        <td>
+          {% if action.status.value != 'done' %}
+          <form method="post" action="/actions/{{ action.id }}/complete?next=/actions">
+            <button class="tiny" type="submit">Done</button>
+          </form>
+          {% else %}
+          <form method="post" action="/actions/{{ action.id }}/reopen?next=/actions?status=done">
+            <button class="tiny ghost" type="submit">Reopen</button>
+          </form>
+          {% endif %}
+        </td>
+        <td><span class="pill {{ action.priority.value }}">{{ action.priority.value | label_imp }}</span></td>
+        <td class="nowrap">{{ action.due_date or '—' }}</td>
+        <td>
+          <strong>{{ action.title }}</strong>
+          <small class="why">{{ action.detail }}</small>
+        </td>
+        <td><a href="/inbox/{{ email.id }}">{{ email.subject }}</a><br/><small>{{ email.sender_name }}</small></td>
+        <td>{{ email.category.value | label_doc }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">No action items in this view.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

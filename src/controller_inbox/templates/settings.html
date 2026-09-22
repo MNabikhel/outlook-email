@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Connect Outlook · CloseDesk{% endblock %}
+{% block heading %}Connect Outlook{% endblock %}
+{% block body %}
+<section class="split">
+  <article class="panel">
+    <h3>How this runs</h3>
+    <ol class="plain numbered">
+      <li>CloseDesk reads mail through Microsoft Graph (Microsoft 365 / Outlook).</li>
+      <li>It pulls the body plus every attachment, extracts text from PDF, Excel, Word, and CSV, and redacts account numbers.</li>
+      <li>Finance-specific rules classify the file (invoice, bank statement, payroll, PBC request, payment-instruction change, and so on) and score importance.</li>
+      <li>Action items are extracted for you: enter invoice, apply cash, reconcile, approve T&amp;E, complete PBC, do not process a wire-instruction change.</li>
+      <li>A daily digest rolls the open list together. Optional Outlook write-back flags the message in your mailbox.</li>
+    </ol>
+    <p class="muted">Last sync: {{ last_sync or 'never' }}</p>
+  </article>
+  <article class="panel">
+    <h3>Microsoft 365 setup</h3>
+    <ol class="plain numbered">
+      <li>In Entra ID, register an app (public client / mobile &amp; desktop).</li>
+      <li>Enable “Allow public client flows”.</li>
+      <li>Add delegated Graph permissions: <code>Mail.Read</code>, <code>User.Read</code>. Add <code>Mail.ReadWrite</code> to flag messages, <code>Mail.Send</code> to email the digest.</li>
+      <li>Copy the application (client) ID into <code>.env</code> as <code>AZURE_CLIENT_ID</code>.</li>
+      <li>Run <code>python -m controller_inbox auth</code>, then <code>sync</code> or <code>watch</code>.</li>
+    </ol>
+    <p>Status: <strong>{{ 'ready to sign in' if graph_configured else 'not configured — using demo mailbox' }}</strong></p>
+    <form method="post" action="/demo/reload">
+      <button type="submit">Reload demo mailbox</button>
+    </form>
+  </article>
+</section>
+<article class="panel">
+  <h3>Improvements included for an assistant controller</h3>
+  <ul class="plain">
+    <li>Business-email-compromise check when a vendor “updates wiring instructions”.</li>
+    <li>Duplicate invoice detection on invoice number.</li>
+    <li>Missing-attachment catch when the body says “see attached” and nothing arrived.</li>
+    <li>Month-end countdown and close-item boost in the last week of the month.</li>
+    <li>CSV export so you can drop the action list into Excel.</li>
+    <li>Account numbers stored as last-4 only.</li>
+  </ul>
+</article>
+{% endblock %}

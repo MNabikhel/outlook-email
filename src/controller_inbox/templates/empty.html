@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Get started · CloseDesk{% endblock %}
+{% block heading %}Get started{% endblock %}
+{% block body %}
+<article class="panel hero">
+  <h2>No mail in the local ledger yet.</h2>
+  <p>Load a realistic assistant-controller mailbox (invoices, bank statements, payroll, a fraud wire-instruction change, auditor PBC, tax notice) or connect Outlook.</p>
+  <form method="post" action="/demo/reload">
+    <button type="submit">Load demo mailbox</button>
+  </form>
+  <p class="muted">Or from the terminal: <code>python -m controller_inbox demo --serve</code></p>
+</article>
+{% endblock %}
