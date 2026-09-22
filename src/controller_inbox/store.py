@@ -15,6 +15,7 @@ from controller_inbox.models import (
     EmailRecord,
     ExtractedFields,
     Importance,
+    TriageBin,
 )
 
 
@@ -37,6 +38,10 @@ CREATE TABLE IF NOT EXISTS emails (
     importance_reasons TEXT,
     flags TEXT,
     extracted TEXT,
+    triage_bin TEXT,
+    summary TEXT,
+    highlights TEXT,
+    ai_source TEXT,
     source TEXT,
     conversation_id TEXT,
     internet_message_id TEXT,
@@ -88,10 +93,21 @@ CREATE TABLE IF NOT EXISTS sync_state (
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(category);
+CREATE INDEX IF NOT EXISTS idx_emails_bin ON emails(triage_bin);
 CREATE INDEX IF NOT EXISTS idx_actions_status ON action_items(status);
 CREATE INDEX IF NOT EXISTS idx_actions_due ON action_items(due_date);
 CREATE INDEX IF NOT EXISTS idx_att_hash ON attachments(sha256);
 """
+
+# Columns added after the first release. SQLite has no "ADD COLUMN IF NOT EXISTS",
+# so we diff against PRAGMA table_info and add what is missing. This keeps older
+# on-disk databases working without a reset.
+_EMAIL_MIGRATIONS = {
+    "triage_bin": "ALTER TABLE emails ADD COLUMN triage_bin TEXT",
+    "summary": "ALTER TABLE emails ADD COLUMN summary TEXT",
+    "highlights": "ALTER TABLE emails ADD COLUMN highlights TEXT",
+    "ai_source": "ALTER TABLE emails ADD COLUMN ai_source TEXT",
+}
 
 
 def _dumps(value: Any) -> str:
@@ -113,6 +129,13 @@ class Store:
     def _init(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(emails)")}
+        for column, ddl in _EMAIL_MIGRATIONS.items():
+            if column not in existing:
+                conn.execute(ddl)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -138,9 +161,10 @@ class Store:
                     id, subject, sender_name, sender_email, received_at, body_text,
                     body_preview, has_attachments, outlook_importance, is_read,
                     category, category_confidence, importance, importance_score,
-                    importance_reasons, flags, extracted, source, conversation_id,
+                    importance_reasons, flags, extracted, triage_bin, summary,
+                    highlights, ai_source, source, conversation_id,
                     internet_message_id, writeback_status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     subject=excluded.subject,
                     sender_name=excluded.sender_name,
@@ -158,6 +182,10 @@ class Store:
                     importance_reasons=excluded.importance_reasons,
                     flags=excluded.flags,
                     extracted=excluded.extracted,
+                    triage_bin=excluded.triage_bin,
+                    summary=excluded.summary,
+                    highlights=excluded.highlights,
+                    ai_source=excluded.ai_source,
                     source=excluded.source,
                     conversation_id=excluded.conversation_id,
                     internet_message_id=excluded.internet_message_id,
@@ -181,6 +209,10 @@ class Store:
                     _dumps(email.importance_reasons),
                     _dumps(email.flags),
                     _dumps(email.extracted.to_dict()),
+                    email.triage_bin.value,
+                    email.summary,
+                    _dumps(email.highlights),
+                    email.ai_source,
                     email.source,
                     email.conversation_id,
                     email.internet_message_id,
@@ -280,6 +312,7 @@ class Store:
         *,
         importance: str | None = None,
         category: str | None = None,
+        triage_bin: str | None = None,
         flag: str | None = None,
         q: str | None = None,
         limit: int = 200,
@@ -292,6 +325,9 @@ class Store:
         if category:
             clauses.append("category = ?")
             params.append(category)
+        if triage_bin:
+            clauses.append("triage_bin = ?")
+            params.append(triage_bin)
         if q:
             clauses.append(
                 "(subject LIKE ? OR sender_email LIKE ? OR sender_name LIKE ? OR body_preview LIKE ?)"
@@ -465,6 +501,13 @@ class Store:
             ).fetchall()
         return {row["document_type"]: row["n"] for row in rows}
 
+    def bin_counts(self) -> dict[str, int]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT triage_bin, COUNT(*) AS n FROM emails GROUP BY triage_bin"
+            ).fetchall()
+        return {(row["triage_bin"] or "fyi"): row["n"] for row in rows}
+
     def save_digest(self, period_date: str, generated_at: str, markdown: str, html: str, payload: dict) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -495,6 +538,27 @@ class Store:
             ).fetchone()
         return dict(row) if row else None
 
+    def list_digests(self, *, limit: int = 60) -> list[dict[str, Any]]:
+        """History of stored digests (newest first) with a few headline KPIs."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT period_date, generated_at, payload FROM digests "
+                "ORDER BY period_date DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            payload = _loads(row["payload"], {}) if row["payload"] else {}
+            kpis = payload.get("kpis", {}) if isinstance(payload, dict) else {}
+            out.append(
+                {
+                    "period_date": row["period_date"],
+                    "generated_at": row["generated_at"],
+                    "kpis": kpis,
+                }
+            )
+        return out
+
     def get_state(self, key: str) -> str | None:
         with self.connect() as conn:
             row = conn.execute("SELECT value FROM sync_state WHERE key = ?", (key,)).fetchone()
@@ -506,6 +570,23 @@ class Store:
                 "INSERT INTO sync_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+
+
+def _row_get(row: sqlite3.Row, key: str) -> Any:
+    """sqlite3.Row has no .get(); some callers build rows without newer columns."""
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return None
+
+
+def _coerce_stored_bin(value: Any) -> TriageBin:
+    if not value:
+        return TriageBin.FYI
+    try:
+        return TriageBin(value)
+    except ValueError:
+        return TriageBin.FYI
 
 
 def _action_from_row(row: sqlite3.Row) -> ActionItem:
@@ -561,6 +642,10 @@ def _email_from_rows(
         importance_reasons=_loads(row["importance_reasons"], []),
         flags=_loads(row["flags"], []),
         extracted=ExtractedFields.from_dict(_loads(row["extracted"], {})),
+        triage_bin=_coerce_stored_bin(_row_get(row, "triage_bin")),
+        summary=_row_get(row, "summary") or "",
+        highlights=_loads(_row_get(row, "highlights"), []),
+        ai_source=_row_get(row, "ai_source") or "rules",
         source=row["source"] or "graph",
         conversation_id=row["conversation_id"] or "",
         internet_message_id=row["internet_message_id"] or "",

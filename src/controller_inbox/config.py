@@ -7,6 +7,10 @@ from zoneinfo import ZoneInfo
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Default to the LM Studio local server. Ollama users set http://localhost:11434/v1,
+# Bionic / other OpenAI-compatible servers set their own base URL.
+DEFAULT_LLM_BASE_URL = "http://localhost:1234/v1"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -30,7 +34,10 @@ class Settings(BaseSettings):
     digest_to: str = ""
     mailbox: str = ""
     llm: bool = False
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "local-model"
+    llm_base_url: str = ""
+    llm_api_key: str = ""
+    llm_timeout: float = 45.0
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"
@@ -73,6 +80,22 @@ class Settings(BaseSettings):
     @property
     def graph_configured(self) -> bool:
         return bool(self.azure_client_id)
+
+    @property
+    def llm_endpoint(self) -> str:
+        """Effective OpenAI-compatible base URL for the local model server."""
+        base = (self.llm_base_url or "").strip() or DEFAULT_LLM_BASE_URL
+        return base.rstrip("/")
+
+    @property
+    def llm_key(self) -> str:
+        # Local servers (LM Studio, Ollama, Bionic) ignore the key but the OpenAI
+        # client format wants one; fall back to any OpenAI key, then a harmless placeholder.
+        return self.llm_api_key or self.openai_api_key or "local-no-key"
+
+    @property
+    def llm_configured(self) -> bool:
+        return bool(self.llm and self.llm_endpoint)
 
     @property
     def daemon_mode(self) -> bool:

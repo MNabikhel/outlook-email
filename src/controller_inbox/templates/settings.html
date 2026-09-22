@@ -2,6 +2,25 @@
 {% block title %}Connect Outlook · CloseDesk{% endblock %}
 {% block heading %}Connect Outlook{% endblock %}
 {% block body %}
+<article class="panel llm-card {{ 'on' if settings.llm_configured else 'off' }}">
+  <h3>Local AI (LM Studio / Ollama / Bionic)</h3>
+  <p>
+    Status:
+    <strong>{{ 'ON — enriching mail with ' + settings.llm_model if settings.llm_configured else 'OFF — deterministic rules only' }}</strong>
+  </p>
+  <ul class="plain">
+    <li>Endpoint: <code>{{ settings.llm_endpoint }}</code></li>
+    <li>Model: <code>{{ settings.llm_model }}</code></li>
+    <li>Nothing leaves your machine — classification, fraud checks, and action items stay rule-based; the model only writes summaries and refines the soft bins.</li>
+  </ul>
+  {% if not settings.llm_configured %}
+  <p class="muted">
+    Turn it on: start your local server, then set <code>CONTROLLER_INBOX_LLM=true</code>
+    (and <code>CONTROLLER_INBOX_LLM_BASE_URL</code> if it is not the LM Studio default).
+    Verify with <code>python -m controller_inbox llm-check</code>.
+  </p>
+  {% endif %}
+</article>
 <section class="split">
   <article class="panel">
     <h3>How this runs</h3>
@@ -32,11 +51,14 @@
 <article class="panel">
   <h3>Improvements included for an assistant controller</h3>
   <ul class="plain">
+    <li>Local-AI summaries and triage bins from LM Studio / Ollama / Bionic — private, on your laptop.</li>
+    <li>Triage bins: do-not-process, action required, needs review, FYI, read later.</li>
     <li>Business-email-compromise check when a vendor “updates wiring instructions”.</li>
     <li>Duplicate invoice detection on invoice number.</li>
     <li>Missing-attachment catch when the body says “see attached” and nothing arrived.</li>
     <li>Month-end countdown and close-item boost in the last week of the month.</li>
-    <li>CSV export so you can drop the action list into Excel.</li>
+    <li>Daily digest with a browsable history so you can look back at any day.</li>
+    <li>CSV / JSON export and a <code>triage</code> command for scripts and agents.</li>
     <li>Account numbers stored as last-4 only.</li>
   </ul>
 </article>

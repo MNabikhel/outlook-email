@@ -7,10 +7,24 @@
     Morning brief of what to code, pay, reconcile, and verify.
     {% if payload %}For {{ payload.date }} · {{ payload.days_to_close }} day(s) to close.{% endif %}
   </p>
-  <form method="post" action="/digest/rebuild">
-    <button type="submit">Rebuild digest</button>
-  </form>
+  <div class="toolbar-actions">
+    <a class="ghost" href="/digests">Digest history</a>
+    <form method="post" action="/digest/rebuild">
+      <button type="submit">Rebuild digest</button>
+    </form>
+  </div>
 </section>
+
+{% if history and history|length > 1 %}
+<section class="toolbar">
+  <div class="digest-jump">
+    <span class="muted">Jump to a past day:</span>
+    {% for row in history[:10] %}
+    <a class="ghost {{ 'on' if row.period_date == as_of else '' }}" href="/digest?date={{ row.period_date }}">{{ row.period_date }}</a>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
 
 {% if payload %}
 {% macro action_list(items, empty) %}
@@ -61,6 +75,12 @@
     {{ action_list(payload.cash_to_apply, 'No remittances waiting.') }}
     <h3>Close / reconcile</h3>
     {{ action_list(payload.close_items, 'No close items in the window.') }}
+    <h3>Triage bins</h3>
+    <ul class="plain">
+      {% for key, n in payload.bin_counts.items() %}
+      <li><a href="/inbox?bin={{ key }}">{{ key | label_bin }}</a> — {{ n }}</li>
+      {% endfor %}
+    </ul>
     <h3>Category mix</h3>
     <ul class="plain">
       {% for key, n in payload.category_counts.items() %}

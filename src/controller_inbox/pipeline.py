@@ -12,6 +12,7 @@ from controller_inbox.extract import (
     redact_financial_secrets,
     sha256_bytes,
 )
+from controller_inbox.llm import LocalLLMClient, enrich_email
 from controller_inbox.models import AttachmentRecord, EmailRecord, RawMessage
 from controller_inbox.store import Store
 
@@ -33,6 +34,7 @@ def process_message(
     as_of=None,
     now: datetime | None = None,
     writeback: bool | None = None,
+    llm_client: LocalLLMClient | None = None,
 ) -> EmailRecord:
     now = now or datetime.now(timezone.utc)
     as_of = as_of or now.astimezone(settings.tz).date()
@@ -151,6 +153,13 @@ def process_message(
         attachments=att_records,
         actions=actions,
     )
+
+    enrichment = enrich_email(record, settings, client=llm_client)
+    record.summary = enrichment.summary
+    record.triage_bin = enrichment.triage_bin
+    record.highlights = enrichment.highlights
+    record.ai_source = enrichment.source
+
     store.upsert_email(record)
     return store.get_email(record.id) or record
 
@@ -162,17 +171,29 @@ def ingest_mailbox(
     *,
     received_after: datetime | None = None,
     now: datetime | None = None,
+    llm_client: LocalLLMClient | None = None,
 ) -> list[EmailRecord]:
+    client = llm_client
+    if client is None and settings.llm_configured:
+        client = LocalLLMClient(settings)
     processed: list[EmailRecord] = []
     for raw in mailbox.list_messages(received_after=received_after):
-        processed.append(process_message(raw, store, settings, mailbox, now=now))
+        processed.append(
+            process_message(raw, store, settings, mailbox, now=now, llm_client=client)
+        )
     last = now or datetime.now(timezone.utc)
     store.set_state("last_sync_at", last.astimezone(timezone.utc).isoformat())
     return processed
 
 
-def ingest_demo(store: Store, settings: Settings, *, now: datetime | None = None) -> list[EmailRecord]:
+def ingest_demo(
+    store: Store,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+    llm_client: LocalLLMClient | None = None,
+) -> list[EmailRecord]:
     from controller_inbox.demo import DemoMailbox
 
     mailbox = DemoMailbox(now=now)
-    return ingest_mailbox(mailbox, store, settings, now=now)
+    return ingest_mailbox(mailbox, store, settings, now=now, llm_client=llm_client)
