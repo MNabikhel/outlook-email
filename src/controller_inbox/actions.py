@@ -149,26 +149,27 @@ def extract_actions(
     elif category == DocumentType.WORKPAPER:
         add("Complete close workpaper", subject, _close_due(as_of), Importance.HIGH, "close")
 
-    for sentence in _sentences(f"{subject}. {body}"):
-        if not ACTION_RE.search(sentence):
-            continue
-        if category == DocumentType.NEWSLETTER:
-            continue
-        sent_due = None
-        due_match = re.search(
-            r"\b(?:by|before|due)\s+([A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2}|EOD|COB|today|tomorrow|Monday|Tuesday|Wednesday|Thursday|Friday)",
-            sentence,
-            re.I,
-        )
-        if due_match:
-            sent_due = parse_due_date(due_match.group(1), as_of=as_of)
-        add(
-            _title_from_sentence(sentence),
-            sentence.strip(),
-            sent_due or due,
-            importance if importance != Importance.LOW else Importance.MEDIUM,
-            "body",
-        )
+    if "fraud_risk" not in flags and category != DocumentType.PAYMENT_INSTRUCTION_CHANGE:
+        for sentence in _sentences(f"{subject}. {body}"):
+            if not ACTION_RE.search(sentence):
+                continue
+            if category == DocumentType.NEWSLETTER:
+                continue
+            sent_due = None
+            due_match = re.search(
+                r"\b(?:by|before|due)\s+([A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2}|EOD|COB|today|tomorrow|Monday|Tuesday|Wednesday|Thursday|Friday)",
+                sentence,
+                re.I,
+            )
+            if due_match:
+                sent_due = parse_due_date(due_match.group(1), as_of=as_of)
+            add(
+                _title_from_sentence(sentence),
+                sentence.strip(),
+                sent_due or due,
+                importance if importance != Importance.LOW else Importance.MEDIUM,
+                "body",
+            )
 
     return items
 

@@ -41,6 +41,7 @@ def test_demo_pipeline_categorizes_controller_mailbox(store, settings, as_of_now
 
     action_titles = " ".join(a.title.lower() for a in by_id["demo-bec-wire"].actions)
     assert "verify" in action_titles and "phone" in action_titles
+    assert "please process the outstanding" not in action_titles
 
 
 def test_daily_digest_lists_fraud_and_actions(loaded, settings, as_of_now):
@@ -50,6 +51,10 @@ def test_daily_digest_lists_fraud_and_actions(loaded, settings, as_of_now):
     assert payload["kpis"]["fraud_alerts"] >= 1
     assert payload["kpis"]["open_actions"] >= 8
     assert any("wiring" in item["subject"].lower() or "fraud" in ",".join(item["flags"]) for item in payload["critical_alerts"])
+    assert all(
+        "fraud_risk" in item["flags"] or item["category"] == "payment_instruction_change"
+        for item in payload["critical_alerts"]
+    )
     assert payload["invoices_to_enter"]
     assert payload["cash_to_apply"]
     assert "CloseDesk daily digest" in payload["markdown"]

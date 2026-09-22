@@ -49,6 +49,8 @@
 
 <section class="split">
   <article class="panel">
+    <h3>Other critical (not payment-instruction fraud)</h3>
+    {{ action_list(payload.other_critical, 'No other critical mail.') }}
     <h3>Due this week</h3>
     {{ action_list(payload.due_this_week, 'Nothing else dated this week.') }}
     <h3>Invoices to enter</h3>

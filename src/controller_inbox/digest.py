@@ -25,7 +25,16 @@ def build_digest(store: Store, *, as_of: date, generated_at: datetime) -> dict[s
     ]
     undated = [(a, e) for a, e in open_actions if not a.due_date]
 
-    critical_alerts = [e for e in emails if e.importance == Importance.CRITICAL or "fraud_risk" in e.flags]
+    critical_alerts = [
+        e
+        for e in emails
+        if "fraud_risk" in e.flags or e.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE
+    ]
+    other_critical = [
+        e
+        for e in emails
+        if e.importance == Importance.CRITICAL and e.id not in {x.id for x in critical_alerts}
+    ]
     high = [e for e in emails if e.importance in {Importance.CRITICAL, Importance.HIGH}]
     invoices = [e for e in emails if e.category == DocumentType.AP_INVOICE]
     cash = [e for e in emails if e.category == DocumentType.REMITTANCE_ADVICE]
@@ -60,6 +69,7 @@ def build_digest(store: Store, *, as_of: date, generated_at: datetime) -> dict[s
             Counter(att.document_type.value for e in emails for att in e.attachments)
         ),
         "critical_alerts": [_email_card(e) for e in critical_alerts],
+        "other_critical": [_email_card(e) for e in other_critical],
         "high_importance": [_email_card(e) for e in high],
         "overdue_actions": [_action_card(a, e) for a, e in overdue],
         "due_today": [_action_card(a, e) for a, e in due_today],
@@ -130,6 +140,12 @@ def render_markdown(payload: dict[str, Any]) -> str:
     if payload["critical_alerts"]:
         for item in payload["critical_alerts"]:
             lines.append(f"- **{item['subject']}** from {item['sender']} ({', '.join(item['flags']) or 'critical'})")
+    else:
+        lines.append("- None.")
+    lines += ["", "## Other critical mail"]
+    if payload.get("other_critical"):
+        for item in payload["other_critical"]:
+            lines.append(f"- **{item['subject']}** from {item['sender']} ({item['category_label']})")
     else:
         lines.append("- None.")
     lines += ["", "## Overdue"]
