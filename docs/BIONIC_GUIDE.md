@@ -1,4 +1,6 @@
-# CloseDesk with Bionic — setup and overnight guide
+# CloseDesk with Bionic — how it runs overnight
+
+The short path is [SETUP.md](SETUP.md). This page is the detail behind it. The slides are [CloseDesk-how-it-works.pptx](CloseDesk-how-it-works.pptx).
 
 CloseDesk reads a heavy Outlook inbox on your laptop. Fast scripts pull the text, the amounts, the dates, and the file type. A local model in LM Studio's Bionic does the actual reading: what the message is, which folder it belongs in, a one-line summary, and the tasks.
 

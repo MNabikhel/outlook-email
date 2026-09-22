@@ -4,7 +4,7 @@ A local inbox assistant for Outlook mail.
 
 Drop `.msg` or `.eml` files into a folder on your laptop, or connect Microsoft 365. Scripts pull the text, the amounts, the dates, and the file type. A local model in LM Studio's Bionic does the reading and files each message into a morning board: daily digest, important mail, action items, informational, and reference.
 
-The setup steps, the overnight command, and the Bionic skill are in [docs/BIONIC_GUIDE.md](docs/BIONIC_GUIDE.md). The same story is in [docs/CloseDesk-how-it-works.pptx](docs/CloseDesk-how-it-works.pptx).
+Start here: [docs/SETUP.md](docs/SETUP.md). How it works, in slides: [docs/CloseDesk-how-it-works.pptx](docs/CloseDesk-how-it-works.pptx). The longer notes are in [docs/BIONIC_GUIDE.md](docs/BIONIC_GUIDE.md).
 
 ## Laptop drop folder
 

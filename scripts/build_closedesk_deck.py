@@ -85,7 +85,7 @@ def build(path: Path) -> None:
     prs.core_properties.title = "CloseDesk — how it works"
     prs.core_properties.subject = "Overnight inbox reading with a local Bionic model"
     blank = prs.slide_layouts[6]
-    pages = 12
+    pages = 13
 
     # 1 title
     slide = prs.slides.add_slide(blank)
@@ -357,28 +357,44 @@ def build(path: Path) -> None:
     )
     _footer(slide, 11, pages)
 
-    # 12 tonight
+    # 12 setup
     slide = prs.slides.add_slide(blank)
-    _chrome(slide, "Tonight", "Five steps, then leave it.")
+    _chrome(slide, "Easy setup", "Five steps. The written page is docs/SETUP.md.")
     steps = [
-        "1    Install the project and the Python packages.",
-        "2    Load a model in LM Studio and start the local server.",
-        "3    Add the closedesk-inbox skill in Bionic, and turn CONTROLLER_INBOX_LLM on.",
-        "4    Drop today’s .msg files into inbox/incoming.",
-        "5    Run python -m controller_inbox overnight. In the morning, open the dashboard.",
+        "1    Install.  python -m venv .venv, then pip install -e \".[dev]\"",
+        "2    Prove it.  python -m controller_inbox demo --serve",
+        "3    Start LM Studio’s local server, and set CONTROLLER_INBOX_LLM=true",
+        "4    Drop .msg files into inbox/incoming",
+        "5    python -m controller_inbox overnight, then serve in the morning",
     ]
-    _bullets(slide, steps, Inches(0.55), Inches(1.75), Inches(12.2), Inches(3.6), size=22)
+    _bullets(slide, steps, Inches(0.55), Inches(1.7), Inches(12.2), Inches(4.2), size=22)
     _text(
         slide,
-        "Rows marked Waiting on Bionic are drafts. Read by Bionic means the model filed them.",
+        "Outlook login is optional. The drop folder is enough for the first night.",
         Inches(0.55),
-        Inches(5.7),
+        Inches(6.15),
         Inches(12),
-        Inches(0.6),
+        Inches(0.45),
         size=18,
         color=MUTED,
     )
     _footer(slide, 12, pages)
+
+    # 13 ready
+    slide = prs.slides.add_slide(blank)
+    _chrome(slide, "Ready to run", "Three checks, then leave it on overnight.")
+    checks = [
+        ("1", "The sample opens", "demo --serve shows Morning, Important, Informational, and Reference."),
+        ("2", "Your file lands", "A .msg in inbox/incoming shows up after ingest or overnight."),
+        ("3", "Bionic reads", "With the LM Studio server on, rows can say Read by Bionic."),
+    ]
+    for index, (num, title, body) in enumerate(checks):
+        y = Inches(1.7 + index * 1.45)
+        _box(slide, Inches(0.55), y, Inches(12.2), Inches(1.3), WHITE)
+        _text(slide, num, Inches(0.75), y + Inches(0.28), Inches(0.7), Inches(0.7), size=28, bold=True, color=GOLD, font="Georgia")
+        _text(slide, title, Inches(1.6), y + Inches(0.18), Inches(10.5), Inches(0.45), size=22, bold=True, color=NAVY, font="Georgia")
+        _text(slide, body, Inches(1.6), y + Inches(0.68), Inches(10.5), Inches(0.4), size=16, color=INK)
+    _footer(slide, 13, pages)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(path)
