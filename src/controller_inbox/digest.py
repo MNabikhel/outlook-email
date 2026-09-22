@@ -63,6 +63,12 @@ def build_digest(store: Store, *, as_of: date, generated_at: datetime) -> dict[s
             "overdue_actions": len(overdue),
             "fraud_alerts": len([e for e in emails if "fraud_risk" in e.flags]),
             "attachments": sum(len(e.attachments) for e in emails),
+            "waiting_on_bionic": sum(1 for e in emails if e.model_status == "script_draft"),
+        },
+        "folder_counts": {
+            "important": sum(1 for e in emails if e.folder == "important"),
+            "informational": sum(1 for e in emails if e.folder == "informational"),
+            "reference": sum(1 for e in emails if e.folder == "reference"),
         },
         "category_counts": dict(Counter(e.category.value for e in emails)),
         "attachment_counts": dict(
@@ -98,6 +104,9 @@ def _email_card(email) -> dict[str, Any]:
         "importance_label": IMPORTANCE_LABELS.get(email.importance, email.importance.value),
         "score": email.importance_score,
         "flags": email.flags,
+        "folder": email.folder,
+        "summary": email.summary,
+        "model_status": email.model_status,
         "invoice": email.extracted.primary_invoice,
         "amount": email.extracted.primary_amount,
         "due": email.extracted.primary_due,
@@ -134,6 +143,15 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"- Open action items: {k['open_actions']} ({k['overdue_actions']} overdue)",
         f"- Fraud / payment-change alerts: {k['fraud_alerts']}",
         f"- Attachments classified: {k['attachments']}",
+        f"- Waiting on Bionic: {k.get('waiting_on_bionic', 0)}",
+        "",
+        "## Morning folders",
+    ]
+    folders = payload.get("folder_counts") or {}
+    lines.append(
+        f"- Important: {folders.get('important', 0)} · Informational: {folders.get('informational', 0)} · Reference: {folders.get('reference', 0)}"
+    )
+    lines += [
         "",
         "## Do not process — verify by phone",
     ]
@@ -235,7 +253,7 @@ def render_html(payload: dict[str, Any]) -> str:
 <body>
 <main>
   <h1>CloseDesk daily digest</h1>
-  <p class="lede">{payload['date']} · month-end {payload['close_date']} · {payload['days_to_close']} day(s) to close</p>
+  <p class="lede">{payload['date']} · month-end {payload['close_date']} · {payload['days_to_close']} day(s) to close · waiting on Bionic {k.get('waiting_on_bionic', 0)}</p>
   <div class="kpis">
     <div class="kpi"><span>Emails</span><b>{k['emails']}</b></div>
     <div class="kpi"><span>High / critical</span><b>{k['high_importance']}</b></div>

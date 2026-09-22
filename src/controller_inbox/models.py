@@ -202,8 +202,20 @@ class EmailRecord:
     internet_message_id: str = ""
     writeback_status: str = "skipped"
     created_at: str = ""
+    folder: str = ""
+    summary: str = ""
+    model_status: str = "script_draft"
     attachments: list[AttachmentRecord] = field(default_factory=list)
     actions: list[ActionItem] = field(default_factory=list)
+
+
+FOLDERS = ("important", "informational", "reference")
+
+FOLDER_LABELS = {
+    "important": "Important",
+    "informational": "Informational",
+    "reference": "Reference",
+}
 
 
 @dataclass

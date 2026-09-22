@@ -2,7 +2,9 @@
 
 A local inbox assistant for Outlook mail.
 
-Drop `.msg` or `.eml` files into a folder on your laptop, or connect Microsoft 365. CloseDesk reads the message and the attachments (Excel, PDF, Word, PowerPoint, CSV, and ZIP), decides what each file is, and builds a daily list of what you need to do.
+Drop `.msg` or `.eml` files into a folder on your laptop, or connect Microsoft 365. Scripts pull the text, the amounts, the dates, and the file type. A local model in LM Studio's Bionic does the reading and files each message into a morning board: daily digest, important mail, action items, informational, and reference.
+
+The setup steps, the overnight command, and the Bionic skill are in [docs/BIONIC_GUIDE.md](docs/BIONIC_GUIDE.md). The same story is in [docs/CloseDesk-how-it-works.pptx](docs/CloseDesk-how-it-works.pptx).
 
 ## Laptop drop folder
 
@@ -27,20 +29,26 @@ Originals move to `inbox/processed/`. Unpacked copies are written to `inbox/extr
 
 Supported attachments: PDF, Excel (`.xlsx`, `.xlsm`, `.xls`), Word (`.docx`), PowerPoint (`.pptx`), CSV, TSV, TXT, RTF, HTML, and ZIP. Images are marked as scans. If Tesseract and Pillow are installed on the laptop, image text is read too.
 
-## Rules and a local model, together
+## Scripts extract. Bionic decides.
 
 Use both, with a clear split:
 
-- **Scripting** reads the file and pulls invoice numbers, amounts, due dates, and the payment-instruction / fraud check. That part should not depend on a model. A “please wire this to the new account” message stays critical even if a model would call it routine.
-- **A local model** (optional) suggests a category only when the rules are unsure. Point it at [Ollama](https://ollama.com) or any local agent that speaks the OpenAI chat API, including a Bionic-style agent:
+- **Scripts** read the file and pull invoice numbers, amounts, due dates, and the payment-instruction check. They also draft a folder so the morning board works before the model has run. A “please wire this to the new account” message stays critical even if a model would call it routine.
+- **Bionic** (the local model in LM Studio) is the reader when you turn it on. It chooses the category, the folder, a one-line summary, and the action items from the packet the scripts already built. It does not re-open the PDF. Install `bionic/closedesk-inbox/` from **Settings → Skills**, or run the unattended night job:
+
+```bash
+python -m controller_inbox overnight
+```
 
 ```env
 CONTROLLER_INBOX_LLM=true
-CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:11434/v1
-CONTROLLER_INBOX_LLM_MODEL=llama3.2
+CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:1234/v1
+CONTROLLER_INBOX_LLM_MODEL=local-model
 ```
 
-- **Learning** is the correction box on each message. If a category is wrong, say what it should be and why. That sender is classified that way next time, and the example is appended to `data/training/corrections.jsonl` so you can fine-tune the local model later. A saved correction does not silence a new payment-instruction warning.
+`local-model` means “whatever LM Studio has loaded.” With the model off, rows stay marked **Waiting on Bionic** and the folders are still filled from the script draft.
+
+- **Learning** is the correction box on each message. If a category is wrong, say what it should be and why. That sender is classified that way next time, the overnight run will not overwrite the message you fixed, and the example is appended to `data/training/corrections.jsonl`. A saved correction does not silence a new payment-instruction warning.
 
 ## Sample mailbox
 
@@ -52,6 +60,7 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The sample is a September 2
 
 | Command | What it does |
 | --- | --- |
+| `python -m controller_inbox overnight` | Read the drop folder, let Bionic file the queue, write the digest and the night log |
 | `python -m controller_inbox ingest` | Read the drop folder |
 | `python -m controller_inbox serve` | Dashboard |
 | `python -m controller_inbox demo` | Load the sample mailbox and print a digest |
@@ -66,11 +75,12 @@ When a message arrives, CloseDesk:
 
 1. Reads the body and attachments from the drop folder or from Microsoft Graph.
 2. Extracts text from PDF, Excel, Word, PowerPoint, CSV, and HTML. Account and routing numbers are stored as last-4 only.
-3. Classifies each attachment and the message. Scripted rules run first. A local model can break a tie when you turn it on.
-4. Scores importance from due dates, dollar amount, sender, month-end proximity, and Outlook’s own importance flag.
-5. Turns the message into action items you can complete in the dashboard or export to Excel.
-6. Optionally writes Outlook categories and a follow-up flag back onto the message.
-7. Builds a daily digest you can open locally, email to yourself, or run from `watch` every morning.
+3. Drafts a category, a folder (important, informational, or reference), and a one-line summary from those facts.
+4. When the local model is on, Bionic replaces that draft: category, folder, importance, summary, and action items. A payment-instruction warning cannot be moved out of Important.
+5. Scores importance from due dates, dollar amount, sender, month-end proximity, and Outlook’s own importance flag when the model has not read the message yet.
+6. Turns the message into action items you can complete in the dashboard or export to Excel.
+7. Optionally writes Outlook categories and a follow-up flag back onto the message.
+8. Builds a daily digest you can open locally, email to yourself, or leave for the morning from `overnight`.
 
 ## What it catches
 

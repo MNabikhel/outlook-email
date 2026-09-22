@@ -126,6 +126,10 @@ def record_correction(
         flags=email.flags,
         as_of=as_of,
     )
+    from controller_inbox.reading import assign_script_draft
+
+    assign_script_draft(email)
+    email.model_status = "corrected"
     store.upsert_email(email)
     return row
 

@@ -53,6 +53,23 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("status", help="Show local database counts and connection state.")
 
+    overnight = sub.add_parser(
+        "overnight",
+        help="Read the drop folder, let Bionic file the queue, and write the morning digest.",
+    )
+    overnight.add_argument("--limit", type=int, default=None, help="How many drafts Bionic reads this run.")
+    overnight.add_argument("--no-graph", action="store_true", help="Skip Outlook even if it is configured.")
+
+    tool = sub.add_parser("tool", help="JSON tool for the local Bionic agent.")
+    tool.add_argument(
+        "name",
+        choices=["queue_status", "prepare_queue", "save_reading", "list_folder", "build_digest"],
+    )
+    tool.add_argument("--limit", type=int, default=20)
+    tool.add_argument("--folder", default="")
+    tool.add_argument("--json", default="", help="Reading JSON for save_reading. Reads stdin when omitted.")
+    tool.add_argument("--date", default=None)
+
     args = parser.parse_args(argv)
     settings = load_settings()
     store = Store(settings.db_path)
@@ -129,10 +146,41 @@ def main(argv: list[str] | None = None) -> int:
         counts = store.counts()
         print(f"Database: {settings.db_path}")
         print(f"Graph configured: {settings.graph_configured}")
+        print(f"Local model: {'on' if settings.llm else 'off'} ({settings.llm_base_url})")
         print(f"Last sync: {store.get_state('last_sync_at') or 'never'}")
+        print(f"Last overnight: {store.get_state('last_overnight_at') or 'never'}")
         for key, value in counts.items():
             print(f"{key}: {value}")
         return 0
+
+    if args.cmd == "overnight":
+        from controller_inbox.overnight import run_overnight
+
+        result = run_overnight(store, settings, limit=args.limit, sync_graph=not args.no_graph)
+        print(f"Overnight {result['date']}: ingested {result['ingested']}, Bionic read {result['read_by_bionic']}.")
+        print(
+            "Folders — important {important}, informational {informational}, reference {reference}.".format(
+                **result["folders"]
+            )
+        )
+        print(f"Still waiting on Bionic: {result['waiting_on_bionic']}")
+        print(f"Log: {result['log_path']}")
+        if not result["llm_enabled"]:
+            print("Local model is off. Drafts are filed. Turn on CONTROLLER_INBOX_LLM to let Bionic read them.")
+        return 0
+
+    if args.cmd == "tool":
+        import json
+        import sys
+
+        from controller_inbox.tools import dispatch
+
+        if args.name == "save_reading" and not args.json and not sys.stdin.isatty():
+            args.json = sys.stdin.read()
+        result = dispatch(store, settings, args.name, args)
+        json.dump(result, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return 0 if result.get("ok") else 1
 
     return 1
 
@@ -141,9 +189,10 @@ def _print_run_summary(records, payload) -> None:
     print(f"Processed {len(records)} email(s).")
     for rec in sorted(records, key=lambda r: r.importance_score, reverse=True)[:8]:
         flags = f" [{', '.join(rec.flags)}]" if rec.flags else ""
+        folder = rec.folder or "unfiled"
         print(
-            f"  {IMPORTANCE_LABELS[rec.importance]:<8} {DOCUMENT_LABELS[rec.category]:<28} "
-            f"{rec.subject[:70]}{flags}"
+            f"  {folder:<14} {IMPORTANCE_LABELS[rec.importance]:<8} {DOCUMENT_LABELS[rec.category]:<28} "
+            f"{rec.subject[:60]}{flags}"
         )
     if payload:
         k = payload["kpis"]

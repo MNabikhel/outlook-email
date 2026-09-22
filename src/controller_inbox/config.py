@@ -31,8 +31,9 @@ class Settings(BaseSettings):
     digest_to: str = ""
     mailbox: str = ""
     llm: bool = False
-    llm_model: str = "llama3.2"
-    llm_base_url: str = "http://127.0.0.1:11434/v1"
+    llm_model: str = "local-model"
+    llm_base_url: str = "http://127.0.0.1:1234/v1"
+    overnight_batch: int = 40
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"
@@ -69,6 +70,10 @@ class Settings(BaseSettings):
         return self.data_dir / "digests"
 
     @property
+    def overnight_dir(self) -> Path:
+        return self.data_dir / "overnight"
+
+    @property
     def training_path(self) -> Path:
         return self.data_dir / "training" / "corrections.jsonl"
 
@@ -103,6 +108,7 @@ class Settings(BaseSettings):
     def ensure_data_dir(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.digest_dir.mkdir(parents=True, exist_ok=True)
+        self.overnight_dir.mkdir(parents=True, exist_ok=True)
         self.training_path.parent.mkdir(parents=True, exist_ok=True)
         for folder in (
             self.inbox_incoming,
