@@ -159,6 +159,10 @@ def process_message(
         attachments=att_records,
         actions=actions,
     )
+    from controller_inbox.reading import assign_script_draft, try_bionic_read
+
+    assign_script_draft(record)
+    try_bionic_read(record, store, settings)
     store.upsert_email(record)
     return store.get_email(record.id) or record
 
@@ -187,26 +191,16 @@ def ingest_demo(store: Store, settings: Settings, *, now: datetime | None = None
 
 
 def _refine(classified, raw: RawMessage, store: Store, settings: Settings, filenames: list[str] | None = None):
+    """Apply a saved correction before the local model reads the packet.
+
+    The model is the parser when it is enabled. That happens after the
+    script draft is built, so it can see amounts and dates. A correction
+    the user already saved is kept and is not sent back to the model.
+    """
+    del settings, filenames
     from controller_inbox.learn import apply_learned, match_correction
-    from controller_inbox.local_llm import suggest_category
-    from controller_inbox.models import DocumentType
 
     learned = match_correction(store, sender_email=raw.sender_email, subject=raw.subject)
     if learned:
         return apply_learned(classified, learned)
-    if not settings.llm or classified.confidence >= 0.75 or "fraud_risk" in classified.flags:
-        return classified
-    hint = suggest_category(
-        settings,
-        subject=raw.subject,
-        body=raw.body_text,
-        filenames=filenames or [att.filename for att in raw.attachments],
-        examples=store.list_corrections(),
-    )
-    if not hint:
-        return classified
-    classified.document_type = DocumentType(hint["category"])
-    classified.confidence = max(classified.confidence, 0.6)
-    classified.reasons.insert(0, f"Local model: {hint['why']}")
-    classified.flags.append("local_model")
     return classified

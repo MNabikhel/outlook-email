@@ -9,8 +9,17 @@
       <span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }} · {{ email.importance_score }}</span>
       <h2>{{ email.subject }}</h2>
       <p>{{ email.sender_name }} &lt;{{ email.sender_email }}&gt; · {{ email.received_at | shortdt }}</p>
+      {% if email.summary %}<p class="summary">{{ email.summary }}</p>{% endif %}
+      {% if email.model_status == 'script_draft' %}
+      <p class="note">Waiting on Bionic. The folder and summary are a script draft from the extracted text.</p>
+      {% elif email.model_status == 'bionic' %}
+      <p class="note">Read by Bionic.</p>
+      {% elif email.model_status == 'corrected' %}
+      <p class="note">Corrected by you. The overnight run will not overwrite this.</p>
+      {% endif %}
     </div>
     <div class="facts">
+      <div><span>Folder</span><b>{{ email.folder|capitalize if email.folder else '—' }}</b></div>
       <div><span>Category</span><b>{{ email.category.value | label_doc }}</b></div>
       <div><span>Invoice</span><b>{{ email.extracted.primary_invoice or '—' }}</b></div>
       <div><span>Amount</span><b>{{ email.extracted.primary_amount | money or '—' }}</b></div>

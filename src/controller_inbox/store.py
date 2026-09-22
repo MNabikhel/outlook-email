@@ -41,7 +41,10 @@ CREATE TABLE IF NOT EXISTS emails (
     conversation_id TEXT,
     internet_message_id TEXT,
     writeback_status TEXT,
-    created_at TEXT
+    created_at TEXT,
+    folder TEXT,
+    summary TEXT,
+    model_status TEXT
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -124,6 +127,7 @@ class Store:
     def _init(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            _migrate(conn)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -150,8 +154,9 @@ class Store:
                     body_preview, has_attachments, outlook_importance, is_read,
                     category, category_confidence, importance, importance_score,
                     importance_reasons, flags, extracted, source, conversation_id,
-                    internet_message_id, writeback_status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    internet_message_id, writeback_status, created_at,
+                    folder, summary, model_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     subject=excluded.subject,
                     sender_name=excluded.sender_name,
@@ -172,7 +177,10 @@ class Store:
                     source=excluded.source,
                     conversation_id=excluded.conversation_id,
                     internet_message_id=excluded.internet_message_id,
-                    writeback_status=excluded.writeback_status
+                    writeback_status=excluded.writeback_status,
+                    folder=excluded.folder,
+                    summary=excluded.summary,
+                    model_status=excluded.model_status
                 """,
                 (
                     email.id,
@@ -197,6 +205,9 @@ class Store:
                     email.internet_message_id,
                     email.writeback_status,
                     email.created_at,
+                    email.folder,
+                    email.summary,
+                    email.model_status or "script_draft",
                 ),
             )
             conn.execute("DELETE FROM attachments WHERE email_id = ?", (email.id,))
@@ -293,6 +304,9 @@ class Store:
         category: str | None = None,
         flag: str | None = None,
         q: str | None = None,
+        folder: str | None = None,
+        model_status: str | None = None,
+        oldest_first: bool = False,
         limit: int = 200,
     ) -> list[EmailRecord]:
         clauses = ["1=1"]
@@ -303,13 +317,20 @@ class Store:
         if category:
             clauses.append("category = ?")
             params.append(category)
+        if folder:
+            clauses.append("folder = ?")
+            params.append(folder)
+        if model_status:
+            clauses.append("model_status = ?")
+            params.append(model_status)
         if q:
             clauses.append(
                 "(subject LIKE ? OR sender_email LIKE ? OR sender_name LIKE ? OR body_preview LIKE ?)"
             )
             like = f"%{q}%"
             params.extend([like, like, like, like])
-        sql = f"SELECT * FROM emails WHERE {' AND '.join(clauses)} ORDER BY received_at DESC LIMIT ?"
+        direction = "ASC" if oldest_first else "DESC"
+        sql = f"SELECT * FROM emails WHERE {' AND '.join(clauses)} ORDER BY received_at {direction} LIMIT ?"
         params.append(limit)
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -454,12 +475,30 @@ class Store:
             fraud = conn.execute(
                 "SELECT COUNT(*) AS n FROM emails WHERE flags LIKE '%fraud_risk%'"
             ).fetchone()["n"]
+            folders = {
+                name: conn.execute(
+                    "SELECT COUNT(*) AS n FROM emails WHERE folder = ?",
+                    (name,),
+                ).fetchone()["n"]
+                for name in ("important", "informational", "reference")
+            }
+            waiting = conn.execute(
+                "SELECT COUNT(*) AS n FROM emails WHERE model_status = 'script_draft'"
+            ).fetchone()["n"]
+            read_by_model = conn.execute(
+                "SELECT COUNT(*) AS n FROM emails WHERE model_status = 'bionic'"
+            ).fetchone()["n"]
         return {
             "emails": emails,
             "high_importance": critical,
             "open_actions": open_actions,
             "attachments": attachments,
             "fraud_alerts": fraud,
+            "important": folders["important"],
+            "informational": folders["informational"],
+            "reference": folders["reference"],
+            "waiting_on_bionic": waiting,
+            "read_by_bionic": read_by_model,
         }
 
     def category_counts(self) -> dict[str, int]:
@@ -622,6 +661,27 @@ def _email_from_rows(
         internet_message_id=row["internet_message_id"] or "",
         writeback_status=row["writeback_status"] or "skipped",
         created_at=row["created_at"] or datetime.utcnow().isoformat(),
+        folder=_col(row, "folder", ""),
+        summary=_col(row, "summary", ""),
+        model_status=_col(row, "model_status", "script_draft") or "script_draft",
         attachments=attachments,
         actions=[_action_from_row(item) for item in action_rows],
     )
+
+
+def _col(row: sqlite3.Row, name: str, default: Any) -> Any:
+    if name not in row.keys() or row[name] is None:
+        return default
+    return row[name]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(emails)")}
+    if "folder" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN folder TEXT DEFAULT ''")
+    if "summary" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN summary TEXT DEFAULT ''")
+    if "model_status" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN model_status TEXT DEFAULT 'script_draft'")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_model ON emails(model_status)")

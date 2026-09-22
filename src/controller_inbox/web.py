@@ -14,7 +14,7 @@ from controller_inbox.classify import month_end
 from controller_inbox.cli import export_actions_csv
 from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, write_digest_files
-from controller_inbox.models import DOCUMENT_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
+from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.pipeline import ingest_demo
 from controller_inbox.store import Store
 
@@ -77,26 +77,45 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
-        emails = store.list_emails(limit=12)
-        if not emails:
-            return render(request, "empty.html", page="inbox")
-        attention = [e for e in store.list_emails(limit=200) if e.importance.value in {"critical", "high"} or "fraud_risk" in e.flags]
-        overdue = store.list_actions(status="open", due_on_or_before=local_today(settings.tz).isoformat())
-        due_today = store.list_actions(status="open", due_on=local_today(settings.tz).isoformat())
-        digest = store.latest_digest()
+        if not store.list_emails(limit=1):
+            return render(request, "empty.html", page="home")
+        as_of = local_today(settings.tz).isoformat()
+        return render(
+            request,
+            "morning.html",
+            page="home",
+            heading="Morning",
+            important=store.list_emails(folder="important", limit=12),
+            informational=store.list_emails(folder="informational", limit=4),
+            reference=store.list_emails(folder="reference", limit=4),
+            overdue=store.list_actions(status="open", due_on_or_before=as_of)[:6],
+            due_today=store.list_actions(status="open", due_on=as_of)[:6],
+            digest=store.latest_digest(),
+        )
+
+    @app.get("/folder/{name}", response_class=HTMLResponse)
+    def folder_page(request: Request, name: str):
+        if name not in FOLDER_LABELS:
+            raise HTTPException(status_code=404, detail="Unknown folder")
+        blurbs = {
+            "important": "Needs a decision, a payment check, or a close task.",
+            "informational": "FYI and newsletters. Nothing is waiting on you.",
+            "reference": "Statements, purchase orders, contracts, and files to keep. Not an overnight task.",
+        }
         return render(
             request,
             "inbox.html",
-            page="inbox",
-            emails=store.list_emails(limit=80),
-            attention=attention[:8],
-            overdue=overdue[:8],
-            due_today=due_today[:8],
-            digest=digest,
+            page=name,
+            emails=store.list_emails(folder=name, limit=200),
+            attention=[],
+            overdue=[],
+            due_today=[],
+            digest=None,
             filter_importance="",
             filter_category="",
             query="",
-            heading="Inbox",
+            heading=FOLDER_LABELS[name],
+            blurb=blurbs[name],
         )
 
     @app.get("/inbox", response_class=HTMLResponse)

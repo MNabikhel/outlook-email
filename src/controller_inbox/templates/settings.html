@@ -18,14 +18,15 @@
     <p class="muted">Corrections saved: {{ correction_count }}</p>
   </article>
   <article class="panel">
-    <h3>Rules, then a local model</h3>
-    <p>Scripted rules pull invoice numbers, amounts, due dates, and payment-instruction changes. Those stay in charge. A local model is optional and only suggests a category when the rules are unsure.</p>
-    <p>Run <a href="https://ollama.com">Ollama</a> (or any local agent with an OpenAI-compatible API, including a Bionic-style agent) and set:</p>
+    <h3>Scripts extract. Bionic decides.</h3>
+    <p>The fast scripts pull text, amounts, dates, and file types, then leave a draft in Important, Informational, or Reference. The local model in Bionic Studio does the reading: category, folder, summary, and action items. A payment-instruction warning stays in Important either way.</p>
+    <p>In LM Studio, load a model, start the local server, and install the <code>bionic/closedesk-inbox</code> skill. Then set:</p>
     <pre class="clip">CONTROLLER_INBOX_LLM=true
-CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:11434/v1
-CONTROLLER_INBOX_LLM_MODEL=llama3.2</pre>
-    <p>Status: <strong>{{ 'local model on' if llm_enabled else 'rules only — local model off' }}</strong></p>
-    <p class="muted">When a category is wrong, open the message and use “Wrong category?”. The reason is saved and applied to the next message from that sender. The same examples are written to <code>data/training/corrections.jsonl</code> if you later fine-tune a local model. A saved correction cannot clear a payment-instruction warning on a new message.</p>
+CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:1234/v1
+CONTROLLER_INBOX_LLM_MODEL=local-model</pre>
+    <p>Status: <strong>{{ 'Bionic reader on' if llm_enabled else 'script drafts only — Bionic off' }}</strong></p>
+    <p class="muted">Overnight: <code>python -m controller_inbox overnight</code>. Or ask Bionic to run the closedesk-inbox skill, which calls the same tools. <code>local-model</code> means “whatever LM Studio has loaded.” Waiting on Bionic: {{ counts.waiting_on_bionic }}.</p>
+    <p class="muted">When a category is wrong, open the message and use “Wrong category?”. The reason is saved, the overnight run will not overwrite that message, and the example is written to <code>data/training/corrections.jsonl</code>. A saved correction cannot clear a payment-instruction warning on a new message.</p>
   </article>
 </section>
 <section class="split">

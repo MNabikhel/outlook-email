@@ -2,6 +2,7 @@
 {% block title %}{{ heading }} · CloseDesk{% endblock %}
 {% block heading %}{{ heading }}{% endblock %}
 {% block body %}
+{% if blurb %}<p class="lede">{{ blurb }}</p>{% endif %}
 {% if attention or overdue or due_today %}
 <section class="triage">
   <article class="panel alert">
@@ -106,8 +107,17 @@
             {% endfor %}
           </div>
           {% endif %}
-          {% if email.importance_reasons %}
+          {% if email.summary %}
+          <small class="summary">{{ email.summary }}</small>
+          {% elif email.importance_reasons %}
           <small class="why">{{ email.importance_reasons[0] }}</small>
+          {% endif %}
+          {% if email.model_status == 'script_draft' %}
+          <span class="flag needs_model">Waiting on Bionic</span>
+          {% elif email.model_status == 'bionic' %}
+          <span class="flag bionic">Read by Bionic</span>
+          {% elif email.model_status == 'corrected' %}
+          <span class="flag user_trained">Corrected by you</span>
           {% endif %}
         </td>
         <td>{{ email.category.value | label_doc }}</td>

@@ -46,6 +46,22 @@ def test_dashboard_after_demo(store, settings, as_of_now):
     assert digest.status_code == 200
     assert "Do not process" in digest.text
 
+    important = client.get("/folder/important")
+    assert important.status_code == 200
+    assert "INV-10482" in important.text
+    assert "Waiting on Bionic" in important.text
+
+    informational = client.get("/folder/informational")
+    assert informational.status_code == 200
+    assert "accounting" in informational.text.lower() or "newsletter" in informational.text.lower()
+
+    reference = client.get("/folder/reference")
+    assert reference.status_code == 200
+    assert "statement" in reference.text.lower() or "PO-77821" in reference.text
+
+    missing = client.get("/folder/archive")
+    assert missing.status_code == 404
+
     csv_resp = client.get("/export/actions.csv")
     assert csv_resp.status_code == 200
     assert "priority" in csv_resp.text

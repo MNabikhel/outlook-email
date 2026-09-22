@@ -17,11 +17,14 @@
         </span>
       </a>
       <nav>
-        <a href="/" class="{{ 'on' if page == 'inbox' else '' }}">Inbox</a>
-        <a href="/inbox?importance=critical" class="{{ 'on' if filter_importance == 'critical' else '' }}">Critical</a>
-        <a href="/actions" class="{{ 'on' if page == 'actions' else '' }}">Action items</a>
-        <a href="/attachments" class="{{ 'on' if page == 'attachments' else '' }}">Attachments</a>
+        <a href="/" class="{{ 'on' if page == 'home' else '' }}">Morning</a>
         <a href="/digest" class="{{ 'on' if page == 'digest' else '' }}">Daily digest</a>
+        <a href="/folder/important" class="{{ 'on' if page == 'important' else '' }}">Important</a>
+        <a href="/actions" class="{{ 'on' if page == 'actions' else '' }}">Action items</a>
+        <a href="/folder/informational" class="{{ 'on' if page == 'informational' else '' }}">Informational</a>
+        <a href="/folder/reference" class="{{ 'on' if page == 'reference' else '' }}">Reference</a>
+        <a href="/inbox" class="{{ 'on' if page == 'inbox' else '' }}">All mail</a>
+        <a href="/attachments" class="{{ 'on' if page == 'attachments' else '' }}">Attachments</a>
         <a href="/settings" class="{{ 'on' if page == 'settings' else '' }}">Setup</a>
       </nav>
       <div class="rail-foot">
