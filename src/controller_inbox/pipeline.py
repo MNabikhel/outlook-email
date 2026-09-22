@@ -7,6 +7,7 @@ from controller_inbox.actions import extract_actions
 from controller_inbox.classify import Classification, classify_document, classify_email, outlook_categories
 from controller_inbox.config import Settings
 from controller_inbox.extract import (
+    explode_archives,
     extract_fields,
     extract_text_from_bytes,
     redact_financial_secrets,
@@ -36,7 +37,7 @@ def process_message(
 ) -> EmailRecord:
     now = now or datetime.now(timezone.utc)
     as_of = as_of or now.astimezone(settings.tz).date()
-    attachments_raw = list(raw.attachments)
+    attachments_raw = explode_archives(list(raw.attachments))
     if mailbox is not None and not attachments_raw and raw.has_attachments:
         attachments_raw = list(mailbox.get_attachments(raw.id))
 
@@ -96,6 +97,13 @@ def process_message(
         vip_senders=settings.vip_list,
         has_attachments=bool(attachments_raw) or raw.has_attachments,
         duplicate_invoice=duplicate,
+    )
+    classified_email = _refine(
+        classified_email,
+        raw,
+        store,
+        settings,
+        filenames=[att.filename for att in att_records],
     )
 
     # If Graph said there were attachments but we still have none after fetch.
@@ -176,3 +184,29 @@ def ingest_demo(store: Store, settings: Settings, *, now: datetime | None = None
 
     mailbox = DemoMailbox(now=now)
     return ingest_mailbox(mailbox, store, settings, now=now)
+
+
+def _refine(classified, raw: RawMessage, store: Store, settings: Settings, filenames: list[str] | None = None):
+    from controller_inbox.learn import apply_learned, match_correction
+    from controller_inbox.local_llm import suggest_category
+    from controller_inbox.models import DocumentType
+
+    learned = match_correction(store, sender_email=raw.sender_email, subject=raw.subject)
+    if learned:
+        return apply_learned(classified, learned)
+    if not settings.llm or classified.confidence >= 0.75 or "fraud_risk" in classified.flags:
+        return classified
+    hint = suggest_category(
+        settings,
+        subject=raw.subject,
+        body=raw.body_text,
+        filenames=filenames or [att.filename for att in raw.attachments],
+        examples=store.list_corrections(),
+    )
+    if not hint:
+        return classified
+    classified.document_type = DocumentType(hint["category"])
+    classified.confidence = max(classified.confidence, 0.6)
+    classified.reasons.insert(0, f"Local model: {hint['why']}")
+    classified.flags.append("local_model")
+    return classified

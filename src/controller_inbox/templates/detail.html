@@ -90,5 +90,25 @@
     <p class="muted">No attachments on this message.{% if 'missing_attachment' in email.flags %} The sender said there was one.{% endif %}</p>
     {% endif %}
   </section>
+  <section class="panel correct">
+    <h3>Wrong category?</h3>
+    <p class="muted">Say what this actually is, and why. The next message from this sender follows that correction, and the example is saved for the local model.</p>
+    {% if 'user_trained' in email.flags %}
+    <p class="note">This category came from a correction you saved.</p>
+    {% endif %}
+    <form method="post" action="/inbox/{{ email.id }}/correct">
+      <label>Correct category
+        <select name="category">
+          {% for key, label in doc_labels.items() %}
+          <option value="{{ key.value }}" {{ 'selected' if email.category == key else '' }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Why was this wrong?
+        <textarea name="reason" required minlength="3" placeholder="Example: Friday files from this vendor are remittances, not invoices."></textarea>
+      </label>
+      <button type="submit">Save and learn</button>
+    </form>
+  </section>
 </article>
 {% endblock %}

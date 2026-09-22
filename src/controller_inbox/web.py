@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -55,6 +55,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "days_to_close": (close - as_of).days,
             "close_date": close.isoformat(),
             "graph_configured": settings.graph_configured,
+            "llm_enabled": settings.llm,
+            "inbox_incoming": str(settings.inbox_incoming),
+            "inbox_attachments": str(settings.inbox_attachments),
+            "correction_count": store.correction_count(),
             "last_sync": store.get_state("last_sync_at"),
             "doc_labels": DOCUMENT_LABELS,
             "filter_importance": "",
@@ -130,6 +134,31 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if not email:
             return HTMLResponse("Not found", status_code=404)
         return render(request, "detail.html", page="inbox", email=email)
+
+    @app.post("/inbox/{email_id}/correct")
+    def correct_category(email_id: str, category: str = Form(...), reason: str = Form(...)):
+        from controller_inbox.learn import record_correction
+
+        try:
+            record_correction(
+                store,
+                settings,
+                email_id=email_id,
+                corrected_category=category,
+                reason=reason,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Message not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return RedirectResponse(f"/inbox/{email_id}", status_code=303)
+
+    @app.post("/folder/ingest")
+    def folder_ingest():
+        from controller_inbox.folder_mail import ingest_folder
+
+        ingest_folder(store, settings)
+        return RedirectResponse("/", status_code=303)
 
     @app.get("/actions", response_class=HTMLResponse)
     def actions_page(request: Request, status: str = "open"):

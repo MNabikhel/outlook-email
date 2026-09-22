@@ -14,6 +14,8 @@ def test_dashboard_after_demo(store, settings, as_of_now):
     home = client.get("/")
     assert home.status_code == 200
     assert "CloseDesk" in home.text
+    assert "Controller inbox" not in home.text
+    assert "Assistant controller" not in home.text
     assert "INV-10482" in home.text
     assert "Updated wiring instructions" in home.text
     assert "Fraud flags" in home.text
@@ -21,7 +23,16 @@ def test_dashboard_after_demo(store, settings, as_of_now):
     detail = client.get("/inbox/demo-bec-wire")
     assert detail.status_code == 200
     assert "verify" in detail.text.lower()
+    assert "Wrong category?" in detail.text
     assert "do not process" in detail.text.lower() or "fraud" in detail.text.lower()
+
+    corrected = client.post(
+        "/inbox/demo-newsletter/correct",
+        data={"category": "internal_fyi", "reason": "This weekly note is internal, not a vendor newsletter."},
+        follow_redirects=True,
+    )
+    assert corrected.status_code == 200
+    assert "correction you saved" in corrected.text.lower() or "user trained" in corrected.text.lower() or "Internal FYI" in corrected.text
 
     actions = client.get("/actions")
     assert actions.status_code == 200
@@ -60,7 +71,7 @@ def test_empty_state_and_reload(store, settings):
     client = TestClient(app)
     empty = client.get("/")
     assert empty.status_code == 200
-    assert "Load demo mailbox" in empty.text
+    assert "Load sample mailbox" in empty.text
     reloaded = client.post("/demo/reload", follow_redirects=True)
     assert reloaded.status_code == 200
     assert "INV-10482" in reloaded.text

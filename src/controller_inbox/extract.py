@@ -108,16 +108,22 @@ def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> st
             return _pdf_text(data)
         if name.endswith(".docx") or "wordprocessingml" in ctype:
             return _docx_text(data)
-        if name.endswith((".xlsx", ".xlsm")) or "spreadsheetml" in ctype:
+        if name.endswith((".xlsx", ".xlsm", ".xltx")) or "spreadsheetml" in ctype:
             return _xlsx_text(data)
+        if name.endswith(".xls") or ctype == "application/vnd.ms-excel":
+            return _xls_text(data)
+        if name.endswith(".pptx") or "presentationml" in ctype:
+            return _pptx_text(data)
         if name.endswith(".csv") or ctype in {"text/csv", "application/csv"}:
             return data.decode("utf-8", errors="replace")[:50_000]
-        if name.endswith((".txt", ".md")) or ctype.startswith("text/plain"):
+        if name.endswith((".txt", ".md", ".tsv")) or ctype.startswith("text/plain"):
             return data.decode("utf-8", errors="replace")[:50_000]
+        if name.endswith(".rtf") or "rtf" in ctype:
+            return _rtf_text(data)
         if "html" in ctype or name.endswith((".html", ".htm")):
             return html_to_text(data.decode("utf-8", errors="replace"))
-        if ctype.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff")):
-            return ""
+        if ctype.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp")):
+            return _image_text(data)
     except Exception as exc:  # extraction should never fail the pipeline
         return f"[extraction error: {exc}]"
     # Last resort: if it looks like text, keep a sample.
@@ -168,6 +174,114 @@ def _xlsx_text(data: bytes) -> str:
                 break
     wb.close()
     return collapse_ws("\n".join(parts))
+
+
+def _xls_text(data: bytes) -> str:
+    import xlrd
+
+    book = xlrd.open_workbook(file_contents=data)
+    parts: list[str] = []
+    for sheet in book.sheets()[:6]:
+        parts.append(f"[sheet:{sheet.name}]")
+        for i in range(min(sheet.nrows, 80)):
+            values = [str(cell) for cell in sheet.row_values(i) if cell not in ("", None)]
+            if values:
+                parts.append(" | ".join(values))
+    return collapse_ws("\n".join(parts))
+
+
+def _pptx_text(data: bytes) -> str:
+    from pptx import Presentation
+
+    deck = Presentation(io.BytesIO(data))
+    parts: list[str] = []
+    for index, slide in enumerate(deck.slides, start=1):
+        if index > 40:
+            break
+        parts.append(f"[slide:{index}]")
+        for shape in slide.shapes:
+            text = getattr(shape, "text", "") or ""
+            if text.strip():
+                parts.append(text)
+    return collapse_ws("\n".join(parts))
+
+
+def _rtf_text(data: bytes) -> str:
+    raw = data.decode("latin-1", errors="replace")
+    raw = re.sub(r"\\'[0-9a-fA-F]{2}", " ", raw)
+    raw = re.sub(r"\\[a-zA-Z]+-?\d* ?", " ", raw)
+    raw = raw.replace("\\", " ")
+    raw = re.sub(r"[{}]", " ", raw)
+    return collapse_ws(raw)
+
+
+def _image_text(data: bytes) -> str:
+    """OCR when a local Tesseract install is present. Otherwise the file stays an image scan."""
+    try:
+        import pytesseract
+        from PIL import Image
+    except ImportError:
+        return ""
+    try:
+        image = Image.open(io.BytesIO(data))
+        return collapse_ws(pytesseract.image_to_string(image))[:20_000]
+    except Exception:
+        return ""
+
+
+def explode_archives(items: list, *, limit: int = 40) -> list:
+    """Unpack zip attachments into the files inside, so a zipped workbook is still classified."""
+    from controller_inbox.models import RawAttachment
+
+    exploded: list[RawAttachment] = []
+    for item in items:
+        name = (item.filename or "").lower()
+        if not name.endswith(".zip") and "zip" not in (item.content_type or "").lower():
+            exploded.append(item)
+            continue
+        inner = _unzip(item, limit=limit)
+        exploded.extend(inner or [item])
+    return exploded
+
+
+def _unzip(item, *, limit: int) -> list:
+    import zipfile
+
+    from controller_inbox.models import RawAttachment
+
+    if not item.content:
+        return []
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(item.content))
+    except zipfile.BadZipFile:
+        return []
+    out = []
+    for info in archive.infolist():
+        if info.is_dir() or len(out) >= limit:
+            continue
+        if info.file_size > 30_000_000 or info.filename.startswith("__MACOSX"):
+            continue
+        filename = _basename(info.filename)
+        if not filename or filename.startswith("."):
+            continue
+        try:
+            payload = archive.read(info)
+        except Exception:
+            continue
+        out.append(
+            RawAttachment(
+                id=f"{item.id}:{filename}",
+                filename=filename,
+                content_type="application/octet-stream",
+                size_bytes=len(payload),
+                content=payload,
+            )
+        )
+    return out
+
+
+def _basename(filename: str) -> str:
+    return filename.replace("\\", "/").split("/")[-1]
 
 
 def parse_amount(raw: str) -> float | None:

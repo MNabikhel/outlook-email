@@ -85,6 +85,17 @@ CREATE TABLE IF NOT EXISTS sync_state (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS corrections (
+    id TEXT PRIMARY KEY,
+    email_id TEXT,
+    previous_category TEXT,
+    corrected_category TEXT,
+    reason TEXT,
+    sender_email TEXT,
+    subject TEXT,
+    created_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(category);
@@ -506,6 +517,51 @@ class Store:
                 "INSERT INTO sync_state(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
             )
+
+    def add_correction(self, row: dict[str, Any]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO corrections (
+                    id, email_id, previous_category, corrected_category, reason,
+                    sender_email, subject, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["id"],
+                    row["email_id"],
+                    row["previous_category"],
+                    row["corrected_category"],
+                    row["reason"],
+                    row["sender_email"],
+                    row["subject"],
+                    row["created_at"],
+                ),
+            )
+
+    def list_corrections(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM corrections ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def latest_correction(self, *, sender_email: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM corrections
+                WHERE lower(sender_email) = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (sender_email.lower(),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def correction_count(self) -> int:
+        with self.connect() as conn:
+            return conn.execute("SELECT COUNT(*) AS n FROM corrections").fetchone()["n"]
 
 
 def _action_from_row(row: sqlite3.Row) -> ActionItem:

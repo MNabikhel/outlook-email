@@ -17,7 +17,7 @@ def as_of_now() -> datetime:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path, _env_file=None)
+    return Settings(data_dir=tmp_path, inbox_dir=tmp_path / "inbox", _env_file=None)
 
 
 @pytest.fixture

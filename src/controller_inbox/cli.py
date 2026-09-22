@@ -19,11 +19,11 @@ from controller_inbox.store import Store
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="controller-inbox",
-        description="CloseDesk: classify Outlook mail and attachments, then produce a daily AP/close action list.",
+        description="CloseDesk: read Outlook mail or a drop folder, classify attachments, and keep a daily action list.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    demo = sub.add_parser("demo", help="Load a realistic assistant-controller mailbox (no Outlook login).")
+    demo = sub.add_parser("demo", help="Load a sample mailbox (no Outlook login).")
     demo.add_argument("--serve", action="store_true", help="Start the dashboard after loading demo mail.")
     demo.add_argument("--host", default=None)
     demo.add_argument("--port", type=int, default=None)
@@ -44,6 +44,9 @@ def main(argv: list[str] | None = None) -> int:
     serve = sub.add_parser("serve", help="Open the local CloseDesk dashboard.")
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
+
+    ingest = sub.add_parser("ingest", help="Read .msg/.eml files and attachments dropped in the inbox folder.")
+    ingest.add_argument("--serve", action="store_true", help="Open the dashboard after reading the folder.")
 
     export = sub.add_parser("export", help="Write open action items to CSV (stdout).")
     export.add_argument("--output", default=None)
@@ -98,6 +101,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "serve":
         return _serve(settings, store, host=args.host, port=args.port)
+
+    if args.cmd == "ingest":
+        from controller_inbox.folder_mail import ingest_folder
+
+        records = ingest_folder(store, settings)
+        print(f"Read {len(records)} file(s) from {settings.inbox_incoming}")
+        if not records:
+            print(f"Nothing new. Drop .msg or .eml files in {settings.inbox_incoming}")
+            print(f"Put related attachments in {settings.inbox_attachments}/<message name>/")
+        else:
+            _print_run_summary(records, None)
+        if args.serve:
+            return _serve(settings, store, host=None, port=None)
+        return 0
 
     if args.cmd == "export":
         text = export_actions_csv(store)
@@ -184,6 +201,9 @@ def _watch(settings: Settings, store: Store, *, once: bool) -> int:
         if isinstance(mailbox, DemoMailbox):
             after = None
         records = ingest_mailbox(mailbox, store, settings, received_after=after)
+        from controller_inbox.folder_mail import ingest_folder
+
+        records.extend(ingest_folder(store, settings))
         print(f"{datetime.now().isoformat(timespec='seconds')} classified {len(records)} message(s)")
         now = datetime.now(settings.tz)
         as_of = local_today(settings.tz, now)

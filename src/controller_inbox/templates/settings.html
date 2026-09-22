@@ -1,43 +1,46 @@
 {% extends "base.html" %}
-{% block title %}Connect Outlook · CloseDesk{% endblock %}
-{% block heading %}Connect Outlook{% endblock %}
+{% block title %}Setup · CloseDesk{% endblock %}
+{% block heading %}Setup{% endblock %}
 {% block body %}
 <section class="split">
   <article class="panel">
-    <h3>How this runs</h3>
+    <h3>Drop folder on this laptop</h3>
+    <p>Copy this project onto the laptop, then drop mail here. You do not need a cloud login to start.</p>
     <ol class="plain numbered">
-      <li>CloseDesk reads mail through Microsoft Graph (Microsoft 365 / Outlook).</li>
-      <li>It pulls the body plus every attachment, extracts text from PDF, Excel, Word, and CSV, and redacts account numbers.</li>
-      <li>Finance-specific rules classify the file (invoice, bank statement, payroll, PBC request, payment-instruction change, and so on) and score importance.</li>
-      <li>Action items are extracted for you: enter invoice, apply cash, reconcile, approve T&amp;E, complete PBC, do not process a wire-instruction change.</li>
-      <li>A daily digest rolls the open list together. Optional Outlook write-back flags the message in your mailbox.</li>
+      <li>Save or drag Outlook messages into <code>{{ inbox_incoming }}</code> as <code>.msg</code> or <code>.eml</code>.</li>
+      <li>Attachments inside the message are unpacked on their own. If you also have the files separately, put them in <code>{{ inbox_attachments }}/&lt;same name as the message&gt;/</code>.</li>
+      <li>Excel, PDF, Word, PowerPoint, CSV, RTF, HTML, ZIP, and older <code>.xls</code> workbooks are read. A loose file dropped in Incoming is classified too.</li>
+      <li>Click the button below, or run <code>python -m controller_inbox ingest</code>. Processed originals move to <code>inbox/processed</code>. Unpacked files land in <code>inbox/extracted</code>.</li>
     </ol>
+    <form method="post" action="/folder/ingest">
+      <button type="submit">Read the drop folder</button>
+    </form>
+    <p class="muted">Corrections saved: {{ correction_count }}</p>
+  </article>
+  <article class="panel">
+    <h3>Rules, then a local model</h3>
+    <p>Scripted rules pull invoice numbers, amounts, due dates, and payment-instruction changes. Those stay in charge. A local model is optional and only suggests a category when the rules are unsure.</p>
+    <p>Run <a href="https://ollama.com">Ollama</a> (or any local agent with an OpenAI-compatible API, including a Bionic-style agent) and set:</p>
+    <pre class="clip">CONTROLLER_INBOX_LLM=true
+CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:11434/v1
+CONTROLLER_INBOX_LLM_MODEL=llama3.2</pre>
+    <p>Status: <strong>{{ 'local model on' if llm_enabled else 'rules only — local model off' }}</strong></p>
+    <p class="muted">When a category is wrong, open the message and use “Wrong category?”. The reason is saved and applied to the next message from that sender. The same examples are written to <code>data/training/corrections.jsonl</code> if you later fine-tune a local model. A saved correction cannot clear a payment-instruction warning on a new message.</p>
+  </article>
+</section>
+<section class="split">
+  <article class="panel">
+    <h3>Outlook direct connection</h3>
+    <p>Optional. Register an Entra public-client app, add delegated <code>Mail.Read</code>, and set <code>AZURE_CLIENT_ID</code>. Then <code>python -m controller_inbox auth</code> and <code>sync</code>.</p>
+    <p>Status: <strong>{{ 'ready to sign in' if graph_configured else 'not configured' }}</strong></p>
     <p class="muted">Last sync: {{ last_sync or 'never' }}</p>
   </article>
   <article class="panel">
-    <h3>Microsoft 365 setup</h3>
-    <ol class="plain numbered">
-      <li>In Entra ID, register an app (public client / mobile &amp; desktop).</li>
-      <li>Enable “Allow public client flows”.</li>
-      <li>Add delegated Graph permissions: <code>Mail.Read</code>, <code>User.Read</code>. Add <code>Mail.ReadWrite</code> to flag messages, <code>Mail.Send</code> to email the digest.</li>
-      <li>Copy the application (client) ID into <code>.env</code> as <code>AZURE_CLIENT_ID</code>.</li>
-      <li>Run <code>python -m controller_inbox auth</code>, then <code>sync</code> or <code>watch</code>.</li>
-    </ol>
-    <p>Status: <strong>{{ 'ready to sign in' if graph_configured else 'not configured — using demo mailbox' }}</strong></p>
+    <h3>Sample mailbox</h3>
+    <p>Load the built-in sample if you want to see the dashboard before your own files are in the folder.</p>
     <form method="post" action="/demo/reload">
-      <button type="submit">Reload demo mailbox</button>
+      <button type="submit">Load sample mailbox</button>
     </form>
   </article>
 </section>
-<article class="panel">
-  <h3>Improvements included for an assistant controller</h3>
-  <ul class="plain">
-    <li>Business-email-compromise check when a vendor “updates wiring instructions”.</li>
-    <li>Duplicate invoice detection on invoice number.</li>
-    <li>Missing-attachment catch when the body says “see attached” and nothing arrived.</li>
-    <li>Month-end countdown and close-item boost in the last week of the month.</li>
-    <li>CSV export so you can drop the action list into Excel.</li>
-    <li>Account numbers stored as last-4 only.</li>
-  </ul>
-</article>
 {% endblock %}

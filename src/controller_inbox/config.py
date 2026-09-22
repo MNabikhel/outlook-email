@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     )
 
     data_dir: Path = Path("./data")
+    inbox_dir: Path = Path("./inbox")
     timezone: str = "America/New_York"
     host: str = "127.0.0.1"
     port: int = 8765
@@ -30,14 +31,15 @@ class Settings(BaseSettings):
     digest_to: str = ""
     mailbox: str = ""
     llm: bool = False
-    llm_model: str = "gpt-4o-mini"
+    llm_model: str = "llama3.2"
+    llm_base_url: str = "http://127.0.0.1:11434/v1"
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"
     azure_client_secret: str = ""
     openai_api_key: str = ""
 
-    @field_validator("data_dir", mode="before")
+    @field_validator("data_dir", "inbox_dir", mode="before")
     @classmethod
     def _path(cls, value: str | Path) -> Path:
         return Path(value).expanduser()
@@ -67,6 +69,26 @@ class Settings(BaseSettings):
         return self.data_dir / "digests"
 
     @property
+    def training_path(self) -> Path:
+        return self.data_dir / "training" / "corrections.jsonl"
+
+    @property
+    def inbox_incoming(self) -> Path:
+        return self.inbox_dir / "incoming"
+
+    @property
+    def inbox_attachments(self) -> Path:
+        return self.inbox_dir / "attachments"
+
+    @property
+    def inbox_processed(self) -> Path:
+        return self.inbox_dir / "processed"
+
+    @property
+    def inbox_extracted(self) -> Path:
+        return self.inbox_dir / "extracted"
+
+    @property
     def vip_list(self) -> list[str]:
         return [part.strip().lower() for part in self.vip_senders.split(",") if part.strip()]
 
@@ -81,6 +103,14 @@ class Settings(BaseSettings):
     def ensure_data_dir(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.digest_dir.mkdir(parents=True, exist_ok=True)
+        self.training_path.parent.mkdir(parents=True, exist_ok=True)
+        for folder in (
+            self.inbox_incoming,
+            self.inbox_attachments,
+            self.inbox_processed,
+            self.inbox_extracted,
+        ):
+            folder.mkdir(parents=True, exist_ok=True)
 
 
 def load_settings() -> Settings:

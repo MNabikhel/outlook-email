@@ -114,9 +114,9 @@ def demo_messages(now: datetime | None = None) -> list[RawMessage]:
     close_xlsx = _xlsx(
         [
             ["Close item", "Owner", "Due"],
-            ["Prepaid rollforward", "Assistant controller", "2026-09-29"],
-            ["AP accruals", "Assistant controller", "2026-09-30"],
-            ["Bank rec - operating", "Assistant controller", "2026-09-28"],
+            ["Prepaid rollforward", "Close team", "2026-09-29"],
+            ["AP accruals", "Close team", "2026-09-30"],
+            ["Bank rec - operating", "Close team", "2026-09-28"],
         ],
         sheet="Close calendar",
     )
