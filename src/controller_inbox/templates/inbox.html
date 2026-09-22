@@ -70,19 +70,29 @@
       <option value="{{ key.value }}" {{ 'selected' if filter_category == key.value else '' }}>{{ label }}</option>
       {% endfor %}
     </select>
+    <select name="bin">
+      <option value="">All bins</option>
+      {% for b in bin_order %}
+      <option value="{{ b.value }}" {{ 'selected' if filter_bin == b.value else '' }}>{{ bin_labels[b] }}</option>
+      {% endfor %}
+    </select>
     <button type="submit">Filter</button>
   </form>
-  <a class="ghost" href="/export/actions.csv">Export actions CSV</a>
+  <div class="toolbar-actions">
+    <a class="ghost" href="/bins">Bins board</a>
+    <a class="ghost" href="/export/actions.csv">Export actions CSV</a>
+  </div>
 </section>
 
 <section class="table-wrap">
   <table class="mail">
     <thead>
       <tr>
+        <th>Bin</th>
         <th>Importance</th>
         <th>Received</th>
         <th>From</th>
-        <th>Subject / why it flagged</th>
+        <th>Subject / summary</th>
         <th>Category</th>
         <th>Amount</th>
         <th>Files</th>
@@ -91,6 +101,7 @@
     <tbody>
       {% for email in emails %}
       <tr class="{{ email.importance.value }}">
+        <td><a class="bin-pill {{ email.triage_bin.value }}" href="/inbox?bin={{ email.triage_bin.value }}">{{ email.triage_bin | label_bin }}</a></td>
         <td><span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }}</span></td>
         <td class="nowrap">{{ email.received_at | shortdt }}</td>
         <td>
@@ -99,6 +110,9 @@
         </td>
         <td>
           <a class="subj" href="/inbox/{{ email.id }}">{{ email.subject }}</a>
+          {% if email.summary %}
+          <small class="summary">{{ email.summary }}{% if email.ai_source.startswith('llm') %} <span class="ai-tag">AI</span>{% endif %}</small>
+          {% endif %}
           {% if email.flags %}
           <div class="flags">
             {% for flag in email.flags %}
@@ -106,16 +120,13 @@
             {% endfor %}
           </div>
           {% endif %}
-          {% if email.importance_reasons %}
-          <small class="why">{{ email.importance_reasons[0] }}</small>
-          {% endif %}
         </td>
         <td>{{ email.category.value | label_doc }}</td>
         <td class="nowrap">{{ email.extracted.primary_amount | money }}</td>
         <td>{{ email.attachments | length }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="7" class="muted">No mail matches this filter.</td></tr>
+      <tr><td colspan="8" class="muted">No mail matches this filter.</td></tr>
       {% endfor %}
     </tbody>
   </table>

@@ -14,7 +14,15 @@ from controller_inbox.classify import month_end
 from controller_inbox.cli import export_actions_csv
 from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, write_digest_files
-from controller_inbox.models import DOCUMENT_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
+from controller_inbox.models import (
+    DOCUMENT_LABELS,
+    IMPORTANCE_LABELS,
+    TRIAGE_BIN_LABELS,
+    TRIAGE_BIN_ORDER,
+    DocumentType,
+    Importance,
+    TriageBin,
+)
 from controller_inbox.pipeline import ingest_demo
 from controller_inbox.store import Store
 
@@ -33,6 +41,17 @@ templates.env.filters["label_doc"] = lambda value: DOCUMENT_LABELS.get(
 templates.env.filters["label_imp"] = lambda value: IMPORTANCE_LABELS.get(
     value if isinstance(value, Importance) else Importance(value), value
 )
+
+
+def _bin_label(value) -> str:
+    try:
+        key = value if isinstance(value, TriageBin) else TriageBin(value)
+    except ValueError:
+        return value
+    return TRIAGE_BIN_LABELS.get(key, value)
+
+
+templates.env.filters["label_bin"] = _bin_label
 
 
 def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:
@@ -57,8 +76,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "graph_configured": settings.graph_configured,
             "last_sync": store.get_state("last_sync_at"),
             "doc_labels": DOCUMENT_LABELS,
+            "bin_labels": TRIAGE_BIN_LABELS,
+            "bin_order": TRIAGE_BIN_ORDER,
+            "bin_counts": store.bin_counts(),
             "filter_importance": "",
             "filter_category": "",
+            "filter_bin": "",
             "query": "",
         }
         try:
@@ -100,12 +123,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         request: Request,
         importance: str = "",
         category: str = "",
+        bin: str = "",
         flag: str = "",
         q: str = "",
     ):
         emails = store.list_emails(
             importance=importance or None,
             category=category or None,
+            triage_bin=bin or None,
             flag=flag or None,
             q=q or None,
         )
@@ -120,9 +145,26 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             digest=None,
             filter_importance=importance,
             filter_category=category,
+            filter_bin=bin,
             query=q,
-            heading="Filtered inbox" if any([importance, category, flag, q]) else "Inbox",
+            heading="Filtered inbox" if any([importance, category, bin, flag, q]) else "Inbox",
         )
+
+    @app.get("/bins", response_class=HTMLResponse)
+    def bins_page(request: Request):
+        all_emails = store.list_emails(limit=500)
+        grouped = {b: [] for b in TRIAGE_BIN_ORDER}
+        for email in all_emails:
+            grouped.setdefault(email.triage_bin, []).append(email)
+        columns = [
+            {
+                "bin": b,
+                "label": TRIAGE_BIN_LABELS.get(b, b.value),
+                "emails": sorted(grouped.get(b, []), key=lambda e: e.importance_score, reverse=True),
+            }
+            for b in TRIAGE_BIN_ORDER
+        ]
+        return render(request, "bins.html", page="bins", columns=columns, heading="Triage bins")
 
     @app.get("/inbox/{email_id}", response_class=HTMLResponse)
     def email_detail(request: Request, email_id: str):
@@ -169,9 +211,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         )
 
     @app.get("/digest", response_class=HTMLResponse)
-    def digest_page(request: Request):
-        as_of = local_today(settings.tz)
-        row = store.get_digest(as_of.isoformat()) or store.latest_digest()
+    def digest_page(request: Request, date: str = ""):
+        if date:
+            row = store.get_digest(date)
+        else:
+            as_of = local_today(settings.tz)
+            row = store.get_digest(as_of.isoformat()) or store.latest_digest()
         payload = None
         if row and row.get("payload"):
             payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
@@ -181,7 +226,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             page="digest",
             digest=row,
             payload=payload,
-            as_of=as_of.isoformat(),
+            as_of=(row or {}).get("period_date") or local_today(settings.tz).isoformat(),
+            history=store.list_digests(limit=30),
+        )
+
+    @app.get("/digests", response_class=HTMLResponse)
+    def digest_history_page(request: Request):
+        return render(
+            request,
+            "digests.html",
+            page="digest",
+            history=store.list_digests(limit=120),
+            heading="Digest history",
         )
 
     @app.post("/digest/rebuild")

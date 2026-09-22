@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Triage bins · CloseDesk{% endblock %}
+{% block heading %}Triage bins{% endblock %}
+{% block body %}
+<section class="toolbar">
+  <p class="muted">
+    Every message dropped into a pile: what must not be paid, what needs action, what to review,
+    and what is just FYI. The local AI can refine the soft bins; fraud and real tasks stay rule-locked.
+  </p>
+</section>
+
+<section class="bins-board">
+  {% for col in columns %}
+  <article class="bin-col {{ col.bin.value }}">
+    <header>
+      <span class="bin-pill {{ col.bin.value }}">{{ col.label }}</span>
+      <b>{{ col.emails | length }}</b>
+    </header>
+    {% if col.emails %}
+    <ul>
+      {% for email in col.emails %}
+      <li>
+        <a href="/inbox/{{ email.id }}">
+          <span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }}</span>
+          {{ email.subject }}
+        </a>
+        {% if email.summary %}<small class="summary">{{ email.summary }}{% if email.ai_source.startswith('llm') %} <span class="ai-tag">AI</span>{% endif %}</small>{% endif %}
+        <small class="meta">{{ email.sender_name or email.sender_email }} · {{ email.category.value | label_doc }}</small>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted empty-col">Empty.</p>
+    {% endif %}
+  </article>
+  {% endfor %}
+</section>
+{% endblock %}

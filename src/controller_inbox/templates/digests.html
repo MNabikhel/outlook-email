@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}Digest history · CloseDesk{% endblock %}
+{% block heading %}Digest history{% endblock %}
+{% block body %}
+<section class="toolbar">
+  <p class="muted">Every daily brief CloseDesk has built, kept so you can look back at what a given day held.</p>
+  <a class="ghost" href="/digest">Today's digest</a>
+</section>
+
+{% if history %}
+<section class="table-wrap">
+  <table class="mail">
+    <thead>
+      <tr><th>Date</th><th>Emails</th><th>High / critical</th><th>Open actions</th><th>Overdue</th><th>Fraud alerts</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for row in history %}
+      <tr>
+        <td class="nowrap"><strong>{{ row.period_date }}</strong></td>
+        <td>{{ row.kpis.emails or 0 }}</td>
+        <td>{{ row.kpis.high_importance or 0 }}</td>
+        <td>{{ row.kpis.open_actions or 0 }}</td>
+        <td>{{ row.kpis.overdue_actions or 0 }}</td>
+        <td>{{ row.kpis.fraud_alerts or 0 }}</td>
+        <td><a class="ghost" href="/digest?date={{ row.period_date }}">Open</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% else %}
+<p class="muted">No digests stored yet. Load the demo mailbox or sync Outlook, then rebuild the digest.</p>
+{% endif %}
+{% endblock %}

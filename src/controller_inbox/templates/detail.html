@@ -7,8 +7,14 @@
   <header class="detail-head">
     <div>
       <span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }} · {{ email.importance_score }}</span>
+      <span class="bin-pill {{ email.triage_bin.value }}">{{ email.triage_bin | label_bin }}</span>
       <h2>{{ email.subject }}</h2>
       <p>{{ email.sender_name }} &lt;{{ email.sender_email }}&gt; · {{ email.received_at | shortdt }}</p>
+      {% if email.summary %}
+      <p class="ai-summary">{{ email.summary }}
+        <span class="ai-tag">{{ 'AI · ' + email.ai_source.split(':')[0] if email.ai_source.startswith('llm') else 'rules' }}</span>
+      </p>
+      {% endif %}
     </div>
     <div class="facts">
       <div><span>Category</span><b>{{ email.category.value | label_doc }}</b></div>
@@ -22,6 +28,14 @@
   <div class="flags big">
     {% for flag in email.flags %}
     <span class="flag {{ flag }}">{{ flag.replace('_', ' ') }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if email.highlights %}
+  <div class="highlights">
+    {% for point in email.highlights %}
+    <span class="chip">{{ point }}</span>
     {% endfor %}
   </div>
   {% endif %}

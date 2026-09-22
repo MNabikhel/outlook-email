@@ -114,11 +114,60 @@ ul.stack li { padding: 8px 0; border-top: 1px solid var(--line); }
 details.panel { margin-top: 16px; }
 details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 18px; }
 
+/* Triage bins */
+.bin-pill {
+  display: inline-block; font-size: 11px; letter-spacing: 0.03em; text-transform: uppercase;
+  padding: 3px 8px; border-radius: 2px; background: var(--chip); color: var(--ink);
+  border: 1px solid transparent; white-space: nowrap;
+}
+.bin-pill:hover { text-decoration: none; opacity: 0.9; }
+.bin-pill.fraud_review { background: var(--danger); color: #fff; }
+.bin-pill.action_required { background: var(--navy); color: #fff; }
+.bin-pill.review { background: #d9c48a; color: #2a2410; }
+.bin-pill.fyi { background: #e2e8dd; color: #34432f; }
+.bin-pill.read_later { background: #e7e1d3; color: #675c43; }
+
+.summary { display: block; color: var(--muted); margin-top: 4px; font-size: 12.5px; line-height: 1.4; }
+.ai-tag {
+  font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; font-weight: 700;
+  background: var(--green); color: #fff; padding: 1px 5px; border-radius: 2px; vertical-align: middle;
+}
+.ai-summary { margin: 8px 0 0; font-size: 14px; color: #34432f; }
+.highlights { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0; }
+.chip { background: var(--chip); border: 1px solid var(--line); padding: 3px 9px; font-size: 12px; border-radius: 2px; }
+.mode.llm-on { color: #a6e3b8; }
+
+.toolbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.digest-jump { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.digest-jump .ghost.on { background: var(--navy); color: #fff; }
+
+/* Bins board */
+.bins-board { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; align-items: start; }
+.bin-col { background: var(--card); border: 1px solid var(--line); padding: 10px; min-height: 120px; }
+.bin-col header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.bin-col header b { font-family: var(--serif); font-size: 20px; }
+.bin-col ul { list-style: none; padding: 0; margin: 0; }
+.bin-col li { padding: 8px 0; border-top: 1px solid #eee6d8; }
+.bin-col li a { font-weight: 600; color: var(--ink); display: block; }
+.bin-col .meta { display: block; color: var(--muted); font-size: 11px; margin-top: 3px; }
+.bin-col.fraud_review { box-shadow: inset 3px 0 0 var(--danger); }
+.bin-col.action_required { box-shadow: inset 3px 0 0 var(--navy); }
+.empty-col { font-style: italic; }
+
+/* Local AI card */
+.llm-card { margin-bottom: 14px; border-left: 4px solid var(--line); }
+.llm-card.on { border-left-color: var(--green); }
+.llm-card.off { border-left-color: var(--gold); }
+
+@media (max-width: 1100px) {
+  .bins-board { grid-template-columns: repeat(2, 1fr); }
+}
 @media (max-width: 980px) {
   .shell { grid-template-columns: 1fr; }
   .rail { flex-direction: row; flex-wrap: wrap; align-items: center; }
   .rail nav { flex-direction: row; flex-wrap: wrap; }
   .rail-foot { margin: 0; display: flex; gap: 12px; align-items: center; }
   .triage, .split { grid-template-columns: 1fr; }
+  .bins-board { grid-template-columns: 1fr; }
   .top h1 { font-size: 26px; }
 }

@@ -14,9 +14,11 @@ When a message arrives, CloseDesk:
 2. Extracts text from PDF, Excel, Word, CSV, and HTML. Account and routing numbers are stored as last-4 only.
 3. Classifies each attachment and the email as a whole, using finance-controller rules rather than a generic “spam vs not spam” model.
 4. Scores importance (critical / high / medium / low) from due dates, dollar amount, sender, month-end proximity, and Outlook’s own importance flag.
-5. Turns the message into action items you can complete in the dashboard or export to Excel.
-6. Optionally writes Outlook categories and a follow-up flag back onto the message.
-7. Builds a daily digest you can open locally, email to yourself, or run from `watch` every morning.
+5. Drops every message into a **triage bin** — do-not-process, action required, needs review, FYI, or read later — so the whole inbox sorts itself into piles.
+6. Optionally runs a **local LLM on your own laptop** (LM Studio, Ollama, or Bionic) to write a plain-English summary and refine the soft bins. Rules stay authoritative: the model can never downgrade a fraud alert or drop a real action item, and if no model is running everything falls back to deterministic rules.
+7. Turns the message into action items you can complete in the dashboard or export to Excel.
+8. Optionally writes Outlook categories and a follow-up flag back onto the message.
+9. Builds a daily digest you can open locally, email to yourself, or run from `watch` every morning — and keeps a browsable history of every past digest.
 
 ## Improvements aimed at an assistant controller
 
@@ -46,10 +48,68 @@ Useful commands:
 | Command | What it does |
 | --- | --- |
 | `python -m controller_inbox demo` | Load the sample mailbox and print a digest |
-| `python -m controller_inbox serve` | Dashboard (inbox, actions, attachments, digest) |
-| `python -m controller_inbox digest` | Rebuild today’s action-item brief |
+| `python -m controller_inbox serve` | Dashboard (inbox, bins, actions, attachments, digest) |
+| `python -m controller_inbox triage` | Group the inbox into triage bins (add `--json` for scripts) |
+| `python -m controller_inbox digest` | Rebuild today’s brief (`--json`, `--history`) |
 | `python -m controller_inbox export` | CSV of action items to stdout |
-| `python -m controller_inbox status` | Local counts |
+| `python -m controller_inbox status` | Local counts + bins (`--json`) |
+| `python -m controller_inbox llm-check` | Confirm the local LLM server is reachable |
+
+## Run a local AI (LM Studio / Ollama / Bionic)
+
+CloseDesk is rules-first and works with **no model at all**. When you want richer
+summaries and smarter binning, point it at an OpenAI-compatible server running on your
+own machine — nothing is sent to a vendor cloud.
+
+1. Start a local server and load a model:
+   - **LM Studio** → enable the local server (default `http://localhost:1234/v1`).
+   - **Ollama** → `ollama serve`, then set `CONTROLLER_INBOX_LLM_BASE_URL=http://localhost:11434/v1`.
+   - **Bionic** / anything else that speaks the OpenAI chat API → use its base URL.
+2. Turn it on and check the connection:
+
+```bash
+export CONTROLLER_INBOX_LLM=true
+export CONTROLLER_INBOX_LLM_BASE_URL=http://localhost:1234/v1
+export CONTROLLER_INBOX_LLM_MODEL=your-loaded-model
+python -m controller_inbox llm-check
+```
+
+3. Load or sync mail as usual — summaries and refined bins appear automatically:
+
+```bash
+python -m controller_inbox demo --serve     # or: scripts/local-llm.sh
+```
+
+What the model is and is **not** allowed to do:
+
+- ✅ Writes a 1–2 sentence summary of each email + attachments.
+- ✅ Refines the *soft* bins (needs review / FYI / read later).
+- ❌ Never overrides a fraud / payment-instruction alert.
+- ❌ Never downgrades an email that has a real extracted action item.
+- ❌ Never invents amounts, dates, or invoice numbers (they come from deterministic extraction).
+
+If the server is offline or slow, CloseDesk silently falls back to the deterministic
+summary and bin, so the pipeline never blocks on the model.
+
+## Triage bins
+
+Every message lands in exactly one bin so a busy inbox sorts itself into piles:
+
+| Bin | Meaning |
+| --- | --- |
+| Do not process | Payment-instruction / BEC fraud — verify by phone |
+| Action required | You need to do something (an action item was extracted, or it’s high/critical) |
+| Needs review | Worth a look, no discrete task yet |
+| FYI | Informational, no action |
+| Read later | Low-value reading such as newsletters |
+
+Open the **Triage bins** board in the dashboard, filter the inbox by bin, or run
+`python -m controller_inbox triage` (add `--json` to feed another script or agent).
+
+## Helper scripts
+
+- `scripts/local-llm.sh` — check the local model, then load the demo mailbox with enrichment and open the dashboard.
+- `scripts/daily-brief.sh` — sync (or refresh demo), rebuild the digest, export the CSV, and print a triage snapshot. Good for cron.
 
 ## Connect your real Outlook
 
@@ -137,11 +197,14 @@ src/controller_inbox/
   demo.py        Sample assistant-controller mailbox
   extract.py     Attachment text + invoice/amount/due-date parsing
   classify.py    Finance document rules + importance
+  triage.py      Triage bins + deterministic summaries (pure, no network)
+  llm.py         Local LLM client + enrichment (LM Studio / Ollama / Bionic)
   actions.py     Action-item extraction
-  pipeline.py    Ingest → classify → store
+  pipeline.py    Ingest → classify → enrich → store
   digest.py      Daily brief
   web.py         Local dashboard
   cli.py         controller-inbox / closedesk commands
+scripts/         local-llm.sh, daily-brief.sh helpers
 ```
 
 Data lives in `data/closedesk.db` (gitignored). Tokens live in `data/msal_token_cache.bin`.
