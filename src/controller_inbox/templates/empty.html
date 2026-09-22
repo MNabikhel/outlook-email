@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Get started · CloseDesk{% endblock %}
+{% block heading %}Get started{% endblock %}
+{% block body %}
+<article class="panel hero">
+  <h2>Nothing in the inbox yet.</h2>
+  <p>Drop <code>.msg</code> or <code>.eml</code> files into <code>{{ inbox_incoming }}</code>, then read the folder. Or load the sample mailbox to see how classification and the daily list work.</p>
+  <form method="post" action="/folder/ingest">
+    <button type="submit">Read the drop folder</button>
+  </form>
+  <form method="post" action="/demo/reload">
+    <button class="ghost" type="submit">Load sample mailbox</button>
+  </form>
+</article>
+{% endblock %}

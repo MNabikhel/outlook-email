@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Morning · CloseDesk{% endblock %}
+{% block heading %}Morning{% endblock %}
+{% block body %}
+<p class="lede">
+  {% if counts.waiting_on_bionic %}
+  {{ counts.waiting_on_bionic }} still waiting on Bionic. Folders below are script drafts until the overnight run reads them.
+  {% else %}
+  Bionic has read the queue. Start with Important, then the action list.
+  {% endif %}
+</p>
+<section class="folder-grid">
+  <a class="panel folder-card" href="/folder/important">
+    <span>Important</span>
+    <b>{{ counts.important }}</b>
+    <ul>
+      {% for email in important %}
+      <li>{{ email.subject }}</li>
+      {% else %}
+      <li class="muted">Nothing filed here.</li>
+      {% endfor %}
+    </ul>
+  </a>
+  <a class="panel folder-card" href="/actions">
+    <span>Action items</span>
+    <b>{{ counts.open_actions }}</b>
+    <ul>
+      {% for action, email in due_today %}
+      <li>Today · {{ action.title }}</li>
+      {% endfor %}
+      {% for action, email in overdue %}
+      <li>Overdue · {{ action.title }}</li>
+      {% else %}
+      {% if not due_today %}<li class="muted">No dated items due.</li>{% endif %}
+      {% endfor %}
+    </ul>
+  </a>
+  <a class="panel folder-card" href="/folder/informational">
+    <span>Informational</span>
+    <b>{{ counts.informational }}</b>
+    <ul>
+      {% for email in informational %}
+      <li>{{ email.subject }}</li>
+      {% else %}
+      <li class="muted">Nothing filed here.</li>
+      {% endfor %}
+    </ul>
+  </a>
+  <a class="panel folder-card" href="/folder/reference">
+    <span>Reference</span>
+    <b>{{ counts.reference }}</b>
+    <ul>
+      {% for email in reference %}
+      <li>{{ email.subject }}</li>
+      {% else %}
+      <li class="muted">Nothing filed here.</li>
+      {% endfor %}
+    </ul>
+  </a>
+</section>
+<p class="muted">Daily digest is the one-page version of this morning. <a href="/digest">Open it</a>.</p>
+{% endblock %}

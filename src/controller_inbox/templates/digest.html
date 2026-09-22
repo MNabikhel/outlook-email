@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Daily digest · CloseDesk{% endblock %}
+{% block heading %}Daily digest{% endblock %}
+{% block body %}
+<section class="toolbar">
+  <p class="muted">
+    Morning brief of what to code, pay, reconcile, and verify.
+    {% if payload %}For {{ payload.date }} · {{ payload.days_to_close }} day(s) to close.
+    {% if payload.folder_counts %}
+    Important {{ payload.folder_counts.important }}, informational {{ payload.folder_counts.informational }}, reference {{ payload.folder_counts.reference }}.
+    {% endif %}
+    {% if payload.kpis.waiting_on_bionic %}{{ payload.kpis.waiting_on_bionic }} still waiting on Bionic.{% endif %}
+    {% endif %}
+  </p>
+  <form method="post" action="/digest/rebuild">
+    <button type="submit">Rebuild digest</button>
+  </form>
+</section>
+
+{% if payload %}
+{% macro action_list(items, empty) %}
+  {% if items %}
+  <ul class="stack">
+    {% for item in items %}
+    <li>
+      <a href="/inbox/{{ item.email_id or item.id }}">{{ item.title or item.subject }}</a>
+      <small>
+        {{ item.sender or item.priority or '' }}
+        {% if item.due_date or item.due %} · due {{ item.due_date or item.due }}{% endif %}
+        {% if item.amount %} · {{ item.amount | money }}{% endif %}
+      </small>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="muted">{{ empty }}</p>
+  {% endif %}
+{% endmacro %}
+
+<section class="triage">
+  <article class="panel alert">
+    <h2>Do not process — verify by phone</h2>
+    {{ action_list(payload.critical_alerts, 'No fraud or critical alerts.') }}
+  </article>
+  <article class="panel">
+    <h2>Overdue</h2>
+    {{ action_list(payload.overdue_actions, 'Nothing overdue.') }}
+  </article>
+  <article class="panel">
+    <h2>Due today</h2>
+    {{ action_list(payload.due_today, 'Nothing due today.') }}
+  </article>
+</section>
+
+<section class="split">
+  <article class="panel">
+    <h3>Other critical (not payment-instruction fraud)</h3>
+    {{ action_list(payload.other_critical, 'No other critical mail.') }}
+    <h3>Due this week</h3>
+    {{ action_list(payload.due_this_week, 'Nothing else dated this week.') }}
+    <h3>Invoices to enter</h3>
+    {{ action_list(payload.invoices_to_enter, 'No vendor invoices in the window.') }}
+  </article>
+  <article class="panel">
+    <h3>Cash to apply</h3>
+    {{ action_list(payload.cash_to_apply, 'No remittances waiting.') }}
+    <h3>Close / reconcile</h3>
+    {{ action_list(payload.close_items, 'No close items in the window.') }}
+    <h3>Category mix</h3>
+    <ul class="plain">
+      {% for key, n in payload.category_counts.items() %}
+      <li>{{ key | label_doc }} — {{ n }}</li>
+      {% endfor %}
+    </ul>
+  </article>
+</section>
+
+<details class="panel">
+  <summary>Markdown copy</summary>
+  <pre class="body">{{ digest.markdown }}</pre>
+</details>
+{% else %}
+<p class="muted">No digest yet. Load the demo mailbox or sync Outlook, then rebuild.</p>
+{% endif %}
+{% endblock %}

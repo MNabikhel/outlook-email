@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}{{ heading }} · CloseDesk{% endblock %}
+{% block heading %}{{ heading }}{% endblock %}
+{% block body %}
+{% if blurb %}<p class="lede">{{ blurb }}</p>{% endif %}
+{% if attention or overdue or due_today %}
+<section class="triage">
+  <article class="panel alert">
+    <h2>Needs you now</h2>
+    {% if attention %}
+      <ul>
+        {% for email in attention %}
+        <li>
+          <a href="/inbox/{{ email.id }}">
+            <span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }}</span>
+            {{ email.subject }}
+          </a>
+          <small>{{ email.sender_name }} · {{ email.category.value | label_doc }}</small>
+        </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">Nothing critical in the current window.</p>
+    {% endif %}
+  </article>
+  <article class="panel">
+    <h2>Overdue actions</h2>
+    {% if overdue %}
+      <ul>
+        {% for action, email in overdue %}
+        <li>
+          <a href="/inbox/{{ email.id }}">{{ action.title }}</a>
+          <small>Due {{ action.due_date }} · {{ email.subject }}</small>
+        </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">No overdue items. Keep it that way.</p>
+    {% endif %}
+  </article>
+  <article class="panel">
+    <h2>Due today</h2>
+    {% if due_today %}
+      <ul>
+        {% for action, email in due_today %}
+        <li>
+          <a href="/inbox/{{ email.id }}">{{ action.title }}</a>
+          <small>{{ action.priority.value | label_imp }} · {{ email.sender_name }}</small>
+        </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">No dated items due today.</p>
+    {% endif %}
+  </article>
+</section>
+{% endif %}
+
+<section class="toolbar">
+  <form class="filters" method="get" action="/inbox">
+    <input type="search" name="q" value="{{ query }}" placeholder="Search subject, sender…"/>
+    <select name="importance">
+      <option value="">All importance</option>
+      {% for key in ['critical','high','medium','low'] %}
+      <option value="{{ key }}" {{ 'selected' if filter_importance == key else '' }}>{{ key | label_imp }}</option>
+      {% endfor %}
+    </select>
+    <select name="category">
+      <option value="">All categories</option>
+      {% for key, label in doc_labels.items() %}
+      <option value="{{ key.value }}" {{ 'selected' if filter_category == key.value else '' }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Filter</button>
+  </form>
+  <a class="ghost" href="/export/actions.csv">Export actions CSV</a>
+</section>
+
+<section class="table-wrap">
+  <table class="mail">
+    <thead>
+      <tr>
+        <th>Importance</th>
+        <th>Received</th>
+        <th>From</th>
+        <th>Subject / why it flagged</th>
+        <th>Category</th>
+        <th>Amount</th>
+        <th>Files</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for email in emails %}
+      <tr class="{{ email.importance.value }}">
+        <td><span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }}</span></td>
+        <td class="nowrap">{{ email.received_at | shortdt }}</td>
+        <td>
+          <div class="from">{{ email.sender_name or email.sender_email }}</div>
+          <small>{{ email.sender_email }}</small>
+        </td>
+        <td>
+          <a class="subj" href="/inbox/{{ email.id }}">{{ email.subject }}</a>
+          {% if email.flags %}
+          <div class="flags">
+            {% for flag in email.flags %}
+            <span class="flag {{ flag }}">{{ flag.replace('_', ' ') }}</span>
+            {% endfor %}
+          </div>
+          {% endif %}
+          {% if email.summary %}
+          <small class="summary">{{ email.summary }}</small>
+          {% elif email.importance_reasons %}
+          <small class="why">{{ email.importance_reasons[0] }}</small>
+          {% endif %}
+          {% if email.model_status == 'script_draft' %}
+          <span class="flag needs_model">Waiting on Bionic</span>
+          {% elif email.model_status == 'bionic' %}
+          <span class="flag bionic">Read by Bionic</span>
+          {% elif email.model_status == 'corrected' %}
+          <span class="flag user_trained">Corrected by you</span>
+          {% endif %}
+        </td>
+        <td>{{ email.category.value | label_doc }}</td>
+        <td class="nowrap">{{ email.extracted.primary_amount | money }}</td>
+        <td>{{ email.attachments | length }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">No mail matches this filter.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

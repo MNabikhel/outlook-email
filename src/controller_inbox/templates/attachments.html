@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Attachments · CloseDesk{% endblock %}
+{% block heading %}Attachments{% endblock %}
+{% block body %}
+<section class="toolbar">
+  <div class="chips">
+    <a class="{{ 'on' if not selected_type else '' }}" href="/attachments">All</a>
+    {% for key, n in type_counts.items() %}
+    <a class="{{ 'on' if selected_type == key else '' }}" href="/attachments?type={{ key }}">{{ key | label_doc }} ({{ n }})</a>
+    {% endfor %}
+  </div>
+</section>
+<section class="table-wrap">
+  <table class="mail">
+    <thead>
+      <tr>
+        <th>Received</th>
+        <th>File</th>
+        <th>Document type</th>
+        <th>From</th>
+        <th>Email</th>
+        <th>Extract</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr>
+        <td class="nowrap">{{ row.received_at | shortdt }}</td>
+        <td>{{ row.filename }}<br/><small>{{ row.content_type }}</small></td>
+        <td>{{ row.document_type | label_doc }}<br/><small>{{ '%.0f'|format((row.document_confidence or 0) * 100) }}%</small></td>
+        <td>{{ row.sender_name }}<br/><small>{{ row.sender_email }}</small></td>
+        <td><a href="/inbox/{{ row.email_id }}">{{ row.subject }}</a></td>
+        <td><pre class="clip">{{ (row.extracted_text or '')[:280] }}</pre></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">No attachments stored yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

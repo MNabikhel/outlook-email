@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Setup · CloseDesk{% endblock %}
+{% block heading %}Setup{% endblock %}
+{% block body %}
+<section class="split">
+  <article class="panel">
+    <h3>Drop folder on this laptop</h3>
+    <p>Copy this project onto the laptop, then drop mail here. You do not need a cloud login to start.</p>
+    <ol class="plain numbered">
+      <li>Save or drag Outlook messages into <code>{{ inbox_incoming }}</code> as <code>.msg</code> or <code>.eml</code>.</li>
+      <li>Attachments inside the message are unpacked on their own. If you also have the files separately, put them in <code>{{ inbox_attachments }}/&lt;same name as the message&gt;/</code>.</li>
+      <li>Excel, PDF, Word, PowerPoint, CSV, RTF, HTML, ZIP, and older <code>.xls</code> workbooks are read. A loose file dropped in Incoming is classified too.</li>
+      <li>Click the button below, or run <code>python -m controller_inbox ingest</code>. Processed originals move to <code>inbox/processed</code>. Unpacked files land in <code>inbox/extracted</code>.</li>
+    </ol>
+    <form method="post" action="/folder/ingest">
+      <button type="submit">Read the drop folder</button>
+    </form>
+    <p class="muted">Corrections saved: {{ correction_count }}</p>
+  </article>
+  <article class="panel">
+    <h3>Scripts extract. Bionic decides.</h3>
+    <p>The fast scripts pull text, amounts, dates, and file types, then leave a draft in Important, Informational, or Reference. The local model in Bionic Studio does the reading: category, folder, summary, and action items. A payment-instruction warning stays in Important either way.</p>
+    <p>In LM Studio, load a model, start the local server, and install the <code>bionic/closedesk-inbox</code> skill. Then set:</p>
+    <pre class="clip">CONTROLLER_INBOX_LLM=true
+CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:1234/v1
+CONTROLLER_INBOX_LLM_MODEL=local-model</pre>
+    <p>Status: <strong>{{ 'Bionic reader on' if llm_enabled else 'script drafts only — Bionic off' }}</strong></p>
+    <p class="muted">Overnight: <code>python -m controller_inbox overnight</code>. Or ask Bionic to run the closedesk-inbox skill, which calls the same tools. <code>local-model</code> means “whatever LM Studio has loaded.” Waiting on Bionic: {{ counts.waiting_on_bionic }}.</p>
+    <p class="muted">When a category is wrong, open the message and use “Wrong category?”. The reason is saved, the overnight run will not overwrite that message, and the example is written to <code>data/training/corrections.jsonl</code>. A saved correction cannot clear a payment-instruction warning on a new message.</p>
+  </article>
+</section>
+<section class="split">
+  <article class="panel">
+    <h3>Outlook direct connection</h3>
+    <p>Optional. Register an Entra public-client app, add delegated <code>Mail.Read</code>, and set <code>AZURE_CLIENT_ID</code>. Then <code>python -m controller_inbox auth</code> and <code>sync</code>.</p>
+    <p>Status: <strong>{{ 'ready to sign in' if graph_configured else 'not configured' }}</strong></p>
+    <p class="muted">Last sync: {{ last_sync or 'never' }}</p>
+  </article>
+  <article class="panel">
+    <h3>Sample mailbox</h3>
+    <p>Load the built-in sample if you want to see the dashboard before your own files are in the folder.</p>
+    <form method="post" action="/demo/reload">
+      <button type="submit">Load sample mailbox</button>
+    </form>
+  </article>
+</section>
+{% endblock %}

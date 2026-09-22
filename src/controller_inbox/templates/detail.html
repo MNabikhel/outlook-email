@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block title %}{{ email.subject }} · CloseDesk{% endblock %}
+{% block heading %}Message{% endblock %}
+{% block body %}
+<p class="crumb"><a href="/">Inbox</a> / {{ email.category.value | label_doc }}</p>
+<article class="detail">
+  <header class="detail-head">
+    <div>
+      <span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }} · {{ email.importance_score }}</span>
+      <h2>{{ email.subject }}</h2>
+      <p>{{ email.sender_name }} &lt;{{ email.sender_email }}&gt; · {{ email.received_at | shortdt }}</p>
+      {% if email.summary %}<p class="summary">{{ email.summary }}</p>{% endif %}
+      {% if email.model_status == 'script_draft' %}
+      <p class="note">Waiting on Bionic. The folder and summary are a script draft from the extracted text.</p>
+      {% elif email.model_status == 'bionic' %}
+      <p class="note">Read by Bionic.</p>
+      {% elif email.model_status == 'corrected' %}
+      <p class="note">Corrected by you. The overnight run will not overwrite this.</p>
+      {% endif %}
+    </div>
+    <div class="facts">
+      <div><span>Folder</span><b>{{ email.folder|capitalize if email.folder else '—' }}</b></div>
+      <div><span>Category</span><b>{{ email.category.value | label_doc }}</b></div>
+      <div><span>Invoice</span><b>{{ email.extracted.primary_invoice or '—' }}</b></div>
+      <div><span>Amount</span><b>{{ email.extracted.primary_amount | money or '—' }}</b></div>
+      <div><span>Due</span><b>{{ email.extracted.primary_due or '—' }}</b></div>
+    </div>
+  </header>
+
+  {% if email.flags %}
+  <div class="flags big">
+    {% for flag in email.flags %}
+    <span class="flag {{ flag }}">{{ flag.replace('_', ' ') }}</span>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if email.importance_reasons %}
+  <section class="panel">
+    <h3>Why this was flagged</h3>
+    <ul class="plain">
+      {% for reason in email.importance_reasons %}
+      <li>{{ reason }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  <div class="split">
+    <section class="panel">
+      <h3>Email body</h3>
+      <pre class="body">{{ email.body_text }}</pre>
+    </section>
+    <section class="panel">
+      <h3>Action items</h3>
+      {% if email.actions %}
+      <ul class="actions">
+        {% for action in email.actions %}
+        <li>
+          <div>
+            <strong>{{ action.title }}</strong>
+            <small>{{ action.priority.value | label_imp }} · due {{ action.due_date or 'unspecified' }} · {{ action.status.value }}</small>
+            <p>{{ action.detail }}</p>
+          </div>
+          {% if action.status.value != 'done' %}
+          <form method="post" action="/actions/{{ action.id }}/complete?next=/inbox/{{ email.id }}">
+            <button type="submit">Mark done</button>
+          </form>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="muted">No action items extracted.</p>
+      {% endif %}
+    </section>
+  </div>
+
+  <section class="panel">
+    <h3>Attachments</h3>
+    {% if email.attachments %}
+    <table class="mail">
+      <thead>
+        <tr><th>File</th><th>Type</th><th>Confidence</th><th>Invoice / amount</th><th>Extracted text</th></tr>
+      </thead>
+      <tbody>
+        {% for att in email.attachments %}
+        <tr>
+          <td>{{ att.filename }}<br/><small>{{ att.content_type }} · {{ att.size_bytes }} bytes</small></td>
+          <td>{{ att.document_type.value | label_doc }}</td>
+          <td>{{ '%.0f'|format(att.document_confidence * 100) }}%</td>
+          <td>{{ att.extracted_fields.primary_invoice or '—' }}<br/>{{ att.extracted_fields.primary_amount | money }}</td>
+          <td><pre class="clip">{{ att.extracted_text[:600] or 'No extractable text (scan/image).' }}</pre></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No attachments on this message.{% if 'missing_attachment' in email.flags %} The sender said there was one.{% endif %}</p>
+    {% endif %}
+  </section>
+  <section class="panel correct">
+    <h3>Wrong category?</h3>
+    <p class="muted">Say what this actually is, and why. The next message from this sender follows that correction, and the example is saved for the local model.</p>
+    {% if 'user_trained' in email.flags %}
+    <p class="note">This category came from a correction you saved.</p>
+    {% endif %}
+    <form method="post" action="/inbox/{{ email.id }}/correct">
+      <label>Correct category
+        <select name="category">
+          {% for key, label in doc_labels.items() %}
+          <option value="{{ key.value }}" {{ 'selected' if email.category == key else '' }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Why was this wrong?
+        <textarea name="reason" required minlength="3" placeholder="Example: Friday files from this vendor are remittances, not invoices."></textarea>
+      </label>
+      <button type="submit">Save and learn</button>
+    </form>
+  </section>
+</article>
+{% endblock %}
