@@ -232,3 +232,30 @@ def test_fraud_summary_always_warns(loaded):
     overlay_reading(email, {**GOOD, "category": "ap_invoice", "summary": "Vendor updated their bank account."})
     assert email.folder == "important"
     assert "verify by phone" in email.summary.lower()
+
+
+def test_model_treating_a_bank_change_as_routine_is_overruled(loaded):
+    email = loaded.get_email("demo-bec-wire")
+    overlay_reading(
+        email,
+        {
+            **GOOD,
+            "category": "other",
+            "folder": "informational",
+            "importance": "medium",
+            "summary": "Vendor has new bank details; update the vendor record before the next payment run.",
+            "actions": [
+                {"title": "Update the vendor bank account in the ERP", "due": None, "priority": "medium"},
+                {"title": "Call the vendor on the known number to verify", "due": None, "priority": "high"},
+            ],
+        },
+    )
+    assert (email.folder, email.importance.value) == ("important", "critical")
+    assert email.summary.startswith("Possible payment-instruction fraud")
+    titles = [a.title for a in email.actions]
+    assert "Update the vendor bank account in the ERP" not in titles
+    assert "Call the vendor on the known number to verify" in titles
+    guards = [r for r in email.importance_reasons if r.startswith("Guard:")]
+    assert any("Kept in Important as critical" in g and "informational" in g for g in guards)
+    assert any("Removed 1 task" in g for g in guards)
+    assert any("fraud warning" in g for g in guards)

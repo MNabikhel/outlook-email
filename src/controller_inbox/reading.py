@@ -52,6 +52,7 @@ INFO_CATEGORIES = {DocumentType.NEWSLETTER, DocumentType.INTERNAL_FYI}
 VERIFY_TITLE = "Verify payment-instruction change by phone before doing anything"
 
 _PAY_WORDS = ("pay the", "process the wire", "release the", "new account", "updated wiring", "wire the funds")
+_BANK_WORDS = re.compile(r"\b(bank|account|routing|remit\w*|wire|ach|vendor (?:record|master|file)|pay\w*)\b")
 
 
 def script_folder(category: DocumentType, importance: Importance, flags: list[str]) -> str:
@@ -180,6 +181,10 @@ def overlay_reading(email: EmailRecord, parsed: dict, *, now: datetime | None = 
 
     fraud = _is_fraud(email, category)
     if fraud:
+        if folder != "important" or importance != Importance.CRITICAL:
+            guard_notes.append(
+                f"Kept in Important as critical: possible payment-instruction fraud (the model said {folder}, {importance.value})."
+            )
         folder = "important"
         importance = Importance.CRITICAL
         if category in INFO_CATEGORIES | {DocumentType.OTHER, DocumentType.MIXED}:
@@ -210,7 +215,10 @@ def overlay_reading(email: EmailRecord, parsed: dict, *, now: datetime | None = 
         if dropped:
             guard_notes.append(f"Dropped {len(dropped)} due date(s) the model gave that are not in the message.")
     if fraud:
-        email.actions = [item for item in email.actions if not _looks_like_payment(item.title)]
+        unsafe = [item for item in email.actions if _unsafe_on_fraud(item.title)]
+        if unsafe:
+            email.actions = [item for item in email.actions if item not in unsafe]
+            guard_notes.append(f"Removed {len(unsafe)} task(s) that would act on the new bank details.")
         if not any("phone" in item.title.lower() for item in email.actions):
             email.actions.insert(0, _verify_action(email.id, as_of, now))
     elif email.folder != "important":
@@ -228,6 +236,7 @@ def overlay_reading(email: EmailRecord, parsed: dict, *, now: datetime | None = 
             guard_notes.append(f"Kept in Important: “{pressing[0].title}” is due {pressing[0].due_date}.")
     if fraud and not _warns(email.summary):
         email.summary = "Possible payment-instruction fraud — verify by phone before anything else. " + email.summary
+        guard_notes.append("Added a fraud warning to the model's summary.")
 
     reasons = [item for item in email.importance_reasons if not item.startswith(("Bionic:", "Guard:"))]
     email.importance_reasons = [f"Bionic: {why}"] + [f"Guard: {note}" for note in guard_notes] + reasons
@@ -408,3 +417,11 @@ def _iso_date(text: str) -> bool:
 def _looks_like_payment(title: str) -> bool:
     text = title.lower()
     return any(word in text for word in _PAY_WORDS)
+
+
+def _unsafe_on_fraud(title: str) -> bool:
+    """On a suspected bank-change email, only verification steps are safe to suggest."""
+    text = title.lower()
+    if re.search(r"\b(verify|call|phone|confirm by)\b", text):
+        return False
+    return _looks_like_payment(title) or bool(_BANK_WORDS.search(text))

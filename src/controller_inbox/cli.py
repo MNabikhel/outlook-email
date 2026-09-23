@@ -281,7 +281,9 @@ def _print_overnight(result: dict) -> None:
     print(
         f"Read {result['ingested']} new file(s)"
         + (f", {result['already_read']} already filed" if result.get("already_read") else "")
-        + f". The local model read {result['read_by_bionic']}"
+        + ". The local model"
+        + (f" ({result['model']})" if result.get("model") else "")
+        + f" read {result['read_by_bionic']}"
         + (f" (about {result['avg_seconds']}s each)" if result.get("avg_seconds") else "")
         + "."
     )
