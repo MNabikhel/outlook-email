@@ -3,11 +3,13 @@
 {% block heading %}Get started{% endblock %}
 {% block body %}
 <article class="panel hero">
-  <h2>No mail in the local ledger yet.</h2>
-  <p>Load a realistic assistant-controller mailbox (invoices, bank statements, payroll, a fraud wire-instruction change, auditor PBC, tax notice) or connect Outlook.</p>
-  <form method="post" action="/demo/reload">
-    <button type="submit">Load demo mailbox</button>
+  <h2>Nothing in the inbox yet.</h2>
+  <p>Drop <code>.msg</code> or <code>.eml</code> files into <code>{{ inbox_incoming }}</code>, then read the folder. Or load the sample mailbox to see how classification and the daily list work.</p>
+  <form method="post" action="/folder/ingest">
+    <button type="submit">Read the drop folder</button>
   </form>
-  <p class="muted">Or from the terminal: <code>python -m controller_inbox demo --serve</code></p>
+  <form method="post" action="/demo/reload">
+    <button class="ghost" type="submit">Load sample mailbox</button>
+  </form>
 </article>
 {% endblock %}

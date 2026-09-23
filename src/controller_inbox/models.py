@@ -39,16 +39,6 @@ class Importance(str, Enum):
     LOW = "low"
 
 
-class TriageBin(str, Enum):
-    """Coarse 'which pile does this go in' bucket, on top of the finance category."""
-
-    FRAUD_REVIEW = "fraud_review"
-    ACTION_REQUIRED = "action_required"
-    REVIEW = "review"
-    FYI = "fyi"
-    READ_LATER = "read_later"
-
-
 class ActionStatus(str, Enum):
     OPEN = "open"
     DONE = "done"
@@ -87,23 +77,6 @@ IMPORTANCE_LABELS = {
     Importance.MEDIUM: "Medium",
     Importance.LOW: "Low",
 }
-
-TRIAGE_BIN_LABELS = {
-    TriageBin.FRAUD_REVIEW: "Do not process",
-    TriageBin.ACTION_REQUIRED: "Action required",
-    TriageBin.REVIEW: "Needs review",
-    TriageBin.FYI: "FYI",
-    TriageBin.READ_LATER: "Read later",
-}
-
-# Display / board order, most urgent first.
-TRIAGE_BIN_ORDER = [
-    TriageBin.FRAUD_REVIEW,
-    TriageBin.ACTION_REQUIRED,
-    TriageBin.REVIEW,
-    TriageBin.FYI,
-    TriageBin.READ_LATER,
-]
 
 
 def json_safe(value: Any) -> Any:
@@ -224,17 +197,25 @@ class EmailRecord:
     importance_reasons: list[str] = field(default_factory=list)
     flags: list[str] = field(default_factory=list)
     extracted: ExtractedFields = field(default_factory=ExtractedFields)
-    triage_bin: TriageBin = TriageBin.FYI
-    summary: str = ""
-    highlights: list[str] = field(default_factory=list)
-    ai_source: str = "rules"
     source: str = "graph"
     conversation_id: str = ""
     internet_message_id: str = ""
     writeback_status: str = "skipped"
     created_at: str = ""
+    folder: str = ""
+    summary: str = ""
+    model_status: str = "script_draft"
     attachments: list[AttachmentRecord] = field(default_factory=list)
     actions: list[ActionItem] = field(default_factory=list)
+
+
+FOLDERS = ("important", "informational", "reference")
+
+FOLDER_LABELS = {
+    "important": "Important",
+    "informational": "Informational",
+    "reference": "Reference",
+}
 
 
 @dataclass

@@ -15,7 +15,6 @@ from controller_inbox.models import (
     EmailRecord,
     ExtractedFields,
     Importance,
-    TriageBin,
 )
 
 
@@ -38,15 +37,14 @@ CREATE TABLE IF NOT EXISTS emails (
     importance_reasons TEXT,
     flags TEXT,
     extracted TEXT,
-    triage_bin TEXT,
-    summary TEXT,
-    highlights TEXT,
-    ai_source TEXT,
     source TEXT,
     conversation_id TEXT,
     internet_message_id TEXT,
     writeback_status TEXT,
-    created_at TEXT
+    created_at TEXT,
+    folder TEXT,
+    summary TEXT,
+    model_status TEXT
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -90,24 +88,24 @@ CREATE TABLE IF NOT EXISTS sync_state (
     value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS corrections (
+    id TEXT PRIMARY KEY,
+    email_id TEXT,
+    previous_category TEXT,
+    corrected_category TEXT,
+    reason TEXT,
+    sender_email TEXT,
+    subject TEXT,
+    created_at TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(category);
-CREATE INDEX IF NOT EXISTS idx_emails_bin ON emails(triage_bin);
 CREATE INDEX IF NOT EXISTS idx_actions_status ON action_items(status);
 CREATE INDEX IF NOT EXISTS idx_actions_due ON action_items(due_date);
 CREATE INDEX IF NOT EXISTS idx_att_hash ON attachments(sha256);
 """
-
-# Columns added after the first release. SQLite has no "ADD COLUMN IF NOT EXISTS",
-# so we diff against PRAGMA table_info and add what is missing. This keeps older
-# on-disk databases working without a reset.
-_EMAIL_MIGRATIONS = {
-    "triage_bin": "ALTER TABLE emails ADD COLUMN triage_bin TEXT",
-    "summary": "ALTER TABLE emails ADD COLUMN summary TEXT",
-    "highlights": "ALTER TABLE emails ADD COLUMN highlights TEXT",
-    "ai_source": "ALTER TABLE emails ADD COLUMN ai_source TEXT",
-}
 
 
 def _dumps(value: Any) -> str:
@@ -129,13 +127,7 @@ class Store:
     def _init(self) -> None:
         with self.connect() as conn:
             conn.executescript(SCHEMA)
-            self._migrate(conn)
-
-    def _migrate(self, conn: sqlite3.Connection) -> None:
-        existing = {row["name"] for row in conn.execute("PRAGMA table_info(emails)")}
-        for column, ddl in _EMAIL_MIGRATIONS.items():
-            if column not in existing:
-                conn.execute(ddl)
+            _migrate(conn)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -161,10 +153,10 @@ class Store:
                     id, subject, sender_name, sender_email, received_at, body_text,
                     body_preview, has_attachments, outlook_importance, is_read,
                     category, category_confidence, importance, importance_score,
-                    importance_reasons, flags, extracted, triage_bin, summary,
-                    highlights, ai_source, source, conversation_id,
-                    internet_message_id, writeback_status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    importance_reasons, flags, extracted, source, conversation_id,
+                    internet_message_id, writeback_status, created_at,
+                    folder, summary, model_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     subject=excluded.subject,
                     sender_name=excluded.sender_name,
@@ -182,14 +174,13 @@ class Store:
                     importance_reasons=excluded.importance_reasons,
                     flags=excluded.flags,
                     extracted=excluded.extracted,
-                    triage_bin=excluded.triage_bin,
-                    summary=excluded.summary,
-                    highlights=excluded.highlights,
-                    ai_source=excluded.ai_source,
                     source=excluded.source,
                     conversation_id=excluded.conversation_id,
                     internet_message_id=excluded.internet_message_id,
-                    writeback_status=excluded.writeback_status
+                    writeback_status=excluded.writeback_status,
+                    folder=excluded.folder,
+                    summary=excluded.summary,
+                    model_status=excluded.model_status
                 """,
                 (
                     email.id,
@@ -209,15 +200,14 @@ class Store:
                     _dumps(email.importance_reasons),
                     _dumps(email.flags),
                     _dumps(email.extracted.to_dict()),
-                    email.triage_bin.value,
-                    email.summary,
-                    _dumps(email.highlights),
-                    email.ai_source,
                     email.source,
                     email.conversation_id,
                     email.internet_message_id,
                     email.writeback_status,
                     email.created_at,
+                    email.folder,
+                    email.summary,
+                    email.model_status or "script_draft",
                 ),
             )
             conn.execute("DELETE FROM attachments WHERE email_id = ?", (email.id,))
@@ -312,9 +302,11 @@ class Store:
         *,
         importance: str | None = None,
         category: str | None = None,
-        triage_bin: str | None = None,
         flag: str | None = None,
         q: str | None = None,
+        folder: str | None = None,
+        model_status: str | None = None,
+        oldest_first: bool = False,
         limit: int = 200,
     ) -> list[EmailRecord]:
         clauses = ["1=1"]
@@ -325,16 +317,20 @@ class Store:
         if category:
             clauses.append("category = ?")
             params.append(category)
-        if triage_bin:
-            clauses.append("triage_bin = ?")
-            params.append(triage_bin)
+        if folder:
+            clauses.append("folder = ?")
+            params.append(folder)
+        if model_status:
+            clauses.append("model_status = ?")
+            params.append(model_status)
         if q:
             clauses.append(
                 "(subject LIKE ? OR sender_email LIKE ? OR sender_name LIKE ? OR body_preview LIKE ?)"
             )
             like = f"%{q}%"
             params.extend([like, like, like, like])
-        sql = f"SELECT * FROM emails WHERE {' AND '.join(clauses)} ORDER BY received_at DESC LIMIT ?"
+        direction = "ASC" if oldest_first else "DESC"
+        sql = f"SELECT * FROM emails WHERE {' AND '.join(clauses)} ORDER BY received_at {direction} LIMIT ?"
         params.append(limit)
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -479,12 +475,30 @@ class Store:
             fraud = conn.execute(
                 "SELECT COUNT(*) AS n FROM emails WHERE flags LIKE '%fraud_risk%'"
             ).fetchone()["n"]
+            folders = {
+                name: conn.execute(
+                    "SELECT COUNT(*) AS n FROM emails WHERE folder = ?",
+                    (name,),
+                ).fetchone()["n"]
+                for name in ("important", "informational", "reference")
+            }
+            waiting = conn.execute(
+                "SELECT COUNT(*) AS n FROM emails WHERE model_status = 'script_draft'"
+            ).fetchone()["n"]
+            read_by_model = conn.execute(
+                "SELECT COUNT(*) AS n FROM emails WHERE model_status = 'bionic'"
+            ).fetchone()["n"]
         return {
             "emails": emails,
             "high_importance": critical,
             "open_actions": open_actions,
             "attachments": attachments,
             "fraud_alerts": fraud,
+            "important": folders["important"],
+            "informational": folders["informational"],
+            "reference": folders["reference"],
+            "waiting_on_bionic": waiting,
+            "read_by_bionic": read_by_model,
         }
 
     def category_counts(self) -> dict[str, int]:
@@ -500,13 +514,6 @@ class Store:
                 "SELECT document_type, COUNT(*) AS n FROM attachments GROUP BY document_type ORDER BY n DESC"
             ).fetchall()
         return {row["document_type"]: row["n"] for row in rows}
-
-    def bin_counts(self) -> dict[str, int]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT triage_bin, COUNT(*) AS n FROM emails GROUP BY triage_bin"
-            ).fetchall()
-        return {(row["triage_bin"] or "fyi"): row["n"] for row in rows}
 
     def save_digest(self, period_date: str, generated_at: str, markdown: str, html: str, payload: dict) -> None:
         with self.connect() as conn:
@@ -538,27 +545,6 @@ class Store:
             ).fetchone()
         return dict(row) if row else None
 
-    def list_digests(self, *, limit: int = 60) -> list[dict[str, Any]]:
-        """History of stored digests (newest first) with a few headline KPIs."""
-        with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT period_date, generated_at, payload FROM digests "
-                "ORDER BY period_date DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            payload = _loads(row["payload"], {}) if row["payload"] else {}
-            kpis = payload.get("kpis", {}) if isinstance(payload, dict) else {}
-            out.append(
-                {
-                    "period_date": row["period_date"],
-                    "generated_at": row["generated_at"],
-                    "kpis": kpis,
-                }
-            )
-        return out
-
     def get_state(self, key: str) -> str | None:
         with self.connect() as conn:
             row = conn.execute("SELECT value FROM sync_state WHERE key = ?", (key,)).fetchone()
@@ -571,22 +557,50 @@ class Store:
                 (key, value),
             )
 
+    def add_correction(self, row: dict[str, Any]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO corrections (
+                    id, email_id, previous_category, corrected_category, reason,
+                    sender_email, subject, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["id"],
+                    row["email_id"],
+                    row["previous_category"],
+                    row["corrected_category"],
+                    row["reason"],
+                    row["sender_email"],
+                    row["subject"],
+                    row["created_at"],
+                ),
+            )
 
-def _row_get(row: sqlite3.Row, key: str) -> Any:
-    """sqlite3.Row has no .get(); some callers build rows without newer columns."""
-    try:
-        return row[key]
-    except (IndexError, KeyError):
-        return None
+    def list_corrections(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM corrections ORDER BY created_at DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
+    def latest_correction(self, *, sender_email: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM corrections
+                WHERE lower(sender_email) = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (sender_email.lower(),),
+            ).fetchone()
+        return dict(row) if row else None
 
-def _coerce_stored_bin(value: Any) -> TriageBin:
-    if not value:
-        return TriageBin.FYI
-    try:
-        return TriageBin(value)
-    except ValueError:
-        return TriageBin.FYI
+    def correction_count(self) -> int:
+        with self.connect() as conn:
+            return conn.execute("SELECT COUNT(*) AS n FROM corrections").fetchone()["n"]
 
 
 def _action_from_row(row: sqlite3.Row) -> ActionItem:
@@ -642,15 +656,32 @@ def _email_from_rows(
         importance_reasons=_loads(row["importance_reasons"], []),
         flags=_loads(row["flags"], []),
         extracted=ExtractedFields.from_dict(_loads(row["extracted"], {})),
-        triage_bin=_coerce_stored_bin(_row_get(row, "triage_bin")),
-        summary=_row_get(row, "summary") or "",
-        highlights=_loads(_row_get(row, "highlights"), []),
-        ai_source=_row_get(row, "ai_source") or "rules",
         source=row["source"] or "graph",
         conversation_id=row["conversation_id"] or "",
         internet_message_id=row["internet_message_id"] or "",
         writeback_status=row["writeback_status"] or "skipped",
         created_at=row["created_at"] or datetime.utcnow().isoformat(),
+        folder=_col(row, "folder", ""),
+        summary=_col(row, "summary", ""),
+        model_status=_col(row, "model_status", "script_draft") or "script_draft",
         attachments=attachments,
         actions=[_action_from_row(item) for item in action_rows],
     )
+
+
+def _col(row: sqlite3.Row, name: str, default: Any) -> Any:
+    if name not in row.keys() or row[name] is None:
+        return default
+    return row[name]
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(emails)")}
+    if "folder" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN folder TEXT DEFAULT ''")
+    if "summary" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN summary TEXT DEFAULT ''")
+    if "model_status" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN model_status TEXT DEFAULT 'script_draft'")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_model ON emails(model_status)")

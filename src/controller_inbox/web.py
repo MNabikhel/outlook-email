@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -14,15 +14,7 @@ from controller_inbox.classify import month_end
 from controller_inbox.cli import export_actions_csv
 from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, write_digest_files
-from controller_inbox.models import (
-    DOCUMENT_LABELS,
-    IMPORTANCE_LABELS,
-    TRIAGE_BIN_LABELS,
-    TRIAGE_BIN_ORDER,
-    DocumentType,
-    Importance,
-    TriageBin,
-)
+from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.pipeline import ingest_demo
 from controller_inbox.store import Store
 
@@ -41,17 +33,6 @@ templates.env.filters["label_doc"] = lambda value: DOCUMENT_LABELS.get(
 templates.env.filters["label_imp"] = lambda value: IMPORTANCE_LABELS.get(
     value if isinstance(value, Importance) else Importance(value), value
 )
-
-
-def _bin_label(value) -> str:
-    try:
-        key = value if isinstance(value, TriageBin) else TriageBin(value)
-    except ValueError:
-        return value
-    return TRIAGE_BIN_LABELS.get(key, value)
-
-
-templates.env.filters["label_bin"] = _bin_label
 
 
 def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:
@@ -74,14 +55,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "days_to_close": (close - as_of).days,
             "close_date": close.isoformat(),
             "graph_configured": settings.graph_configured,
+            "llm_enabled": settings.llm,
+            "inbox_incoming": str(settings.inbox_incoming),
+            "inbox_attachments": str(settings.inbox_attachments),
+            "correction_count": store.correction_count(),
             "last_sync": store.get_state("last_sync_at"),
             "doc_labels": DOCUMENT_LABELS,
-            "bin_labels": TRIAGE_BIN_LABELS,
-            "bin_order": TRIAGE_BIN_ORDER,
-            "bin_counts": store.bin_counts(),
             "filter_importance": "",
             "filter_category": "",
-            "filter_bin": "",
             "query": "",
         }
         try:
@@ -96,26 +77,45 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
-        emails = store.list_emails(limit=12)
-        if not emails:
-            return render(request, "empty.html", page="inbox")
-        attention = [e for e in store.list_emails(limit=200) if e.importance.value in {"critical", "high"} or "fraud_risk" in e.flags]
-        overdue = store.list_actions(status="open", due_on_or_before=local_today(settings.tz).isoformat())
-        due_today = store.list_actions(status="open", due_on=local_today(settings.tz).isoformat())
-        digest = store.latest_digest()
+        if not store.list_emails(limit=1):
+            return render(request, "empty.html", page="home")
+        as_of = local_today(settings.tz).isoformat()
+        return render(
+            request,
+            "morning.html",
+            page="home",
+            heading="Morning",
+            important=store.list_emails(folder="important", limit=12),
+            informational=store.list_emails(folder="informational", limit=4),
+            reference=store.list_emails(folder="reference", limit=4),
+            overdue=store.list_actions(status="open", due_on_or_before=as_of)[:6],
+            due_today=store.list_actions(status="open", due_on=as_of)[:6],
+            digest=store.latest_digest(),
+        )
+
+    @app.get("/folder/{name}", response_class=HTMLResponse)
+    def folder_page(request: Request, name: str):
+        if name not in FOLDER_LABELS:
+            raise HTTPException(status_code=404, detail="Unknown folder")
+        blurbs = {
+            "important": "Needs a decision, a payment check, or a close task.",
+            "informational": "FYI and newsletters. Nothing is waiting on you.",
+            "reference": "Statements, purchase orders, contracts, and files to keep. Not an overnight task.",
+        }
         return render(
             request,
             "inbox.html",
-            page="inbox",
-            emails=store.list_emails(limit=80),
-            attention=attention[:8],
-            overdue=overdue[:8],
-            due_today=due_today[:8],
-            digest=digest,
+            page=name,
+            emails=store.list_emails(folder=name, limit=200),
+            attention=[],
+            overdue=[],
+            due_today=[],
+            digest=None,
             filter_importance="",
             filter_category="",
             query="",
-            heading="Inbox",
+            heading=FOLDER_LABELS[name],
+            blurb=blurbs[name],
         )
 
     @app.get("/inbox", response_class=HTMLResponse)
@@ -123,14 +123,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         request: Request,
         importance: str = "",
         category: str = "",
-        bin: str = "",
         flag: str = "",
         q: str = "",
     ):
         emails = store.list_emails(
             importance=importance or None,
             category=category or None,
-            triage_bin=bin or None,
             flag=flag or None,
             q=q or None,
         )
@@ -145,26 +143,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             digest=None,
             filter_importance=importance,
             filter_category=category,
-            filter_bin=bin,
             query=q,
-            heading="Filtered inbox" if any([importance, category, bin, flag, q]) else "Inbox",
+            heading="Filtered inbox" if any([importance, category, flag, q]) else "Inbox",
         )
-
-    @app.get("/bins", response_class=HTMLResponse)
-    def bins_page(request: Request):
-        all_emails = store.list_emails(limit=500)
-        grouped = {b: [] for b in TRIAGE_BIN_ORDER}
-        for email in all_emails:
-            grouped.setdefault(email.triage_bin, []).append(email)
-        columns = [
-            {
-                "bin": b,
-                "label": TRIAGE_BIN_LABELS.get(b, b.value),
-                "emails": sorted(grouped.get(b, []), key=lambda e: e.importance_score, reverse=True),
-            }
-            for b in TRIAGE_BIN_ORDER
-        ]
-        return render(request, "bins.html", page="bins", columns=columns, heading="Triage bins")
 
     @app.get("/inbox/{email_id}", response_class=HTMLResponse)
     def email_detail(request: Request, email_id: str):
@@ -172,6 +153,31 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if not email:
             return HTMLResponse("Not found", status_code=404)
         return render(request, "detail.html", page="inbox", email=email)
+
+    @app.post("/inbox/{email_id}/correct")
+    def correct_category(email_id: str, category: str = Form(...), reason: str = Form(...)):
+        from controller_inbox.learn import record_correction
+
+        try:
+            record_correction(
+                store,
+                settings,
+                email_id=email_id,
+                corrected_category=category,
+                reason=reason,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Message not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return RedirectResponse(f"/inbox/{email_id}", status_code=303)
+
+    @app.post("/folder/ingest")
+    def folder_ingest():
+        from controller_inbox.folder_mail import ingest_folder
+
+        ingest_folder(store, settings)
+        return RedirectResponse("/", status_code=303)
 
     @app.get("/actions", response_class=HTMLResponse)
     def actions_page(request: Request, status: str = "open"):
@@ -211,12 +217,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         )
 
     @app.get("/digest", response_class=HTMLResponse)
-    def digest_page(request: Request, date: str = ""):
-        if date:
-            row = store.get_digest(date)
-        else:
-            as_of = local_today(settings.tz)
-            row = store.get_digest(as_of.isoformat()) or store.latest_digest()
+    def digest_page(request: Request):
+        as_of = local_today(settings.tz)
+        row = store.get_digest(as_of.isoformat()) or store.latest_digest()
         payload = None
         if row and row.get("payload"):
             payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
@@ -226,18 +229,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             page="digest",
             digest=row,
             payload=payload,
-            as_of=(row or {}).get("period_date") or local_today(settings.tz).isoformat(),
-            history=store.list_digests(limit=30),
-        )
-
-    @app.get("/digests", response_class=HTMLResponse)
-    def digest_history_page(request: Request):
-        return render(
-            request,
-            "digests.html",
-            page="digest",
-            history=store.list_digests(limit=120),
-            heading="Digest history",
+            as_of=as_of.isoformat(),
         )
 
     @app.post("/digest/rebuild")

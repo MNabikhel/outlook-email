@@ -6,15 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 from controller_inbox.classify import month_end
-from controller_inbox.models import (
-    DOCUMENT_LABELS,
-    IMPORTANCE_LABELS,
-    TRIAGE_BIN_LABELS,
-    TRIAGE_BIN_ORDER,
-    DocumentType,
-    Importance,
-    TriageBin,
-)
+from controller_inbox.models import DOCUMENT_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.store import Store
 
 
@@ -71,9 +63,14 @@ def build_digest(store: Store, *, as_of: date, generated_at: datetime) -> dict[s
             "overdue_actions": len(overdue),
             "fraud_alerts": len([e for e in emails if "fraud_risk" in e.flags]),
             "attachments": sum(len(e.attachments) for e in emails),
+            "waiting_on_bionic": sum(1 for e in emails if e.model_status == "script_draft"),
+        },
+        "folder_counts": {
+            "important": sum(1 for e in emails if e.folder == "important"),
+            "informational": sum(1 for e in emails if e.folder == "informational"),
+            "reference": sum(1 for e in emails if e.folder == "reference"),
         },
         "category_counts": dict(Counter(e.category.value for e in emails)),
-        "bin_counts": _ordered_bin_counts(emails),
         "attachment_counts": dict(
             Counter(att.document_type.value for e in emails for att in e.attachments)
         ),
@@ -94,15 +91,6 @@ def build_digest(store: Store, *, as_of: date, generated_at: datetime) -> dict[s
     return payload | {"markdown": markdown, "html": html}
 
 
-def _ordered_bin_counts(emails) -> dict[str, int]:
-    counts = Counter(e.triage_bin.value for e in emails)
-    ordered = {b.value: counts.get(b.value, 0) for b in TRIAGE_BIN_ORDER if counts.get(b.value)}
-    # Include any unexpected bins at the end so nothing is silently dropped.
-    for key, n in counts.items():
-        ordered.setdefault(key, n)
-    return ordered
-
-
 def _email_card(email) -> dict[str, Any]:
     return {
         "id": email.id,
@@ -114,12 +102,11 @@ def _email_card(email) -> dict[str, Any]:
         "category_label": DOCUMENT_LABELS.get(email.category, email.category.value),
         "importance": email.importance.value,
         "importance_label": IMPORTANCE_LABELS.get(email.importance, email.importance.value),
-        "bin": email.triage_bin.value,
-        "bin_label": TRIAGE_BIN_LABELS.get(email.triage_bin, email.triage_bin.value),
-        "summary": email.summary,
-        "ai_source": email.ai_source,
         "score": email.importance_score,
         "flags": email.flags,
+        "folder": email.folder,
+        "summary": email.summary,
+        "model_status": email.model_status,
         "invoice": email.extracted.primary_invoice,
         "amount": email.extracted.primary_amount,
         "due": email.extracted.primary_due,
@@ -156,6 +143,15 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"- Open action items: {k['open_actions']} ({k['overdue_actions']} overdue)",
         f"- Fraud / payment-change alerts: {k['fraud_alerts']}",
         f"- Attachments classified: {k['attachments']}",
+        f"- Waiting on Bionic: {k.get('waiting_on_bionic', 0)}",
+        "",
+        "## Morning folders",
+    ]
+    folders = payload.get("folder_counts") or {}
+    lines.append(
+        f"- Important: {folders.get('important', 0)} · Informational: {folders.get('informational', 0)} · Reference: {folders.get('reference', 0)}"
+    )
+    lines += [
         "",
         "## Do not process — verify by phone",
     ]
@@ -195,24 +191,11 @@ def render_markdown(payload: dict[str, Any]) -> str:
             lines.append(f"- {item['subject']}")
     else:
         lines.append("- None.")
-    lines += ["", "## Triage bins"]
-    if payload.get("bin_counts"):
-        for key, count in payload["bin_counts"].items():
-            lines.append(f"- {_bin_label(key)}: {count}")
-    else:
-        lines.append("- None.")
     lines += ["", "## Category mix"]
     for key, count in payload["category_counts"].items():
         lines.append(f"- {DOCUMENT_LABELS.get(DocumentType(key), key)}: {count}")
     lines.append("")
     return "\n".join(lines)
-
-
-def _bin_label(key: str) -> str:
-    try:
-        return TRIAGE_BIN_LABELS.get(TriageBin(key), key)
-    except ValueError:
-        return key
 
 
 def _md_actions(items: list[dict[str, Any]]) -> list[str]:
@@ -245,10 +228,6 @@ def render_html(payload: dict[str, Any]) -> str:
         f"<li>{_esc(DOCUMENT_LABELS.get(DocumentType(k_), k_))} <b>{n}</b></li>"
         for k_, n in payload["category_counts"].items()
     )
-    bins = "".join(
-        f"<li>{_esc(_bin_label(k_))} <b>{n}</b></li>"
-        for k_, n in payload.get("bin_counts", {}).items()
-    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -274,7 +253,7 @@ def render_html(payload: dict[str, Any]) -> str:
 <body>
 <main>
   <h1>CloseDesk daily digest</h1>
-  <p class="lede">{payload['date']} · month-end {payload['close_date']} · {payload['days_to_close']} day(s) to close</p>
+  <p class="lede">{payload['date']} · month-end {payload['close_date']} · {payload['days_to_close']} day(s) to close · waiting on Bionic {k.get('waiting_on_bionic', 0)}</p>
   <div class="kpis">
     <div class="kpi"><span>Emails</span><b>{k['emails']}</b></div>
     <div class="kpi"><span>High / critical</span><b>{k['high_importance']}</b></div>
@@ -297,8 +276,6 @@ def render_html(payload: dict[str, Any]) -> str:
   {cards(payload['cash_to_apply'], 'No remittances waiting.')}
   <h2>Close / reconcile</h2>
   {cards(payload['close_items'], 'No close items in the current window.')}
-  <h2>Triage bins</h2>
-  <ul class="list">{bins or '<li>None.</li>'}</ul>
   <h2>Category mix</h2>
   <ul class="list">{cats}</ul>
 </main>

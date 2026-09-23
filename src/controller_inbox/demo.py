@@ -64,7 +64,7 @@ def _att(name: str, data: bytes, content_type: str) -> RawAttachment:
 
 
 def demo_messages(now: datetime | None = None) -> list[RawMessage]:
-    """Realistic assistant-controller mailbox snapshot (no live Outlook required)."""
+    """Sample mailbox snapshot (no live Outlook required)."""
     now = now or datetime(2026, 9, 22, 8, 15, tzinfo=timezone.utc)
 
     def ts(hours_ago: float) -> datetime:
@@ -114,9 +114,9 @@ def demo_messages(now: datetime | None = None) -> list[RawMessage]:
     close_xlsx = _xlsx(
         [
             ["Close item", "Owner", "Due"],
-            ["Prepaid rollforward", "Assistant controller", "2026-09-29"],
-            ["AP accruals", "Assistant controller", "2026-09-30"],
-            ["Bank rec - operating", "Assistant controller", "2026-09-28"],
+            ["Prepaid rollforward", "Close team", "2026-09-29"],
+            ["AP accruals", "Close team", "2026-09-30"],
+            ["Bank rec - operating", "Close team", "2026-09-28"],
         ],
         sheet="Close calendar",
     )
@@ -294,7 +294,7 @@ def demo_messages(now: datetime | None = None) -> list[RawMessage]:
         RawMessage(
             id="demo-close",
             subject="Close calendar — September 30 items",
-            sender_name="Priya Shah, Controller",
+            sender_name="Priya Shah",
             sender_email="priya.shah@horizongoods.example",
             received_at=ts(18),
             body_text=(

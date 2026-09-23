@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import csv
 import io
-import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,13 +11,7 @@ from controller_inbox.actions import local_today
 from controller_inbox.config import Settings, load_settings
 from controller_inbox.demo import DemoMailbox
 from controller_inbox.digest import build_digest, write_digest_files
-from controller_inbox.models import (
-    DOCUMENT_LABELS,
-    IMPORTANCE_LABELS,
-    TRIAGE_BIN_LABELS,
-    TRIAGE_BIN_ORDER,
-    TriageBin,
-)
+from controller_inbox.models import DOCUMENT_LABELS, IMPORTANCE_LABELS
 from controller_inbox.pipeline import ingest_demo, ingest_mailbox
 from controller_inbox.store import Store
 
@@ -26,23 +19,17 @@ from controller_inbox.store import Store
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="controller-inbox",
-        description="CloseDesk: classify Outlook mail and attachments, then produce a daily AP/close action list.",
+        description="CloseDesk: read Outlook mail or a drop folder, classify attachments, and keep a daily action list.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    demo = sub.add_parser("demo", help="Load a realistic assistant-controller mailbox (no Outlook login).")
+    demo = sub.add_parser("demo", help="Load a sample mailbox (no Outlook login).")
     demo.add_argument("--serve", action="store_true", help="Start the dashboard after loading demo mail.")
     demo.add_argument("--host", default=None)
     demo.add_argument("--port", type=int, default=None)
     demo.add_argument("--reset", action="store_true", default=True, help="Replace the local database (default).")
 
     sub.add_parser("auth", help="Sign in to Microsoft 365 with a device code.")
-
-    triage = sub.add_parser("triage", help="Group the current inbox into triage bins (agent-friendly).")
-    triage.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of a table.")
-    triage.add_argument("--bin", default=None, help="Only show one bin (e.g. action_required, fraud_review).")
-
-    sub.add_parser("llm-check", help="Check that the local LLM server (LM Studio / Ollama / Bionic) is reachable.")
 
     sync = sub.add_parser("sync", help="Pull recent Outlook mail via Microsoft Graph and classify it.")
     sync.add_argument("--hours", type=int, default=None, help="Lookback window (defaults to CONTROLLER_INBOX_LOOKBACK_HOURS).")
@@ -53,18 +40,35 @@ def main(argv: list[str] | None = None) -> int:
     digest = sub.add_parser("digest", help="Rebuild today's action-item digest from the local database.")
     digest.add_argument("--date", default=None, help="YYYY-MM-DD (defaults to today in the configured timezone).")
     digest.add_argument("--send", action="store_true", help="Email the digest via Graph if CONTROLLER_INBOX_DIGEST_TO is set.")
-    digest.add_argument("--json", action="store_true", help="Print the digest payload as JSON instead of Markdown.")
-    digest.add_argument("--history", action="store_true", help="List stored past digests and exit.")
 
     serve = sub.add_parser("serve", help="Open the local CloseDesk dashboard.")
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
 
+    ingest = sub.add_parser("ingest", help="Read .msg/.eml files and attachments dropped in the inbox folder.")
+    ingest.add_argument("--serve", action="store_true", help="Open the dashboard after reading the folder.")
+
     export = sub.add_parser("export", help="Write open action items to CSV (stdout).")
     export.add_argument("--output", default=None)
 
-    status = sub.add_parser("status", help="Show local database counts and connection state.")
-    status.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    sub.add_parser("status", help="Show local database counts and connection state.")
+
+    overnight = sub.add_parser(
+        "overnight",
+        help="Read the drop folder, let Bionic file the queue, and write the morning digest.",
+    )
+    overnight.add_argument("--limit", type=int, default=None, help="How many drafts Bionic reads this run.")
+    overnight.add_argument("--no-graph", action="store_true", help="Skip Outlook even if it is configured.")
+
+    tool = sub.add_parser("tool", help="JSON tool for the local Bionic agent.")
+    tool.add_argument(
+        "name",
+        choices=["queue_status", "prepare_queue", "save_reading", "list_folder", "build_digest"],
+    )
+    tool.add_argument("--limit", type=int, default=20)
+    tool.add_argument("--folder", default="")
+    tool.add_argument("--json", default="", help="Reading JSON for save_reading. Reads stdin when omitted.")
+    tool.add_argument("--date", default=None)
 
     args = parser.parse_args(argv)
     settings = load_settings()
@@ -101,22 +105,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "watch":
         return _watch(settings, store, once=args.once)
 
-    if args.cmd == "triage":
-        return _triage(settings, store, only_bin=args.bin, as_json=args.json)
-
-    if args.cmd == "llm-check":
-        return _llm_check(settings)
-
     if args.cmd == "digest":
-        if args.history:
-            return _digest_history(store, as_json=args.json)
         now = datetime.now(settings.tz)
         as_of = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else local_today(settings.tz, now)
         payload = build_digest(store, as_of=as_of, generated_at=now)
         md_path, html_path = write_digest_files(payload, settings.digest_dir, as_of.isoformat())
-        if args.json:
-            print(json.dumps({k: v for k, v in payload.items() if k not in {"markdown", "html"}}, indent=2, default=str))
-            return 0
         print(payload["markdown"])
         print(f"\nWrote {md_path}\nWrote {html_path}")
         if args.send:
@@ -125,6 +118,20 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "serve":
         return _serve(settings, store, host=args.host, port=args.port)
+
+    if args.cmd == "ingest":
+        from controller_inbox.folder_mail import ingest_folder
+
+        records = ingest_folder(store, settings)
+        print(f"Read {len(records)} file(s) from {settings.inbox_incoming}")
+        if not records:
+            print(f"Nothing new. Drop .msg or .eml files in {settings.inbox_incoming}")
+            print(f"Put related attachments in {settings.inbox_attachments}/<message name>/")
+        else:
+            _print_run_summary(records, None)
+        if args.serve:
+            return _serve(settings, store, host=None, port=None)
+        return 0
 
     if args.cmd == "export":
         text = export_actions_csv(store)
@@ -137,152 +144,55 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "status":
         counts = store.counts()
-        bins = store.bin_counts()
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "database": str(settings.db_path),
-                        "graph_configured": settings.graph_configured,
-                        "llm_configured": settings.llm_configured,
-                        "llm_endpoint": settings.llm_endpoint if settings.llm_configured else None,
-                        "last_sync": store.get_state("last_sync_at"),
-                        "counts": counts,
-                        "bins": bins,
-                    },
-                    indent=2,
-                )
-            )
-            return 0
         print(f"Database: {settings.db_path}")
         print(f"Graph configured: {settings.graph_configured}")
-        print(f"Local LLM: {'on · ' + settings.llm_endpoint if settings.llm_configured else 'off (rules only)'}")
+        print(f"Local model: {'on' if settings.llm else 'off'} ({settings.llm_base_url})")
         print(f"Last sync: {store.get_state('last_sync_at') or 'never'}")
+        print(f"Last overnight: {store.get_state('last_overnight_at') or 'never'}")
         for key, value in counts.items():
             print(f"{key}: {value}")
-        if bins:
-            print("bins: " + ", ".join(f"{_bin_label(k)}={v}" for k, v in bins.items()))
         return 0
+
+    if args.cmd == "overnight":
+        from controller_inbox.overnight import run_overnight
+
+        result = run_overnight(store, settings, limit=args.limit, sync_graph=not args.no_graph)
+        print(f"Overnight {result['date']}: ingested {result['ingested']}, Bionic read {result['read_by_bionic']}.")
+        print(
+            "Folders — important {important}, informational {informational}, reference {reference}.".format(
+                **result["folders"]
+            )
+        )
+        print(f"Still waiting on Bionic: {result['waiting_on_bionic']}")
+        print(f"Log: {result['log_path']}")
+        if not result["llm_enabled"]:
+            print("Local model is off. Drafts are filed. Turn on CONTROLLER_INBOX_LLM to let Bionic read them.")
+        return 0
+
+    if args.cmd == "tool":
+        import json
+        import sys
+
+        from controller_inbox.tools import dispatch
+
+        if args.name == "save_reading" and not args.json and not sys.stdin.isatty():
+            args.json = sys.stdin.read()
+        result = dispatch(store, settings, args.name, args)
+        json.dump(result, sys.stdout, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return 0 if result.get("ok") else 1
 
     return 1
-
-
-def _bin_label(key: str) -> str:
-    try:
-        return TRIAGE_BIN_LABELS.get(TriageBin(key), key)
-    except ValueError:
-        return key
-
-
-def _triage(settings: Settings, store: Store, *, only_bin: str | None, as_json: bool) -> int:
-    emails = store.list_emails(limit=500)
-    groups: dict[str, list] = {b.value: [] for b in TRIAGE_BIN_ORDER}
-    for email in emails:
-        groups.setdefault(email.triage_bin.value, []).append(email)
-    if only_bin:
-        wanted = only_bin.strip().lower()
-        groups = {k: v for k, v in groups.items() if k == wanted}
-        if not groups:
-            print(f"Unknown bin '{only_bin}'. Choose from: {', '.join(b.value for b in TRIAGE_BIN_ORDER)}", file=sys.stderr)
-            return 2
-
-    if as_json:
-        payload = {
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "bins": [
-                {
-                    "bin": bin_value,
-                    "label": _bin_label(bin_value),
-                    "count": len(items),
-                    "emails": [
-                        {
-                            "id": e.id,
-                            "subject": e.subject,
-                            "sender": e.sender_name or e.sender_email,
-                            "importance": e.importance.value,
-                            "category": e.category.value,
-                            "summary": e.summary,
-                            "ai_source": e.ai_source,
-                            "amount": e.extracted.primary_amount,
-                            "due": e.extracted.primary_due,
-                            "actions": [a.title for a in e.actions],
-                        }
-                        for e in items
-                    ],
-                }
-                for bin_value, items in groups.items()
-            ],
-        }
-        print(json.dumps(payload, indent=2, default=str))
-        return 0
-
-    if not emails:
-        print("No mail yet. Run: python -m controller_inbox demo   (or sync)")
-        return 0
-    for bin_value, items in groups.items():
-        if not items:
-            continue
-        print(f"\n=== {_bin_label(bin_value)} ({len(items)}) ===")
-        for e in sorted(items, key=lambda r: r.importance_score, reverse=True):
-            tag = "*" if e.ai_source.startswith("llm") else " "
-            print(f" {tag}[{e.importance.value:8}] {e.subject[:70]}")
-            if e.summary:
-                print(f"      {e.summary[:100]}")
-    return 0
-
-
-def _digest_history(store: Store, *, as_json: bool) -> int:
-    history = store.list_digests()
-    if as_json:
-        print(json.dumps(history, indent=2, default=str))
-        return 0
-    if not history:
-        print("No digests stored yet. Run: python -m controller_inbox digest")
-        return 0
-    print("Stored daily digests (newest first):")
-    for row in history:
-        k = row.get("kpis", {})
-        print(
-            f"  {row['period_date']}  ·  {k.get('emails', 0)} emails, "
-            f"{k.get('open_actions', 0)} open actions, {k.get('fraud_alerts', 0)} fraud alert(s)"
-        )
-    return 0
-
-
-def _llm_check(settings: Settings) -> int:
-    from controller_inbox.llm import LocalLLMClient
-
-    endpoint = settings.llm_endpoint
-    print(f"Local LLM endpoint: {endpoint}")
-    print(f"Model: {settings.llm_model}")
-    print(f"Enabled (CONTROLLER_INBOX_LLM): {settings.llm}")
-    if not settings.llm:
-        print(
-            "\nLLM enrichment is OFF, so CloseDesk uses deterministic rules only.\n"
-            "To turn it on: set CONTROLLER_INBOX_LLM=true and start LM Studio / Ollama / Bionic,\n"
-            "then set CONTROLLER_INBOX_LLM_BASE_URL if it is not the LM Studio default."
-        )
-    client = LocalLLMClient(settings)
-    try:
-        models = client.list_models()
-    except Exception as exc:  # noqa: BLE001 - connectivity probe
-        print(f"\nCould not reach the local model server: {exc}")
-        print("Is LM Studio / Ollama / Bionic running and serving an OpenAI-compatible API?")
-        return 1
-    print(f"\nConnected. {len(models)} model(s) available:")
-    for name in models[:20]:
-        marker = "  <- selected" if name == settings.llm_model else ""
-        print(f"  - {name}{marker}")
-    return 0
 
 
 def _print_run_summary(records, payload) -> None:
     print(f"Processed {len(records)} email(s).")
     for rec in sorted(records, key=lambda r: r.importance_score, reverse=True)[:8]:
         flags = f" [{', '.join(rec.flags)}]" if rec.flags else ""
+        folder = rec.folder or "unfiled"
         print(
-            f"  {IMPORTANCE_LABELS[rec.importance]:<8} {DOCUMENT_LABELS[rec.category]:<28} "
-            f"{rec.subject[:70]}{flags}"
+            f"  {folder:<14} {IMPORTANCE_LABELS[rec.importance]:<8} {DOCUMENT_LABELS[rec.category]:<28} "
+            f"{rec.subject[:60]}{flags}"
         )
     if payload:
         k = payload["kpis"]
@@ -340,6 +250,9 @@ def _watch(settings: Settings, store: Store, *, once: bool) -> int:
         if isinstance(mailbox, DemoMailbox):
             after = None
         records = ingest_mailbox(mailbox, store, settings, received_after=after)
+        from controller_inbox.folder_mail import ingest_folder
+
+        records.extend(ingest_folder(store, settings))
         print(f"{datetime.now().isoformat(timespec='seconds')} classified {len(records)} message(s)")
         now = datetime.now(settings.tz)
         as_of = local_today(settings.tz, now)

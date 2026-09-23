@@ -14,6 +14,8 @@ def test_dashboard_after_demo(store, settings, as_of_now):
     home = client.get("/")
     assert home.status_code == 200
     assert "CloseDesk" in home.text
+    assert "Controller inbox" not in home.text
+    assert "Assistant controller" not in home.text
     assert "INV-10482" in home.text
     assert "Updated wiring instructions" in home.text
     assert "Fraud flags" in home.text
@@ -21,7 +23,16 @@ def test_dashboard_after_demo(store, settings, as_of_now):
     detail = client.get("/inbox/demo-bec-wire")
     assert detail.status_code == 200
     assert "verify" in detail.text.lower()
+    assert "Wrong category?" in detail.text
     assert "do not process" in detail.text.lower() or "fraud" in detail.text.lower()
+
+    corrected = client.post(
+        "/inbox/demo-newsletter/correct",
+        data={"category": "internal_fyi", "reason": "This weekly note is internal, not a vendor newsletter."},
+        follow_redirects=True,
+    )
+    assert corrected.status_code == 200
+    assert "correction you saved" in corrected.text.lower() or "user trained" in corrected.text.lower() or "Internal FYI" in corrected.text
 
     actions = client.get("/actions")
     assert actions.status_code == 200
@@ -34,6 +45,22 @@ def test_dashboard_after_demo(store, settings, as_of_now):
     digest = client.get("/digest")
     assert digest.status_code == 200
     assert "Do not process" in digest.text
+
+    important = client.get("/folder/important")
+    assert important.status_code == 200
+    assert "INV-10482" in important.text
+    assert "Waiting on Bionic" in important.text
+
+    informational = client.get("/folder/informational")
+    assert informational.status_code == 200
+    assert "accounting" in informational.text.lower() or "newsletter" in informational.text.lower()
+
+    reference = client.get("/folder/reference")
+    assert reference.status_code == 200
+    assert "statement" in reference.text.lower() or "PO-77821" in reference.text
+
+    missing = client.get("/folder/archive")
+    assert missing.status_code == 404
 
     csv_resp = client.get("/export/actions.csv")
     assert csv_resp.status_code == 200
@@ -55,56 +82,12 @@ def test_dashboard_after_demo(store, settings, as_of_now):
     assert health.json()["emails"] == 14
 
 
-def test_bins_board_and_filter(store, settings, as_of_now):
-    ingest_demo(store, settings, now=as_of_now)
-    app = create_app(settings, store)
-    client = TestClient(app)
-
-    bins = client.get("/bins")
-    assert bins.status_code == 200
-    assert "Do not process" in bins.text
-    assert "Action required" in bins.text
-    assert "Updated wiring instructions" in bins.text
-
-    filtered = client.get("/inbox?bin=fraud_review")
-    assert filtered.status_code == 200
-    assert "Updated wiring instructions" in filtered.text
-    # An action-required-only email should not show in the fraud bin.
-    assert "This week in accounting" not in filtered.text
-
-
-def test_digest_history(store, settings, as_of_now):
-    ingest_demo(store, settings, now=as_of_now)
-    build_digest(store, as_of=as_of_now.date(), generated_at=as_of_now)
-    app = create_app(settings, store)
-    client = TestClient(app)
-
-    history = client.get("/digests")
-    assert history.status_code == 200
-    assert "2026-09-22" in history.text
-
-    dated = client.get("/digest?date=2026-09-22")
-    assert dated.status_code == 200
-    assert "Do not process" in dated.text
-    # Triage bin counts appear in the digest body.
-    assert "Triage bins" in dated.text
-
-
-def test_store_lists_digests(store, settings, as_of_now):
-    ingest_demo(store, settings, now=as_of_now)
-    build_digest(store, as_of=as_of_now.date(), generated_at=as_of_now)
-    rows = store.list_digests()
-    assert rows
-    assert rows[0]["period_date"] == "2026-09-22"
-    assert rows[0]["kpis"]["emails"] == 14
-
-
 def test_empty_state_and_reload(store, settings):
     app = create_app(settings, store)
     client = TestClient(app)
     empty = client.get("/")
     assert empty.status_code == 200
-    assert "Load demo mailbox" in empty.text
+    assert "Load sample mailbox" in empty.text
     reloaded = client.post("/demo/reload", follow_redirects=True)
     assert reloaded.status_code == 200
     assert "INV-10482" in reloaded.text
