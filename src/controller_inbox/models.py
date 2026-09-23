@@ -213,6 +213,7 @@ class EmailRecord:
     folder: str = ""
     summary: str = ""
     model_status: str = "script_draft"
+    source_path: str = ""
     attachments: list[AttachmentRecord] = field(default_factory=list)
     actions: list[ActionItem] = field(default_factory=list)
 

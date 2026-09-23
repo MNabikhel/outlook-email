@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS emails (
     created_at TEXT,
     folder TEXT,
     summary TEXT,
-    model_status TEXT
+    model_status TEXT,
+    source_path TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -329,12 +330,9 @@ class Store:
         if model_status:
             clauses.append("model_status = ?")
             params.append(model_status)
-        if q:
-            clauses.append(
-                "(subject LIKE ? OR sender_email LIKE ? OR sender_name LIKE ? OR body_preview LIKE ?)"
-            )
-            like = f"%{q}%"
-            params.extend([like, like, like, like])
+        for word in (q or "").split()[:8]:
+            clauses.append(_MATCH_ANY)
+            params.extend([f"%{word}%"] * _MATCH_ANY.count("?"))
         order = order or ("oldest" if oldest_first else "newest")
         order_sql = {
             "newest": "received_at DESC",
@@ -362,6 +360,31 @@ class Store:
                     continue
                 out.append(email)
         return out
+
+    def search_ranked(self, terms: list[str], *, limit: int = 6) -> list[EmailRecord]:
+        """Emails that mention the most of ``terms``; subject and sender hits count more."""
+        terms = [t for t in dict.fromkeys(t.lower() for t in terms if t.strip())][:10]
+        if not terms:
+            return []
+        parts, params = [], []
+        for term in terms:
+            like = f"%{term}%"
+            parts.append(
+                "(CASE WHEN lower(subject) LIKE ? THEN 3 ELSE 0 END"
+                " + CASE WHEN lower(sender_name) LIKE ? OR lower(sender_email) LIKE ? THEN 3 ELSE 0 END"
+                " + CASE WHEN lower(summary) LIKE ? THEN 2 ELSE 0 END"
+                " + CASE WHEN lower(body_text) LIKE ? THEN 1 ELSE 0 END"
+                " + CASE WHEN EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
+                " AND (lower(a.filename) LIKE ? OR lower(a.extracted_text) LIKE ?)) THEN 1 ELSE 0 END)"
+            )
+            params.extend([like] * 7)
+        sql = (
+            f"SELECT id, ({' + '.join(parts)}) AS hits FROM emails WHERE hits > 0"
+            " ORDER BY hits DESC, importance_score DESC, received_at DESC LIMIT ?"
+        )
+        with self.connect() as conn:
+            ids = [row["id"] for row in conn.execute(sql, [*params, limit]).fetchall()]
+        return [email for email in (self.get_email(i) for i in ids) if email is not None]
 
     def list_actions(
         self,
@@ -586,6 +609,11 @@ class Store:
                 "SELECT COUNT(*) AS n FROM emails WHERE COALESCE(source, '') != 'demo'"
             ).fetchone()["n"]
 
+    def set_source_path(self, email_id: str, path: str) -> None:
+        """Where the original .msg/.eml was archived. Kept apart from upsert so re-reads keep it."""
+        with self.connect() as conn:
+            conn.execute("UPDATE emails SET source_path = ? WHERE id = ?", (path, email_id))
+
     def get_state(self, key: str) -> str | None:
         with self.connect() as conn:
             row = conn.execute("SELECT value FROM sync_state WHERE key = ?", (key,)).fetchone()
@@ -705,9 +733,17 @@ def _email_from_rows(
         folder=_col(row, "folder", ""),
         summary=_col(row, "summary", ""),
         model_status=_col(row, "model_status", "script_draft") or "script_draft",
+        source_path=_col(row, "source_path", ""),
         attachments=attachments,
         actions=[_action_from_row(item) for item in action_rows],
     )
+
+
+_MATCH_ANY = (
+    "(subject LIKE ? OR sender_email LIKE ? OR sender_name LIKE ? OR summary LIKE ? OR body_text LIKE ?"
+    " OR EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
+    " AND (a.filename LIKE ? OR a.extracted_text LIKE ?)))"
+)
 
 
 def _col(row: sqlite3.Row, name: str, default: Any) -> Any:
@@ -724,5 +760,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE emails ADD COLUMN summary TEXT DEFAULT ''")
     if "model_status" not in cols:
         conn.execute("ALTER TABLE emails ADD COLUMN model_status TEXT DEFAULT 'script_draft'")
+    if "source_path" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN source_path TEXT DEFAULT ''")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_model ON emails(model_status)")
