@@ -45,6 +45,8 @@ def ingest_folder(
     records = []
     seen: set[str] = set()
     batches = collect_batches(settings)
+    if batches and not store.real_mail_count():
+        report["sample_cleared"] = store.clear_sample()
     for index, (path, sidecars) in enumerate(batches, start=1):
         if on_progress:
             on_progress(index, len(batches), path.name)

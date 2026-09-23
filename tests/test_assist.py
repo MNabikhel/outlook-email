@@ -245,3 +245,21 @@ def test_redropping_mail_keeps_the_file_path(settings: Settings, store: Store):
     assert store.get_email(record.id).source_path
     assert Path(store.get_email(record.id).source_path).is_file()
     assert first
+
+
+def test_first_real_mail_replaces_the_sample(settings: Settings, loaded: Store):
+    settings.ensure_data_dir()
+    loaded.save_digest("2026-09-22", "2026-09-22T12:00:00+00:00", "# sample", "<p>sample</p>", {"date": "2026-09-22"})
+    _drop_eml(settings)
+    report: dict = {}
+    [record] = ingest_folder(loaded, settings, report=report)
+    assert report["sample_cleared"] == 19
+    assert [e.id for e in loaded.list_emails(limit=50)] == [record.id]
+    assert loaded.list_actions(status=None) == [] or all(e.id == record.id for _a, e in loaded.list_actions(status=None))
+    assert loaded.list_digests() == []
+
+    _drop_eml(settings, "second.eml")
+    second: dict = {}
+    ingest_folder(loaded, settings, report=second)
+    assert "sample_cleared" not in second
+    assert loaded.counts()["emails"] == 1

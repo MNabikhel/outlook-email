@@ -70,7 +70,7 @@
     {% if counts.emails and not is_sample %}
     <p class="muted">Your own mail is loaded, so the sample is switched off here — loading it would erase your mail. To look at the sample, run it with a separate data folder: <code>CONTROLLER_INBOX_DATA_DIR=./data-sample python -m controller_inbox demo --serve</code></p>
     {% else %}
-    <p>Load the built-in sample to see the dashboard before your own mail is in the folder.</p>
+    <p>Load the built-in sample to see the dashboard before your own mail is in the folder. The first time you process your own mail, the sample is removed.</p>
     <form method="post" action="/demo/reload">
       <button type="submit">Load sample mailbox</button>
     </form>

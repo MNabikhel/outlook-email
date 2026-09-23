@@ -609,6 +609,21 @@ class Store:
                 "SELECT COUNT(*) AS n FROM emails WHERE COALESCE(source, '') != 'demo'"
             ).fetchone()["n"]
 
+    def clear_sample(self) -> int:
+        """Remove the sample mailbox (and its digests) so real mail starts on a clean board."""
+        sample = "SELECT id FROM emails WHERE source = 'demo'"
+        with self.connect() as conn:
+            removed = conn.execute("SELECT COUNT(*) AS n FROM emails WHERE source = 'demo'").fetchone()["n"]
+            if not removed:
+                return 0
+            conn.execute(f"DELETE FROM attachments WHERE email_id IN ({sample})")
+            conn.execute(f"DELETE FROM action_items WHERE email_id IN ({sample})")
+            conn.execute(f"DELETE FROM corrections WHERE email_id IN ({sample})")
+            conn.execute("DELETE FROM emails WHERE source = 'demo'")
+            if not conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]:
+                conn.execute("DELETE FROM digests")
+        return removed
+
     def set_source_path(self, email_id: str, path: str) -> None:
         """Where the original .msg/.eml was archived. Kept apart from upsert so re-reads keep it."""
         with self.connect() as conn:
