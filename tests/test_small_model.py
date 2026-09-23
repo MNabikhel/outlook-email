@@ -198,9 +198,20 @@ def test_made_up_due_date_is_dropped(loaded):
     )
     by_title = {a.title: a for a in email.actions}
     assert by_title["Enter the invoice"].due_date == known
-    assert by_title["Chase the approver"].due_date is None
+    assert by_title["Chase the approver"].due_date == known, "the message has one date, so that one is used"
     assert "2031-01-01" in by_title["Chase the approver"].detail
-    assert any("Dropped 1 due date" in r for r in email.importance_reasons)
+    assert any("Replaced 1 due date" in r and "own date" in r for r in email.importance_reasons)
+
+
+def test_made_up_due_date_on_undated_mail_is_dropped(loaded):
+    email = next(
+        e for e in loaded.list_emails(limit=100)
+        if not e.extracted.due_dates and not any(a.extracted_fields.due_dates for a in e.attachments)
+    )
+    overlay_reading(email, {**GOOD, "actions": [{"title": "Reply", "due": "2031-01-01", "priority": "low"}]})
+    action = next(a for a in email.actions if a.title == "Reply")
+    assert action.due_date is None
+    assert "2031-01-01" in action.detail
 
 
 def test_task_due_this_week_stays_in_important(loaded):

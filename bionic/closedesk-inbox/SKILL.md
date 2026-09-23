@@ -70,7 +70,7 @@ The field list and folder meanings are in `references/tools.md` in this skill fo
 - An attachment note that says there is no extractable text is a scan. Say so in the summary. Do not guess what the scan says.
 - An empty `actions` list keeps the script's existing tasks. Send actions only when you want those tasks to replace the draft list.
 - Do not overwrite a message the user already corrected. Those are `model_status: corrected` and they are not in the queue.
-- If `save_reading` returns `guard_notes`, CloseDesk corrected part of your reading (an amount or date that is not in the packet, or a task due this week filed away from Important). Do not try to save it again the other way.
+- If `save_reading` returns `guard_notes`, CloseDesk corrected part of your reading (an amount or date that is not in the packet, a task due this week filed away from Important, or a bank-change email treated as routine). Do not try to save it again the other way.
 
 ## "What do I need to do today?"
 

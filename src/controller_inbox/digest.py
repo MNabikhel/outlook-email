@@ -65,12 +65,14 @@ def build_digest(
     )
     total_emails = store.counts()["emails"]
     open_actions = store.list_actions(status="open")
+    # Phone-verification tasks are reported as fraud alerts, not as overdue work.
+    dated = [(a, e) for a, e in open_actions if a.source != "fraud_rule"]
     today = as_of.isoformat()
     week_end = (as_of + timedelta(days=7)).isoformat()
 
-    overdue = [(a, e) for a, e in open_actions if a.due_date and a.due_date < today]
-    due_today = [(a, e) for a, e in open_actions if a.due_date == today]
-    due_week = [(a, e) for a, e in open_actions if a.due_date and today < a.due_date <= week_end]
+    overdue = [(a, e) for a, e in dated if a.due_date and a.due_date < today]
+    due_today = [(a, e) for a, e in dated if a.due_date == today]
+    due_week = [(a, e) for a, e in dated if a.due_date and today < a.due_date <= week_end]
     undated = [(a, e) for a, e in open_actions if not a.due_date]
 
     emails_by_id: dict[str, EmailRecord] = {e.id: e for e in window_emails}

@@ -126,3 +126,19 @@ def test_old_digest_payloads_still_render(store, settings):
     client = TestClient(create_app(settings, store))
     assert client.get("/digest?date=2026-09-01").status_code == 200
     assert client.get("/digests").status_code == 200
+
+
+def test_phone_verification_is_a_fraud_alert_not_overdue_work(loaded):
+    from datetime import datetime, timezone
+
+    from controller_inbox.digest import build_digest
+
+    digest = build_digest(
+        loaded,
+        as_of=datetime(2026, 10, 6).date(),
+        generated_at=datetime(2026, 10, 6, 11, tzinfo=timezone.utc),
+        save=False,
+    )
+    verify = [row for row in digest["overdue_actions"] if "phone" in row["title"].lower()]
+    assert verify == []
+    assert digest["kpis"]["fraud_alerts"] >= 1

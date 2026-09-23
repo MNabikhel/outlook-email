@@ -49,9 +49,9 @@ A payment-instruction change is always forced back to `important`, even if you s
 CloseDesk also checks every reading. `save_reading` returns `guard_notes` when it changed something:
 
 - a summary that quotes a dollar amount not in the packet is replaced by the script summary;
-- an action `due` date that is not one of the packet's `due_dates` is dropped (the date is kept in the action detail);
+- an action `due` date that is not one of the packet's `due_dates` is replaced by the message's date when it has exactly one, and dropped otherwise (your date is kept in the action detail);
 - a message with a task due within 7 days stays in `important`;
-- a fraud summary always tells the reader to verify by phone.
+- on a payment-instruction change, any task that would update bank details or pay is removed, and a summary that does not warn is replaced by a verify-by-phone warning.
 
 ## Unattended
 

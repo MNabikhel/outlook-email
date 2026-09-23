@@ -51,6 +51,10 @@ INFO_CATEGORIES = {DocumentType.NEWSLETTER, DocumentType.INTERNAL_FYI}
 
 VERIFY_TITLE = "Verify payment-instruction change by phone before doing anything"
 
+FRAUD_SUMMARY = (
+    "Possible payment-instruction fraud — verify by phone before anything else. "
+    "Do not change bank details or pay from this email."
+)
 _PAY_WORDS = ("pay the", "process the wire", "release the", "new account", "updated wiring", "wire the funds")
 _BANK_WORDS = re.compile(r"\b(bank|account|routing|remit\w*|wire|ach|vendor (?:record|master|file)|pay\w*)\b")
 
@@ -213,7 +217,10 @@ def overlay_reading(email: EmailRecord, parsed: dict, *, now: datetime | None = 
         email.actions = _actions_from_model(email.id, provided, as_of, now, known_dates=_known_dates(email))
         dropped = [item for item in email.actions if item.detail.startswith(_DATE_NOTE)]
         if dropped:
-            guard_notes.append(f"Dropped {len(dropped)} due date(s) the model gave that are not in the message.")
+            guard_notes.append(
+                f"Replaced {len(dropped)} due date(s) the model gave that are not in the message"
+                + (" with the message's own date." if all(item.due_date for item in dropped) else ".")
+            )
     if fraud:
         unsafe = [item for item in email.actions if _unsafe_on_fraud(item.title)]
         if unsafe:
@@ -235,8 +242,8 @@ def overlay_reading(email: EmailRecord, parsed: dict, *, now: datetime | None = 
                 email.importance_score = _score(Importance.MEDIUM, False)
             guard_notes.append(f"Kept in Important: “{pressing[0].title}” is due {pressing[0].due_date}.")
     if fraud and not _warns(email.summary):
-        email.summary = "Possible payment-instruction fraud — verify by phone before anything else. " + email.summary
-        guard_notes.append("Added a fraud warning to the model's summary.")
+        email.summary = FRAUD_SUMMARY
+        guard_notes.append("Replaced the model's summary with a fraud warning: it did not warn about the bank change.")
 
     reasons = [item for item in email.importance_reasons if not item.startswith(("Bionic:", "Guard:"))]
     email.importance_reasons = [f"Bionic: {why}"] + [f"Guard: {note}" for note in guard_notes] + reasons
@@ -373,8 +380,10 @@ def _actions_from_model(
             due_text = None
         detail = str(raw.get("detail") or "")[:500]
         if due_text and known_dates is not None and due_text not in known_dates:
-            detail = f"{_DATE_NOTE} {due_text}; that date is not in the message. {detail}".strip()
-            due_text = None
+            only = next(iter(known_dates)) if len(known_dates) == 1 else None
+            used = f" Using {only}, the date in the message." if only else ""
+            detail = f"{_DATE_NOTE} {due_text}; that date is not in the message.{used} {detail}".strip()
+            due_text = only
         priority = _importance(raw.get("priority"), Importance.MEDIUM)
         items.append(
             ActionItem(

@@ -55,8 +55,9 @@ No configuration is needed: `CONTROLLER_INBOX_LLM=auto` (the default) uses a mod
 | Short context windows | Each packet is plain text under a hard budget (`CONTROLLER_INBOX_LLM_MAX_PROMPT_CHARS`, default 6000). |
 | Chatty or fenced JSON | Structured output is requested when the server supports it; fenced, chatty, or trailing-comma replies are still parsed. |
 | Invented numbers | A summary quoting a dollar amount that is not in the email is replaced by the script summary. |
-| Invented dates | An action due date that is not in the email is dropped (kept in the task note). |
-| Burying real work | A task due within a week keeps the email in Important. Fraud stays in Important with "verify by phone". |
+| Invented dates | An action due date that is not in the email is replaced by the email's own date, or dropped if it has none (kept in the task note). |
+| Burying real work | A task due within a week keeps the email in Important. |
+| Treating a bank change as routine | Fraud stays in Important as critical; "update the vendor's bank account" tasks are removed and the summary becomes a verify-by-phone warning. |
 | Slow or crashed server | The model is resolved once per run; if the server stops answering or times out twice, the run stops asking and the mail stays filed. |
 
 Every correction a guard makes is shown on the message under **Why this was flagged**.
