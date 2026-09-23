@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 from datetime import datetime, timezone
@@ -21,6 +22,8 @@ from controller_inbox.store import Store
 
 PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
+# Changes whenever the stylesheet does, so browsers never keep an old copy after an update.
+templates.env.globals["static_version"] = hashlib.sha256((PACKAGE_DIR / "static" / "app.css").read_bytes()).hexdigest()[:10]
 templates.env.filters["shortdt"] = lambda value: (
     (datetime.fromisoformat(value.replace("Z", "+00:00")).strftime("%b %d · %H:%M"))
     if value
