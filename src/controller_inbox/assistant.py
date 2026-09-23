@@ -243,7 +243,7 @@ def offline_answer(
         if current.summary:
             lines.append(current.summary)
         if tasks:
-            lines.append("Open tasks: " + "; ".join(tasks[:3]) + ".")
+            lines.append("Open tasks: " + "; ".join(t.rstrip(".") for t in tasks[:3]) + ".")
         if is_fraud(current):
             lines.append(FRAUD_WARNING)
         return "\n".join(lines)

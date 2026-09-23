@@ -69,7 +69,8 @@ def test_sample_everyday_mail_is_filed_without_a_model(loaded: Store):
     assert rows["demo-question"].folder == "important"
     assert rows["demo-question"].summary.startswith("Reply needed: Could you send me")
     assert rows["demo-approval"].folder == "important"
-    assert any(a.title.startswith("Approve or decline") for a in rows["demo-approval"].actions)
+    approve = [a.title for a in rows["demo-approval"].actions if "approv" in a.title.lower()]
+    assert len(approve) == 1, approve
     assert rows["demo-meeting"].category == DocumentType.MEETING
     assert rows["demo-notification"].folder == "reference"
     assert rows["demo-fyi"].folder == "informational"

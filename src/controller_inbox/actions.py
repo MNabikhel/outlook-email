@@ -151,8 +151,6 @@ def extract_actions(
         )
     elif category == DocumentType.WORKPAPER:
         add("Complete close workpaper", subject, _close_due(as_of), Importance.HIGH, "close")
-    elif category == DocumentType.APPROVAL_REQUEST:
-        add(f"Approve or decline: {subject}", f"{sender or 'The sender'} is waiting on your approval.", due, _due_priority(due, as_of, importance), "approval")
 
     if "fraud_risk" not in flags and category != DocumentType.PAYMENT_INSTRUCTION_CHANGE:
         for sentence in _sentences(f"{subject}. {own_words(body)}"):
@@ -177,7 +175,11 @@ def extract_actions(
             )
 
     body_tasks = any(item.source == "body" for item in items)
-    if category == DocumentType.REPLY_NEEDED and not body_tasks:
+    if category == DocumentType.APPROVAL_REQUEST and not any(
+        item.source == "body" and re.search(r"\b(approv\w*|sign)\b", item.title, re.I) for item in items
+    ):
+        add(f"Approve or decline: {subject}", f"{sender or 'The sender'} is waiting on your approval.", due, _due_priority(due, as_of, importance), "approval")
+    elif category == DocumentType.REPLY_NEEDED and not body_tasks:
         who = (sender or "the sender").split("<")[0].strip() or "the sender"
         add(f"Reply to {who}: {subject}", "They asked you something and are waiting on an answer.", due, _due_priority(due, as_of, importance), "reply")
     elif category == DocumentType.MEETING and (has_invite or re.match(r"\s*(?:updated\s+)?invitation:.*\s@\s", subject or "", re.I)):

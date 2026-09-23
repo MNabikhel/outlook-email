@@ -79,7 +79,8 @@ def test_chat_uses_the_email_on_screen(settings: Settings, loaded: Store):
     sources, _today, _found = pick_sources(loaded, "what does this one want?", email_id="demo-approval")
     assert sources[0].id == "demo-approval"
     text = _answer(list(answer_stream(loaded, settings, "what does this one want?", email_id="demo-approval")))
-    assert "offer letter" in text and "Approve or decline" in text
+    assert "offer letter" in text and "Open tasks: Please approve the offer letter" in text
+    assert ".." not in text
 
 
 def test_chat_streams_from_the_local_model_with_sources(settings, loaded, monkeypatch):
