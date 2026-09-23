@@ -142,3 +142,13 @@ def test_phone_verification_is_a_fraud_alert_not_overdue_work(loaded):
     verify = [row for row in digest["overdue_actions"] if "phone" in row["title"].lower()]
     assert verify == []
     assert digest["kpis"]["fraud_alerts"] >= 1
+
+
+def test_finishing_an_emails_tasks_takes_it_out_of_focus_the_same_day(loaded, settings, as_of_now):
+    for email_id in ("demo-bec-wire", "demo-inv-10482"):
+        for action in loaded.get_email(email_id).actions:
+            loaded.set_action_status(action.id, "done")
+    payload = build_digest(loaded, as_of=date(2026, 9, 22), generated_at=as_of_now, tz=settings.tz, save=False)
+    ids = [row["email_id"] for row in payload["focus"]]
+    assert "demo-bec-wire" not in ids
+    assert "demo-inv-10482" not in ids

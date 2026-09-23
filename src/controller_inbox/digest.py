@@ -19,6 +19,7 @@ from controller_inbox.models import (
     DOCUMENT_LABELS,
     FOLDER_LABELS,
     IMPORTANCE_LABELS,
+    ActionStatus,
     DocumentType,
     EmailRecord,
     Importance,
@@ -199,6 +200,8 @@ def _focus(as_of: date, window_emails, open_actions, full) -> list[dict[str, Any
 
     for email in window_emails:
         if email.id in best or email.folder != "important":
+            continue
+        if email.actions and all(action.status != ActionStatus.OPEN for action in email.actions):
             continue
         kind, label = ("fraud", "Verify by phone") if _is_fraud(email) else ("decide", "New · needs a look")
         score = (1000 if kind == "fraud" else 50) + email.importance_score // 2
