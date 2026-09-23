@@ -30,7 +30,13 @@
   </article>
   <article class="panel llm-card">
     <h3>Local model</h3>
+    {% if model.mode != 'off' and not model.reachable %}
+    <p class="model-line off">No local model is running. That's fine: sorting, summaries, tasks, the digest, search, and <b>Ask CloseDesk</b> all work without one.</p>
+    <p>To add one later: open <a href="https://lmstudio.ai/" rel="noopener">LM Studio</a>, load a small instruct model (3B–8B), and click <b>Start server</b> on the Developer tab. CloseDesk finds it on its own.</p>
+    <p class="muted"><small>Tried {{ model.base_url }}: {{ model.error }}</small></p>
+    {% else %}
     <p class="model-line {{ 'on' if model.active else 'off' }}">{{ model.describe() }}</p>
+    {% endif %}
     {% if model.models %}
     <p class="muted">Loaded on the server: {{ model.models | join(', ') }}</p>
     {% endif %}

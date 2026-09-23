@@ -208,6 +208,7 @@ button[disabled] { opacity: 0.55; cursor: progress; }
 .top-search { position: relative; align-self: center; }
 .top-search input { width: 260px; padding-right: 34px; }
 .top-search kbd { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); }
+.top-search input:focus + kbd, .top-search input:not(:placeholder-shown) + kbd { display: none; }
 kbd { font: 11px/1 var(--sans); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 2px 5px; color: var(--muted); background: #fff; }
 [data-email] { cursor: pointer; }
 table.mail tr.is-open td { background: #f1ead9; }

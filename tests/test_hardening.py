@@ -257,3 +257,11 @@ def test_header_says_local_ai_is_off_instead_of_waiting(settings: Settings, load
     assert "Local AI" in page and "Waiting on model" not in page
     monkeypatch.setattr(web, "check_model", lambda *_a, **_k: local_llm.ModelStatus(mode="auto", reachable=True, model="llama-3.2-3b"))
     assert "Waiting on model" in client.get("/").text
+
+
+def test_setup_page_reassures_when_no_model_is_running(settings: Settings, loaded: Store):
+    settings.llm = None
+    settings.llm_base_url = "http://127.0.0.1:9/v1"
+    page = TestClient(create_app(settings, loaded)).get("/settings").text
+    assert "No local model is running." in page and "all work without one" in page
+    assert "Start server" in page
