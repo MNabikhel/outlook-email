@@ -37,7 +37,12 @@ PAYMENT_CHANGE_RE = re.compile(
     r"please\s+use\s+(?:the\s+)?following\s+(?:account|routing|bank)|"
     r"wire\s+instructions\s+have\s+changed|"
     r"our\s+bank(?:ing)?\s+details\s+have\s+changed|"
-    r"do\s+not\s+use\s+(?:the\s+)?previous\s+account)",
+    r"do\s+not\s+use\s+(?:the\s+)?previous\s+account|"
+    r"(?<!not )(?:changed|switched|moved)\s+(?:our\s+bank(?:s|ing\s+partner)?|banks|to\s+a\s+new\s+bank)\b|"
+    r"update\s+(?:our|the|your\s+records\s+with\s+our)\s+(?:bank(?:ing)?|remittance|payment|wire|ach)\s+"
+    r"(?:details|information|info|instructions)|"
+    r"(?:updated|new)\s+(?:remittance|bank(?:ing)?|payment|wire|ach)\s+(?:details|information|info)|"
+    r"(?:to|into)\s+(?:the|our)\s+new\s+(?:bank\s+)?account)",
     re.IGNORECASE,
 )
 
@@ -332,7 +337,7 @@ def classify_email(
         combined_flags.append("missing_attachment")
         reasons.append("Email says something is attached, but no attachment was found")
 
-    if duplicate_invoice:
+    if duplicate_invoice and category in _INVOICE_TYPES:
         combined_flags.append("duplicate_invoice")
         reasons.append("Invoice number already seen on another email")
 
@@ -361,6 +366,14 @@ def classify_email(
         importance_score=score,
         importance_reasons=imp_reasons,
     )
+
+
+_INVOICE_TYPES = {
+    DocumentType.AP_INVOICE,
+    DocumentType.AR_INVOICE,
+    DocumentType.CREDIT_MEMO,
+    DocumentType.MIXED,
+}
 
 
 _TYPE_PRIORITY = [
@@ -492,9 +505,7 @@ def _importance(
             DocumentType.PAYROLL,
         }
         or "month_end" in flags
-        or "close" in blob
-        or "month-end" in blob
-        or "month end" in blob
+        or re.search(r"\bclose\b|month[- ]end", blob)
     ):
         score += 12
         reasons.append(f"Month-end is in {days_to_close} day(s)")

@@ -199,3 +199,40 @@ def test_run_command_end_to_end(settings, monkeypatch, capsys):
 
     assert main(["llm-check"]) == 1
     assert "turned off" in capsys.readouterr().out
+
+
+def test_same_message_twice_in_one_drop_counts_once(store, settings):
+    settings.ensure_data_dir()
+    _eml(settings.inbox_incoming / "Invoice.eml", subject="Invoice INV-1", body="Amount due $10.00", message_id="<inv-1@v.example>")
+    _eml(settings.inbox_incoming / "FW Invoice (copy).eml", subject="Invoice INV-1", body="Amount due $10.00", message_id="<inv-1@v.example>")
+    report: dict = {}
+    records = ingest_folder(store, settings, report=report)
+    assert len(records) == 1
+    assert (report["read"], report["already_read"]) == (1, 1)
+    assert store.counts()["emails"] == 1
+    assert not list(settings.inbox_incoming.glob("*.eml"))
+
+
+def test_msg_strings_lose_outlook_padding(store, settings, monkeypatch):
+    import extract_msg
+
+    class FakeMessage:
+        def __init__(self, path):
+            self.subject = "Test: multiple To recipients\x00\x00\x00   "
+            self.sender = None
+            self.body = "Body\x00"
+            self.htmlBody = None
+            self.date = None
+            self.messageId = None
+            self.attachments = []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(extract_msg, "Message", FakeMessage)
+    settings.ensure_data_dir()
+    (settings.inbox_incoming / "padded.msg").write_bytes(b"fake")
+    [record] = ingest_folder(store, settings)
+    assert record.subject == "Test: multiple To recipients"
+    assert record.sender_name == "Unknown sender"
+    assert "\x00" not in record.body_text

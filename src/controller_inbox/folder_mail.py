@@ -43,6 +43,7 @@ def ingest_folder(
     report = report if report is not None else {}
     report.update({"read": 0, "already_read": 0, "failed": []})
     records = []
+    seen: set[str] = set()
     batches = collect_batches(settings)
     for index, (path, sidecars) in enumerate(batches, start=1):
         if on_progress:
@@ -57,15 +58,19 @@ def ingest_folder(
             else:
                 raw = _standalone(path)
             existing = store.get_email(raw.id)
-            if existing is not None and existing.model_status in KEEP_READINGS:
+            if raw.id in seen or (existing is not None and existing.model_status in KEEP_READINGS):
                 report["already_read"] += 1
                 _archive(settings, owned)
                 continue
+            seen.add(raw.id)
             record = process_message(raw, store, settings, now=now)
             _write_extracted(settings, raw)
             _archive(settings, owned)
             records.append(record)
-            report["read"] += 1
+            if existing is None:
+                report["read"] += 1
+            else:
+                report["already_read"] += 1
         except Exception as exc:
             report["failed"].append({"file": path.name, "error": str(exc)[:300]})
             _quarantine(settings, owned, exc)
@@ -248,11 +253,15 @@ def _standalone(path: Path) -> RawMessage:
 def _raw_message(
     path, data, subject, sender_name, sender_email, received, body, attachments, message_id: str = ""
 ) -> RawMessage:
+    subject = _tidy(subject) or _tidy(path.stem)
+    sender_name, sender_email = _tidy(sender_name), _tidy(sender_email)
+    body = (body or "").replace("\x00", "").strip()
+    message_id = _tidy(message_id)
     return RawMessage(
         id=_stable_id(message_id) if message_id else _message_id(data),
         internet_message_id=message_id,
         subject=subject,
-        sender_name=sender_name,
+        sender_name=sender_name or ("" if sender_email else "Unknown sender"),
         sender_email=sender_email,
         received_at=received,
         body_text=body,
@@ -261,6 +270,11 @@ def _raw_message(
         source="folder",
         attachments=attachments,
     )
+
+
+def _tidy(value) -> str:
+    """Outlook pads some .msg strings with NUL characters; drop them and fold whitespace."""
+    return re.sub(r"\s+", " ", str(value or "").replace("\x00", "")).strip()
 
 
 def _file_attachment(path: Path) -> RawAttachment:
