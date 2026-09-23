@@ -7,7 +7,7 @@ Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get
 ## Quick start
 
 1. **Install Python 3.11+** from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH**.
-2. **Get CloseDesk:** green **Code** button → **Download ZIP**, then unzip it somewhere permanent (for example `Documents\CloseDesk`).
+2. **Get CloseDesk:** green **Code** button → **Download ZIP**, then unzip it somewhere permanent (for example `Documents`). The folder is called `outlook-email-main`; rename it `CloseDesk` if you like.
 3. **Double-click `CloseDesk.bat`** (Windows) or **`CloseDesk.command`** (Mac). The first run sets itself up in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around.
 4. **Add your mail:** drag emails from Outlook into the `inbox/incoming` folder and click **Process new mail**. ([New Outlook, web, and Mac](docs/SETUP.md#every-morning))
 5. **Optional local AI:** in [LM Studio](https://lmstudio.ai/), load a small instruct model (3B–8B) and start the server (Developer tab → **Start server**). CloseDesk finds it on its own.
@@ -19,7 +19,7 @@ Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get
 - **Draft a reply:** open an email and click **Draft a reply**.
 - **Choose your inbox type:** **Setup** → *General* or *Finance*.
 
-The full guide and troubleshooting are in [docs/SETUP.md](docs/SETUP.md).
+The full guide and troubleshooting are in [docs/SETUP.md](docs/SETUP.md). Prefer slides? The [quick setup deck](docs/CloseDesk-quick-setup.pptx) walks through the same steps with screenshots.
 
 <details>
 <summary>No model, or a small one? What changes</summary>

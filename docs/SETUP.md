@@ -2,12 +2,12 @@
 
 CloseDesk turns a pile of Outlook mail into one short page each morning: what you must act on, what you should know, and what can wait. It runs on your laptop. No Outlook add-in, no IT approval, no cloud. It works for any inbox, with or without a local AI model.
 
-The longer notes are in [BIONIC_GUIDE.md](BIONIC_GUIDE.md). The picture version is [CloseDesk-how-it-works.pptx](CloseDesk-how-it-works.pptx).
+The longer notes are in [BIONIC_GUIDE.md](BIONIC_GUIDE.md). The picture versions are [CloseDesk-quick-setup.pptx](CloseDesk-quick-setup.pptx) (these steps, with screenshots) and [CloseDesk-how-it-works.pptx](CloseDesk-how-it-works.pptx).
 
 ## One-time setup
 
 1. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH** in the installer.
-2. Put this project folder somewhere permanent, for example `Documents\CloseDesk`.
+2. Put this project folder somewhere permanent, for example `Documents`. From GitHub's **Download ZIP** the folder is called `outlook-email-main`; rename it `CloseDesk` if you like.
 3. Optional: install [LM Studio](https://lmstudio.ai/), download a small *instruct* model (3B–8B is plenty), load it, and start the local server (Developer tab → **Start server**). CloseDesk finds it on its own. Ollama works too (see the README). If your laptop can't run a model, skip this step: sorting, summaries, tasks, fraud warnings, search, and the digest all work without one.
 4. After the first launch, open **Setup** and choose **What kind of inbox is this?** *General* suits anyone. *Finance* adds the month-end countdown and close sections.
 
