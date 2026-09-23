@@ -52,6 +52,27 @@ NEWSLETTER_RE = re.compile(
     re.IGNORECASE,
 )
 
+REPLY_RE = re.compile(
+    r"(\b(?:can|could|would)\s+you\b[^.?!\n]{0,120}\?|"
+    r"\bplease\s+(?:confirm|advise|reply|respond|get\s+back\s+to\s+me)\b|"
+    r"\blet\s+me\s+know\s+(?:by|before|whether|when\s+you|what\s+you|if\s+you\s+(?:can|could|are|agree))\b|"
+    r"\bwhat\s+do\s+you\s+think\b|\byour\s+thoughts\?|\bany\s+update\s+on\b|"
+    r"\bwaiting\s+(?:on|for)\s+your\b|\bquick\s+question\b|\bare\s+you\s+(?:available|free|able)\b)",
+    re.IGNORECASE,
+)
+
+AUTOMATED_SENDERS = (
+    "no-reply",
+    "noreply",
+    "donotreply",
+    "do-not-reply",
+    "notifications@",
+    "notification@",
+    "alerts@",
+    "notify@",
+    "mailer-daemon",
+)
+
 RULES: tuple[Rule, ...] = (
     Rule(
         DocumentType.PAYMENT_INSTRUCTION_CHANGE,
@@ -178,6 +199,75 @@ RULES: tuple[Rule, ...] = (
         reason="Close / accounting workpaper",
     ),
     Rule(
+        DocumentType.APPROVAL_REQUEST,
+        70,
+        keywords=(
+            "please approve",
+            "approval needed",
+            "needs your approval",
+            "awaiting your approval",
+            "for your approval",
+            "approve or reject",
+            "approve or decline",
+            "sign off",
+            "sign-off",
+            "please sign",
+            "signature requested",
+            "docusign",
+        ),
+        flags=("approval",),
+        reason="Someone is waiting on your approval",
+    ),
+    Rule(
+        DocumentType.MEETING,
+        50,
+        keywords=(
+            "meeting invitation",
+            "invitation:",
+            "updated invitation",
+            "calendar invite",
+            "meeting request",
+            "join zoom meeting",
+            "microsoft teams meeting",
+            "join the meeting",
+            "google meet",
+            "accepted:",
+            "declined:",
+            "tentative:",
+            "reschedule",
+        ),
+        filename_keywords=(".ics",),
+        reason="Meeting or calendar invite",
+    ),
+    Rule(
+        DocumentType.REPLY_NEEDED,
+        45,
+        regexes=(REPLY_RE,),
+        reason="Someone asked you a question or is waiting on your reply",
+    ),
+    Rule(
+        DocumentType.NOTIFICATION,
+        36,
+        keywords=(
+            "this is an automated message",
+            "do not reply to this email",
+            "automated notification",
+            "password reset",
+            "verification code",
+            "your order has shipped",
+            "sign-in attempt",
+            "security alert",
+        ),
+        sender_keywords=AUTOMATED_SENDERS,
+        reason="Automated notification",
+    ),
+    Rule(
+        DocumentType.INTERNAL_FYI,
+        34,
+        keywords=("fyi", "for your information", "heads up", "heads-up", "no action needed", "no action required", "for your awareness"),
+        reason="FYI, nothing asked of you",
+    ),
+    Rule(
         DocumentType.NEWSLETTER,
         40,
         regexes=(NEWSLETTER_RE,),
@@ -250,6 +340,9 @@ def score_rules(
             list(dict.fromkeys(prev[1] + reasons + ([rule.reason] if rule.reason else []))),
             flags,
         )
+    # Bulk and machine mail asks questions nobody is waiting on.
+    if DocumentType.NEWSLETTER in scores or DocumentType.NOTIFICATION in scores:
+        scores.pop(DocumentType.REPLY_NEEDED, None)
     return scores
 
 
@@ -279,7 +372,7 @@ def classify_document(
             return Classification(DocumentType.SPREADSHEET, 0.4, ["spreadsheet without a stronger document type"], importance=Importance.MEDIUM, importance_score=40)
         if has_text is False:
             return Classification(DocumentType.IMAGE_SCAN, 0.3, ["no extractable text"], importance=Importance.LOW, importance_score=25)
-        return Classification(DocumentType.OTHER, 0.2, ["no matching finance document pattern"], importance=Importance.LOW, importance_score=20)
+        return Classification(DocumentType.OTHER, 0.2, ["no stronger pattern matched"], importance=Importance.LOW, importance_score=20)
 
     best_type, (weight, reasons, flags) = max(scores.items(), key=lambda item: item[1][0])
     confidence = min(0.98, 0.35 + weight / 180)
@@ -304,6 +397,7 @@ def classify_email(
     vip_senders: list[str] | None = None,
     has_attachments: bool = False,
     duplicate_invoice: bool = False,
+    finance: bool = True,
 ) -> Classification:
     attachment_types = [item.document_type for item in attachments]
     combined_flags: list[str] = []
@@ -356,6 +450,7 @@ def classify_email(
         vip_senders=vip_senders or [],
         subject=subject,
         body=body,
+        finance=finance,
     )
     return Classification(
         document_type=category,
@@ -396,7 +491,11 @@ _TYPE_PRIORITY = [
     DocumentType.PACKING_SLIP,
     DocumentType.SPREADSHEET,
     DocumentType.IMAGE_SCAN,
+    DocumentType.APPROVAL_REQUEST,
+    DocumentType.REPLY_NEEDED,
+    DocumentType.MEETING,
     DocumentType.NEWSLETTER,
+    DocumentType.NOTIFICATION,
     DocumentType.INTERNAL_FYI,
     DocumentType.OTHER,
 ]
@@ -425,6 +524,7 @@ def _importance(
     vip_senders: list[str],
     subject: str,
     body: str,
+    finance: bool = True,
 ) -> tuple[Importance, int, list[str]]:
     score = 30
     reasons: list[str] = []
@@ -455,6 +555,18 @@ def _importance(
     if category == DocumentType.REMITTANCE_ADVICE:
         score += 14
         reasons.append("Cash to apply")
+    if category == DocumentType.APPROVAL_REQUEST:
+        score += 24
+        reasons.append("Waiting on your approval")
+    if category == DocumentType.REPLY_NEEDED:
+        score += 16
+        reasons.append("Someone is waiting on your reply")
+    if category == DocumentType.MEETING:
+        score += 6
+        reasons.append("Meeting or calendar change")
+    if category == DocumentType.NOTIFICATION:
+        score -= 18
+        reasons.append("Automated notification")
     if category in {DocumentType.NEWSLETTER, DocumentType.INTERNAL_FYI}:
         score -= 20
         reasons.append("Informational / newsletter")
@@ -495,7 +607,7 @@ def _importance(
 
     last_day = _month_end(as_of)
     days_to_close = (last_day - as_of).days
-    if days_to_close <= 7 and (
+    if finance and days_to_close <= 7 and (
         category
         in {
             DocumentType.BANK_STATEMENT,

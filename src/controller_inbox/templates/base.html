@@ -35,10 +35,12 @@
           <span>Local model</span>
           <b>{{ model.model if model.active else ('off' if model.mode == 'off' else 'not running') }}</b>
         </a>
+        {% if finance %}
         <div class="close-chip">
           <span>Days to month-end</span>
           <b>{{ days_to_close }}</b>
         </div>
+        {% endif %}
         <p class="mode">{{ 'Outlook connected' if graph_configured else 'Drop folder' }}{{ ' · sample mailbox' if is_sample else '' }}</p>
       </div>
     </aside>
@@ -47,7 +49,11 @@
         <div>
           <p class="kicker">{{ today_long }}</p>
           <h1>{% block heading %}Inbox{% endblock %}</h1>
+          {% if finance %}
           <p class="sub">Month-end {{ close_date }} · {{ days_to_close }} day{{ '' if days_to_close == 1 else 's' }} left</p>
+          {% else %}
+          <p class="sub">{{ counts.emails }} email{{ '' if counts.emails == 1 else 's' }} sorted{% if last_run %} · last processed {{ last_run | shortdt }}{% endif %}</p>
+          {% endif %}
         </div>
         <div class="kpis">
           <div><span>Needs you</span><b>{{ counts.important }}</b></div>

@@ -43,6 +43,7 @@ def extract_actions(
     flags: list[str],
     as_of: date,
     now: datetime | None = None,
+    sender: str = "",
 ) -> list[ActionItem]:
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     created = now.replace(microsecond=0).isoformat()
@@ -148,6 +149,8 @@ def extract_actions(
         )
     elif category == DocumentType.WORKPAPER:
         add("Complete close workpaper", subject, _close_due(as_of), Importance.HIGH, "close")
+    elif category == DocumentType.APPROVAL_REQUEST:
+        add(f"Approve or decline: {subject}", f"{sender or 'The sender'} is waiting on your approval.", due, _due_priority(due, as_of, importance), "approval")
 
     if "fraud_risk" not in flags and category != DocumentType.PAYMENT_INSTRUCTION_CHANGE:
         for sentence in _sentences(f"{subject}. {body}"):
@@ -170,6 +173,13 @@ def extract_actions(
                 importance if importance != Importance.LOW else Importance.MEDIUM,
                 "body",
             )
+
+    body_tasks = any(item.source == "body" for item in items)
+    if category == DocumentType.REPLY_NEEDED and not body_tasks:
+        who = (sender or "the sender").split("<")[0].strip() or "the sender"
+        add(f"Reply to {who}: {subject}", "They asked you something and are waiting on an answer.", due, _due_priority(due, as_of, importance), "reply")
+    elif category == DocumentType.MEETING and re.match(r"\s*(?:updated\s+)?invitation\b", subject or "", re.I):
+        add(f"Accept or decline: {subject}", "Meeting invitation waiting on your answer.", due, Importance.MEDIUM, "meeting")
 
     return items
 

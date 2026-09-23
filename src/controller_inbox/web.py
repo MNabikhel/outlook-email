@@ -14,10 +14,11 @@ from fastapi.templating import Jinja2Templates
 from controller_inbox.actions import local_today
 from controller_inbox.classify import month_end
 from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
-from controller_inbox.config import Settings
+from controller_inbox.config import PROFILES, Settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.local_llm import check_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
+from controller_inbox.profile import active_profile, is_finance, set_profile
 from controller_inbox.store import Store
 
 PACKAGE_DIR = Path(__file__).parent
@@ -42,6 +43,7 @@ NOTICES = {
     "Run the sample from a separate data folder instead (see README).",
     "processing": "Processing started. This page updates as it goes.",
     "busy": "Already processing. This page updates as it goes.",
+    "profile": "Saved. The digest and Today page now use this profile; new mail is sorted with it.",
 }
 
 
@@ -117,6 +119,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         as_of = board_date()
         counts = store.counts()
         close = month_end(as_of)
+        profile = active_profile(settings, store)
         base = {
             "request": request,
             "settings": settings,
@@ -140,6 +143,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "query": "",
             "notice": NOTICES.get(request.query_params.get("notice", ""), ""),
             "is_sample": bool(counts["emails"]) and not store.real_mail_count(),
+            "profile": profile,
+            "profiles": PROFILES,
+            "finance": profile == "finance",
         }
         base["llm_enabled"] = base["model"].active
         base.update(extra)
@@ -161,6 +167,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             tz=settings.tz,
             lookback_days=settings.digest_lookback_days,
             save=False,
+            finance=is_finance(settings, store),
         )
         return render(
             request,
@@ -177,7 +184,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         blurbs = {
             "important": "Needs a decision, a reply, a payment check, or a task. Most important first.",
             "informational": "Worth knowing. Nothing is waiting on you.",
-            "reference": "Statements, purchase orders, contracts, and files to keep. Not a task.",
+            "reference": "Notifications, receipts, statements, and files to keep. Not a task.",
         }
         return render(
             request,
@@ -337,6 +344,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     def settings_page(request: Request, recheck: int = 0):
         model = check_model(settings, use_cache=not recheck)
         return render(request, "settings.html", page="settings", model=model, llm_enabled=model.active)
+
+    @app.post("/settings/profile")
+    def save_profile(profile: str = Form(...)):
+        try:
+            set_profile(store, profile)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return RedirectResponse("/settings?notice=profile", status_code=303)
 
     @app.post("/demo/reload")
     def demo_reload():

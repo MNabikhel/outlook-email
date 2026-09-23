@@ -79,7 +79,7 @@ def test_dashboard_after_demo(store, settings, as_of_now):
 
     health = client.get("/health")
     assert health.json()["ok"] is True
-    assert health.json()["emails"] == 14
+    assert health.json()["emails"] == 19
 
 
 def test_empty_state_and_reload(store, settings):

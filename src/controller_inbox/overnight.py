@@ -15,6 +15,7 @@ from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.local_llm import LocalReader, check_model, llm_active
+from controller_inbox.profile import is_finance
 from controller_inbox.reading import build_packet, overlay_reading
 from controller_inbox.store import Store
 
@@ -96,6 +97,7 @@ def run_overnight(
         generated_at=now.astimezone(settings.tz),
         tz=settings.tz,
         lookback_days=settings.digest_lookback_days,
+        finance=is_finance(settings, store),
     )
     digest_md, _digest_html = write_digest_files(payload, settings.digest_dir, as_of.isoformat())
     counts = store.counts()

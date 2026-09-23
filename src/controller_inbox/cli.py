@@ -14,6 +14,7 @@ from controller_inbox.config import Settings, load_settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.models import DOCUMENT_LABELS, IMPORTANCE_LABELS
 from controller_inbox.pipeline import ingest_demo, ingest_mailbox
+from controller_inbox.profile import STATE_KEY as PROFILE_KEY, is_finance
 from controller_inbox.store import Store
 
 DEMO_NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
@@ -239,12 +240,20 @@ def main(argv: list[str] | None = None) -> int:
 
 def make_digest(store: Store, settings: Settings, *, as_of, now: datetime) -> dict:
     return build_digest(
-        store, as_of=as_of, generated_at=now, tz=settings.tz, lookback_days=settings.digest_lookback_days
+        store,
+        as_of=as_of,
+        generated_at=now,
+        tz=settings.tz,
+        lookback_days=settings.digest_lookback_days,
+        finance=is_finance(settings, store),
     )
 
 
 def load_sample(store: Store, settings: Settings):
+    chosen = store.get_state(PROFILE_KEY)
     store.reset()
+    if chosen:
+        store.set_state(PROFILE_KEY, chosen)
     records = ingest_demo(store, settings, now=DEMO_NOW)
     as_of = local_today(settings.tz, DEMO_NOW)
     payload = make_digest(store, settings, as_of=as_of, now=DEMO_NOW.astimezone(settings.tz))

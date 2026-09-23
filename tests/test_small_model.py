@@ -124,7 +124,7 @@ def test_read_queue_leaves_mail_filed_when_the_model_dies(loaded, settings):
     result = read_queue(loaded, settings, limit=10, reader=_reader(settings, handler))
     assert len(result["read_ids"]) == 1
     assert "Stopped reading" in result["note"]
-    assert loaded.counts()["waiting_on_bionic"] == 13
+    assert loaded.counts()["waiting_on_bionic"] == 18
     assert all(email.folder for email in loaded.list_emails())
 
 

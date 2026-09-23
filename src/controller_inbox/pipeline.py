@@ -14,6 +14,7 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import AttachmentRecord, EmailRecord, RawMessage
+from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
 
 # A message the model already read, or the user corrected, is not re-scored
@@ -104,6 +105,7 @@ def process_message(
         vip_senders=settings.vip_list,
         has_attachments=bool(attachments_raw) or raw.has_attachments,
         duplicate_invoice=duplicate,
+        finance=is_finance(settings, store),
     )
     classified_email = _refine(
         classified_email,
@@ -128,6 +130,7 @@ def process_message(
         flags=classified_email.flags,
         as_of=as_of,
         now=now,
+        sender=raw.sender_name or raw.sender_email,
     )
 
     writeback_status = "skipped"
