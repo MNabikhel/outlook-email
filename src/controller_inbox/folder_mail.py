@@ -6,6 +6,7 @@ import hashlib
 import mimetypes
 import re
 import shutil
+from collections.abc import Callable
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
@@ -15,7 +16,7 @@ from pathlib import Path
 from controller_inbox.config import Settings
 from controller_inbox.extract import html_to_text, sha256_bytes
 from controller_inbox.models import RawAttachment, RawMessage
-from controller_inbox.pipeline import process_message
+from controller_inbox.pipeline import KEEP_READINGS, process_message
 from controller_inbox.store import Store
 
 
@@ -23,26 +24,51 @@ MESSAGE_SUFFIXES = {".msg", ".eml"}
 SKIP_NAMES = {".gitkeep", ".ds_store"}
 
 
-def ingest_folder(store: Store, settings: Settings, *, now: datetime | None = None) -> list:
+def ingest_folder(
+    store: Store,
+    settings: Settings,
+    *,
+    now: datetime | None = None,
+    report: dict | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
+) -> list:
+    """Read everything in the drop folder. Returns the records that were read.
+
+    ``report`` (when given) is filled with ``read``, ``already_read`` (same mail
+    dropped again after the model or the user filed it), and ``failed`` rows.
+    A file that cannot be read moves to ``inbox/failed`` with a note, so it is
+    not retried on every run.
+    """
     settings.ensure_data_dir()
+    report = report if report is not None else {}
+    report.update({"read": 0, "already_read": 0, "failed": []})
     records = []
-    for path, sidecars in collect_batches(settings):
+    batches = collect_batches(settings)
+    for index, (path, sidecars) in enumerate(batches, start=1):
+        if on_progress:
+            on_progress(index, len(batches), path.name)
+        owned = [path, *sidecars] if path.suffix.lower() in MESSAGE_SUFFIXES else [path]
         try:
             if path.suffix.lower() in MESSAGE_SUFFIXES:
                 raw = _parse_message(path)
                 for extra in sidecars:
                     raw.attachments.append(_file_attachment(extra))
                     raw.has_attachments = True
-                owned = [path, *sidecars]
             else:
                 raw = _standalone(path)
-                owned = [path]
+            existing = store.get_email(raw.id)
+            if existing is not None and existing.model_status in KEEP_READINGS:
+                report["already_read"] += 1
+                _archive(settings, owned)
+                continue
             record = process_message(raw, store, settings, now=now)
             _write_extracted(settings, raw)
             _archive(settings, owned)
             records.append(record)
+            report["read"] += 1
         except Exception as exc:
-            print(f"Skipped {path.name}: {exc}")
+            report["failed"].append({"file": path.name, "error": str(exc)[:300]})
+            _quarantine(settings, owned, exc)
     if records:
         stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
         store.set_state("last_folder_ingest", stamp)
@@ -140,7 +166,8 @@ def _parse_eml(path: Path) -> RawMessage:
         elif ctype == "text/html" and not html_fallback:
             html_fallback = html_to_text(_decode_text_part(part, payload))
     body = "\n".join(p for p in body_parts if p).strip() or html_fallback
-    return _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments)
+    message_id = str(parsed.get("message-id") or "").strip()
+    return _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
 
 
 def _parse_msg(path: Path) -> RawMessage:
@@ -166,21 +193,38 @@ def _parse_msg(path: Path) -> RawMessage:
         for att in message.attachments:
             filename = att.longFilename or att.shortFilename or "attachment"
             payload = att.data or b""
+            content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
             if isinstance(payload, str):
                 payload = payload.encode("utf-8", errors="replace")
+            elif not isinstance(payload, (bytes, bytearray)):
+                # A forwarded email attached as an item: keep its text, not the object.
+                payload = _embedded_message_text(payload).encode("utf-8")
+                filename = (Path(filename).stem or "forwarded message") + ".txt"
+                content_type = "text/plain"
             attachments.append(
                 RawAttachment(
                     id=filename,
                     filename=filename,
-                    content_type=mimetypes.guess_type(filename)[0] or "application/octet-stream",
+                    content_type=content_type,
                     size_bytes=len(payload),
-                    content=payload,
+                    content=bytes(payload),
                 )
             )
+        message_id = str(getattr(message, "messageId", None) or "").strip()
     finally:
         message.close()
     data = path.read_bytes()
-    return _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments)
+    return _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
+
+
+def _embedded_message_text(item) -> str:
+    subject = getattr(item, "subject", "") or ""
+    sender = getattr(item, "sender", "") or ""
+    date = getattr(item, "date", "") or ""
+    body = getattr(item, "body", "") or ""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", errors="replace")
+    return f"Forwarded message\nSubject: {subject}\nFrom: {sender}\nDate: {date}\n\n{body}".strip()
 
 
 def _standalone(path: Path) -> RawMessage:
@@ -201,9 +245,12 @@ def _standalone(path: Path) -> RawMessage:
     )
 
 
-def _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments) -> RawMessage:
+def _raw_message(
+    path, data, subject, sender_name, sender_email, received, body, attachments, message_id: str = ""
+) -> RawMessage:
     return RawMessage(
-        id=_message_id(data),
+        id=_stable_id(message_id) if message_id else _message_id(data),
+        internet_message_id=message_id,
         subject=subject,
         sender_name=sender_name,
         sender_email=sender_email,
@@ -229,6 +276,12 @@ def _file_attachment(path: Path) -> RawAttachment:
 
 def _message_id(data: bytes) -> str:
     return "file-" + hashlib.sha256(data).hexdigest()[:20]
+
+
+def _stable_id(message_id: str) -> str:
+    """Same Outlook message, same id — whether it was saved as .msg or .eml, today or next week."""
+    normalized = message_id.strip().strip("<>").strip().lower()
+    return "mail-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
 
 
 def _files(folder: Path) -> list[Path]:
@@ -287,14 +340,38 @@ def _write_extracted(settings: Settings, raw: RawMessage) -> None:
     dest = settings.inbox_extracted / raw.id
     dest.mkdir(parents=True, exist_ok=True)
     for att in raw.attachments:
-        safe = Path(att.filename).name or "attachment"
-        (dest / safe).write_bytes(att.content or b"")
+        (dest / _safe_filename(att.filename)).write_bytes(att.content or b"")
+
+
+def _safe_filename(name: str) -> str:
+    """Windows refuses : * ? " < > | in file names; forwarded-mail subjects often have them."""
+    base = re.split(r"[\\/]", name or "")[-1]
+    cleaned = re.sub(r'[<>:"|?*\x00-\x1f]', "_", base).strip(" .")
+    return cleaned[:150] or "attachment"
+
+
+def _quarantine(settings: Settings, paths: list[Path], exc: Exception) -> None:
+    dest_root = settings.inbox_failed
+    dest_root.mkdir(parents=True, exist_ok=True)
+    _move_all(dest_root, paths)
+    if paths:
+        note = dest_root / f"{paths[0].name}.why.txt"
+        note.write_text(
+            "CloseDesk could not read this file.\n"
+            f"Reason: {exc}\n\n"
+            "If it is an Outlook message, save it again as .msg or .eml and drop it back in inbox/incoming.\n",
+            encoding="utf-8",
+        )
 
 
 def _archive(settings: Settings, paths: list[Path]) -> None:
     day = datetime.now().strftime("%Y-%m-%d")
     dest_root = settings.inbox_processed / day
     dest_root.mkdir(parents=True, exist_ok=True)
+    _move_all(dest_root, paths)
+
+
+def _move_all(dest_root: Path, paths: list[Path]) -> None:
     for path in paths:
         if not path.exists():
             continue

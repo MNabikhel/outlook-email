@@ -17,6 +17,8 @@ inbox/processed/*
 !inbox/processed/.gitkeep
 inbox/extracted/*
 !inbox/extracted/.gitkeep
+inbox/failed/*
+!inbox/failed/.gitkeep
 *.db
 .msal_token_cache.bin
 .token_cache.bin

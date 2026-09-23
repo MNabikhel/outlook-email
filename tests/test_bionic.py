@@ -89,10 +89,24 @@ def test_overnight_without_model_still_files_and_logs(loaded, settings, as_of_no
     assert "Important" in log
 
 
-def test_overnight_applies_a_local_reading(loaded, settings, as_of_now, monkeypatch):
-    settings.llm = True
+class AgreeingReader:
+    """Stands in for LocalReader: agrees with the script draft."""
 
-    def fake_read(_settings, packet):
+    def __init__(self):
+        from controller_inbox.local_llm import ReaderStats
+
+        self.model = "test-model"
+        self.stats = ReaderStats()
+        self.subjects: list[str] = []
+
+    @property
+    def stopped(self):
+        return bool(self.stats.stopped_reason)
+
+    def read(self, packet):
+        self.subjects.append(packet["subject"])
+        self.stats.read += 1
+        self.stats.seconds += 0.5
         return {
             "category": packet["script_draft"]["category"],
             "folder": packet["script_draft"]["folder"],
@@ -102,12 +116,17 @@ def test_overnight_applies_a_local_reading(loaded, settings, as_of_now, monkeypa
             "why": "Agreed with the extracted facts.",
         }
 
-    monkeypatch.setattr("controller_inbox.overnight.read_packet", fake_read)
-    monkeypatch.setattr("controller_inbox.overnight.resolve_model", lambda _settings: "test-model")
-    result = run_overnight(loaded, settings, now=as_of_now, limit=3, sync_graph=False)
+
+def test_overnight_applies_a_local_reading(loaded, settings, as_of_now):
+    reader = AgreeingReader()
+    result = run_overnight(loaded, settings, now=as_of_now, limit=3, sync_graph=False, reader=reader)
     assert result["read_by_bionic"] == 3
     assert result["waiting_on_bionic"] == 11
+    assert result["model"] == "test-model"
+    assert result["avg_seconds"] == 0.5
     assert loaded.counts()["read_by_bionic"] == 3
+    read = [loaded.get_email(email_id) for email_id in [e.id for e in loaded.list_emails(model_status="bionic")]]
+    assert all(email.folder == "important" for email in read), "the model reads Important mail first"
 
 
 def test_cli_tool_prints_json(loaded, settings, monkeypatch, capsys):

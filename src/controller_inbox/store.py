@@ -234,13 +234,6 @@ class Store:
                         _dumps(att.classification_reasons),
                     ),
                 )
-            existing_open = {
-                row["title"]
-                for row in conn.execute(
-                    "SELECT title FROM action_items WHERE email_id = ? AND status != 'done'",
-                    (email.id,),
-                )
-            }
             done_titles = {
                 row["title"]
                 for row in conn.execute(
@@ -255,8 +248,6 @@ class Store:
             for action in email.actions:
                 if action.title in done_titles:
                     continue
-                if action.title in existing_open and action.id:
-                    pass
                 conn.execute(
                     """
                     INSERT INTO action_items (
@@ -307,10 +298,25 @@ class Store:
         folder: str | None = None,
         model_status: str | None = None,
         oldest_first: bool = False,
+        received_from: str | None = None,
+        received_before: str | None = None,
+        order: str | None = None,
         limit: int = 200,
     ) -> list[EmailRecord]:
+        """List messages.
+
+        ``order`` is ``newest`` (default), ``oldest``, ``score`` (most important
+        first), or ``queue`` (the order the local model should read: Important
+        first, then by score, oldest first within a tie).
+        """
         clauses = ["1=1"]
         params: list[Any] = []
+        if received_from:
+            clauses.append("received_at >= ?")
+            params.append(received_from)
+        if received_before:
+            clauses.append("received_at < ?")
+            params.append(received_before)
         if importance:
             clauses.append("importance = ?")
             params.append(importance)
@@ -329,8 +335,15 @@ class Store:
             )
             like = f"%{q}%"
             params.extend([like, like, like, like])
-        direction = "ASC" if oldest_first else "DESC"
-        sql = f"SELECT * FROM emails WHERE {' AND '.join(clauses)} ORDER BY received_at {direction} LIMIT ?"
+        order = order or ("oldest" if oldest_first else "newest")
+        order_sql = {
+            "newest": "received_at DESC",
+            "oldest": "received_at ASC",
+            "score": "importance_score DESC, received_at DESC",
+            "queue": "CASE folder WHEN 'important' THEN 0 WHEN 'informational' THEN 1 ELSE 2 END, "
+            "importance_score DESC, received_at ASC",
+        }.get(order, "received_at DESC")
+        sql = f"SELECT * FROM emails WHERE {' AND '.join(clauses)} ORDER BY {order_sql} LIMIT ?"
         params.append(limit)
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -544,6 +557,34 @@ class Store:
                 "SELECT * FROM digests ORDER BY period_date DESC LIMIT 1"
             ).fetchone()
         return dict(row) if row else None
+
+    def list_digests(self, limit: int = 90) -> list[dict[str, Any]]:
+        """Saved digests, newest first, without the rendered bodies."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT period_date, generated_at, payload FROM digests ORDER BY period_date DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        out = []
+        for row in rows:
+            payload = _loads(row["payload"], {})
+            out.append(
+                {
+                    "period_date": row["period_date"],
+                    "generated_at": row["generated_at"],
+                    "headline": payload.get("headline", ""),
+                    "kpis": payload.get("kpis", {}),
+                    "window": payload.get("window", {}),
+                }
+            )
+        return out
+
+    def real_mail_count(self) -> int:
+        """Messages that did not come from the built-in sample mailbox."""
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS n FROM emails WHERE COALESCE(source, '') != 'demo'"
+            ).fetchone()["n"]
 
     def get_state(self, key: str) -> str | None:
         with self.connect() as conn:

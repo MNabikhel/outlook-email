@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -8,6 +9,14 @@ import pytest
 from controller_inbox.config import Settings
 from controller_inbox.pipeline import ingest_demo
 from controller_inbox.store import Store
+
+
+@pytest.fixture(autouse=True)
+def _isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in list(os.environ):
+        if key.startswith("CONTROLLER_INBOX_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CONTROLLER_INBOX_LLM", "false")
 
 
 @pytest.fixture
