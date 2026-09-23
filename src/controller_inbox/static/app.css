@@ -254,6 +254,7 @@ body.drawer-open .chat { right: min(622px, calc(100vw - 420px)); }
 .msg.assistant { align-self: flex-start; background: #f3eee3; border-bottom-left-radius: 4px; }
 .msg .cite { font-weight: 600; }
 .msg .typing { color: var(--muted); }
+.msg-note { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
 .msg-warn { margin: 0 0 6px; padding: 6px 8px; background: var(--danger); color: #fff; border-radius: 8px; font-size: 13px; }
 .msg-sources { list-style: none; padding: 6px 0 0; margin: 8px 0 0; border-top: 1px solid var(--line); font-size: 12px; }
 .msg-sources li { padding: 2px 0; }

@@ -152,6 +152,7 @@
   const STORE_KEY = "closedesk-chat-v1";
   let turns = [];
   let busy = false;
+  let chatRound = 0;
   try {
     turns = JSON.parse(sessionStorage.getItem(STORE_KEY) || "[]");
   } catch (error) {
@@ -187,6 +188,7 @@
       el.textContent = turn.text;
     } else {
       let html = turn.warning ? `<p class="msg-warn">${escapeHtml(turn.warning)}</p>` : "";
+      if (turn.note) html += `<p class="msg-note">${escapeHtml(turn.note)}</p>`;
       html += `<div>${turn.text ? formatAnswer(turn.text, turn.sources) : '<span class="typing">Thinking…</span>'}</div>`;
       const cited =
         turn.mode === "model" ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
@@ -247,6 +249,7 @@
     question = (question || "").trim();
     if (!question || busy) return;
     busy = true;
+    const round = ++chatRound;
     openChat(false);
     const history = turns.slice(-6).map(({ role, text }) => ({ role, text }));
     turns.push({ role: "user", text: question });
@@ -267,6 +270,10 @@
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
+        if (round !== chatRound) {
+          reader.cancel().catch(() => {});
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
         let cut;
         while ((cut = buffer.indexOf("\n")) >= 0) {
@@ -274,12 +281,18 @@
           buffer = buffer.slice(cut + 1);
           if (!line) continue;
           const event = JSON.parse(line);
+          if (round !== chatRound) break;
           if (event.type === "sources") {
             answer.sources = event.sources || [];
             answer.warning = event.warning || "";
             answer.mode = event.mode;
           } else if (event.type === "mode") {
             answer.mode = event.mode;
+            answer.note = event.note || "";
+            renderTurn(answer, bubble);
+          } else if (event.type === "error") {
+            answer.text = (answer.text ? answer.text + "\n\n" : "") + event.text;
+            renderTurn(answer, bubble);
           } else if (event.type === "delta") {
             answer.text += event.text;
             renderTurn(answer, bubble);
@@ -289,19 +302,21 @@
     } catch (error) {
       answer.text = (answer.text ? answer.text + "\n\n" : "") + `Something went wrong (${error.message}). Try again.`;
     }
+    busy = false;
+    $("button[type='submit']", chatForm).disabled = false;
+    if (round !== chatRound) return;
     answer.pending = false;
     if (!answer.text) answer.text = "I didn't get an answer. Try asking another way.";
     turns.push(answer);
     saveTurns();
     renderTurn(answer, bubble);
-    busy = false;
-    $("button[type='submit']", chatForm).disabled = false;
     chatInput.focus({ preventScroll: true });
   }
 
   if (chat) {
     chatForm.addEventListener("submit", (event) => {
       event.preventDefault();
+      if (busy) return;
       const question = chatInput.value;
       chatInput.value = "";
       ask(question);
@@ -338,6 +353,7 @@
         case "close-chat":
           return closeChat();
         case "clear-chat":
+          chatRound++;
           turns = [];
           saveTurns();
           return renderChat();

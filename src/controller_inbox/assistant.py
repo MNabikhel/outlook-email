@@ -14,7 +14,6 @@ from collections.abc import Iterator
 from typing import Any
 from urllib.parse import quote
 
-import httpx
 
 from controller_inbox.config import Settings
 from controller_inbox.local_llm import complete_text, llm_active, stream_text
@@ -53,7 +52,7 @@ _INTENTS = [
     (re.compile(r"\b(repl(?:y|ies)|respond|answer|get back)\b", re.I), [DocumentType.REPLY_NEEDED]),
     (re.compile(r"\b(approv\w*|sign[- ]?off)\b", re.I), [DocumentType.APPROVAL_REQUEST, DocumentType.EXPENSE_REPORT]),
     (re.compile(r"\b(meetings?|invite\w*|calendar)\b", re.I), [DocumentType.MEETING]),
-    (re.compile(r"\b(invoices?|bills?)\b", re.I), [DocumentType.AP_INVOICE]),
+    (re.compile(r"\binvoices?\b", re.I), [DocumentType.AP_INVOICE]),
     (
         re.compile(r"\b(fraud|scam|phish\w*|suspicious|bank details?|wire change)\b", re.I),
         [DocumentType.PAYMENT_INSTRUCTION_CHANGE],
@@ -127,14 +126,17 @@ def pick_sources(
         current = store.get_email(email_id)
         if current is not None:
             picked[current.id] = current
-    stripped = _HELP.sub(" ", _TODAY.sub(" ", question) if about_today else question)
+    stripped = _TODAY.sub(" ", question) if about_today else question
     found = []
     for pattern, categories in _INTENTS:
         if pattern.search(question):
             stripped = pattern.sub(" ", stripped)
             for category in categories:
                 found += store.list_emails(category=category.value, order="score", limit=4)
-    terms = keywords(stripped)
+    # "How do I set up LM Studio?" is a help question, but "the payroll export" is a search.
+    terms = keywords(_HELP.sub(" ", stripped))
+    if terms:
+        terms = keywords(stripped)
     found += store.search_ranked(terms, limit=MAX_SOURCES)
     found = list({email.id: email for email in found}.values())[:MAX_SOURCES]
     for email in found:
@@ -313,7 +315,7 @@ def answer_stream(
             for piece in stream_text(settings, messages, max_tokens=settings.chat_max_tokens):
                 wrote = True
                 yield {"type": "delta", "text": piece}
-        except (httpx.HTTPError, ValueError) as exc:
+        except Exception as exc:  # any model failure falls back to the lookup answer
             if wrote:
                 yield {"type": "delta", "text": "\n\n(The local model stopped answering partway.)"}
             else:
@@ -347,7 +349,7 @@ def draft_reply(settings: Settings, email: EmailRecord, *, instructions: str = "
                 max_tokens=320,
             )
             mode = "model"
-        except (httpx.HTTPError, ValueError) as exc:
+        except Exception as exc:  # any model failure falls back to the template
             note = f"The local model didn't answer ({str(exc)[:100]}), so this is a starter template."
         if text and _ungrounded_amounts(text, email):
             text, mode = "", "template"

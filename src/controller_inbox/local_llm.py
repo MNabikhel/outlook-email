@@ -221,7 +221,7 @@ class LocalReader:
                 ) from exc
             raise
         try:
-            return str(response.json()["choices"][0]["message"]["content"] or "")
+            return strip_thinking(str(response.json()["choices"][0]["message"]["content"] or ""))
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
 
@@ -238,15 +238,82 @@ def _chat_request(settings: Settings, messages: list[dict], max_tokens: int, *, 
     return url, payload
 
 
+def _first_choice(data) -> dict:
+    """The first ``choices`` entry, or ``{}`` when the server sent something else."""
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        return choices[0]
+    return {}
+
+
+def _content(choice: dict, key: str) -> str:
+    part = choice.get(key)
+    text = part.get("content") if isinstance(part, dict) else None
+    return text if isinstance(text, str) else ""
+
+
+_THINK_OPEN, _THINK_CLOSE = "<think>", "</think>"
+_THINK_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.S)
+
+
+def strip_thinking(text: str) -> str:
+    """Reasoning models (Qwen3, DeepSeek-R1) put their scratch work in <think> tags."""
+    return _THINK_RE.sub("", text or "").strip()
+
+
+class ThinkFilter:
+    """``strip_thinking`` for a stream, where a tag can arrive split across pieces."""
+
+    def __init__(self) -> None:
+        self.buffer = ""
+        self.inside = False
+        self.started = False
+
+    def feed(self, piece: str) -> str:
+        self.buffer += piece
+        out: list[str] = []
+        while True:
+            if self.inside:
+                cut = self.buffer.find(_THINK_CLOSE)
+                if cut < 0:
+                    self.buffer = self.buffer[-(len(_THINK_CLOSE) - 1) :]
+                    break
+                self.buffer = self.buffer[cut + len(_THINK_CLOSE) :]
+                self.inside = False
+                continue
+            cut = self.buffer.find(_THINK_OPEN)
+            if cut < 0:
+                keep = next((k for k in range(len(_THINK_OPEN) - 1, 0, -1) if self.buffer.endswith(_THINK_OPEN[:k])), 0)
+                out.append(self.buffer[: len(self.buffer) - keep])
+                self.buffer = self.buffer[len(self.buffer) - keep :]
+                break
+            out.append(self.buffer[:cut])
+            self.buffer = self.buffer[cut + len(_THINK_OPEN) :]
+            self.inside = True
+        return self._lead("".join(out))
+
+    def flush(self) -> str:
+        rest = "" if self.inside else self.buffer
+        self.buffer = ""
+        return self._lead(rest)
+
+    def _lead(self, text: str) -> str:
+        if not self.started:
+            text = text.lstrip()
+            self.started = bool(text)
+        return text
+
+
 def complete_text(settings: Settings, messages: list[dict], *, max_tokens: int = 400) -> str:
     """One plain-text answer. Raises ``httpx.HTTPError`` when the server fails."""
     url, payload = _chat_request(settings, messages, max_tokens, stream=False)
     response = httpx.post(url, json=payload, headers=_headers(settings), timeout=settings.llm_timeout)
     response.raise_for_status()
     try:
-        return str(response.json()["choices"][0]["message"]["content"] or "").strip()
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        data = response.json()
+    except ValueError as exc:
         raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
+    return strip_thinking(_content(_first_choice(data), "message"))
 
 
 def stream_text(settings: Settings, messages: list[dict], *, max_tokens: int = 500):
@@ -256,25 +323,32 @@ def stream_text(settings: Settings, messages: list[dict], *, max_tokens: int = 5
     with httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
         response.raise_for_status()
         if "text/event-stream" not in response.headers.get("content-type", ""):
-            data = json.loads(response.read() or b"{}")
-            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            try:
+                data = json.loads(response.read() or b"{}")
+            except ValueError as exc:
+                raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
+            text = strip_thinking(_content(_first_choice(data), "message"))
             if text:
                 yield text
             return
+        thinking = ThinkFilter()
         for line in response.iter_lines():
             line = line.strip()
             if not line.startswith("data:"):
                 continue
             chunk = line[5:].strip()
             if chunk == "[DONE]":
-                return
+                break
             try:
-                choice = (json.loads(chunk).get("choices") or [{}])[0]
-            except (json.JSONDecodeError, AttributeError):
+                choice = _first_choice(json.loads(chunk))
+            except ValueError:
                 continue
-            piece = (choice.get("delta") or {}).get("content") or (choice.get("message") or {}).get("content")
+            piece = thinking.feed(_content(choice, "delta") or _content(choice, "message"))
             if piece:
                 yield piece
+        rest = thinking.flush()
+        if rest:
+            yield rest
 
 
 def read_packet(settings: Settings, packet: dict) -> dict | None:
