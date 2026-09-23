@@ -45,8 +45,7 @@ def ingest_folder(
     records = []
     seen: set[str] = set()
     batches = collect_batches(settings)
-    if batches and not store.real_mail_count():
-        report["sample_cleared"] = store.clear_sample()
+    sample_checked = False
     for index, (path, sidecars) in enumerate(batches, start=1):
         if on_progress:
             on_progress(index, len(batches), path.name)
@@ -67,6 +66,11 @@ def ingest_folder(
                     store.set_source_path(raw.id, str(archived[0]))
                 continue
             seen.add(raw.id)
+            if not sample_checked:
+                # Only once a real message has parsed, so a bad file cannot empty the board.
+                sample_checked = True
+                if not store.real_mail_count():
+                    report["sample_cleared"] = store.clear_sample()
             record = process_message(raw, store, settings, now=now)
             _write_extracted(settings, raw)
             archived = _archive(settings, owned)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -332,7 +333,7 @@ class Store:
             params.append(model_status)
         for word in (q or "").split()[:8]:
             clauses.append(_MATCH_ANY)
-            params.extend([f"%{word}%"] * _MATCH_ANY.count("?"))
+            params.extend([_contains(word)] * _MATCH_ANY.count("?"))
         order = order or ("oldest" if oldest_first else "newest")
         order_sql = {
             "newest": "received_at DESC",
@@ -368,14 +369,14 @@ class Store:
             return []
         parts, params = [], []
         for term in terms:
-            like = f"%{term}%"
+            like = _contains(term)
             parts.append(
-                "(CASE WHEN lower(subject) LIKE ? THEN 3 ELSE 0 END"
-                " + CASE WHEN lower(sender_name) LIKE ? OR lower(sender_email) LIKE ? THEN 3 ELSE 0 END"
-                " + CASE WHEN lower(summary) LIKE ? THEN 2 ELSE 0 END"
-                " + CASE WHEN lower(body_text) LIKE ? THEN 1 ELSE 0 END"
-                " + CASE WHEN EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
-                " AND (lower(a.filename) LIKE ? OR lower(a.extracted_text) LIKE ?)) THEN 1 ELSE 0 END)"
+                f"(CASE WHEN lower(subject) {_LIKE} THEN 3 ELSE 0 END"
+                f" + CASE WHEN lower(sender_name) {_LIKE} OR lower(sender_email) {_LIKE} THEN 3 ELSE 0 END"
+                f" + CASE WHEN lower(summary) {_LIKE} THEN 2 ELSE 0 END"
+                f" + CASE WHEN lower(body_text) {_LIKE} THEN 1 ELSE 0 END"
+                f" + CASE WHEN EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
+                f" AND (lower(a.filename) {_LIKE} OR lower(a.extracted_text) {_LIKE})) THEN 1 ELSE 0 END)"
             )
             params.extend([like] * 7)
         sql = (
@@ -754,11 +755,17 @@ def _email_from_rows(
     )
 
 
+_LIKE = "LIKE ? ESCAPE '\\'"
 _MATCH_ANY = (
-    "(subject LIKE ? OR sender_email LIKE ? OR sender_name LIKE ? OR summary LIKE ? OR body_text LIKE ?"
+    f"(subject {_LIKE} OR sender_email {_LIKE} OR sender_name {_LIKE} OR summary {_LIKE} OR body_text {_LIKE}"
     " OR EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
-    " AND (a.filename LIKE ? OR a.extracted_text LIKE ?)))"
+    f" AND (a.filename {_LIKE} OR a.extracted_text {_LIKE})))"
 )
+
+
+def _contains(word: str) -> str:
+    """A LIKE pattern that treats % and _ in what was typed as plain characters."""
+    return "%" + re.sub(r"([\\%_])", r"\\\1", word) + "%"
 
 
 def _col(row: sqlite3.Row, name: str, default: Any) -> Any:
@@ -777,5 +784,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE emails ADD COLUMN model_status TEXT DEFAULT 'script_draft'")
     if "source_path" not in cols:
         conn.execute("ALTER TABLE emails ADD COLUMN source_path TEXT DEFAULT ''")
+        # Databases from before profiles existed were all finance boards; keep them that way.
+        real = conn.execute("SELECT COUNT(*) FROM emails WHERE COALESCE(source, '') != 'demo'").fetchone()[0]
+        if real:
+            conn.execute("INSERT OR IGNORE INTO sync_state(key, value) VALUES ('profile', 'finance')")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_model ON emails(model_status)")
