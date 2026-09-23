@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -701,7 +701,7 @@ def _email_from_rows(
         conversation_id=row["conversation_id"] or "",
         internet_message_id=row["internet_message_id"] or "",
         writeback_status=row["writeback_status"] or "skipped",
-        created_at=row["created_at"] or datetime.utcnow().isoformat(),
+        created_at=row["created_at"] or datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
         folder=_col(row, "folder", ""),
         summary=_col(row, "summary", ""),
         model_status=_col(row, "model_status", "script_draft") or "script_draft",

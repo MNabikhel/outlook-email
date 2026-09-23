@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from controller_inbox.extract import parse_due_date
@@ -44,7 +44,7 @@ def extract_actions(
     as_of: date,
     now: datetime | None = None,
 ) -> list[ActionItem]:
-    now = now or datetime.utcnow()
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     created = now.replace(microsecond=0).isoformat()
     items: list[ActionItem] = []
     seen: set[str] = set()
