@@ -397,6 +397,8 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None)
 
     from controller_inbox.web import create_app
 
+    if host:
+        settings.host = host
     app = create_app(settings, store)
     uvicorn.run(app, host=host or settings.host, port=port or settings.port, log_level="warning")
     return 0

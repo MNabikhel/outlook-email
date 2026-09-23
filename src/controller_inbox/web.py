@@ -8,12 +8,20 @@ import subprocess
 import sys
 import threading
 from email.message import EmailMessage
-from email.utils import format_datetime
+from email.utils import formataddr, format_datetime
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    PlainTextResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
@@ -58,6 +66,8 @@ NOTICES = {
 
 
 LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+# Only mail files are handed to the OS; anything else dropped in the inbox could be a program.
+MAIL_FILES = {".msg", ".eml"}
 
 
 def open_file(path: Path) -> None:
@@ -68,6 +78,40 @@ def open_file(path: Path) -> None:
         subprocess.Popen(["open", str(path)])
     else:
         subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _host_name(header: str) -> str:
+    header = header.strip().lower()
+    if header.startswith("["):
+        return header[: header.find("]") + 1] if "]" in header else header
+    return header.rsplit(":", 1)[0] if header.count(":") == 1 else header
+
+
+class LocalHostOnly:
+    """Refuse requests addressed to another hostname, so a web page cannot rebind its own domain to this server."""
+
+    def __init__(self, app, allowed: set[str]) -> None:
+        self.app = app
+        self.allowed = allowed
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and "*" not in self.allowed:
+            headers = dict(scope.get("headers") or [])
+            host = _host_name(headers.get(b"host", b"").decode("latin-1"))
+            if host not in self.allowed:
+                await PlainTextResponse("CloseDesk only answers on this computer's own address.", status_code=400)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def allowed_hosts(bind_host: str) -> set[str]:
+    bind = (bind_host or "").strip().lower()
+    if bind in {"", "0.0.0.0", "::", "[::]", "*"}:
+        return {"*"}
+    hosts = {"127.0.0.1", "localhost", "::1", "[::1]", "testserver", bind}
+    if ":" in bind and not bind.startswith("["):
+        hosts.add(f"[{bind}]")
+    return hosts
 
 
 def _require_page(request: Request) -> None:
@@ -134,6 +178,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     settings.ensure_data_dir()
     store = store or Store(settings.db_path)
     app = FastAPI(title="CloseDesk", docs_url=None, redoc_url=None)
+    app.add_middleware(LocalHostOnly, allowed=allowed_hosts(settings.host))
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
     job = ProcessJob()
     app.state.job = job
@@ -292,6 +337,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             return JSONResponse(
                 {"ok": False, "download": download, "message": "No original file for this email, so here is a copy to open."}
             )
+        if path.suffix.lower() not in MAIL_FILES:
+            return JSONResponse(
+                {"ok": False, "download": download, "message": f"This came in as a {path.suffix or 'plain'} file, so it downloads instead of opening."}
+            )
         try:
             open_file(path)
         except OSError as exc:
@@ -345,10 +394,17 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         )["focus"]
 
         def lines():
-            for event in answer_stream(
-                store, settings, question, history=history, email_id=email_id, focus=focus, today=as_of.isoformat()
-            ):
-                yield json.dumps(event) + "\n"
+            finished = False
+            try:
+                for event in answer_stream(
+                    store, settings, question, history=history, email_id=email_id, focus=focus, today=as_of.isoformat()
+                ):
+                    finished = finished or event.get("type") == "done"
+                    yield json.dumps(event) + "\n"
+            except Exception as exc:  # the chat box shows a message instead of hanging
+                yield json.dumps({"type": "error", "text": f"Something went wrong answering that ({type(exc).__name__})."}) + "\n"
+            if not finished:
+                yield json.dumps({"type": "done"}) + "\n"
 
         return StreamingResponse(lines(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
 
@@ -525,7 +581,7 @@ def _rebuilt_eml(email) -> bytes:
     one_line = lambda value: re.sub(r"[\r\n]+", " ", value or "").strip()  # noqa: E731
     message["Subject"] = one_line(email.subject)
     sender = one_line(email.sender_email)
-    message["From"] = f"{one_line(email.sender_name)} <{sender}>" if email.sender_name else sender
+    message["From"] = formataddr((one_line(email.sender_name), sender)) if email.sender_name else sender
     try:
         message["Date"] = format_datetime(datetime.fromisoformat(email.received_at.replace("Z", "+00:00")))
     except (TypeError, ValueError):
