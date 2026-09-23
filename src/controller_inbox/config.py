@@ -7,10 +7,6 @@ from zoneinfo import ZoneInfo
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Default to the LM Studio local server. Ollama users set http://localhost:11434/v1,
-# Bionic / other OpenAI-compatible servers set their own base URL.
-DEFAULT_LLM_BASE_URL = "http://localhost:1234/v1"
-
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -22,6 +18,7 @@ class Settings(BaseSettings):
     )
 
     data_dir: Path = Path("./data")
+    inbox_dir: Path = Path("./inbox")
     timezone: str = "America/New_York"
     host: str = "127.0.0.1"
     port: int = 8765
@@ -33,21 +30,33 @@ class Settings(BaseSettings):
     digest_hour: int = 7
     digest_to: str = ""
     mailbox: str = ""
-    llm: bool = False
+    llm: bool | None = None
     llm_model: str = "local-model"
-    llm_base_url: str = ""
+    llm_base_url: str = "http://127.0.0.1:1234/v1"
     llm_api_key: str = ""
-    llm_timeout: float = 45.0
+    llm_timeout: float = 90.0
+    llm_max_prompt_chars: int = 6000
+    llm_max_tokens: int = 450
+    overnight_batch: int = 40
+    digest_lookback_days: int = 1
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"
     azure_client_secret: str = ""
     openai_api_key: str = ""
 
-    @field_validator("data_dir", mode="before")
+    @field_validator("data_dir", "inbox_dir", mode="before")
     @classmethod
     def _path(cls, value: str | Path) -> Path:
         return Path(value).expanduser()
+
+    @field_validator("llm", mode="before")
+    @classmethod
+    def _llm_mode(cls, value):
+        """``auto`` (the default) means: use the local model when one is answering."""
+        if value is None or (isinstance(value, str) and value.strip().lower() in {"", "auto"}):
+            return None
+        return value
 
     @model_validator(mode="after")
     def _unprefixed_secrets(self) -> "Settings":
@@ -74,6 +83,40 @@ class Settings(BaseSettings):
         return self.data_dir / "digests"
 
     @property
+    def overnight_dir(self) -> Path:
+        return self.data_dir / "overnight"
+
+    @property
+    def training_path(self) -> Path:
+        return self.data_dir / "training" / "corrections.jsonl"
+
+    @property
+    def inbox_incoming(self) -> Path:
+        return self.inbox_dir / "incoming"
+
+    @property
+    def inbox_attachments(self) -> Path:
+        return self.inbox_dir / "attachments"
+
+    @property
+    def inbox_processed(self) -> Path:
+        return self.inbox_dir / "processed"
+
+    @property
+    def inbox_extracted(self) -> Path:
+        return self.inbox_dir / "extracted"
+
+    @property
+    def inbox_failed(self) -> Path:
+        return self.inbox_dir / "failed"
+
+    @property
+    def llm_mode(self) -> str:
+        if self.llm is None:
+            return "auto"
+        return "on" if self.llm else "off"
+
+    @property
     def vip_list(self) -> list[str]:
         return [part.strip().lower() for part in self.vip_senders.split(",") if part.strip()]
 
@@ -82,28 +125,22 @@ class Settings(BaseSettings):
         return bool(self.azure_client_id)
 
     @property
-    def llm_endpoint(self) -> str:
-        """Effective OpenAI-compatible base URL for the local model server."""
-        base = (self.llm_base_url or "").strip() or DEFAULT_LLM_BASE_URL
-        return base.rstrip("/")
-
-    @property
-    def llm_key(self) -> str:
-        # Local servers (LM Studio, Ollama, Bionic) ignore the key but the OpenAI
-        # client format wants one; fall back to any OpenAI key, then a harmless placeholder.
-        return self.llm_api_key or self.openai_api_key or "local-no-key"
-
-    @property
-    def llm_configured(self) -> bool:
-        return bool(self.llm and self.llm_endpoint)
-
-    @property
     def daemon_mode(self) -> bool:
         return bool(self.azure_client_id and self.azure_client_secret and self.mailbox)
 
     def ensure_data_dir(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.digest_dir.mkdir(parents=True, exist_ok=True)
+        self.overnight_dir.mkdir(parents=True, exist_ok=True)
+        self.training_path.parent.mkdir(parents=True, exist_ok=True)
+        for folder in (
+            self.inbox_incoming,
+            self.inbox_attachments,
+            self.inbox_processed,
+            self.inbox_extracted,
+            self.inbox_failed,
+        ):
+            folder.mkdir(parents=True, exist_ok=True)
 
 
 def load_settings() -> Settings:

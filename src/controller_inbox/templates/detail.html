@@ -2,21 +2,24 @@
 {% block title %}{{ email.subject }} · CloseDesk{% endblock %}
 {% block heading %}Message{% endblock %}
 {% block body %}
-<p class="crumb"><a href="/">Inbox</a> / {{ email.category.value | label_doc }}</p>
+<p class="crumb"><a href="/">Today</a> / <a href="/folder/{{ email.folder or 'important' }}">{{ (email.folder or '')|capitalize }}</a> / {{ email.category.value | label_doc }}</p>
 <article class="detail">
   <header class="detail-head">
     <div>
       <span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }} · {{ email.importance_score }}</span>
-      <span class="bin-pill {{ email.triage_bin.value }}">{{ email.triage_bin | label_bin }}</span>
       <h2>{{ email.subject }}</h2>
       <p>{{ email.sender_name }} &lt;{{ email.sender_email }}&gt; · {{ email.received_at | shortdt }}</p>
-      {% if email.summary %}
-      <p class="ai-summary">{{ email.summary }}
-        <span class="ai-tag">{{ 'AI · ' + email.ai_source.split(':')[0] if email.ai_source.startswith('llm') else 'rules' }}</span>
-      </p>
+      {% if email.summary %}<p class="summary">{{ email.summary }}</p>{% endif %}
+      {% if email.model_status == 'script_draft' %}
+      <p class="note">Waiting on Bionic. The folder and summary are a script draft from the extracted text.</p>
+      {% elif email.model_status == 'bionic' %}
+      <p class="note">Read by Bionic.</p>
+      {% elif email.model_status == 'corrected' %}
+      <p class="note">Corrected by you. The overnight run will not overwrite this.</p>
       {% endif %}
     </div>
     <div class="facts">
+      <div><span>Folder</span><b>{{ email.folder|capitalize if email.folder else '—' }}</b></div>
       <div><span>Category</span><b>{{ email.category.value | label_doc }}</b></div>
       <div><span>Invoice</span><b>{{ email.extracted.primary_invoice or '—' }}</b></div>
       <div><span>Amount</span><b>{{ email.extracted.primary_amount | money or '—' }}</b></div>
@@ -28,14 +31,6 @@
   <div class="flags big">
     {% for flag in email.flags %}
     <span class="flag {{ flag }}">{{ flag.replace('_', ' ') }}</span>
-    {% endfor %}
-  </div>
-  {% endif %}
-
-  {% if email.highlights %}
-  <div class="highlights">
-    {% for point in email.highlights %}
-    <span class="chip">{{ point }}</span>
     {% endfor %}
   </div>
   {% endif %}
@@ -103,6 +98,26 @@
     {% else %}
     <p class="muted">No attachments on this message.{% if 'missing_attachment' in email.flags %} The sender said there was one.{% endif %}</p>
     {% endif %}
+  </section>
+  <section class="panel correct">
+    <h3>Wrong category?</h3>
+    <p class="muted">Say what this actually is, and why. The next message from this sender follows that correction, and the example is saved for the local model.</p>
+    {% if 'user_trained' in email.flags %}
+    <p class="note">This category came from a correction you saved.</p>
+    {% endif %}
+    <form method="post" action="/inbox/{{ email.id }}/correct">
+      <label>Correct category
+        <select name="category">
+          {% for key, label in doc_labels.items() %}
+          <option value="{{ key.value }}" {{ 'selected' if email.category == key else '' }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Why was this wrong?
+        <textarea name="reason" required minlength="3" placeholder="Example: Friday files from this vendor are remittances, not invoices."></textarea>
+      </label>
+      <button type="submit">Save and learn</button>
+    </form>
   </section>
 </article>
 {% endblock %}

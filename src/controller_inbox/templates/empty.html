@@ -2,12 +2,33 @@
 {% block title %}Get started · CloseDesk{% endblock %}
 {% block heading %}Get started{% endblock %}
 {% block body %}
+{% include "_job.html" %}
 <article class="panel hero">
-  <h2>No mail in the local ledger yet.</h2>
-  <p>Load a realistic assistant-controller mailbox (invoices, bank statements, payroll, a fraud wire-instruction change, auditor PBC, tax notice) or connect Outlook.</p>
-  <form method="post" action="/demo/reload">
-    <button type="submit">Load demo mailbox</button>
-  </form>
-  <p class="muted">Or from the terminal: <code>python -m controller_inbox demo --serve</code></p>
+  <h2>Three steps to your first focus digest</h2>
+  <div class="steps">
+    <div class="step">
+      <b>1</b>
+      <h3>Get mail out of Outlook</h3>
+      {% include "_export_help.html" %}
+    </div>
+    <div class="step">
+      <b>2</b>
+      <h3>Turn on the local model (optional)</h3>
+      <p>Open LM Studio, load a small instruct model, and start the local server. CloseDesk finds it on its own.</p>
+      <p class="model-line {{ 'on' if model.active else 'off' }}">{{ model.describe() }}</p>
+      <p class="muted">Without a model, mail is still filed and the digest still works — the model adds better one-line summaries and judgment.</p>
+    </div>
+    <div class="step">
+      <b>3</b>
+      <h3>Process</h3>
+      <form method="post" action="/process">
+        <button type="submit" {{ 'disabled' if job.state == 'running' else '' }}>Process new mail</button>
+      </form>
+      <p class="muted">Or try it first with the sample mailbox:</p>
+      <form method="post" action="/demo/reload">
+        <button class="ghost" type="submit">Load sample mailbox</button>
+      </form>
+    </div>
+  </div>
 </article>
 {% endblock %}

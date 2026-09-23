@@ -9,6 +9,16 @@ __pycache__/
 dist/
 build/
 data/
+inbox/incoming/*
+!inbox/incoming/.gitkeep
+inbox/attachments/*
+!inbox/attachments/.gitkeep
+inbox/processed/*
+!inbox/processed/.gitkeep
+inbox/extracted/*
+!inbox/extracted/.gitkeep
+inbox/failed/*
+!inbox/failed/.gitkeep
 *.db
 .msal_token_cache.bin
 .token_cache.bin

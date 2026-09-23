@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +11,14 @@ from controller_inbox.pipeline import ingest_demo
 from controller_inbox.store import Store
 
 
+@pytest.fixture(autouse=True)
+def _isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for key in list(os.environ):
+        if key.startswith("CONTROLLER_INBOX_"):
+            monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CONTROLLER_INBOX_LLM", "false")
+
+
 @pytest.fixture
 def as_of_now() -> datetime:
     return datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
@@ -17,7 +26,7 @@ def as_of_now() -> datetime:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path, _env_file=None)
+    return Settings(data_dir=tmp_path, inbox_dir=tmp_path / "inbox", _env_file=None)
 
 
 @pytest.fixture

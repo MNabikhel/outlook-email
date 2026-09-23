@@ -7,14 +7,18 @@ from controller_inbox.actions import extract_actions
 from controller_inbox.classify import Classification, classify_document, classify_email, outlook_categories
 from controller_inbox.config import Settings
 from controller_inbox.extract import (
+    explode_archives,
     extract_fields,
     extract_text_from_bytes,
     redact_financial_secrets,
     sha256_bytes,
 )
-from controller_inbox.llm import LocalLLMClient, enrich_email
 from controller_inbox.models import AttachmentRecord, EmailRecord, RawMessage
 from controller_inbox.store import Store
+
+# A message the model already read, or the user corrected, is not re-scored
+# when the same mail is dropped or synced again.
+KEEP_READINGS = {"bionic", "corrected"}
 
 
 class Mailbox(Protocol):
@@ -34,11 +38,13 @@ def process_message(
     as_of=None,
     now: datetime | None = None,
     writeback: bool | None = None,
-    llm_client: LocalLLMClient | None = None,
 ) -> EmailRecord:
     now = now or datetime.now(timezone.utc)
+    existing = store.get_email(raw.id)
+    if existing is not None and existing.model_status in KEEP_READINGS:
+        return existing
     as_of = as_of or now.astimezone(settings.tz).date()
-    attachments_raw = list(raw.attachments)
+    attachments_raw = explode_archives(list(raw.attachments))
     if mailbox is not None and not attachments_raw and raw.has_attachments:
         attachments_raw = list(mailbox.get_attachments(raw.id))
 
@@ -99,6 +105,13 @@ def process_message(
         has_attachments=bool(attachments_raw) or raw.has_attachments,
         duplicate_invoice=duplicate,
     )
+    classified_email = _refine(
+        classified_email,
+        raw,
+        store,
+        settings,
+        filenames=[att.filename for att in att_records],
+    )
 
     # If Graph said there were attachments but we still have none after fetch.
     has_files = bool(att_records)
@@ -153,13 +166,9 @@ def process_message(
         attachments=att_records,
         actions=actions,
     )
+    from controller_inbox.reading import assign_script_draft
 
-    enrichment = enrich_email(record, settings, client=llm_client)
-    record.summary = enrichment.summary
-    record.triage_bin = enrichment.triage_bin
-    record.highlights = enrichment.highlights
-    record.ai_source = enrichment.source
-
+    assign_script_draft(record)
     store.upsert_email(record)
     return store.get_email(record.id) or record
 
@@ -171,29 +180,33 @@ def ingest_mailbox(
     *,
     received_after: datetime | None = None,
     now: datetime | None = None,
-    llm_client: LocalLLMClient | None = None,
 ) -> list[EmailRecord]:
-    client = llm_client
-    if client is None and settings.llm_configured:
-        client = LocalLLMClient(settings)
     processed: list[EmailRecord] = []
     for raw in mailbox.list_messages(received_after=received_after):
-        processed.append(
-            process_message(raw, store, settings, mailbox, now=now, llm_client=client)
-        )
+        processed.append(process_message(raw, store, settings, mailbox, now=now))
     last = now or datetime.now(timezone.utc)
     store.set_state("last_sync_at", last.astimezone(timezone.utc).isoformat())
     return processed
 
 
-def ingest_demo(
-    store: Store,
-    settings: Settings,
-    *,
-    now: datetime | None = None,
-    llm_client: LocalLLMClient | None = None,
-) -> list[EmailRecord]:
+def ingest_demo(store: Store, settings: Settings, *, now: datetime | None = None) -> list[EmailRecord]:
     from controller_inbox.demo import DemoMailbox
 
     mailbox = DemoMailbox(now=now)
-    return ingest_mailbox(mailbox, store, settings, now=now, llm_client=llm_client)
+    return ingest_mailbox(mailbox, store, settings, now=now)
+
+
+def _refine(classified, raw: RawMessage, store: Store, settings: Settings, filenames: list[str] | None = None):
+    """Apply a saved correction before the local model reads the packet.
+
+    The model is the parser when it is enabled. That happens after the
+    script draft is built, so it can see amounts and dates. A correction
+    the user already saved is kept and is not sent back to the model.
+    """
+    del settings, filenames
+    from controller_inbox.learn import apply_learned, match_correction
+
+    learned = match_correction(store, sender_email=raw.sender_email, subject=raw.subject)
+    if learned:
+        return apply_learned(classified, learned)
+    return classified

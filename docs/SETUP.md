@@ -1,0 +1,75 @@
+# CloseDesk — easy setup
+
+CloseDesk turns a pile of Outlook mail into one short page each morning: what you must act on, what you should know, and what can wait. It runs on your laptop. No Outlook add-in, no IT approval, no cloud.
+
+The longer notes are in [BIONIC_GUIDE.md](BIONIC_GUIDE.md). The picture version is [CloseDesk-how-it-works.pptx](CloseDesk-how-it-works.pptx).
+
+## One-time setup
+
+1. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH** in the installer.
+2. Put this project folder somewhere permanent, for example `Documents\CloseDesk`.
+3. Optional but recommended: install [LM Studio](https://lmstudio.ai/), download a small *instruct* model (3B–8B is plenty), load it, and start the local server (Developer tab → **Start server**). CloseDesk finds it on its own.
+
+That's it. The first double-click below finishes the setup by itself.
+
+## Every morning
+
+1. **Get yesterday's mail out of Outlook** into the project's `inbox/incoming` folder:
+   - **Classic Outlook (Windows):** click the first message, Shift+click the last, and drag the selection onto `inbox\incoming` in File Explorer. Each becomes a `.msg` with its attachments inside.
+   - **New Outlook / Outlook on the web:** open a message → **… → Save as** (or **Download**) → save the `.eml` into `inbox/incoming`.
+   - **Outlook for Mac:** drag messages into `inbox/incoming` in Finder.
+
+   Tip: pin `inbox\incoming` to Quick Access or make a desktop shortcut. Dropping an email you already dropped is fine; it is recognized.
+
+2. **Double-click `CloseDesk.bat`** (Windows) or **`CloseDesk.command`** (Mac).
+
+   It reads the folder, lets the local model read the most important mail first, writes today's digest, and opens the dashboard in your browser. Leave the black window open while you use the dashboard; close it when you're done.
+
+3. **Read the Today page top to bottom.**
+   - A red **Do not process — verify by phone** box means someone asked to change payment details. Call a number you already have before doing anything.
+   - **Your focus today** is the short ranked list. Click **Done** as you finish things; they drop off.
+   - **What came in since yesterday** splits the rest into *Needs you*, *Worth knowing*, and *Filed for reference*, each with a one-line summary.
+
+Every day's digest is kept under **Past digests**, so you can look back at what came in last Tuesday.
+
+## Try it first with sample mail
+
+```bash
+python -m controller_inbox demo --serve
+```
+
+Or click **Load sample mailbox** on the Get started page. Once your own mail is loaded, the sample button is switched off so it can never erase your mail.
+
+## Run it before you wake up (optional)
+
+Windows Task Scheduler, weekdays at 6:30 (change the path):
+
+```bat
+schtasks /Create /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 06:30 /TN "CloseDesk morning" /TR "\"C:\Users\you\Documents\CloseDesk\scripts\overnight.bat\""
+```
+
+Mac / Linux (`crontab -e`):
+
+```cron
+30 6 * * 1-5  /Users/you/Documents/CloseDesk/scripts/overnight.sh
+```
+
+Leave LM Studio's server running overnight. In the morning, double-click CloseDesk as usual — the night's reading is already done, so it only picks up anything new and opens the digest.
+
+## You are ready when
+
+1. Double-clicking CloseDesk opens the dashboard.
+2. A message dragged into `inbox/incoming` shows up on the Today page after **Process new mail**.
+3. The rail at the bottom-left says **Local model** with a green dot and the model's name (or you are happy with script-only filing).
+
+## If something is off
+
+| What you see | What to do |
+| --- | --- |
+| "Python 3.11 or newer is needed" | Install Python from python.org, tick **Add python.exe to PATH**, double-click again. |
+| The page does not open | The CloseDesk window must still be open. Go to [http://127.0.0.1:8765](http://127.0.0.1:8765). |
+| Local model: **not running** | Open LM Studio, load a model, and start the server. Then click **Process new mail** again. `python -m controller_inbox llm-check` says exactly what is wrong. |
+| Summaries look generic | Those came from the fast scripts. Start the model and process again; the model reads everything that is still waiting. |
+| A file landed in `inbox/failed` | Open the `.why.txt` next to it. Usually re-saving the message from Outlook fixes it. |
+| A category is wrong | Open the message, use **Wrong category?**, and write one sentence on why. That sender is learned. |
+| A payment-change email is not in the red box | It should be. Please report it — the fraud rule forces Important and "verify by phone". |

@@ -1,65 +1,67 @@
 {% extends "base.html" %}
-{% block title %}Connect Outlook · CloseDesk{% endblock %}
-{% block heading %}Connect Outlook{% endblock %}
+{% block title %}Setup · CloseDesk{% endblock %}
+{% block heading %}Setup{% endblock %}
 {% block body %}
-<article class="panel llm-card {{ 'on' if settings.llm_configured else 'off' }}">
-  <h3>Local AI (LM Studio / Ollama / Bionic)</h3>
-  <p>
-    Status:
-    <strong>{{ 'ON — enriching mail with ' + settings.llm_model if settings.llm_configured else 'OFF — deterministic rules only' }}</strong>
-  </p>
-  <ul class="plain">
-    <li>Endpoint: <code>{{ settings.llm_endpoint }}</code></li>
-    <li>Model: <code>{{ settings.llm_model }}</code></li>
-    <li>Nothing leaves your machine — classification, fraud checks, and action items stay rule-based; the model only writes summaries and refines the soft bins.</li>
-  </ul>
-  {% if not settings.llm_configured %}
-  <p class="muted">
-    Turn it on: start your local server, then set <code>CONTROLLER_INBOX_LLM=true</code>
-    (and <code>CONTROLLER_INBOX_LLM_BASE_URL</code> if it is not the LM Studio default).
-    Verify with <code>python -m controller_inbox llm-check</code>.
-  </p>
-  {% endif %}
-</article>
 <section class="split">
   <article class="panel">
-    <h3>How this runs</h3>
-    <ol class="plain numbered">
-      <li>CloseDesk reads mail through Microsoft Graph (Microsoft 365 / Outlook).</li>
-      <li>It pulls the body plus every attachment, extracts text from PDF, Excel, Word, and CSV, and redacts account numbers.</li>
-      <li>Finance-specific rules classify the file (invoice, bank statement, payroll, PBC request, payment-instruction change, and so on) and score importance.</li>
-      <li>Action items are extracted for you: enter invoice, apply cash, reconcile, approve T&amp;E, complete PBC, do not process a wire-instruction change.</li>
-      <li>A daily digest rolls the open list together. Optional Outlook write-back flags the message in your mailbox.</li>
-    </ol>
-    <p class="muted">Last sync: {{ last_sync or 'never' }}</p>
-  </article>
-  <article class="panel">
-    <h3>Microsoft 365 setup</h3>
-    <ol class="plain numbered">
-      <li>In Entra ID, register an app (public client / mobile &amp; desktop).</li>
-      <li>Enable “Allow public client flows”.</li>
-      <li>Add delegated Graph permissions: <code>Mail.Read</code>, <code>User.Read</code>. Add <code>Mail.ReadWrite</code> to flag messages, <code>Mail.Send</code> to email the digest.</li>
-      <li>Copy the application (client) ID into <code>.env</code> as <code>AZURE_CLIENT_ID</code>.</li>
-      <li>Run <code>python -m controller_inbox auth</code>, then <code>sync</code> or <code>watch</code>.</li>
-    </ol>
-    <p>Status: <strong>{{ 'ready to sign in' if graph_configured else 'not configured — using demo mailbox' }}</strong></p>
-    <form method="post" action="/demo/reload">
-      <button type="submit">Reload demo mailbox</button>
+    <h3>Getting mail in (no Outlook add-in or IT approval needed)</h3>
+    {% include "_export_help.html" %}
+    <form method="post" action="/process">
+      <button type="submit" {{ 'disabled' if job.state == 'running' else '' }}>Process new mail</button>
     </form>
+    <p class="muted">
+      Files that are read move to <code>inbox/processed</code>. Attachments are unpacked into <code>inbox/extracted</code>.
+      Anything that cannot be read goes to <code>{{ inbox_failed }}</code> with a note saying why.
+      If attachments were saved separately, put them in <code>{{ inbox_attachments }}/&lt;same name as the message&gt;/</code>.
+    </p>
+  </article>
+  <article class="panel llm-card">
+    <h3>Local model</h3>
+    <p class="model-line {{ 'on' if model.active else 'off' }}">{{ model.describe() }}</p>
+    {% if model.models %}
+    <p class="muted">Loaded on the server: {{ model.models | join(', ') }}</p>
+    {% endif %}
+    <p><a href="/settings?recheck=1">Check again</a></p>
+    <p>The fast scripts pull text, amounts, dates, and file types, then file a draft. The model reads that short packet — never the raw files — and writes the category, folder, a one-line summary, and tasks. The most important mail is read first.</p>
+    <p>Guard rails that hold even with a small model:</p>
+    <ul class="plain">
+      <li>A payment-instruction change stays in Important with “verify by phone”, whatever the model says.</li>
+      <li>A summary that quotes a dollar amount not in the email is replaced by the script summary.</li>
+      <li>A due date the model made up is dropped. A task due this week keeps the email in Important.</li>
+      <li>If the server stops answering, the run stops asking and the mail stays filed from the draft.</li>
+    </ul>
+    <p class="muted">Mode: <b>{{ model.mode }}</b> ({{ settings.llm_base_url }}). <code>auto</code> uses a model whenever LM Studio's server is running. Set <code>CONTROLLER_INBOX_LLM=false</code> to never use one.</p>
+    <p class="muted">Check speed from a terminal: <code>python -m controller_inbox llm-check</code></p>
   </article>
 </section>
-<article class="panel">
-  <h3>Improvements included for an assistant controller</h3>
-  <ul class="plain">
-    <li>Local-AI summaries and triage bins from LM Studio / Ollama / Bionic — private, on your laptop.</li>
-    <li>Triage bins: do-not-process, action required, needs review, FYI, read later.</li>
-    <li>Business-email-compromise check when a vendor “updates wiring instructions”.</li>
-    <li>Duplicate invoice detection on invoice number.</li>
-    <li>Missing-attachment catch when the body says “see attached” and nothing arrived.</li>
-    <li>Month-end countdown and close-item boost in the last week of the month.</li>
-    <li>Daily digest with a browsable history so you can look back at any day.</li>
-    <li>CSV / JSON export and a <code>triage</code> command for scripts and agents.</li>
-    <li>Account numbers stored as last-4 only.</li>
-  </ul>
-</article>
+<section class="split">
+  <article class="panel">
+    <h3>Teaching it</h3>
+    <p>When a category is wrong, open the message and use <b>Wrong category?</b>. Write one sentence on why. The next email from that sender follows your correction, the model never overwrites the message you fixed, and the example is saved to <code>data/training/corrections.jsonl</code>.</p>
+    <p class="muted">Corrections saved: {{ correction_count }}. A saved correction cannot clear a payment-instruction warning on a new message.</p>
+  </article>
+  <article class="panel">
+    <h3>Running it every morning</h3>
+    <p>Double-click <code>CloseDesk.bat</code> (Windows) or <code>CloseDesk.command</code> (Mac) in the project folder. It reads the drop folder, lets the model read, writes today's digest, and opens this dashboard.</p>
+    <p class="muted">Unattended: schedule <code>python -m controller_inbox overnight</code> (see README), or leave <code>python -m controller_inbox watch</code> running. Last run: {{ last_run or 'never' }}.</p>
+  </article>
+</section>
+<section class="split">
+  <article class="panel">
+    <h3>Outlook direct connection (optional, needs IT)</h3>
+    <p>If IT later approves a Microsoft Entra app with delegated <code>Mail.Read</code>, set <code>AZURE_CLIENT_ID</code>, then run <code>python -m controller_inbox auth</code> and <code>sync</code>. The drop folder keeps working either way.</p>
+    <p>Status: <strong>{{ 'ready to sign in' if graph_configured else 'not configured' }}</strong> · Last sync: {{ last_sync or 'never' }}</p>
+  </article>
+  <article class="panel">
+    <h3>Sample mailbox</h3>
+    {% if counts.emails and not is_sample %}
+    <p class="muted">Your own mail is loaded, so the sample is switched off here — loading it would erase your mail. To look at the sample, run it with a separate data folder: <code>CONTROLLER_INBOX_DATA_DIR=./data-sample python -m controller_inbox demo --serve</code></p>
+    {% else %}
+    <p>Load the built-in sample to see the dashboard before your own mail is in the folder.</p>
+    <form method="post" action="/demo/reload">
+      <button type="submit">Load sample mailbox</button>
+    </form>
+    {% endif %}
+  </article>
+</section>
 {% endblock %}

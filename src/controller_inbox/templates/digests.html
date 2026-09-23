@@ -1,34 +1,36 @@
 {% extends "base.html" %}
-{% block title %}Digest history · CloseDesk{% endblock %}
-{% block heading %}Digest history{% endblock %}
+{% block title %}Past digests · CloseDesk{% endblock %}
+{% block heading %}Past digests{% endblock %}
 {% block body %}
-<section class="toolbar">
-  <p class="muted">Every daily brief CloseDesk has built, kept so you can look back at what a given day held.</p>
-  <a class="ghost" href="/digest">Today's digest</a>
-</section>
-
-{% if history %}
+<p class="lede">One digest is kept for every day it ran. Open any day to see what came in and what needed you. The files are also in <code>{{ settings.digest_dir }}</code> as .md, .html, and .json.</p>
 <section class="table-wrap">
   <table class="mail">
     <thead>
-      <tr><th>Date</th><th>Emails</th><th>High / critical</th><th>Open actions</th><th>Overdue</th><th>Fraud alerts</th><th></th></tr>
+      <tr>
+        <th>Day</th>
+        <th>Headline</th>
+        <th>New mail</th>
+        <th>Needed you</th>
+        <th>Open tasks</th>
+        <th>Overdue</th>
+        <th></th>
+      </tr>
     </thead>
     <tbody>
       {% for row in history %}
       <tr>
-        <td class="nowrap"><strong>{{ row.period_date }}</strong></td>
-        <td>{{ row.kpis.emails or 0 }}</td>
-        <td>{{ row.kpis.high_importance or 0 }}</td>
-        <td>{{ row.kpis.open_actions or 0 }}</td>
-        <td>{{ row.kpis.overdue_actions or 0 }}</td>
-        <td>{{ row.kpis.fraud_alerts or 0 }}</td>
-        <td><a class="ghost" href="/digest?date={{ row.period_date }}">Open</a></td>
+        <td class="nowrap"><a class="subj" href="/digest?date={{ row.period_date }}">{{ row.period_date }}</a></td>
+        <td>{{ row.headline or '—' }}</td>
+        <td>{{ row.kpis.emails if row.kpis.emails is defined else '—' }}</td>
+        <td>{{ row.kpis.need_you if row.kpis.need_you is defined else '—' }}</td>
+        <td>{{ row.kpis.open_actions if row.kpis.open_actions is defined else '—' }}</td>
+        <td>{{ row.kpis.overdue_actions if row.kpis.overdue_actions is defined else '—' }}</td>
+        <td class="nowrap"><a href="/digest/{{ row.period_date }}.html" target="_blank">Printable</a></td>
       </tr>
+      {% else %}
+      <tr><td colspan="7" class="muted">No digests yet. One is written every time you process mail.</td></tr>
       {% endfor %}
     </tbody>
   </table>
 </section>
-{% else %}
-<p class="muted">No digests stored yet. Load the demo mailbox or sync Outlook, then rebuild the digest.</p>
-{% endif %}
 {% endblock %}

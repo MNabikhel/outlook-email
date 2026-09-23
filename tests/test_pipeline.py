@@ -46,8 +46,10 @@ def test_demo_pipeline_categorizes_controller_mailbox(store, settings, as_of_now
 
 def test_daily_digest_lists_fraud_and_actions(loaded, settings, as_of_now):
     as_of = local_today(settings.tz, as_of_now)
-    payload = build_digest(loaded, as_of=as_of, generated_at=as_of_now)
-    assert payload["kpis"]["emails"] == 14
+    payload = build_digest(loaded, as_of=as_of, generated_at=as_of_now, tz=settings.tz)
+    # Tuesday's digest covers Monday onward; the Sunday afternoon sample is outside it.
+    assert payload["kpis"]["emails"] == 13
+    assert payload["kpis"]["total_emails"] == 14
     assert payload["kpis"]["fraud_alerts"] >= 1
     assert payload["kpis"]["open_actions"] >= 8
     assert any("wiring" in item["subject"].lower() or "fraud" in ",".join(item["flags"]) for item in payload["critical_alerts"])
