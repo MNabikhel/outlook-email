@@ -1,6 +1,6 @@
 # CloseDesk — easy setup
 
-CloseDesk turns a pile of Outlook mail into one short page each morning: what you must act on, what you should know, and what can wait. It runs on your laptop. No Outlook add-in, no IT approval, no cloud.
+CloseDesk turns a pile of Outlook mail into one short page each morning: what you must act on, what you should know, and what can wait. It runs on your laptop. No Outlook add-in, no IT approval, no cloud. It works for any inbox, with or without a local AI model.
 
 The longer notes are in [BIONIC_GUIDE.md](BIONIC_GUIDE.md). The picture version is [CloseDesk-how-it-works.pptx](CloseDesk-how-it-works.pptx).
 
@@ -8,7 +8,8 @@ The longer notes are in [BIONIC_GUIDE.md](BIONIC_GUIDE.md). The picture version 
 
 1. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH** in the installer.
 2. Put this project folder somewhere permanent, for example `Documents\CloseDesk`.
-3. Optional but recommended: install [LM Studio](https://lmstudio.ai/), download a small *instruct* model (3B–8B is plenty), load it, and start the local server (Developer tab → **Start server**). CloseDesk finds it on its own.
+3. Optional: install [LM Studio](https://lmstudio.ai/), download a small *instruct* model (3B–8B is plenty), load it, and start the local server (Developer tab → **Start server**). CloseDesk finds it on its own. Ollama works too (see the README). If your laptop can't run a model, skip this step: sorting, summaries, tasks, fraud warnings, search, and the digest all work without one.
+4. After the first launch, open **Setup** and choose **What kind of inbox is this?** *General* suits anyone. *Finance* adds the month-end countdown and close sections.
 
 That's it. The first double-click below finishes the setup by itself.
 
@@ -31,6 +32,14 @@ That's it. The first double-click below finishes the setup by itself.
    - **What came in since yesterday** splits the rest into *Needs you*, *Worth knowing*, and *Filed for reference*, each with a one-line summary.
 
 Every day's digest is kept under **Past digests**, so you can look back at what came in last Tuesday.
+
+## Getting around
+
+- **Open an email:** click it anywhere (the focus list, a folder, search results), and it opens in a panel on the right. **Esc** closes it.
+- **Open in Outlook:** opens the original `.msg` or `.eml` with your mail app. Mail loaded some other way (the sample, or Outlook sync) downloads as an `.eml` copy instead.
+- **Draft a reply:** writes a draft to copy, or opens it in your mail app. With no model you get a starter template. A payment-change email gets "verify by phone" advice instead of a reply.
+- **Ask CloseDesk:** the button at the bottom-right. Try *what's urgent today?*, *what needs a reply?*, *anything from Maya?*, or *invoice 10482*. Click a [number] in the answer to open that email. With no model, it lists the matching emails and your focus list.
+- **Search:** press `/` anywhere and type a name, company, invoice number, or a phrase from an attachment.
 
 ## Try it first with sample mail
 
@@ -72,4 +81,7 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 | Summaries look generic | Those came from the fast scripts. Start the model and process again; the model reads everything that is still waiting. |
 | A file landed in `inbox/failed` | Open the `.why.txt` next to it. Usually re-saving the message from Outlook fixes it. |
 | A category is wrong | Open the message, use **Wrong category?**, and write one sentence on why. That sender is learned. |
+| **Ask CloseDesk** says the model isn't running | That's fine: it still finds emails. Start LM Studio's server for written answers. |
+| Mac says CloseDesk.command "can't be opened" | Right-click it → **Open** → **Open** once. After that, double-click works. |
+| **Open in Outlook** downloads a file instead | That email has no original file (sample mail, or Outlook sync). Open the downloaded `.eml`. |
 | A payment-change email is not in the red box | It should be. Please report it — the fraud rule forces Important and "verify by phone". |

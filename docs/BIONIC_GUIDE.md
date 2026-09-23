@@ -94,7 +94,7 @@ That command:
 5. Writes today's focus digest (and keeps it in the digest history).
 6. Writes `data/overnight/YYYY-MM-DD.md` so you can see what happened.
 
-If the model is off, the command still files script drafts and says so in the log. The dashboard shows those rows as **Waiting on Bionic**. Run the command again after the server is up, or let Bionic finish the queue with the skill.
+If the model is off, the command still files script drafts and says so in the log. The dashboard marks those rows **Script draft**. Run the command again after the server is up, or let Bionic finish the queue with the skill.
 
 A prompt you can paste into Bionic when you want the agent, not the unattended command, to do the reading:
 
@@ -123,8 +123,11 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
 | Reference | Statements, purchase orders, contracts, and other files to keep. Not tonight's work. |
 | All mail | The full list, when you need to search |
 | Attachments | Every file, by type |
+| Ask CloseDesk (bottom-right, every page) | Chat with the same local model about your mail. It answers from the emails it finds and cites them; click a citation to open the email |
 
-Each row has a one-line summary. **Waiting on Bionic** means the folder is still the script draft. **Read by Bionic** means the model filed it.
+Click any email to open it in a side panel, with **Open in Outlook** and **Draft a reply**.
+
+Each row has a one-line summary. **Script draft** means the folder is still the script draft. **Read by local model** means the model filed it.
 
 ## 7. Teach it when it is wrong
 

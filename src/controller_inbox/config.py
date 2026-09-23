@@ -10,7 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 PROFILES = {
     "general": "General — any inbox",
-    "finance": "Finance & accounting — adds month-end, invoices, and cash",
+    "finance": "Finance & accounting — adds month-end and close",
 }
 
 
