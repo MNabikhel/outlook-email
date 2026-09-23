@@ -13,26 +13,33 @@
         <span class="mark">CD</span>
         <span>
           <strong>CloseDesk</strong>
-          <em>Inbox</em>
+          <em>Focus digest</em>
         </span>
       </a>
       <nav>
-        <a href="/" class="{{ 'on' if page == 'home' else '' }}">Morning</a>
+        <a href="/" class="{{ 'on' if page == 'home' else '' }}">Today</a>
         <a href="/digest" class="{{ 'on' if page == 'digest' else '' }}">Daily digest</a>
-        <a href="/folder/important" class="{{ 'on' if page == 'important' else '' }}">Important</a>
-        <a href="/actions" class="{{ 'on' if page == 'actions' else '' }}">Action items</a>
-        <a href="/folder/informational" class="{{ 'on' if page == 'informational' else '' }}">Informational</a>
-        <a href="/folder/reference" class="{{ 'on' if page == 'reference' else '' }}">Reference</a>
+        <a href="/digests" class="{{ 'on' if page == 'digests' else '' }}">Past digests</a>
+        <span class="nav-label">Folders</span>
+        <a href="/folder/important" class="{{ 'on' if page == 'important' else '' }}">Important <i>{{ counts.important }}</i></a>
+        <a href="/actions" class="{{ 'on' if page == 'actions' else '' }}">Action items <i>{{ counts.open_actions }}</i></a>
+        <a href="/folder/informational" class="{{ 'on' if page == 'informational' else '' }}">Informational <i>{{ counts.informational }}</i></a>
+        <a href="/folder/reference" class="{{ 'on' if page == 'reference' else '' }}">Reference <i>{{ counts.reference }}</i></a>
+        <span class="nav-label">Everything</span>
         <a href="/inbox" class="{{ 'on' if page == 'inbox' else '' }}">All mail</a>
         <a href="/attachments" class="{{ 'on' if page == 'attachments' else '' }}">Attachments</a>
         <a href="/settings" class="{{ 'on' if page == 'settings' else '' }}">Setup</a>
       </nav>
       <div class="rail-foot">
+        <a class="model-chip {{ 'on' if model.active else 'off' }}" href="/settings" title="{{ model.describe() }}">
+          <span>Local model</span>
+          <b>{{ model.model if model.active else ('off' if model.mode == 'off' else 'not running') }}</b>
+        </a>
         <div class="close-chip">
           <span>Days to month-end</span>
           <b>{{ days_to_close }}</b>
         </div>
-        <p class="mode">{{ 'Outlook connected' if graph_configured else 'Folder + demo' }}</p>
+        <p class="mode">{{ 'Outlook connected' if graph_configured else 'Drop folder' }}{{ ' · sample mailbox' if is_sample else '' }}</p>
       </div>
     </aside>
     <div class="main">
@@ -43,12 +50,13 @@
           <p class="sub">Month-end {{ close_date }} · {{ days_to_close }} day{{ '' if days_to_close == 1 else 's' }} left</p>
         </div>
         <div class="kpis">
-          <div><span>Mail</span><b>{{ counts.emails }}</b></div>
-          <div><span>High / critical</span><b>{{ counts.high_importance }}</b></div>
-          <div><span>Open actions</span><b>{{ counts.open_actions }}</b></div>
+          <div><span>Needs you</span><b>{{ counts.important }}</b></div>
+          <div><span>Open tasks</span><b>{{ counts.open_actions }}</b></div>
+          <div><span>Waiting on model</span><b>{{ counts.waiting_on_bionic }}</b></div>
           <div class="{{ 'hot' if counts.fraud_alerts else '' }}"><span>Fraud flags</span><b>{{ counts.fraud_alerts }}</b></div>
         </div>
       </header>
+      {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
       {% block body %}{% endblock %}
     </div>
   </div>

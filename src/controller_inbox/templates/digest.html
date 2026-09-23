@@ -2,33 +2,20 @@
 {% block title %}Daily digest · CloseDesk{% endblock %}
 {% block heading %}Daily digest{% endblock %}
 {% block body %}
-<section class="toolbar">
-  <p class="muted">
-    Morning brief of what to code, pay, reconcile, and verify.
-    {% if payload %}For {{ payload.date }} · {{ payload.days_to_close }} day(s) to close.
-    {% if payload.folder_counts %}
-    Important {{ payload.folder_counts.important }}, informational {{ payload.folder_counts.informational }}, reference {{ payload.folder_counts.reference }}.
-    {% endif %}
-    {% if payload.kpis.waiting_on_bionic %}{{ payload.kpis.waiting_on_bionic }} still waiting on Bionic.{% endif %}
-    {% endif %}
-  </p>
-  <form method="post" action="/digest/rebuild">
-    <button type="submit">Rebuild digest</button>
-  </form>
-</section>
-
-{% if payload %}
-{% macro action_list(items, empty) %}
+{% macro item_list(items, empty, show_summary=True) %}
   {% if items %}
   <ul class="stack">
     {% for item in items %}
     <li>
-      <a href="/inbox/{{ item.email_id or item.id }}">{{ item.title or item.subject }}</a>
-      <small>
-        {{ item.sender or item.priority or '' }}
-        {% if item.due_date or item.due %} · due {{ item.due_date or item.due }}{% endif %}
-        {% if item.amount %} · {{ item.amount | money }}{% endif %}
-      </small>
+      <div>
+        <a href="/inbox/{{ item.email_id or item.id }}">{{ item.title or item.subject }}</a>
+        <small>
+          {{ item.sender or item.priority or '' }}
+          {% if item.due_label or item.due_date or item.due %} · due {{ item.due_label or item.due_date or item.due }}{% endif %}
+          {% if item.amount %} · {{ item.amount | money }}{% endif %}
+        </small>
+        {% if show_summary and item.summary %}<p class="summary">{{ item.summary }}</p>{% endif %}
+      </div>
     </li>
     {% endfor %}
   </ul>
@@ -37,49 +24,94 @@
   {% endif %}
 {% endmacro %}
 
-<section class="triage">
-  <article class="panel alert">
-    <h2>Do not process — verify by phone</h2>
-    {{ action_list(payload.critical_alerts, 'No fraud or critical alerts.') }}
-  </article>
-  <article class="panel">
-    <h2>Overdue</h2>
-    {{ action_list(payload.overdue_actions, 'Nothing overdue.') }}
-  </article>
-  <article class="panel">
-    <h2>Due today</h2>
-    {{ action_list(payload.due_today, 'Nothing due today.') }}
-  </article>
+<section class="toolbar">
+  <div class="tabs">
+    {% if older %}<a href="/digest?date={{ older }}">← {{ older }}</a>{% endif %}
+    {% if payload %}<a class="on" href="/digest?date={{ payload.date }}">{{ payload.date }}</a>{% endif %}
+    {% if newer %}<a href="/digest?date={{ newer }}">{{ newer }} →</a>{% endif %}
+    <a href="/digests">All past digests</a>
+  </div>
+  <div class="tabs">
+    {% if payload %}<a href="/digest/{{ payload.date }}.html" target="_blank">Printable page</a>{% endif %}
+    <form method="post" action="/digest/rebuild"><button type="submit">Rebuild today's digest</button></form>
+  </div>
 </section>
+
+{% if payload %}
+<section class="today-head">
+  <p class="headline">{{ payload.headline or ('Digest for ' ~ payload.date) }}</p>
+</section>
+<p class="lede">
+  {{ payload.date_long or payload.date }}.
+  {% if payload.window %}Covers mail since {{ payload.window.since_label }}; open tasks carry over until you mark them done.{% endif %}
+  {% if payload.kpis.waiting_on_bionic %}{{ payload.kpis.waiting_on_bionic }} were still waiting on the local model when this was written.{% endif %}
+</p>
+
+{% if payload.critical_alerts %}
+<section class="panel alert">
+  <h2>Do not process — verify by phone</h2>
+  {{ item_list(payload.critical_alerts, '') }}
+</section>
+{% else %}
+<p class="muted">Do not process — verify by phone: no payment-change warnings.</p>
+{% endif %}
+
+{% if payload.focus is defined %}
+<section class="focus">
+  <h2>Your focus</h2>
+  <ol class="focus-list">
+    {% for row in payload.focus %}
+    <li class="focus-item {{ row.kind }}">
+      <span class="rank">{{ row.rank }}</span>
+      <div class="focus-body">
+        <div class="focus-top"><span class="tag {{ row.kind }}">{{ row.label }}</span> <a href="/inbox/{{ row.email_id }}">{{ row.title }}</a></div>
+        <p>{{ row.summary or row.subject }}</p>
+        <small>{{ row.sender }}{% if row.more_tasks %} · +{{ row.more_tasks }} more{% endif %}</small>
+      </div>
+    </li>
+    {% else %}
+    <li class="focus-empty">Nothing needed you.</li>
+    {% endfor %}
+  </ol>
+</section>
+{% endif %}
+
+{% if payload.new_mail is defined %}
+<h2 class="section-title">What came in since {{ payload.window.since_label }} <small>{{ payload.kpis.emails }}</small></h2>
+<section class="split three">
+  {% for folder, heading in [('important', 'Needs you'), ('informational', 'Worth knowing'), ('reference', 'Filed for reference')] %}
+  <article class="panel">
+    <h3>{{ heading }} <small class="muted">{{ payload.new_mail[folder] | length }}</small></h3>
+    {{ item_list(payload.new_mail[folder], 'None.', folder != 'reference') }}
+  </article>
+  {% endfor %}
+</section>
+{% endif %}
 
 <section class="split">
   <article class="panel">
-    <h3>Other critical (not payment-instruction fraud)</h3>
-    {{ action_list(payload.other_critical, 'No other critical mail.') }}
-    <h3>Due this week</h3>
-    {{ action_list(payload.due_this_week, 'Nothing else dated this week.') }}
-    <h3>Invoices to enter</h3>
-    {{ action_list(payload.invoices_to_enter, 'No vendor invoices in the window.') }}
+    <h3>Overdue</h3>
+    {{ item_list(payload.overdue_actions, 'Nothing overdue.', False) }}
+    <h3>Due today</h3>
+    {{ item_list(payload.due_today, 'Nothing due today.', False) }}
+    <h3>Coming up in the next 7 days</h3>
+    {{ item_list(payload.due_this_week, 'Nothing else dated this week.', False) }}
   </article>
   <article class="panel">
+    <h3>Invoices to enter</h3>
+    {{ item_list(payload.invoices_to_enter, 'No new vendor invoices.', False) }}
     <h3>Cash to apply</h3>
-    {{ action_list(payload.cash_to_apply, 'No remittances waiting.') }}
+    {{ item_list(payload.cash_to_apply, 'No remittances.', False) }}
     <h3>Close / reconcile</h3>
-    {{ action_list(payload.close_items, 'No close items in the window.') }}
-    <h3>Category mix</h3>
-    <ul class="plain">
-      {% for key, n in payload.category_counts.items() %}
-      <li>{{ key | label_doc }} — {{ n }}</li>
-      {% endfor %}
-    </ul>
+    {{ item_list(payload.close_items, 'No close items.', False) }}
   </article>
 </section>
 
 <details class="panel">
-  <summary>Markdown copy</summary>
+  <summary>Markdown copy (paste into an email or notes)</summary>
   <pre class="body">{{ digest.markdown }}</pre>
 </details>
 {% else %}
-<p class="muted">No digest yet. Load the demo mailbox or sync Outlook, then rebuild.</p>
+<p class="muted">No digest yet. Click <b>Process new mail</b> on the Today page, or rebuild.</p>
 {% endif %}
 {% endblock %}

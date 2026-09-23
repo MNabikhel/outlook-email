@@ -3,59 +3,6 @@
 {% block heading %}{{ heading }}{% endblock %}
 {% block body %}
 {% if blurb %}<p class="lede">{{ blurb }}</p>{% endif %}
-{% if attention or overdue or due_today %}
-<section class="triage">
-  <article class="panel alert">
-    <h2>Needs you now</h2>
-    {% if attention %}
-      <ul>
-        {% for email in attention %}
-        <li>
-          <a href="/inbox/{{ email.id }}">
-            <span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }}</span>
-            {{ email.subject }}
-          </a>
-          <small>{{ email.sender_name }} · {{ email.category.value | label_doc }}</small>
-        </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="muted">Nothing critical in the current window.</p>
-    {% endif %}
-  </article>
-  <article class="panel">
-    <h2>Overdue actions</h2>
-    {% if overdue %}
-      <ul>
-        {% for action, email in overdue %}
-        <li>
-          <a href="/inbox/{{ email.id }}">{{ action.title }}</a>
-          <small>Due {{ action.due_date }} · {{ email.subject }}</small>
-        </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="muted">No overdue items. Keep it that way.</p>
-    {% endif %}
-  </article>
-  <article class="panel">
-    <h2>Due today</h2>
-    {% if due_today %}
-      <ul>
-        {% for action, email in due_today %}
-        <li>
-          <a href="/inbox/{{ email.id }}">{{ action.title }}</a>
-          <small>{{ action.priority.value | label_imp }} · {{ email.sender_name }}</small>
-        </li>
-        {% endfor %}
-      </ul>
-    {% else %}
-      <p class="muted">No dated items due today.</p>
-    {% endif %}
-  </article>
-</section>
-{% endif %}
-
 <section class="toolbar">
   <form class="filters" method="get" action="/inbox">
     <input type="search" name="q" value="{{ query }}" placeholder="Search subject, sender…"/>

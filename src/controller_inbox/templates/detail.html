@@ -2,7 +2,7 @@
 {% block title %}{{ email.subject }} · CloseDesk{% endblock %}
 {% block heading %}Message{% endblock %}
 {% block body %}
-<p class="crumb"><a href="/">Inbox</a> / {{ email.category.value | label_doc }}</p>
+<p class="crumb"><a href="/">Today</a> / <a href="/folder/{{ email.folder or 'important' }}">{{ (email.folder or '')|capitalize }}</a> / {{ email.category.value | label_doc }}</p>
 <article class="detail">
   <header class="detail-head">
     <div>
