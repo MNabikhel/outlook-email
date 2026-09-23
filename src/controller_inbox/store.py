@@ -384,8 +384,22 @@ class Store:
             " ORDER BY hits DESC, importance_score DESC, received_at DESC LIMIT ?"
         )
         with self.connect() as conn:
-            ids = [row["id"] for row in conn.execute(sql, [*params, limit]).fetchall()]
-        return [email for email in (self.get_email(i) for i in ids) if email is not None]
+            rows = [(row["id"], row["hits"]) for row in conn.execute(sql, [*params, max(limit * 4, 20)]).fetchall()]
+        # LIKE finds "bill" inside "Billing"; whole words decide the order, and win outright when there are any.
+        words = [re.compile(r"(?<![a-z0-9])" + re.escape(term) + r"(?:s|es)?(?![a-z0-9])") for term in terms]
+        scored = []
+        for position, (email_id, hits) in enumerate(rows):
+            email = self.get_email(email_id)
+            if email is None:
+                continue
+            head = f"{email.subject}\n{email.sender_name}\n{email.sender_email}".lower()
+            rest = f"{email.summary}\n{email.body_text}".lower()
+            whole = sum(4 if rx.search(head) else 1 if rx.search(rest) else 0 for rx in words)
+            scored.append((whole, hits, -position, email))
+        if any(item[0] for item in scored):
+            scored = [item for item in scored if item[0]]
+        scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        return [item[3] for item in scored[:limit]]
 
     def list_actions(
         self,

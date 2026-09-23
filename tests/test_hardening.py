@@ -233,3 +233,19 @@ def test_pages_ship_the_fixed_chat_script(settings: Settings, loaded: Store, pat
     assert client.get(path).status_code == 200
     script = client.get("/static/app.js").text
     assert "chatRound" in script and 'event.type === "error"' in script and "if (busy) return;" in script
+
+
+def test_a_name_search_prefers_whole_words(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    (settings.inbox_incoming / "billing.eml").write_bytes(
+        b"Subject: Updated banking details\nFrom: Northwind Billing <billing@northwind.example>\n\n"
+        b"Our bank details have changed. Please send the payment to our new account.\n"
+    )
+    (settings.inbox_incoming / "lunch.eml").write_bytes(
+        b"Subject: Lunch Thursday?\nFrom: Bill Turner <bill@partner.example>\n\nAre you free for lunch Thursday?\n"
+    )
+    ingest_folder(store, settings)
+    assert [e.subject for e in store.search_ranked(["bill"])] == ["Lunch Thursday?"]
+    assert len(store.search_ranked(["north"])) == 1
+    _sources, _today, found = pick_sources(store, "anything from Bill?")
+    assert [store.get_email(i).subject for i in found] == ["Lunch Thursday?"]
