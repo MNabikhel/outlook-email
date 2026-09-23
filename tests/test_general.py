@@ -122,3 +122,95 @@ def test_setup_page_switches_profile_and_month_end_chip(settings: Settings, load
     assert client.get("/settings?notice=profile").text.count('value="finance" checked') == 1
     assert "Days to month-end" in client.get("/").text
     assert client.post("/settings/profile", data={"profile": "pirate"}).status_code == 400
+
+
+@pytest.mark.parametrize(
+    ("subject", "body", "sender", "expected"),
+    [
+        (
+            "Q3 numbers",
+            "Here are the Q3 numbers for your files.\n\nCONFIDENTIALITY NOTICE: This email is intended only for the "
+            "named recipient. If you have received this message in error, please reply to the sender and delete it.",
+            "Maya Chen <maya@example.com>",
+            DocumentType.OTHER,
+        ),
+        (
+            "Re: budget",
+            "Thanks, all set.\n\nOn Mon, Sep 21, 2026 at 9:00 AM Bob <bob@example.com> wrote:\n> Can you send the budget by Friday?",
+            "Bob <bob@example.com>",
+            DocumentType.OTHER,
+        ),
+        (
+            "Please sign in to review your account",
+            "Please sign in to your account. Security alert: unusual sign-in activity.",
+            "account-security-noreply@accountprotection.example",
+            DocumentType.NOTIFICATION,
+        ),
+        ("Heading out", "I'm going to sign off for the week, see you Monday.", "Maya Chen <maya@example.com>", DocumentType.OTHER),
+        ("PO 4411", "Can I get your sign-off on the attached PO before Friday?", "Maya Chen <maya@example.com>", DocumentType.APPROVAL_REQUEST),
+        (
+            "Time-off request awaiting your approval",
+            "A request from Sam is awaiting your approval. This is an automated message.",
+            "notifications@approvals.example",
+            DocumentType.APPROVAL_REQUEST,
+        ),
+        (
+            "Invitation: Join our Q4 product webinar",
+            "Save your seat. You are receiving this because you subscribed. Unsubscribe",
+            "events@vendor.example",
+            DocumentType.NEWSLETTER,
+        ),
+        ("Delivery", "We need to reschedule the delivery to Tuesday.", "ops@freight.example", DocumentType.OTHER),
+        ("1:1", "Can we reschedule our weekly sync to Thursday?", "Maya Chen <maya@example.com>", DocumentType.MEETING),
+        (
+            "FW: request",
+            "---------- Forwarded message ---------\nFrom: Ann <ann@example.com>\nPlease approve the attached request.",
+            "Maya Chen <maya@example.com>",
+            DocumentType.APPROVAL_REQUEST,
+        ),
+        (
+            "Question",
+            "CAUTION: This email originated from outside the organization. Do not click links or open attachments.\n\n"
+            "Could you send me the signed contract for Acme?",
+            "Maya Chen <maya@example.com>",
+            DocumentType.REPLY_NEEDED,
+        ),
+    ],
+)
+def test_rules_read_only_what_the_sender_wrote(subject, body, sender, expected):
+    assert _classify(subject, body, sender=sender) == expected
+
+
+def test_tasks_ignore_quoted_text_disclaimers_and_sign_in():
+    from controller_inbox.actions import extract_actions
+    from controller_inbox.models import ExtractedFields, Importance
+
+    def titles(subject, body, category=DocumentType.OTHER, **extra):
+        return [
+            item.title
+            for item in extract_actions(
+                email_id="x",
+                subject=subject,
+                body=body,
+                category=category,
+                importance=Importance.MEDIUM,
+                fields=ExtractedFields(),
+                flags=[],
+                as_of=AS_OF.date(),
+                **extra,
+            )
+        ]
+
+    assert titles("Re: budget", "Done.\n\nOn Mon, Bob wrote:\n> Please send the budget by Friday.") == []
+    assert titles("New device", "Please sign in to confirm it was you.") == []
+    assert titles("Budget", "Please send the budget by Friday.") == ["Please send the budget by Friday."]
+    assert titles("Invitation: Webinar", "Join us", DocumentType.MEETING) == []
+    assert titles("Invitation: Q4 review @ Thu 2pm", "Join", DocumentType.MEETING) == ["Accept or decline: Invitation: Q4 review @ Thu 2pm"]
+    assert titles("Q4 review", "Join", DocumentType.MEETING, has_invite=True) == ["Accept or decline: Q4 review"]
+
+
+def test_lead_sentence_keeps_real_first_lines():
+    assert lead_sentence("All invoices for March are approved and paid.") == "All invoices for March are approved and paid."
+    assert lead_sentence("Hi all,\nAttached is the signed Acme contract.") == "Attached is the signed Acme contract."
+    assert lead_sentence("Hello Sam, the draft is ready for review.") == "The draft is ready for review."
+    assert lead_sentence("Team,\nThe offsite moves to Friday.") == "The offsite moves to Friday."

@@ -5,6 +5,7 @@ import uuid
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
+from controller_inbox.classify import own_words
 from controller_inbox.extract import parse_due_date
 from controller_inbox.models import (
     ActionItem,
@@ -17,9 +18,9 @@ from controller_inbox.models import (
 
 
 ACTION_RE = re.compile(
-    r"(please\s+(?:approve|review|sign|send|confirm|process|pay|code|post|reconcile|"
+    r"(please\s+(?:approve|review|sign(?!\s*(?:in|up|out|into)\b)|send|confirm|process|pay|code|post|reconcile|"
     r"respond|provide|complete|enter|forward|flag|verify)|"
-    r"kindly\s+(?:approve|review|sign|send|confirm|process|provide)|"
+    r"kindly\s+(?:approve|review|sign(?!\s*(?:in|up|out|into)\b)|send|confirm|process|provide)|"
     r"(?:need|needs|needed)\s+you\s+to|"
     r"(?:can|could)\s+you\s+(?:please\s+)?(?:approve|review|send|confirm|process|pay|provide|reconcile)|"
     r"action\s+required|"
@@ -44,6 +45,7 @@ def extract_actions(
     as_of: date,
     now: datetime | None = None,
     sender: str = "",
+    has_invite: bool = False,
 ) -> list[ActionItem]:
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     created = now.replace(microsecond=0).isoformat()
@@ -153,7 +155,7 @@ def extract_actions(
         add(f"Approve or decline: {subject}", f"{sender or 'The sender'} is waiting on your approval.", due, _due_priority(due, as_of, importance), "approval")
 
     if "fraud_risk" not in flags and category != DocumentType.PAYMENT_INSTRUCTION_CHANGE:
-        for sentence in _sentences(f"{subject}. {body}"):
+        for sentence in _sentences(f"{subject}. {own_words(body)}"):
             if not ACTION_RE.search(sentence):
                 continue
             if category == DocumentType.NEWSLETTER:
@@ -178,7 +180,7 @@ def extract_actions(
     if category == DocumentType.REPLY_NEEDED and not body_tasks:
         who = (sender or "the sender").split("<")[0].strip() or "the sender"
         add(f"Reply to {who}: {subject}", "They asked you something and are waiting on an answer.", due, _due_priority(due, as_of, importance), "reply")
-    elif category == DocumentType.MEETING and re.match(r"\s*(?:updated\s+)?invitation\b", subject or "", re.I):
+    elif category == DocumentType.MEETING and (has_invite or re.match(r"\s*(?:updated\s+)?invitation:.*\s@\s", subject or "", re.I)):
         add(f"Accept or decline: {subject}", "Meeting invitation waiting on your answer.", due, Importance.MEDIUM, "meeting")
 
     return items

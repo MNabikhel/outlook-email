@@ -131,6 +131,7 @@ def process_message(
         as_of=as_of,
         now=now,
         sender=raw.sender_name or raw.sender_email,
+        has_invite=any(att.filename.lower().endswith(".ics") for att in att_records),
     )
 
     writeback_status = "skipped"

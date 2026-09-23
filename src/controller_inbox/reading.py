@@ -13,6 +13,7 @@ import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
+from controller_inbox.classify import QUOTE_START_RE
 from controller_inbox.models import (
     DOCUMENT_LABELS,
     EVERYDAY_CATEGORIES,
@@ -112,27 +113,30 @@ def script_summary(email: EmailRecord) -> str:
     return line
 
 
-_GREETING = re.compile(r"^(?:hi|hello|hey|dear|good\s+(?:morning|afternoon|evening)|team|all|folks|everyone)\b[^.!?\n]{0,40}[,!:.]?\s*$", re.I)
+_GREETING = re.compile(
+    r"^(?:(?:hi|hello|hey|dear|good\s+(?:morning|afternoon|evening))\b[^.!?,\n]{0,40}[,!:.]?|"
+    r"(?:team|all|folks|everyone|everybody)\s*[,!:.]?)\s*$",
+    re.I,
+)
 _FILLER = re.compile(
-    r"^(?:please\s+(?:find|see)\s+(?:the\s+)?attached|(?:see|find)\s+attached|attached\s+(?:is|are)|"
+    r"^(?:please\s+(?:find|see)\s+(?:the\s+)?attached|(?:see|find)\s+attached|"
     r"(?:i\s+)?hope\s+(?:you|this|all)|thanks?(?:\s+you)?(?:\s+(?:so\s+much|again))?[,.!]|"
     r"thank\s+you\s+for\s+your\s+(?:email|message|note)|happy\s+(?:monday|friday))",
     re.I,
 )
-_QUOTE_START = re.compile(r"^(?:-{2,}\s*original message|from:\s|sent:\s|on .{6,80} wrote:|>)", re.I | re.M)
 
 
 def lead_sentence(body: str, limit: int = 160) -> str:
     """The first real sentence of a message, without the greeting or the quoted thread."""
     text = body or ""
-    quote = _QUOTE_START.search(text)
+    quote = QUOTE_START_RE.search(text)
     if quote:
         text = text[: quote.start()]
     lines = [line.strip() for line in text.splitlines()]
     lines = [line for line in lines if line and not _GREETING.match(line)]
     flat = re.sub(r"\s+", " ", " ".join(lines)).strip()
     flat = re.sub(
-        r"^(?:hi|hello|hey|dear|team|all|folks|everyone)(?:\s+[\w.'-]+){0,3}?\s*[,!:\u2014\u2013-]+\s*",
+        r"^(?:(?:hi|hello|hey|dear)(?:\s+[\w.'-]+){0,3}?|team|all|folks|everyone|everybody)\s*[,!:\u2014\u2013-]+\s*",
         "",
         flat,
         flags=re.I,
@@ -142,7 +146,8 @@ def lead_sentence(body: str, limit: int = 160) -> str:
         if len(sentence) >= 15 and not _FILLER.match(sentence):
             sentence = sentence[0].upper() + sentence[1:]
             return sentence if len(sentence) <= limit else sentence[: limit - 1].rstrip() + "…"
-    return flat[:limit]
+    flat = flat[:limit]
+    return flat[:1].upper() + flat[1:]
 
 
 def assign_script_draft(email: EmailRecord) -> EmailRecord:
