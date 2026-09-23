@@ -15,7 +15,11 @@
       <b>2</b>
       <h3>Turn on the local model (optional)</h3>
       <p>Open LM Studio, load a small instruct model, and start the local server. CloseDesk finds it on its own.</p>
+      {% if model.mode != 'off' and not model.reachable %}
+      <p class="model-line off">No local model is running right now. That's fine; you can add one any time.</p>
+      {% else %}
       <p class="model-line {{ 'on' if model.active else 'off' }}">{{ model.describe() }}</p>
+      {% endif %}
       <p class="muted">No model? Mail is still sorted, summarized, and searchable, and the digest still works. The model adds written summaries, chat answers, and reply drafts.</p>
     </div>
     <div class="step">

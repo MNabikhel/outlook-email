@@ -265,3 +265,5 @@ def test_setup_page_reassures_when_no_model_is_running(settings: Settings, loade
     page = TestClient(create_app(settings, loaded)).get("/settings").text
     assert "No local model is running." in page and "all work without one" in page
     assert "Start server" in page
+    empty = TestClient(create_app(settings, Store(settings.data_dir / "empty.db"))).get("/").text
+    assert "No local model is running right now" in empty and "Connection refused)</p>" not in empty
