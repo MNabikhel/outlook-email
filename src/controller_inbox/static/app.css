@@ -61,7 +61,7 @@ table.mail tr:hover td { background: #fbf8f1; }
 .panel.alert { background: #9b2335; color: #fff; border-color: #7a1b29; }
 .panel.alert a { color: #fff; }
 .panel.alert small, .panel.alert .muted { color: #f3c5cc; }
-.panel.alert .summary { color: #fde8eb; }
+.panel.alert .summary { color: #fff; font-size: 14px; }
 .panel ul { list-style: none; padding: 0; margin: 0; }
 .panel li { padding: 8px 0; border-top: 1px solid rgba(0,0,0,0.06); }
 .panel.alert li { border-top-color: rgba(255,255,255,0.15); }
