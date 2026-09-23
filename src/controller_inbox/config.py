@@ -8,6 +8,12 @@ from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+PROFILES = {
+    "general": "General — any inbox",
+    "finance": "Finance & accounting — adds month-end and close",
+}
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CONTROLLER_INBOX_",
@@ -39,6 +45,8 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 450
     overnight_batch: int = 40
     digest_lookback_days: int = 1
+    profile: str = "general"
+    chat_max_tokens: int = 500
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"
@@ -57,6 +65,12 @@ class Settings(BaseSettings):
         if value is None or (isinstance(value, str) and value.strip().lower() in {"", "auto"}):
             return None
         return value
+
+    @field_validator("profile", mode="before")
+    @classmethod
+    def _profile(cls, value) -> str:
+        text = str(value or "general").strip().lower()
+        return text if text in PROFILES else "general"
 
     @model_validator(mode="after")
     def _unprefixed_secrets(self) -> "Settings":

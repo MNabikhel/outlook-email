@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -44,7 +45,8 @@ CREATE TABLE IF NOT EXISTS emails (
     created_at TEXT,
     folder TEXT,
     summary TEXT,
-    model_status TEXT
+    model_status TEXT,
+    source_path TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -329,12 +331,9 @@ class Store:
         if model_status:
             clauses.append("model_status = ?")
             params.append(model_status)
-        if q:
-            clauses.append(
-                "(subject LIKE ? OR sender_email LIKE ? OR sender_name LIKE ? OR body_preview LIKE ?)"
-            )
-            like = f"%{q}%"
-            params.extend([like, like, like, like])
+        for word in (q or "").split()[:8]:
+            clauses.append(_MATCH_ANY)
+            params.extend([_contains(word)] * _MATCH_ANY.count("?"))
         order = order or ("oldest" if oldest_first else "newest")
         order_sql = {
             "newest": "received_at DESC",
@@ -362,6 +361,45 @@ class Store:
                     continue
                 out.append(email)
         return out
+
+    def search_ranked(self, terms: list[str], *, limit: int = 6) -> list[EmailRecord]:
+        """Emails that mention the most of ``terms``; subject and sender hits count more."""
+        terms = [t for t in dict.fromkeys(t.lower() for t in terms if t.strip())][:10]
+        if not terms:
+            return []
+        parts, params = [], []
+        for term in terms:
+            like = _contains(term)
+            parts.append(
+                f"(CASE WHEN lower(subject) {_LIKE} THEN 3 ELSE 0 END"
+                f" + CASE WHEN lower(sender_name) {_LIKE} OR lower(sender_email) {_LIKE} THEN 3 ELSE 0 END"
+                f" + CASE WHEN lower(summary) {_LIKE} THEN 2 ELSE 0 END"
+                f" + CASE WHEN lower(body_text) {_LIKE} THEN 1 ELSE 0 END"
+                f" + CASE WHEN EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
+                f" AND (lower(a.filename) {_LIKE} OR lower(a.extracted_text) {_LIKE})) THEN 1 ELSE 0 END)"
+            )
+            params.extend([like] * 7)
+        sql = (
+            f"SELECT id, ({' + '.join(parts)}) AS hits FROM emails WHERE hits > 0"
+            " ORDER BY hits DESC, importance_score DESC, received_at DESC LIMIT ?"
+        )
+        with self.connect() as conn:
+            rows = [(row["id"], row["hits"]) for row in conn.execute(sql, [*params, max(limit * 4, 20)]).fetchall()]
+        # LIKE finds "bill" inside "Billing"; whole words decide the order, and win outright when there are any.
+        words = [re.compile(r"(?<![a-z0-9])" + re.escape(term) + r"(?:s|es)?(?![a-z0-9])") for term in terms]
+        scored = []
+        for position, (email_id, hits) in enumerate(rows):
+            email = self.get_email(email_id)
+            if email is None:
+                continue
+            head = f"{email.subject}\n{email.sender_name}\n{email.sender_email}".lower()
+            rest = f"{email.summary}\n{email.body_text}".lower()
+            whole = sum(4 if rx.search(head) else 1 if rx.search(rest) else 0 for rx in words)
+            scored.append((whole, hits, -position, email))
+        if any(item[0] for item in scored):
+            scored = [item for item in scored if item[0]]
+        scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        return [item[3] for item in scored[:limit]]
 
     def list_actions(
         self,
@@ -586,6 +624,26 @@ class Store:
                 "SELECT COUNT(*) AS n FROM emails WHERE COALESCE(source, '') != 'demo'"
             ).fetchone()["n"]
 
+    def clear_sample(self) -> int:
+        """Remove the sample mailbox (and its digests) so real mail starts on a clean board."""
+        sample = "SELECT id FROM emails WHERE source = 'demo'"
+        with self.connect() as conn:
+            removed = conn.execute("SELECT COUNT(*) AS n FROM emails WHERE source = 'demo'").fetchone()["n"]
+            if not removed:
+                return 0
+            conn.execute(f"DELETE FROM attachments WHERE email_id IN ({sample})")
+            conn.execute(f"DELETE FROM action_items WHERE email_id IN ({sample})")
+            conn.execute(f"DELETE FROM corrections WHERE email_id IN ({sample})")
+            conn.execute("DELETE FROM emails WHERE source = 'demo'")
+            if not conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]:
+                conn.execute("DELETE FROM digests")
+        return removed
+
+    def set_source_path(self, email_id: str, path: str) -> None:
+        """Where the original .msg/.eml was archived. Kept apart from upsert so re-reads keep it."""
+        with self.connect() as conn:
+            conn.execute("UPDATE emails SET source_path = ? WHERE id = ?", (path, email_id))
+
     def get_state(self, key: str) -> str | None:
         with self.connect() as conn:
             row = conn.execute("SELECT value FROM sync_state WHERE key = ?", (key,)).fetchone()
@@ -705,9 +763,23 @@ def _email_from_rows(
         folder=_col(row, "folder", ""),
         summary=_col(row, "summary", ""),
         model_status=_col(row, "model_status", "script_draft") or "script_draft",
+        source_path=_col(row, "source_path", ""),
         attachments=attachments,
         actions=[_action_from_row(item) for item in action_rows],
     )
+
+
+_LIKE = "LIKE ? ESCAPE '\\'"
+_MATCH_ANY = (
+    f"(subject {_LIKE} OR sender_email {_LIKE} OR sender_name {_LIKE} OR summary {_LIKE} OR body_text {_LIKE}"
+    " OR EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
+    f" AND (a.filename {_LIKE} OR a.extracted_text {_LIKE})))"
+)
+
+
+def _contains(word: str) -> str:
+    """A LIKE pattern that treats % and _ in what was typed as plain characters."""
+    return "%" + re.sub(r"([\\%_])", r"\\\1", word) + "%"
 
 
 def _col(row: sqlite3.Row, name: str, default: Any) -> Any:
@@ -724,5 +796,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE emails ADD COLUMN summary TEXT DEFAULT ''")
     if "model_status" not in cols:
         conn.execute("ALTER TABLE emails ADD COLUMN model_status TEXT DEFAULT 'script_draft'")
+    if "source_path" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN source_path TEXT DEFAULT ''")
+        # Databases from before profiles existed were all finance boards; keep them that way.
+        real = conn.execute("SELECT COUNT(*) FROM emails WHERE COALESCE(source, '') != 'demo'").fetchone()[0]
+        if real:
+            conn.execute("INSERT OR IGNORE INTO sync_state(key, value) VALUES ('profile', 'finance')")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_model ON emails(model_status)")

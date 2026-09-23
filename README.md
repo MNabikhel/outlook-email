@@ -1,10 +1,40 @@
 # CloseDesk
 
-A local focus digest for a busy Outlook inbox.
+Your Outlook inbox, sorted into one short page every morning, on your own laptop.
 
-Export yesterday's mail from Outlook into a folder on your laptop (drag and drop — no add-in, no IT approval), double-click **CloseDesk**, and get one page: what you must act on, ranked; what came in and what it was about; and what can wait. Scripts pull the text, amounts, dates, and file types from every email and attachment. A small local model in LM Studio (Bionic) reads the short packets the scripts built and writes the one-line summaries, with guard rails that keep a small model honest. Every day's digest is kept so you can look back.
+Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get a ranked list of what needs you, a one-line summary of everything else, and a chat box for questions about your mail. It works for any inbox; the finance profile adds month-end and close tracking. A local AI model is optional. Without one, everything still works.
 
-Start here: [docs/SETUP.md](docs/SETUP.md). How it works, in slides: [docs/CloseDesk-how-it-works.pptx](docs/CloseDesk-how-it-works.pptx). The longer notes are in [docs/BIONIC_GUIDE.md](docs/BIONIC_GUIDE.md).
+## Quick start
+
+1. **Install Python 3.11+** from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH**.
+2. **Get CloseDesk:** green **Code** button → **Download ZIP**, then unzip it somewhere permanent (for example `Documents`). The folder is called `outlook-email-main`; rename it `CloseDesk` if you like.
+3. **Double-click `CloseDesk.bat`** (Windows) or **`CloseDesk.command`** (Mac). The first run sets itself up in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around.
+4. **Add your mail:** drag emails from Outlook into the `inbox/incoming` folder and click **Process new mail**. ([New Outlook, web, and Mac](docs/SETUP.md#every-morning))
+5. **Optional local AI:** in [LM Studio](https://lmstudio.ai/), load a small instruct model (3B–8B) and start the server (Developer tab → **Start server**). CloseDesk finds it on its own.
+
+**Using it:**
+- **Open an email:** click it, and it opens right there. **Open in Outlook** opens the original.
+- **Ask a question:** use **Ask CloseDesk** (bottom-right), for example *what's urgent today?*
+- **Search:** press `/` to search everything.
+- **Draft a reply:** open an email and click **Draft a reply**.
+- **Choose your inbox type:** **Setup** → *General* or *Finance*.
+
+The full guide and troubleshooting are in [docs/SETUP.md](docs/SETUP.md). Prefer slides? The [quick setup deck](docs/CloseDesk-quick-setup.pptx) walks through the same steps with screenshots.
+
+<details>
+<summary>No model, or a small one? What changes</summary>
+
+| | No model | With a local model |
+| --- | --- | --- |
+| Sorting into Needs you / Worth knowing / Reference | Yes (rules) | Yes (the model decides, with guard rails) |
+| One-line summaries | The email's key sentence | Written by the model |
+| Tasks, due dates, fraud warnings, digest | Yes | Yes |
+| **Ask CloseDesk** | Finds the emails and today's focus list | Writes an answer and cites the emails |
+| **Draft a reply** | A starter template | A written draft; payment-change emails get safety advice instead |
+
+</details>
+
+More detail: [how it works, in slides](docs/CloseDesk-how-it-works.pptx) and the [Bionic / LM Studio guide](docs/BIONIC_GUIDE.md).
 
 ## The everyday loop
 
@@ -77,7 +107,7 @@ The Bionic Studio skill in `bionic/closedesk-inbox/` lets the agent do the readi
 python -m controller_inbox demo --serve
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The sample is a September 2026 mailbox: Northwind invoice INV-10482, a Chase statement, ADP payroll, an IRS CP2000, an auditor PBC, a customer remittance, a close calendar, and a fraudulent wiring-instruction change. Once your own mail is in the database, `demo` and the **Load sample mailbox** button refuse to run so they cannot erase it; use `CONTROLLER_INBOX_DATA_DIR=./data-sample` to look at the sample separately.
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The sample is a September 2026 mailbox: Northwind invoice INV-10482, a Chase statement, ADP payroll, an IRS CP2000, an auditor PBC, a customer remittance, a close calendar, and a fraudulent wiring-instruction change. There is everyday mail too: a colleague's question, an approval request, a meeting invite, an IT notice, and an FYI. Once your own mail is in the database, `demo` and the **Load sample mailbox** button refuse to run so they cannot erase it; use `CONTROLLER_INBOX_DATA_DIR=./data-sample` to look at the sample separately.
 
 | Command | What it does |
 | --- | --- |
@@ -108,7 +138,12 @@ When a message arrives, CloseDesk:
 
 ## What it catches
 
-These are the extras that matter when the inbox is invoices, banking, payroll, and close — not a generic mail client:
+For any inbox:
+
+- **Replies, approvals, and meetings.** "Could you send me…?" lands in *Needs you* with a reply task. An approval request gets an "Approve or decline" task. A meeting invite gets "Accept or decline".
+- **Noise stays out of the way.** Newsletters, automated notices, and FYIs go to *Worth knowing* or *Reference*.
+
+For invoices, banking, payroll, and close (the finance profile adds the month-end view; the fraud and invoice checks run in every profile):
 
 - **Payment-instruction / BEC trap.** “Our bank details have changed, please wire today” is treated as critical. The action is *verify by phone*, not *process the payment*.
 - **Duplicate invoice detection** on invoice number (the classic double-entry from a resent PDF).
@@ -184,13 +219,15 @@ The digest is the thing to read with coffee. It opens with one sentence — for 
 - **Your focus today**: up to seven items, ranked — fraud, overdue, due today, due in the next few days, new decisions — one row per email with its one-line summary
 - **What came in** since the previous working day, grouped into *Needs you*, *Worth knowing*, and *Filed for reference*
 - **Coming up** in the next 7 days
-- **Month-end** lists when there is something in them: invoices to enter, cash to apply, close / bank-rec items
+- **Invoices & payments** when there are any: invoices to enter and cash to apply (the finance profile adds a month-end countdown and close / bank-rec items)
 
 Each day is stored in SQLite (browse it under **Past digests**, or `digest --history`) and written under `data/digests/` as Markdown, HTML (standalone, printable), and JSON. `CONTROLLER_INBOX_DIGEST_LOOKBACK_DAYS` widens the window.
 
 ## Categories it knows
 
-AP invoice, credit memo, purchase order, packing slip, remittance / cash app, bank statement, bank rec, wire/ACH request, **payment-instruction change**, payroll, expense report, tax document, contract, insurance, audit / PBC, close workpaper, spreadsheet, scanned image, newsletter, mixed, other.
+Everyday: reply needed, approval request, meeting / calendar, FYI, newsletter, automated notification, other.
+
+Finance: AP invoice, credit memo, purchase order, packing slip, remittance / cash app, bank statement, bank rec, wire/ACH request, **payment-instruction change**, payroll, expense report, tax document, contract, insurance, audit / PBC, close workpaper, spreadsheet, scanned image, mixed.
 
 Importance is a 0–100 score, not a single keyword: a $400 newsletter stays low; a $12,850 invoice due in two days does not.
 
@@ -211,7 +248,10 @@ src/controller_inbox/
   learn.py       Corrections that teach the classifier
   tools.py       JSON tools for the Bionic agent
   digest.py      Daily focus digest
+  assistant.py   Ask CloseDesk chat and reply drafts (local model, or lookups without one)
+  profile.py     General / finance inbox profile
   web.py         Local dashboard
+  static/app.js  Open-in-place preview, chat box, search shortcut
   cli.py         controller-inbox / closedesk commands
 CloseDesk.bat / CloseDesk.command   Double-click launchers (first run sets up .venv)
 scripts/overnight.bat / .sh         For Task Scheduler / cron
@@ -232,4 +272,4 @@ The suite classifies the demo mailbox end-to-end (including the fraud wire and d
 - Mail is processed on the machine that runs CloseDesk and stored in local SQLite.
 - Routing / account / IBAN values are redacted in stored bodies; only last-4 is kept for matching.
 - Outlook write-back is **off** until you set `CONTROLLER_INBOX_WRITEBACK=true`.
-- There is no cloud AI in the default path. The model, when used, runs on the laptop. The fraud rules are deterministic so a $48,500 “new account” email cannot be quietly labeled “FYI”, whatever the model says.
+- There is no cloud AI in the default path. The model, when used, runs on the laptop, and so do the chat box and reply drafts. The chat's history stays in the browser tab and is cleared when the tab closes. The fraud rules are deterministic so a $48,500 “new account” email cannot be quietly labeled “FYI”, whatever the model says.

@@ -6,7 +6,7 @@
   <title>{% block title %}CloseDesk{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css?v={{ static_version }}"/>
 </head>
-<body>
+<body{% if email is defined and email %} data-email-id="{{ email.id }}"{% endif %}>
   <div class="shell">
     <aside class="rail">
       <a class="brand" href="/">
@@ -35,10 +35,12 @@
           <span>Local model</span>
           <b>{{ model.model if model.active else ('off' if model.mode == 'off' else 'not running') }}</b>
         </a>
+        {% if finance %}
         <div class="close-chip">
           <span>Days to month-end</span>
           <b>{{ days_to_close }}</b>
         </div>
+        {% endif %}
         <p class="mode">{{ 'Outlook connected' if graph_configured else 'Drop folder' }}{{ ' · sample mailbox' if is_sample else '' }}</p>
       </div>
     </aside>
@@ -47,12 +49,24 @@
         <div>
           <p class="kicker">{{ today_long }}</p>
           <h1>{% block heading %}Inbox{% endblock %}</h1>
+          {% if finance %}
           <p class="sub">Month-end {{ close_date }} · {{ days_to_close }} day{{ '' if days_to_close == 1 else 's' }} left</p>
+          {% else %}
+          <p class="sub">{{ counts.emails }} email{{ '' if counts.emails == 1 else 's' }} sorted{% if last_run %} · last processed {{ last_run | shortdt }}{% endif %}</p>
+          {% endif %}
         </div>
+        <form class="top-search" method="get" action="/inbox" role="search">
+          <input type="search" name="q" value="{{ query }}" placeholder="Search all mail" aria-label="Search all mail" autocomplete="off"/>
+          <kbd title="Press / to search">/</kbd>
+        </form>
         <div class="kpis">
           <div><span>Needs you</span><b>{{ counts.important }}</b></div>
           <div><span>Open tasks</span><b>{{ counts.open_actions }}</b></div>
+          {% if model.active %}
           <div><span>Waiting on model</span><b>{{ counts.waiting_on_bionic }}</b></div>
+          {% else %}
+          <a class="kpi-link" href="/settings" title="No local model is running. Everything works without one; Setup shows how to add one."><span>Local AI</span><b>Off</b></a>
+          {% endif %}
           <div class="{{ 'hot' if counts.fraud_alerts else '' }}"><span>Fraud flags</span><b>{{ counts.fraud_alerts }}</b></div>
         </div>
       </header>
@@ -60,5 +74,41 @@
       {% block body %}{% endblock %}
     </div>
   </div>
+
+  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+  <aside class="drawer" id="drawer" hidden aria-label="Email preview" role="dialog">
+    <div class="drawer-bar">
+      <a class="drawer-full" href="#">Open full page</a>
+      <button type="button" class="ghost drawer-close" data-action="close-drawer" aria-label="Close preview">Close <kbd>Esc</kbd></button>
+    </div>
+    <div class="drawer-body"></div>
+  </aside>
+
+  <button type="button" class="chat-fab" id="chat-toggle" aria-controls="chat" aria-expanded="false">
+    <span class="dot {{ 'on' if model.active else 'off' }}"></span> Ask CloseDesk
+  </button>
+  <section class="chat" id="chat" hidden aria-label="Ask CloseDesk">
+    <header class="chat-head">
+      <div>
+        <strong>Ask CloseDesk</strong>
+        <small>{% if model.active %}Answers from {{ model.model }} on this computer{% else %}No local model running: I'll look things up instead{% endif %}</small>
+      </div>
+      <button type="button" class="ghost tiny" data-action="clear-chat" title="Start over">Clear</button>
+      <button type="button" class="ghost tiny" data-action="close-chat" aria-label="Close chat">✕</button>
+    </header>
+    <div class="chat-log" aria-live="polite"></div>
+    <div class="chat-suggest">
+      <button type="button" class="ghost tiny" data-ask="What's urgent today?">What's urgent today?</button>
+      <button type="button" class="ghost tiny" data-ask="What needs a reply from me?">Needs a reply</button>
+      <button type="button" class="ghost tiny" data-ask="Anything waiting for my approval?">Approvals</button>
+      <button type="button" class="ghost tiny" data-ask="How do I set this up?">Setup help</button>
+    </div>
+    <form class="chat-form">
+      <textarea rows="2" maxlength="1000" placeholder="Ask about your mail… (Enter to send)" aria-label="Your question"></textarea>
+      <button type="submit">Send</button>
+    </form>
+  </section>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="/static/app.js?v={{ static_version }}" defer></script>
 </body>
 </html>

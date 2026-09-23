@@ -7,6 +7,10 @@ from typing import Any
 
 
 class DocumentType(str, Enum):
+    REPLY_NEEDED = "reply_needed"
+    APPROVAL_REQUEST = "approval_request"
+    MEETING = "meeting"
+    NOTIFICATION = "notification"
     AP_INVOICE = "ap_invoice"
     AR_INVOICE = "ar_invoice"
     CREDIT_MEMO = "credit_memo"
@@ -46,6 +50,13 @@ class ActionStatus(str, Enum):
 
 
 DOCUMENT_LABELS = {
+    DocumentType.REPLY_NEEDED: "Reply needed",
+    DocumentType.APPROVAL_REQUEST: "Approval request",
+    DocumentType.MEETING: "Meeting / calendar",
+    DocumentType.INTERNAL_FYI: "FYI",
+    DocumentType.NEWSLETTER: "Newsletter",
+    DocumentType.NOTIFICATION: "Automated notification",
+    DocumentType.PAYMENT_INSTRUCTION_CHANGE: "Payment instruction change",
     DocumentType.AP_INVOICE: "AP invoice",
     DocumentType.AR_INVOICE: "AR / customer invoice",
     DocumentType.CREDIT_MEMO: "Credit memo",
@@ -55,7 +66,6 @@ DOCUMENT_LABELS = {
     DocumentType.BANK_STATEMENT: "Bank statement",
     DocumentType.BANK_RECONCILIATION: "Bank reconciliation",
     DocumentType.WIRE_ACH_REQUEST: "Wire / ACH request",
-    DocumentType.PAYMENT_INSTRUCTION_CHANGE: "Payment instruction change",
     DocumentType.PAYROLL: "Payroll",
     DocumentType.EXPENSE_REPORT: "Expense report",
     DocumentType.TAX_DOCUMENT: "Tax document",
@@ -65,8 +75,6 @@ DOCUMENT_LABELS = {
     DocumentType.WORKPAPER: "Workpaper",
     DocumentType.SPREADSHEET: "Spreadsheet / data file",
     DocumentType.IMAGE_SCAN: "Scanned image",
-    DocumentType.NEWSLETTER: "Newsletter / FYI",
-    DocumentType.INTERNAL_FYI: "Internal FYI",
     DocumentType.MIXED: "Mixed attachments",
     DocumentType.OTHER: "Other / uncategorized",
 }
@@ -205,9 +213,22 @@ class EmailRecord:
     folder: str = ""
     summary: str = ""
     model_status: str = "script_draft"
+    source_path: str = ""
     attachments: list[AttachmentRecord] = field(default_factory=list)
     actions: list[ActionItem] = field(default_factory=list)
 
+
+EVERYDAY_CATEGORIES = frozenset(
+    {
+        DocumentType.REPLY_NEEDED,
+        DocumentType.APPROVAL_REQUEST,
+        DocumentType.MEETING,
+        DocumentType.NOTIFICATION,
+        DocumentType.INTERNAL_FYI,
+        DocumentType.NEWSLETTER,
+        DocumentType.OTHER,
+    }
+)
 
 FOLDERS = ("important", "informational", "reference")
 

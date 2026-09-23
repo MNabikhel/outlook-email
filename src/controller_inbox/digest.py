@@ -55,7 +55,9 @@ def build_digest(
     tz: tzinfo | None = None,
     lookback_days: int = 1,
     save: bool = True,
+    finance: bool = False,
 ) -> dict[str, Any]:
+    """``finance`` adds month-end and close sections; invoices and cash show whenever there are any."""
     tz = tz or generated_at.tzinfo or timezone.utc
     start, end = digest_window(as_of, tz, lookback_days)
     window_emails = store.list_emails(
@@ -101,8 +103,11 @@ def build_digest(
     close_items = [
         e
         for e in window_emails
-        if e.category in {DocumentType.BANK_STATEMENT, DocumentType.BANK_RECONCILIATION, DocumentType.WORKPAPER}
-        or "month_end" in e.flags
+        if finance
+        and (
+            e.category in {DocumentType.BANK_STATEMENT, DocumentType.BANK_RECONCILIATION, DocumentType.WORKPAPER}
+            or "month_end" in e.flags
+        )
     ]
 
     focus = _focus(as_of, window_emails, open_actions, full)
@@ -130,6 +135,7 @@ def build_digest(
     payload = {
         "date": today,
         "date_long": _long_date(as_of),
+        "finance": finance,
         "generated_at": generated_at.isoformat(),
         "window": {
             "start": _utc(start),
@@ -336,7 +342,10 @@ def render_markdown(payload: dict[str, Any]) -> str:
         ("Close / reconcile", payload["close_items"]),
     ]
     if any(rows for _, rows in finance):
-        lines += [f"## Month-end ({payload['days_to_close']} day(s) to {payload['close_date']})", ""]
+        if payload.get("finance"):
+            lines += [f"## Month-end ({payload['days_to_close']} day(s) to {payload['close_date']})", ""]
+        else:
+            lines += ["## Invoices & payments", ""]
         for heading, rows in finance:
             if not rows:
                 continue
@@ -400,6 +409,24 @@ def render_html(payload: dict[str, Any]) -> str:
             + rows(payload["critical_alerts"], "")
             + "</section>"
         )
+    money = ""
+    for heading, items in (
+        ("Invoices to enter", payload.get("invoices_to_enter", [])),
+        ("Cash to apply", payload.get("cash_to_apply", [])),
+        ("Close / reconcile", payload.get("close_items", [])),
+    ):
+        if items:
+            money += f"<h3>{heading} <small>{len(items)}</small></h3>" + rows(items, "", summary=False)
+    if money:
+        title = (
+            f"Month-end · {payload['days_to_close']} days to {payload['close_date']}"
+            if payload.get("finance")
+            else "Invoices &amp; payments"
+        )
+        money = f"<h2>{title}</h2>" + money
+    close_note = (
+        f" · month-end {payload['close_date']} ({payload['days_to_close']} days)" if payload.get("finance") else ""
+    )
     new_mail = "".join(
         f"<h3>{heading} <small>{len(payload['new_mail'].get(folder, []))}</small></h3>"
         + rows(payload["new_mail"].get(folder, []), "None.", summary=folder != "reference")
@@ -447,10 +474,10 @@ def render_html(payload: dict[str, Any]) -> str:
   {new_mail}
   <h2>Coming up in the next 7 days</h2>
   {rows(payload['due_this_week'], 'Nothing else is dated this week.', summary=False)}
+  {money}
   <h2>Snapshot</h2>
   <p class="stats">{k['emails']} new emails · {k['open_actions']} open tasks ({k['overdue_actions']} overdue) ·
-  {k['read_by_bionic']} read by the local model · {k['waiting_on_bionic']} waiting · month-end {payload['close_date']}
-  ({payload['days_to_close']} days)</p>
+  {k['read_by_bionic']} read by the local model · {k['waiting_on_bionic']} waiting{close_note}</p>
 </main>
 </body>
 </html>

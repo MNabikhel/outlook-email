@@ -5,7 +5,7 @@
 {% if blurb %}<p class="lede">{{ blurb }}</p>{% endif %}
 <section class="toolbar">
   <form class="filters" method="get" action="/inbox">
-    <input type="search" name="q" value="{{ query }}" placeholder="Search subject, sender…"/>
+    <input type="search" name="q" value="{{ query }}" placeholder="Search subject, sender, text, attachments…"/>
     <select name="importance">
       <option value="">All importance</option>
       {% for key in ['critical','high','medium','low'] %}
@@ -38,7 +38,7 @@
     </thead>
     <tbody>
       {% for email in emails %}
-      <tr class="{{ email.importance.value }}">
+      <tr class="{{ email.importance.value }}" data-email="{{ email.id }}">
         <td><span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }}</span></td>
         <td class="nowrap">{{ email.received_at | shortdt }}</td>
         <td>
@@ -60,9 +60,9 @@
           <small class="why">{{ email.importance_reasons[0] }}</small>
           {% endif %}
           {% if email.model_status == 'script_draft' %}
-          <span class="flag needs_model">Waiting on Bionic</span>
+          <span class="flag needs_model">Script draft</span>
           {% elif email.model_status == 'bionic' %}
-          <span class="flag bionic">Read by Bionic</span>
+          <span class="flag bionic">Read by local model</span>
           {% elif email.model_status == 'corrected' %}
           <span class="flag user_trained">Corrected by you</span>
           {% endif %}

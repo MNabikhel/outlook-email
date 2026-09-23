@@ -13,6 +13,7 @@ from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.local_llm import check_model
 from controller_inbox.models import FOLDERS, FOLDER_LABELS
+from controller_inbox.profile import is_finance
 from controller_inbox.reading import apply_bionic_reading, build_packet
 from controller_inbox.store import Store
 
@@ -111,7 +112,12 @@ def _digest(store: Store, settings: Settings, on: str | None) -> dict:
     now = datetime.now(settings.tz)
     as_of = datetime.strptime(on, "%Y-%m-%d").date() if on else local_today(settings.tz, now)
     payload = build_digest(
-        store, as_of=as_of, generated_at=now, tz=settings.tz, lookback_days=settings.digest_lookback_days
+        store,
+        as_of=as_of,
+        generated_at=now,
+        tz=settings.tz,
+        lookback_days=settings.digest_lookback_days,
+        finance=is_finance(settings, store),
     )
     md_path, html_path = write_digest_files(payload, settings.digest_dir, as_of.isoformat())
     return payload | {"markdown_path": md_path, "html_path": html_path}

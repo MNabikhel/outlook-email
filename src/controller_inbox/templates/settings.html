@@ -2,6 +2,19 @@
 {% block title %}Setup · CloseDesk{% endblock %}
 {% block heading %}Setup{% endblock %}
 {% block body %}
+<section class="panel profile-card">
+  <h3>What kind of inbox is this?</h3>
+  <form method="post" action="/settings/profile" class="profile-form">
+    {% for key, label in profiles.items() %}
+    <label class="choice {{ 'on' if profile == key else '' }}">
+      <input type="radio" name="profile" value="{{ key }}" {{ 'checked' if profile == key else '' }}/>
+      <span>{{ label }}</span>
+    </label>
+    {% endfor %}
+    <button type="submit">Save</button>
+  </form>
+  <p class="muted">General works for anyone: replies, approvals, meetings, deadlines, and notifications. Finance adds the month-end countdown and close sections. Invoices and payment warnings are caught either way.</p>
+</section>
 <section class="split">
   <article class="panel">
     <h3>Getting mail in (no Outlook add-in or IT approval needed)</h3>
@@ -17,7 +30,13 @@
   </article>
   <article class="panel llm-card">
     <h3>Local model</h3>
+    {% if model.mode != 'off' and not model.reachable %}
+    <p class="model-line off">No local model is running. That's fine: sorting, summaries, tasks, the digest, search, and <b>Ask CloseDesk</b> all work without one.</p>
+    <p>To add one later: open <a href="https://lmstudio.ai/" rel="noopener">LM Studio</a>, load a small instruct model (3B–8B), and click <b>Start server</b> on the Developer tab. CloseDesk finds it on its own.</p>
+    <p class="muted"><small>Tried {{ model.base_url }}: {{ model.error }}</small></p>
+    {% else %}
     <p class="model-line {{ 'on' if model.active else 'off' }}">{{ model.describe() }}</p>
+    {% endif %}
     {% if model.models %}
     <p class="muted">Loaded on the server: {{ model.models | join(', ') }}</p>
     {% endif %}
@@ -57,7 +76,7 @@
     {% if counts.emails and not is_sample %}
     <p class="muted">Your own mail is loaded, so the sample is switched off here — loading it would erase your mail. To look at the sample, run it with a separate data folder: <code>CONTROLLER_INBOX_DATA_DIR=./data-sample python -m controller_inbox demo --serve</code></p>
     {% else %}
-    <p>Load the built-in sample to see the dashboard before your own mail is in the folder.</p>
+    <p>Load the built-in sample to see the dashboard before your own mail is in the folder. The first time you process your own mail, the sample is removed.</p>
     <form method="post" action="/demo/reload">
       <button type="submit">Load sample mailbox</button>
     </form>

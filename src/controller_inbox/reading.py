@@ -13,8 +13,10 @@ import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 
+from controller_inbox.classify import QUOTE_START_RE
 from controller_inbox.models import (
     DOCUMENT_LABELS,
+    EVERYDAY_CATEGORIES,
     FOLDERS,
     ActionItem,
     ActionStatus,
@@ -32,9 +34,12 @@ REFERENCE_CATEGORIES = {
     DocumentType.SPREADSHEET,
     DocumentType.IMAGE_SCAN,
     DocumentType.PACKING_SLIP,
+    DocumentType.NOTIFICATION,
 }
 
 ACTION_CATEGORIES = {
+    DocumentType.REPLY_NEEDED,
+    DocumentType.APPROVAL_REQUEST,
     DocumentType.AP_INVOICE,
     DocumentType.AR_INVOICE,
     DocumentType.CREDIT_MEMO,
@@ -47,7 +52,7 @@ ACTION_CATEGORIES = {
     DocumentType.PAYMENT_INSTRUCTION_CHANGE,
 }
 
-INFO_CATEGORIES = {DocumentType.NEWSLETTER, DocumentType.INTERNAL_FYI}
+INFO_CATEGORIES = {DocumentType.NEWSLETTER, DocumentType.INTERNAL_FYI, DocumentType.MEETING}
 
 VERIFY_TITLE = "Verify payment-instruction change by phone before doing anything"
 
@@ -61,6 +66,8 @@ _BANK_WORDS = re.compile(r"\b(bank|account|routing|remit\w*|wire|ach|vendor (?:r
 
 def script_folder(category: DocumentType, importance: Importance, flags: list[str]) -> str:
     if "fraud_risk" in flags or category == DocumentType.PAYMENT_INSTRUCTION_CHANGE:
+        return "important"
+    if category == DocumentType.MEETING and importance in {Importance.CRITICAL, Importance.HIGH}:
         return "important"
     if category in INFO_CATEGORIES:
         return "informational"
@@ -77,6 +84,15 @@ def script_summary(email: EmailRecord) -> str:
     if "fraud_risk" in email.flags or email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE:
         return "Payment instructions may have changed. Confirm by phone before any payment."
     label = DOCUMENT_LABELS.get(email.category, email.category.value)
+    lead = lead_sentence(email.body_text)
+    has_facts = bool(email.extracted.primary_invoice or email.extracted.primary_amount is not None)
+    if email.category in {DocumentType.NEWSLETTER, DocumentType.NOTIFICATION}:
+        who = email.sender_name or email.sender_email or "an automated sender"
+        return f"{label} from {who}: {email.subject}".strip()
+    if lead and (email.category in EVERYDAY_CATEGORIES or not has_facts):
+        if email.category in {DocumentType.OTHER, DocumentType.INTERNAL_FYI}:
+            return lead
+        return f"{label}: {lead}"
     bits = [label]
     if email.extracted.primary_invoice:
         bits.append(email.extracted.primary_invoice)
@@ -95,6 +111,43 @@ def script_summary(email: EmailRecord) -> str:
     if "missing_attachment" in email.flags:
         return f"{line}. The note says a file was attached, and none arrived."
     return line
+
+
+_GREETING = re.compile(
+    r"^(?:(?:hi|hello|hey|dear|good\s+(?:morning|afternoon|evening))\b[^.!?,\n]{0,40}[,!:.]?|"
+    r"(?:team|all|folks|everyone|everybody)\s*[,!:.]?)\s*$",
+    re.I,
+)
+_FILLER = re.compile(
+    r"^(?:please\s+(?:find|see)\s+(?:the\s+)?attached|(?:see|find)\s+attached|"
+    r"(?:i\s+)?hope\s+(?:you|this|all)|thanks?(?:\s+you)?(?:\s+(?:so\s+much|again))?[,.!]|"
+    r"thank\s+you\s+for\s+your\s+(?:email|message|note)|happy\s+(?:monday|friday))",
+    re.I,
+)
+
+
+def lead_sentence(body: str, limit: int = 160) -> str:
+    """The first real sentence of a message, without the greeting or the quoted thread."""
+    text = body or ""
+    quote = QUOTE_START_RE.search(text)
+    if quote:
+        text = text[: quote.start()]
+    lines = [line.strip() for line in text.splitlines()]
+    lines = [line for line in lines if line and not _GREETING.match(line)]
+    flat = re.sub(r"\s+", " ", " ".join(lines)).strip()
+    flat = re.sub(
+        r"^(?:(?:hi|hello|hey|dear)(?:\s+[\w.'-]+){0,3}?|team|all|folks|everyone|everybody)\s*[,!:\u2014\u2013-]+\s*",
+        "",
+        flat,
+        flags=re.I,
+    )
+    for sentence in re.split(r"(?<=[.!?])\s+", flat):
+        sentence = sentence.strip()
+        if len(sentence) >= 15 and not _FILLER.match(sentence):
+            sentence = sentence[0].upper() + sentence[1:]
+            return sentence if len(sentence) <= limit else sentence[: limit - 1].rstrip() + "…"
+    flat = flat[:limit]
+    return flat[:1].upper() + flat[1:]
 
 
 def assign_script_draft(email: EmailRecord) -> EmailRecord:

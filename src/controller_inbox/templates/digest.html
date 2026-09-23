@@ -44,7 +44,7 @@
 <p class="lede">
   {{ payload.date_long or payload.date }}.
   {% if payload.window %}Covers mail since {{ payload.window.since_label }}; open tasks carry over until you mark them done.{% endif %}
-  {% if payload.kpis.waiting_on_bionic %}{{ payload.kpis.waiting_on_bionic }} were still waiting on the local model when this was written.{% endif %}
+  {% if payload.kpis.waiting_on_bionic %}{{ payload.kpis.waiting_on_bionic }} were sorted by the scripts alone; no local model had read them yet.{% endif %}
 </p>
 
 {% if payload.critical_alerts %}
@@ -97,14 +97,23 @@
     <h3>Coming up in the next 7 days</h3>
     {{ item_list(payload.due_this_week, 'Nothing else dated this week.', False) }}
   </article>
+  {% if payload.finance or payload.invoices_to_enter or payload.cash_to_apply %}
   <article class="panel">
     <h3>Invoices to enter</h3>
     {{ item_list(payload.invoices_to_enter, 'No new vendor invoices.', False) }}
     <h3>Cash to apply</h3>
     {{ item_list(payload.cash_to_apply, 'No remittances.', False) }}
+    {% if payload.finance %}
     <h3>Close / reconcile</h3>
     {{ item_list(payload.close_items, 'No close items.', False) }}
+    {% endif %}
   </article>
+  {% else %}
+  <article class="panel">
+    <h3>Open tasks with no due date</h3>
+    {{ item_list((payload.undated_actions or [])[:8], 'Nothing undated is open.', False) }}
+  </article>
+  {% endif %}
 </section>
 
 <details class="panel">

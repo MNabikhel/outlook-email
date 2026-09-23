@@ -11,9 +11,9 @@
       <p>{{ email.sender_name }} &lt;{{ email.sender_email }}&gt; · {{ email.received_at | shortdt }}</p>
       {% if email.summary %}<p class="summary">{{ email.summary }}</p>{% endif %}
       {% if email.model_status == 'script_draft' %}
-      <p class="note">Waiting on Bionic. The folder and summary are a script draft from the extracted text.</p>
+      <p class="note">Sorted by the fast scripts. When a local model is running, it reads this and may refine the folder and summary.</p>
       {% elif email.model_status == 'bionic' %}
-      <p class="note">Read by Bionic.</p>
+      <p class="note">Read by the local model.</p>
       {% elif email.model_status == 'corrected' %}
       <p class="note">Corrected by you. The overnight run will not overwrite this.</p>
       {% endif %}
@@ -26,6 +26,7 @@
       <div><span>Due</span><b>{{ email.extracted.primary_due or '—' }}</b></div>
     </div>
   </header>
+  {% include "_mail_tools.html" %}
 
   {% if email.flags %}
   <div class="flags big">

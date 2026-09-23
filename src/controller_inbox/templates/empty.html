@@ -15,8 +15,12 @@
       <b>2</b>
       <h3>Turn on the local model (optional)</h3>
       <p>Open LM Studio, load a small instruct model, and start the local server. CloseDesk finds it on its own.</p>
+      {% if model.mode != 'off' and not model.reachable %}
+      <p class="model-line off">No local model is running right now. That's fine; you can add one any time.</p>
+      {% else %}
       <p class="model-line {{ 'on' if model.active else 'off' }}">{{ model.describe() }}</p>
-      <p class="muted">Without a model, mail is still filed and the digest still works — the model adds better one-line summaries and judgment.</p>
+      {% endif %}
+      <p class="muted">No model? Mail is still sorted, summarized, and searchable, and the digest still works. The model adds written summaries, chat answers, and reply drafts.</p>
     </div>
     <div class="step">
       <b>3</b>
@@ -24,7 +28,7 @@
       <form method="post" action="/process">
         <button type="submit" {{ 'disabled' if job.state == 'running' else '' }}>Process new mail</button>
       </form>
-      <p class="muted">Or try it first with the sample mailbox:</p>
+      <p class="muted">Or try it first with the sample mailbox. It is removed the first time you process your own mail.</p>
       <form method="post" action="/demo/reload">
         <button class="ghost" type="submit">Load sample mailbox</button>
       </form>

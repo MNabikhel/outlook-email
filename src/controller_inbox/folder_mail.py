@@ -45,6 +45,7 @@ def ingest_folder(
     records = []
     seen: set[str] = set()
     batches = collect_batches(settings)
+    sample_checked = False
     for index, (path, sidecars) in enumerate(batches, start=1):
         if on_progress:
             on_progress(index, len(batches), path.name)
@@ -60,12 +61,22 @@ def ingest_folder(
             existing = store.get_email(raw.id)
             if raw.id in seen or (existing is not None and existing.model_status in KEEP_READINGS):
                 report["already_read"] += 1
-                _archive(settings, owned)
+                archived = _archive(settings, owned)
+                if existing is not None and not existing.source_path and archived:
+                    store.set_source_path(raw.id, str(archived[0]))
                 continue
             seen.add(raw.id)
+            if not sample_checked:
+                # Only once a real message has parsed, so a bad file cannot empty the board.
+                sample_checked = True
+                if not store.real_mail_count():
+                    report["sample_cleared"] = store.clear_sample()
             record = process_message(raw, store, settings, now=now)
             _write_extracted(settings, raw)
-            _archive(settings, owned)
+            archived = _archive(settings, owned)
+            if archived:
+                store.set_source_path(record.id, str(archived[0]))
+                record.source_path = str(archived[0])
             records.append(record)
             if existing is None:
                 report["read"] += 1
@@ -378,14 +389,16 @@ def _quarantine(settings: Settings, paths: list[Path], exc: Exception) -> None:
         )
 
 
-def _archive(settings: Settings, paths: list[Path]) -> None:
+def _archive(settings: Settings, paths: list[Path]) -> list[Path]:
     day = datetime.now().strftime("%Y-%m-%d")
     dest_root = settings.inbox_processed / day
     dest_root.mkdir(parents=True, exist_ok=True)
-    _move_all(dest_root, paths)
+    return _move_all(dest_root, paths)
 
 
-def _move_all(dest_root: Path, paths: list[Path]) -> None:
+def _move_all(dest_root: Path, paths: list[Path]) -> list[Path]:
+    """Move files into ``dest_root``; returns where each one landed, in order."""
+    moved = []
     for path in paths:
         if not path.exists():
             continue
@@ -393,3 +406,5 @@ def _move_all(dest_root: Path, paths: list[Path]) -> None:
         if target.exists():
             target = dest_root / f"{path.stem}-{sha256_bytes(path.read_bytes())[:8]}{path.suffix}"
         shutil.move(str(path), str(target))
+        moved.append(target.resolve())
+    return moved

@@ -32,7 +32,7 @@ def test_focus_puts_fraud_first_and_one_row_per_email(loaded, settings, as_of_no
     assert all(row["summary"] or row["subject"] for row in focus)
     scores = [row["score"] for row in focus]
     assert scores == sorted(scores, reverse=True)
-    assert payload["headline"].startswith(f"{payload['kpis']['need_you']} of 13 emails since Mon Sep 21 need you")
+    assert payload["headline"].startswith(f"{payload['kpis']['need_you']} of 18 emails since Mon Sep 21 need you")
     assert "payment-change warning" in payload["headline"]
 
 
@@ -40,7 +40,7 @@ def test_new_mail_is_grouped_by_folder_with_summaries(loaded, settings, as_of_no
     payload = build_digest(loaded, as_of=date(2026, 9, 22), generated_at=as_of_now, tz=settings.tz)
     new = payload["new_mail"]
     assert set(new) == {"important", "informational", "reference"}
-    assert sum(len(rows) for rows in new.values()) == payload["kpis"]["emails"] == 13
+    assert sum(len(rows) for rows in new.values()) == payload["kpis"]["emails"] == 18
     assert any(row["id"] == "demo-newsletter" for row in new["informational"])
     assert all(row["summary"] for rows in new.values() for row in rows)
     md = payload["markdown"]
@@ -76,7 +76,7 @@ def test_digest_history_is_kept_and_browsable(loaded, settings, as_of_now):
     history = loaded.list_digests()
     assert [row["period_date"] for row in history] == ["2026-09-22", "2026-09-21"]
     assert history[0]["headline"]
-    assert history[0]["kpis"]["emails"] == 13
+    assert history[0]["kpis"]["emails"] == 18
 
     client = TestClient(create_app(settings, loaded))
     page = client.get("/digests")
