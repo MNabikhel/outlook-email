@@ -62,7 +62,11 @@
         <div class="kpis">
           <div><span>Needs you</span><b>{{ counts.important }}</b></div>
           <div><span>Open tasks</span><b>{{ counts.open_actions }}</b></div>
+          {% if model.active %}
           <div><span>Waiting on model</span><b>{{ counts.waiting_on_bionic }}</b></div>
+          {% else %}
+          <a class="kpi-link" href="/settings" title="No local model is running. Everything works without one; Setup shows how to add one."><span>Local AI</span><b>Off</b></a>
+          {% endif %}
           <div class="{{ 'hot' if counts.fraud_alerts else '' }}"><span>Fraud flags</span><b>{{ counts.fraud_alerts }}</b></div>
         </div>
       </header>

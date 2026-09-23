@@ -44,7 +44,7 @@
 <p class="lede">
   {{ payload.date_long or payload.date }}.
   {% if payload.window %}Covers mail since {{ payload.window.since_label }}; open tasks carry over until you mark them done.{% endif %}
-  {% if payload.kpis.waiting_on_bionic %}{{ payload.kpis.waiting_on_bionic }} were still waiting on the local model when this was written.{% endif %}
+  {% if payload.kpis.waiting_on_bionic %}{{ payload.kpis.waiting_on_bionic }} were sorted by the scripts alone; no local model had read them yet.{% endif %}
 </p>
 
 {% if payload.critical_alerts %}

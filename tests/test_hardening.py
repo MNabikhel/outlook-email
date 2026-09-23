@@ -249,3 +249,11 @@ def test_a_name_search_prefers_whole_words(settings: Settings, store: Store):
     assert len(store.search_ranked(["north"])) == 1
     _sources, _today, found = pick_sources(store, "anything from Bill?")
     assert [store.get_email(i).subject for i in found] == ["Lunch Thursday?"]
+
+
+def test_header_says_local_ai_is_off_instead_of_waiting(settings: Settings, loaded: Store, monkeypatch):
+    client = TestClient(create_app(settings, loaded))
+    page = client.get("/").text
+    assert "Local AI" in page and "Waiting on model" not in page
+    monkeypatch.setattr(web, "check_model", lambda *_a, **_k: local_llm.ModelStatus(mode="auto", reachable=True, model="llama-3.2-3b"))
+    assert "Waiting on model" in client.get("/").text
