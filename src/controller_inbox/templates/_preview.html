@@ -1,0 +1,52 @@
+{% set fraud = 'fraud_risk' in email.flags or email.category.value == 'payment_instruction_change' %}
+<article class="preview" data-email-id="{{ email.id }}">
+  <p class="preview-meta">
+    <span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }}</span>
+    {{ email.category.value | label_doc }}{% if email.folder %} · {{ email.folder | capitalize }}{% endif %}
+  </p>
+  <h2>{{ email.subject }}</h2>
+  <p class="muted">{{ email.sender_name or email.sender_email }}{% if email.sender_name %} &lt;{{ email.sender_email }}&gt;{% endif %} · {{ email.received_at | shortdt }}</p>
+  {% if fraud %}
+  <p class="warn-box">Payment details may have changed. Verify by phone using a number you already have. Don't pay, and don't reply with account details.</p>
+  {% endif %}
+  {% if email.summary %}<p class="preview-summary">{{ email.summary }}</p>{% endif %}
+  {% include "_mail_tools.html" %}
+
+  {% if email.actions %}
+  <section class="preview-part">
+    <h3>Tasks</h3>
+    <ul class="actions">
+      {% for action in email.actions %}
+      <li class="{{ 'is-done' if action.status.value == 'done' else '' }}">
+        <div>
+          <strong>{{ action.title }}</strong>
+          <small>{{ action.priority.value | label_imp }}{% if action.due_date %} · due {{ action.due_date }}{% endif %} · {{ action.status.value }}</small>
+        </div>
+        {% if action.status.value != 'done' %}
+        <form method="post" action="/actions/{{ action.id }}/complete?next={{ back | urlencode }}">
+          <button class="tiny" type="submit">Done</button>
+        </form>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+
+  <section class="preview-part">
+    <h3>Email</h3>
+    <pre class="body">{{ email.body_text or '(no text)' }}</pre>
+  </section>
+
+  {% if email.attachments %}
+  <section class="preview-part">
+    <h3>Attachments</h3>
+    <ul class="plain">
+      {% for att in email.attachments %}
+      <li>{{ att.filename }} <small class="muted">· {{ att.document_type.value | label_doc }}</small></li>
+      {% endfor %}
+    </ul>
+  </section>
+  {% endif %}
+  <p class="preview-foot"><a data-full href="/inbox/{{ email.id }}">Full page: why it was flagged, extracted text, fix the category →</a></p>
+</article>

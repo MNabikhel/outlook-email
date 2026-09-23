@@ -1,10 +1,11 @@
 ---
 name: closedesk-inbox
 description: >-
-  Read a CloseDesk inbox overnight. Use when the user asks to process mail,
-  file messages into Important, Informational, or Reference, build the daily
-  digest, clear the waiting queue, or run the CloseDesk inbox skill. Scripts
-  already extracted the text; you decide the reading.
+  Read a CloseDesk inbox and answer "what do I need to do today?". Use when
+  the user asks to process mail, file messages into Important, Informational,
+  or Reference, build the daily digest, clear the waiting queue, look back at
+  past digests, or run the CloseDesk inbox skill. Scripts already extracted
+  the text; you decide the reading.
 ---
 
 # CloseDesk inbox
@@ -69,6 +70,15 @@ The field list and folder meanings are in `references/tools.md` in this skill fo
 - An attachment note that says there is no extractable text is a scan. Say so in the summary. Do not guess what the scan says.
 - An empty `actions` list keeps the script's existing tasks. Send actions only when you want those tasks to replace the draft list.
 - Do not overwrite a message the user already corrected. Those are `model_status: corrected` and they are not in the queue.
+- If `save_reading` returns `guard_notes`, CloseDesk corrected part of your reading (an amount or date that is not in the packet, a task due this week filed away from Important, or a bank-change email treated as routine). Do not try to save it again the other way.
+
+## "What do I need to do today?"
+
+```bash
+python -m controller_inbox tool focus
+```
+
+Answer from `do_not_process` first, then `focus` in rank order (each row has a label such as *Overdue 2 days* or *Due today*, a title, and a one-line summary), then `coming_up`. Keep it short: the user wants the list, not the method. For an earlier day, pass `--date YYYY-MM-DD`; `tool digest_history` lists the days that have a digest.
 
 ## After you finish
 

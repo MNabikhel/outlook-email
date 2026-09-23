@@ -14,7 +14,12 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import AttachmentRecord, EmailRecord, RawMessage
+from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
+
+# A message the model already read, or the user corrected, is not re-scored
+# when the same mail is dropped or synced again.
+KEEP_READINGS = {"bionic", "corrected"}
 
 
 class Mailbox(Protocol):
@@ -36,6 +41,9 @@ def process_message(
     writeback: bool | None = None,
 ) -> EmailRecord:
     now = now or datetime.now(timezone.utc)
+    existing = store.get_email(raw.id)
+    if existing is not None and existing.model_status in KEEP_READINGS:
+        return existing
     as_of = as_of or now.astimezone(settings.tz).date()
     attachments_raw = explode_archives(list(raw.attachments))
     if mailbox is not None and not attachments_raw and raw.has_attachments:
@@ -97,6 +105,7 @@ def process_message(
         vip_senders=settings.vip_list,
         has_attachments=bool(attachments_raw) or raw.has_attachments,
         duplicate_invoice=duplicate,
+        finance=is_finance(settings, store),
     )
     classified_email = _refine(
         classified_email,
@@ -121,6 +130,8 @@ def process_message(
         flags=classified_email.flags,
         as_of=as_of,
         now=now,
+        sender=raw.sender_name or raw.sender_email,
+        has_invite=any(att.filename.lower().endswith(".ics") for att in att_records),
     )
 
     writeback_status = "skipped"
@@ -159,10 +170,9 @@ def process_message(
         attachments=att_records,
         actions=actions,
     )
-    from controller_inbox.reading import assign_script_draft, try_bionic_read
+    from controller_inbox.reading import assign_script_draft
 
     assign_script_draft(record)
-    try_bionic_read(record, store, settings)
     store.upsert_email(record)
     return store.get_email(record.id) or record
 

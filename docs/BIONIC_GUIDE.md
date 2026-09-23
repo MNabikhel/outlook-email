@@ -37,18 +37,19 @@ Copy `.env.example` to `.env` if you want to change paths or the timezone. The d
 
 ## 2. Start the local model
 
-1. Install [LM Studio](https://lmstudio.ai/) and download a model you are willing to leave running overnight. A model that follows JSON instructions matters more than a huge one.
+1. Install [LM Studio](https://lmstudio.ai/) and download a model you are willing to leave running overnight. A model that follows JSON instructions matters more than a huge one — a 3B–8B *instruct* model (Qwen 2.5, Llama 3.x, Phi) is plenty.
 2. Load the model.
 3. Start the local server. The default address CloseDesk expects is `http://127.0.0.1:1234/v1`.
-4. In `.env`:
+4. Check it: `python -m controller_inbox llm-check`. It lists the loaded model, times one sample reading, and estimates how long the waiting queue will take.
 
-```env
-CONTROLLER_INBOX_LLM=true
-CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:1234/v1
-CONTROLLER_INBOX_LLM_MODEL=local-model
-```
+Nothing else to configure: `CONTROLLER_INBOX_LLM=auto` (the default) uses the model whenever the server has one loaded. Set `CONTROLLER_INBOX_LLM_MODEL` to a specific id only when you want to pin one, `CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:11434/v1` for Ollama, or `CONTROLLER_INBOX_LLM=false` to never use a model.
 
-`local-model` means "use whatever LM Studio has loaded." Set `CONTROLLER_INBOX_LLM_MODEL` to a specific id only when you want to pin one.
+What CloseDesk does so a small model holds up:
+
+- Each packet is short plain text with a hard size limit (`CONTROLLER_INBOX_LLM_MAX_PROMPT_CHARS`, default 6000), so a 4k-context model is not overrun.
+- Structured JSON output is requested when the server supports it; loose replies (code fences, chat around the JSON) are still parsed.
+- A summary that quotes an amount not in the email, or a due date not in the email, is not accepted. A task due this week keeps the email in Important. Payment-change warnings stay in Important with "verify by phone".
+- If the server stops answering, the run stops asking instead of waiting on every remaining message.
 
 Leave the server running. Overnight has nothing to call if the server is asleep.
 
@@ -88,12 +89,12 @@ That command:
 
 1. Reads anything new in the drop folder.
 2. Pulls recent Outlook mail too, if you already connected Microsoft 365.
-3. Sends each draft packet to the local model, up to 40 a night (`CONTROLLER_INBOX_OVERNIGHT_BATCH`).
+3. Sends each draft packet to the local model, most important first, up to 40 a night (`CONTROLLER_INBOX_OVERNIGHT_BATCH`).
 4. Files the reading into Important, Informational, or Reference.
-5. Rebuilds the daily digest.
+5. Writes today's focus digest (and keeps it in the digest history).
 6. Writes `data/overnight/YYYY-MM-DD.md` so you can see what happened.
 
-If the model is off, the command still files script drafts and says so in the log. The dashboard shows those rows as **Waiting on Bionic**. Run the command again after the server is up, or let Bionic finish the queue with the skill.
+If the model is off, the command still files script drafts and says so in the log. The dashboard marks those rows **Script draft**. Run the command again after the server is up, or let Bionic finish the queue with the skill.
 
 A prompt you can paste into Bionic when you want the agent, not the unattended command, to do the reading:
 
@@ -113,16 +114,20 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
 
 | Section | What you do there |
 | --- | --- |
-| Morning | Counts for the three folders, what's due, and how many messages are still waiting on Bionic |
-| Daily digest | One page: fraud warnings, overdue, due today, invoices, cash to apply |
+| Today | The headline, any do-not-process warning, your ranked focus list with Done buttons, and what came in since yesterday by folder |
+| Daily digest | The same as a saved page per day: focus, new mail with summaries, due this week, invoices, cash, close |
+| Past digests | Every earlier day's digest, with its headline |
 | Important | Mail that needs a decision, a payment check, or a close task |
 | Action items | The task list. Mark items done. Export CSV if you want it in a sheet. |
 | Informational | Newsletters and FYI. Nothing is waiting on you. |
 | Reference | Statements, purchase orders, contracts, and other files to keep. Not tonight's work. |
 | All mail | The full list, when you need to search |
 | Attachments | Every file, by type |
+| Ask CloseDesk (bottom-right, every page) | Chat with the same local model about your mail. It answers from the emails it finds and cites them; click a citation to open the email |
 
-Each row has a one-line summary. **Waiting on Bionic** means the folder is still the script draft. **Read by Bionic** means the model filed it.
+Click any email to open it in a side panel, with **Open in Outlook** and **Draft a reply**.
+
+Each row has a one-line summary. **Script draft** means the folder is still the script draft. **Read by local model** means the model filed it.
 
 ## 7. Teach it when it is wrong
 
@@ -156,7 +161,11 @@ The sample is a September 2026 inbox: a Northwind invoice, a duplicate of that i
 
 | Command | What it does |
 | --- | --- |
+| `python -m controller_inbox run` | Everyday: drop folder, model, digest, then open the dashboard (what `CloseDesk.bat` runs) |
 | `python -m controller_inbox overnight` | Night run: drop folder, model, digest, log |
+| `python -m controller_inbox llm-check` | Is the model answering, and how fast |
+| `python -m controller_inbox tool focus` | JSON: today's ranked focus list |
+| `python -m controller_inbox tool digest_history` | JSON: past digests and their headlines |
 | `python -m controller_inbox tool queue_status` | JSON count of what Bionic still has to read |
 | `python -m controller_inbox tool prepare_queue --limit 20` | JSON packets (text already extracted) |
 | `python -m controller_inbox tool save_reading --json '...'` | File one reading |

@@ -17,7 +17,7 @@ def test_script_drafts_file_the_demo_mailbox(loaded):
     assert rows["demo-inv-10482"].folder == "important"
     assert rows["demo-po"].folder == "reference"
     counts = loaded.counts()
-    assert counts["waiting_on_bionic"] == 14
+    assert counts["waiting_on_bionic"] == 19
     assert counts["important"] >= 1
     assert counts["informational"] >= 1
     assert counts["reference"] >= 1
@@ -31,7 +31,7 @@ def test_prepare_queue_is_extracted_text_not_raw_files(loaded):
     assert "body" in packet and "extracted" in packet
     assert packet["script_draft"]["folder"] in {"important", "informational", "reference"}
     status = queue_status(loaded, _settings(loaded))
-    assert status["waiting_on_bionic"] == 14
+    assert status["waiting_on_bionic"] == 19
 
 
 def test_fraud_reading_cannot_land_in_informational(loaded):
@@ -82,17 +82,31 @@ def test_model_reading_replaces_the_draft(loaded):
 def test_overnight_without_model_still_files_and_logs(loaded, settings, as_of_now):
     result = run_overnight(loaded, settings, now=as_of_now, sync_graph=False)
     assert result["read_by_bionic"] == 0
-    assert result["waiting_on_bionic"] == 14
+    assert result["waiting_on_bionic"] == 19
     assert result["folders"]["important"] >= 1
     log = open(result["log_path"], encoding="utf-8").read()
     assert "Bionic was off" in log
     assert "Important" in log
 
 
-def test_overnight_applies_a_local_reading(loaded, settings, as_of_now, monkeypatch):
-    settings.llm = True
+class AgreeingReader:
+    """Stands in for LocalReader: agrees with the script draft."""
 
-    def fake_read(_settings, packet):
+    def __init__(self):
+        from controller_inbox.local_llm import ReaderStats
+
+        self.model = "test-model"
+        self.stats = ReaderStats()
+        self.subjects: list[str] = []
+
+    @property
+    def stopped(self):
+        return bool(self.stats.stopped_reason)
+
+    def read(self, packet):
+        self.subjects.append(packet["subject"])
+        self.stats.read += 1
+        self.stats.seconds += 0.5
         return {
             "category": packet["script_draft"]["category"],
             "folder": packet["script_draft"]["folder"],
@@ -102,12 +116,17 @@ def test_overnight_applies_a_local_reading(loaded, settings, as_of_now, monkeypa
             "why": "Agreed with the extracted facts.",
         }
 
-    monkeypatch.setattr("controller_inbox.overnight.read_packet", fake_read)
-    monkeypatch.setattr("controller_inbox.overnight.resolve_model", lambda _settings: "test-model")
-    result = run_overnight(loaded, settings, now=as_of_now, limit=3, sync_graph=False)
+
+def test_overnight_applies_a_local_reading(loaded, settings, as_of_now):
+    reader = AgreeingReader()
+    result = run_overnight(loaded, settings, now=as_of_now, limit=3, sync_graph=False, reader=reader)
     assert result["read_by_bionic"] == 3
-    assert result["waiting_on_bionic"] == 11
+    assert result["waiting_on_bionic"] == 16
+    assert result["model"] == "test-model"
+    assert result["avg_seconds"] == 0.5
     assert loaded.counts()["read_by_bionic"] == 3
+    read = [loaded.get_email(email_id) for email_id in [e.id for e in loaded.list_emails(model_status="bionic")]]
+    assert all(email.folder == "important" for email in read), "the model reads Important mail first"
 
 
 def test_cli_tool_prints_json(loaded, settings, monkeypatch, capsys):

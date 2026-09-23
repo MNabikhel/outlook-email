@@ -118,3 +118,51 @@ def test_large_invoice_near_due_is_high():
     )
     assert result.importance in {Importance.HIGH, Importance.CRITICAL}
     assert result.document_type == DocumentType.AP_INVOICE
+
+
+def test_everyday_bank_change_wording_is_fraud():
+    for body in (
+        "We have changed our bank. Please update our remittance details before your next payment run.",
+        "Kindly send the INV-8841 payment to the new account below.",
+        "We switched banks last month; please update your records with our payment information.",
+    ):
+        result = classify_document(subject="Remittance update", body=body, sender="accounts@harb0r-logistics.co")
+        assert result.document_type == DocumentType.PAYMENT_INSTRUCTION_CHANGE, body
+        assert "fraud_risk" in result.flags
+
+
+def test_bank_words_in_ordinary_mail_are_not_fraud():
+    for body in (
+        "We moved bank reconciliation to Friday this month.",
+        "Please review the new account reconciliation before close.",
+        "We have not changed our bank; the remit-to on the invoice is correct.",
+    ):
+        result = classify_document(subject="Update", body=body, sender="team@corp.example")
+        assert "fraud_risk" not in result.flags, body
+
+
+def _email(subject: str, body: str, *, duplicate: bool = False):
+    return classify_email(
+        subject=subject,
+        body=body,
+        sender="someone@corp.example",
+        outlook_importance="normal",
+        attachments=[],
+        fields=extract_fields(f"{subject}\n{body}", as_of=AS_OF),
+        as_of=AS_OF,
+        has_attachments=False,
+        duplicate_invoice=duplicate,
+    )
+
+
+def test_office_closed_is_not_month_end_work():
+    result = _email("Office closed Monday Sep 28 for maintenance", "FYI: the office will be closed Monday.")
+    assert "month_end" not in result.flags
+    assert "month_end" in _email("September close checklist", "Please finish your close tasks.").flags
+
+
+def test_duplicate_invoice_flag_only_on_invoices():
+    mention = _email("Question", "Can you confirm when INV-8841 will be paid?", duplicate=True)
+    assert "duplicate_invoice" not in mention.flags
+    invoice = _email("Invoice INV-8841", "Vendor invoice INV-8841, amount due $1,200.00.", duplicate=True)
+    assert "duplicate_invoice" in invoice.flags

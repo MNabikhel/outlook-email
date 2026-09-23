@@ -1,62 +1,108 @@
 {% extends "base.html" %}
-{% block title %}Morning · CloseDesk{% endblock %}
-{% block heading %}Morning{% endblock %}
+{% block title %}Today · CloseDesk{% endblock %}
+{% block heading %}Today{% endblock %}
 {% block body %}
+{% include "_job.html" %}
+<section class="today-head">
+  <p class="headline">{{ payload.headline }}</p>
+  <form method="post" action="/process">
+    <button type="submit" {{ 'disabled' if job.state == 'running' else '' }}>Process new mail</button>
+  </form>
+</section>
 <p class="lede">
-  {% if counts.waiting_on_bionic %}
-  {{ counts.waiting_on_bionic }} still waiting on Bionic. Folders below are script drafts until the overnight run reads them.
+  {% if counts.waiting_on_bionic and model.active %}
+  {{ counts.waiting_on_bionic }} message{{ '' if counts.waiting_on_bionic == 1 else 's' }} still waiting on the local model. Click <b>Process new mail</b> and it reads the most important first.
+  {% elif counts.waiting_on_bionic %}
+  Filed by the fast scripts. Start LM Studio's server and click <b>Process new mail</b> for the model's one-line summaries.
   {% else %}
-  Bionic has read the queue. Start with Important, then the action list.
+  Everything has been read. Work down the list; mark a task done and it drops off.
   {% endif %}
 </p>
-<section class="folder-grid">
-  <a class="panel folder-card" href="/folder/important">
-    <span>Important</span>
-    <b>{{ counts.important }}</b>
-    <ul>
-      {% for email in important %}
-      <li>{{ email.subject }}</li>
-      {% else %}
-      <li class="muted">Nothing filed here.</li>
-      {% endfor %}
-    </ul>
-  </a>
-  <a class="panel folder-card" href="/actions">
-    <span>Action items</span>
-    <b>{{ counts.open_actions }}</b>
-    <ul>
-      {% for action, email in due_today %}
-      <li>Today · {{ action.title }}</li>
-      {% endfor %}
-      {% for action, email in overdue %}
-      <li>Overdue · {{ action.title }}</li>
-      {% else %}
-      {% if not due_today %}<li class="muted">No dated items due.</li>{% endif %}
-      {% endfor %}
-    </ul>
-  </a>
-  <a class="panel folder-card" href="/folder/informational">
-    <span>Informational</span>
-    <b>{{ counts.informational }}</b>
-    <ul>
-      {% for email in informational %}
-      <li>{{ email.subject }}</li>
-      {% else %}
-      <li class="muted">Nothing filed here.</li>
-      {% endfor %}
-    </ul>
-  </a>
-  <a class="panel folder-card" href="/folder/reference">
-    <span>Reference</span>
-    <b>{{ counts.reference }}</b>
-    <ul>
-      {% for email in reference %}
-      <li>{{ email.subject }}</li>
-      {% else %}
-      <li class="muted">Nothing filed here.</li>
-      {% endfor %}
-    </ul>
-  </a>
+
+{% if payload.critical_alerts %}
+<section class="panel alert">
+  <h2>Do not process — verify by phone</h2>
+  <ul>
+    {% for item in payload.critical_alerts %}
+    <li>
+      <a href="/inbox/{{ item.id }}"><strong>{{ item.subject }}</strong></a>
+      <small>{{ item.sender }} · {{ item.summary }}</small>
+    </li>
+    {% endfor %}
+  </ul>
 </section>
-<p class="muted">Daily digest is the one-page version of this morning. <a href="/digest">Open it</a>.</p>
+{% endif %}
+
+<section class="focus">
+  <h2>Your focus today</h2>
+  <ol class="focus-list">
+    {% for row in payload.focus %}
+    <li class="focus-item {{ row.kind }}" data-email="{{ row.email_id }}">
+      <span class="rank">{{ row.rank }}</span>
+      <div class="focus-body">
+        <div class="focus-top">
+          <span class="tag {{ row.kind }}">{{ row.label }}</span>
+          <a href="/inbox/{{ row.email_id }}">{{ row.title }}</a>
+        </div>
+        <p>{{ row.summary or row.subject }}</p>
+        <small>
+          {{ row.sender }}{% if row.title != row.subject %} · {{ row.subject }}{% endif %}
+          {% if row.amount %} · {{ row.amount | money }}{% endif %}
+          {% if row.more_tasks %} · +{{ row.more_tasks }} more task{{ '' if row.more_tasks == 1 else 's' }}{% endif %}
+          {% if row.model_status == 'bionic' %} · <span class="ai">read by local model</span>{% endif %}
+        </small>
+      </div>
+      {% if row.action_id %}
+      <form method="post" action="/actions/{{ row.action_id }}/complete?next=/">
+        <button class="tiny ghost" type="submit" title="Mark this task done">Done</button>
+      </form>
+      {% endif %}
+    </li>
+    {% else %}
+    <li class="focus-empty">Nothing needs you right now.</li>
+    {% endfor %}
+  </ol>
+</section>
+
+<h2 class="section-title">What came in since {{ payload.window.since_label }} <small>{{ payload.kpis.emails }} email{{ '' if payload.kpis.emails == 1 else 's' }}</small></h2>
+<section class="folder-grid three">
+  {% for folder, heading, href in [('important', 'Needs you', '/folder/important'), ('informational', 'Worth knowing', '/folder/informational'), ('reference', 'Filed for reference', '/folder/reference')] %}
+  {% set rows = payload.new_mail[folder] %}
+  <article class="panel folder-card {{ folder }}">
+    <span>{{ heading }}</span>
+    <b>{{ rows | length }}</b>
+    <ul>
+      {% for item in rows[:6] %}
+      <li>
+        <a href="/inbox/{{ item.id }}">{{ item.subject }}</a>
+        {% if item.summary and folder != 'reference' %}<small>{{ item.summary }}</small>{% endif %}
+      </li>
+      {% else %}
+      <li class="muted">Nothing new here.</li>
+      {% endfor %}
+    </ul>
+    {% if rows | length > 6 %}<a class="more" href="{{ href }}">See all {{ rows | length }}</a>{% endif %}
+  </article>
+  {% endfor %}
+</section>
+
+<section class="split">
+  <article class="panel">
+    <h3>Coming up in the next 7 days</h3>
+    {% if payload.due_this_week %}
+    <ul>
+      {% for item in payload.due_this_week %}
+      <li><a href="/inbox/{{ item.email_id }}">{{ item.title }}</a><small>Due {{ item.due_label }} · {{ item.subject }}</small></li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">Nothing else is dated this week.</p>
+    {% endif %}
+  </article>
+  <article class="panel">
+    <h3>The one-page version</h3>
+    <p class="muted">The daily digest is this page as a file you can print, forward, or look back on. One is saved every day.</p>
+    <p><a href="/digest">Open today's digest</a> · <a href="/digests">Past digests</a></p>
+  </article>
+</section>
 {% endblock %}

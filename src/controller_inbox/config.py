@@ -8,6 +8,12 @@ from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+PROFILES = {
+    "general": "General — any inbox",
+    "finance": "Finance & accounting — adds month-end and close",
+}
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CONTROLLER_INBOX_",
@@ -30,10 +36,17 @@ class Settings(BaseSettings):
     digest_hour: int = 7
     digest_to: str = ""
     mailbox: str = ""
-    llm: bool = False
+    llm: bool | None = None
     llm_model: str = "local-model"
     llm_base_url: str = "http://127.0.0.1:1234/v1"
+    llm_api_key: str = ""
+    llm_timeout: float = 90.0
+    llm_max_prompt_chars: int = 6000
+    llm_max_tokens: int = 450
     overnight_batch: int = 40
+    digest_lookback_days: int = 1
+    profile: str = "general"
+    chat_max_tokens: int = 500
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"
@@ -44,6 +57,20 @@ class Settings(BaseSettings):
     @classmethod
     def _path(cls, value: str | Path) -> Path:
         return Path(value).expanduser()
+
+    @field_validator("llm", mode="before")
+    @classmethod
+    def _llm_mode(cls, value):
+        """``auto`` (the default) means: use the local model when one is answering."""
+        if value is None or (isinstance(value, str) and value.strip().lower() in {"", "auto"}):
+            return None
+        return value
+
+    @field_validator("profile", mode="before")
+    @classmethod
+    def _profile(cls, value) -> str:
+        text = str(value or "general").strip().lower()
+        return text if text in PROFILES else "general"
 
     @model_validator(mode="after")
     def _unprefixed_secrets(self) -> "Settings":
@@ -94,6 +121,16 @@ class Settings(BaseSettings):
         return self.inbox_dir / "extracted"
 
     @property
+    def inbox_failed(self) -> Path:
+        return self.inbox_dir / "failed"
+
+    @property
+    def llm_mode(self) -> str:
+        if self.llm is None:
+            return "auto"
+        return "on" if self.llm else "off"
+
+    @property
     def vip_list(self) -> list[str]:
         return [part.strip().lower() for part in self.vip_senders.split(",") if part.strip()]
 
@@ -115,6 +152,7 @@ class Settings(BaseSettings):
             self.inbox_attachments,
             self.inbox_processed,
             self.inbox_extracted,
+            self.inbox_failed,
         ):
             folder.mkdir(parents=True, exist_ok=True)
 

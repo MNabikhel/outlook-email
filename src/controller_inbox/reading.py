@@ -9,11 +9,14 @@ action.
 
 from __future__ import annotations
 
+import re
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
+from controller_inbox.classify import QUOTE_START_RE
 from controller_inbox.models import (
     DOCUMENT_LABELS,
+    EVERYDAY_CATEGORIES,
     FOLDERS,
     ActionItem,
     ActionStatus,
@@ -31,9 +34,12 @@ REFERENCE_CATEGORIES = {
     DocumentType.SPREADSHEET,
     DocumentType.IMAGE_SCAN,
     DocumentType.PACKING_SLIP,
+    DocumentType.NOTIFICATION,
 }
 
 ACTION_CATEGORIES = {
+    DocumentType.REPLY_NEEDED,
+    DocumentType.APPROVAL_REQUEST,
     DocumentType.AP_INVOICE,
     DocumentType.AR_INVOICE,
     DocumentType.CREDIT_MEMO,
@@ -46,15 +52,22 @@ ACTION_CATEGORIES = {
     DocumentType.PAYMENT_INSTRUCTION_CHANGE,
 }
 
-INFO_CATEGORIES = {DocumentType.NEWSLETTER, DocumentType.INTERNAL_FYI}
+INFO_CATEGORIES = {DocumentType.NEWSLETTER, DocumentType.INTERNAL_FYI, DocumentType.MEETING}
 
 VERIFY_TITLE = "Verify payment-instruction change by phone before doing anything"
 
+FRAUD_SUMMARY = (
+    "Possible payment-instruction fraud — verify by phone before anything else. "
+    "Do not change bank details or pay from this email."
+)
 _PAY_WORDS = ("pay the", "process the wire", "release the", "new account", "updated wiring", "wire the funds")
+_BANK_WORDS = re.compile(r"\b(bank|account|routing|remit\w*|wire|ach|vendor (?:record|master|file)|pay\w*)\b")
 
 
 def script_folder(category: DocumentType, importance: Importance, flags: list[str]) -> str:
     if "fraud_risk" in flags or category == DocumentType.PAYMENT_INSTRUCTION_CHANGE:
+        return "important"
+    if category == DocumentType.MEETING and importance in {Importance.CRITICAL, Importance.HIGH}:
         return "important"
     if category in INFO_CATEGORIES:
         return "informational"
@@ -71,6 +84,15 @@ def script_summary(email: EmailRecord) -> str:
     if "fraud_risk" in email.flags or email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE:
         return "Payment instructions may have changed. Confirm by phone before any payment."
     label = DOCUMENT_LABELS.get(email.category, email.category.value)
+    lead = lead_sentence(email.body_text)
+    has_facts = bool(email.extracted.primary_invoice or email.extracted.primary_amount is not None)
+    if email.category in {DocumentType.NEWSLETTER, DocumentType.NOTIFICATION}:
+        who = email.sender_name or email.sender_email or "an automated sender"
+        return f"{label} from {who}: {email.subject}".strip()
+    if lead and (email.category in EVERYDAY_CATEGORIES or not has_facts):
+        if email.category in {DocumentType.OTHER, DocumentType.INTERNAL_FYI}:
+            return lead
+        return f"{label}: {lead}"
     bits = [label]
     if email.extracted.primary_invoice:
         bits.append(email.extracted.primary_invoice)
@@ -89,6 +111,43 @@ def script_summary(email: EmailRecord) -> str:
     if "missing_attachment" in email.flags:
         return f"{line}. The note says a file was attached, and none arrived."
     return line
+
+
+_GREETING = re.compile(
+    r"^(?:(?:hi|hello|hey|dear|good\s+(?:morning|afternoon|evening))\b[^.!?,\n]{0,40}[,!:.]?|"
+    r"(?:team|all|folks|everyone|everybody)\s*[,!:.]?)\s*$",
+    re.I,
+)
+_FILLER = re.compile(
+    r"^(?:please\s+(?:find|see)\s+(?:the\s+)?attached|(?:see|find)\s+attached|"
+    r"(?:i\s+)?hope\s+(?:you|this|all)|thanks?(?:\s+you)?(?:\s+(?:so\s+much|again))?[,.!]|"
+    r"thank\s+you\s+for\s+your\s+(?:email|message|note)|happy\s+(?:monday|friday))",
+    re.I,
+)
+
+
+def lead_sentence(body: str, limit: int = 160) -> str:
+    """The first real sentence of a message, without the greeting or the quoted thread."""
+    text = body or ""
+    quote = QUOTE_START_RE.search(text)
+    if quote:
+        text = text[: quote.start()]
+    lines = [line.strip() for line in text.splitlines()]
+    lines = [line for line in lines if line and not _GREETING.match(line)]
+    flat = re.sub(r"\s+", " ", " ".join(lines)).strip()
+    flat = re.sub(
+        r"^(?:(?:hi|hello|hey|dear)(?:\s+[\w.'-]+){0,3}?|team|all|folks|everyone|everybody)\s*[,!:\u2014\u2013-]+\s*",
+        "",
+        flat,
+        flags=re.I,
+    )
+    for sentence in re.split(r"(?<=[.!?])\s+", flat):
+        sentence = sentence.strip()
+        if len(sentence) >= 15 and not _FILLER.match(sentence):
+            sentence = sentence[0].upper() + sentence[1:]
+            return sentence if len(sentence) <= limit else sentence[: limit - 1].rstrip() + "…"
+    flat = flat[:limit]
+    return flat[:1].upper() + flat[1:]
 
 
 def assign_script_draft(email: EmailRecord) -> EmailRecord:
@@ -155,16 +214,34 @@ def build_packet(email: EmailRecord, corrections: list[dict] | None = None) -> d
 
 
 def overlay_reading(email: EmailRecord, parsed: dict, *, now: datetime | None = None) -> EmailRecord:
-    """Apply a model reading onto a message. Fraud cannot be talked out of Important."""
+    """Apply a model reading onto a message.
+
+    Fraud cannot be talked out of Important. A small model's summary that
+    quotes a dollar amount not in the message is replaced by the script
+    summary, a due date it made up is dropped, and a message with a task due
+    within a week stays in Important.
+    """
     now = now or datetime.now(timezone.utc)
+    script_line = email.summary
     category = _category(parsed.get("category"), email.category)
     importance = _importance(parsed.get("importance"), email.importance)
     folder = parsed.get("folder") if parsed.get("folder") in FOLDERS else email.folder or "informational"
-    summary = str(parsed.get("summary") or email.summary or "").strip()[:280]
-    why = str(parsed.get("why") or "Local model reading").strip()[:300]
+    summary = _clean_sentence(parsed.get("summary") or email.summary or "")
+    why = _clean_sentence(parsed.get("why") or "Local model reading", limit=300)
+    guard_notes: list[str] = []
+    invented = _ungrounded_amounts(summary, email)
+    if invented:
+        guard_notes.append(
+            f"Kept the script summary: the model quoted {', '.join(invented)}, which is not in the message."
+        )
+        summary = script_line
 
     fraud = _is_fraud(email, category)
     if fraud:
+        if folder != "important" or importance != Importance.CRITICAL:
+            guard_notes.append(
+                f"Kept in Important as critical: possible payment-instruction fraud (the model said {folder}, {importance.value})."
+            )
         folder = "important"
         importance = Importance.CRITICAL
         if category in INFO_CATEGORIES | {DocumentType.OTHER, DocumentType.MIXED}:
@@ -187,29 +264,43 @@ def overlay_reading(email: EmailRecord, parsed: dict, *, now: datetime | None = 
     email.flags = [flag for flag in email.flags if flag != "needs_model"]
     if "bionic" not in email.flags:
         email.flags.append("bionic")
-    note = f"Bionic: {why}"
-    email.importance_reasons = [note] + [item for item in email.importance_reasons if not item.startswith("Bionic:")]
-
     as_of = _as_of(email)
     provided = parsed.get("actions")
     if isinstance(provided, list) and provided:
-        email.actions = _actions_from_model(email.id, provided, as_of, now)
+        email.actions = _actions_from_model(email.id, provided, as_of, now, known_dates=_known_dates(email))
+        dropped = [item for item in email.actions if item.detail.startswith(_DATE_NOTE)]
+        if dropped:
+            guard_notes.append(
+                f"Replaced {len(dropped)} due date(s) the model gave that are not in the message"
+                + (" with the message's own date." if all(item.due_date for item in dropped) else ".")
+            )
     if fraud:
-        email.actions = [item for item in email.actions if not _looks_like_payment(item.title)]
+        unsafe = [item for item in email.actions if _unsafe_on_fraud(item.title)]
+        if unsafe:
+            email.actions = [item for item in email.actions if item not in unsafe]
+            guard_notes.append(f"Removed {len(unsafe)} task(s) that would act on the new bank details.")
         if not any("phone" in item.title.lower() for item in email.actions):
             email.actions.insert(0, _verify_action(email.id, as_of, now))
+    elif email.folder != "important":
+        soon = (as_of + timedelta(days=7)).isoformat()
+        pressing = [
+            item
+            for item in email.actions
+            if item.status == ActionStatus.OPEN and item.due_date and item.due_date <= soon
+        ]
+        if pressing:
+            email.folder = "important"
+            if email.importance == Importance.LOW:
+                email.importance = Importance.MEDIUM
+                email.importance_score = _score(Importance.MEDIUM, False)
+            guard_notes.append(f"Kept in Important: “{pressing[0].title}” is due {pressing[0].due_date}.")
+    if fraud and not _warns(email.summary):
+        email.summary = FRAUD_SUMMARY
+        guard_notes.append("Replaced the model's summary with a fraud warning: it did not warn about the bank change.")
+
+    reasons = [item for item in email.importance_reasons if not item.startswith(("Bionic:", "Guard:"))]
+    email.importance_reasons = [f"Bionic: {why}"] + [f"Guard: {note}" for note in guard_notes] + reasons
     return email
-
-
-def try_bionic_read(email: EmailRecord, store, settings) -> EmailRecord:
-    if not settings.llm or email.model_status == "corrected":
-        return email
-    from controller_inbox.local_llm import read_packet
-
-    parsed = read_packet(settings, build_packet(email, store.list_corrections()))
-    if not parsed:
-        return email
-    return overlay_reading(email, parsed)
 
 
 def apply_bionic_reading(store, email_id: str, parsed: dict) -> EmailRecord:
@@ -261,7 +352,66 @@ def _as_of(email: EmailRecord) -> date:
         return datetime.now(timezone.utc).date()
 
 
-def _actions_from_model(email_id: str, raw_actions: list, as_of: date, now: datetime) -> list[ActionItem]:
+_DATE_NOTE = "Model suggested due"
+_MONEY = re.compile(r"\$\s?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)(\s?[kKmM]\b)?")
+
+
+def _clean_sentence(value, *, limit: int = 240) -> str:
+    text = re.sub(r"[*_`#>]+", "", str(value or ""))
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+    return text
+
+
+def _warns(summary: str) -> bool:
+    text = (summary or "").lower()
+    return any(word in text for word in ("verify", "phone", "fraud", "do not pay", "confirm by"))
+
+
+def _haystack(email: EmailRecord) -> str:
+    parts = [email.subject, email.body_text] + [att.extracted_text for att in email.attachments]
+    return "\n".join(part or "" for part in parts)
+
+
+def _ungrounded_amounts(summary: str, email: EmailRecord) -> list[str]:
+    """Dollar figures in a model summary that the message itself does not contain."""
+    known = [float(value) for value in email.extracted.amounts]
+    for att in email.attachments:
+        known += [float(value) for value in att.extracted_fields.amounts]
+    haystack = _haystack(email).replace(",", "")
+    invented = []
+    for match in _MONEY.finditer(summary or ""):
+        raw = match.group(1).replace(",", "")
+        try:
+            value = float(raw)
+        except ValueError:
+            continue
+        if match.group(2):
+            value *= 1_000_000 if match.group(2).strip().lower() == "m" else 1_000
+            if any(abs(value - item) <= max(0.06 * item, 1) for item in known):
+                continue
+        elif any(abs(value - item) < 0.01 for item in known) or raw in haystack:
+            continue
+        invented.append(match.group(0).strip())
+    return invented
+
+
+def _known_dates(email: EmailRecord) -> set[str]:
+    dates = set(email.extracted.due_dates)
+    for att in email.attachments:
+        dates.update(att.extracted_fields.due_dates)
+    return dates
+
+
+def _actions_from_model(
+    email_id: str,
+    raw_actions: list,
+    as_of: date,
+    now: datetime,
+    *,
+    known_dates: set[str] | None = None,
+) -> list[ActionItem]:
     created = now.replace(microsecond=0).isoformat()
     items: list[ActionItem] = []
     seen: set[str] = set()
@@ -279,13 +429,21 @@ def _actions_from_model(email_id: str, raw_actions: list, as_of: date, now: date
             due_text = None
         if due_text and len(due_text) >= 10:
             due_text = due_text[:10]
+        if due_text and not _iso_date(due_text):
+            due_text = None
+        detail = str(raw.get("detail") or "")[:500]
+        if due_text and known_dates is not None and due_text not in known_dates:
+            only = next(iter(known_dates)) if len(known_dates) == 1 else None
+            used = f" Using {only}, the date in the message." if only else ""
+            detail = f"{_DATE_NOTE} {due_text}; that date is not in the message.{used} {detail}".strip()
+            due_text = only
         priority = _importance(raw.get("priority"), Importance.MEDIUM)
         items.append(
             ActionItem(
                 id=str(uuid.uuid4()),
                 email_id=email_id,
                 title=title,
-                detail=str(raw.get("detail") or "")[:500],
+                detail=detail,
                 due_date=due_text,
                 priority=priority,
                 status=ActionStatus.OPEN,
@@ -310,6 +468,22 @@ def _verify_action(email_id: str, as_of: date, now: datetime) -> ActionItem:
     )
 
 
+def _iso_date(text: str) -> bool:
+    try:
+        date.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
+
+
 def _looks_like_payment(title: str) -> bool:
     text = title.lower()
     return any(word in text for word in _PAY_WORDS)
+
+
+def _unsafe_on_fraud(title: str) -> bool:
+    """On a suspected bank-change email, only verification steps are safe to suggest."""
+    text = title.lower()
+    if re.search(r"\b(verify|call|phone|confirm by)\b", text):
+        return False
+    return _looks_like_payment(title) or bool(_BANK_WORDS.search(text))

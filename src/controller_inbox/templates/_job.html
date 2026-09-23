@@ -1,0 +1,41 @@
+{% set stage_labels = {'starting': 'Starting', 'importing': 'Reading files', 'reading': 'Local model reading', 'digest': 'Writing the digest'} %}
+{% if job.state == 'running' %}
+<section class="job running" data-poll="/process/status">
+  <div>
+    <strong>{{ stage_labels.get(job.stage, job.stage) }}{% if job.total > 1 %} · {{ job.done }} of {{ job.total }}{% endif %}</strong>
+    <span>{{ job.note }}</span>
+  </div>
+  <progress {% if job.total %}value="{{ job.done }}" max="{{ job.total }}"{% endif %}></progress>
+</section>
+<script>
+  (function poll() {
+    setTimeout(function () {
+      fetch('/process/status').then(function (r) { return r.json(); }).then(function (s) {
+        if (s.state === 'running') {
+          var box = document.querySelector('.job.running');
+          var labels = {{ stage_labels | tojson }};
+          box.querySelector('strong').textContent = (labels[s.stage] || s.stage) + (s.total > 1 ? ' · ' + s.done + ' of ' + s.total : '');
+          box.querySelector('span').textContent = s.note || '';
+          var bar = box.querySelector('progress');
+          if (s.total) { bar.max = s.total; bar.value = s.done; }
+          poll();
+        } else {
+          window.location.href = '/';
+        }
+      }).catch(poll);
+    }, 1200);
+  })();
+</script>
+{% elif job.state == 'done' and job.result %}
+<section class="job done">
+  <strong>Processed.</strong>
+  <span>
+    Read {{ job.result.ingested }} new file{{ '' if job.result.ingested == 1 else 's' }}{% if job.result.already_read %}, {{ job.result.already_read }} already filed{% endif %}.
+    {% if job.result.model %}The local model read {{ job.result.read_by_bionic }}{% if job.result.avg_seconds %} (about {{ job.result.avg_seconds }}s each){% endif %}.{% else %}No local model was running, so mail is filed from the script draft.{% endif %}
+    {% if job.result.failed_files %}{{ job.result.failed_files | length }} file(s) could not be read and were moved to <code>inbox/failed</code>.{% endif %}
+    {% if job.result.model_note and job.result.model %}{{ job.result.model_note }}{% endif %}
+  </span>
+</section>
+{% elif job.state == 'error' %}
+<section class="job error"><strong>Processing stopped.</strong> <span>{{ job.error }}</span></section>
+{% endif %}

@@ -120,6 +120,10 @@ def demo_messages(now: datetime | None = None) -> list[RawMessage]:
         ],
         sheet="Close calendar",
     )
+    invite_ics = (
+        b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nSUMMARY:Q4 planning review\r\n"
+        b"DTSTART:20260924T180000Z\r\nDTEND:20260924T190000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
 
     messages = [
         RawMessage(
@@ -353,6 +357,72 @@ def demo_messages(now: datetime | None = None) -> list[RawMessage]:
             body_preview="Please wire $8,400.00 to Lakeside Tooling...",
             has_attachments=False,
             outlook_importance="high",
+            source="demo",
+        ),
+        RawMessage(
+            id="demo-question",
+            subject="Quick question on the Q4 headcount numbers",
+            sender_name="Maya Chen",
+            sender_email="maya.chen@horizongoods.example",
+            received_at=ts(2),
+            body_text=(
+                "Hi Dan,\n\nCould you send me the updated Q4 headcount numbers before Thursday's leadership "
+                "meeting? I want them in the deck.\n\nThanks,\nMaya"
+            ),
+            body_preview="Could you send me the updated Q4 headcount numbers before Thursday's leadership meeting?",
+            has_attachments=False,
+            source="demo",
+        ),
+        RawMessage(
+            id="demo-meeting",
+            subject="Invitation: Q4 planning review @ Thu Sep 24, 2pm",
+            sender_name="Jordan Lee",
+            sender_email="jordan.lee@horizongoods.example",
+            received_at=ts(6),
+            body_text=(
+                "Jordan Lee has invited you to Q4 planning review.\n"
+                "Thursday, September 24, 2026 2:00 PM - 3:00 PM (Eastern)\n"
+                "Microsoft Teams meeting. Join the meeting now."
+            ),
+            body_preview="Jordan Lee has invited you to Q4 planning review.",
+            has_attachments=True,
+            source="demo",
+            attachments=[_att("invite.ics", invite_ics, "text/calendar")],
+        ),
+        RawMessage(
+            id="demo-approval",
+            subject="Approval needed: offer letter for Senior Analyst",
+            sender_name="Alex Rivera",
+            sender_email="alex.rivera@horizongoods.example",
+            received_at=ts(7),
+            body_text=(
+                "Hi Dan,\n\nPlease approve the offer letter for the Senior Analyst role by September 24, 2026. "
+                "The candidate is waiting on an answer.\n\nAlex\nPeople team"
+            ),
+            body_preview="Please approve the offer letter for the Senior Analyst role by September 24, 2026.",
+            has_attachments=False,
+            source="demo",
+        ),
+        RawMessage(
+            id="demo-notification",
+            subject="Your password will expire in 5 days",
+            sender_name="IT Service Desk",
+            sender_email="no-reply@it.horizongoods.example",
+            received_at=ts(9),
+            body_text="This is an automated message. Your network password expires in 5 days. Do not reply to this email.",
+            body_preview="Your network password expires in 5 days.",
+            has_attachments=False,
+            source="demo",
+        ),
+        RawMessage(
+            id="demo-fyi",
+            subject="Parking garage closed Friday",
+            sender_name="Facilities",
+            sender_email="facilities@horizongoods.example",
+            received_at=ts(11),
+            body_text="Heads up: the parking garage is closed Friday for resurfacing. No action needed.",
+            body_preview="Heads up: the parking garage is closed Friday for resurfacing.",
+            has_attachments=False,
             source="demo",
         ),
     ]
