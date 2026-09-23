@@ -8,7 +8,11 @@ python -m controller_inbox tool prepare_queue --limit 20
 python -m controller_inbox tool list_folder --folder important
 python -m controller_inbox tool build_digest
 python -m controller_inbox tool save_reading --json '<object>'
+python -m controller_inbox tool focus
+python -m controller_inbox tool digest_history --limit 14
 ```
+
+`prepare_queue` returns the most important waiting mail first. `focus` returns today's ranked list (what to do first, with one-line summaries) plus any do-not-process warnings — use it to answer "what do I need to do today?". `digest_history` lists past digests with their one-sentence headline.
 
 `list_folder` accepts `important`, `informational`, or `reference`.
 
@@ -42,10 +46,17 @@ Folders:
 
 A payment-instruction change is always forced back to `important`, even if you send another folder.
 
+CloseDesk also checks every reading. `save_reading` returns `guard_notes` when it changed something:
+
+- a summary that quotes a dollar amount not in the packet is replaced by the script summary;
+- an action `due` date that is not one of the packet's `due_dates` is dropped (the date is kept in the action detail);
+- a message with a task due within 7 days stays in `important`;
+- a fraud summary always tells the reader to verify by phone.
+
 ## Unattended
 
 ```bash
 python -m controller_inbox overnight
 ```
 
-Requires `CONTROLLER_INBOX_LLM=true` and LM Studio's local server (default `http://127.0.0.1:1234/v1`). With the model off, the command still files script drafts and writes `data/overnight/YYYY-MM-DD.md`.
+Uses LM Studio's local server (default `http://127.0.0.1:1234/v1`) whenever it has a model loaded (`CONTROLLER_INBOX_LLM=auto`, the default). With no model answering, the command still files script drafts and writes `data/overnight/YYYY-MM-DD.md`. If the server stops answering mid-run, the run stops asking and says so in the log.

@@ -1,97 +1,75 @@
 # CloseDesk — easy setup
 
-Follow this page once. When the three checks at the bottom pass, it is ready to run overnight.
+CloseDesk turns a pile of Outlook mail into one short page each morning: what you must act on, what you should know, and what can wait. It runs on your laptop. No Outlook add-in, no IT approval, no cloud.
 
-You need Python 3.11 or newer. You do not need an Outlook login to start. The longer notes are in [BIONIC_GUIDE.md](BIONIC_GUIDE.md). The picture version is [CloseDesk-how-it-works.pptx](CloseDesk-how-it-works.pptx).
+The longer notes are in [BIONIC_GUIDE.md](BIONIC_GUIDE.md). The picture version is [CloseDesk-how-it-works.pptx](CloseDesk-how-it-works.pptx).
 
-## 1. Install
+## One-time setup
 
-Open a terminal in this project folder.
+1. Install Python 3.11 or newer from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH** in the installer.
+2. Put this project folder somewhere permanent, for example `Documents\CloseDesk`.
+3. Optional but recommended: install [LM Studio](https://lmstudio.ai/), download a small *instruct* model (3B–8B is plenty), load it, and start the local server (Developer tab → **Start server**). CloseDesk finds it on its own.
 
-Mac or Linux:
+That's it. The first double-click below finishes the setup by itself.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-```
+## Every morning
 
-Windows (Command Prompt):
+1. **Get yesterday's mail out of Outlook** into the project's `inbox/incoming` folder:
+   - **Classic Outlook (Windows):** click the first message, Shift+click the last, and drag the selection onto `inbox\incoming` in File Explorer. Each becomes a `.msg` with its attachments inside.
+   - **New Outlook / Outlook on the web:** open a message → **… → Save as** (or **Download**) → save the `.eml` into `inbox/incoming`.
+   - **Outlook for Mac:** drag messages into `inbox/incoming` in Finder.
 
-```bat
-py -3 -m venv .venv
-.venv\Scripts\activate
-pip install -e ".[dev]"
-```
+   Tip: pin `inbox\incoming` to Quick Access or make a desktop shortcut. Dropping an email you already dropped is fine; it is recognized.
 
-Leave that terminal open. The next commands assume the virtualenv is active (`(.venv)` shows in the prompt).
+2. **Double-click `CloseDesk.bat`** (Windows) or **`CloseDesk.command`** (Mac).
 
-## 2. See it work before you add a model
+   It reads the folder, lets the local model read the most important mail first, writes today's digest, and opens the dashboard in your browser. Leave the black window open while you use the dashboard; close it when you're done.
+
+3. **Read the Today page top to bottom.**
+   - A red **Do not process — verify by phone** box means someone asked to change payment details. Call a number you already have before doing anything.
+   - **Your focus today** is the short ranked list. Click **Done** as you finish things; they drop off.
+   - **What came in since yesterday** splits the rest into *Needs you*, *Worth knowing*, and *Filed for reference*, each with a one-line summary.
+
+Every day's digest is kept under **Past digests**, so you can look back at what came in last Tuesday.
+
+## Try it first with sample mail
 
 ```bash
 python -m controller_inbox demo --serve
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
+Or click **Load sample mailbox** on the Get started page. Once your own mail is loaded, the sample button is switched off so it can never erase your mail.
 
-You should see Morning, with mail already filed into Important, Informational, and Reference. The wiring-instruction sample sits in Important and says to verify by phone. Stop the dashboard with Ctrl+C when you have looked.
+## Run it before you wake up (optional)
 
-## 3. Turn on the local model
+Windows Task Scheduler, weekdays at 6:30 (change the path):
 
-1. Install [LM Studio](https://lmstudio.ai/) and download a model that can follow instructions.
-2. Load the model.
-3. Start the local server. Leave it running. CloseDesk calls `http://127.0.0.1:1234/v1`.
-4. In this project folder, copy `.env.example` to `.env` and set:
-
-```env
-CONTROLLER_INBOX_LLM=true
-CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:1234/v1
-CONTROLLER_INBOX_LLM_MODEL=local-model
+```bat
+schtasks /Create /SC WEEKLY /D MON,TUE,WED,THU,FRI /ST 06:30 /TN "CloseDesk morning" /TR "\"C:\Users\you\Documents\CloseDesk\scripts\overnight.bat\""
 ```
 
-`local-model` means “use whatever LM Studio currently has loaded.”
+Mac / Linux (`crontab -e`):
 
-Optional: in Bionic, open **Settings → Skills** and add `bionic/closedesk-inbox/SKILL.md`. Open this project as Bionic’s folder. You can skip the skill if you only want the overnight command.
-
-## 4. Give it your mail
-
-Drag Outlook messages into `inbox/incoming/` as `.msg` or `.eml`.
-
-Attachments inside the message are unpacked on their own. If you saved the files separately, put them in `inbox/attachments/` inside a folder with the same name as the message.
-
-## 5. Run the night
-
-LM Studio’s server stays on. In the project terminal:
-
-```bash
-python -m controller_inbox overnight
+```cron
+30 6 * * 1-5  /Users/you/Documents/CloseDesk/scripts/overnight.sh
 ```
 
-In the morning:
-
-```bash
-python -m controller_inbox serve
-```
-
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765) again. Start with Daily digest, then Important, then Action items. Informational is skippable. Reference is “keep this, not tonight.”
-
-A row that says **Waiting on Bionic** was filed by the scripts only. **Read by Bionic** means the model read it. If the server was off, run `overnight` again after you start it.
-
-The night also writes `data/overnight/` plus today’s date, as a markdown file.
+Leave LM Studio's server running overnight. In the morning, double-click CloseDesk as usual — the night's reading is already done, so it only picks up anything new and opens the digest.
 
 ## You are ready when
 
-1. `python -m controller_inbox demo --serve` opens the morning board.
-2. A `.msg` dropped in `inbox/incoming/` shows up after `python -m controller_inbox ingest` or after `overnight`.
-3. With LM Studio’s server on, `overnight` prints a log path and the morning rows can say **Read by Bionic**.
+1. Double-clicking CloseDesk opens the dashboard.
+2. A message dragged into `inbox/incoming` shows up on the Today page after **Process new mail**.
+3. The rail at the bottom-left says **Local model** with a green dot and the model's name (or you are happy with script-only filing).
 
 ## If something is off
 
 | What you see | What to do |
 | --- | --- |
-| `python` is not recognized | Use `python3` on Mac, or `py -3` on Windows. |
-| The page does not open | The serve command must still be running. Use `http://127.0.0.1:8765`. |
-| Everything says Waiting on Bionic | LM Studio’s local server is not running, or `CONTROLLER_INBOX_LLM` is not `true`. Start the server and run `overnight` again. |
-| A payment-change email landed in Informational | It should not stay there. Open it. If the warning is gone, say so in the project — the fraud rule is supposed to force Important and “verify by phone.” |
-
-When a category is wrong, open the message, use **Wrong category?**, and write one sentence on why. The next night will not undo that message.
+| "Python 3.11 or newer is needed" | Install Python from python.org, tick **Add python.exe to PATH**, double-click again. |
+| The page does not open | The CloseDesk window must still be open. Go to [http://127.0.0.1:8765](http://127.0.0.1:8765). |
+| Local model: **not running** | Open LM Studio, load a model, and start the server. Then click **Process new mail** again. `python -m controller_inbox llm-check` says exactly what is wrong. |
+| Summaries look generic | Those came from the fast scripts. Start the model and process again; the model reads everything that is still waiting. |
+| A file landed in `inbox/failed` | Open the `.why.txt` next to it. Usually re-saving the message from Outlook fixes it. |
+| A category is wrong | Open the message, use **Wrong category?**, and write one sentence on why. That sender is learned. |
+| A payment-change email is not in the red box | It should be. Please report it — the fraud rule forces Important and "verify by phone". |

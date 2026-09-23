@@ -1,54 +1,74 @@
 # CloseDesk
 
-A local inbox assistant for Outlook mail.
+A local focus digest for a busy Outlook inbox.
 
-Drop `.msg` or `.eml` files into a folder on your laptop, or connect Microsoft 365. Scripts pull the text, the amounts, the dates, and the file type. A local model in LM Studio's Bionic does the reading and files each message into a morning board: daily digest, important mail, action items, informational, and reference.
+Export yesterday's mail from Outlook into a folder on your laptop (drag and drop — no add-in, no IT approval), double-click **CloseDesk**, and get one page: what you must act on, ranked; what came in and what it was about; and what can wait. Scripts pull the text, amounts, dates, and file types from every email and attachment. A small local model in LM Studio (Bionic) reads the short packets the scripts built and writes the one-line summaries, with guard rails that keep a small model honest. Every day's digest is kept so you can look back.
 
 Start here: [docs/SETUP.md](docs/SETUP.md). How it works, in slides: [docs/CloseDesk-how-it-works.pptx](docs/CloseDesk-how-it-works.pptx). The longer notes are in [docs/BIONIC_GUIDE.md](docs/BIONIC_GUIDE.md).
 
-## Laptop drop folder
+## The everyday loop
 
-This is the path that does not need an Azure app.
+1. Drag yesterday's mail from Outlook into `inbox/incoming/` (`.msg` from classic Outlook, `.eml` from new Outlook, the web, or Mac).
+2. Double-click `CloseDesk.bat` (Windows) or `CloseDesk.command` (Mac/Linux). The first run creates `.venv` and installs everything.
+3. The dashboard opens on **Today**:
+   - **Do not process — verify by phone** when someone asks to change payment details;
+   - **Your focus today** — a ranked list (fraud, overdue, due today, due soon, new decisions), one row per email, with **Done** buttons;
+   - **What came in since yesterday** — *Needs you*, *Worth knowing*, *Filed for reference*, each with a one-line summary;
+   - **Coming up** in the next 7 days.
+4. **Past digests** keeps every day (also written to `data/digests/YYYY-MM-DD.{md,html,json}`).
+
+The same thing from a terminal:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate   # Windows: py -3 -m venv .venv && .venv\Scripts\activate
 pip install -e ".[dev]"
-python -m controller_inbox serve
+python -m controller_inbox run
 ```
 
-Then:
+The digest covers mail since the start of the previous working day (Friday, on a Monday). Open tasks and unverified payment-change warnings carry over until you mark them done.
 
-1. Put Outlook messages in `inbox/incoming/` (`.msg` or `.eml`).
-2. Attachments stored inside the message are unpacked automatically.
-3. If the files were saved separately, put them in `inbox/attachments/<same name as the message>/`.
-4. A loose PDF or workbook dropped straight into `inbox/incoming/` is classified on its own.
-5. On the Setup page, click **Read the drop folder**, or run `python -m controller_inbox ingest`.
+## Laptop drop folder
 
-Originals move to `inbox/processed/`. Unpacked copies are written to `inbox/extracted/` so you can open them.
+1. Put Outlook messages in `inbox/incoming/` (`.msg` or `.eml`). Attachments stored inside the message are unpacked automatically, including forwarded emails attached as items.
+2. If the files were saved separately, put them in `inbox/attachments/<same name as the message>/`.
+3. A loose PDF or workbook dropped straight into `inbox/incoming/` is classified on its own.
+4. Click **Process new mail** on the dashboard, or run `python -m controller_inbox run` (or `ingest` for the scripts only).
+
+Originals move to `inbox/processed/`. Unpacked copies are written to `inbox/extracted/`. A file that cannot be read moves to `inbox/failed/` with a `.why.txt` note instead of being retried forever.
+
+Mail is identified by its `Message-ID`, so the same email saved twice — or once as `.msg` and once as `.eml` — is one record. A message the model already read, or that you corrected, is never reset by dropping it again.
 
 Supported attachments: PDF, Excel (`.xlsx`, `.xlsm`, `.xls`), Word (`.docx`), PowerPoint (`.pptx`), CSV, TSV, TXT, RTF, HTML, and ZIP. Images are marked as scans. If Tesseract and Pillow are installed on the laptop, image text is read too.
 
-## Scripts extract. Bionic decides.
+## Scripts extract. The local model decides.
 
-Use both, with a clear split:
+- **Scripts** read every file and pull invoice numbers, amounts, due dates, and the payment-instruction check. They also draft a folder and a summary, so the board works before — or without — a model. A "please wire this to the new account" message stays critical even if a model would call it routine.
+- **The local model** (LM Studio / Bionic, or Ollama) reads a short plain-text packet — never the raw PDF — and chooses the category, the folder, a one-line summary, and the action items. The most important mail is read first.
+- **Learning** is the correction box on each message. Say what it should be and why. That sender is classified that way next time, the model never overwrites the message you fixed, and the example is appended to `data/training/corrections.jsonl`. A saved correction does not silence a new payment-instruction warning.
 
-- **Scripts** read the file and pull invoice numbers, amounts, due dates, and the payment-instruction check. They also draft a folder so the morning board works before the model has run. A “please wire this to the new account” message stays critical even if a model would call it routine.
-- **Bionic** (the local model in LM Studio) is the reader when you turn it on. It chooses the category, the folder, a one-line summary, and the action items from the packet the scripts already built. It does not re-open the PDF. Install `bionic/closedesk-inbox/` from **Settings → Skills**, or run the unattended night job:
+### Built for a small model on a laptop
 
-```bash
-python -m controller_inbox overnight
-```
+No configuration is needed: `CONTROLLER_INBOX_LLM=auto` (the default) uses a model whenever LM Studio's server has one loaded, and files from the script draft when it does not. `python -m controller_inbox llm-check` shows the loaded model, times a sample reading, and estimates how long the waiting queue will take.
+
+| Problem with small models | What CloseDesk does |
+| --- | --- |
+| Short context windows | Each packet is plain text under a hard budget (`CONTROLLER_INBOX_LLM_MAX_PROMPT_CHARS`, default 6000). |
+| Chatty or fenced JSON | Structured output is requested when the server supports it; fenced, chatty, or trailing-comma replies are still parsed. |
+| Invented numbers | A summary quoting a dollar amount that is not in the email is replaced by the script summary. |
+| Invented dates | An action due date that is not in the email is dropped (kept in the task note). |
+| Burying real work | A task due within a week keeps the email in Important. Fraud stays in Important with "verify by phone". |
+| Slow or crashed server | The model is resolved once per run; if the server stops answering or times out twice, the run stops asking and the mail stays filed. |
+
+Every correction a guard makes is shown on the message under **Why this was flagged**.
 
 ```env
-CONTROLLER_INBOX_LLM=true
-CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:1234/v1
-CONTROLLER_INBOX_LLM_MODEL=local-model
+# Optional overrides (see .env.example)
+CONTROLLER_INBOX_LLM=auto                     # auto | true | false
+CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:1234/v1   # Ollama: http://127.0.0.1:11434/v1
+CONTROLLER_INBOX_LLM_MODEL=local-model        # "whatever is loaded"; set an id to pin one
 ```
 
-`local-model` means “whatever LM Studio has loaded.” With the model off, rows stay marked **Waiting on Bionic** and the folders are still filled from the script draft.
-
-- **Learning** is the correction box on each message. If a category is wrong, say what it should be and why. That sender is classified that way next time, the overnight run will not overwrite the message you fixed, and the example is appended to `data/training/corrections.jsonl`. A saved correction does not silence a new payment-instruction warning.
+The Bionic Studio skill in `bionic/closedesk-inbox/` lets the agent do the reading in chat and answer "what do I need to do today?" with `tool focus`.
 
 ## Sample mailbox
 
@@ -56,18 +76,21 @@ CONTROLLER_INBOX_LLM_MODEL=local-model
 python -m controller_inbox demo --serve
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The sample is a September 2026 mailbox: Northwind invoice INV-10482, a Chase statement, ADP payroll, an IRS CP2000, an auditor PBC, a customer remittance, a close calendar, and a fraudulent wiring-instruction change.
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The sample is a September 2026 mailbox: Northwind invoice INV-10482, a Chase statement, ADP payroll, an IRS CP2000, an auditor PBC, a customer remittance, a close calendar, and a fraudulent wiring-instruction change. Once your own mail is in the database, `demo` and the **Load sample mailbox** button refuse to run so they cannot erase it; use `CONTROLLER_INBOX_DATA_DIR=./data-sample` to look at the sample separately.
 
 | Command | What it does |
 | --- | --- |
-| `python -m controller_inbox overnight` | Read the drop folder, let Bionic file the queue, write the digest and the night log |
-| `python -m controller_inbox ingest` | Read the drop folder |
+| `python -m controller_inbox run` | The everyday command: drop folder, local model, today's digest, open the dashboard |
+| `python -m controller_inbox overnight` | Same, unattended, plus a log in `data/overnight/` (schedule `scripts/overnight.bat` / `.sh`) |
+| `python -m controller_inbox llm-check` | Is the local model answering, and how fast |
+| `python -m controller_inbox ingest` | Read the drop folder with the scripts only |
 | `python -m controller_inbox serve` | Dashboard |
+| `python -m controller_inbox digest` | Rebuild today's digest (`--date`, `--json`, `--history`) |
 | `python -m controller_inbox demo` | Load the sample mailbox and print a digest |
-| `python -m controller_inbox digest` | Rebuild today’s action list |
 | `python -m controller_inbox export` | CSV of action items |
-| `python -m controller_inbox watch` | Poll Outlook and the drop folder; write the morning digest |
-| `python -m controller_inbox status` | Local counts |
+| `python -m controller_inbox watch` | Keep running: drop folder (and Outlook if connected), digest each morning |
+| `python -m controller_inbox status` | Counts, model status (`--json`) |
+| `python -m controller_inbox tool …` | JSON tools for the Bionic agent: `queue_status`, `prepare_queue`, `save_reading`, `list_folder`, `build_digest`, `focus`, `digest_history` |
 
 ## What happens to each message
 
@@ -75,12 +98,12 @@ When a message arrives, CloseDesk:
 
 1. Reads the body and attachments from the drop folder or from Microsoft Graph.
 2. Extracts text from PDF, Excel, Word, PowerPoint, CSV, and HTML. Account and routing numbers are stored as last-4 only.
-3. Drafts a category, a folder (important, informational, or reference), and a one-line summary from those facts.
-4. When the local model is on, Bionic replaces that draft: category, folder, importance, summary, and action items. A payment-instruction warning cannot be moved out of Important.
+3. Drafts a category, a folder (important, informational, or reference), and a one-line summary from those facts. This step is fast and never waits on a model.
+4. When a local model is answering, it reads the waiting messages — Important first — and replaces the draft: category, folder, importance, summary, and action items. The guard rails above apply to every reading.
 5. Scores importance from due dates, dollar amount, sender, month-end proximity, and Outlook’s own importance flag when the model has not read the message yet.
 6. Turns the message into action items you can complete in the dashboard or export to Excel.
 7. Optionally writes Outlook categories and a follow-up flag back onto the message.
-8. Builds a daily digest you can open locally, email to yourself, or leave for the morning from `overnight`.
+8. Builds the daily focus digest you can open locally, print, email to yourself, or leave for the morning from `overnight`.
 
 ## What it catches
 
@@ -154,17 +177,15 @@ CONTROLLER_INBOX_MAILBOX=controller@yourco.com
 
 ## Daily digest
 
-The digest is the thing to read with coffee:
+The digest is the thing to read with coffee. It opens with one sentence — for example *"4 of 13 emails since Mon Sep 21 need you. 1 payment-change warning."* — and then:
 
-- Do-not-process / payment-instruction alerts
-- Overdue actions
-- Due today and due this week
-- Invoices to enter (number, amount, due date)
-- Cash to apply
-- Close / bank-rec items
-- Category mix of what landed
+- **Do not process — verify by phone** for payment-instruction changes (carried over until the verify task is done)
+- **Your focus today**: up to seven items, ranked — fraud, overdue, due today, due in the next few days, new decisions — one row per email with its one-line summary
+- **What came in** since the previous working day, grouped into *Needs you*, *Worth knowing*, and *Filed for reference*
+- **Coming up** in the next 7 days
+- **Month-end** lists when there is something in them: invoices to enter, cash to apply, close / bank-rec items
 
-It is stored in SQLite and written under `data/digests/` as Markdown, HTML, and JSON.
+Each day is stored in SQLite (browse it under **Past digests**, or `digest --history`) and written under `data/digests/` as Markdown, HTML (standalone, printable), and JSON. `CONTROLLER_INBOX_DIGEST_LOOKBACK_DAYS` widens the window.
 
 ## Categories it knows
 
@@ -181,10 +202,18 @@ src/controller_inbox/
   extract.py     Attachment text + invoice/amount/due-date parsing
   classify.py    Finance document rules + importance
   actions.py     Action-item extraction
-  pipeline.py    Ingest → classify → store
-  digest.py      Daily brief
+  pipeline.py    Ingest → classify → store (scripts only, fast)
+  folder_mail.py Drop folder: .msg / .eml / loose files, Message-ID dedupe, inbox/failed
+  reading.py     Script drafts, model packets, and the guard rails on a model reading
+  local_llm.py   LM Studio / Ollama client built for small models
+  overnight.py   One pass: drop folder → model → digest (run, overnight, watch, dashboard)
+  learn.py       Corrections that teach the classifier
+  tools.py       JSON tools for the Bionic agent
+  digest.py      Daily focus digest
   web.py         Local dashboard
   cli.py         controller-inbox / closedesk commands
+CloseDesk.bat / CloseDesk.command   Double-click launchers (first run sets up .venv)
+scripts/overnight.bat / .sh         For Task Scheduler / cron
 ```
 
 Data lives in `data/closedesk.db` (gitignored). Tokens live in `data/msal_token_cache.bin`.
@@ -195,11 +224,11 @@ Data lives in `data/closedesk.db` (gitignored). Tokens live in `data/msal_token_
 pytest
 ```
 
-The suite classifies the demo mailbox end-to-end (including the fraud wire and duplicate invoice) and hits the dashboard routes.
+The suite classifies the demo mailbox end-to-end (including the fraud wire and duplicate invoice), drops real `.eml` files through the folder, exercises the small-model reader against a fake server (structured-output fallback, dead server, chatty replies, invented amounts and dates), checks the focus ranking and digest window, and hits the dashboard routes including background processing.
 
 ## Privacy notes
 
 - Mail is processed on the machine that runs CloseDesk and stored in local SQLite.
 - Routing / account / IBAN values are redacted in stored bodies; only last-4 is kept for matching.
 - Outlook write-back is **off** until you set `CONTROLLER_INBOX_WRITEBACK=true`.
-- There is no vendor cloud AI in the default path. Classification is deterministic so a $48,500 “new account” email cannot be quietly labeled “FYI”.
+- There is no cloud AI in the default path. The model, when used, runs on the laptop. The fraud rules are deterministic so a $48,500 “new account” email cannot be quietly labeled “FYI”, whatever the model says.
