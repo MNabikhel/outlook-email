@@ -226,6 +226,57 @@ class LocalReader:
             raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
 
 
+def _chat_request(settings: Settings, messages: list[dict], max_tokens: int, *, stream: bool) -> tuple[str, dict]:
+    url = settings.llm_base_url.rstrip("/") + "/chat/completions"
+    payload = {
+        "model": check_model(settings).model or settings.llm_model,
+        "temperature": 0.2,
+        "max_tokens": max_tokens,
+        "messages": messages,
+        "stream": stream,
+    }
+    return url, payload
+
+
+def complete_text(settings: Settings, messages: list[dict], *, max_tokens: int = 400) -> str:
+    """One plain-text answer. Raises ``httpx.HTTPError`` when the server fails."""
+    url, payload = _chat_request(settings, messages, max_tokens, stream=False)
+    response = httpx.post(url, json=payload, headers=_headers(settings), timeout=settings.llm_timeout)
+    response.raise_for_status()
+    try:
+        return str(response.json()["choices"][0]["message"]["content"] or "").strip()
+    except (KeyError, IndexError, TypeError, ValueError) as exc:
+        raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
+
+
+def stream_text(settings: Settings, messages: list[dict], *, max_tokens: int = 500):
+    """Yield the answer as it is written. Servers that ignore ``stream`` send it in one piece."""
+    url, payload = _chat_request(settings, messages, max_tokens, stream=True)
+    timeout = httpx.Timeout(settings.llm_timeout, connect=5.0)
+    with httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
+        response.raise_for_status()
+        if "text/event-stream" not in response.headers.get("content-type", ""):
+            data = json.loads(response.read() or b"{}")
+            text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            if text:
+                yield text
+            return
+        for line in response.iter_lines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            chunk = line[5:].strip()
+            if chunk == "[DONE]":
+                return
+            try:
+                choice = (json.loads(chunk).get("choices") or [{}])[0]
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            piece = (choice.get("delta") or {}).get("content") or (choice.get("message") or {}).get("content")
+            if piece:
+                yield piece
+
+
 def read_packet(settings: Settings, packet: dict) -> dict | None:
     """One-off read. Runs that read many messages should share a LocalReader."""
     if not llm_active(settings):

@@ -37,7 +37,7 @@
   <h2>Your focus today</h2>
   <ol class="focus-list">
     {% for row in payload.focus %}
-    <li class="focus-item {{ row.kind }}">
+    <li class="focus-item {{ row.kind }}" data-email="{{ row.email_id }}">
       <span class="rank">{{ row.rank }}</span>
       <div class="focus-body">
         <div class="focus-top">

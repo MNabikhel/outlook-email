@@ -49,7 +49,7 @@ def test_dashboard_after_demo(store, settings, as_of_now):
     important = client.get("/folder/important")
     assert important.status_code == 200
     assert "INV-10482" in important.text
-    assert "Waiting on Bionic" in important.text
+    assert "Script draft" in important.text
 
     informational = client.get("/folder/informational")
     assert informational.status_code == 200

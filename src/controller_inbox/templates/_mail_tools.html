@@ -1,0 +1,21 @@
+<div class="mail-tools">
+  <button type="button" class="ghost" data-action="open-original" data-id="{{ email.id }}" title="{{ 'Open the original file with your mail app' if has_original else 'Opens a copy of this email in your mail app' }}">Open in Outlook</button>
+  <a class="ghost" href="/inbox/{{ email.id }}/original" download>{{ 'Download original' if has_original else 'Download .eml' }}</a>
+  <button type="button" data-action="draft" data-id="{{ email.id }}">Draft a reply</button>
+  <button type="button" class="ghost" data-action="ask" data-id="{{ email.id }}">Ask about this email</button>
+</div>
+<div class="draft-box" data-draft-for="{{ email.id }}" hidden>
+  <div class="draft-head">
+    <strong>Reply draft</strong>
+    <span class="draft-note muted"></span>
+  </div>
+  <textarea class="draft-text" rows="8" aria-label="Reply draft"></textarea>
+  <div class="draft-row">
+    <input class="draft-ask" type="text" maxlength="300" placeholder="Optional: what should it say? e.g. yes, but Friday works better"/>
+    <button type="button" class="ghost" data-action="draft" data-id="{{ email.id }}">Redo</button>
+  </div>
+  <div class="draft-row">
+    <button type="button" data-action="copy-draft">Copy</button>
+    <a class="ghost draft-mailto" href="#">Open in mail app</a>
+  </div>
+</div>

@@ -6,7 +6,7 @@
   <title>{% block title %}CloseDesk{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css?v={{ static_version }}"/>
 </head>
-<body>
+<body{% if email is defined and email %} data-email-id="{{ email.id }}"{% endif %}>
   <div class="shell">
     <aside class="rail">
       <a class="brand" href="/">
@@ -55,6 +55,10 @@
           <p class="sub">{{ counts.emails }} email{{ '' if counts.emails == 1 else 's' }} sorted{% if last_run %} · last processed {{ last_run | shortdt }}{% endif %}</p>
           {% endif %}
         </div>
+        <form class="top-search" method="get" action="/inbox" role="search">
+          <input type="search" name="q" value="{{ query }}" placeholder="Search all mail" aria-label="Search all mail" autocomplete="off"/>
+          <kbd title="Press / to search">/</kbd>
+        </form>
         <div class="kpis">
           <div><span>Needs you</span><b>{{ counts.important }}</b></div>
           <div><span>Open tasks</span><b>{{ counts.open_actions }}</b></div>
@@ -66,5 +70,41 @@
       {% block body %}{% endblock %}
     </div>
   </div>
+
+  <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+  <aside class="drawer" id="drawer" hidden aria-label="Email preview" role="dialog">
+    <div class="drawer-bar">
+      <a class="drawer-full" href="#">Open full page</a>
+      <button type="button" class="ghost drawer-close" data-action="close-drawer" aria-label="Close preview">Close <kbd>Esc</kbd></button>
+    </div>
+    <div class="drawer-body"></div>
+  </aside>
+
+  <button type="button" class="chat-fab" id="chat-toggle" aria-controls="chat" aria-expanded="false">
+    <span class="dot {{ 'on' if model.active else 'off' }}"></span> Ask CloseDesk
+  </button>
+  <section class="chat" id="chat" hidden aria-label="Ask CloseDesk">
+    <header class="chat-head">
+      <div>
+        <strong>Ask CloseDesk</strong>
+        <small>{% if model.active %}Answers from {{ model.model }} on this computer{% else %}No local model running: I'll look things up instead{% endif %}</small>
+      </div>
+      <button type="button" class="ghost tiny" data-action="clear-chat" title="Start over">Clear</button>
+      <button type="button" class="ghost tiny" data-action="close-chat" aria-label="Close chat">✕</button>
+    </header>
+    <div class="chat-log" aria-live="polite"></div>
+    <div class="chat-suggest">
+      <button type="button" class="ghost tiny" data-ask="What's urgent today?">What's urgent today?</button>
+      <button type="button" class="ghost tiny" data-ask="What needs a reply from me?">Needs a reply</button>
+      <button type="button" class="ghost tiny" data-ask="Anything waiting for my approval?">Approvals</button>
+      <button type="button" class="ghost tiny" data-ask="How do I set this up?">Setup help</button>
+    </div>
+    <form class="chat-form">
+      <textarea rows="2" maxlength="1000" placeholder="Ask about your mail… (Enter to send)" aria-label="Your question"></textarea>
+      <button type="submit">Send</button>
+    </form>
+  </section>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="/static/app.js?v={{ static_version }}" defer></script>
 </body>
 </html>
