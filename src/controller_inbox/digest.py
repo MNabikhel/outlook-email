@@ -243,7 +243,11 @@ def _headline(kpis: dict[str, int], since: str) -> str:
     emails = kpis["emails"]
     if not emails and not kpis["open_actions"]:
         return f"Nothing new since {since}, and no open tasks."
-    parts = [f"{kpis['need_you']} of {emails} email{'s' if emails != 1 else ''} since {since} need you"]
+    if emails:
+        parts = [f"{kpis['need_you']} of {emails} email{'s' if emails != 1 else ''} since {since} need you"]
+    else:
+        tasks = kpis["open_actions"]
+        parts = [f"No new email since {since}", f"{tasks} open task{'s' if tasks != 1 else ''}"]
     if kpis["overdue_actions"]:
         parts.append(f"{kpis['overdue_actions']} task{'s' if kpis['overdue_actions'] != 1 else ''} overdue")
     if kpis["fraud_alerts"]:

@@ -286,3 +286,4 @@ def test_today_explains_when_all_the_mail_is_older_than_the_window(settings: Set
     received(web.DEMO_NOW - timedelta(days=30))
     page = client.get("/").text
     assert f"Your {loaded.counts()['emails']} emails arrived before" in page and 'href="/inbox">All mail' in page
+    assert "No new email since" in page and "of 0 emails" not in page
