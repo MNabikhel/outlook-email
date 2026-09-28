@@ -14,7 +14,7 @@ from controller_inbox import assistant, local_llm, web
 from controller_inbox.assistant import answer_stream, draft_reply, pick_sources
 from controller_inbox.config import Settings
 from controller_inbox.folder_mail import ingest_folder
-from controller_inbox.local_llm import ThinkFilter, complete_text, stream_text, strip_thinking
+from controller_inbox.local_llm import EmptyReply, ThinkFilter, complete_text, stream_text, strip_thinking
 from controller_inbox.profile import active_profile
 from controller_inbox.store import Store
 from controller_inbox.web import _host_name, allowed_hosts, create_app
@@ -113,8 +113,10 @@ def test_complete_text_handles_odd_replies(settings: Settings, monkeypatch):
     )
     _fake_server(monkeypatch, lambda _request: next(replies))
     assert complete_text(settings, []) == "Sure, Friday works."
-    assert complete_text(settings, []) == ""
-    assert complete_text(settings, []) == ""
+    with pytest.raises(EmptyReply):
+        complete_text(settings, [])
+    with pytest.raises(EmptyReply):
+        complete_text(settings, [])
 
 
 def test_think_filter_across_any_split():
