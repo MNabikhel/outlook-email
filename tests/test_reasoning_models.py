@@ -253,3 +253,20 @@ def test_complete_text_retries_a_thinking_model(auto, monkeypatch):
     _serve(monkeypatch, server)
     assert complete_text(auto, [{"role": "system", "content": "draft"}], max_tokens=320) == "Start with [1]; it needs you today."
     assert [call["max_tokens"] for call in server.calls] == [320, 2048]
+
+
+def test_thinking_requests_get_a_longer_timeout(auto, monkeypatch):
+    server = FakeLMStudio(native=False)
+    seen: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            seen.append(request.extensions["timeout"]["read"])
+        return server(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(local_llm.httpx, "get", lambda url, **kw: client.get(url))
+    reader = LocalReader(auto, model="qwen/qwen3.5-4b", client=client)
+    reader._structured = False
+    assert reader.read({"subject": "one", "body": "x"})
+    assert seen == [auto.llm_timeout, local_llm.THINKING_TIMEOUT]

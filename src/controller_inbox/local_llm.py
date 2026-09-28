@@ -194,6 +194,7 @@ class EmptyReply(RuntimeError):
 # Reasoning models (Qwen3.x, DeepSeek-R1, gpt-oss) think before answering. That
 # needs far more than the usual token budget unless thinking can be turned off.
 THINKING_ROOM = 2048
+THINKING_TIMEOUT = 300.0
 _RETRYABLE = {400, 404, 415, 422, 500, 501}
 _reasoning_seen: set[str] = set()
 _effort_rejected: set[str] = set()
@@ -255,6 +256,11 @@ def reasoning_effort(settings: Settings, model: str) -> str | None:
     if model in _reasoning_seen:
         return "none"
     return None
+
+
+def _timeout(settings: Settings, budget: int) -> float:
+    """A laptop writing 2,048 tokens of thinking can take minutes."""
+    return max(settings.llm_timeout, THINKING_TIMEOUT) if budget >= THINKING_ROOM else settings.llm_timeout
 
 
 def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> httpx.Response:
@@ -363,21 +369,23 @@ class LocalReader:
         if self._effort:
             payload["reasoning_effort"] = self._effort
         try:
-            response = _post_chat(self.client.post, url, payload, self.settings)
+            response = _post_chat(self.client.post, url, payload, self.settings, timeout=_timeout(self.settings, self._max_tokens))
             if "reasoning_effort" not in payload:
                 self._effort = None
             if self._structured and response.status_code in _RETRYABLE:
                 # Older LM Studio / Ollama builds reject response_format. Ask again, plain.
                 self._structured = False
                 payload.pop("response_format", None)
-                response = self.client.post(url, json=payload, headers=_headers(self.settings))
+                response = self.client.post(
+                    url, json=payload, headers=_headers(self.settings), timeout=_timeout(self.settings, self._max_tokens)
+                )
             response.raise_for_status()
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as exc:
             raise ModelUnavailable(f"the local model server stopped answering ({_short_error(exc)})") from exc
         except httpx.ReadTimeout as exc:
             if self._consecutive_failures >= 1:
                 raise ModelUnavailable(
-                    f"the model took longer than {self.settings.llm_timeout:.0f}s twice in a row"
+                    f"the model took longer than {_timeout(self.settings, self._max_tokens):.0f}s twice in a row"
                 ) from exc
             raise
         try:
@@ -524,7 +532,7 @@ def complete_text(settings: Settings, messages: list[dict], *, max_tokens: int =
         url, payload = _chat_request(settings, messages, budget, stream=False)
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(httpx.post, url, payload, settings, timeout=settings.llm_timeout)
+        response = _post_chat(httpx.post, url, payload, settings, timeout=_timeout(settings, budget))
         response.raise_for_status()
         try:
             data = response.json()
