@@ -269,3 +269,20 @@ def test_setup_page_reassures_when_no_model_is_running(settings: Settings, loade
     assert "Start server" in page
     empty = TestClient(create_app(settings, Store(settings.data_dir / "empty.db"))).get("/").text
     assert "No local model is running right now" in empty and "Connection refused)</p>" not in empty
+
+
+def test_today_explains_when_all_the_mail_is_older_than_the_window(settings: Settings, loaded: Store):
+    from datetime import datetime, timedelta
+
+    client = TestClient(create_app(settings, loaded))
+
+    def received(when: datetime) -> None:
+        for email in loaded.list_emails(limit=100):
+            email.received_at = when
+            loaded.upsert_email(email)
+
+    received(web.DEMO_NOW - timedelta(hours=1))
+    assert "so this section is empty" not in client.get("/").text
+    received(web.DEMO_NOW - timedelta(days=30))
+    page = client.get("/").text
+    assert f"Your {loaded.counts()['emails']} emails arrived before" in page and 'href="/inbox">All mail' in page

@@ -65,6 +65,9 @@
 </section>
 
 <h2 class="section-title">What came in since {{ payload.window.since_label }} <small>{{ payload.kpis.emails }} email{{ '' if payload.kpis.emails == 1 else 's' }}</small></h2>
+{% if payload.kpis.emails == 0 and counts.emails %}
+<p class="muted older-mail">Your {{ counts.emails }} email{{ '' if counts.emails == 1 else 's' }} arrived before {{ payload.window.since_label }}, so this section is empty. Their open tasks are in the focus list, and every email is under <a href="/inbox">All mail</a>.</p>
+{% endif %}
 <section class="folder-grid three">
   {% for folder, heading, href in [('important', 'Needs you', '/folder/important'), ('informational', 'Worth knowing', '/folder/informational'), ('reference', 'Filed for reference', '/folder/reference')] %}
   {% set rows = payload.new_mail[folder] %}
