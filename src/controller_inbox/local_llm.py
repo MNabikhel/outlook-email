@@ -258,6 +258,13 @@ def reasoning_effort(settings: Settings, model: str) -> str | None:
     return None
 
 
+def _thinks(settings: Settings, model: str, effort: str | None) -> bool:
+    """Whether replies need room for thinking. Models like DeepSeek-R1 only allow ``on``."""
+    status = check_model(settings)
+    options = status.reasoning if status.model == model else []
+    return bool(effort) or model in _reasoning_seen or "on" in options
+
+
 def _timeout(settings: Settings, budget: int) -> float:
     """A laptop writing 2,048 tokens of thinking can take minutes."""
     return max(settings.llm_timeout, THINKING_TIMEOUT) if budget >= THINKING_ROOM else settings.llm_timeout
@@ -297,7 +304,7 @@ class LocalReader:
         self._structured = True
         self._effort = reasoning_effort(settings, self.model)
         self._max_tokens = settings.llm_max_tokens
-        if self._effort or self.model in _reasoning_seen:
+        if _thinks(settings, self.model, self._effort):
             self._max_tokens = max(self._max_tokens, THINKING_ROOM)
         self._consecutive_failures = 0
 
@@ -509,8 +516,7 @@ def _chat_plan(settings: Settings, max_tokens: int) -> tuple[str, str | None, in
     """Model, reasoning effort, and token budget for a chat or draft request."""
     model = check_model(settings).model or settings.llm_model
     effort = reasoning_effort(settings, model)
-    thinks = bool(effort) or model in _reasoning_seen
-    return model, effort, max(max_tokens, THINKING_ROOM) if thinks else max_tokens
+    return model, effort, max(max_tokens, THINKING_ROOM) if _thinks(settings, model, effort) else max_tokens
 
 
 def _retry_plan(model: str, effort: str | None, budget: int, reply: Reply) -> tuple[str | None, int] | None:

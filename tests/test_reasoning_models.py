@@ -32,8 +32,9 @@ THOUGHT = "Let me think about this email carefully. " * 80
 class FakeLMStudio:
     """LM Studio 0.4 with a Qwen3.5-style model loaded, as the bug reports describe it."""
 
-    def __init__(self, *, native: bool = True, rejects_effort: bool = False, think_tokens: int = 600):
+    def __init__(self, *, native: bool = True, rejects_effort: bool = False, think_tokens: int = 600, options=("off", "on")):
         self.native = native
+        self.options = list(options)
         self.rejects_effort = rejects_effort
         self.think_tokens = think_tokens
         self.calls: list[dict] = []
@@ -46,7 +47,7 @@ class FakeLMStudio:
         if path == "/api/v1/models":
             if not self.native:
                 return httpx.Response(404, json={"error": "not found"})
-            reasoning = {"reasoning": {"allowed_options": ["off", "on"], "default": "on"}}
+            reasoning = {"reasoning": {"allowed_options": self.options, "default": "on"}}
             return httpx.Response(
                 200,
                 json={
@@ -64,7 +65,7 @@ class FakeLMStudio:
         if self.rejects_effort and "reasoning_effort" in payload:
             return httpx.Response(400, json={"error": "Unrecognized key 'reasoning_effort'"})
         answer = json.dumps(READING) if "JSON object" in payload["messages"][0]["content"] else "Start with [1]; it needs you today."
-        thinking = payload.get("reasoning_effort") not in {"none", "minimal"}
+        thinking = "off" not in self.options or payload.get("reasoning_effort") not in {"none", "minimal"}
         thought = THOUGHT if thinking else ""
         if (payload.get("response_format") or {}).get("type") == "json_schema":
             reasoning, content, finish = (thought + answer), "", "stop"
@@ -193,6 +194,22 @@ def test_chat_gives_a_thinking_model_room_and_turns_thinking_down(auto, monkeypa
     server.calls.clear()
     assert "".join(stream_text(auto, [{"role": "system", "content": "chat"}], max_tokens=500))
     assert len(server.calls) == 1, "the next question goes straight to the settings that worked"
+
+
+def test_a_model_that_always_thinks_gets_room_from_the_first_request(auto, monkeypatch):
+    server = FakeLMStudio(options=["on"], think_tokens=1500)
+    _serve(monkeypatch, server)
+    assert reasoning_effort(auto, "qwen/qwen3.5-4b") is None, "a model that can't turn thinking off isn't asked to"
+    text = "".join(stream_text(auto, [{"role": "system", "content": "chat"}, {"role": "user", "content": "hi"}], max_tokens=500))
+    assert text == "Start with [1]; it needs you today."
+    assert [(call["max_tokens"], call.get("reasoning_effort")) for call in server.calls] == [(2048, None)]
+
+    server.calls.clear()
+    reader = LocalReader(auto, client=_serve(monkeypatch, server))
+    assert reader.model == "qwen/qwen3.5-4b"
+    reader._structured = False
+    assert reader.read({"subject": "Invoice INV-7", "body": "Northwind, $4,200 due Friday."})
+    assert [call["max_tokens"] for call in server.calls] == [2048]
 
 
 def test_chat_raises_instead_of_a_blank_answer(auto, monkeypatch):
