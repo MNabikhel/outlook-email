@@ -161,9 +161,9 @@ def test_reader_recovers_when_the_model_thinks_past_its_budget(auto, monkeypatch
 
 def test_a_whole_run_reads_every_email_with_a_reasoning_model(loaded, auto, monkeypatch):
     server = FakeLMStudio()
-    _serve(monkeypatch, server)
+    client = _serve(monkeypatch, server)
     waiting = loaded.counts()["waiting_on_bionic"]
-    result = read_queue(loaded, auto, limit=6)
+    result = read_queue(loaded, auto, limit=6, reader=LocalReader(auto, client=client))
     assert result["model"] == "qwen/qwen3.5-4b"
     assert len(result["read_ids"]) == 6 and "Stopped" not in result["note"]
     assert loaded.counts()["waiting_on_bionic"] == waiting - 6
