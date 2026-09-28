@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -65,6 +66,22 @@ class Settings(BaseSettings):
         if value is None or (isinstance(value, str) and value.strip().lower() in {"", "auto"}):
             return None
         return value
+
+    @field_validator("llm_base_url", mode="before")
+    @classmethod
+    def _base_url(cls, value) -> str:
+        """Accept any URL LM Studio shows (…/v1/chat/completions, …/api/v1/chat, host:port) as the /v1 base."""
+        text = str(value or "").strip().rstrip("/")
+        if not text:
+            return "http://127.0.0.1:1234/v1"
+        if "://" not in text:
+            text = "http://" + text
+        scheme, rest = text.split("://", 1)
+        host, _, path = rest.partition("/")
+        path = "/" + path if path else ""
+        path = re.sub(r"/(chat/completions|completions|responses|models|embeddings)$", "", path)
+        path = re.sub(r"^/api/v\d+(/chat|/models)?$", "", path)
+        return f"{scheme}://{host}{path or '/v1'}"
 
     @field_validator("profile", mode="before")
     @classmethod
