@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import logging
 import re
 from datetime import date, datetime
 from typing import Iterable
@@ -9,6 +10,10 @@ from typing import Iterable
 from dateutil import parser as date_parser
 
 from controller_inbox.models import ExtractedFields
+
+# pypdf warns on the small defects many real PDFs have ("EOF marker not found") and still
+# reads them; with no logging set up, those warnings land in the user's terminal.
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 
 INVOICE_RE = re.compile(
