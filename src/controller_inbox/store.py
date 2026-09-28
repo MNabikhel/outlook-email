@@ -18,6 +18,9 @@ from controller_inbox.models import (
     Importance,
 )
 
+# Python 3.12 deprecated sqlite3's built-in datetime adapter; this is the same format it wrote.
+sqlite3.register_adapter(datetime, lambda value: value.isoformat(" "))
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS emails (

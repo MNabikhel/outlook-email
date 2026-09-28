@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -12,6 +14,19 @@ PROFILES = {
     "general": "General — any inbox",
     "finance": "Finance & accounting — adds month-end and close",
 }
+
+
+def _on_this_network(host: str) -> bool:
+    name = host.rsplit("@", 1)[-1]
+    name = name[1:].split("]", 1)[0] if name.startswith("[") else name.rsplit(":", 1)[0]
+    name = name.lower()
+    if name == "localhost" or name.endswith((".local", ".lan", ".home")) or "." not in name:
+        return True
+    try:
+        address = ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified
 
 
 class Settings(BaseSettings):
@@ -65,6 +80,25 @@ class Settings(BaseSettings):
         if value is None or (isinstance(value, str) and value.strip().lower() in {"", "auto"}):
             return None
         return value
+
+    @field_validator("llm_base_url", mode="before")
+    @classmethod
+    def _base_url(cls, value) -> str:
+        """Accept any URL LM Studio shows (…/v1/chat/completions, …/api/v1/chat, host:port) as the /v1 base."""
+        text = str(value or "").strip().rstrip("/")
+        if not text:
+            return "http://127.0.0.1:1234/v1"
+        if "://" not in text:
+            text = "http://" + text
+        scheme, rest = text.split("://", 1)
+        host, _, path = rest.partition("/")
+        path = "/" + path if path else ""
+        path = re.sub(r"/(chat/completions|completions|responses|models|embeddings)$", "", path)
+        # Hosted gateways such as OpenRouter really live under /api/v1; only a server on
+        # this machine or network is LM Studio's native /api/vN address.
+        if _on_this_network(host):
+            path = re.sub(r"^/api/v\d+(/chat|/models)?$", "", path)
+        return f"{scheme}://{host}{path or '/v1'}"
 
     @field_validator("profile", mode="before")
     @classmethod

@@ -230,13 +230,14 @@ def offline_answer(
     focus: list[dict],
     found: set[str] | None = None,
     current_id: str | None = None,
+    model_failed: bool = False,
 ) -> str:
     found = found or set()
     current = next((email for email in sources if email.id == current_id), None)
     numbers = {email.id: index for index, email in enumerate(sources, start=1)}
     if _HELP.search(question) and not found:
         return HELP_TEXT
-    note = "The local model isn't running, so this is a straight lookup."
+    note = "Here's a straight lookup instead." if model_failed else "The local model isn't running, so this is a straight lookup."
     if current is not None and not found and not about_today:
         tasks = [a.title for a in current.actions if a.status == ActionStatus.OPEN]
         lines = [f"{note} The email on screen [1]:", f"**{current.subject}** from {current.sender_name or current.sender_email}."]
@@ -320,10 +321,11 @@ def answer_stream(
                 yield {"type": "delta", "text": "\n\n(The local model stopped answering partway.)"}
             else:
                 yield {"type": "mode", "mode": "lookup", "note": f"The local model didn't answer ({str(exc)[:120]})."}
-                yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id)}
+                yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True)}
         else:
             if not wrote:
-                yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id)}
+                yield {"type": "mode", "mode": "lookup", "note": "The local model sent an empty answer."}
+                yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True)}
     else:
         yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id)}
     yield {"type": "done"}

@@ -14,7 +14,7 @@ from controller_inbox import assistant, local_llm, web
 from controller_inbox.assistant import answer_stream, draft_reply, pick_sources
 from controller_inbox.config import Settings
 from controller_inbox.folder_mail import ingest_folder
-from controller_inbox.local_llm import ThinkFilter, complete_text, stream_text, strip_thinking
+from controller_inbox.local_llm import EmptyReply, ThinkFilter, complete_text, stream_text, strip_thinking
 from controller_inbox.profile import active_profile
 from controller_inbox.store import Store
 from controller_inbox.web import _host_name, allowed_hosts, create_app
@@ -113,8 +113,10 @@ def test_complete_text_handles_odd_replies(settings: Settings, monkeypatch):
     )
     _fake_server(monkeypatch, lambda _request: next(replies))
     assert complete_text(settings, []) == "Sure, Friday works."
-    assert complete_text(settings, []) == ""
-    assert complete_text(settings, []) == ""
+    with pytest.raises(EmptyReply):
+        complete_text(settings, [])
+    with pytest.raises(EmptyReply):
+        complete_text(settings, [])
 
 
 def test_think_filter_across_any_split():
@@ -267,3 +269,21 @@ def test_setup_page_reassures_when_no_model_is_running(settings: Settings, loade
     assert "Start server" in page
     empty = TestClient(create_app(settings, Store(settings.data_dir / "empty.db"))).get("/").text
     assert "No local model is running right now" in empty and "Connection refused)</p>" not in empty
+
+
+def test_today_explains_when_all_the_mail_is_older_than_the_window(settings: Settings, loaded: Store):
+    from datetime import datetime, timedelta
+
+    client = TestClient(create_app(settings, loaded))
+
+    def received(when: datetime) -> None:
+        for email in loaded.list_emails(limit=100):
+            email.received_at = when
+            loaded.upsert_email(email)
+
+    received(web.DEMO_NOW - timedelta(hours=1))
+    assert "so this section is empty" not in client.get("/").text
+    received(web.DEMO_NOW - timedelta(days=30))
+    page = client.get("/").text
+    assert f"Your {loaded.counts()['emails']} emails arrived before" in page and 'href="/inbox">All mail' in page
+    assert "No new email since" in page and "of 0 emails" not in page

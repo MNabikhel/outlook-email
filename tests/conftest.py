@@ -19,6 +19,20 @@ def _isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CONTROLLER_INBOX_LLM", "false")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_model_memory():
+    """What a run learned about the loaded model must not leak between tests."""
+    from controller_inbox import local_llm
+
+    local_llm._status_cache.clear()
+    local_llm._reasoning_seen.clear()
+    local_llm._effort_rejected.clear()
+    yield
+    local_llm._status_cache.clear()
+    local_llm._reasoning_seen.clear()
+    local_llm._effort_rejected.clear()
+
+
 @pytest.fixture
 def as_of_now() -> datetime:
     return datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)

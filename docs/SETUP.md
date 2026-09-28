@@ -78,10 +78,13 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 | "Python 3.11 or newer is needed" | Install Python from python.org, tick **Add python.exe to PATH**, double-click again. |
 | The page does not open | The CloseDesk window must still be open. Go to [http://127.0.0.1:8765](http://127.0.0.1:8765). |
 | Local model: **not running** | Open LM Studio, load a model, and start the server. Then click **Process new mail** again. `python -m controller_inbox llm-check` says exactly what is wrong. |
+| "The local model read 0" or "three messages in a row failed" | Update CloseDesk (download the ZIP again and copy your `data` and `inbox` folders across). Reasoning models such as Qwen3.5 used to come back empty; they now work, with thinking turned off for filing. The message ends with what the model actually sent, and `python -m controller_inbox llm-check` shows the same for one sample. |
+| Which LM Studio address? | CloseDesk uses the OpenAI-compatible one, `http://localhost:1234/v1`, and adds `/chat/completions` itself. Pasting `…/v1/chat/completions` or `…/api/v1/chat` into `CONTROLLER_INBOX_LLM_BASE_URL` works too. |
 | Summaries look generic | Those came from the fast scripts. Start the model and process again; the model reads everything that is still waiting. |
 | A file landed in `inbox/failed` | Open the `.why.txt` next to it. Usually re-saving the message from Outlook fixes it. |
 | A category is wrong | Open the message, use **Wrong category?**, and write one sentence on why. That sender is learned. |
 | **Ask CloseDesk** says the model isn't running | That's fine: it still finds emails. Start LM Studio's server for written answers. |
+| **Ask CloseDesk** says the model didn't answer | The model is running but sent no answer; the reason is in brackets. Try again, or load a non-reasoning *instruct* model. |
 | Mac says CloseDesk.command "can't be opened" | Right-click it → **Open** → **Open** once. After that, double-click works. |
 | **Open in Outlook** downloads a file instead | That email has no original file (sample mail, or Outlook sync). Open the downloaded `.eml`. |
 | A payment-change email is not in the red box | It should be. Please report it — the fraud rule forces Important and "verify by phone". |

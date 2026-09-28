@@ -323,8 +323,10 @@ def _llm_check(settings: Settings, store: Store, *, sample: bool) -> int:
 
     status = check_model(settings, timeout=4, use_cache=False)
     print(status.describe())
-    if status.models:
-        print("Loaded models: " + ", ".join(status.models))
+    if status.loaded:
+        print("Loaded in LM Studio: " + ", ".join(status.loaded))
+    elif status.models:
+        print("Models the server lists: " + ", ".join(status.models))
     if not status.active:
         print(
             "\nTo fix: open LM Studio, load a model, and start the local server (Developer tab → Start server).\n"
@@ -350,7 +352,7 @@ def _llm_check(settings: Settings, store: Store, *, sample: bool) -> int:
     parsed = reader.read(packet)
     elapsed = time.monotonic() - started
     if not parsed:
-        print(f"The model answered, but not with usable JSON ({reader.stats.stopped_reason or 'unparseable reply'}).")
+        print(f"The model answered, but not with usable JSON ({reader.stats.last_error or 'unparseable reply'}).")
         print("Try a stronger instruction-following model, e.g. a 7B/8B instruct model.")
         return 1
     print(f"Sample reading in {elapsed:.1f}s:")

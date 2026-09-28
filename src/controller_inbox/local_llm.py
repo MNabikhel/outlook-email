@@ -57,6 +57,8 @@ class ModelStatus:
     model: str = ""
     base_url: str = ""
     error: str = ""
+    loaded: list[str] = field(default_factory=list)
+    reasoning: list[str] = field(default_factory=list)
 
     @property
     def active(self) -> bool:
@@ -103,11 +105,56 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         ids = [str(item.get("id")) for item in response.json().get("data", []) if item.get("id")]
         status.reachable = True
         status.models = ids
-        status.model = _pick_model(settings.llm_model, ids)
+        loaded, reasoning = _lm_studio_models(settings, base, timeout)
+        status.loaded = loaded
+        status.model = _pick_model(settings.llm_model, ids, loaded)
+        status.reasoning = reasoning.get(status.model, [])
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         status.error = _short_error(exc)
     _status_cache[key] = (time.monotonic(), status)
     return status
+
+
+def _lm_studio_models(settings: Settings, base: str, timeout: float) -> tuple[list[str], dict[str, list[str]]]:
+    """Loaded models and their reasoning options, from LM Studio's own API.
+
+    With just-in-time loading on, ``/v1/models`` lists every downloaded model, so
+    picking from it can make LM Studio load a second, bigger model. Other servers
+    don't have these routes; they get empty results.
+    """
+    root = base[: -len("/v1")] if base.endswith("/v1") else base
+    for path in ("/api/v1/models", "/api/v0/models"):
+        try:
+            response = httpx.get(root + path, headers=_headers(settings), timeout=timeout)
+            data = response.json() if response.status_code == 200 else None
+        except (httpx.HTTPError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        loaded: list[str] = []
+        reasoning: dict[str, list[str]] = {}
+        if isinstance(data.get("models"), list):
+            for item in data["models"]:
+                if not isinstance(item, dict) or item.get("type") not in {"llm", "vlm"}:
+                    continue
+                caps = item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {}
+                allowed = caps.get("reasoning", {}).get("allowed_options") if isinstance(caps.get("reasoning"), dict) else None
+                options = [str(option) for option in allowed] if isinstance(allowed, list) else []
+                if item.get("key"):
+                    reasoning[str(item["key"])] = options
+                for instance in item.get("loaded_instances") or []:
+                    if isinstance(instance, dict) and instance.get("id"):
+                        loaded.append(str(instance["id"]))
+                        reasoning[str(instance["id"])] = options
+            return loaded, reasoning
+        if isinstance(data.get("data"), list):
+            loaded = [
+                str(item["id"])
+                for item in data["data"]
+                if isinstance(item, dict) and item.get("id") and item.get("state") == "loaded" and item.get("type") in {"llm", "vlm"}
+            ]
+            return loaded, reasoning
+    return [], {}
 
 
 def llm_active(settings: Settings) -> bool:
@@ -125,9 +172,11 @@ def resolve_model(settings: Settings) -> str:
     return status.model or settings.llm_model
 
 
-def _pick_model(requested: str, ids: list[str]) -> str:
+def _pick_model(requested: str, ids: list[str], loaded: list[str] | None = None) -> str:
     if requested in ids:
         return requested
+    if loaded:
+        return loaded[0]
     if not ids:
         return "" if requested in {"", "local-model"} else requested
     usable = [item for item in ids if "embed" not in item.lower()]
@@ -138,12 +187,106 @@ class ModelUnavailable(RuntimeError):
     pass
 
 
+class EmptyReply(RuntimeError):
+    """The server answered 200 but wrote no answer, usually because the model only reasoned."""
+
+
+# Reasoning models (Qwen3.x, DeepSeek-R1, gpt-oss) think before answering. That
+# needs far more than the usual token budget unless thinking can be turned off.
+THINKING_ROOM = 2048
+THINKING_TIMEOUT = 300.0
+_RETRYABLE = {400, 404, 415, 422, 500, 501}
+_reasoning_seen: set[str] = set()
+_effort_rejected: set[str] = set()
+
+
+@dataclass
+class Reply:
+    content: str
+    reasoning: str = ""
+    finish: str = ""
+
+    def why_unusable(self) -> str:
+        if not self.content and self.reasoning and self.finish == "length":
+            return "the model used its whole reply budget thinking"
+        if not self.content and self.reasoning:
+            return "the model sent only its reasoning, no answer"
+        if not self.content:
+            return "the model sent an empty reply"
+        snippet = " ".join(self.content.split())[:60]
+        return f"reply was not the JSON shape: “{snippet}”"
+
+
+def _reasoning_text(part: dict) -> str:
+    """LM Studio calls it ``reasoning_content``; OpenRouter and newer builds ``reasoning``."""
+    for key in ("reasoning_content", "reasoning"):
+        value = part.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _reply_from(data) -> Reply:
+    choice = _first_choice(data)
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    raw = message.get("content") if isinstance(message.get("content"), str) else ""
+    reasoning = _reasoning_text(message)
+    tagged = "".join(_THINK_RE.findall(raw))
+    return Reply(
+        content=strip_thinking(raw),
+        reasoning=(reasoning + tagged).strip(),
+        finish=str(choice.get("finish_reason") or ""),
+    )
+
+
+def reasoning_effort(settings: Settings, model: str) -> str | None:
+    """The lightest ``reasoning_effort`` this model accepts, or None to leave it alone.
+
+    LM Studio 0.4.8+ reports each model's options on ``/api/v1/models``; for
+    older builds, a model is treated as a thinker once it has sent reasoning.
+    """
+    if model in _effort_rejected:
+        return None
+    status = check_model(settings)
+    options = status.reasoning if status.model == model else []
+    if "off" in options:
+        return "none"
+    if "low" in options:
+        return "low"
+    if model in _reasoning_seen:
+        return "none"
+    return None
+
+
+def _thinks(settings: Settings, model: str, effort: str | None) -> bool:
+    """Whether replies need room for thinking. Models like DeepSeek-R1 only allow ``on``."""
+    status = check_model(settings)
+    options = status.reasoning if status.model == model else []
+    return bool(effort) or model in _reasoning_seen or "on" in options
+
+
+def _timeout(settings: Settings, budget: int) -> float:
+    """A laptop writing 2,048 tokens of thinking can take minutes."""
+    return max(settings.llm_timeout, THINKING_TIMEOUT) if budget >= THINKING_ROOM else settings.llm_timeout
+
+
+def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> httpx.Response:
+    """POST, dropping ``reasoning_effort`` if this server build refuses it."""
+    response = post(url, json=payload, headers=_headers(settings), **options)
+    if "reasoning_effort" in payload and response.status_code in _RETRYABLE:
+        _effort_rejected.add(str(payload.get("model")))
+        payload.pop("reasoning_effort")
+        response = post(url, json=payload, headers=_headers(settings), **options)
+    return response
+
+
 @dataclass
 class ReaderStats:
     read: int = 0
     failed: int = 0
     seconds: float = 0.0
     stopped_reason: str = ""
+    last_error: str = ""
 
     @property
     def average_seconds(self) -> float:
@@ -159,6 +302,10 @@ class LocalReader:
         self.client = client or httpx.Client(timeout=settings.llm_timeout)
         self.stats = ReaderStats()
         self._structured = True
+        self._effort = reasoning_effort(settings, self.model)
+        self._max_tokens = settings.llm_max_tokens
+        if _thinks(settings, self.model, self._effort):
+            self._max_tokens = max(self._max_tokens, THINKING_ROOM)
         self._consecutive_failures = 0
 
     @property
@@ -169,16 +316,20 @@ class LocalReader:
         if self.stopped:
             return None
         started = time.monotonic()
+        prompt = build_prompt(packet, budget=self.settings.llm_max_prompt_chars)
         try:
-            content = self._complete(build_prompt(packet, budget=self.settings.llm_max_prompt_chars))
+            reply = self._complete(prompt)
+            parsed = _find_reading(reply)
+            if parsed is None and self._adapt(reply):
+                reply = self._complete(prompt)
+                parsed = _find_reading(reply)
         except ModelUnavailable as exc:
             self.stats.stopped_reason = str(exc)
             return None
         except httpx.HTTPError as exc:
             return self._failed(_short_error(exc))
-        parsed = parse_json_object(content)
-        if not parsed or ("category" not in parsed and "folder" not in parsed):
-            return self._failed("reply was not the JSON shape")
+        if parsed is None:
+            return self._failed(reply.why_unusable())
         self._consecutive_failures = 0
         self.stats.read += 1
         self.stats.seconds += time.monotonic() - started
@@ -186,17 +337,35 @@ class LocalReader:
 
     def _failed(self, reason: str) -> None:
         self.stats.failed += 1
+        self.stats.last_error = reason
         self._consecutive_failures += 1
         if self._consecutive_failures >= 3:
             self.stats.stopped_reason = f"three messages in a row failed ({reason})"
         return None
 
-    def _complete(self, user: str) -> str:
+    def _adapt(self, reply: Reply) -> bool:
+        """After a reasoning model's unusable reply: settings for one more try, if any changed."""
+        if reply.content and not reply.reasoning:
+            return False
+        if reply.reasoning:
+            _reasoning_seen.add(self.model)
+        changed = False
+        if self._effort is None and self.model not in _effort_rejected:
+            self._effort, changed = "none", True
+        if self._max_tokens < THINKING_ROOM:
+            self._max_tokens, changed = THINKING_ROOM, True
+        if self._structured and not reply.content:
+            # LM Studio can route schema-constrained output into the reasoning
+            # stream and leave the answer empty; plain prompts answer normally.
+            self._structured, changed = False, True
+        return changed
+
+    def _complete(self, user: str) -> Reply:
         url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
         payload = {
             "model": self.model,
             "temperature": 0,
-            "max_tokens": self.settings.llm_max_tokens,
+            "max_tokens": self._max_tokens,
             "messages": [
                 {"role": "system", "content": SYSTEM},
                 {"role": "user", "content": user},
@@ -204,26 +373,70 @@ class LocalReader:
         }
         if self._structured:
             payload["response_format"] = {"type": "json_schema", "json_schema": _schema()}
+        if self._effort:
+            payload["reasoning_effort"] = self._effort
         try:
-            response = self.client.post(url, json=payload, headers=_headers(self.settings))
-            if self._structured and response.status_code in {400, 404, 415, 422, 500, 501}:
+            response = _post_chat(self.client.post, url, payload, self.settings, timeout=_timeout(self.settings, self._max_tokens))
+            if "reasoning_effort" not in payload:
+                self._effort = None
+            if self._structured and response.status_code in _RETRYABLE:
                 # Older LM Studio / Ollama builds reject response_format. Ask again, plain.
                 self._structured = False
                 payload.pop("response_format", None)
-                response = self.client.post(url, json=payload, headers=_headers(self.settings))
+                response = self.client.post(
+                    url, json=payload, headers=_headers(self.settings), timeout=_timeout(self.settings, self._max_tokens)
+                )
             response.raise_for_status()
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as exc:
             raise ModelUnavailable(f"the local model server stopped answering ({_short_error(exc)})") from exc
         except httpx.ReadTimeout as exc:
             if self._consecutive_failures >= 1:
                 raise ModelUnavailable(
-                    f"the model took longer than {self.settings.llm_timeout:.0f}s twice in a row"
+                    f"the model took longer than {_timeout(self.settings, self._max_tokens):.0f}s twice in a row"
                 ) from exc
             raise
         try:
-            return strip_thinking(str(response.json()["choices"][0]["message"]["content"] or ""))
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            data = response.json()
+        except ValueError as exc:
             raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
+        if not _first_choice(data):
+            raise httpx.DecodingError("unexpected reply: no choices")
+        reply = _reply_from(data)
+        if reply.reasoning:
+            _reasoning_seen.add(self.model)
+        return reply
+
+
+def _find_reading(reply: Reply) -> dict | None:
+    """The reading JSON from the answer, or from the reasoning when LM Studio put it there."""
+    for text in (reply.content, reply.reasoning):
+        found = None
+        for candidate in _json_objects(text):
+            if "category" in candidate or "folder" in candidate:
+                found = candidate
+        if found is not None:
+            return found
+    return None
+
+
+def _json_objects(content: str):
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", (content or "").strip(), flags=re.I | re.M)
+    start = text.find("{")
+    while start != -1:
+        chunk = _balanced(text, start)
+        data = None
+        if chunk:
+            for candidate in (chunk, re.sub(r",\s*([}\]])", r"\1", chunk)):
+                try:
+                    data = json.loads(candidate)
+                    break
+                except json.JSONDecodeError:
+                    continue
+        if isinstance(data, dict):
+            yield data
+            start = text.find("{", start + len(chunk))
+        else:
+            start = text.find("{", start + 1)
 
 
 def _chat_request(settings: Settings, messages: list[dict], max_tokens: int, *, stream: bool) -> tuple[str, dict]:
@@ -246,12 +459,6 @@ def _first_choice(data) -> dict:
     return {}
 
 
-def _content(choice: dict, key: str) -> str:
-    part = choice.get(key)
-    text = part.get("content") if isinstance(part, dict) else None
-    return text if isinstance(text, str) else ""
-
-
 _THINK_OPEN, _THINK_CLOSE = "<think>", "</think>"
 _THINK_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.S)
 
@@ -268,6 +475,7 @@ class ThinkFilter:
         self.buffer = ""
         self.inside = False
         self.started = False
+        self.saw = False
 
     def feed(self, piece: str) -> str:
         self.buffer += piece
@@ -289,7 +497,7 @@ class ThinkFilter:
                 break
             out.append(self.buffer[:cut])
             self.buffer = self.buffer[cut + len(_THINK_OPEN) :]
-            self.inside = True
+            self.inside = self.saw = True
         return self._lead("".join(out))
 
     def flush(self) -> str:
@@ -304,51 +512,122 @@ class ThinkFilter:
         return text
 
 
+def _chat_plan(settings: Settings, max_tokens: int) -> tuple[str, str | None, int]:
+    """Model, reasoning effort, and token budget for a chat or draft request."""
+    model = check_model(settings).model or settings.llm_model
+    effort = reasoning_effort(settings, model)
+    return model, effort, max(max_tokens, THINKING_ROOM) if _thinks(settings, model, effort) else max_tokens
+
+
+def _retry_plan(model: str, effort: str | None, budget: int, reply: Reply) -> tuple[str | None, int] | None:
+    """A reasoning model wrote no answer: turn thinking down and give it room, once."""
+    if reply.content or not reply.reasoning:
+        return None
+    _reasoning_seen.add(model)
+    new_effort = effort or (None if model in _effort_rejected else "none")
+    new_budget = max(budget, THINKING_ROOM)
+    if (new_effort, new_budget) == (effort, budget):
+        return None
+    return new_effort, new_budget
+
+
 def complete_text(settings: Settings, messages: list[dict], *, max_tokens: int = 400) -> str:
-    """One plain-text answer. Raises ``httpx.HTTPError`` when the server fails."""
-    url, payload = _chat_request(settings, messages, max_tokens, stream=False)
-    response = httpx.post(url, json=payload, headers=_headers(settings), timeout=settings.llm_timeout)
-    response.raise_for_status()
-    try:
-        data = response.json()
-    except ValueError as exc:
-        raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
-    return strip_thinking(_content(_first_choice(data), "message"))
+    """One plain-text answer. Raises ``httpx.HTTPError`` or ``EmptyReply`` when there is none."""
+    model, effort, budget = _chat_plan(settings, max_tokens)
+    for _attempt in range(2):
+        url, payload = _chat_request(settings, messages, budget, stream=False)
+        if effort:
+            payload["reasoning_effort"] = effort
+        response = _post_chat(httpx.post, url, payload, settings, timeout=_timeout(settings, budget))
+        response.raise_for_status()
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
+        reply = _reply_from(data)
+        if reply.content:
+            return reply.content
+        plan = _retry_plan(model, payload.get("reasoning_effort"), budget, reply)
+        if plan is None:
+            break
+        effort, budget = plan
+    raise EmptyReply(reply.why_unusable())
 
 
 def stream_text(settings: Settings, messages: list[dict], *, max_tokens: int = 500):
-    """Yield the answer as it is written. Servers that ignore ``stream`` send it in one piece."""
-    url, payload = _chat_request(settings, messages, max_tokens, stream=True)
+    """Yield the answer as it is written. Servers that ignore ``stream`` send it in one piece.
+
+    Raises ``EmptyReply`` when the model wrote nothing, so callers never show a blank answer.
+    """
+    model, effort, budget = _chat_plan(settings, max_tokens)
+    for _attempt in range(2):
+        reply = Reply(content="")
+        for piece in _stream_once(settings, messages, budget, effort, reply):
+            reply.content += piece
+            yield piece
+        if reply.content:
+            return
+        plan = _retry_plan(model, effort if model not in _effort_rejected else None, budget, reply)
+        if plan is None:
+            break
+        effort, budget = plan
+    raise EmptyReply(reply.why_unusable())
+
+
+def _stream_once(settings: Settings, messages: list[dict], budget: int, effort: str | None, reply: Reply):
+    url, payload = _chat_request(settings, messages, budget, stream=True)
+    if effort:
+        payload["reasoning_effort"] = effort
     timeout = httpx.Timeout(settings.llm_timeout, connect=5.0)
     with httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
-        response.raise_for_status()
-        if "text/event-stream" not in response.headers.get("content-type", ""):
-            try:
-                data = json.loads(response.read() or b"{}")
-            except ValueError as exc:
-                raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
-            text = strip_thinking(_content(_first_choice(data), "message"))
-            if text:
-                yield text
-            return
-        thinking = ThinkFilter()
-        for line in response.iter_lines():
-            line = line.strip()
-            if not line.startswith("data:"):
-                continue
-            chunk = line[5:].strip()
-            if chunk == "[DONE]":
-                break
-            try:
-                choice = _first_choice(json.loads(chunk))
-            except ValueError:
-                continue
-            piece = thinking.feed(_content(choice, "delta") or _content(choice, "message"))
-            if piece:
-                yield piece
-        rest = thinking.flush()
-        if rest:
-            yield rest
+        if effort and response.status_code in _RETRYABLE:
+            _effort_rejected.add(str(payload.get("model")))
+            rejected = True
+        else:
+            rejected = False
+            response.raise_for_status()
+            yield from _stream_pieces(response, reply)
+    if rejected:
+        yield from _stream_once(settings, messages, budget, None, reply)
+
+
+def _stream_pieces(response: httpx.Response, reply: Reply):
+    if "text/event-stream" not in response.headers.get("content-type", ""):
+        try:
+            data = json.loads(response.read() or b"{}")
+        except ValueError as exc:
+            raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
+        whole = _reply_from(data)
+        reply.reasoning, reply.finish = whole.reasoning, whole.finish
+        if whole.content:
+            yield whole.content
+        return
+    thinking = ThinkFilter()
+    for line in response.iter_lines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        chunk = line[5:].strip()
+        if chunk == "[DONE]":
+            break
+        try:
+            choice = _first_choice(json.loads(chunk))
+        except ValueError:
+            continue
+        part = choice.get("delta") if isinstance(choice.get("delta"), dict) else choice.get("message")
+        part = part if isinstance(part, dict) else {}
+        if _reasoning_text(part):
+            reply.reasoning += _reasoning_text(part)
+        if choice.get("finish_reason"):
+            reply.finish = str(choice["finish_reason"])
+        piece = thinking.feed(part.get("content") if isinstance(part.get("content"), str) else "")
+        if thinking.saw and not reply.reasoning:
+            reply.reasoning = "<think>"
+        if piece:
+            yield piece
+    rest = thinking.flush()
+    if rest:
+        yield rest
 
 
 def read_packet(settings: Settings, packet: dict) -> dict | None:
@@ -403,23 +682,7 @@ def build_prompt(packet: dict, *, budget: int = 6000) -> str:
 
 def parse_json_object(content: str) -> dict | None:
     """Find the first JSON object in a model reply. Tolerates fences, prose, and trailing commas."""
-    text = (content or "").strip()
-    if not text:
-        return None
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.I | re.M)
-    start = text.find("{")
-    while start != -1:
-        chunk = _balanced(text, start)
-        if chunk:
-            for candidate in (chunk, re.sub(r",\s*([}\]])", r"\1", chunk)):
-                try:
-                    data = json.loads(candidate)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(data, dict):
-                    return data
-        start = text.find("{", start + 1)
-    return None
+    return next(_json_objects(content), None)
 
 
 def _balanced(text: str, start: int) -> str | None:

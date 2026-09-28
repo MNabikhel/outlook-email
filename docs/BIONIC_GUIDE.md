@@ -37,7 +37,7 @@ Copy `.env.example` to `.env` if you want to change paths or the timezone. The d
 
 ## 2. Start the local model
 
-1. Install [LM Studio](https://lmstudio.ai/) and download a model you are willing to leave running overnight. A model that follows JSON instructions matters more than a huge one — a 3B–8B *instruct* model (Qwen 2.5, Llama 3.x, Phi) is plenty.
+1. Install [LM Studio](https://lmstudio.ai/) and download a model you are willing to leave running overnight. A model that follows JSON instructions matters more than a huge one — a 3B–8B *instruct* model (Qwen 2.5, Llama 3.x, Phi) is plenty. Reasoning models (Qwen3.x, DeepSeek-R1, gpt-oss) work too: CloseDesk asks LM Studio to turn thinking off for filing (LM Studio 0.4.8 or newer), gives them room to think when it can't, and reads the answer even when LM Studio puts it in `reasoning_content`. If several models are downloaded, CloseDesk uses the one that is loaded.
 2. Load the model.
 3. Start the local server. The default address CloseDesk expects is `http://127.0.0.1:1234/v1`.
 4. Check it: `python -m controller_inbox llm-check`. It lists the loaded model, times one sample reading, and estimates how long the waiting queue will take.
