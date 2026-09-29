@@ -246,7 +246,8 @@ def test_budget_follows_the_loaded_context_length():
     assert "reload the model in LM Studio" in agent.context_advice(4096, ["Q4 budget.xlsx"])
     assert "only read parts of Audit.pdf. " in agent.context_advice(4096, ["Audit.pdf", "the files"])
     assert agent.context_advice(4096, []) == ""
-    assert "is long" in agent.context_advice(32768, ["the files"])
+    assert agent.context_advice(32768, ["the files"]).startswith("The files are long, so I read only part of them.")
+    assert agent.context_advice(32768, ["FY26 Audit.pdf"]).startswith("FY26 Audit.pdf is long, so I read only part of it.")
 
 
 def test_lm_studio_context_length_and_tool_replies_are_read(settings, monkeypatch):

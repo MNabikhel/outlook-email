@@ -192,7 +192,11 @@ def context_advice(context_tokens: int, left_out: list[str]) -> str:
             f"For whole documents, reload the model in LM Studio with Context Length {RECOMMENDED_CONTEXT:,} or more "
             "(My Models → the model's settings → Context Length), then ask again."
         )
-    return f"{what.capitalize()} is long, so I read the parts that match your question. Ask about a page or sheet to read more."
+    several = len(dict.fromkeys(named)) > 1 or not named
+    return (
+        f"{what[0].upper()}{what[1:]} {'are' if several else 'is'} long, so I read only part of {'them' if several else 'it'}. "
+        "Ask about a page or sheet to read more."
+    )
 
 
 @dataclass
