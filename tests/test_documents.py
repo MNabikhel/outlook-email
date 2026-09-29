@@ -10,7 +10,17 @@ from docx.oxml import OxmlElement
 from openpyxl import Workbook
 
 from controller_inbox.demo import make_pdf
-from controller_inbox.documents import Part, outline, read_cells, read_part, search_parts, skim, split_parts, trace_cell
+from controller_inbox.documents import (
+    Part,
+    compare_columns,
+    outline,
+    read_cells,
+    read_part,
+    search_parts,
+    skim,
+    split_parts,
+    trace_cell,
+)
 from controller_inbox.extract import extract_text_from_bytes
 
 
@@ -145,6 +155,30 @@ def test_a_skim_keeps_what_differs_from_page_to_page():
     covered = skim(varied, 180)
     assert "[page 7]\nHeading G topic" in covered and "[page 8]" not in covered and "Detail line" not in covered
     assert len(covered) <= 180
+
+
+def test_compare_columns_ranks_each_row_and_keeps_totals_apart():
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Detail"
+    sheet.append(["Dept", "Line", "Q3 actual", "Q4 budget"])
+    for row in (["Mkt", "Trade show", 18000, 36500], ["Sales", "Travel", 31000, 29500], ["Ops", "Lease", 45000, 45000], ["", "Total", 94000, 111000]):
+        sheet.append(row)
+    out = io.BytesIO()
+    book.save(out)
+    by_header = compare_columns(out.getvalue(), "detail", "Q3", "Q4 budget")
+    assert by_header.splitlines() == [
+        'Sheet "Detail": C “Q3 actual” → D “Q4 budget”, 3 rows, biggest increase first',
+        "Mkt · Trade show (row 2): 18,000 → 36,500, +18,500 (+102.8%)",
+        "Ops · Lease (row 4): 45,000 → 45,000, +0 (+0.0%)",
+        "Sales · Travel (row 3): 31,000 → 29,500, −1,500 (−4.8%)",
+        "Biggest increase: Mkt · Trade show. Biggest decrease: Sales · Travel.",
+        "Total rows:",
+        "Total (row 5): 94,000 → 111,000, +17,000 (+18.1%)",
+    ]
+    assert compare_columns(out.getvalue(), "", "C", "D") == by_header
+    assert compare_columns(out.getvalue(), "", "Q2", "Q4").startswith("No column called 'Q2'. Give column letters")
+    assert "saved without values" in compare_columns(_budget(), "Budget", "Change", "D")
 
 
 def test_big_sheets_are_cut_into_row_ranges():

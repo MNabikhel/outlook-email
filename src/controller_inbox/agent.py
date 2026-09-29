@@ -5,8 +5,9 @@ question is about, the model also gets an outline of each attached file and
 the passages that match the question (or the start of the file for "summarize
 this"). A model that can call tools may then search mail, open another email,
 read any page or sheet, pull exact cells, trace a formula back to its inputs,
-work out sums and dates exactly, and keep notes. Notes are saved with the email, so the next question starts
-from what was already found.
+compare two columns row by row, work out sums and dates exactly, and keep
+notes. Notes are saved with the email, so the next question on the same
+subject starts from what was already found.
 
 Files on an email flagged as possible payment fraud are not read until the
 user clears it. Text inside emails and files is passed as data; the system
@@ -34,7 +35,7 @@ MAX_STEPS = 6
 CHARS_PER_TOKEN = 3
 DEFAULT_CONTEXT = 4096
 RECOMMENDED_CONTEXT = 16384
-TOOL_SCHEMA_TOKENS = 900
+TOOL_SCHEMA_TOKENS = 1000
 MAX_FILE_BYTES = 40_000_000
 
 LOCKED = (
@@ -142,6 +143,25 @@ TOOLS = [
                     "cell": {"type": "string", "description": "One cell like E12"},
                 },
                 "required": ["email", "file", "cell"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_columns",
+            "description": "How every row of a sheet changes between two columns (e.g. Q3 actual → Q4 budget), biggest "
+            "increase first, with totals. Use it for what went up or down most, variances and budget vs actual.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email": {"type": "string"},
+                    "file": {"type": "string"},
+                    "sheet": {"type": "string"},
+                    "from": {"type": "string", "description": "Column letter or header, like C or Q3 actual"},
+                    "to": {"type": "string", "description": "Column letter or header, like D or Q4 budget"},
+                },
+                "required": ["email", "file", "from", "to"],
             },
         },
     },
@@ -476,6 +496,8 @@ def step_label(name: str, args: dict, ws: Workspace) -> str:
         return f"Reading cells {_sheet_ref(args)}{args.get('cells', '')} in {fname}"
     if name == "trace_cell":
         return f"Tracing how {_sheet_ref(args)}{args.get('cell', '')} is calculated in {fname}"
+    if name == "compare_columns":
+        return f"Comparing {_sheet_ref(args)}{args.get('from', '')} → {args.get('to', '')} in {fname}"
     if name == "calculate":
         return f"Working out {str(args.get('expression', ''))[:80]}"
     return name.replace("_", " ")
@@ -522,7 +544,7 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
     ws.read_files = True
     if name == "read_file":
         return _read_file(att, str(args.get("part") or ""))
-    if name in {"read_cells", "trace_cell"}:
+    if name in {"read_cells", "trace_cell", "compare_columns"}:
         if not att.filename.lower().endswith(documents.SPREADSHEET_SUFFIXES):
             return f"{att.filename} isn't an Excel workbook. Use read_file or find_in_file."
         data = ws.original(email, att)
@@ -533,6 +555,8 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
             )
         if name == "read_cells":
             return documents.read_cells(data, str(args.get("sheet") or ""), str(args.get("cells") or "A1:J40"))
+        if name == "compare_columns":
+            return documents.compare_columns(data, str(args.get("sheet") or ""), str(args.get("from") or ""), str(args.get("to") or ""))
         return documents.trace_cell(data, str(args.get("sheet") or ""), str(args.get("cell") or ""))
     return f"There is no tool called {name}."
 

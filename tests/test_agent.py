@@ -111,6 +111,9 @@ def test_tools_read_exact_cells_and_trace_a_total(store, settings, mail):
     assert "A4: Total | B4: =SUM(B2:B3) | C4: =SUM(C2:C3) | D4: =D2+D3" in cells
     trace = agent.run_tool(ws, "trace_cell", {"email": "1", "file": "Q4 budget.xlsx", "sheet": "Budget", "cell": "D4"}, limit=2000)
     assert "Budget!D4 ← =D2+D3" in trace and "Budget!D2 ← =C2-B2" in trace
+    changes = agent.run_tool(ws, "compare_columns", {"email": "1", "file": "budget", "from": "Q3", "to": "Q4"}, limit=2000)
+    assert "Ads (row 2): 1,000 → 1,500, +500 (+50.0%)" in changes and "Biggest increase: Ads." in changes
+    assert agent.step_label("compare_columns", {"email": "1", "file": "budget", "from": "Q3", "to": "Q4"}, ws) == "Comparing Q3 → Q4 in Q4 budget.xlsx"
     page = agent.run_tool(ws, "read_file", {"email": "1", "file": "memo", "part": ""}, limit=2000)
     assert "Lisbon on 14 November" in page
     found = agent.run_tool(ws, "search_mail", {"query": "Acme quote"}, limit=2000)

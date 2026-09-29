@@ -107,7 +107,8 @@ SYSTEM = (
 TOOLS_GUIDE = (
     "\nYou can read more before answering. Work step by step: find the right email and file, read the part that "
     "answers the question (read_file, find_in_file), for spreadsheets check exact numbers with read_cells and how "
-    "a total is built with trace_cell, and write each finding with note, saying where it came from. Work out "
+    "a total is built with trace_cell, for what went up or down most use compare_columns, and write each "
+    "finding with note, saying where it came from. Work out "
     "every sum, difference, percentage and date with calculate, never in your head: for \"payment due 45 days after "
     "an invoice dated 15 March 2026\", call calculate with \"2026-03-15 + 45 days\". "
     "Stop and answer as soon as you have what you need."

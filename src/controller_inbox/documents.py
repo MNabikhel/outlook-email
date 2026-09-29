@@ -689,6 +689,88 @@ def trace_cell(data: bytes, sheet: str, cell: str, *, depth: int = 2) -> str:
         formulas.close()
 
 
+def compare_columns(data: bytes, sheet: str, first: str, second: str, *, limit: int = 40) -> str:
+    """How each row changes from column ``first`` to ``second`` (letters or header text), biggest increase first."""
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+
+    book = load_workbook(io.BytesIO(data), data_only=True)
+    try:
+        ws = _find_sheet(book, sheet)
+        if ws is None:
+            return f"No sheet called {sheet!r}. Sheets: " + ", ".join(f'"{s}"' for s in book.sheetnames)
+        found = _columns(ws, first, second)
+        if isinstance(found, str):
+            return found
+        header, a, b = found
+        rows, totals = [], []
+        for r in range(header + 1, ws.max_row + 1):
+            old, new = ws.cell(r, a).value, ws.cell(r, b).value
+            if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (old, new)):
+                continue
+            words = [str(ws.cell(r, c).value).strip() for c in range(1, min(a, b)) if isinstance(ws.cell(r, c).value, str)]
+            label = " · ".join(word for word in words if word) or f"row {r}"
+            (totals if re.search(r"\btotal\b", label, re.I) else rows).append((new - old, r, label, old, new))
+        if not rows and not totals:
+            return (
+                f"No rows on \"{ws.title}\" have numbers in both {get_column_letter(a)} and {get_column_letter(b)}. "
+                "If they are formulas, the file may have been saved without values: open and save it in Excel."
+            )
+        def name(col: int) -> str:
+            head = ws.cell(header, col).value if header else None
+            return f"{get_column_letter(col)} “{_fmt(head)}”" if head is not None else get_column_letter(col)
+
+        rows.sort(key=lambda row: row[0], reverse=True)
+        lines = [f'Sheet "{ws.title}": {name(a)} → {name(b)}, {len(rows)} rows, biggest increase first']
+        lines += [_change_line(*row) for row in rows[:limit]]
+        if len(rows) > limit:
+            lines.append(f"… {len(rows) - limit} more rows")
+        if rows:
+            up = f"Biggest increase: {rows[0][2]}." if rows[0][0] > 0 else "Nothing went up."
+            down = f"Biggest decrease: {rows[-1][2]}." if rows[-1][0] < 0 else "Nothing went down."
+            lines.append(f"{up} {down}")
+        if totals:
+            lines += ["Total rows:"] + [_change_line(*row) for row in totals]
+        return "\n".join(lines)
+    finally:
+        book.close()
+
+
+def _columns(ws, first: str, second: str):
+    """(header row, first column, second column) from letters or header text, or a message saying what's there."""
+    from openpyxl.utils import column_index_from_string
+
+    headers: dict[str, tuple[int, int]] = {}
+    for r in range(1, min(ws.max_row, 10) + 1):
+        for c in range(1, min(ws.max_column, 60) + 1):
+            value = ws.cell(r, c).value
+            if isinstance(value, str) and value.strip():
+                headers.setdefault(value.strip().lower(), (r, c))
+    picked = []
+    for wanted in (first, second):
+        text = (wanted or "").strip().strip("'\"")
+        if re.fullmatch(r"[A-Za-z]{1,3}", text):
+            picked.append((None, column_index_from_string(text.upper())))
+            continue
+        hit = headers.get(text.lower()) or next((spot for head, spot in headers.items() if text and text.lower() in head), None)
+        if hit is None:
+            shown = ", ".join(f'"{head}"' for head in list(headers)[:20])
+            return f"No column called {wanted!r}. Give column letters like C and D, or one of these headers: {shown}"
+        picked.append(hit)
+    rows = [r for r, _c in picked if r is not None]
+    if rows:
+        header = max(rows)
+    else:
+        header = next((r for r in range(1, min(ws.max_row, 10) + 1) if all(isinstance(ws.cell(r, c).value, str) for _r, c in picked)), 0)
+    return header, picked[0][1], picked[1][1]
+
+
+def _change_line(diff, row: int, label: str, old, new) -> str:
+    sign = "+" if diff >= 0 else "−"
+    pct = f" ({sign}{abs(diff / old * 100):.1f}%)" if old else ""
+    return f"{label} (row {row}): {_fmt(old)} → {_fmt(new)}, {sign}{_fmt(abs(diff))}{pct}"
+
+
 def _trace(formulas, values, sheet: str, ref: str, depth: int, level: int, lines: list[str], seen: set) -> None:
     from openpyxl.utils import range_boundaries, get_column_letter
 
