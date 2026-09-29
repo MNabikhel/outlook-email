@@ -359,6 +359,14 @@ def _haystack(subject: str, body: str, filename: str, sender: str, extracted_tex
     return "\n".join([subject or "", body or "", filename or "", sender or "", extracted_text or ""]).lower()
 
 
+FILENAME_BONUS = 25
+
+
+def _name_hit(filename: str, keyword: str) -> bool:
+    """``keyword`` starts a word of the file name: "nda" is in "NDA_signed.pdf" but not in "close_calendar.xlsx"."""
+    return re.search(rf"(?<![a-z]){re.escape(keyword)}", filename) is not None
+
+
 def score_rules(
     *,
     subject: str,
@@ -375,7 +383,7 @@ def score_rules(
         full_blob = f"{own_blob}\n{(sender or '').lower()}"
     else:
         full_blob = _haystack(subject, body, filename, sender, extracted_text)
-    file_low = (filename or "").lower()
+    file_low = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", filename or "").lower()
     sender_low = (sender or "").lower()
     scores: dict[DocumentType, tuple[int, list[str], list[str]]] = {}
     for rule in RULES:
@@ -395,7 +403,7 @@ def score_rules(
         if any(rx.search(subject or "") for rx in rule.subject_regexes):
             hit = True
             reasons.append("subject")
-        if rule.filename_keywords and any(k in file_low for k in rule.filename_keywords):
+        if rule.filename_keywords and any(_name_hit(file_low, k) for k in rule.filename_keywords):
             hit = True
             reasons.append("filename")
         if rule.sender_keywords and any(k in sender_low for k in rule.sender_keywords):
@@ -405,8 +413,10 @@ def score_rules(
             continue
         prev = scores.get(rule.document_type, (0, [], []))
         flags = list(dict.fromkeys(list(prev[2]) + list(rule.flags)))
+        # What a file is called says more about it than one word somewhere in its pages.
+        named = FILENAME_BONUS if "filename" in reasons else 0
         scores[rule.document_type] = (
-            prev[0] + rule.weight,
+            prev[0] + rule.weight + named,
             list(dict.fromkeys(prev[1] + reasons + ([rule.reason] if rule.reason else []))),
             flags,
         )

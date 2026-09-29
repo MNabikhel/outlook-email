@@ -176,3 +176,13 @@ def test_a_reply_is_filed_by_what_the_sender_wrote_not_the_thread_it_quotes():
     assert _email("RE: Invoice INV-7", "Approved, go ahead." + quoted).document_type == DocumentType.AP_INVOICE
     forward = _email("FW: see below", quoted.strip())
     assert forward.document_type == DocumentType.AP_INVOICE
+
+
+def test_what_a_file_is_called_outweighs_one_word_in_its_pages():
+    contract = classify_document(
+        filename="Master Supply Agreement.pdf",
+        extracted_text="Master Supply Agreement. 3. Payment: each invoice is payable within 30 days. 5. Termination.",
+    )
+    assert contract.document_type == DocumentType.CONTRACT
+    assert classify_document(filename="Sep2026_close_calendar.xlsx", extracted_text="Close checklist").document_type != DocumentType.CONTRACT
+    assert classify_document(filename="ChaseStmt_Sep.pdf", extracted_text="Summary").document_type == DocumentType.BANK_STATEMENT
