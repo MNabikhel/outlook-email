@@ -232,7 +232,11 @@ def test_chat_box_says_the_model_failed_not_that_it_is_off(loaded, auto, monkeyp
         raise EmptyReply("the model sent only its reasoning, no answer")
         yield  # pragma: no cover
 
+    def thinks_only(*_a, **_k):
+        raise EmptyReply("the model sent only its reasoning, no answer")
+
     monkeypatch.setattr("controller_inbox.assistant.stream_text", empty)
+    monkeypatch.setattr("controller_inbox.assistant.chat_with_tools", thinks_only)
     events = list(answer_stream(loaded, auto, "What does this email need from me?", email_id="demo-inv-10482"))
     note = next(event["note"] for event in events if event["type"] == "mode")
     text = "".join(event["text"] for event in events if event["type"] == "delta")
