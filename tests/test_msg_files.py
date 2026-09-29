@@ -62,6 +62,7 @@ def test_a_forwarded_email_brings_its_own_attachments(store, settings):
     assert set(files) == {"Acme quote.txt", "Acme quote › quote.pdf"}, "the signature logo is not an attachment"
     assert "From: Acme Sales <sales@acme.com>" in files["Acme quote.txt"]
     assert "Attachments: quote.pdf" in files["Acme quote.txt"]
+    assert "Date: Mon, 28 Sep 2026 14:30:00" in files["Acme quote.txt"]
     assert "Support plan | $9,600.00" in files["Acme quote › quote.pdf"]
     saved = {path.name for path in (settings.inbox_extracted / record.id).iterdir()}
     assert saved == {"Acme quote.txt", "Acme quote › quote.pdf"}

@@ -296,6 +296,9 @@ def _embedded_message_text(item, filenames: list[str] | None = None) -> str:
     subject = getattr(item, "subject", "") or ""
     sender = getattr(item, "sender", "") or ""
     date = getattr(item, "date", "") or ""
+    header = getattr(item, "header", None)
+    if not date and header is not None:
+        date = _tidy(str(header.get("Date") or ""))
     body = getattr(item, "body", "") or ""
     if isinstance(body, bytes):
         body = body.decode("utf-8", errors="replace")
