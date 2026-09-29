@@ -521,6 +521,38 @@ def search_parts(text: str, query: str, *, limit: int = 3, stop: set[str] | froz
     return [item[2] for item in scored[:limit]]
 
 
+def excerpt(text: str, query: str, size: int) -> str:
+    """At most ``size`` characters: the whole text if it fits, else its section list, its opening, and the matching sections."""
+    text = (text or "").strip()
+    if len(text) <= size:
+        return text
+    parts = split_parts(text)
+    lines = []
+    if len(parts) > 1:
+        labels = [part.label for part in parts[:12]] + ([f"… {len(parts) - 12} more"] if len(parts) > 12 else [])
+        lines.append("Sections: " + " / ".join(labels))
+    room = size - sum(len(line) + 1 for line in lines)
+    matches = [part for part in search_parts(text, query, limit=3) if part.label != parts[0].label]
+    opening_cap = room // 3 if matches else room
+    shown: dict[str, str] = {}
+    for part in matches:
+        shown[part.label] = _clip(part, (room - opening_cap) // len(matches))
+    used = sum(len(block) + 1 for block in shown.values())
+    shown[parts[0].label] = _clip(parts[0], room - used)
+    order = {part.label: index for index, part in enumerate(parts)}
+    lines += [block for label, block in sorted(shown.items(), key=lambda item: order[item[0]]) if block]
+    return "\n".join(lines)
+
+
+def _clip(part: Part, room: int) -> str:
+    head = f"[{part.label}]\n"
+    if room - len(head) < 100:
+        return ""
+    if len(head) + len(part.text) <= room:
+        return head + part.text
+    return head + part.text[: room - len(head) - 2].rsplit(" ", 1)[0] + " …"
+
+
 def read_part(text: str, label: str) -> Part | None:
     """A section by its label ("page 3", "slide 2", "Budget", "part 4"), matched loosely."""
     parts = split_parts(text)
