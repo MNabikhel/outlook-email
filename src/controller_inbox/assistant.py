@@ -103,14 +103,15 @@ SYSTEM = (
 TOOLS_GUIDE = (
     "\nYou can read more before answering. Work step by step: find the right email and file, read the part that "
     "answers the question (read_file, find_in_file), for spreadsheets check exact numbers with read_cells and how "
-    "a total is built with trace_cell, and write each finding with note, saying where it came from. Stop and "
-    "answer as soon as you have what you need."
+    "a total is built with trace_cell, and write each finding with note, saying where it came from. Work out "
+    "every sum, difference, percentage and date (such as a notice deadline) with calculate, never in your head. "
+    "Stop and answer as soon as you have what you need."
 )
 
 VERIFY = (
     "Check your draft answer against the text above before the user sees it. Every amount, date, name, and "
-    "cell value must appear in that text; fix or remove anything that doesn't, and follow any calculation "
-    "through the cells it uses. Then write the final answer for the user, citing emails like [1] and naming "
+    "cell value must appear in that text or come from a calculate result; fix or remove anything that doesn't, "
+    "and follow any calculation through the cells it uses. Then write the final answer for the user, citing emails like [1] and naming "
     "the file and page, sheet or cell. Do not mention the draft or this check."
 )
 
@@ -176,7 +177,7 @@ def pick_sources(
     current = store.get_email(email_id) if email_id else None
     if current is not None:
         picked[current.id] = current
-        if on_screen_question(question):
+        if on_screen_question(question) or (not about_today and not _ELSEWHERE.search(question) and answered_here(current, question)):
             return [current], False, set()
     stripped = _TODAY.sub(" ", question) if about_today else question
     found = []
@@ -201,6 +202,16 @@ def pick_sources(
                     picked[email.id] = email
     cap = MAX_SOURCES + (1 if email_id in picked else 0)
     return list(picked.values())[:cap], about_today, {email.id for email in found}
+
+
+def answered_here(email: EmailRecord, question: str) -> bool:
+    """Most of the question's words are in this email or its files ("when can we cancel before renewal?" on a contract)."""
+    terms = keywords(question)
+    if len(terms) < 2:
+        return False
+    text = " ".join([email.subject, email.body_text or ""] + [att.extracted_text or "" for att in email.attachments]).lower()
+    hits = sum(1 for term in terms if term in text)
+    return hits >= 2 and hits * 2 >= len(terms)
 
 
 def on_screen_question(question: str) -> bool:

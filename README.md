@@ -98,7 +98,7 @@ Every correction a guard makes is shown on the message under **Why this was flag
 
 Attachments become text the model can find its way around: PDF pages (with a note when a page is a scan), every workbook sheet with cell references and formulas (`C4: 1,800 (=SUM(C2:C3))`), Word documents in reading order with tracked changes and comments, slides with speaker notes, and CSV tables. Emails attached to a `.msg` are opened too, with their own files.
 
-When you ask about an email, the chat starts from that email, its file list, and the sections that match your question, sized to the model's context window. If the server supports tools (LM Studio does), the model can also search other mail, open another email, read a page or sheet, read exact cells, trace a total back to its inputs, and write down what it found. It then checks its answer against those notes before you see it. The notes stay on the email page (**Notes from Ask CloseDesk**) for next time.
+When you ask about an email, the chat starts from that email, its file list, and the sections that match your question, sized to the model's context window. If the server supports tools (LM Studio does), the model can also search other mail, open another email, read a page or sheet, read exact cells, trace a total back to its inputs, work out sums, percentages and deadlines exactly (small models get these wrong in their heads), and write down what it found. It then checks its answer against those notes before you see it. The notes stay on the email page (**Notes from Ask CloseDesk**) for next time.
 
 If the loaded model has a small context window, the chat says which files it only partly read and how to raise it (LM Studio → My Models → Context Length, 16,384 or more).
 

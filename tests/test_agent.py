@@ -53,6 +53,14 @@ def test_file_passages_are_sized_to_the_model_and_the_fraud_email_is_locked(stor
     assert "locked: possible payment fraud" in agent.files_line(scam)
 
 
+def test_files_that_fit_are_read_whole_in_order(store, settings, mail):
+    budget = mail["Q4 budget draft"]
+    ws = agent.Workspace(store, settings, [budget], question="What is the venue deposit?", current_id=budget.id)
+    block = agent.file_context(ws, "What is the venue deposit?", 12000)[budget.id]
+    assert "venue deposit" in block and "C4: =SUM(C2:C3)" in block
+    assert "Showing" not in block and ws.left_out == []
+
+
 def test_a_file_named_in_the_question_gets_the_room(store, settings, mail):
     budget = mail["Q4 budget draft"]
     question = 'Summarize the attachment "Offsite memo.docx": what it is, the key figures'
@@ -165,10 +173,43 @@ def test_a_full_context_window_is_retried_smaller_and_explained(store, settings,
     assert advice and "Context Length 16,384" in advice[0]
 
 
+@pytest.mark.parametrize(
+    "expression, answer",
+    [
+        ("2026-12-31 - 90 days", "= 2026-10-02 (Friday 2 October 2026)"),
+        ("31 December 2026 - 90 days", "= 2026-10-02"),
+        ("2026-01-31 + 1 month", "= 2026-02-28"),
+        ("days between 2026-10-02 and 2026-12-31", "90 days from 2026-10-02 to 2026-12-31"),
+        ("55,000+36,500+24,000", "= 115,500"),
+        ("(301500-259400)/259400*100", "= 16.2298"),
+        ("$9,600.00 - $8,900", "= 700"),
+        ("15% * 1200", "= 180"),
+    ],
+)
+def test_calculate_does_the_arithmetic_and_dates(expression, answer):
+    assert answer in agent.calculate(expression)
+
+
+@pytest.mark.parametrize("expression", ['__import__("os").system("ls")', "2**100", "1/0", "open('x')", ""])
+def test_calculate_refuses_anything_but_numbers(expression):
+    result = agent.calculate(expression)
+    assert "=" not in result.split(".")[0] and ("Couldn't" in result or result.startswith("Write numbers"))
+
+
+def test_a_question_the_open_email_answers_stays_on_it(store, settings, mail):
+    budget, quote = mail["Q4 budget draft"], mail["FW: Acme quote"]
+    sources, _, _ = pick_sources(store, "when is the offsite and what is the venue deposit?", email_id=budget.id)
+    assert [s.id for s in sources] == [budget.id]
+    sources, _, _ = pick_sources(store, "what is the Acme support plan quote?", email_id=budget.id)
+    assert quote.id in [s.id for s in sources], "words that aren't in the open email search the inbox"
+    sources, _, _ = pick_sources(store, "anything from Priya?", email_id=budget.id)
+    assert quote.id in [s.id for s in sources]
+
+
 def test_budget_follows_the_loaded_context_length():
     small = agent.prompt_budget(4096, 500, tools=True)
     large = agent.prompt_budget(32768, 500, tools=True)
-    assert small == (4096 - 500 - 700) * 3 and large > 10 * small // 2
+    assert small == (4096 - 500 - agent.TOOL_SCHEMA_TOKENS) * 3 and large > 10 * small // 2
     assert agent.prompt_budget(0, 500, tools=False) == (4096 - 500 - 250) * 3
     assert "reload the model in LM Studio" in agent.context_advice(4096, ["Q4 budget.xlsx"])
     assert agent.context_advice(4096, []) == ""

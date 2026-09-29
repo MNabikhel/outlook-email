@@ -5,7 +5,7 @@ question is about, the model also gets an outline of each attached file and
 the passages that match the question (or the start of the file for "summarize
 this"). A model that can call tools may then search mail, open another email,
 read any page or sheet, pull exact cells, trace a formula back to its inputs,
-and keep notes. Notes are saved with the email, so the next question starts
+work out sums and dates exactly, and keep notes. Notes are saved with the email, so the next question starts
 from what was already found.
 
 Files on an email flagged as possible payment fraud are not read until the
@@ -15,10 +15,13 @@ prompt tells the model not to follow instructions written there.
 
 from __future__ import annotations
 
+import ast
+import calendar
 import json
+import operator
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from controller_inbox import documents
@@ -31,7 +34,7 @@ MAX_STEPS = 6
 CHARS_PER_TOKEN = 3
 DEFAULT_CONTEXT = 4096
 RECOMMENDED_CONTEXT = 16384
-TOOL_SCHEMA_TOKENS = 700
+TOOL_SCHEMA_TOKENS = 900
 MAX_FILE_BYTES = 40_000_000
 
 LOCKED = (
@@ -139,6 +142,19 @@ TOOLS = [
                     "cell": {"type": "string", "description": "One cell like E12"},
                 },
                 "required": ["email", "file", "cell"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate",
+            "description": "Exact arithmetic or date math; use it instead of working numbers out yourself. Examples: "
+            "55000+36500+24000 · (301500-259400)/259400*100 · 2026-12-31 - 90 days · days between 2026-10-02 and 2026-12-31",
+            "parameters": {
+                "type": "object",
+                "properties": {"expression": {"type": "string"}},
+                "required": ["expression"],
             },
         },
     },
@@ -325,25 +341,28 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             f"── File: {att.filename} ({file_kind(att)}) · {len(parts)} section{'s' if len(parts) != 1 else ''}"
             f" · {len(text):,} characters"
         )
-        chosen = [] if whole else documents.search_parts(text, question, limit=4, stop=_STOP)
-        if not chosen:
-            chosen = parts
+        matches = [] if whole else documents.search_parts(text, question, limit=4, stop=_STOP)
+        wanted = {part.label for part in matches}
         block = [head]
         if len(parts) > 1:
             labels = [p.label for p in parts[:12]] + ([f"… {len(parts) - 12} more"] if len(parts) > 12 else [])
             block.append("Sections: " + " / ".join(labels))
+        # Matching sections first; the rest of the file fills whatever room is left.
         budget = per_file - len(head) - 200
-        shown = 0
-        for part in chosen:
+        picked: dict[str, str] = {}
+        cut = False
+        for part in matches + [part for part in parts if part.label not in wanted]:
             if budget <= 200:
                 break
-            body = part.text if len(part.text) <= budget else part.text[:budget].rsplit("\n", 1)[0] + "\n…"
-            block.append(f"[{part.label}]\n{body}")
+            body = part.text
+            if len(body) > budget:
+                body, cut = body[:budget].rsplit("\n", 1)[0] + "\n…", True
+            picked[part.label] = body
             budget -= len(body) + len(part.label) + 4
-            shown += 1
-        if shown < len(parts):
+        block += [f"[{part.label}]\n{picked[part.label]}" for part in parts if part.label in picked]
+        if cut or len(picked) < len(parts):
             ws.left_out.append(att.filename)
-            block.append(f"(Showing {shown} of {len(parts)} sections. Read others with read_file.)")
+            block.append(f"(Showing {len(picked)} of {len(parts)} sections{', one cut short' if cut else ''}. Read others with read_file.)")
         piece = "\n".join(block)
         if used + len(piece) > room and lines:
             ws.left_out.append(att.filename)
@@ -411,7 +430,7 @@ def _snippet(text: str, words: list[str], width: int = 180) -> str:
 
 
 def step_label(name: str, args: dict, ws: Workspace) -> str:
-    email = ws.email(args.get("email")) if args.get("email") or name not in {"search_mail", "note"} else None
+    email = ws.email(args.get("email")) if args.get("email") or name not in {"search_mail", "note", "calculate"} else None
     file = ws.file(email, args.get("file")) if email is not None and args.get("file") else None
     fname = file.filename if file else str(args.get("file") or "the files")
     if name == "search_mail":
@@ -426,6 +445,8 @@ def step_label(name: str, args: dict, ws: Workspace) -> str:
         return f"Reading cells {_sheet_ref(args)}{args.get('cells', '')} in {fname}"
     if name == "trace_cell":
         return f"Tracing how {_sheet_ref(args)}{args.get('cell', '')} is calculated in {fname}"
+    if name == "calculate":
+        return f"Working out {str(args.get('expression', ''))[:80]}"
     return name.replace("_", " ")
 
 
@@ -452,6 +473,8 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
         return _search_mail(ws, str(args.get("query") or ""))
     if name == "note":
         return _note(ws, str(args.get("text") or ""), args.get("email"))
+    if name == "calculate":
+        return calculate(str(args.get("expression") or ""))
     email = ws.email(args.get("email"))
     if email is None:
         return "No email with that number. Use a number from the list, like 1."
@@ -564,6 +587,76 @@ def _note(ws: Workspace, text: str, ref) -> str:
         at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         ws.store.add_finding(email.id, text, question=ws.question, at=at)
     return "Noted."
+
+
+_OPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul, ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv, ast.Mod: operator.mod, ast.Pow: operator.pow,
+    ast.USub: operator.neg, ast.UAdd: operator.pos,
+}
+_DATE_FORMATS = ("%Y-%m-%d", "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%m/%d/%Y")
+_DATE_STEP = re.compile(r"^(.+?)\s*([+-])\s*(\d{1,5})\s*(day|week|month|year)s?$", re.I)
+_BETWEEN = re.compile(r"^(?:(?:number of\s+)?days?\s+)?(?:between|from)\s+(.+?)\s+(?:and|to|until)\s+(.+)$", re.I)
+CALC_HELP = "Write numbers with + - * / ( ) and %, or dates like 2026-12-31 - 90 days, or days between 2026-10-02 and 2026-12-31."
+
+
+def calculate(expression: str) -> str:
+    """Arithmetic and date offsets a small model shouldn't do in its head."""
+    text = " ".join(expression.split())[:200].rstrip("=? ")
+    if not text:
+        return CALC_HELP
+    step = _DATE_STEP.match(text)
+    if step and _parse_date(step.group(1)):
+        start = _parse_date(step.group(1))
+        count = int(step.group(3)) * (1 if step.group(2) == "+" else -1)
+        unit = step.group(4).lower()
+        if unit in {"day", "week"}:
+            result = start + timedelta(days=count * (7 if unit == "week" else 1))
+        else:
+            months = start.year * 12 + start.month - 1 + count * (12 if unit == "year" else 1)
+            year, month = divmod(months, 12)
+            result = date(year, month + 1, min(start.day, calendar.monthrange(year, month + 1)[1]))
+        return f"{text} = {result.isoformat()} ({result:%A} {result.day} {result:%B %Y})"
+    between = _BETWEEN.match(text)
+    if between and _parse_date(between.group(1)) and _parse_date(between.group(2)):
+        first, second = _parse_date(between.group(1)), _parse_date(between.group(2))
+        return f"{(second - first).days} days from {first.isoformat()} to {second.isoformat()}"
+    cleaned = re.sub(r"(?<=\d),(?=\d{3}\b)", "", text.replace("$", "").replace("×", "*").replace("÷", "/"))
+    cleaned = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", cleaned)
+    try:
+        value = _evaluate(ast.parse(cleaned, mode="eval").body)
+    except (SyntaxError, ValueError, TypeError, ZeroDivisionError, OverflowError) as exc:
+        return f"Couldn't work that out ({type(exc).__name__}). {CALC_HELP}"
+    return f"{text} = {_number(value)}"
+
+
+def _parse_date(text: str) -> date | None:
+    text = text.strip().strip(",.")
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _evaluate(node):
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
+        left, right = _evaluate(node.left), _evaluate(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > 12:
+            raise ValueError("exponent too large")
+        return _OPS[type(node.op)](left, right)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
+        return _OPS[type(node.op)](_evaluate(node.operand))
+    raise ValueError("only numbers and + - * / ( ) are allowed")
+
+
+def _number(value: float) -> str:
+    if abs(value - round(value)) < 1e-9:
+        return f"{round(value):,}"
+    return f"{value:,.4f}".rstrip("0").rstrip(".")
 
 
 def evidence_text(ws: Workspace, room: int) -> str:
