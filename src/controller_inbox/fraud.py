@@ -490,11 +490,12 @@ def remove_sender_trust(store: "Store", settings: "Settings", sender: str, *, no
 
 
 def suggested_domains(store: "Store", settings: "Settings", *, limit: int = 8) -> list[tuple[str, int]]:
-    """Frequent sender domains nobody has trusted or reported yet (free-mail services left out)."""
+    """Frequent sender domains nobody has trusted or reported yet (free-mail and flagged senders left out)."""
     ctx = trust_context(store, settings)
+    flagged = {domain_of(row["sender_email"]) for row in store.flagged(limit=1000)}
     out = []
     for domain, count in store.sender_domains(limit=60):
-        if domain in FREEMAIL or domain_matches(domain, ctx.domains) or domain_matches(domain, ctx.fraud_domains):
+        if domain in FREEMAIL or domain in flagged or domain_matches(domain, ctx.domains) or domain_matches(domain, ctx.fraud_domains):
             continue
         out.append((domain, count))
     return out[:limit]

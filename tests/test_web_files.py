@@ -8,7 +8,7 @@ import io
 import pytest
 from fastapi.testclient import TestClient
 
-from controller_inbox import web
+from controller_inbox import fraud, web
 from controller_inbox.local_llm import ModelStatus
 
 
@@ -95,12 +95,13 @@ def test_reporting_and_trusting_from_the_email_page(client, store, mail):
     assert "didn&#39;t save. Use the buttons" in nonsense.text
 
 
-def test_fraud_page_manages_trusted_domains_and_exports_the_log(client, store, mail):
+def test_fraud_page_manages_trusted_domains_and_exports_the_log(client, store, settings, mail):
     page = client.get("/fraud")
     assert page.status_code == 200
     assert "@taz.com" in page.text and "from settings" in page.text
     assert "Updated remittance details" in page.text, "the blocked email is listed"
     assert "What it has learned" in page.text
+    assert "acme-payments.net" not in dict(fraud.suggested_domains(store, settings)), "never suggest a flagged sender"
 
     assert "free email service" in client.post("/fraud/domain", data={"domain": "gmail.com"}).text
     assert "enter a domain such as taz.com" in client.post("/fraud/domain", data={"domain": "not a domain"}).text
