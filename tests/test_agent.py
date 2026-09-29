@@ -2,87 +2,14 @@
 
 from __future__ import annotations
 
-import io
 import json
 
 import httpx
 import pytest
-from openpyxl import Workbook
 
 from controller_inbox import agent, assistant, local_llm
 from controller_inbox.assistant import answer_stream, on_screen_question, pick_sources
-from controller_inbox.demo import make_pdf
-from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.local_llm import ContextOverflow, ToolReply, ToolsUnsupported
-from msgfactory import DOCX, PDF, XLSX, build_message, write_msg
-
-
-def _budget_xlsx() -> bytes:
-    book = Workbook()
-    sheet = book.active
-    sheet.title = "Budget"
-    sheet.append(["Line", "Q3", "Q4", "Change"])
-    sheet.append(["Ads", 1000, 1500, "=C2-B2"])
-    sheet.append(["Travel", 250, 300, "=C3-B3"])
-    sheet.append(["Total", "=SUM(B2:B3)", "=SUM(C2:C3)", "=D2+D3"])
-    out = io.BytesIO()
-    book.save(out)
-    return out.getvalue()
-
-
-def _memo_docx() -> bytes:
-    from docx import Document
-
-    doc = Document()
-    doc.add_heading("Offsite plan (draft)", 1)
-    doc.add_paragraph("The offsite moves to Lisbon on 14 November. Budget is capped at $42,000.")
-    doc.add_paragraph("Open item: confirm the venue deposit with Finance.")
-    out = io.BytesIO()
-    doc.save(out)
-    return out.getvalue()
-
-
-@pytest.fixture
-def mail(store, settings):
-    """Three real .msg files: a budget from a colleague, a forwarded quote, and a bank-change scam with a file."""
-    settings.trusted_domains = "taz.com"
-    settings.ensure_data_dir()
-    write_msg(
-        settings.inbox_incoming / "budget.msg",
-        "Q4 budget draft",
-        "Hi, the Q4 budget draft is attached. Can you check the totals before Friday?",
-        sender_name="Maya Chen",
-        sender_email="maya@taz.com",
-        attachments=[
-            ("Q4 budget.xlsx", _budget_xlsx(), XLSX),
-            ("Offsite memo.docx", _memo_docx(), DOCX),
-        ],
-    )
-    quote = build_message(
-        "Acme quote",
-        "Our quote is attached.",
-        sender_name="Acme Sales",
-        sender_email="sales@acme.com",
-        attachments=[("quote.pdf", make_pdf([["Acme quote Q-881", ["Item", "Amount"], ["Support plan", "$9,600.00"]]]), PDF)],
-    )
-    write_msg(
-        settings.inbox_incoming / "fw quote.msg",
-        "FW: Acme quote",
-        "Is this in line with last year?",
-        sender_name="Priya Raman",
-        sender_email="priya@taz.com",
-        forwarded=[("Acme quote.msg", quote)],
-    )
-    write_msg(
-        settings.inbox_incoming / "scam.msg",
-        "Updated remittance details",
-        "Our bank details have changed. Please use the following account for all payments from today.",
-        sender_name="Acme Billing",
-        sender_email="billing@acme-payments.net",
-        attachments=[("new bank letter.pdf", make_pdf([["Remit to account 5566778899 routing 021000021"]]), PDF)],
-    )
-    records = {email.subject: email for email in ingest_folder(store, settings)}
-    return records
 
 
 def _events(stream) -> list[dict]:
@@ -124,6 +51,17 @@ def test_file_passages_are_sized_to_the_model_and_the_fraud_email_is_locked(stor
     assert agent.run_tool(ws, "read_file", {"email": "2", "file": "1"}, limit=2000) == agent.LOCKED
     assert "5566778899" not in json.dumps(blocks)
     assert "locked: possible payment fraud" in agent.files_line(scam)
+
+
+def test_a_file_named_in_the_question_gets_the_room(store, settings, mail):
+    budget = mail["Q4 budget draft"]
+    question = 'Summarize the attachment "Offsite memo.docx": what it is, the key figures'
+    ws = agent.Workspace(store, settings, [budget], question=question, current_id=budget.id)
+    block = agent.file_context(ws, question, 3000)[budget.id]
+    assert "── File: Offsite memo.docx" in block and "Lisbon" in block
+    assert "Q4 budget.xlsx (Excel workbook; not asked about" in block and "SUM(" not in block
+    assert [att.filename for att in agent.named_files(budget.attachments, "is the q4 budget right?")] == ["Q4 budget.xlsx"]
+    assert agent.named_files(budget.attachments, "what's in the files?") == []
 
 
 def test_tools_read_exact_cells_and_trace_a_total(store, settings, mail):

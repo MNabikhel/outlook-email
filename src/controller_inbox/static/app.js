@@ -181,6 +181,17 @@
     return html.replace(/\n/g, "<br>");
   }
 
+  function renderSteps(turn) {
+    const steps = turn.steps || [];
+    const notes = turn.notes || [];
+    if (!steps.length && !notes.length) return "";
+    const items =
+      steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("") +
+      notes.map((note) => `<li class="noted">Noted: ${escapeHtml(note)}</li>`).join("");
+    const label = `Read ${steps.length} thing${steps.length === 1 ? "" : "s"}${notes.length ? `, noted ${notes.length}` : ""}`;
+    return `<details class="msg-steps"${turn.pending ? " open" : ""}><summary>${label}</summary><ul>${items}</ul></details>`;
+  }
+
   function renderTurn(turn, bubble) {
     const el = bubble || document.createElement("div");
     el.className = `msg ${turn.role}${turn.pending ? " pending" : ""}`;
@@ -189,7 +200,10 @@
     } else {
       let html = turn.warning ? `<p class="msg-warn">${escapeHtml(turn.warning)}</p>` : "";
       if (turn.note) html += `<p class="msg-note">${escapeHtml(turn.note)}</p>`;
-      html += `<div>${turn.text ? formatAnswer(turn.text, turn.sources) : '<span class="typing">Thinking…</span>'}</div>`;
+      html += renderSteps(turn);
+      const waiting = turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
+      html += `<div>${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
+      if (turn.context) html += `<p class="msg-context">${escapeHtml(turn.context)} <a href="/settings">Setup</a></p>`;
       const cited =
         turn.mode === "model" ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
       if (!turn.pending && cited.length) {
@@ -254,14 +268,14 @@
     const history = turns.slice(-6).map(({ role, text }) => ({ role, text }));
     turns.push({ role: "user", text: question });
     renderTurn(turns[turns.length - 1]);
-    const answer = { role: "assistant", text: "", sources: [], pending: true };
+    const answer = { role: "assistant", text: "", sources: [], steps: [], notes: [], pending: true };
     const bubble = renderTurn(answer);
     $("button[type='submit']", chatForm).disabled = true;
     try {
       const response = await fetch("/chat", {
         method: "POST",
         headers: JSON_HEADERS,
-        body: JSON.stringify({ message: question, history, email_id: emailId || currentEmailId() }),
+        body: JSON.stringify({ message: question, history, email_id: emailId || chatInput.dataset.emailId || currentEmailId() }),
       });
       if (!response.ok || !response.body) throw new Error(`the server said ${response.status}`);
       const reader = response.body.getReader();
@@ -284,8 +298,15 @@
           if (round !== chatRound) break;
           if (event.type === "sources") {
             answer.sources = event.sources || [];
-            answer.warning = event.warning || "";
+            if (event.warning) answer.warning = event.warning;
             answer.mode = event.mode;
+          } else if (event.type === "step" || event.type === "note") {
+            const list = event.type === "step" ? (answer.steps = answer.steps || []) : (answer.notes = answer.notes || []);
+            list.push(event.text);
+            renderTurn(answer, bubble);
+          } else if (event.type === "context") {
+            answer.context = event.text;
+            renderTurn(answer, bubble);
           } else if (event.type === "mode") {
             answer.mode = event.mode;
             answer.note = event.note || "";
@@ -313,13 +334,26 @@
     chatInput.focus({ preventScroll: true });
   }
 
+  function askFile(id, file, mode) {
+    if (mode === "summary") {
+      return ask(`Summarize the attachment "${file}": what it is, the key figures, and anything I need to act on.`, id);
+    }
+    openChat(false);
+    chatInput.value = `About "${file}": `;
+    chatInput.dataset.emailId = id;
+    chatInput.focus();
+    chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+  }
+
   if (chat) {
     chatForm.addEventListener("submit", (event) => {
       event.preventDefault();
       if (busy) return;
       const question = chatInput.value;
+      const emailId = chatInput.dataset.emailId;
       chatInput.value = "";
-      ask(question);
+      delete chatInput.dataset.emailId;
+      ask(question, emailId);
     });
     chatInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
@@ -348,6 +382,8 @@
           return copyDraft(actionButton);
         case "ask":
           return ask("What does this email need from me?", id);
+        case "ask-file":
+          return askFile(id, actionButton.dataset.file, actionButton.dataset.mode);
         case "close-drawer":
           return closePreview();
         case "close-chat":

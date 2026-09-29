@@ -28,6 +28,7 @@
         <span class="nav-label">Everything</span>
         <a href="/inbox" class="{{ 'on' if page == 'inbox' else '' }}">All mail</a>
         <a href="/attachments" class="{{ 'on' if page == 'attachments' else '' }}">Attachments</a>
+        <a href="/fraud" class="{{ 'on' if page == 'fraud' else '' }}">Fraud check{% if counts.fraud_alerts %} <i>{{ counts.fraud_alerts }}</i>{% endif %}</a>
         <a href="/settings" class="{{ 'on' if page == 'settings' else '' }}">Setup</a>
       </nav>
       <div class="rail-foot">
@@ -67,7 +68,7 @@
           {% else %}
           <a class="kpi-link" href="/settings" title="No local model is running. Everything works without one; Setup shows how to add one."><span>Local AI</span><b>Off</b></a>
           {% endif %}
-          <div class="{{ 'hot' if counts.fraud_alerts else '' }}"><span>Fraud flags</span><b>{{ counts.fraud_alerts }}</b></div>
+          <a class="kpi-link {{ 'hot' if counts.fraud_alerts else '' }}" href="/fraud"><span>Fraud flags</span><b>{{ counts.fraud_alerts }}</b></a>
         </div>
       </header>
       {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
@@ -98,6 +99,9 @@
     </header>
     <div class="chat-log" aria-live="polite"></div>
     <div class="chat-suggest">
+      {% if email is defined and email %}
+      <button type="button" class="ghost tiny" data-ask="Summarize this email and its attachments">Summarize this email</button>
+      {% endif %}
       <button type="button" class="ghost tiny" data-ask="What's urgent today?">What's urgent today?</button>
       <button type="button" class="ghost tiny" data-ask="What needs a reply from me?">Needs a reply</button>
       <button type="button" class="ghost tiny" data-ask="Anything waiting for my approval?">Approvals</button>

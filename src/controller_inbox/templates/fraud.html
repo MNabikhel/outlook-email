@@ -1,0 +1,134 @@
+{% extends "base.html" %}
+{% block title %}Fraud check · CloseDesk{% endblock %}
+{% block heading %}Fraud check{% endblock %}
+{% block body %}
+<p class="lede">
+  Each email gets a score from the signals below. At {{ high_at }} or more it is blocked as possible payment fraud: nothing on it is processed and its files are locked.
+  From {{ caution_at }} it gets a “double-check before paying” note that doesn't block work. Trusted domains and senders count against the score, and every
+  “not fraud” or “this is fraud” you give is logged here and changes how much each signal counts next time.
+</p>
+
+<section class="split">
+  <article class="panel">
+    <h3>Trusted domains <small>mail from these counts as known</small></h3>
+    <ul class="trust-list">
+      {% for domain in configured %}
+      <li><span><b>@{{ domain }}</b><small>from settings (CONTROLLER_INBOX_TRUSTED_DOMAINS)</small></span></li>
+      {% endfor %}
+      {% for row in domains if row.verdict == 'safe' %}
+      <li>
+        <span><b>@{{ row.value }}</b><small>added {{ row.created_at | shortdt }}{% if row.note %} · {{ row.note }}{% endif %}</small></span>
+        <form method="post" action="/fraud/domain/remove"><input type="hidden" name="domain" value="{{ row.value }}"/><button type="submit" class="ghost tiny">Remove</button></form>
+      </li>
+      {% endfor %}
+      {% if not configured and not (domains | selectattr('verdict', 'equalto', 'safe') | list) %}
+      <li class="muted">None yet. Add your own company's domain and the vendors you pay.</li>
+      {% endif %}
+    </ul>
+    <form method="post" action="/fraud/domain" class="trust-form">
+      <input type="text" name="domain" required placeholder="taz.com" aria-label="Domain to trust" autocomplete="off"/>
+      <input type="text" name="note" maxlength="300" placeholder="Why (optional)" aria-label="Why"/>
+      <input type="hidden" name="verdict" value="safe"/>
+      <button type="submit">Trust domain</button>
+    </form>
+    <p class="muted small">Free email services (gmail.com, outlook.com…) can't be trusted as a whole; trust the person's address from their email instead. Lookalikes of a trusted domain (t4z.com, taz-billing.com) score higher, not lower.</p>
+    {% if suggestions %}
+    <h4>Domains you hear from most</h4>
+    <ul class="trust-list">
+      {% for domain, count in suggestions %}
+      <li>
+        <span><b>@{{ domain }}</b><small>{{ count }} email{{ '' if count == 1 else 's' }}</small></span>
+        <form method="post" action="/fraud/domain"><input type="hidden" name="domain" value="{{ domain }}"/><input type="hidden" name="verdict" value="safe"/><button type="submit" class="ghost tiny">Trust</button></form>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </article>
+
+  <article class="panel">
+    <h3>Senders and reported domains</h3>
+    <ul class="trust-list">
+      {% for row in senders %}
+      <li>
+        <span><b>{{ row.value }}</b><small>{{ 'trusted' if row.verdict == 'safe' else 'reported as fraud' }} · {{ row.created_at | shortdt }}{% if row.note %} · {{ row.note }}{% endif %}</small></span>
+        <form method="post" action="/fraud/sender/remove"><input type="hidden" name="sender" value="{{ row.value }}"/><button type="submit" class="ghost tiny">Remove</button></form>
+      </li>
+      {% endfor %}
+      {% for row in domains if row.verdict != 'safe' %}
+      <li>
+        <span><b class="bad">@{{ row.value }}</b><small>reported as fraud · {{ row.created_at | shortdt }}{% if row.note %} · {{ row.note }}{% endif %}</small></span>
+        <form method="post" action="/fraud/domain/remove"><input type="hidden" name="domain" value="{{ row.value }}"/><button type="submit" class="ghost tiny">Remove</button></form>
+      </li>
+      {% endfor %}
+      {% if not senders and not (domains | rejectattr('verdict', 'equalto', 'safe') | list) %}
+      <li class="muted">None yet. Use “Trust” or “Report this sender” in an email's fraud check.</li>
+      {% endif %}
+    </ul>
+    <form method="post" action="/fraud/domain" class="trust-form">
+      <input type="text" name="domain" required placeholder="bad-domain.com" aria-label="Domain to report" autocomplete="off"/>
+      <input type="text" name="note" maxlength="300" placeholder="Why (optional)" aria-label="Why"/>
+      <input type="hidden" name="verdict" value="fraud"/>
+      <button type="submit" class="danger">Report domain</button>
+    </form>
+  </article>
+</section>
+
+<section class="panel">
+  <h3>Flagged now <small>{{ flagged | length }} email{{ '' if flagged | length == 1 else 's' }}</small></h3>
+  {% if flagged %}
+  <div class="table-wrap">
+    <table class="mail">
+      <thead><tr><th>Level</th><th>Email</th><th>Why</th><th>Score</th></tr></thead>
+      <tbody>
+        {% for row in flagged %}
+        <tr class="{{ 'critical' if row.level == 'high' else 'high' }}" data-email="{{ row.email_id }}">
+          <td class="nowrap"><span class="tag {{ 'fraud' if row.level == 'high' else 'due_soon' }}">{{ 'Blocked' if row.level == 'high' else 'Caution' }}</span>
+            {% if 'fraud_cleared' in row.flags %}<small class="muted">you cleared it</small>{% endif %}</td>
+          <td><a class="subj" href="/inbox/{{ row.email_id }}">{{ row.subject or '(no subject)' }}</a><small class="why">{{ row.sender_name or row.sender_email }} · {{ row.received_at | shortdt }}</small></td>
+          <td><small>{% for signal in row.signals if signal.points > 0 %}{{ signal.label }}{{ '' if loop.last else ' · ' }}{% endfor %}</small></td>
+          <td>{{ row.score }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">Nothing is flagged right now.</p>
+  {% endif %}
+</section>
+
+<section class="split">
+  <article class="panel">
+    <h3>What it has learned <small>how much each signal counts now</small></h3>
+    <table class="mail weights">
+      <thead><tr><th>Signal</th><th>Points</th><th>Weight</th></tr></thead>
+      <tbody>
+        {% for row in weights %}
+        <tr>
+          <td>{{ row.label }}</td>
+          <td>{{ row.points }}</td>
+          <td class="{{ 'up' if row.weight > 1 else 'down' if row.weight < 1 else '' }}">×{{ '%.2f' | format(row.weight) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted small">Each “this is fraud” raises the weight of the signals that email had; each “not fraud” lowers them. A bank-change request never drops below ×0.80.</p>
+  </article>
+  <article class="panel">
+    <h3>Fraud log <small><a href="/fraud/log.csv">Download CSV</a></small></h3>
+    {% if log %}
+    <ul class="log-list">
+      {% for row in log %}
+      <li>
+        <span class="tag log-{{ row.event }}">{{ row.event.replace('_', ' ') }}</span>
+        {% if row.email_id %}<a href="/inbox/{{ row.email_id }}">{{ row.subject or '(no subject)' }}</a>{% else %}<b>{{ row.sender_email }}</b>{% endif %}
+        <small>{{ row.at | shortdt }}{% if row.email_id %} · {{ row.sender_email }}{% endif %}{% if row.level %} · {{ row.level }} {{ row.score }}{% endif %}{% if row.note %} · {{ row.note }}{% endif %}</small>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="muted">Nothing logged yet. Flags, level changes, and your verdicts appear here.</p>
+    {% endif %}
+  </article>
+</section>
+{% endblock %}

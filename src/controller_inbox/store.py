@@ -813,6 +813,20 @@ class Store:
             return None
         return {**dict(row), "signals": _loads(row["signals"], [])}
 
+    def flagged(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Emails whose latest check is caution or high, highest score first."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.email_id, c.level, c.score, c.signals, e.subject, e.sender_name, e.sender_email, e.received_at, e.flags
+                FROM fraud_checks c JOIN emails e ON e.id = c.email_id
+                WHERE c.level IN ('high', 'caution')
+                ORDER BY CASE c.level WHEN 'high' THEN 0 ELSE 1 END, c.score DESC, e.received_at DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [{**dict(row), "signals": _loads(row["signals"], []), "flags": _loads(row["flags"], [])} for row in rows]
+
     def log_fraud(self, row: dict[str, Any]) -> None:
         with self.connect() as conn:
             conn.execute(

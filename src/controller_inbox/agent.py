@@ -236,14 +236,19 @@ class Workspace:
         return None
 
     def original(self, email: EmailRecord, att: AttachmentRecord) -> bytes | None:
-        """The attachment as it arrived, from inbox/extracted/<email id>/ (never outside it)."""
-        from controller_inbox.folder_mail import safe_filename
+        path = original_file(self.settings, email, att)
+        return path.read_bytes() if path is not None else None
 
-        root = self.settings.inbox_extracted.resolve()
-        path = (root / email.id / safe_filename(att.filename)).resolve()
-        if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
-            return None
-        return path.read_bytes()
+
+def original_file(settings: Settings, email: EmailRecord, att: AttachmentRecord) -> Path | None:
+    """The attachment as it arrived, from inbox/extracted/<email id>/ (never outside it)."""
+    from controller_inbox.folder_mail import safe_filename
+
+    root = settings.inbox_extracted.resolve()
+    path = (root / email.id / safe_filename(att.filename)).resolve()
+    if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
+        return None
+    return path
 
 
 # The context the model starts from ---------------------------------------------------------
@@ -307,6 +312,9 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
     if not readable:
         return ""
     ws.read_files = True
+    named = named_files(readable, question)
+    skipped = [att for att in readable if att not in named] if named else []
+    readable = named or readable
     lines: list[str] = []
     used = 0
     per_file = max(600, room // len(readable))
@@ -343,7 +351,20 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             continue
         lines.append(piece)
         used += len(piece)
+    lines += [f"── File: {att.filename} ({file_kind(att)}; not asked about, read it with read_file)" for att in skipped]
     return "\n".join(lines)
+
+
+def named_files(files: list[AttachmentRecord], question: str) -> list[AttachmentRecord]:
+    """The files a question mentions by name ("the budget.xlsx", "in Q3 Budget")."""
+    text = question.lower()
+    named = []
+    for att in files:
+        name = att.filename.lower()
+        stem = Path(name).stem.split(" › ")[-1]
+        if name in text or name.split(" › ")[-1] in text or (len(stem) >= 4 and re.search(rf"(?<!\w){re.escape(stem)}(?!\w)", text)):
+            named.append(att)
+    return named
 
 
 def earlier_findings(ws: Workspace, email: EmailRecord, limit: int = 5) -> str:

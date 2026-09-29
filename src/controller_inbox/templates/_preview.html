@@ -1,4 +1,3 @@
-{% set fraud = 'fraud_risk' in email.flags or email.category.value == 'payment_instruction_change' %}
 <article class="preview" data-email-id="{{ email.id }}">
   <p class="preview-meta">
     <span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }}</span>
@@ -6,8 +5,10 @@
   </p>
   <h2>{{ email.subject }}</h2>
   <p class="muted">{{ email.sender_name or email.sender_email }}{% if email.sender_name %} &lt;{{ email.sender_email }}&gt;{% endif %} · {{ email.received_at | shortdt }}</p>
-  {% if fraud %}
-  <p class="warn-box">Payment details may have changed. Verify by phone using a number you already have. Don't pay, and don't reply with account details.</p>
+  {% if locked %}
+  <p class="warn-box">Payment details may have changed. Verify by phone using a number you already have. Don't pay, and don't reply with account details.{% if email.attachments %} Its files are locked until you mark it safe.{% endif %}</p>
+  {% elif 'payment_caution' in email.flags %}
+  <p class="note">Worth a second look before any money moves. <a data-full href="/inbox/{{ email.id }}#fraud">See why</a></p>
   {% endif %}
   {% if email.summary %}<p class="preview-summary">{{ email.summary }}</p>{% endif %}
   {% include "_mail_tools.html" %}
@@ -38,15 +39,24 @@
     <pre class="body">{{ email.body_text or '(no text)' }}</pre>
   </section>
 
-  {% if email.attachments %}
+  {% if files %}
   <section class="preview-part">
     <h3>Attachments</h3>
-    <ul class="plain">
-      {% for att in email.attachments %}
-      <li>{{ att.filename }} <small class="muted">· {{ att.document_type.value | label_doc }}</small></li>
+    <ul class="file-list">
+      {% for card in files %}
+      <li>
+        <span><b>{{ card.att.filename }}</b> <small class="muted">· {{ card.kind }} · {{ card.att.document_type.value | label_doc }}</small></span>
+        <span class="file-actions">
+          {% if card.chars %}<a class="ghost tiny" data-full href="/inbox/{{ email.id }}/files/{{ card.n }}">Read</a>{% endif %}
+          {% if card.chars and not locked %}
+          <button type="button" class="tiny" data-action="ask-file" data-mode="summary" data-id="{{ email.id }}" data-file="{{ card.att.filename }}">Summarize</button>
+          <button type="button" class="tiny ghost" data-action="ask-file" data-id="{{ email.id }}" data-file="{{ card.att.filename }}">Ask…</button>
+          {% elif not card.chars %}<small class="muted">no readable text</small>{% endif %}
+        </span>
+      </li>
       {% endfor %}
     </ul>
   </section>
   {% endif %}
-  <p class="preview-foot"><a data-full href="/inbox/{{ email.id }}">Full page: why it was flagged, extracted text, fix the category →</a></p>
+  <p class="preview-foot"><a data-full href="/inbox/{{ email.id }}">Full page: files, fraud check, why it was flagged, fix the category →</a></p>
 </article>

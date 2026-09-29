@@ -10,6 +10,8 @@ much each signal counts next time.
 
 from __future__ import annotations
 
+import csv
+import io
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -496,6 +498,29 @@ def suggested_domains(store: "Store", settings: "Settings", *, limit: int = 8) -
             continue
         out.append((domain, count))
     return out[:limit]
+
+
+def log_csv(store: "Store", *, limit: int = 5000) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["at", "event", "level", "score", "sender", "subject", "signals", "note", "email_id"])
+    for row in store.fraud_log(limit=limit):
+        signals = "; ".join(
+            f"{item['key']} {int(item.get('points') or 0):+}" for item in row["signals"] if isinstance(item, dict) and item.get("key")
+        )
+        writer.writerow(
+            [_cell(row.get(name)) for name in ("at", "event", "level")]
+            + [row.get("score") if row.get("level") else ""]
+            + [_cell(row.get(name)) for name in ("sender_email", "subject")]
+            + [signals, _cell(row.get("note")), row.get("email_id") or ""]
+        )
+    return buf.getvalue()
+
+
+def _cell(value) -> str:
+    """Senders write the subject; keep a spreadsheet from running it as a formula."""
+    text = "" if value is None else str(value)
+    return "'" + text if text[:1] in {"=", "+", "-", "@", "\t", "\r"} else text
 
 
 def _lookalike(domain: str, ctx: TrustContext) -> str:
