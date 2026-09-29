@@ -11,7 +11,6 @@ from controller_inbox.models import (
     ActionItem,
     ActionStatus,
     DocumentType,
-    EmailRecord,
     ExtractedFields,
     Importance,
 )
