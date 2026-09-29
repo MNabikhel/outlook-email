@@ -166,3 +166,13 @@ def test_duplicate_invoice_flag_only_on_invoices():
     assert "duplicate_invoice" not in mention.flags
     invoice = _email("Invoice INV-8841", "Vendor invoice INV-8841, amount due $1,200.00.", duplicate=True)
     assert "duplicate_invoice" in invoice.flags
+
+
+def test_a_reply_is_filed_by_what_the_sender_wrote_not_the_thread_it_quotes():
+    quoted = "\n\n-----Original Message-----\nFrom: Accounts <a@vendor.example>\n\nPlease pay invoice INV-7 from the new account. Amount due $4,000."
+    reply = _email("RE: Northwind bank details update", "I called Northwind and nothing has changed. Ignore it." + quoted)
+    assert reply.document_type != DocumentType.AP_INVOICE and "fraud_risk" not in reply.flags
+    assert "Urgent timing language" not in _email("RE: bank", "Nothing changed." + quoted + " Pay today.").importance_reasons
+    assert _email("RE: Invoice INV-7", "Approved, go ahead." + quoted).document_type == DocumentType.AP_INVOICE
+    forward = _email("FW: see below", quoted.strip())
+    assert forward.document_type == DocumentType.AP_INVOICE

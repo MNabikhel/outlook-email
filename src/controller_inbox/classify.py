@@ -368,8 +368,13 @@ def score_rules(
     extracted_text: str = "",
     payment_rule: bool = True,
 ) -> dict[DocumentType, tuple[int, list[str], list[str]]]:
-    full_blob = _haystack(subject, body, filename, sender, extracted_text)
     own_blob = f"{subject or ''}\n{own_words(body)}".lower()
+    # A reply with words of its own is about those words; the thread it quotes doesn't pick its category.
+    replied = bool(QUOTE_START_RE.search(body or "")) and own_blob.strip() != (subject or "").strip().lower()
+    if replied and not (filename or extracted_text):
+        full_blob = f"{own_blob}\n{(sender or '').lower()}"
+    else:
+        full_blob = _haystack(subject, body, filename, sender, extracted_text)
     file_low = (filename or "").lower()
     sender_low = (sender or "").lower()
     scores: dict[DocumentType, tuple[int, list[str], list[str]]] = {}
@@ -615,7 +620,7 @@ def _importance(
 ) -> tuple[Importance, int, list[str]]:
     score = 30
     reasons: list[str] = []
-    blob = f"{subject}\n{body}".lower()
+    blob = f"{subject}\n{own_words(body)}".lower()
     sender_low = (sender or "").lower()
 
     if "fraud_risk" in flags or category == DocumentType.PAYMENT_INSTRUCTION_CHANGE:
