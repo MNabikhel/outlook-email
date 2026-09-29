@@ -164,6 +164,8 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
     monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: ToolReply("From my notes: D2+D3 [1]."))
     _events(answer_stream(store, settings, "remind me how the total works", email_id=budget.id))
     assert "Notes from earlier reading of this email:\n- D4 (total change)" in checked["messages"][-1]["content"]
+    _events(answer_stream(store, settings, "summarize the offsite memo", email_id=budget.id))
+    assert "Notes from earlier reading" not in checked["messages"][-1]["content"], "unrelated notes stay out"
 
 
 def test_servers_without_tools_still_read_the_files(store, settings, mail, monkeypatch):

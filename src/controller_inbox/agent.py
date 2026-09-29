@@ -416,7 +416,9 @@ def named_files(files: list[AttachmentRecord], question: str) -> list[Attachment
 
 
 def earlier_findings(ws: Workspace, email: EmailRecord, limit: int = 5) -> str:
-    rows = ws.store.findings(email.id, limit=limit)
+    """Notes from earlier questions on this email that share a word with this one (others only distract)."""
+    asked = set(documents.terms_of(ws.question, _STOP))
+    rows = [row for row in ws.store.findings(email.id, limit=20) if asked & set(documents.terms_of(row["text"], _STOP))][:limit]
     if not rows:
         return ""
     return "Notes from earlier reading of this email:\n" + "\n".join(f"- {row['text']}" for row in reversed(rows))
