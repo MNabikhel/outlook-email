@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     digest_lookback_days: int = 1
     profile: str = "general"
     chat_max_tokens: int = 500
+    # The model's context window in tokens when the server doesn't report it (LM Studio does).
+    chat_context_tokens: int = 0
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"

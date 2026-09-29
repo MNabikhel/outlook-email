@@ -136,6 +136,15 @@ CREATE TABLE IF NOT EXISTS fraud_log (
     note TEXT
 );
 
+CREATE TABLE IF NOT EXISTS findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email_id TEXT NOT NULL,
+    at TEXT,
+    question TEXT,
+    text TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_findings_email ON findings(email_id);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(category);
@@ -672,6 +681,7 @@ class Store:
             conn.execute(f"DELETE FROM action_items WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM corrections WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM fraud_checks WHERE email_id IN ({sample})")
+            conn.execute(f"DELETE FROM findings WHERE email_id IN ({sample})")
             conn.execute("DELETE FROM emails WHERE source = 'demo'")
             if not conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]:
                 conn.execute("DELETE FROM digests")
@@ -738,6 +748,30 @@ class Store:
     def correction_count(self) -> int:
         with self.connect() as conn:
             return conn.execute("SELECT COUNT(*) AS n FROM corrections").fetchone()["n"]
+
+    # Notes the chat kept while reading an email's files -------------------------------------
+
+    def add_finding(self, email_id: str, text: str, *, question: str = "", at: str = "") -> None:
+        with self.connect() as conn:
+            duplicate = conn.execute(
+                "SELECT 1 FROM findings WHERE email_id = ? AND text = ?", (email_id, text)
+            ).fetchone()
+            if not duplicate:
+                conn.execute(
+                    "INSERT INTO findings(email_id, at, question, text) VALUES (?, ?, ?, ?)",
+                    (email_id, at, question[:300], text[:1000]),
+                )
+
+    def findings(self, email_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM findings WHERE email_id = ? ORDER BY id DESC LIMIT ?", (email_id, limit)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def clear_findings(self, email_id: str) -> int:
+        with self.connect() as conn:
+            return conn.execute("DELETE FROM findings WHERE email_id = ?", (email_id,)).rowcount
 
     # Fraud checks ------------------------------------------------------------------------------
 

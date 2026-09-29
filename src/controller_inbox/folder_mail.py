@@ -426,10 +426,10 @@ def _write_extracted(settings: Settings, raw: RawMessage) -> None:
     dest = settings.inbox_extracted / raw.id
     dest.mkdir(parents=True, exist_ok=True)
     for att in raw.attachments:
-        (dest / _safe_filename(att.filename)).write_bytes(att.content or b"")
+        (dest / safe_filename(att.filename)).write_bytes(att.content or b"")
 
 
-def _safe_filename(name: str) -> str:
+def safe_filename(name: str) -> str:
     """Windows refuses : * ? " < > | in file names; forwarded-mail subjects often have them."""
     base = re.split(r"[\\/]", name or "")[-1]
     cleaned = re.sub(r'[<>:"|?*\x00-\x1f]', "_", base).strip(" .")

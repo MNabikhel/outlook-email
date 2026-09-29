@@ -24,13 +24,12 @@ def _fresh_model_memory():
     """What a run learned about the loaded model must not leak between tests."""
     from controller_inbox import local_llm
 
-    local_llm._status_cache.clear()
-    local_llm._reasoning_seen.clear()
-    local_llm._effort_rejected.clear()
+    caches = (local_llm._status_cache, local_llm._reasoning_seen, local_llm._effort_rejected, local_llm._tools_rejected)
+    for cache in caches:
+        cache.clear()
     yield
-    local_llm._status_cache.clear()
-    local_llm._reasoning_seen.clear()
-    local_llm._effort_rejected.clear()
+    for cache in caches:
+        cache.clear()
 
 
 @pytest.fixture
