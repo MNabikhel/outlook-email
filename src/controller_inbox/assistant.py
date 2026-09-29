@@ -508,11 +508,15 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
 _ECHO_RE = re.compile(
     "|".join(
         r"\s+".join(re.escape(word) for word in text.split()[:6])
-        for text in (VERIFY, ANSWER_FROM_READING, TOOLS_GUIDE, SYSTEM, "What you read with tools:", "Your draft answer:", "Your notes:")
-    ),
+        for text in (
+            VERIFY, ANSWER_FROM_READING, TOOLS_GUIDE, SYSTEM,
+            "What you read with tools:", "Your draft answer:", "Your notes:", "Notes from earlier reading",
+        )
+    )
+    + r"|(?:^|\n)[^\n]*· \d+ sections? · [\d,]+ characters",
     re.IGNORECASE,
 )
-_HOLD = 80
+_HOLD = 120
 
 
 def without_echo(pieces: Iterator[str]) -> Iterator[str]:

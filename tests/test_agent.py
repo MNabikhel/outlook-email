@@ -235,6 +235,9 @@ def test_an_answer_stops_where_the_model_starts_repeating_its_instructions():
     pieces = [text[i : i + 7] for i in range(0, len(text), 7)]
     assert "".join(assistant.without_echo(iter(pieces))) == answer
     assert "".join(assistant.without_echo(iter([answer]))) == answer
+    header = "\n\nFile: Offsite memo DRAFT.docx (Word document) · 1 section · 451 characters · part 1"
+    assert "".join(assistant.without_echo(iter([answer, header]))) == answer
+    assert "".join(assistant.without_echo(iter([answer + "\n\nNotes from earlier reading:\n- B8: Yes"]))) == answer
     with pytest.raises(local_llm.EmptyReply):
         list(assistant.without_echo(iter(["Your draft answer:", " the memo..."])))
 
