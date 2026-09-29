@@ -228,6 +228,17 @@ def test_calculate_refuses_anything_but_numbers(expression):
     assert "=" not in result.split(".")[0] and ("Couldn't" in result or result.startswith("Write numbers"))
 
 
+def test_an_answer_stops_where_the_model_starts_repeating_its_instructions():
+    answer = "The memo plans a Lisbon offsite on 12-14 November, capped at $42,000."
+    echo = "\n\nCheck your draft answer against the text\nabove before the user sees it. Every amount..."
+    text = answer + echo
+    pieces = [text[i : i + 7] for i in range(0, len(text), 7)]
+    assert "".join(assistant.without_echo(iter(pieces))) == answer
+    assert "".join(assistant.without_echo(iter([answer]))) == answer
+    with pytest.raises(local_llm.EmptyReply):
+        list(assistant.without_echo(iter(["Your draft answer:", " the memo..."])))
+
+
 def test_calculate_sends_cell_names_back_to_read_cells():
     assert agent.calculate("(E5 - B5) / B5").startswith("calculate needs the numbers, not cell names (E5, B5). Read those cells")
 

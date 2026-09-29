@@ -23,6 +23,7 @@ from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
     ContextOverflow,
+    EmptyReply,
     ToolsUnsupported,
     chat_with_tools,
     complete_text,
@@ -498,9 +499,42 @@ def _budget(settings: Settings, *, tools: bool) -> int:
 
 
 def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[dict[str, Any]]:
-    for piece in stream_text(settings, messages, max_tokens=settings.chat_max_tokens):
+    for piece in without_echo(stream_text(settings, messages, max_tokens=settings.chat_max_tokens)):
         state["wrote"] = True
         yield {"type": "delta", "text": piece}
+
+
+# Small models sometimes carry on past their answer by copying the instructions they were given.
+_ECHO_RE = re.compile(
+    "|".join(
+        r"\s+".join(re.escape(word) for word in text.split()[:6])
+        for text in (VERIFY, ANSWER_FROM_READING, TOOLS_GUIDE, SYSTEM, "What you read with tools:", "Your draft answer:", "Your notes:")
+    ),
+    re.IGNORECASE,
+)
+_HOLD = 80
+
+
+def without_echo(pieces: Iterator[str]) -> Iterator[str]:
+    """Pass the answer through as it streams, and stop where the model starts repeating its instructions."""
+    pending = ""
+    sent = False
+    for piece in pieces:
+        pending += piece
+        echo = _ECHO_RE.search(pending)
+        if echo:
+            kept = pending[: echo.start()].rstrip()
+            if kept:
+                yield kept
+            elif not sent:
+                raise EmptyReply("the model repeated its instructions instead of answering")
+            return
+        if len(pending) > _HOLD:
+            sent = True
+            yield pending[:-_HOLD]
+            pending = pending[-_HOLD:]
+    if pending:
+        yield pending
 
 
 def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history, today, shrink: int) -> Iterator[dict[str, Any]]:
@@ -521,6 +555,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         draft = complete_text(settings, messages, max_tokens=settings.chat_max_tokens)
     if len(ws.sources) > known:
         yield {"type": "sources", "sources": source_cards(ws.sources), "mode": "model"}
+    draft = _ECHO_RE.split(draft, maxsplit=1)[0].rstrip()
     if not ws.read_files and not ws.evidence:
         if draft:
             state["wrote"] = True
