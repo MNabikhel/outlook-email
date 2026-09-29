@@ -116,12 +116,14 @@ VERIFY = (
     "Check your draft answer against the text above before the user sees it. Every amount, date, name, and "
     "cell value must appear in that text or come from a calculate result; fix or remove anything that doesn't, "
     "and follow any calculation through the cells it uses. Then write the final answer for the user, citing emails like [1] and naming "
-    "the file and page, sheet or cell. Do not mention the draft or this check."
+    "the file and page, sheet or cell. Give results, not how to work them out: leave out formulas, steps and "
+    "instructions to calculate. Do not mention the draft or this check."
 )
 
 ANSWER_FROM_READING = (
     "Answer from the text above. Use only amounts, dates, names, and cell values that appear in it, and follow "
-    "any calculation through the cells it uses. Cite emails like [1] and name the file and page, sheet or cell."
+    "any calculation through the cells it uses. Cite emails like [1] and name the file and page, sheet or cell. "
+    "Give results, not how to work them out."
 )
 
 HELP_TEXT = (

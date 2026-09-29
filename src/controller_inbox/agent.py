@@ -149,7 +149,8 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "calculate",
-            "description": "Exact arithmetic or date math; use it instead of working numbers out yourself. Examples: "
+            "description": "Exact arithmetic or date math on numbers you have read (not cell names); use it instead of "
+            "working numbers out yourself. Examples: "
             "55000+36500+24000 · (301500-259400)/259400*100 · 2026-12-31 - 90 days · days between 2026-10-02 and 2026-12-31",
             "parameters": {
                 "type": "object",
@@ -649,6 +650,12 @@ def calculate(expression: str) -> str:
     if between and _parse_date(between.group(1)) and _parse_date(between.group(2)):
         first, second = _parse_date(between.group(1)), _parse_date(between.group(2))
         return f"{(second - first).days} days from {first.isoformat()} to {second.isoformat()}"
+    cells = re.findall(r"\b[A-Z]{1,3}\d{1,6}\b", text)
+    if cells:
+        return (
+            f"calculate needs the numbers, not cell names ({', '.join(dict.fromkeys(cells))}). "
+            "Read those cells with read_cells first, then call calculate with their values."
+        )
     cleaned = re.sub(r"(?<=\d),(?=\d{3}\b)", "", text.replace("$", "").replace("×", "*").replace("÷", "/"))
     cleaned = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", cleaned)
     try:

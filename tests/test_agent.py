@@ -228,6 +228,10 @@ def test_calculate_refuses_anything_but_numbers(expression):
     assert "=" not in result.split(".")[0] and ("Couldn't" in result or result.startswith("Write numbers"))
 
 
+def test_calculate_sends_cell_names_back_to_read_cells():
+    assert agent.calculate("(E5 - B5) / B5").startswith("calculate needs the numbers, not cell names (E5, B5). Read those cells")
+
+
 def test_a_question_the_open_email_answers_stays_on_it(store, settings, mail):
     budget, quote = mail["Q4 budget draft"], mail["FW: Acme quote"]
     sources, _, _ = pick_sources(store, "when is the offsite and what is the venue deposit?", email_id=budget.id)
