@@ -8,36 +8,48 @@ from controller_inbox.models import RawAttachment, RawMessage
 
 
 def _pdf(text: str) -> bytes:
-    safe = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-    stream = f"BT /F1 11 Tf 48 720 Td ({safe[:1200]}) Tj ET".encode("latin-1", errors="replace")
-    objects = [
-        b"1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj",
-        b"2 0 obj<< /Type /Pages /Kids [3 0 R] /Count 1 >>endobj",
-        (
-            b"3 0 obj<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            b"/Contents 4 0 R /Resources<< /Font<< /F1 5 0 R >> >> >>endobj"
-        ),
-        b"4 0 obj<< /Length %d >>stream\n" % len(stream) + stream + b"\nendstream endobj",
-        b"5 0 obj<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>endobj",
-    ]
-    header = b"%PDF-1.1\n"
-    xref_positions = []
-    body = b""
-    offset = len(header)
-    for obj in objects:
-        xref_positions.append(offset)
-        body += obj + b"\n"
-        offset += len(obj) + 1
-    xref = [b"xref", b"0 6", b"0000000000 65535 f "]
-    for pos in xref_positions:
-        xref.append(f"{pos:010d} 00000 n ".encode())
-    trailer = (
-        b"\n".join(xref)
-        + b"\ntrailer<< /Size 6 /Root 1 0 R >>\nstartxref\n"
-        + str(offset).encode()
-        + b"\n%%EOF"
-    )
-    return header + body + trailer
+    return make_pdf([[text[:1200]]])
+
+
+def make_pdf(pages: list[list[str | list[str]]]) -> bytes:
+    """A small text PDF. Each page is a list of lines; a line given as a list is laid out in columns."""
+
+    def escape(value: str) -> str:
+        return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+    objects: list[bytes] = [b"<< /Type /Catalog /Pages 2 0 R >>", b""]
+    kids = []
+    for lines in pages:
+        ops = ["BT /F1 10 Tf"]
+        y = 740
+        for line in lines:
+            cells = line if isinstance(line, list) else [line]
+            for column, cell in enumerate(cells):
+                ops.append(f"1 0 0 1 {48 + column * 150} {y} Tm ({escape(str(cell))}) Tj")
+            y -= 16
+        ops.append("ET")
+        stream = "\n".join(ops).encode("latin-1", errors="replace")
+        page_number = len(objects) + 1
+        kids.append(f"{page_number} 0 R")
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {page_number + 1} 0 R "
+            f"/Resources << /Font << /F1 {{font}} 0 R >> >> >>".encode()
+        )
+        objects.append(b"<< /Length %d >>stream\n" % len(stream) + stream + b"\nendstream")
+    font = len(objects) + 1
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    objects[1] = f"<< /Type /Pages /Kids [{' '.join(kids)}] /Count {len(kids)} >>".encode()
+    objects = [item.replace(b"{font}", str(font).encode()) for item in objects]
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj" % number + body + b"endobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return out
 
 
 def _xlsx(rows: list[list[object]], sheet: str = "Sheet1") -> bytes:

@@ -2,18 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import io
-import logging
 import re
 from datetime import date, datetime
 from typing import Iterable
 
 from dateutil import parser as date_parser
 
+from controller_inbox.documents import extract_document
 from controller_inbox.models import ExtractedFields
-
-# pypdf warns on the small defects many real PDFs have ("EOF marker not found") and still
-# reads them; with no logging set up, those warnings land in the user's terminal.
-logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 
 INVOICE_RE = re.compile(
@@ -109,20 +105,11 @@ def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> st
     if not data:
         return ""
     try:
-        if name.endswith(".pdf") or "pdf" in ctype:
-            return _pdf_text(data)
-        if name.endswith(".docx") or "wordprocessingml" in ctype:
-            return _docx_text(data)
-        if name.endswith((".xlsx", ".xlsm", ".xltx")) or "spreadsheetml" in ctype:
-            return _xlsx_text(data)
-        if name.endswith(".xls") or ctype == "application/vnd.ms-excel":
-            return _xls_text(data)
-        if name.endswith(".pptx") or "presentationml" in ctype:
-            return _pptx_text(data)
-        if name.endswith(".csv") or ctype in {"text/csv", "application/csv"}:
-            return data.decode("utf-8", errors="replace")[:50_000]
-        if name.endswith((".txt", ".md", ".tsv")) or ctype.startswith("text/plain"):
-            return data.decode("utf-8", errors="replace")[:50_000]
+        structured = extract_document(filename, content_type, data)
+        if structured:
+            return structured
+        if name.endswith((".txt", ".md")) or ctype.startswith("text/plain"):
+            return data.decode("utf-8", errors="replace")[:400_000]
         if name.endswith(".rtf") or "rtf" in ctype:
             return _rtf_text(data)
         if "html" in ctype or name.endswith((".html", ".htm")):
@@ -141,74 +128,6 @@ def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> st
         except UnicodeDecodeError:
             return ""
     return ""
-
-
-def _pdf_text(data: bytes) -> str:
-    from pypdf import PdfReader
-
-    reader = PdfReader(io.BytesIO(data))
-    pages = []
-    for page in reader.pages[:50]:
-        pages.append(page.extract_text() or "")
-    return collapse_ws("\n".join(pages))
-
-
-def _docx_text(data: bytes) -> str:
-    from docx import Document
-
-    document = Document(io.BytesIO(data))
-    parts = [p.text for p in document.paragraphs if p.text]
-    for table in document.tables:
-        for row in table.rows:
-            parts.append(" | ".join(cell.text for cell in row.cells))
-    return collapse_ws("\n".join(parts))
-
-
-def _xlsx_text(data: bytes) -> str:
-    from openpyxl import load_workbook
-
-    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
-    parts: list[str] = []
-    for sheet in wb.worksheets[:6]:
-        parts.append(f"[sheet:{sheet.title}]")
-        for i, row in enumerate(sheet.iter_rows(max_row=80, values_only=True)):
-            values = [str(cell) for cell in row if cell is not None]
-            if values:
-                parts.append(" | ".join(values))
-            if i >= 80:
-                break
-    wb.close()
-    return collapse_ws("\n".join(parts))
-
-
-def _xls_text(data: bytes) -> str:
-    import xlrd
-
-    book = xlrd.open_workbook(file_contents=data)
-    parts: list[str] = []
-    for sheet in book.sheets()[:6]:
-        parts.append(f"[sheet:{sheet.name}]")
-        for i in range(min(sheet.nrows, 80)):
-            values = [str(cell) for cell in sheet.row_values(i) if cell not in ("", None)]
-            if values:
-                parts.append(" | ".join(values))
-    return collapse_ws("\n".join(parts))
-
-
-def _pptx_text(data: bytes) -> str:
-    from pptx import Presentation
-
-    deck = Presentation(io.BytesIO(data))
-    parts: list[str] = []
-    for index, slide in enumerate(deck.slides, start=1):
-        if index > 40:
-            break
-        parts.append(f"[slide:{index}]")
-        for shape in slide.shapes:
-            text = getattr(shape, "text", "") or ""
-            if text.strip():
-                parts.append(text)
-    return collapse_ws("\n".join(parts))
 
 
 def _rtf_text(data: bytes) -> str:

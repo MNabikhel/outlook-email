@@ -6,6 +6,7 @@ from typing import Protocol
 from controller_inbox.actions import extract_actions
 from controller_inbox.classify import Classification, classify_document, classify_email, outlook_categories
 from controller_inbox.config import Settings
+from controller_inbox.documents import MAX_TEXT
 from controller_inbox.extract import (
     explode_archives,
     extract_fields,
@@ -80,7 +81,7 @@ def process_message(
                 content_type=raw_att.content_type,
                 size_bytes=raw_att.size_bytes or len(raw_att.content),
                 sha256=sha256_bytes(raw_att.content) if raw_att.content else "",
-                extracted_text=text[:20_000],
+                extracted_text=text[:MAX_TEXT],
                 document_type=classified.document_type,
                 document_confidence=classified.confidence,
                 extracted_fields=fields,
