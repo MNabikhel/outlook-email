@@ -28,7 +28,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "aspose-email-foss>=26.3,<27"]
 
 [project.scripts]
 controller-inbox = "controller_inbox.cli:main"

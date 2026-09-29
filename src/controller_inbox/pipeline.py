@@ -168,6 +168,7 @@ def process_message(
         internet_message_id=raw.internet_message_id,
         writeback_status=writeback_status,
         created_at=now.isoformat(),
+        reply_to=raw.reply_to,
         attachments=att_records,
         actions=actions,
     )

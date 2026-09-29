@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import mimetypes
 import re
 import shutil
@@ -19,6 +20,9 @@ from controller_inbox.models import RawAttachment, RawMessage
 from controller_inbox.pipeline import KEEP_READINGS, process_message
 from controller_inbox.store import Store
 
+
+# extract-msg logs every Outlook property it doesn't know; the file still reads fine.
+logging.getLogger("extract_msg").setLevel(logging.ERROR)
 
 MESSAGE_SUFFIXES = {".msg", ".eml"}
 SKIP_NAMES = {".gitkeep", ".ds_store"}
@@ -165,6 +169,8 @@ def _parse_eml(path: Path) -> RawMessage:
         filename = part.get_filename()
         disposition = (part.get_content_disposition() or "").lower()
         payload = part.get_payload(decode=True) or b""
+        if _inline_picture(part.get_content_type(), filename or "", len(payload), disposition != "attachment" and bool(part.get("content-id"))):
+            continue
         if filename or disposition == "attachment":
             attachments.append(
                 RawAttachment(
@@ -183,7 +189,9 @@ def _parse_eml(path: Path) -> RawMessage:
             html_fallback = html_to_text(_decode_text_part(part, payload))
     body = "\n".join(p for p in body_parts if p).strip() or html_fallback
     message_id = str(parsed.get("message-id") or "").strip()
-    return _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
+    raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
+    raw.reply_to = _reply_address(str(parsed.get("reply-to") or ""))
+    return raw
 
 
 def _parse_msg(path: Path) -> RawMessage:
@@ -196,8 +204,9 @@ def _parse_msg(path: Path) -> RawMessage:
     try:
         subject = message.subject or path.stem
         sender_name, sender_email = _split_address(message.sender or "")
-        if not sender_email:
-            sender_email = getattr(message, "senderEmail", None) or getattr(message, "sender_email", None) or ""
+        if "@" not in sender_email:
+            sender_email = _msg_smtp_address(message) or ""
+            sender_name = sender_name if sender_name and "/o=" not in sender_name.lower() else sender_email
         body = message.body or ""
         html_body = getattr(message, "htmlBody", None)
         if not body and html_body:
@@ -205,42 +214,94 @@ def _parse_msg(path: Path) -> RawMessage:
                 html_body = html_body.decode("utf-8", errors="replace")
             body = html_to_text(html_body)
         received = _coerce_date(getattr(message, "date", None), path)
-        attachments: list[RawAttachment] = []
-        for att in message.attachments:
-            filename = att.longFilename or att.shortFilename or "attachment"
-            payload = att.data or b""
-            content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-            if isinstance(payload, str):
-                payload = payload.encode("utf-8", errors="replace")
-            elif not isinstance(payload, (bytes, bytearray)):
-                # A forwarded email attached as an item: keep its text, not the object.
-                payload = _embedded_message_text(payload).encode("utf-8")
-                filename = (Path(filename).stem or "forwarded message") + ".txt"
-                content_type = "text/plain"
-            attachments.append(
-                RawAttachment(
-                    id=filename,
-                    filename=filename,
-                    content_type=content_type,
-                    size_bytes=len(payload),
-                    content=bytes(payload),
-                )
-            )
+        attachments = _msg_attachments(message)
+        header = getattr(message, "header", None)
+        reply_to = _reply_address(str(header.get("Reply-To") or "")) if header is not None else ""
         message_id = str(getattr(message, "messageId", None) or "").strip()
     finally:
         message.close()
     data = path.read_bytes()
-    return _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
+    raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
+    raw.reply_to = reply_to
+    return raw
 
 
-def _embedded_message_text(item) -> str:
+MAX_NESTING = 3
+
+
+def _msg_attachments(message, prefix: str = "", depth: int = 0) -> list[RawAttachment]:
+    """Files on a .msg, and the files inside any email attached to it (named "forwarded › file.pdf")."""
+    html = getattr(message, "htmlBody", None) or b""
+    html = html.decode("utf-8", errors="replace") if isinstance(html, bytes) else str(html)
+    found: list[RawAttachment] = []
+    for att in getattr(message, "attachments", None) or []:
+        filename = att.longFilename or att.shortFilename or getattr(att, "displayName", None) or "attachment"
+        payload = att.data if att.data is not None else b""
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8", errors="replace")
+        if isinstance(payload, (bytes, bytearray)):
+            content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            cid = str(getattr(att, "cid", None) or getattr(att, "contentId", None) or "")
+            inline = bool(getattr(att, "hidden", False)) or bool(cid and cid.strip("<>") in html)
+            if _inline_picture(content_type, filename, len(payload), inline):
+                continue
+            found.append(_attachment(prefix + filename, content_type, bytes(payload)))
+            continue
+        # A forwarded email attached as an item: keep its text, then the files it carried.
+        stem = Path(filename).stem or "forwarded message"
+        inner = getattr(payload, "attachments", None) or []
+        text = _embedded_message_text(payload, [a.longFilename or a.shortFilename or "" for a in inner])
+        found.append(_attachment(f"{prefix}{stem}.txt", "text/plain", text.encode("utf-8")))
+        if depth < MAX_NESTING:
+            found.extend(_msg_attachments(payload, f"{prefix}{stem} › ", depth + 1))
+    return found
+
+
+def _attachment(filename: str, content_type: str, payload: bytes) -> RawAttachment:
+    return RawAttachment(id=filename, filename=filename, content_type=content_type, size_bytes=len(payload), content=payload)
+
+
+def _inline_picture(content_type: str, filename: str, size: int, inline: bool) -> bool:
+    """Signature logos and pasted pictures shown inside the body, not files anyone sent."""
+    picture = content_type.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp"))
+    return picture and inline and size < 400_000
+
+
+def _msg_smtp_address(message) -> str:
+    """Exchange stores internal senders as /O=EXCHANGELABS/…; the SMTP address is kept in other fields."""
+    read = getattr(message, "getStringStream", None)
+    if read is None:
+        return ""
+    for stream in ("__substg1.0_5D01", "__substg1.0_5D02", "__substg1.0_0C1F", "__substg1.0_0065", "__substg1.0_39FE"):
+        try:
+            value = read(stream)
+        except Exception:
+            continue
+        if value and "@" in str(value):
+            return _tidy(value)
+    header = getattr(message, "header", None)
+    if header is not None:
+        _name, address = _split_address(str(header.get("From") or ""))
+        if "@" in address:
+            return address
+    return ""
+
+
+def _reply_address(raw: str) -> str:
+    _name, address = _split_address(raw)
+    return _tidy(address).lower() if "@" in address else ""
+
+
+def _embedded_message_text(item, filenames: list[str] | None = None) -> str:
     subject = getattr(item, "subject", "") or ""
     sender = getattr(item, "sender", "") or ""
     date = getattr(item, "date", "") or ""
     body = getattr(item, "body", "") or ""
     if isinstance(body, bytes):
         body = body.decode("utf-8", errors="replace")
-    return f"Forwarded message\nSubject: {subject}\nFrom: {sender}\nDate: {date}\n\n{body}".strip()
+    files = [name for name in filenames or [] if name]
+    attached = f"\nAttachments: {', '.join(files)}" if files else ""
+    return f"Forwarded message\nSubject: {subject}\nFrom: {sender}\nDate: {date}{attached}\n\n{body}".strip()
 
 
 def _standalone(path: Path) -> RawMessage:

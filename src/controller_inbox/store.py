@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS emails (
     folder TEXT,
     summary TEXT,
     model_status TEXT,
-    source_path TEXT DEFAULT ''
+    source_path TEXT DEFAULT '',
+    reply_to TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -160,8 +161,8 @@ class Store:
                     category, category_confidence, importance, importance_score,
                     importance_reasons, flags, extracted, source, conversation_id,
                     internet_message_id, writeback_status, created_at,
-                    folder, summary, model_status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    folder, summary, model_status, reply_to
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     subject=excluded.subject,
                     sender_name=excluded.sender_name,
@@ -185,7 +186,8 @@ class Store:
                     writeback_status=excluded.writeback_status,
                     folder=excluded.folder,
                     summary=excluded.summary,
-                    model_status=excluded.model_status
+                    model_status=excluded.model_status,
+                    reply_to=excluded.reply_to
                 """,
                 (
                     email.id,
@@ -213,6 +215,7 @@ class Store:
                     email.folder,
                     email.summary,
                     email.model_status or "script_draft",
+                    email.reply_to,
                 ),
             )
             conn.execute("DELETE FROM attachments WHERE email_id = ?", (email.id,))
@@ -767,6 +770,7 @@ def _email_from_rows(
         summary=_col(row, "summary", ""),
         model_status=_col(row, "model_status", "script_draft") or "script_draft",
         source_path=_col(row, "source_path", ""),
+        reply_to=_col(row, "reply_to", "") or "",
         attachments=attachments,
         actions=[_action_from_row(item) for item in action_rows],
     )
@@ -805,5 +809,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         real = conn.execute("SELECT COUNT(*) FROM emails WHERE COALESCE(source, '') != 'demo'").fetchone()[0]
         if real:
             conn.execute("INSERT OR IGNORE INTO sync_state(key, value) VALUES ('profile', 'finance')")
+    if "reply_to" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN reply_to TEXT DEFAULT ''")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_model ON emails(model_status)")

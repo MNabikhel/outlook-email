@@ -214,6 +214,7 @@ class EmailRecord:
     summary: str = ""
     model_status: str = "script_draft"
     source_path: str = ""
+    reply_to: str = ""
     attachments: list[AttachmentRecord] = field(default_factory=list)
     actions: list[ActionItem] = field(default_factory=list)
 
@@ -263,4 +264,5 @@ class RawMessage:
     conversation_id: str = ""
     internet_message_id: str = ""
     source: str = "graph"
+    reply_to: str = ""
     attachments: list[RawAttachment] = field(default_factory=list)
