@@ -236,7 +236,16 @@ def overlay_reading(email: EmailRecord, parsed: dict, *, now: datetime | None = 
         )
         summary = script_line
 
-    fraud = _is_fraud(email, category)
+    fraud = _is_fraud(email)
+    if category == DocumentType.PAYMENT_INSTRUCTION_CHANGE and not fraud:
+        # The model alone cannot block an email: the fraud check found no bank-change request.
+        category = email.category
+        if "fraud_cleared" not in email.flags:
+            email.flags = list(dict.fromkeys([*email.flags, "model_said_bank_change", "payment_caution"]))
+            guard_notes.append(
+                "The model read a bank-detail change that the fraud check did not flag. "
+                "Confirm any bank change by phone before acting on it."
+            )
     if fraud:
         if folder != "important" or importance != Importance.CRITICAL:
             guard_notes.append(
@@ -312,12 +321,8 @@ def apply_bionic_reading(store, email_id: str, parsed: dict) -> EmailRecord:
     return store.get_email(email_id) or email
 
 
-def _is_fraud(email: EmailRecord, category: DocumentType) -> bool:
-    return (
-        "fraud_risk" in email.flags
-        or email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE
-        or category == DocumentType.PAYMENT_INSTRUCTION_CHANGE
-    )
+def _is_fraud(email: EmailRecord) -> bool:
+    return "fraud_risk" in email.flags or email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE
 
 
 def _category(value, fallback: DocumentType) -> DocumentType:

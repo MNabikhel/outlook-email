@@ -366,6 +366,7 @@ def score_rules(
     filename: str = "",
     sender: str = "",
     extracted_text: str = "",
+    payment_rule: bool = True,
 ) -> dict[DocumentType, tuple[int, list[str], list[str]]]:
     full_blob = _haystack(subject, body, filename, sender, extracted_text)
     own_blob = f"{subject or ''}\n{own_words(body)}".lower()
@@ -373,6 +374,8 @@ def score_rules(
     sender_low = (sender or "").lower()
     scores: dict[DocumentType, tuple[int, list[str], list[str]]] = {}
     for rule in RULES:
+        if not payment_rule and rule.document_type == DocumentType.PAYMENT_INSTRUCTION_CHANGE:
+            continue
         blob = own_blob if rule.own_words_only else full_blob
         hit = False
         reasons: list[str] = []
@@ -423,13 +426,16 @@ def classify_document(
     extracted_text: str = "",
     content_type: str = "",
     has_text: bool | None = None,
+    payment_rule: bool = True,
 ) -> Classification:
+    """``payment_rule=False`` leaves bank-change wording to the fraud check in ``fraud.py``."""
     scores = score_rules(
         subject=subject,
         body=body,
         filename=filename,
         sender=sender,
         extracted_text=extracted_text,
+        payment_rule=payment_rule,
     )
     if not scores:
         ctype = (content_type or "").lower()
@@ -466,12 +472,23 @@ def classify_email(
     has_attachments: bool = False,
     duplicate_invoice: bool = False,
     finance: bool = True,
+    fraud: str | None = None,
 ) -> Classification:
+    """Pick the email's category and importance.
+
+    ``fraud`` is the level from ``fraud.assess``. When it is given, only a
+    ``high`` check makes the email a payment-instruction change; without it the
+    bank-change wording rule decides on its own.
+    """
+    if fraud is not None:
+        attachments = [item for item in attachments if item.document_type != DocumentType.PAYMENT_INSTRUCTION_CHANGE]
     attachment_types = [item.document_type for item in attachments]
     combined_flags: list[str] = []
     for item in attachments:
         combined_flags.extend(item.flags)
-    email_scores = score_rules(subject=subject, body=body, sender=sender, extracted_text="")
+    if fraud is not None:
+        combined_flags = [flag for flag in combined_flags if flag not in {"fraud_risk", "do_not_process"}]
+    email_scores = score_rules(subject=subject, body=body, sender=sender, extracted_text="", payment_rule=fraud is None)
     if email_scores:
         email_type, (weight, reasons, flags) = max(email_scores.items(), key=lambda item: item[1][0])
         combined_flags.extend(flags)
@@ -503,9 +520,11 @@ def classify_email(
         combined_flags.append("duplicate_invoice")
         reasons.append("Invoice number already seen on another email")
 
-    if category == DocumentType.PAYMENT_INSTRUCTION_CHANGE or "fraud_risk" in combined_flags:
+    if fraud == "high" or category == DocumentType.PAYMENT_INSTRUCTION_CHANGE or "fraud_risk" in combined_flags:
         combined_flags.extend(["fraud_risk", "do_not_process"])
         category = DocumentType.PAYMENT_INSTRUCTION_CHANGE
+    elif fraud == "caution":
+        combined_flags.append("payment_caution")
 
     importance, score, imp_reasons = _importance(
         category=category,

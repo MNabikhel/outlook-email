@@ -106,6 +106,25 @@ def record_correction(
         learned.flags = [flag for flag in learned.flags if flag not in {"fraud_risk", "do_not_process"}]
         learned.flags.append("user_trained")
 
+    was_fraud = "fraud_risk" in email.flags or email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE
+    if was_fraud != (corrected == DocumentType.PAYMENT_INSTRUCTION_CHANGE):
+        keep, drop = ("fraud_confirmed", "fraud_cleared") if not was_fraud else ("fraud_cleared", "fraud_confirmed")
+        learned.flags = [flag for flag in learned.flags if flag != drop] + [keep]
+        check = store.fraud_check(email.id)
+        store.log_fraud(
+            {
+                "at": row["created_at"],
+                "email_id": email.id,
+                "event": "marked_safe" if was_fraud else "marked_fraud",
+                "level": check["level"] if check else "",
+                "score": check["score"] if check else 0,
+                "sender_email": row["sender_email"],
+                "subject": email.subject,
+                "signals": check["signals"] if check else [],
+                "note": f"scope: email — category corrected to {DOCUMENT_LABELS[corrected]}: {reason[:200]}",
+            }
+        )
+
     received = datetime.fromisoformat(email.received_at)
     as_of = received.astimezone(settings.tz).date()
     email.category = learned.document_type

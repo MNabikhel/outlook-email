@@ -14,9 +14,12 @@ from controller_inbox.extract import (
     redact_financial_secrets,
     sha256_bytes,
 )
-from controller_inbox.models import AttachmentRecord, EmailRecord, RawMessage
+from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, EmailRecord, RawMessage
+from controller_inbox.fraud import assess, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
+
+VERDICT_FLAGS = {"fraud_cleared", "fraud_confirmed"}
 
 # A message the model already read, or the user corrected, is not re-scored
 # when the same mail is dropped or synced again.
@@ -71,6 +74,7 @@ def process_message(
             extracted_text=text,
             content_type=raw_att.content_type,
             has_text=bool(text.strip()),
+            payment_rule=False,
         )
         att_classifications.append(classified)
         att_records.append(
@@ -89,32 +93,34 @@ def process_message(
             )
         )
 
-    duplicate = False
-    if merged_fields.primary_invoice:
-        dupes = store.find_duplicate_invoices(merged_fields.primary_invoice, raw.id)
-        duplicate = bool(dupes)
-
-    classified_email = classify_email(
+    body_text = redact_financial_secrets(raw.body_text)
+    verdicts = [flag for flag in (existing.flags if existing else []) if flag in VERDICT_FLAGS]
+    check = assess(
+        trust_context(store, settings),
+        subject=raw.subject,
+        body=body_text,
+        sender_name=raw.sender_name,
+        sender_email=raw.sender_email,
+        reply_to=raw.reply_to,
+        attachments=[(att.filename, att.extracted_text) for att in att_records],
+        history=store.sender_history(raw.sender_email, exclude=raw.id),
+        flags=verdicts,
+    )
+    classified_email = _classify(
+        store,
+        settings,
+        email_id=raw.id,
         subject=raw.subject,
         body=raw.body_text,
-        sender=raw.sender_email,
+        sender_email=raw.sender_email,
         outlook_importance=raw.outlook_importance,
         attachments=att_classifications,
         fields=merged_fields,
         as_of=as_of,
-        high_amount=settings.high_amount,
-        vip_senders=settings.vip_list,
         has_attachments=bool(attachments_raw) or raw.has_attachments,
-        duplicate_invoice=duplicate,
-        finance=is_finance(settings, store),
+        fraud=check.level,
     )
-    classified_email = _refine(
-        classified_email,
-        raw,
-        store,
-        settings,
-        filenames=[att.filename for att in att_records],
-    )
+    classified_email.flags.extend(verdicts)
 
     # If Graph said there were attachments but we still have none after fetch.
     has_files = bool(att_records)
@@ -151,7 +157,7 @@ def process_message(
         sender_name=raw.sender_name,
         sender_email=raw.sender_email,
         received_at=raw.received_at.astimezone(timezone.utc).isoformat(),
-        body_text=redact_financial_secrets(raw.body_text)[:50_000],
+        body_text=body_text[:50_000],
         body_preview=(raw.body_preview or raw.body_text[:240])[:500],
         has_attachments=has_files,
         outlook_importance=raw.outlook_importance,
@@ -176,6 +182,7 @@ def process_message(
 
     assign_script_draft(record)
     store.upsert_email(record)
+    save_check(store, record, check, now=now)
     return store.get_email(record.id) or record
 
 
@@ -202,17 +209,114 @@ def ingest_demo(store: Store, settings: Settings, *, now: datetime | None = None
     return ingest_mailbox(mailbox, store, settings, now=now)
 
 
-def _refine(classified, raw: RawMessage, store: Store, settings: Settings, filenames: list[str] | None = None):
-    """Apply a saved correction before the local model reads the packet.
+def _classify(
+    store: Store,
+    settings: Settings,
+    *,
+    email_id: str,
+    subject: str,
+    body: str,
+    sender_email: str,
+    outlook_importance: str,
+    attachments: list[Classification],
+    fields,
+    as_of,
+    has_attachments: bool,
+    fraud: str,
+) -> Classification:
+    """Script classification, then any correction the user saved for this sender or subject.
 
     The model is the parser when it is enabled. That happens after the
     script draft is built, so it can see amounts and dates. A correction
     the user already saved is kept and is not sent back to the model.
     """
-    del settings, filenames
     from controller_inbox.learn import apply_learned, match_correction
 
-    learned = match_correction(store, sender_email=raw.sender_email, subject=raw.subject)
-    if learned:
-        return apply_learned(classified, learned)
-    return classified
+    duplicate = bool(fields.primary_invoice and store.find_duplicate_invoices(fields.primary_invoice, email_id))
+    classified = classify_email(
+        subject=subject,
+        body=body,
+        sender=sender_email,
+        outlook_importance=outlook_importance,
+        attachments=attachments,
+        fields=fields,
+        as_of=as_of,
+        high_amount=settings.high_amount,
+        vip_senders=settings.vip_list,
+        has_attachments=has_attachments,
+        duplicate_invoice=duplicate,
+        finance=is_finance(settings, store),
+        fraud=fraud,
+    )
+    learned = match_correction(store, sender_email=sender_email, subject=subject)
+    return apply_learned(classified, learned) if learned else classified
+
+
+def rescore_stored(store: Store, settings: Settings, email: EmailRecord, check) -> EmailRecord:
+    """Refile a stored email after its fraud level changed (a verdict, a trusted domain, a report).
+
+    The script draft is rebuilt from the stored text, so an overnight reading made
+    under the old level is read again. Tasks already done or dismissed are kept.
+    """
+    try:
+        as_of = datetime.fromisoformat(email.received_at).astimezone(settings.tz).date()
+    except ValueError:
+        as_of = datetime.now(settings.tz).date()
+    attachments = [
+        classify_document(
+            subject=email.subject,
+            body=email.body_text,
+            filename=att.filename,
+            sender=email.sender_email,
+            extracted_text=att.extracted_text,
+            content_type=att.content_type,
+            has_text=bool((att.extracted_text or "").strip()),
+            payment_rule=False,
+        )
+        for att in email.attachments
+    ]
+    classified = _classify(
+        store,
+        settings,
+        email_id=email.id,
+        subject=email.subject,
+        body=email.body_text,
+        sender_email=email.sender_email,
+        outlook_importance=email.outlook_importance,
+        attachments=attachments,
+        fields=email.extracted,
+        as_of=as_of,
+        has_attachments=email.has_attachments,
+        fraud=check.level,
+    )
+    kept = [flag for flag in email.flags if flag in VERDICT_FLAGS | {"model_said_bank_change"}]
+    email.category = classified.document_type
+    email.category_confidence = classified.confidence
+    email.importance = classified.importance
+    email.importance_score = classified.importance_score
+    email.importance_reasons = classified.importance_reasons
+    email.flags = list(dict.fromkeys(classified.flags + kept))
+    def key(item: ActionItem) -> str:
+        return item.title.strip().lower()
+
+    old = {key(item): item for item in email.actions}
+    fresh = extract_actions(
+        email_id=email.id,
+        subject=email.subject,
+        body=email.body_text,
+        category=email.category,
+        importance=email.importance,
+        fields=email.extracted,
+        flags=email.flags,
+        as_of=as_of,
+        sender=email.sender_name or email.sender_email,
+        has_invite=any(att.filename.lower().endswith(".ics") for att in email.attachments),
+    )
+    fresh_keys = {key(item) for item in fresh}
+    finished = [item for item in email.actions if item.status != ActionStatus.OPEN and key(item) not in fresh_keys]
+    email.actions = [old.get(key(item), item) for item in fresh] + finished
+    from controller_inbox.reading import assign_script_draft
+
+    assign_script_draft(email)
+    store.upsert_email(email)
+    return store.get_email(email.id) or email

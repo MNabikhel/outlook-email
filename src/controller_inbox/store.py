@@ -105,6 +105,37 @@ CREATE TABLE IF NOT EXISTS corrections (
     created_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS fraud_trust (
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    source TEXT,
+    note TEXT,
+    created_at TEXT,
+    PRIMARY KEY (kind, value)
+);
+
+CREATE TABLE IF NOT EXISTS fraud_checks (
+    email_id TEXT PRIMARY KEY,
+    score INTEGER,
+    level TEXT,
+    signals TEXT,
+    checked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS fraud_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT,
+    email_id TEXT,
+    event TEXT,
+    level TEXT,
+    score INTEGER,
+    sender_email TEXT,
+    subject TEXT,
+    signals TEXT,
+    note TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(category);
@@ -640,6 +671,7 @@ class Store:
             conn.execute(f"DELETE FROM attachments WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM action_items WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM corrections WHERE email_id IN ({sample})")
+            conn.execute(f"DELETE FROM fraud_checks WHERE email_id IN ({sample})")
             conn.execute("DELETE FROM emails WHERE source = 'demo'")
             if not conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]:
                 conn.execute("DELETE FROM digests")
@@ -706,6 +738,124 @@ class Store:
     def correction_count(self) -> int:
         with self.connect() as conn:
             return conn.execute("SELECT COUNT(*) AS n FROM corrections").fetchone()["n"]
+
+    # Fraud checks ------------------------------------------------------------------------------
+
+    def trust_entries(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM fraud_trust ORDER BY kind, value").fetchall()
+        return [dict(row) for row in rows]
+
+    def set_trust(self, kind: str, value: str, verdict: str, *, source: str, note: str = "", at: str = "") -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO fraud_trust(kind, value, verdict, source, note, created_at) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(kind, value) DO UPDATE SET verdict=excluded.verdict, source=excluded.source,
+                    note=excluded.note, created_at=excluded.created_at
+                """,
+                (kind, value.lower(), verdict, source, note, at),
+            )
+
+    def remove_trust(self, kind: str, value: str) -> bool:
+        with self.connect() as conn:
+            return conn.execute("DELETE FROM fraud_trust WHERE kind = ? AND value = ?", (kind, value.lower())).rowcount > 0
+
+    def save_fraud_check(self, email_id: str, score: int, level: str, signals: list[dict], at: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO fraud_checks(email_id, score, level, signals, checked_at) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(email_id) DO UPDATE SET score=excluded.score, level=excluded.level,
+                    signals=excluded.signals, checked_at=excluded.checked_at
+                """,
+                (email_id, score, level, _dumps(signals), at),
+            )
+
+    def fraud_check(self, email_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM fraud_checks WHERE email_id = ?", (email_id,)).fetchone()
+        if not row:
+            return None
+        return {**dict(row), "signals": _loads(row["signals"], [])}
+
+    def log_fraud(self, row: dict[str, Any]) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO fraud_log(at, email_id, event, level, score, sender_email, subject, signals, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.get("at", ""),
+                    row.get("email_id", ""),
+                    row["event"],
+                    row.get("level", ""),
+                    row.get("score", 0),
+                    row.get("sender_email", ""),
+                    row.get("subject", ""),
+                    _dumps(row.get("signals", [])),
+                    row.get("note", ""),
+                ),
+            )
+
+    def fraud_log(self, *, limit: int = 200, events: tuple[str, ...] = ()) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM fraud_log"
+        params: list[Any] = []
+        if events:
+            sql += f" WHERE event IN ({', '.join('?' for _ in events)})"
+            params.extend(events)
+        sql += " ORDER BY id DESC LIMIT ?"
+        with self.connect() as conn:
+            rows = conn.execute(sql, [*params, limit]).fetchall()
+        return [{**dict(row), "signals": _loads(row["signals"], [])} for row in rows]
+
+    def sender_history(self, sender_email: str, *, exclude: str = "") -> int:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS n FROM emails WHERE lower(sender_email) = ? AND id != ?",
+                ((sender_email or "").lower(), exclude),
+            ).fetchone()["n"]
+
+    def email_ids_from(self, *, sender: str = "", domain: str = "") -> list[str]:
+        """Emails from one address, or from a domain and its subdomains."""
+        with self.connect() as conn:
+            if sender:
+                rows = conn.execute("SELECT id FROM emails WHERE lower(sender_email) = ?", (sender.lower(),)).fetchall()
+            elif domain:
+                domain = domain.lower()
+                rows = conn.execute(
+                    "SELECT id FROM emails WHERE lower(sender_email) LIKE ? OR lower(sender_email) LIKE ?",
+                    (f"%@{domain}", f"%.{domain}"),
+                ).fetchall()
+            else:
+                return []
+        return [row["id"] for row in rows]
+
+    def sender_domains(self, *, limit: int = 12) -> list[tuple[str, int]]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT lower(substr(sender_email, instr(sender_email, '@') + 1)) AS domain, COUNT(*) AS n
+                FROM emails WHERE instr(sender_email, '@') > 0 AND COALESCE(source, '') != 'demo'
+                GROUP BY domain ORDER BY n DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [(row["domain"], row["n"]) for row in rows]
+
+    def names_at_domains(self, domains: set[str]) -> dict[str, str]:
+        """Display names seen from trusted domains, so a stranger borrowing one stands out."""
+        if not domains:
+            return {}
+        with self.connect() as conn:
+            rows = conn.execute("SELECT DISTINCT sender_name, sender_email FROM emails WHERE sender_name != ''").fetchall()
+        out = {}
+        for row in rows:
+            address = (row["sender_email"] or "").lower()
+            if address.rsplit("@", 1)[-1] in domains:
+                out[(row["sender_name"] or "").strip().lower()] = address
+        return out
 
 
 def _action_from_row(row: sqlite3.Row) -> ActionItem:
