@@ -17,6 +17,7 @@ original workbook for exact ranges and formula precedents.
 from __future__ import annotations
 
 import csv
+import importlib.util
 import io
 import logging
 import math
@@ -124,9 +125,7 @@ def _pdf_page(page) -> str:
 
 def _ocr_page_images(page) -> str:
     """OCR a scanned page's pictures when Tesseract is installed; otherwise nothing."""
-    try:
-        import pytesseract  # noqa: F401
-    except ImportError:
+    if importlib.util.find_spec("pytesseract") is None:
         return ""
     from controller_inbox.extract import _image_text
 
