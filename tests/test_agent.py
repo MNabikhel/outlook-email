@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 
 import httpx
@@ -9,6 +10,8 @@ import pytest
 
 from controller_inbox import agent, assistant, local_llm
 from controller_inbox.assistant import answer_stream, on_screen_question, pick_sources
+from controller_inbox.demo import make_pdf
+from controller_inbox.extract import extract_text_from_bytes
 from controller_inbox.local_llm import ContextOverflow, ToolReply, ToolsUnsupported
 
 
@@ -59,6 +62,23 @@ def test_files_that_fit_are_read_whole_in_order(store, settings, mail):
     block = agent.file_context(ws, "What is the venue deposit?", 12000)[budget.id]
     assert "venue deposit" in block and "C4: =SUM(C2:C3)" in block
     assert "Showing" not in block and ws.left_out == []
+
+
+def test_a_summary_of_a_long_file_skims_it_end_to_end(store, settings, mail):
+    budget = copy.deepcopy(mail["Q4 budget draft"])
+    pages = [[f"Audit page {n}"] + [f"Section {n}.{i}: area reviewed, no exceptions in the sample." for i in range(25)] for n in range(1, 25)]
+    pages[16][3] = "FINDING 4 (HIGH): bank-detail changes approved without a call-back. Owner: AP lead."
+    report = budget.attachments[0]
+    report.filename = "Audit.pdf"
+    report.extracted_text = extract_text_from_bytes("Audit.pdf", "application/pdf", make_pdf(pages))
+    budget.attachments = [report]
+    ws = agent.Workspace(store, settings, [budget], question="summarize the report", current_id=budget.id)
+    block = agent.file_context(ws, "summarize the report", 4000)[budget.id]
+    assert "[Audit.pdf · page 1" in block and "comes from a skim" in block
+    assert "[Audit.pdf · page 17" in block and "FINDING 4 (HIGH)" in block
+    assert len(block) < 4000 and ws.left_out == ["Audit.pdf"]
+    asked = agent.Workspace(store, settings, [budget], question="who owns finding 4?", current_id=budget.id)
+    assert "skim" not in agent.file_context(asked, "who owns finding 4?", 4000)[budget.id]
 
 
 def test_a_file_named_in_the_question_gets_the_room(store, settings, mail):
@@ -224,6 +244,7 @@ def test_budget_follows_the_loaded_context_length():
     assert small == (4096 - 500 - agent.TOOL_SCHEMA_TOKENS) * 3 and large > 10 * small // 2
     assert agent.prompt_budget(0, 500, tools=False) == (4096 - 500 - 250) * 3
     assert "reload the model in LM Studio" in agent.context_advice(4096, ["Q4 budget.xlsx"])
+    assert "only read parts of Audit.pdf. " in agent.context_advice(4096, ["Audit.pdf", "the files"])
     assert agent.context_advice(4096, []) == ""
     assert "is long" in agent.context_advice(32768, ["the files"])
 

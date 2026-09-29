@@ -183,7 +183,8 @@ def prompt_budget(context_tokens: int, reply_tokens: int, *, tools: bool) -> int
 def context_advice(context_tokens: int, left_out: list[str]) -> str:
     if not left_out:
         return ""
-    what = ", ".join(dict.fromkeys(left_out))
+    named = [item for item in left_out if not item.startswith("the ")]
+    what = ", ".join(dict.fromkeys(named or left_out))
     if (context_tokens or DEFAULT_CONTEXT) < RECOMMENDED_CONTEXT:
         known = f"{context_tokens:,}-token" if context_tokens else "small (probably 4,096-token)"
         return (
@@ -342,27 +343,16 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             f" · {len(text):,} characters"
         )
         matches = [] if whole else documents.search_parts(text, question, limit=4, stop=_STOP)
-        wanted = {part.label for part in matches}
         block = [head]
         if len(parts) > 1:
             labels = [p.label for p in parts[:12]] + ([f"… {len(parts) - 12} more"] if len(parts) > 12 else [])
             block.append("Sections: " + " / ".join(labels))
-        # Matching sections first; the rest of the file fills whatever room is left.
         budget = per_file - len(head) - 200
-        picked: dict[str, str] = {}
-        cut = False
-        for part in matches + [part for part in parts if part.label not in wanted]:
-            if budget <= 200:
-                break
-            body = part.text
-            if len(body) > budget:
-                body, cut = body[:budget].rsplit("\n", 1)[0] + "\n…", True
-            picked[part.label] = body
-            budget -= len(body) + len(part.label) + 4
-        block += [f"[{att.filename} · {part.label}]\n{picked[part.label]}" for part in parts if part.label in picked]
-        if cut or len(picked) < len(parts):
+        if whole and len(parts) > 2 and len(text) > budget:
+            block.append(_skimmed(att, parts, budget))
             ws.left_out.append(att.filename)
-            block.append(f"(Showing {len(picked)} of {len(parts)} sections{', one cut short' if cut else ''}. Read others with read_file.)")
+        else:
+            block += _passages(ws, att, parts, matches, budget)
         piece = "\n".join(block)
         if used + len(piece) > room and lines:
             ws.left_out.append(att.filename)
@@ -372,6 +362,40 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         used += len(piece)
     lines += [f"── File: {att.filename} ({file_kind(att)}; not asked about, read it with read_file)" for att in skipped]
     return "\n".join(lines)
+
+
+def _skimmed(att: AttachmentRecord, parts: list[documents.Part], budget: int) -> str:
+    """For a summary of a file too long to show: its opening, then the lines that stand out from every other section."""
+    first = parts[0].text
+    if len(first) > budget // 3:
+        first = first[: budget // 3].rsplit("\n", 1)[0] + "\n…"
+    opening = f"[{att.filename} · {parts[0].label}]\n{first}"
+    rest = documents.skim(parts[1:], budget - len(opening) - 250, tag=f"{att.filename} · ")
+    return (
+        f"{opening}\n(Too long to show whole. Below are the lines that stand out from the other {len(parts) - 1} "
+        "sections; lines repeated from section to section are left out. Say that your summary comes from a skim, "
+        "and read any section whole with read_file.)\n" + rest
+    )
+
+
+def _passages(ws: Workspace, att: AttachmentRecord, parts: list[documents.Part], matches: list[documents.Part], budget: int) -> list[str]:
+    """Matching sections first; the rest of the file fills whatever room is left. Shown in document order."""
+    wanted = {part.label for part in matches}
+    picked: dict[str, str] = {}
+    cut = False
+    for part in matches + [part for part in parts if part.label not in wanted]:
+        if budget <= 200:
+            break
+        body = part.text
+        if len(body) > budget:
+            body, cut = body[:budget].rsplit("\n", 1)[0] + "\n…", True
+        picked[part.label] = body
+        budget -= len(body) + len(part.label) + 4
+    block = [f"[{att.filename} · {part.label}]\n{picked[part.label]}" for part in parts if part.label in picked]
+    if cut or len(picked) < len(parts):
+        ws.left_out.append(att.filename)
+        block.append(f"(Showing {len(picked)} of {len(parts)} sections{', one cut short' if cut else ''}. Read others with read_file.)")
+    return block
 
 
 def named_files(files: list[AttachmentRecord], question: str) -> list[AttachmentRecord]:

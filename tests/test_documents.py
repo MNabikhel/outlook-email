@@ -10,7 +10,7 @@ from docx.oxml import OxmlElement
 from openpyxl import Workbook
 
 from controller_inbox.demo import make_pdf
-from controller_inbox.documents import outline, read_cells, read_part, search_parts, split_parts, trace_cell
+from controller_inbox.documents import Part, outline, read_cells, read_part, search_parts, skim, split_parts, trace_cell
 from controller_inbox.extract import extract_text_from_bytes
 
 
@@ -129,6 +129,22 @@ def test_long_documents_split_into_labelled_parts_and_search_finds_the_right_one
     assert [part.label for part in split_parts(text)] == [f"page {n}" for n in range(1, 6)]
     assert [part.label for part in search_parts(text, "Globex accrual")] == ["page 4"]
     assert outline(text)[0] == "page 1: Section 1 filler text about the quarterly close."
+
+
+def test_a_skim_keeps_what_differs_from_page_to_page():
+    pages = [[f"Audit pack page {n}"] + [f"Section {n}.{i}: area reviewed, no exceptions noted in the sample." for i in range(8)] for n in range(1, 21)]
+    pages[16][3] = "FINDING 4 (HIGH): bank-detail changes approved without a call-back. Owner: AP lead."
+    pages[19][2] = "Total sampled: $4,812,300; exceptions: $61,450."
+    parts = split_parts(extract_text_from_bytes("audit.pdf", "application/pdf", make_pdf(pages)))
+    text = skim(parts, 600, tag="audit.pdf · ")
+    assert text == (
+        "[audit.pdf · page 17]\nFINDING 4 (HIGH): bank-detail changes approved without a call-back. Owner: AP lead.\n"
+        "[audit.pdf · page 20]\nTotal sampled: $4,812,300; exceptions: $61,450."
+    )
+    varied = [Part(f"page {n}", f"Heading {chr(64 + n)} topic\nDetail line for {chr(64 + n)} alone") for n in range(1, 9)]
+    covered = skim(varied, 180)
+    assert "[page 7]\nHeading G topic" in covered and "[page 8]" not in covered and "Detail line" not in covered
+    assert len(covered) <= 180
 
 
 def test_big_sheets_are_cut_into_row_ranges():

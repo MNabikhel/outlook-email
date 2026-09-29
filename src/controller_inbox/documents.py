@@ -544,6 +544,43 @@ def excerpt(text: str, query: str, size: int) -> str:
     return "\n".join(lines)
 
 
+def skim(parts: list[Part], room: int, *, tag: str = "", line_size: int = 240) -> str:
+    """The lines that stand out from ``parts``, labelled by section, within ``room`` characters.
+
+    Lines whose shape repeats (page headers, boilerplate, "Section 3.2: no exceptions…") are dropped, so what is
+    left is what differs from page to page: findings, totals, names, dates. Sections take turns so a long file is
+    covered end to end instead of only its first pages.
+    """
+
+    def shape(line: str) -> str:
+        return re.sub(r"\d+", "#", line.lower()).strip()
+
+    counts: dict[str, int] = {}
+    for part in parts:
+        for line in part.text.splitlines():
+            counts[shape(line)] = counts.get(shape(line), 0) + 1
+    standout = [
+        [line.strip()[:line_size] for line in part.text.splitlines() if len(line.split()) >= 3 and counts[shape(line)] < 3]
+        for part in parts
+    ]
+    chosen: list[list[str]] = [[] for _ in parts]
+    used = 0
+    for depth in range(max((len(lines) for lines in standout), default=0)):
+        for index, lines in enumerate(standout):
+            if depth >= len(lines):
+                continue
+            cost = len(lines[depth]) + 1 + (0 if chosen[index] else len(tag) + len(parts[index].label) + 3)
+            if used + cost > room:
+                return _skim_text(parts, chosen, tag)
+            chosen[index].append(lines[depth])
+            used += cost
+    return _skim_text(parts, chosen, tag)
+
+
+def _skim_text(parts: list[Part], chosen: list[list[str]], tag: str) -> str:
+    return "\n".join(f"[{tag}{part.label}]\n" + "\n".join(lines) for part, lines in zip(parts, chosen) if lines)
+
+
 def _clip(part: Part, room: int) -> str:
     head = f"[{part.label}]\n"
     if room - len(head) < 100:
