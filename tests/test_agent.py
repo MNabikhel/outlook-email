@@ -72,6 +72,18 @@ def test_a_file_named_in_the_question_gets_the_room(store, settings, mail):
     assert agent.named_files(budget.attachments, "what's in the files?") == []
 
 
+def test_asking_about_a_locked_file_never_reaches_the_model(store, settings, mail, monkeypatch):
+    scam = mail["Updated remittance details"]
+    settings.llm = True
+    monkeypatch.setattr(assistant, "llm_active", lambda _settings: True)
+    monkeypatch.setattr(assistant, "_model_answer", lambda *a, **k: (_ for _ in ()).throw(AssertionError("model called")))
+    events = list(answer_stream(store, settings, 'Summarize the attachment "new bank letter.pdf"', email_id=scam.id))
+    text = _text(events)
+    assert "won't open the files on this email (new bank letter.pdf)" in text and "Not fraud" in text
+    assert events[0]["warning"] and events[0]["mode"] == "lookup"
+    assert "5566778899" not in text and "****8899" not in text
+
+
 def test_tools_read_exact_cells_and_trace_a_total(store, settings, mail):
     budget = mail["Q4 budget draft"]
     ws = agent.Workspace(store, settings, [budget], question="q", current_id=budget.id)

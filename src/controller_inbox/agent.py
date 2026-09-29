@@ -359,7 +359,7 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
                 body, cut = body[:budget].rsplit("\n", 1)[0] + "\n…", True
             picked[part.label] = body
             budget -= len(body) + len(part.label) + 4
-        block += [f"[{part.label}]\n{picked[part.label]}" for part in parts if part.label in picked]
+        block += [f"[{att.filename} · {part.label}]\n{picked[part.label]}" for part in parts if part.label in picked]
         if cut or len(picked) < len(parts):
             ws.left_out.append(att.filename)
             block.append(f"(Showing {len(picked)} of {len(parts)} sections{', one cut short' if cut else ''}. Read others with read_file.)")
