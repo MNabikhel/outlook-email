@@ -642,11 +642,7 @@ def _search_mail(ws: Workspace, query: str) -> str:
     terms = keywords(query)
     if not terms:
         return "Give a name, company, invoice number or file name to search for."
-    found = ws.store.search_ranked(terms, limit=5)
-    keyword_ids = {email.id for email in found}
-    if len(found) < 5:
-        found += [email for email in semantic.search(ws.store, ws.settings, query, limit=5) if email.id not in keyword_ids]
-    found = found[:5]
+    found, by_meaning = semantic.find_mail(ws.store, ws.settings, query, terms, limit=5)
     if not found:
         return f"No emails mention {query!r}."
     lines = [f"Emails matching {query!r}:"]
@@ -656,7 +652,7 @@ def _search_mail(ws: Workspace, query: str) -> str:
         lines.append(
             f"[{n}] {email.received_at[:10]} · from {email.sender_name or email.sender_email} · “{email.subject}”"
             + (f" · files: {files}" if files else "")
-            + ("" if email.id in keyword_ids else " · related in meaning, not by the same words")
+            + (" · related in meaning, not by the same words" if email.id in by_meaning else "")
         )
     return "\n".join(lines)
 

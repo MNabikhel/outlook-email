@@ -204,6 +204,30 @@ def search(store: Store, settings: Settings, query: str, *, limit: int = 5) -> l
     return found
 
 
+def find_mail(store: Store, settings: Settings | None, query: str, terms: list[str], *, limit: int) -> tuple[list[EmailRecord], set[str]]:
+    """Keyword and meaning search together, best first, and the ids only meaning found.
+
+    An email with every word of the question leads. Otherwise the keyword hits share only some words
+    ("team" in an audit report for "team trip in Portugal"), and a close match in meaning goes first.
+    """
+    by_words = store.search_ranked(terms, limit=limit) if terms else []
+    exact = any(_has_all(email, terms) for email in by_words)
+    if settings is None or not terms or (exact and len(by_words) >= limit):
+        return by_words[:limit], set()
+    seen = {email.id for email in by_words}
+    by_meaning = [email for email in search(store, settings, query, limit=limit) if email.id not in seen]
+    found = by_words + by_meaning if exact else by_meaning + by_words
+    return found[:limit], {email.id for email in by_meaning}
+
+
+def _has_all(email: EmailRecord, terms: list[str]) -> bool:
+    text = "\n".join(
+        [email.subject, email.sender_name, email.sender_email, email.summary or "", email.body_text or ""]
+        + [f"{att.filename}\n{att.extracted_text or ''}" for att in email.attachments]
+    ).lower()
+    return all(term in text for term in terms)
+
+
 def _vectors(store: Store, model: str) -> tuple[list[str], Any]:
     """Email ids and their vectors: a numpy matrix when numpy is installed (the OCR add-on brings it), else arrays."""
     version = store.embedding_version(model)

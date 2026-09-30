@@ -185,7 +185,7 @@ def pick_sources(
 ) -> tuple[list[EmailRecord], bool, set[str]]:
     """The emails the answer may use, best first; whether the question is about today; the search hits.
 
-    Keyword matches come first; with ``settings`` and an embedding model, emails close in meaning fill the rest.
+    With ``settings`` and an embedding model, emails close in meaning join the keyword matches.
     """
     about_today = bool(_TODAY.search(question) or _MY_DAY.search(question))
     picked: dict[str, EmailRecord] = {}
@@ -205,9 +205,7 @@ def pick_sources(
     terms = keywords(_HELP.sub(" ", stripped))
     if terms:
         terms = keywords(stripped)
-    found += store.search_ranked(terms, limit=MAX_SOURCES)
-    if settings is not None and terms and len({email.id for email in found}) < MAX_SOURCES:
-        found += semantic.search(store, settings, stripped, limit=MAX_SOURCES)
+    found += semantic.find_mail(store, settings, stripped, terms, limit=MAX_SOURCES)[0]
     found = list({email.id: email for email in found}.values())[:MAX_SOURCES]
     for email in found:
         picked.setdefault(email.id, email)

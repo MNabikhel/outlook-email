@@ -92,6 +92,10 @@ def test_chat_and_the_search_tool_add_mail_close_in_meaning(store, settings, mai
     assert budget.id in [email.id for email in sources]
     assert pick_sources(store, "Where is the team trip in Portugal?")[0] == [], "keyword-only without settings"
 
+    partial = pick_sources(store, "The trip in Portugal last year", settings=settings)[0]
+    assert partial[0].id == budget.id and "FW: Acme quote" in [email.subject for email in partial], "a match on one word goes after"
+    assert pick_sources(store, "Acme quote", settings=settings)[0][0].subject == "FW: Acme quote", "every word matches: it leads"
+
     ws = agent.Workspace(store=store, settings=settings, sources=[])
     listing = agent._search_mail(ws, "team trip in Portugal")
     assert "Q4 budget draft" in listing and "related in meaning, not by the same words" in listing
