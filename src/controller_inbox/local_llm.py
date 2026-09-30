@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -60,8 +61,9 @@ class ModelStatus:
     loaded: list[str] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
     context_length: int = 0
-    # LM Studio's model key for the loaded instance, used to reload it with a longer context.
+    # LM Studio's model key for the loaded instance and the longest context it supports, for reloading it.
     key: str = ""
+    max_context: int = 0
 
     @property
     def active(self) -> bool:
@@ -109,12 +111,12 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         ids = [str(item.get("id")) for item in response.json().get("data", []) if item.get("id")]
         status.reachable = True
         status.models = ids
-        loaded, reasoning, contexts, keys = _lm_studio_models(settings, base, timeout)
+        loaded, reasoning, contexts, reloadable = _lm_studio_models(settings, base, timeout)
         status.loaded = loaded
         status.model = _pick_model(settings.llm_model, ids, loaded)
         status.reasoning = reasoning.get(status.model, [])
         status.context_length = contexts.get(status.model, 0)
-        status.key = keys.get(status.model, "")
+        status.key, status.max_context = reloadable.get(status.model, ("", 0))
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         status.error = _short_error(exc)
     _status_cache[key] = (time.monotonic(), status)
@@ -123,8 +125,8 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
 
 def _lm_studio_models(
     settings: Settings, base: str, timeout: float
-) -> tuple[list[str], dict[str, list[str]], dict[str, int], dict[str, str]]:
-    """Loaded models, their reasoning options, the context length each was loaded with, and each one's model key.
+) -> tuple[list[str], dict[str, list[str]], dict[str, int], dict[str, tuple[str, int]]]:
+    """Loaded models, their reasoning options, the context length each was loaded with, and each one's model key and longest context.
 
     With just-in-time loading on, ``/v1/models`` lists every downloaded model, so
     picking from it can make LM Studio load a second, bigger model. Other servers
@@ -142,7 +144,7 @@ def _lm_studio_models(
         loaded: list[str] = []
         reasoning: dict[str, list[str]] = {}
         contexts: dict[str, int] = {}
-        keys: dict[str, str] = {}
+        reloadable: dict[str, tuple[str, int]] = {}
         if isinstance(data.get("models"), list):
             for item in data["models"]:
                 if not isinstance(item, dict) or item.get("type") not in {"llm", "vlm"}:
@@ -158,14 +160,14 @@ def _lm_studio_models(
                         reasoning[str(instance["id"])] = options
                         config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
                         contexts[str(instance["id"])] = _int(config.get("context_length"))
-                        keys[str(instance["id"])] = str(item.get("key") or instance["id"])
-            return loaded, reasoning, contexts, keys
+                        reloadable[str(instance["id"])] = (str(item.get("key") or instance["id"]), _int(item.get("max_context_length")))
+            return loaded, reasoning, contexts, reloadable
         if isinstance(data.get("data"), list):
             for item in data["data"]:
                 if isinstance(item, dict) and item.get("id") and item.get("state") == "loaded" and item.get("type") in {"llm", "vlm"}:
                     loaded.append(str(item["id"]))
                     contexts[str(item["id"])] = _int(item.get("loaded_context_length") or item.get("max_context_length"))
-            return loaded, reasoning, contexts, keys
+            return loaded, reasoning, contexts, reloadable
     return [], {}, {}, {}
 
 
@@ -671,6 +673,7 @@ _OVERFLOW_RE = re.compile(
 )
 _tools_rejected: set[str] = set()
 _context_raised: set[str] = set()
+_context_lock = threading.Lock()
 
 
 def _raise_for(response: httpx.Response) -> None:
@@ -694,14 +697,20 @@ def context_length(settings: Settings) -> int:
     return check_model(settings).context_length or settings.chat_context_tokens
 
 
+def context_target(settings: Settings, status: ModelStatus | None = None) -> int:
+    """The context the model should have: ``min_context_tokens``, but no more than the model supports."""
+    status = status or check_model(settings)
+    want = settings.min_context_tokens
+    return min(want, status.max_context) if want and status.max_context else want
+
+
 def needs_more_context(settings: Settings) -> bool:
-    """LM Studio loaded the model with less than ``min_context_tokens`` and CloseDesk hasn't tried to raise it yet."""
+    """LM Studio loaded the model with less than the minimum and CloseDesk hasn't tried to raise it yet."""
     status = check_model(settings)
     return bool(
-        settings.min_context_tokens
-        and status.active
+        status.active
         and status.key
-        and 0 < status.context_length < settings.min_context_tokens
+        and 0 < status.context_length < context_target(settings, status)
         and status.model not in _context_raised
     )
 
@@ -718,10 +727,15 @@ def ensure_context(settings: Settings) -> str:
     Tried once per loaded instance, so a machine without the memory for it isn't asked again and again.
     If the longer load fails, the model is loaded back as it was. Returns what happened ("" when nothing did).
     """
-    if not needs_more_context(settings):
-        return ""
-    want = settings.min_context_tokens
+    with _context_lock:
+        if not needs_more_context(settings):
+            return ""
+        return _reload_with_context(settings)
+
+
+def _reload_with_context(settings: Settings) -> str:
     status = check_model(settings)
+    want = context_target(settings, status)
     _context_raised.add(status.model)
     root = status.base_url[: -len("/v1")] if status.base_url.endswith("/v1") else status.base_url
     timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
@@ -742,7 +756,8 @@ def ensure_context(settings: Settings) -> str:
         break
     _status_cache.clear()
     if not errors:
-        return f"Reloaded {status.key} in LM Studio with a {want:,}-token context so whole attachments fit."
+        most = " (the most it supports)" if want < settings.min_context_tokens else ""
+        return f"Reloaded {status.key} in LM Studio with a {want:,}-token context{most} so whole attachments fit."
     if len(errors) == 1:
         return f"LM Studio couldn't load {status.key} with a {want:,}-token context ({errors[0]}), so it stays at {status.context_length:,}."
     return f"LM Studio couldn't reload {status.key} ({errors[-1]}). Load it again in LM Studio."

@@ -33,7 +33,7 @@ from controller_inbox.classify import month_end
 from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
 from controller_inbox.config import PROFILES, Settings
 from controller_inbox.digest import build_digest, write_digest_files
-from controller_inbox.local_llm import check_model, set_min_context
+from controller_inbox.local_llm import check_model, context_target, needs_more_context, set_min_context
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.profile import active_profile, is_finance, set_profile
 from controller_inbox.store import Store
@@ -739,6 +739,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             recommended_context=agent.RECOMMENDED_CONTEXT,
             context_steps=[agent.context_capacity(tokens, settings.chat_max_tokens) for tokens in agent.CONTEXT_STEPS],
             context_step=_nearest_step(settings.min_context_tokens),
+            context_target=context_target(settings, model),
+            will_reload=needs_more_context(settings),
         )
 
     @app.post("/settings/context")

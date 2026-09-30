@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import json
 import re
+import threading
+import time
 
 import httpx
 import pytest
@@ -304,19 +306,23 @@ def test_lm_studio_context_length_and_tool_replies_are_read(settings, monkeypatc
 class _FakeLMStudio:
     """Just enough of LM Studio's native API to list, unload and load one model."""
 
-    def __init__(self, context: int, *, fail_above: int = 0):
-        self.context, self.fail_above, self.posts = context, fail_above, []
+    def __init__(self, context: int, *, fail_above: int = 0, max_context: int = 0, delay: float = 0):
+        self.context, self.fail_above, self.max_context, self.delay, self.posts = context, fail_above, max_context, delay, []
 
     def get(self, url, **_kwargs):
         request = httpx.Request("GET", url)
         if url.endswith("/api/v1/models"):
             instances = [{"id": "qwen/qwen3-4b", "config": {"context_length": self.context}}] if self.context else []
-            return httpx.Response(200, request=request, json={"models": [{"type": "llm", "key": "qwen/qwen3-4b", "loaded_instances": instances}]})
+            model = {"type": "llm", "key": "qwen/qwen3-4b", "loaded_instances": instances}
+            if self.max_context:
+                model["max_context_length"] = self.max_context
+            return httpx.Response(200, request=request, json={"models": [model]})
         return httpx.Response(200, request=request, json={"data": [{"id": "qwen/qwen3-4b"}]})
 
     def post(self, url, json=None, **_kwargs):
         request = httpx.Request("POST", url)
         self.posts.append((url.rsplit("/", 1)[-1], json))
+        time.sleep(self.delay)
         if url.endswith("/unload"):
             self.context = 0
         elif self.fail_above and json["context_length"] > self.fail_above:
@@ -348,6 +354,40 @@ def test_a_model_loaded_with_a_short_context_is_reloaded_once_with_the_minimum(s
     settings.min_context_tokens = 0
     local_llm._context_raised.clear()
     assert not local_llm.needs_more_context(settings)
+
+
+def test_the_reload_stays_within_what_the_model_supports_and_happens_once_for_two_chats(settings, monkeypatch):
+    server = _FakeLMStudio(4096, max_context=32768, delay=0.2)
+    monkeypatch.setattr(local_llm.httpx, "get", server.get)
+    monkeypatch.setattr(local_llm.httpx, "post", server.post)
+    settings.llm = True
+    local_llm.set_min_context(settings, 131072)
+    assert local_llm.context_target(settings) == 32768
+    results = []
+    chats = [threading.Thread(target=lambda: results.append(local_llm.ensure_context(settings))) for _ in range(2)]
+    for chat in chats:
+        chat.start()
+    for chat in chats:
+        chat.join()
+    assert sorted(results) == ["", "Reloaded qwen/qwen3-4b in LM Studio with a 32,768-token context (the most it supports) so whole attachments fit."]
+    assert [call[0] for call in server.posts] == ["unload", "load"] and server.context == 32768
+    assert not local_llm.needs_more_context(settings), "at the model's limit already"
+
+
+def test_setup_says_what_will_happen_to_the_model(store, settings, monkeypatch):
+    server = _FakeLMStudio(4096, fail_above=8192)
+    monkeypatch.setattr(local_llm.httpx, "get", server.get)
+    monkeypatch.setattr(local_llm.httpx, "post", server.post)
+    settings.llm = True
+    client = TestClient(web.create_app(settings, store))
+    assert "The next time you ask something, CloseDesk reloads qwen/qwen3-4b in LM Studio with <b>16,384 tokens</b>" in client.get("/settings").text
+    local_llm.ensure_context(settings)
+    assert "LM Studio couldn't load qwen/qwen3-4b with 16,384 tokens. Close other apps or pick a smaller minimum" in client.get("/settings").text
+
+    small = _FakeLMStudio(8192, max_context=8192)
+    monkeypatch.setattr(local_llm.httpx, "get", small.get)
+    local_llm._status_cache.clear()
+    assert "qwen/qwen3-4b supports at most 8,192 tokens" in client.get("/settings").text
 
 
 def test_the_setup_slider_saves_the_minimum_and_the_next_question_reloads_at_it(store, settings, monkeypatch):
@@ -393,6 +433,7 @@ def test_the_chat_says_when_it_reloads_the_model(store, settings, mail, monkeypa
     budget = mail["Q4 budget draft"]
     monkeypatch.setattr(assistant, "llm_active", lambda _settings: True)
     monkeypatch.setattr(assistant, "needs_more_context", lambda _settings: True)
+    monkeypatch.setattr(assistant, "context_target", lambda _settings: 16384)
     monkeypatch.setattr(assistant, "ensure_context", lambda _settings: "Reloaded m in LM Studio with a 16,384-token context so whole attachments fit.")
     monkeypatch.setattr(assistant, "_model_answer", lambda *a, **k: iter([{"type": "delta", "text": "ok"}]))
     steps = [e["text"] for e in answer_stream(store, settings, "summarize this", email_id=budget.id) if e["type"] == "step"]

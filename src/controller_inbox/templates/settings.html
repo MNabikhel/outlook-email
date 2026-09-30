@@ -44,13 +44,19 @@
     {% set window = model.context_length or settings.chat_context_tokens %}
     <p class="context-line {{ 'ok' if window >= recommended_context else 'short' }}">
       Context window: <b>{{ '{:,}'.format(window) + ' tokens' if window else 'not reported' }}</b>.
-      {% if window >= recommended_context %}
+      {% if will_reload %}
+      The next time you ask something, CloseDesk reloads {{ model.key }} in LM Studio with <b>{{ '{:,}'.format(context_target) }} tokens</b> (the minimum set below).
+      If your computer runs short of memory, it goes back to the current size.
+      {% elif window >= recommended_context %}
       Enough to read whole attachments when you ask about them.
       {% else %}
       Ask CloseDesk reads long attachments a section at a time with this.
-      {% if model.key and settings.min_context_tokens %}
-      The first time you ask it something, it reloads {{ model.key }} in LM Studio with <b>{{ '{:,}'.format(settings.min_context_tokens) }} tokens</b> so whole workbooks and PDFs fit.
-      If your computer runs short of memory, it goes back to the current size.
+      {% if model.key and model.context_length and window < context_target %}
+      LM Studio couldn't load {{ model.key }} with {{ '{:,}'.format(context_target) }} tokens. Close other apps or pick a smaller minimum below, then Save to try again.
+      {% elif model.key and model.max_context and model.max_context < recommended_context %}
+      {{ model.key }} supports at most {{ '{:,}'.format(model.max_context) }} tokens. For whole workbooks and PDFs, load a model with a longer context.
+      {% elif model.key %}
+      For whole workbooks and PDFs, move the minimum below to 16k or more and Save.
       {% else %}
       For whole workbooks and PDFs, reload the model in LM Studio with
       <b>Context Length {{ '{:,}'.format(recommended_context) }}</b> or more (My Models → the model's settings → Context Length).

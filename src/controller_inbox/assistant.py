@@ -28,6 +28,7 @@ from controller_inbox.local_llm import (
     chat_with_tools,
     complete_text,
     context_length,
+    context_target,
     ensure_context,
     llm_active,
     needs_more_context,
@@ -443,10 +444,11 @@ def answer_stream(
         return
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id)
     state = {"wrote": False}
-    if needs_more_context(settings):
-        yield {"type": "step", "text": f"Reloading the model in LM Studio with a {settings.min_context_tokens:,}-token context (once)"}
-        yield {"type": "step", "text": ensure_context(settings)}
     try:
+        if needs_more_context(settings):
+            yield {"type": "step", "text": f"Reloading the model in LM Studio with a {context_target(settings):,}-token context (once)"}
+            if reloaded := ensure_context(settings):
+                yield {"type": "step", "text": reloaded}
         yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
     except Exception as exc:  # any model failure falls back to the lookup answer
         if state["wrote"]:
