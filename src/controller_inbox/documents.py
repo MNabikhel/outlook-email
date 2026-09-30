@@ -32,7 +32,7 @@ logging.getLogger("pypdf").setLevel(logging.ERROR)
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 # Raise when attachments read differently, so text stored by an older reader is read again.
-READER_VERSION = "2"
+READER_VERSION = "3"
 MAX_TEXT = 400_000
 MAX_PDF_PAGES = 300
 MAX_SHEETS = 40
@@ -322,13 +322,14 @@ class SheetRow:
     bold: bool = False
 
 
-def sheet_row_lines(rows: list[SheetRow]) -> list[str]:
+def sheet_row_lines(rows: list[SheetRow], *, first_names_columns: bool = False) -> list[str]:
     """``A5: value | C5: value`` for each row. Under a header row each cell also names its column,
     ``C5 (Department): Finance``, and a blank between filled cells is written ``C5 (Department): not listed``,
-    so a row about one person or account reads on its own."""
+    so a row about one person or account reads on its own. ``first_names_columns``: a CSV, whose first row
+    is its header whenever it holds distinct labels, even over columns of names only."""
     from openpyxl.utils import get_column_letter
 
-    header = _sheet_header(rows)
+    header = _sheet_header(rows, first_names_columns=first_names_columns)
     labels = {c: v.replace("|", "/") for c, v in rows[header].cells.items()} if header is not None else {}
     out = []
     for index, row in enumerate(rows):
@@ -345,7 +346,7 @@ def sheet_row_lines(rows: list[SheetRow]) -> list[str]:
     return out
 
 
-def _sheet_header(rows: list[SheetRow]) -> int | None:
+def _sheet_header(rows: list[SheetRow], *, first_names_columns: bool = False) -> int | None:
     """The index of the row naming the columns: one of the first rows, with two or more distinct labels,
     bold over rows that aren't, or over a column of figures."""
     for index, row in enumerate(rows[:_HEADER_SEARCH]):
@@ -355,7 +356,7 @@ def _sheet_header(rows: list[SheetRow]) -> int | None:
         columns = range(min(row.cells), max(max(r.cells) for r in [row, *below]) + 1)
         grid = [[r.cells.get(c, "") for c in columns] for r in [row, *below]]
         bold = row.bold and not all(r.bold for r in below)
-        if tables.has_header(grid, bold_first=bold):
+        if tables.has_header(grid, bold_first=bold, marked=first_names_columns and index == 0 and row.number == 1):
             return index
     return None
 
@@ -466,7 +467,7 @@ def csv_text(data: bytes, filename: str) -> str:
         SheetRow(number, {c + 1: v.strip() for c, v in enumerate(row[:MAX_COLUMNS]) if v.strip()})
         for number, row in enumerate(rows[:MAX_ROWS], start=1)
     ]
-    lines.extend(sheet_row_lines([row for row in sheet if row.cells]))
+    lines.extend(sheet_row_lines([row for row in sheet if row.cells], first_names_columns=True))
     if len(rows) > MAX_ROWS:
         lines.append(f"[{len(rows) - MAX_ROWS} more rows not shown.]")
     return "\n".join(lines)

@@ -269,6 +269,7 @@ class Workspace:
     evidence: list[str] = field(default_factory=list)
     left_out: list[str] = field(default_factory=list)
     reads: list[str] = field(default_factory=list)
+    past: str = ""
     read_files: bool = False
     last_email: str = ""
 

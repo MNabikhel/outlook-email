@@ -2,7 +2,7 @@
 {% block title %}{{ att.filename }} · CloseDesk{% endblock %}
 {% block heading %}Attachment{% endblock %}
 {% block body %}
-<p class="crumb"><a href="/inbox/{{ email.id }}">{{ email.subject }}</a> / {{ att.filename }}</p>
+<p class="crumb">{% if email.source == 'chat' %}Added to an Ask CloseDesk conversation{% else %}<a href="/inbox/{{ email.id }}">{{ email.subject }}</a>{% endif %} / {{ att.filename }}</p>
 <article class="detail file-view">
   <header class="detail-head">
     <div>
@@ -22,7 +22,7 @@
     </form>
     {% if viewable and not locked %}<a class="ghost" href="/inbox/{{ email.id }}/files/{{ n }}/view" target="_blank" rel="noopener">Open original</a>{% endif %}
     {% if downloadable and not locked %}<a class="ghost" href="/inbox/{{ email.id }}/files/{{ n }}/download">Download original</a>{% endif %}
-    {% if parts and not locked %}
+    {% if parts and not locked and email.source != 'chat' %}
     <button type="button" data-action="ask-file" data-mode="summary" data-id="{{ email.id }}" data-file="{{ att.filename }}">Summarize</button>
     <button type="button" class="ghost" data-action="ask-file" data-id="{{ email.id }}" data-file="{{ att.filename }}">Ask about this file</button>
     {% endif %}

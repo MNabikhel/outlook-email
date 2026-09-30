@@ -149,23 +149,35 @@
   const chatLog = $("#chat .chat-log");
   const chatForm = $("#chat .chat-form");
   const chatInput = $("#chat textarea");
-  const STORE_KEY = "closedesk-chat-v1";
+  const chatWindow = document.body.classList.contains("chat-window");
+  const CHAT_KEY = "closedesk-chat-id";
+  const SIZE_KEY = "closedesk-chat-size";
+  let chatId = null;
   let turns = [];
+  let chatFiles = [];
+  let loaded = false;
   let busy = false;
   let chatRound = 0;
   try {
-    turns = JSON.parse(sessionStorage.getItem(STORE_KEY) || "[]");
+    chatId = localStorage.getItem(CHAT_KEY);
   } catch (error) {
-    turns = [];
+    chatId = null;
   }
 
-  const saveTurns = () => {
+  const rememberChat = (id) => {
+    chatId = id;
     try {
-      sessionStorage.setItem(STORE_KEY, JSON.stringify(turns.slice(-30)));
+      if (id) localStorage.setItem(CHAT_KEY, id);
+      else localStorage.removeItem(CHAT_KEY);
     } catch (error) {
-      /* private mode: history just is not kept */
+      /* private mode: the conversation is still saved, just not reopened on the next page */
     }
   };
+
+  const mailHref = (source) =>
+    source.chat && (source.files || []).length
+      ? `/inbox/${encodeURIComponent(source.id)}/files/1`
+      : `/inbox/${encodeURIComponent(source.id)}`;
 
   /* A citation opens the file it is about: the file named in the same sentence, or the email's one
      readable file when the sentence talks about a page, sheet or file. PDFs open at the cited page;
@@ -257,7 +269,7 @@
       if (!source) return match;
       const target = citeTarget(source, context, whole);
       if (target) return fileLink(target.href, target.file.name, `[${n}]`, "cite");
-      return `<a class="cite" href="/inbox/${encodeURIComponent(source.id)}" title="${escapeHtml(source.subject)}">[${n}]</a>`;
+      return `<a class="cite" href="${mailHref(source)}" title="${escapeHtml(source.subject)}">[${n}]</a>`;
     });
   }
 
@@ -331,7 +343,7 @@
           cited
             .map(
               (s) =>
-                `<li><a class="cite" href="/inbox/${encodeURIComponent(s.id)}">[${s.n}] ${escapeHtml(s.subject)}</a> <small>${escapeHtml(s.sender)}</small>` +
+                `<li><a class="cite" href="${mailHref(s)}">[${s.n}] ${escapeHtml(s.subject)}</a> <small>${escapeHtml(s.sender)}</small>` +
                 (s.files || [])
                   .filter((file) => turn.text.toLowerCase().includes(file.name.toLowerCase()))
                   .map((file) => fileLink(fileHref(s, file, ""), file.name, escapeHtml(file.name), "cite-file"))
@@ -356,23 +368,71 @@
         role: "assistant",
         text:
           "Hi! Ask me about your mail: what's urgent, what needs a reply, or anything from a person or company. " +
+          "Add files with the paperclip or drop them here to ask about them too. " +
           "Click a [number] in my answers to open that email.",
       });
     }
     turns.forEach((turn) => renderTurn(turn));
+    chat.classList.toggle("has-turns", turns.length > 0);
+    renderFiles();
+  }
+
+  function setTitle(title) {
+    const box = $("[data-chat-title]", chat);
+    if (!box) return;
+    box.textContent = title || "Ask CloseDesk";
+    box.title = title || "";
+  }
+
+  async function loadChat(id) {
+    const round = ++chatRound;
+    if (!id) {
+      turns = [];
+      chatFiles = [];
+      setTitle("");
+      loaded = true;
+      return renderChat();
+    }
+    try {
+      const response = await fetch(`/chats/${encodeURIComponent(id)}`);
+      if (round !== chatRound) return;
+      if (!response.ok) throw new Error(String(response.status));
+      const saved = await response.json();
+      rememberChat(saved.id);
+      turns = saved.turns || [];
+      chatFiles = saved.files || [];
+      setTitle(saved.title);
+    } catch (error) {
+      rememberChat(null);
+      turns = [];
+      chatFiles = [];
+      setTitle("");
+    }
+    loaded = true;
+    renderChat();
+  }
+
+  function newChat() {
+    rememberChat(null);
+    closeHistory();
+    loadChat(null);
+    chatInput.focus();
   }
 
   function openChat(focusInput = true) {
     if (!chat) return;
     chat.hidden = false;
-    chatToggle.setAttribute("aria-expanded", "true");
-    chatToggle.classList.add("hidden-fab");
-    if (!chatLog.children.length) renderChat();
+    if (chatToggle) {
+      chatToggle.setAttribute("aria-expanded", "true");
+      chatToggle.classList.add("hidden-fab");
+    }
+    if (!loaded) loadChat(chatId);
     chatLog.scrollTop = chatLog.scrollHeight;
     if (focusInput) chatInput.focus();
   }
 
   function closeChat() {
+    if (chatWindow) return window.close();
     if (!chat || chat.hidden) return false;
     chat.hidden = true;
     chatToggle.setAttribute("aria-expanded", "false");
@@ -387,10 +447,12 @@
     question = (question || "").trim();
     if (!question || busy) return;
     busy = true;
+    closeHistory();
     const round = ++chatRound;
     openChat(false);
-    const history = turns.slice(-6).map(({ role, text }) => ({ role, text }));
+    if (!turns.length) chatLog.innerHTML = "";
     turns.push({ role: "user", text: question });
+    chat.classList.add("has-turns");
     renderTurn(turns[turns.length - 1]);
     const answer = { role: "assistant", text: "", sources: [], steps: [], notes: [], pending: true };
     const bubble = renderTurn(answer);
@@ -399,7 +461,7 @@
       const response = await fetch("/chat", {
         method: "POST",
         headers: JSON_HEADERS,
-        body: JSON.stringify({ message: question, history, email_id: emailId || chatInput.dataset.emailId || currentEmailId() }),
+        body: JSON.stringify({ message: question, chat_id: chatId, email_id: emailId || chatInput.dataset.emailId || currentEmailId() }),
       });
       if (!response.ok || !response.body) throw new Error(`the server said ${response.status}`);
       const reader = response.body.getReader();
@@ -420,7 +482,10 @@
           if (!line) continue;
           const event = JSON.parse(line);
           if (round !== chatRound) break;
-          if (event.type === "sources") {
+          if (event.type === "chat") {
+            rememberChat(event.id);
+            setTitle(event.title);
+          } else if (event.type === "sources") {
             answer.sources = event.sources || [];
             if (event.warning) answer.warning = event.warning;
             answer.mode = event.mode;
@@ -459,7 +524,6 @@
     answer.pending = false;
     if (!answer.text) answer.text = "I didn't get an answer. Try asking another way.";
     turns.push(answer);
-    saveTurns();
     renderTurn(answer, bubble);
     chatInput.focus({ preventScroll: true });
   }
@@ -475,7 +539,208 @@
     chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
   }
 
+  /* Past conversations */
+
+  const historyPanel = $("#chat .chat-history");
+  const historySearch = $("#chat .chat-history input");
+  const historyList = $("#chat .chat-history-list");
+
+  function dayLabel(iso) {
+    const when = new Date(iso);
+    if (Number.isNaN(when.getTime())) return "";
+    const today = new Date();
+    const days = Math.round((new Date(today.toDateString()) - new Date(when.toDateString())) / 86400000);
+    if (days === 0) return "Today";
+    if (days === 1) return "Yesterday";
+    if (days < 7) return "This week";
+    return when.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  }
+
+  async function showHistory() {
+    const query = historySearch.value.trim();
+    const response = await fetch(`/chats?q=${encodeURIComponent(query)}`).catch(() => null);
+    const saved = response && response.ok ? (await response.json()).chats : [];
+    if (!saved.length) {
+      historyList.innerHTML = `<li class="chat-history-empty">${query ? "No conversation mentions that." : "Your conversations will show up here."}</li>`;
+      return;
+    }
+    let group = "";
+    historyList.innerHTML = saved
+      .map((item) => {
+        const label = dayLabel(item.updated_at);
+        const heading = label !== group ? `<li class="chat-history-day">${escapeHtml((group = label))}</li>` : "";
+        const time = new Date(item.updated_at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+        const bits = [`${item.questions} question${item.questions === 1 ? "" : "s"}`];
+        if (item.files) bits.push(`${item.files} file${item.files === 1 ? "" : "s"}`);
+        return (
+          heading +
+          `<li class="chat-history-item${item.id === chatId ? " current" : ""}">` +
+          `<button type="button" class="chat-history-open" data-chat-open="${escapeHtml(item.id)}">` +
+          `<b>${escapeHtml(item.title || "Files only")}</b><small>${escapeHtml(time)} · ${bits.join(" · ")}</small></button>` +
+          `<button type="button" class="icon chat-history-delete" data-chat-delete="${escapeHtml(item.id)}" title="Delete this conversation" aria-label="Delete this conversation">` +
+          '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg>' +
+          "</button></li>"
+        );
+      })
+      .join("");
+  }
+
+  function toggleHistory() {
+    if (!historyPanel) return;
+    historyPanel.hidden = !historyPanel.hidden;
+    $("[data-action='chat-history']", chat).classList.toggle("on", !historyPanel.hidden);
+    if (!historyPanel.hidden) {
+      showHistory();
+      historySearch.focus();
+    }
+  }
+
+  function closeHistory() {
+    if (!historyPanel || historyPanel.hidden) return false;
+    historyPanel.hidden = true;
+    $("[data-action='chat-history']", chat).classList.remove("on");
+    return true;
+  }
+
+  async function deleteChat(id) {
+    if (!window.confirm("Delete this conversation and the files added to it?")) return;
+    const response = await fetch(`/chats/${encodeURIComponent(id)}/delete`, { method: "POST", headers: JSON_HEADERS }).catch(() => null);
+    if (!response || !response.ok) return toast("That conversation couldn't be deleted.");
+    if (id === chatId) {
+      rememberChat(null);
+      loadChat(null);
+    }
+    showHistory();
+  }
+
+  /* Files added to the conversation */
+
+  const filesRow = $("#chat .chat-files");
+  const fileInput = $("#chat .chat-file-input");
+  const dropZone = $("#chat .chat-drop");
+
+  const fileSize = (bytes) =>
+    bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : bytes >= 1e3 ? `${Math.round(bytes / 1e3)} KB` : `${bytes} B`;
+
+  function renderFiles(pending = []) {
+    if (!filesRow) return;
+    filesRow.hidden = !chatFiles.length && !pending.length;
+    filesRow.innerHTML =
+      chatFiles
+        .map(
+          (file) =>
+            `<span class="chat-file${file.text ? "" : " no-text"}" title="${file.text ? "" : "No readable text found"}">` +
+            `<a href="${escapeHtml(file.href)}" target="_blank" rel="noopener">${escapeHtml(file.name)}</a>` +
+            `<small>${fileSize(file.size)}</small>` +
+            `<button type="button" data-file-remove="${file.n}" aria-label="Remove ${escapeHtml(file.name)}" title="Remove">&times;</button></span>`
+        )
+        .join("") + pending.map((name) => `<span class="chat-file pending">${escapeHtml(name)}<small>Reading…</small></span>`).join("");
+  }
+
+  async function ensureChat() {
+    if (chatId) return chatId;
+    const response = await fetch("/chats", { method: "POST", headers: JSON_HEADERS });
+    if (!response.ok) throw new Error(String(response.status));
+    rememberChat((await response.json()).id);
+    return chatId;
+  }
+
+  async function addFiles(list) {
+    const files = Array.from(list || []);
+    if (!files.length) return;
+    openChat(false);
+    renderFiles(files.map((file) => file.name));
+    try {
+      const id = await ensureChat();
+      const form = new FormData();
+      files.forEach((file) => form.append("files", file, file.name));
+      const response = await fetch(`/chats/${encodeURIComponent(id)}/files`, { method: "POST", headers: { "X-CloseDesk": "1" }, body: form });
+      if (!response.ok) throw new Error(`the server said ${response.status}`);
+      const result = await response.json();
+      chatFiles = result.files || [];
+      if (result.problems && result.problems.length) toast(result.problems.join(" "), 6000);
+      else toast(`Added ${files.length === 1 ? files[0].name : `${files.length} files`}. Ask away.`);
+    } catch (error) {
+      toast(`The files weren't added (${error.message}).`);
+    }
+    renderFiles();
+    chatInput.focus();
+  }
+
+  async function removeFile(n) {
+    const response = await fetch(`/chats/${encodeURIComponent(chatId)}/files/${n}/delete`, { method: "POST", headers: JSON_HEADERS }).catch(() => null);
+    if (!response || !response.ok) return toast("That file couldn't be removed.");
+    chatFiles = (await response.json()).files || [];
+    renderFiles();
+  }
+
+  /* Size: drag the top-left corner, or switch to the large panel */
+
+  function applySize() {
+    if (!chat || chatWindow) return;
+    let size = null;
+    try {
+      size = JSON.parse(localStorage.getItem(SIZE_KEY) || "null");
+    } catch (error) {
+      size = null;
+    }
+    const large = Boolean(size && size.large);
+    chat.classList.toggle("large", large);
+    $("[data-action='expand-chat']", chat).setAttribute("aria-pressed", String(large));
+    chat.style.width = size && size.width && !large ? `${size.width}px` : "";
+    chat.style.height = size && size.height && !large ? `${size.height}px` : "";
+  }
+
+  function saveSize(size) {
+    try {
+      if (size) localStorage.setItem(SIZE_KEY, JSON.stringify(size));
+      else localStorage.removeItem(SIZE_KEY);
+    } catch (error) {
+      /* the size just isn't remembered */
+    }
+    applySize();
+  }
+
+  const grip = $("#chat .chat-grip");
+  if (grip) {
+    grip.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      const box = chat.getBoundingClientRect();
+      const start = { x: event.clientX, y: event.clientY, width: box.width, height: box.height };
+      chat.classList.remove("large");
+      chat.classList.add("resizing");
+      grip.setPointerCapture(event.pointerId);
+      const move = (e) => {
+        const width = Math.min(window.innerWidth - 24, Math.max(340, start.width + start.x - e.clientX));
+        const height = Math.min(window.innerHeight - 24, Math.max(380, start.height + start.y - e.clientY));
+        chat.style.width = `${width}px`;
+        chat.style.height = `${height}px`;
+      };
+      const stop = () => {
+        grip.removeEventListener("pointermove", move);
+        chat.classList.remove("resizing");
+        const box = chat.getBoundingClientRect();
+        saveSize({ width: Math.round(box.width), height: Math.round(box.height) });
+      };
+      grip.addEventListener("pointermove", move);
+      grip.addEventListener("pointerup", stop, { once: true });
+      grip.addEventListener("pointercancel", stop, { once: true });
+    });
+    grip.addEventListener("dblclick", () => saveSize(null));
+  }
+
+  function toggleLarge() {
+    saveSize(chat.classList.contains("large") ? null : { large: true });
+  }
+
+  function popOut() {
+    const popup = window.open("/chat/window", "closedesk-chat", "popup,width=560,height=820");
+    if (!popup) return toast("Your browser blocked the window. Allow pop-ups for CloseDesk and try again.");
+    closeChat();
+  }
+
   if (chat) {
+    applySize();
     chatForm.addEventListener("submit", (event) => {
       event.preventDefault();
       if (busy) return;
@@ -491,7 +756,65 @@
         chatForm.requestSubmit();
       }
     });
-    chatToggle.addEventListener("click", () => (chat.hidden ? openChat() : closeChat()));
+    chatInput.addEventListener("paste", (event) => {
+      const files = event.clipboardData && event.clipboardData.files;
+      if (files && files.length) {
+        event.preventDefault();
+        addFiles(files);
+      }
+    });
+    if (chatToggle) chatToggle.addEventListener("click", () => (chat.hidden ? openChat() : closeChat()));
+    fileInput.addEventListener("change", () => {
+      addFiles(fileInput.files);
+      fileInput.value = "";
+    });
+    let dragDepth = 0;
+    const carriesFiles = (event) => event.dataTransfer && Array.from(event.dataTransfer.types || []).includes("Files");
+    chat.addEventListener("dragenter", (event) => {
+      if (!carriesFiles(event)) return;
+      event.preventDefault();
+      dragDepth++;
+      dropZone.hidden = false;
+    });
+    chat.addEventListener("dragover", (event) => {
+      if (carriesFiles(event)) event.preventDefault();
+    });
+    chat.addEventListener("dragleave", () => {
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) dropZone.hidden = true;
+    });
+    chat.addEventListener("drop", (event) => {
+      if (!carriesFiles(event)) return;
+      event.preventDefault();
+      dragDepth = 0;
+      dropZone.hidden = true;
+      addFiles(event.dataTransfer.files);
+    });
+    let searchTimer = null;
+    historySearch.addEventListener("input", () => {
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(showHistory, 200);
+    });
+    chat.addEventListener("click", (event) => {
+      const open = event.target.closest("[data-chat-open]");
+      if (open) {
+        closeHistory();
+        return loadChat(open.dataset.chatOpen);
+      }
+      const remove = event.target.closest("[data-chat-delete]");
+      if (remove) return deleteChat(remove.dataset.chatDelete);
+      const file = event.target.closest("[data-file-remove]");
+      if (file) return removeFile(file.dataset.fileRemove);
+    });
+    // Another window (the pop-out or a second tab) switched conversations: follow it when idle.
+    window.addEventListener("storage", (event) => {
+      if (event.key === CHAT_KEY && !busy && event.newValue !== chatId) {
+        chatId = event.newValue;
+        if (!chat.hidden || chatWindow) loadChat(chatId);
+        else loaded = false;
+      }
+    });
+    if (chatWindow) openChat();
   }
 
   /* ---------- One click handler for the whole page ---------- */
@@ -518,11 +841,16 @@
           return closePreview();
         case "close-chat":
           return closeChat();
-        case "clear-chat":
-          chatRound++;
-          turns = [];
-          saveTurns();
-          return renderChat();
+        case "new-chat":
+          return newChat();
+        case "chat-history":
+          return toggleHistory();
+        case "expand-chat":
+          return toggleLarge();
+        case "popout-chat":
+          return popOut();
+        case "attach-file":
+          return fileInput.click();
       }
     }
 
@@ -569,7 +897,7 @@
 
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
-      if (closePreview() || closeChat()) event.preventDefault();
+      if (closeHistory() || closePreview() || (!chatWindow && closeChat())) event.preventDefault();
       return;
     }
     if (event.key === "/" && !isTyping(event.target) && !event.metaKey && !event.ctrlKey) {
