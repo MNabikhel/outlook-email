@@ -34,6 +34,11 @@ class Mailbox(Protocol):
     def apply_categories(self, message_id: str, categories: list[str], flag: bool) -> str: ...
 
 
+def attachment_text(filename: str, content_type: str, data: bytes) -> str:
+    """An attachment's text as stored: account and card numbers masked, capped in length."""
+    return redact_financial_secrets(extract_text_from_bytes(filename, content_type, data))[:MAX_TEXT]
+
+
 def process_message(
     raw: RawMessage,
     store: Store,
@@ -62,8 +67,7 @@ def process_message(
     )
 
     for raw_att in attachments_raw:
-        text = extract_text_from_bytes(raw_att.filename, raw_att.content_type, raw_att.content)
-        text = redact_financial_secrets(text)
+        text = attachment_text(raw_att.filename, raw_att.content_type, raw_att.content)
         fields = extract_fields(f"{raw_att.filename}\n{text}", as_of=as_of, extra_vendor=raw.sender_name)
         merged_fields = merged_fields.merged_with(fields)
         classified = classify_document(
@@ -85,7 +89,7 @@ def process_message(
                 content_type=raw_att.content_type,
                 size_bytes=raw_att.size_bytes or len(raw_att.content),
                 sha256=sha256_bytes(raw_att.content) if raw_att.content else "",
-                extracted_text=text[:MAX_TEXT],
+                extracted_text=text,
                 document_type=classified.document_type,
                 document_confidence=classified.confidence,
                 extracted_fields=fields,
