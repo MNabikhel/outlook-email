@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from controller_inbox.actions import local_today
 from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, write_digest_files
+from controller_inbox.file_summaries import summarize_files
 from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.local_llm import LocalReader, check_model, llm_active
 from controller_inbox.profile import is_finance
@@ -87,6 +88,15 @@ def run_overnight(
 
     reading = read_queue(store, settings, limit=limit, now=now, reader=reader, on_progress=on_progress)
     stats = reading["stats"]
+    summarized = 0
+    if reading["model"] and not (stats and stats.stopped_reason) and settings.overnight_file_summaries:
+        summarized = summarize_files(
+            store,
+            settings,
+            limit=settings.overnight_file_summaries,
+            model=reading["model"],
+            on_progress=(lambda i, n, name: on_progress("summarizing", i, n, name)) if on_progress else None,
+        )
 
     if on_progress:
         on_progress("digest", 1, 1, "Writing the digest")
@@ -110,6 +120,7 @@ def run_overnight(
         "graph_synced": graph_count,
         "graph_note": graph_note,
         "read_by_bionic": len(reading["read_ids"]),
+        "files_summarized": summarized,
         "waiting_on_bionic": counts["waiting_on_bionic"],
         "folders": {
             "important": counts["important"],
@@ -159,6 +170,7 @@ def _log(summary: dict, *, store: Store) -> str:
         f"- Read by Bionic this run: {summary['read_by_bionic']}"
         + (f" (about {summary['avg_seconds']}s each)" if summary["avg_seconds"] else ""),
         f"- Still waiting on Bionic: {summary['waiting_on_bionic']}",
+        f"- Attachments summarized for Ask CloseDesk: {summary.get('files_summarized', 0)}",
         f"- Important / informational / reference: {folders['important']} / {folders['informational']} / {folders['reference']}",
         f"- Fraud alerts: {summary['fraud_alerts']}",
         f"- Digest: {summary['digest_path']}",

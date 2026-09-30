@@ -444,6 +444,16 @@ def answer_stream(
         return
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id)
     state = {"wrote": False, "text": ""}
+    if (ready := agent.summary_request(ws, question)) is not None:
+        att, summary = ready
+        yield {"type": "step", "text": f"Used the summary of {att.filename} written during the overnight reading"}
+        yield {
+            "type": "delta",
+            "text": f"**{att.filename}**\n{summary}\n\n*Written overnight and checked against the file. "
+            "Ask about a page, sheet or figure to have it read again.*",
+        }
+        yield {"type": "done"}
+        return
     try:
         if needs_more_context(settings):
             yield {"type": "step", "text": f"Reloading the model in LM Studio with a {context_target(settings):,}-token context (once)"}

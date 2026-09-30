@@ -410,6 +410,10 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             labels = [p.label for p in parts[:12]] + ([f"… {len(parts) - 12} more"] if len(parts) > 12 else [])
             block.append("Sections: " + " / ".join(labels))
         budget = per_file - len(head) - 200
+        summary = overnight_summary(ws.store, att) if len(text) > budget else ""
+        if summary:
+            block.append("Summary written overnight (checked against the file):\n" + summary[:900])
+            budget -= min(len(summary), 900) + 60
         if whole and len(parts) > 2 and len(text) > budget:
             block.append(_skimmed(att, parts, budget))
             ws.left_out.append(att.filename)
@@ -458,6 +462,40 @@ def _passages(ws: Workspace, att: AttachmentRecord, parts: list[documents.Part],
         ws.left_out.append(att.filename)
         block.append(f"(Showing {len(picked)} of {len(parts)} sections{', one cut short' if cut else ''}. Read others with read_file.)")
     return block
+
+
+SUMMARY_MIN_CHARS = 1_500
+FILE_WORDS_RE = re.compile(
+    r"\b(files?|attach\w*|documents?|docs?|pdfs?|workbooks?|spreadsheets?|sheets?|excel|decks?|slides?|reports?|memos?|contracts?|agreements?)\b",
+    re.I,
+)
+
+
+def summary_key(att: AttachmentRecord) -> str:
+    """Changes when the file's text does, so an old summary isn't used for new text."""
+    return f"{att.sha256}:{len(att.extracted_text or '')}"
+
+
+def overnight_summary(store: Store, att: AttachmentRecord) -> str:
+    if len(att.extracted_text or "") < SUMMARY_MIN_CHARS:
+        return ""
+    return store.file_summary(att.id, summary_key(att))
+
+
+def summary_request(ws: Workspace, question: str) -> tuple[AttachmentRecord, str] | None:
+    """The one file a "summarize the file" question is about and its overnight summary, when there is one."""
+    email = ws.primary()
+    if email is None or not SUMMARY_RE.search(question) or attachments_locked(email):
+        return None
+    readable = [att for att in email.attachments if (att.extracted_text or "").strip()]
+    named = named_files(readable, question)
+    if not named and not FILE_WORDS_RE.search(question):
+        return None
+    candidates = named or readable
+    if len(candidates) != 1:
+        return None
+    summary = overnight_summary(ws.store, candidates[0])
+    return (candidates[0], summary) if summary else None
 
 
 def named_files(files: list[AttachmentRecord], question: str) -> list[AttachmentRecord]:

@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     llm_max_prompt_chars: int = 6000
     llm_max_tokens: int = 450
     overnight_batch: int = 40
+    # Long attachments the model summarizes per overnight run, so "summarize this file" answers at once. 0 = none.
+    overnight_file_summaries: int = 20
     digest_lookback_days: int = 1
     profile: str = "general"
     chat_max_tokens: int = 500
