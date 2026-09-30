@@ -522,6 +522,7 @@ _ECHO_RE = re.compile(
         )
     )
     + r"|(?:^|\n)[^\n]*· \d+ sections? · [\d,]+ characters"
+    + r"|(?:^|\n)\W*File: [^\n]*\([^)\n]+\) ·"
     + r"|Today is \d{4}-\d\d-\d\d"
     + r"|(?:(?<=[.!?]\s)|(?<=\n)|^)(?:[^.!?\n]|[.!?](?!\s))*\bnot asked about\b",
     re.IGNORECASE,

@@ -251,6 +251,9 @@ def test_an_answer_stops_where_the_model_starts_repeating_its_instructions():
     tail = "\n\nToday is 2026-09-29. The Q4 budget.xlsx is also attached, but it is not asked about."
     assert "".join(assistant.without_echo(iter([answer, tail]))) == answer
     assert "".join(assistant.without_echo(iter([answer + " The budget.xlsx is also attached, but it is not asked about."]))) == answer
+    cited = "\n\nFile: FY26 Vendor Payments Audit.pdf (PDF) · page 17.4"
+    assert "".join(assistant.without_echo(iter([answer, cited]))) == answer
+    assert "".join(assistant.without_echo(iter([answer + "\nFile: see the memo (page 2) for dates."]))).endswith("for dates.")
     with pytest.raises(local_llm.EmptyReply):
         list(assistant.without_echo(iter(["Your draft answer:", " the memo..."])))
 
