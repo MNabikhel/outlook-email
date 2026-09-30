@@ -1,0 +1,8 @@
+{% set state = card.search if card is defined else search %}
+{% if state == 'indexed' %}
+<span class="search-state indexed" title="Ask CloseDesk can find this file by meaning">✓ Indexed</span>
+{% elif state == 'waiting' %}
+<span class="search-state" title="Search by meaning doesn't cover this file yet">Not indexed yet</span>
+{% elif state == 'changed' %}
+<span class="search-state" title="The text was read again after it was indexed">Changed since indexed</span>
+{% endif %}

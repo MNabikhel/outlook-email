@@ -79,7 +79,12 @@
   </div>
 
   <section class="panel" id="files">
-    <h3>Attachments{% if files %} <small>{{ files | length }} file{{ '' if files | length == 1 else 's' }}</small>{% endif %}</h3>
+    <div class="files-head">
+      <h3>Attachments{% if files %} <small>{{ files | length }} file{{ '' if files | length == 1 else 's' }}</small>{% endif %}</h3>
+      {% if files | selectattr('search', 'in', ['waiting', 'changed']) | list %}
+      <form method="post" action="/inbox/{{ email.id }}/index"><button type="submit" class="tiny ghost">Index for search</button></form>
+      {% endif %}
+    </div>
     {% if files %}
     {% if locked %}
     <p class="warn-box">Files locked: this email may be payment fraud. You can read their text here (text can't run anything), but they don't download and Ask CloseDesk won't open them. Verify by phone, then mark it safe in the fraud check below.</p>
@@ -91,6 +96,7 @@
         <div class="file-top">
           <b title="{{ att.filename }}">{{ att.filename }}</b>
           <small>{{ card.kind }} · {{ att.size_bytes | filesizeformat }}{% if card.sections > 1 %} · {{ card.sections }} sections{% endif %}</small>
+          {% include "_search_state.html" %}
         </div>
         <p class="file-type">
           <span class="tag">{{ att.document_type.value | label_doc }} · {{ '%.0f'|format(att.document_confidence * 100) }}%</span>

@@ -6,7 +6,7 @@
 <article class="detail file-view">
   <header class="detail-head">
     <div>
-      <h2>{{ att.filename }}</h2>
+      <h2>{{ att.filename }} {% include "_search_state.html" %}</h2>
       <p>{{ kind }} · {{ att.size_bytes | filesizeformat }} · {{ parts | length }} section{{ '' if parts | length == 1 else 's' }} · {{ att.document_type.value | label_doc }}</p>
       <p class="muted">From {{ email.sender_name or email.sender_email }} · {{ email.received_at | shortdt }}</p>
     </div>
