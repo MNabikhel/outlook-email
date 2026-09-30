@@ -76,6 +76,7 @@ NOTICES = {
     "trust-added": "Domain saved. Its mail was checked again.",
     "trust-reported": "Domain reported. Its mail was checked again.",
     "trust-removed": "Removed. Its mail was checked again.",
+    "corrected": "Category corrected. Mail from this sender follows it, and the example is saved for the local model.",
     "findings-cleared": "Notes cleared. Ask CloseDesk reads the files fresh next time.",
     "indexing": "Indexing started. This page updates as it goes.",
     "indexed": "Indexed for search. Ask CloseDesk can now find these files by meaning.",
@@ -295,7 +296,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         )
 
     @app.get("/folder/{name}", response_class=HTMLResponse)
-    def folder_page(request: Request, name: str):
+    def folder_page(request: Request, name: str, done: int = 0):
         if name not in FOLDER_LABELS:
             raise HTTPException(status_code=404, detail="Unknown folder")
         blurbs = {
@@ -307,10 +308,20 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             request,
             "inbox.html",
             page=name,
-            emails=store.list_emails(folder=name, order="score", limit=200),
-            heading=FOLDER_LABELS[name],
-            blurb=blurbs[name],
+            emails=store.list_emails(folder=name, order="score", done=bool(done), limit=200),
+            heading=FOLDER_LABELS[name] + (" · done" if done else ""),
+            blurb="Mail you marked done. Undo puts it back in the list." if done else blurbs[name],
+            folder_name=name,
+            showing_done=bool(done),
+            done_count=store.done_count(name),
         )
+
+    @app.post("/inbox/{email_id}/done")
+    def mark_done(email_id: str, undo: int = 0, next: str = Query("/")):
+        if store.get_email(email_id) is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+        store.set_done(email_id, not undo)
+        return RedirectResponse(_local_path(next, "/"), status_code=303)
 
     @app.get("/inbox", response_class=HTMLResponse)
     def inbox(
@@ -558,6 +569,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "_preview.html",
             email=email,
             back=_local_path(next, "/"),
+            done=store.is_done(email.id),
             has_original=original_path(email) is not None,
             files=file_cards(email),
             locked=fraud.attachments_locked(email),
@@ -654,7 +666,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return StreamingResponse(lines(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
 
     @app.post("/inbox/{email_id}/correct")
-    def correct_category(email_id: str, category: str = Form(...), reason: str = Form(...)):
+    def correct_category(email_id: str, category: str = Form(...), reason: str = Form(...), next: str = Form("")):
         from controller_inbox.learn import record_correction
 
         try:
@@ -669,7 +681,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise HTTPException(status_code=404, detail="Message not found") from None
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
-        return RedirectResponse(f"/inbox/{email_id}", status_code=303)
+        back = _local_path(next, f"/inbox/{email_id}")
+        return RedirectResponse(back + ("&" if "?" in back else "?") + "notice=corrected", status_code=303)
 
     @app.post("/process")
     def process():

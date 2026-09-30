@@ -91,3 +91,39 @@ def test_empty_state_and_reload(store, settings):
     reloaded = client.post("/demo/reload", follow_redirects=True)
     assert reloaded.status_code == 200
     assert "INV-10482" in reloaded.text
+
+
+def test_folder_done_and_preview_correction(store, settings, as_of_now):
+    ingest_demo(store, settings, now=as_of_now)
+    client = TestClient(create_app(settings, store))
+    email = store.list_emails(folder="important", limit=1)[0]
+    before = store.counts()["important"]
+
+    page = client.get("/folder/important")
+    assert f"/inbox/{email.id}/done?next=" in page.text
+
+    done = client.post(f"/inbox/{email.id}/done", params={"next": "/folder/important"}, follow_redirects=False)
+    assert done.status_code == 303 and done.headers["location"] == "/folder/important"
+    assert store.is_done(email.id)
+    assert f'data-email="{email.id}"' not in client.get("/folder/important").text
+    assert "Show 1 done" in client.get("/folder/important").text
+    assert store.counts()["important"] == before - 1
+
+    shown = client.get("/folder/important?done=1").text
+    assert f'data-email="{email.id}"' in shown and "Undo" in shown
+    assert "Undo done" in client.get(f"/inbox/{email.id}/preview").text
+
+    client.post(f"/inbox/{email.id}/done", params={"undo": 1, "next": "/folder/important?done=1"})
+    assert not store.is_done(email.id)
+    assert f'data-email="{email.id}"' in client.get("/folder/important").text
+    assert client.post("/inbox/nope/done").status_code == 404
+
+    preview = client.get("/inbox/demo-newsletter/preview", params={"next": "/folder/informational"}).text
+    assert "Wrong category?" in preview and 'name="next" value="/folder/informational"' in preview
+    fixed = client.post(
+        "/inbox/demo-newsletter/correct",
+        data={"category": "internal_fyi", "reason": "Internal weekly note.", "next": "/folder/informational"},
+        follow_redirects=False,
+    )
+    assert fixed.headers["location"] == "/folder/informational?notice=corrected"
+    assert "Category corrected" in client.get(fixed.headers["location"]).text

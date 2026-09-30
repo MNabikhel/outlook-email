@@ -20,6 +20,10 @@
     </select>
     <button type="submit">Filter</button>
   </form>
+  {% if folder_name is defined %}
+  {% if showing_done %}<a class="ghost" href="/folder/{{ folder_name }}">Back to open mail</a>
+  {% elif done_count %}<a class="ghost" href="/folder/{{ folder_name }}?done=1">Show {{ done_count }} done</a>{% endif %}
+  {% endif %}
   <a class="ghost" href="/export/actions.csv">Export actions CSV</a>
 </section>
 
@@ -34,6 +38,7 @@
         <th>Category</th>
         <th>Amount</th>
         <th>Files</th>
+        {% if folder_name is defined %}<th></th>{% endif %}
       </tr>
     </thead>
     <tbody>
@@ -70,9 +75,22 @@
         <td>{{ email.category.value | label_doc }}</td>
         <td class="nowrap">{{ email.extracted.primary_amount | money }}</td>
         <td>{{ email.attachments | length }}</td>
+        {% if folder_name is defined %}
+        <td>
+          {% if showing_done %}
+          <form method="post" action="/inbox/{{ email.id }}/done?undo=1&next={{ ('/folder/' ~ folder_name ~ '?done=1') | urlencode }}">
+            <button class="tiny ghost" type="submit">Undo</button>
+          </form>
+          {% else %}
+          <form method="post" action="/inbox/{{ email.id }}/done?next={{ ('/folder/' ~ folder_name) | urlencode }}">
+            <button class="tiny" type="submit" title="Mark as read and remove it from this list">Done</button>
+          </form>
+          {% endif %}
+        </td>
+        {% endif %}
       </tr>
       {% else %}
-      <tr><td colspan="7" class="muted">No mail matches this filter.</td></tr>
+      <tr><td colspan="{{ 8 if folder_name is defined else 7 }}" class="muted">{{ 'Nothing marked done yet.' if showing_done else 'No mail matches this filter.' }}</td></tr>
       {% endfor %}
     </tbody>
   </table>

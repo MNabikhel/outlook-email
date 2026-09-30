@@ -362,6 +362,7 @@ class Store:
         q: str | None = None,
         folder: str | None = None,
         model_status: str | None = None,
+        done: bool | None = None,
         oldest_first: bool = False,
         received_from: str | None = None,
         received_before: str | None = None,
@@ -391,6 +392,8 @@ class Store:
         if folder:
             clauses.append("folder = ?")
             params.append(folder)
+        if done is not None:
+            clauses.append("COALESCE(done_at, '') != ''" if done else "COALESCE(done_at, '') = ''")
         if model_status:
             clauses.append("model_status = ?")
             params.append(model_status)
@@ -591,7 +594,7 @@ class Store:
             ).fetchone()["n"]
             folders = {
                 name: conn.execute(
-                    "SELECT COUNT(*) AS n FROM emails WHERE folder = ?",
+                    "SELECT COUNT(*) AS n FROM emails WHERE folder = ? AND COALESCE(done_at, '') = ''",
                     (name,),
                 ).fetchone()["n"]
                 for name in ("important", "informational", "reference")
@@ -788,6 +791,23 @@ class Store:
                     "INSERT INTO findings(email_id, at, question, text) VALUES (?, ?, ?, ?)",
                     (email_id, at, question[:300], text[:1000]),
                 )
+
+    def set_done(self, email_id: str, done: bool) -> None:
+        """Done: handled, so it leaves its folder's list (it stays in All mail and search)."""
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds") if done else ""
+        with self.connect() as conn:
+            conn.execute("UPDATE emails SET done_at = ? WHERE id = ?", (stamp, email_id))
+
+    def is_done(self, email_id: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute("SELECT COALESCE(done_at, '') AS d FROM emails WHERE id = ?", (email_id,)).fetchone()
+        return bool(row and row["d"])
+
+    def done_count(self, folder: str) -> int:
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS n FROM emails WHERE folder = ? AND COALESCE(done_at, '') != ''", (folder,)
+            ).fetchone()["n"]
 
     def findings(self, email_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -1115,6 +1135,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         real = conn.execute("SELECT COUNT(*) FROM emails WHERE COALESCE(source, '') != 'demo'").fetchone()[0]
         if real:
             conn.execute("INSERT OR IGNORE INTO sync_state(key, value) VALUES ('profile', 'finance')")
+    if "done_at" not in cols:
+        conn.execute("ALTER TABLE emails ADD COLUMN done_at TEXT DEFAULT ''")
     if "reply_to" not in cols:
         conn.execute("ALTER TABLE emails ADD COLUMN reply_to TEXT DEFAULT ''")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
