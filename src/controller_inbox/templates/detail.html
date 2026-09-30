@@ -20,7 +20,7 @@
     </div>
     <div class="facts">
       <div><span>Folder</span><b>{{ email.folder|capitalize if email.folder else '—' }}</b></div>
-      <div><span>Category</span><b>{{ email.category.value | label_doc }}</b></div>
+      <div><span>Category</span><b>{{ email.category.value | label_doc }}</b> <a class="tiny-link" href="#correct">Wrong?</a></div>
       <div><span>Invoice</span><b>{{ email.extracted.primary_invoice or '—' }}</b></div>
       <div><span>Amount</span><b>{{ email.extracted.primary_amount | money or '—' }}</b></div>
       <div><span>Due</span><b>{{ email.extracted.primary_due or '—' }}</b></div>
@@ -141,7 +141,7 @@
   {% endif %}
 
   {% if check.level == 'none' %}{% include "_fraud_panel.html" %}{% endif %}
-  <section class="panel correct">
+  <section class="panel correct" id="correct">
     <h3>Wrong category?</h3>
     <p class="muted">Say what this actually is, and why. The next message from this sender follows that correction, and the example is saved for the local model.</p>
     {% if 'user_trained' in email.flags %}

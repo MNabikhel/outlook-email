@@ -10,6 +10,15 @@
   {% elif 'payment_caution' in email.flags %}
   <p class="note">Worth a second look before any money moves. <a data-full href="/inbox/{{ email.id }}#fraud">See why</a></p>
   {% endif %}
+  <div class="preview-done">
+    {% if done %}
+    <form method="post" action="/inbox/{{ email.id }}/done?undo=1&next={{ back | urlencode }}"><button class="tiny ghost" type="submit">Undo done</button></form>
+    <small class="muted">Marked done. It is hidden from its folder list.</small>
+    {% elif email.folder %}
+    <form method="post" action="/inbox/{{ email.id }}/done?next={{ back | urlencode }}"><button class="tiny" type="submit">Mark done</button></form>
+    <small class="muted">Read it? Remove it from the {{ email.folder | capitalize }} list.</small>
+    {% endif %}
+  </div>
   {% if email.summary %}<p class="preview-summary">{{ email.summary }}</p>{% endif %}
   {% include "_mail_tools.html" %}
 
@@ -58,5 +67,22 @@
     </ul>
   </section>
   {% endif %}
-  <p class="preview-foot"><a data-full href="/inbox/{{ email.id }}">Full page: files, fraud check, why it was flagged, fix the category →</a></p>
+  <details class="preview-part correct">
+    <summary>Wrong category? <small class="muted">({{ email.category.value | label_doc }})</small></summary>
+    <form method="post" action="/inbox/{{ email.id }}/correct">
+      <input type="hidden" name="next" value="{{ back }}"/>
+      <label>Correct category
+        <select name="category">
+          {% for key, label in doc_labels.items() %}
+          <option value="{{ key.value }}" {{ 'selected' if email.category == key else '' }}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Why was this wrong?
+        <textarea name="reason" required minlength="3" rows="2" placeholder="Example: Friday files from this vendor are remittances, not invoices."></textarea>
+      </label>
+      <button class="tiny" type="submit">Save correction</button>
+    </form>
+  </details>
+  <p class="preview-foot"><a data-full href="/inbox/{{ email.id }}">Full page: files, fraud check, why it was flagged →</a></p>
 </article>
