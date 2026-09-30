@@ -373,12 +373,15 @@
       });
     }
     turns.forEach((turn) => renderTurn(turn));
+    chat.classList.toggle("has-turns", turns.length > 0);
     renderFiles();
   }
 
   function setTitle(title) {
     const box = $("[data-chat-title]", chat);
-    if (box) box.textContent = title || "Ask CloseDesk";
+    if (!box) return;
+    box.textContent = title || "Ask CloseDesk";
+    box.title = title || "";
   }
 
   async function loadChat(id) {
@@ -449,6 +452,7 @@
     openChat(false);
     if (!turns.length) chatLog.innerHTML = "";
     turns.push({ role: "user", text: question });
+    chat.classList.add("has-turns");
     renderTurn(turns[turns.length - 1]);
     const answer = { role: "assistant", text: "", sources: [], steps: [], notes: [], pending: true };
     const bubble = renderTurn(answer);

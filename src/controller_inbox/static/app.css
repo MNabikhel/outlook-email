@@ -251,7 +251,7 @@ table.mail tr.is-open td { background: #f1ead9; }
 body.drawer-open .chat { right: min(622px, calc(100vw - 420px)); }
 .chat-head { display: flex; gap: 8px; align-items: center; padding: 12px 14px; background: var(--navy-2); color: #f4efe4; }
 .chat-head div { flex: 1; min-width: 0; }
-.chat-head strong { display: block; font-family: var(--serif); font-size: 16px; }
+.chat-head strong { display: block; font-family: var(--serif); font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-head small { display: block; color: #b7c0b0; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-head .ghost { color: #e8eadf; border-color: #34527a; }
 .chat-head .chat-tools { flex: 0 0 auto; display: flex; gap: 2px; }
@@ -307,6 +307,7 @@ body.chat-window .msg { max-width: min(88%, 760px); }
 .msg-sources li { padding: 2px 0; }
 .msg-sources small { color: var(--muted); }
 .chat-suggest { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 14px 8px; }
+.chat.has-turns .chat-suggest { display: none; }
 .chat-suggest .ghost { border-radius: 999px; padding: 4px 10px; font-size: 12px; background: #fff; }
 .chat-form { display: flex; gap: 8px; padding: 10px 14px 14px; border-top: 1px solid var(--line); }
 .chat-form textarea { flex: 1; resize: none; font: 14px/1.4 var(--sans); padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; }

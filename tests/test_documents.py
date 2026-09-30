@@ -132,7 +132,17 @@ def test_word_draft_in_order_with_tracked_changes_and_comments():
 
 def test_csv_reads_like_a_sheet():
     text = extract_text_from_bytes("vendors.csv", "text/csv", "Vendor;Amount\nAcme;100\nGlobex;250\n".encode())
-    assert text.splitlines() == ['[sheet "vendors.csv" A1:B3]', "A1: Vendor | B1: Amount", "A2: Acme | B2: 100", "A3: Globex | B3: 250"]
+    assert text.splitlines() == [
+        '[sheet "vendors.csv" A1:B3]', "A1: Vendor | B1: Amount", "A2 (Vendor): Acme | B2 (Amount): 100", "A3 (Vendor): Globex | B3 (Amount): 250"
+    ]
+    pairs = extract_text_from_bytes("terms.csv", "text/csv", b"Amount due,12480.00\nPaid,0\n").splitlines()
+    assert pairs[1:] == ["A1: Amount due | B1: 12480.00", "A2: Paid | B2: 0"], "a list of values isn't a header"
+
+
+def test_a_csv_of_names_only_still_names_its_columns():
+    data = "Employee,Department,Manager\nJonathan Reyes,,Priya Raman\nLi Wei,Finance,Dana Cole\n"
+    lines = extract_text_from_bytes("staff.csv", "text/csv", data.encode()).splitlines()
+    assert lines[2] == "A2 (Employee): Jonathan Reyes | B2 (Department): not listed | C2 (Manager): Priya Raman"
 
 
 def test_csv_rows_under_a_header_name_their_columns_and_blanks():

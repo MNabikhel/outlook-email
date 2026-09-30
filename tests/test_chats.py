@@ -116,7 +116,7 @@ def test_the_model_reads_added_files_and_what_earlier_conversations_found(settin
     )
     prompt = asked[0]
     assert "[1] Files the user added to this chat (not an email)\nFiles: 1. staff list.csv (CSV table)" in prompt, "added files lead when the question names nothing on screen"
-    assert "A2: Jonathan Reyes | C2: Priya Raman" in prompt, "the file text is in front of the model"
+    assert "A2 (Employee): Jonathan Reyes | B2 (Department): not listed | C2 (Manager): Priya Raman" in prompt
     assert "From earlier conversations with this person" in prompt
     assert chats.past_context(loaded, "What is the weather like?", exclude=current) == ""
 
