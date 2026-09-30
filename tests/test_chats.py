@@ -89,7 +89,13 @@ def test_the_model_reads_added_files_and_what_earlier_conversations_found(settin
     earlier = chats.new_id()
     loaded.create_chat(earlier, "Jonathan's department")
     loaded.add_chat_turn(earlier, "user", "Which department is Jonathan Reyes in?")
-    loaded.add_chat_turn(earlier, "assistant", "The staff list leaves Jonathan Reyes's department blank [1].")
+    loaded.add_chat_turn(earlier, "assistant", "The staff list leaves Jonathan Reyes's department blank [1].", {"mode": "model"})
+    failed = chats.new_id()
+    loaded.create_chat(failed)
+    loaded.add_chat_turn(failed, "user", "Who manages Jonathan Reyes now?")
+    loaded.add_chat_turn(failed, "assistant", "Jonathan Reyes reports to Bob.\n\n(The local model stopped answering partway.)", {"mode": "model", "failed": True})
+    loaded.add_chat_turn(failed, "user", "Jonathan Reyes manager?")
+    loaded.add_chat_turn(failed, "assistant", "Emails mentioning Jonathan Reyes: …", {"mode": "lookup"})
     current = chats.new_id()
     loaded.create_chat(current)
     chats.add_file(loaded, settings, current, "staff list.csv", "text/csv", ROSTER)
@@ -109,6 +115,7 @@ def test_the_model_reads_added_files_and_what_earlier_conversations_found(settin
     monkeypatch.setattr(assistant, "stream_text", fake_stream)
     past = chats.past_context(loaded, "Who manages Jonathan Reyes?", exclude=current)
     assert "leaves Jonathan Reyes's department blank" in past and "[1]" not in past
+    assert "Bob" not in past and "Emails mentioning" not in past, "failed and lookup replies are not learned from"
     list(
         assistant.answer_stream(
             loaded, settings, "Who manages Jonathan Reyes?", uploads=chats.chat_mail(loaded, current), past=past, email_id="demo-question"

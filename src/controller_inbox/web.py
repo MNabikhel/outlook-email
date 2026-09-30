@@ -174,9 +174,12 @@ class _AnswerLog:
             self.data[kind + "s"].append(event.get("text", ""))
         elif kind == "delta":
             self.text += event.get("text", "")
+            if "stopped answering partway" in event.get("text", ""):
+                self.data["failed"] = True
         elif kind == "revise":
             self.text = event.get("text", "")
         elif kind == "error":
+            self.data["failed"] = True
             self.text = (self.text + "\n\n" if self.text else "") + event.get("text", "")
         elif kind == "check":
             self.data["checks"] = event.get("items") or []
@@ -704,6 +707,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 answer.take(event)
                 yield json.dumps(event) + "\n"
             finally:
+                if not answer.text:
+                    answer.data["failed"] = True
                 store.add_chat_turn(chat_id, "assistant", answer.text or "(No answer: the question was stopped.)", answer.data)
             if not finished:
                 yield json.dumps({"type": "done"}) + "\n"

@@ -884,11 +884,12 @@ class Store:
         return [{**_loads(row["data"], {}), "role": row["role"], "text": row["text"], "at": row["at"]} for row in rows]
 
     def past_exchanges(self, *, exclude: str = "", limit: int = 2_000) -> list[dict[str, Any]]:
-        """Question-and-answer pairs from other conversations, newest first."""
+        """Question-and-answer pairs from other conversations, newest first. Only finished answers from the
+        model count: failed, stopped and plain-lookup replies are not worth learning from."""
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT t.chat_id, t.role, t.text, t.at, c.title FROM chat_turns t JOIN chats c ON c.id = t.chat_id
+                SELECT t.chat_id, t.role, t.text, t.data, t.at, c.title FROM chat_turns t JOIN chats c ON c.id = t.chat_id
                 WHERE t.chat_id != ? ORDER BY t.id DESC LIMIT ?
                 """,
                 (exclude, limit),
@@ -897,7 +898,8 @@ class Store:
         answer: dict[str, Any] | None = None
         for row in rows:
             if row["role"] == "assistant":
-                answer = dict(row)
+                data = _loads(row["data"], {})
+                answer = dict(row) if data.get("mode") == "model" and not data.get("failed") else None
             elif answer is not None and answer["chat_id"] == row["chat_id"]:
                 pairs.append({"chat_id": row["chat_id"], "title": row["title"], "question": row["text"], "answer": answer["text"], "at": row["at"]})
                 answer = None
