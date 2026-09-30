@@ -18,6 +18,7 @@ from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.local_llm import LocalReader, check_model, llm_active
 from controller_inbox.profile import is_finance
 from controller_inbox.reading import build_packet, overlay_reading
+from controller_inbox.semantic import index_mail
 from controller_inbox.store import Store
 
 Progress = Callable[[str, int, int, str], None]
@@ -97,6 +98,9 @@ def run_overnight(
             model=reading["model"],
             on_progress=(lambda i, n, name: on_progress("summarizing", i, n, name)) if on_progress else None,
         )
+    indexed = 0
+    if reading["model"]:
+        indexed = index_mail(store, settings, on_progress=(lambda i, n, _name: on_progress("indexing", i, n, "")) if on_progress else None)
 
     if on_progress:
         on_progress("digest", 1, 1, "Writing the digest")
@@ -121,6 +125,7 @@ def run_overnight(
         "graph_note": graph_note,
         "read_by_bionic": len(reading["read_ids"]),
         "files_summarized": summarized,
+        "indexed_for_search": indexed,
         "waiting_on_bionic": counts["waiting_on_bionic"],
         "folders": {
             "important": counts["important"],
@@ -171,6 +176,7 @@ def _log(summary: dict, *, store: Store) -> str:
         + (f" (about {summary['avg_seconds']}s each)" if summary["avg_seconds"] else ""),
         f"- Still waiting on Bionic: {summary['waiting_on_bionic']}",
         f"- Attachments summarized for Ask CloseDesk: {summary.get('files_summarized', 0)}",
+        f"- Emails and file sections added to search by meaning: {summary.get('indexed_for_search', 0)}",
         f"- Important / informational / reference: {folders['important']} / {folders['informational']} / {folders['reference']}",
         f"- Fraud alerts: {summary['fraud_alerts']}",
         f"- Digest: {summary['digest_path']}",

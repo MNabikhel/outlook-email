@@ -28,7 +28,7 @@ def _isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _fresh_model_memory():
     """What a run learned about the loaded model must not leak between tests."""
-    from controller_inbox import local_llm
+    from controller_inbox import local_llm, semantic
 
     caches = (
         local_llm._status_cache,
@@ -36,6 +36,8 @@ def _fresh_model_memory():
         local_llm._effort_rejected,
         local_llm._tools_rejected,
         local_llm._context_raised,
+        semantic._model_cache,
+        semantic._vector_cache,
     )
     for cache in caches:
         cache.clear()

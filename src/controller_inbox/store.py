@@ -146,6 +146,15 @@ CREATE TABLE IF NOT EXISTS findings (
 
 CREATE INDEX IF NOT EXISTS idx_findings_email ON findings(email_id);
 
+CREATE TABLE IF NOT EXISTS embeddings (
+    key TEXT NOT NULL,
+    model TEXT NOT NULL,
+    email_id TEXT NOT NULL,
+    text_key TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    PRIMARY KEY (key, model)
+);
+
 CREATE TABLE IF NOT EXISTS file_summaries (
     attachment_id TEXT PRIMARY KEY,
     text_key TEXT NOT NULL,
@@ -817,6 +826,36 @@ class Store:
                 (min_chars, limit),
             ).fetchall()
         return [(row["email_id"], row["id"]) for row in rows]
+
+    # Vectors for search by meaning ---------------------------------------------------------------
+
+    def embedding_keys(self, model: str) -> dict[str, str]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT key, text_key FROM embeddings WHERE model = ?", (model,)).fetchall()
+        return {row["key"]: row["text_key"] for row in rows}
+
+    def save_embeddings(self, model: str, rows: list[tuple[str, str, str, bytes]]) -> None:
+        """``rows`` are (key, email id, text key, vector bytes)."""
+        with self.connect() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO embeddings(key, model, email_id, text_key, vector) VALUES (?, ?, ?, ?, ?)",
+                [(key, model, email_id, text_key, vector) for key, email_id, text_key, vector in rows],
+            )
+
+    def has_embeddings(self) -> bool:
+        with self.connect() as conn:
+            return conn.execute("SELECT 1 FROM embeddings LIMIT 1").fetchone() is not None
+
+    def embedding_vectors(self, model: str) -> list[tuple[str, bytes]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT email_id, vector FROM embeddings WHERE model = ?", (model,)).fetchall()
+        return [(row["email_id"], row["vector"]) for row in rows]
+
+    def embedding_version(self, model: str) -> str:
+        """Changes whenever vectors for ``model`` are added or replaced."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n, MAX(rowid) AS last FROM embeddings WHERE model = ?", (model,)).fetchone()
+        return f"{row['n']}:{row['last']}"
 
     # Fraud checks ------------------------------------------------------------------------------
 

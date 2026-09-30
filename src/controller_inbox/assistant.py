@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from typing import Any
 from urllib.parse import quote
 
-from controller_inbox import agent, answer_check
+from controller_inbox import agent, answer_check, semantic
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
@@ -181,8 +181,12 @@ def pick_sources(
     *,
     email_id: str | None = None,
     focus: list[dict] | None = None,
+    settings: Settings | None = None,
 ) -> tuple[list[EmailRecord], bool, set[str]]:
-    """The emails the answer may use, best first; whether the question is about today; the search hits."""
+    """The emails the answer may use, best first; whether the question is about today; the search hits.
+
+    Keyword matches come first; with ``settings`` and an embedding model, emails close in meaning fill the rest.
+    """
     about_today = bool(_TODAY.search(question) or _MY_DAY.search(question))
     picked: dict[str, EmailRecord] = {}
     current = store.get_email(email_id) if email_id else None
@@ -202,6 +206,8 @@ def pick_sources(
     if terms:
         terms = keywords(stripped)
     found += store.search_ranked(terms, limit=MAX_SOURCES)
+    if settings is not None and terms and len({email.id for email in found}) < MAX_SOURCES:
+        found += semantic.search(store, settings, stripped, limit=MAX_SOURCES)
     found = list({email.id: email for email in found}.values())[:MAX_SOURCES]
     for email in found:
         picked.setdefault(email.id, email)
@@ -420,7 +426,7 @@ def answer_stream(
     """Events for the chat box: ``sources``, then ``delta`` pieces, then ``done``."""
     question = (question or "").strip()[:MAX_QUESTION]
     focus = focus or []
-    sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus)
+    sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings)
     if _HELP.search(question) and not found:
         yield {"type": "sources", "sources": [], "mode": "help"}
         yield {"type": "delta", "text": HELP_TEXT}

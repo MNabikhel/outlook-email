@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     overnight_batch: int = 40
     # Long attachments the model summarizes per overnight run, so "summarize this file" answers at once. 0 = none.
     overnight_file_summaries: int = 20
+    # Search by meaning uses an embedding model on the local server (LM Studio ships nomic-embed-text).
+    # Empty = find one there; "off" = keyword search only. The URL defaults to the chat server's.
+    embedding_model: str = ""
+    embedding_base_url: str = ""
     digest_lookback_days: int = 1
     profile: str = "general"
     chat_max_tokens: int = 500

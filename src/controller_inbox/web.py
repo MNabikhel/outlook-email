@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
-from controller_inbox import agent, documents, fraud, ocr
+from controller_inbox import agent, documents, fraud, ocr, semantic
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.classify import month_end
@@ -742,6 +742,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             context_target=context_target(settings, model),
             will_reload=needs_more_context(settings),
             ocr_engine=ocr.engine_name(),
+            embedding_model=semantic.embedding_model(settings) if model.active else "",
+            search_indexed=store.has_embeddings(),
         )
 
     @app.post("/settings/context")

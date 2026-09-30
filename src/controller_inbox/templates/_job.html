@@ -1,4 +1,4 @@
-{% set stage_labels = {'starting': 'Starting', 'importing': 'Reading files', 'reading': 'Local model reading', 'summarizing': 'Summarizing attachments', 'digest': 'Writing the digest'} %}
+{% set stage_labels = {'starting': 'Starting', 'importing': 'Reading files', 'reading': 'Local model reading', 'summarizing': 'Summarizing attachments', 'indexing': 'Indexing for search', 'digest': 'Writing the digest'} %}
 {% if job.state == 'running' %}
 <section class="job running" data-poll="/process/status">
   <div>
