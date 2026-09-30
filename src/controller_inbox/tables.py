@@ -4,17 +4,19 @@ A row written as ``Maya Chen | Finance | 98,500`` only works while every cell is
 one blank cell and every value after it looks like it belongs to the column before.
 So when a table has a header row, each row names its columns and says which are blank:
 
-    Employee: Jonathan Alvarez | ID: E-1002 | Department: (blank) | Manager: Priya Raman
+    Employee: Jonathan Alvarez | ID: E-1002 | Department: not listed | Manager: Priya Raman
 
-and a question about one person needs nothing but that line. Without a header, the
-blank cells are still written out so the columns stay in place.
+and a question about one person needs nothing but that line. "not listed" rather than a
+marker, because a small model repeats what it reads: "no department is listed" is right.
+Without a header, empty cells are still written, as (empty), so the columns stay in place.
 """
 
 from __future__ import annotations
 
 import re
 
-BLANK = "(blank)"
+BLANK = "not listed"
+EMPTY = "(empty)"
 
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
 _VALUE_RE = re.compile(
@@ -76,7 +78,7 @@ def table_lines(rows: list[list[str | None]], *, header: bool) -> list[str]:
 
 
 def labelled_row(labels: list[str | None], row: list[str | None]) -> str:
-    """``Label: value`` for each column, ``(blank)`` where the cell is empty."""
+    """``Label: value`` for each column, ``Label: not listed`` where the cell is empty."""
     labels = [_clean(label) or "" for label in labels]
     row = [_clean(cell) for cell in row] + [""] * (len(labels) - len(row))
     filled = [cell for cell in row if cell]
@@ -103,7 +105,7 @@ def _plain(row: list[str | None]) -> str:
         if out and out[-1].endswith(":"):
             out[-1] = f"{out[-1]} {cell or BLANK}"
         else:
-            out.append(cell or BLANK)
+            out.append(cell or EMPTY)
     return " | ".join(out)
 
 

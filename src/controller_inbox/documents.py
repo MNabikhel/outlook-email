@@ -322,7 +322,7 @@ class SheetRow:
 
 def sheet_row_lines(rows: list[SheetRow]) -> list[str]:
     """``A5: value | C5: value`` for each row. Under a header row each cell also names its column,
-    ``C5 (Department): Finance``, and a blank between filled cells is written ``C5 (Department): (blank)``,
+    ``C5 (Department): Finance``, and a blank between filled cells is written ``C5 (Department): not listed``,
     so a row about one person or account reads on its own."""
     from openpyxl.utils import get_column_letter
 

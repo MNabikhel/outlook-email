@@ -48,17 +48,17 @@ def test_a_sheet_saved_as_pdf_keeps_blank_cells_in_their_columns():
     assert lines[0] == "Staff roster"
     assert "Employee | ID | Department | Manager | Start date | Salary" in lines
     assert (
-        "Employee: Jonathan Alvarez | ID: E-1002 | Department: (blank) | Manager: Priya Raman | "
+        "Employee: Jonathan Alvarez | ID: E-1002 | Department: not listed | Manager: Priya Raman | "
         "Start date: 2019-07-15 | Salary: $112,000"
     ) in lines
-    assert "Employee: Sofia Rossi | ID: E-1003 | Department: Operations | Manager: (blank) | Start date: 2022-11-30 | Salary: $87,250" in lines
-    assert "Employee: Liam O'Brien | ID: E-1004 | Department: Sales | Manager: Dana Kim | Start date: (blank) | Salary: $91,000" in lines
+    assert "Employee: Sofia Rossi | ID: E-1003 | Department: Operations | Manager: not listed | Start date: 2022-11-30 | Salary: $87,250" in lines
+    assert "Employee: Liam O'Brien | ID: E-1004 | Department: Sales | Manager: Dana Kim | Start date: not listed | Salary: $91,000" in lines
 
 
 def test_a_table_without_a_header_still_marks_blank_cells():
     rows = [["North", "", "1,200"], ["South", "Closed", "900"], ["East", "Open", ""], ["West", "Open", "450"]]
     items = [Text(x, 700 - r * 15, value) for r, row in enumerate(rows) for x, value in zip((40, 200, 360), row) if value]
-    assert _page(*items).splitlines() == ["North | (blank) | 1,200", "South | Closed | 900", "East | Open", "West | Open | 450"]
+    assert _page(*items).splitlines() == ["North | (empty) | 1,200", "South | Closed | 900", "East | Open", "West | Open | 450"]
 
 
 def test_a_wrapped_cell_stays_with_its_row():
@@ -77,8 +77,8 @@ def test_a_wide_sheet_printed_across_two_pages_names_each_row():
     text = pdf_text(build_pdf([first, second]))
     page_two = text.split("[page 2]\n", 1)[1]
     assert "each row starts with its Employee" in page_two
-    assert "Employee: Jonathan Alvarez | Phone: (blank) | Notes: On leave" in page_two
-    assert "Employee: Sofia Rossi | Phone: 555-0103 | Notes: (blank)" in page_two
+    assert "Employee: Jonathan Alvarez | Phone: not listed | Notes: On leave" in page_two
+    assert "Employee: Sofia Rossi | Phone: 555-0103 | Notes: not listed" in page_two
 
 
 def test_labels_and_values_on_one_line_stay_together():

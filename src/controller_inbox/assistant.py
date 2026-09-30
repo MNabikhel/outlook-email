@@ -96,6 +96,7 @@ SYSTEM = (
     "- Use only the numbered emails and file text you are given or read with tools. Cite emails like [1] or [2]. "
     "When a fact comes from a file, also name the file and where in it the fact is: the page of a PDF, the sheet "
     "and cell of a workbook, the slide of a deck. Only name a page or cell you actually saw.\n"
+    "- In file tables each row reads \"Column: value\"; \"not listed\" means the file leaves that cell empty.\n"
     "- An email marked (open on screen) is the one the user is looking at. \"This\", \"it\", \"the attachment\" "
     "and \"the draft\" mean that email and its files unless the user names another.\n"
     "- If what you have doesn't show the answer, say so and say which file, page or email to check. Never invent "
