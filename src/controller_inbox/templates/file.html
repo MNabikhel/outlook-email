@@ -20,6 +20,7 @@
       <button type="submit" class="ghost">Find</button>
       {% if q %}<a class="ghost" href="/inbox/{{ email.id }}/files/{{ n }}">Show all</a>{% endif %}
     </form>
+    {% if viewable and not locked %}<a class="ghost" href="/inbox/{{ email.id }}/files/{{ n }}/view" target="_blank" rel="noopener">Open original</a>{% endif %}
     {% if downloadable and not locked %}<a class="ghost" href="/inbox/{{ email.id }}/files/{{ n }}/download">Download original</a>{% endif %}
     {% if parts and not locked %}
     <button type="button" data-action="ask-file" data-mode="summary" data-id="{{ email.id }}" data-file="{{ att.filename }}">Summarize</button>
@@ -38,16 +39,21 @@
       <h3>Sections</h3>
       <ol>
         {% for part in parts %}
-        <li class="{{ 'hit' if part.label in matches else '' }}"><a href="#s{{ loop.index }}">{{ part.label }}</a></li>
+        <li class="{{ 'hit' if part.label in matches or loop.index0 == target else '' }}"><a href="#s{{ loop.index }}">{{ part.label }}</a></li>
         {% endfor %}
       </ol>
     </nav>
     {% endif %}
     <div class="file-parts">
       {% for part in parts %}
-      <section class="panel file-part {{ 'hit' if part.label in matches else '' }}" id="s{{ loop.index }}">
+      <section class="panel file-part{{ ' hit' if part.label in matches else '' }}{{ ' target' if loop.index0 == target else '' }}" id="s{{ loop.index }}">
         <h4>{{ part.label }}</h4>
+        {% if loop.index0 == target and marked %}
+        {% set before, _, after = part.text.partition(marked) %}
+        <pre class="body">{{ before }}<mark class="cited">{{ marked }}</mark>{{ after }}</pre>
+        {% else %}
         <pre class="body">{{ part.text }}</pre>
+        {% endif %}
       </section>
       {% endfor %}
     </div>

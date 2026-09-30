@@ -178,6 +178,18 @@ def test_labelled_sheet_parts_and_citations_still_find_their_cells():
     assert parts[1].label.startswith('sheet "Staff" rows ')
 
 
+def test_a_citation_finds_its_section_and_cell():
+    from controller_inbox.documents import locate
+
+    parts = split_parts(extract_text_from_bytes("roster.xlsx", "", _roster_book()) + "\n")
+    assert locate(parts, "Staff!C5") == (1, "A5 (Employee): Jonathan Alvarez | B5 (ID): E-1002 | C5 (Department): (blank) | D5 (Manager): Priya Raman")
+    assert locate(parts, "c5")[0] == 1
+    assert locate(parts, 'sheet "Staff"') == (1, "")
+    pages = split_parts("[page 1]\nIntro\n[page 2]\nTerms\n[page 10]\nAppendix")
+    assert locate(pages, "page 1") == (0, "") and locate(pages, "Page 10") == (2, "")
+    assert locate(pages, "page 4") is None and locate(pages, "") is None
+
+
 def test_word_table_with_a_header_row_merged_cells_and_blanks():
     document = Document()
     table = document.add_table(rows=6, cols=4)

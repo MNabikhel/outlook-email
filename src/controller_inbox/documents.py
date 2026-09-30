@@ -724,6 +724,34 @@ def _clip(part: Part, room: int) -> str:
     return head + part.text[: room - len(head) - 2].rsplit(" ", 1)[0] + " …"
 
 
+def locate(parts: list[Part], at: str) -> tuple[int, str] | None:
+    """Where a citation points: the index of the section for "page 3", "slide 2", 'sheet "Staff"', a cell
+    such as "Staff!C5" or "C5", and the line holding that cell ("" when the whole section is meant)."""
+    at = re.sub(r"\s+", " ", (at or "").strip())[:120]
+    if not at:
+        return None
+    cell = re.fullmatch(r"(?:['\"]?([^'\"!]+?)['\"]?!)?\$?([A-Za-z]{1,3})\$?(\d{1,6})", at)
+    if cell and not re.fullmatch(r"(?i)(?:page|slide|part)\d+", at):
+        sheet, ref = cell.group(1), f"{cell.group(2).upper()}{cell.group(3)}"
+        holds = re.compile(rf"(?:^|\| ){ref}(?: \(|:)")
+        for index, part in enumerate(parts):
+            if sheet and not part.label.lower().startswith(f'sheet "{sheet.lower()}"'):
+                continue
+            line = next((line for line in part.text.splitlines() if holds.search(line)), None)
+            if line is not None:
+                return index, line
+    wanted = at.lower()
+    number = re.fullmatch(r"(page|slide|part) ?(\d+)", wanted)
+    for index, part in enumerate(parts):
+        label = part.label.lower()
+        if label == wanted or (number and re.match(rf"{number.group(1)} {number.group(2)}\b", label)):
+            return index, ""
+    for index, part in enumerate(parts):
+        if wanted in part.label.lower():
+            return index, ""
+    return None
+
+
 def read_part(text: str, label: str) -> Part | None:
     """A section by its label ("page 3", "slide 2", "Budget", "part 4"), matched loosely."""
     parts = split_parts(text)

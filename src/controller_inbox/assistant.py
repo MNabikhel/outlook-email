@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -337,7 +338,9 @@ def _source_block(number: int, email: EmailRecord, limit: int, *, on_screen: boo
     return "\n".join(bits)
 
 
-def source_cards(sources: list[EmailRecord]) -> list[dict[str, Any]]:
+def source_cards(sources: list[EmailRecord], settings: Settings | None = None) -> list[dict[str, Any]]:
+    """The numbered emails the answer cites, with their files so a citation of a file can open it.
+    ``view``: the original opens in the browser (a PDF or picture that was kept); otherwise the text view."""
     return [
         {
             "n": index,
@@ -345,6 +348,17 @@ def source_cards(sources: list[EmailRecord]) -> list[dict[str, Any]]:
             "subject": email.subject,
             "sender": email.sender_name or email.sender_email,
             "fraud": is_fraud(email),
+            "files": [] if attachments_locked(email) else [
+                {
+                    "n": number,
+                    "name": att.filename,
+                    "text": bool((att.extracted_text or "").strip()),
+                    "view": settings is not None
+                    and Path(att.filename).suffix.lower() in agent.VIEWABLE
+                    and agent.original_file(settings, email, att) is not None,
+                }
+                for number, att in enumerate(email.attachments, start=1)
+            ],
         }
         for index, email in enumerate(sources, start=1)
     ]
@@ -431,7 +445,7 @@ def answer_stream(
         yield {"type": "done"}
         return
     use_model = llm_active(settings)
-    event: dict[str, Any] = {"type": "sources", "sources": source_cards(sources), "mode": "model" if use_model else "lookup"}
+    event: dict[str, Any] = {"type": "sources", "sources": source_cards(sources, settings), "mode": "model" if use_model else "lookup"}
     if any(is_fraud(email) for email in sources):
         event["warning"] = FRAUD_WARNING
     current = next((email for email in sources if email.id == email_id), None)
@@ -602,7 +616,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         messages = build_messages(question, ws.sources, budget=budget, files=files, **base)
         draft = complete_text(settings, messages, max_tokens=settings.chat_max_tokens)
     if len(ws.sources) > known:
-        yield {"type": "sources", "sources": source_cards(ws.sources), "mode": "model"}
+        yield {"type": "sources", "sources": source_cards(ws.sources, settings), "mode": "model"}
     draft = _ECHO_RE.split(draft, maxsplit=1)[0].rstrip()
     if not ws.read_files and not ws.evidence:
         if draft:

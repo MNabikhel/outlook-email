@@ -319,6 +319,10 @@ class Workspace:
         return path.read_bytes() if path is not None else None
 
 
+# Originals the browser shows itself, so a citation can open the file (a PDF at the cited page).
+VIEWABLE = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif"}
+
+
 def original_file(settings: Settings, email: EmailRecord, att: AttachmentRecord) -> Path | None:
     """The attachment as it arrived, from inbox/extracted/<email id>/ (never outside it)."""
     from controller_inbox.folder_mail import safe_filename

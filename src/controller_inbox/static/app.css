@@ -352,6 +352,9 @@ table.weights td.down { color: var(--green); font-weight: 600; }
 .file-parts { display: flex; flex-direction: column; gap: 10px; }
 .file-part h4 { margin: 0 0 6px; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
 .file-part.hit { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold); }
+.file-part.target { border-color: var(--gold); box-shadow: 0 0 0 2px var(--gold); scroll-margin-top: 12px; }
+.file-part mark.cited { background: #f3e2b3; outline: 1px solid var(--gold); border-radius: 2px; }
+.cite-file { margin-left: 6px; font-size: 12px; }
 .file-part pre.body { max-height: none; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 13px; }
 
 /* Chat: what it read */
