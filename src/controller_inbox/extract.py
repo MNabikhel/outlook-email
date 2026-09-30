@@ -10,6 +10,7 @@ from dateutil import parser as date_parser
 
 from controller_inbox.documents import extract_document
 from controller_inbox.models import ExtractedFields
+from controller_inbox.ocr import image_text
 
 
 INVOICE_RE = re.compile(
@@ -115,7 +116,7 @@ def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> st
         if "html" in ctype or name.endswith((".html", ".htm")):
             return html_to_text(data.decode("utf-8", errors="replace"))
         if ctype.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp")):
-            return _image_text(data)
+            return image_text(data)
     except Exception as exc:  # extraction should never fail the pipeline
         return f"[extraction error: {exc}]"
     # Last resort: if it looks like text, keep a sample.
@@ -137,20 +138,6 @@ def _rtf_text(data: bytes) -> str:
     raw = raw.replace("\\", " ")
     raw = re.sub(r"[{}]", " ", raw)
     return collapse_ws(raw)
-
-
-def _image_text(data: bytes) -> str:
-    """OCR when a local Tesseract install is present. Otherwise the file stays an image scan."""
-    try:
-        import pytesseract
-        from PIL import Image
-    except ImportError:
-        return ""
-    try:
-        image = Image.open(io.BytesIO(data))
-        return collapse_ws(pytesseract.image_to_string(image))[:20_000]
-    except Exception:
-        return ""
 
 
 def explode_archives(items: list, *, limit: int = 40) -> list:

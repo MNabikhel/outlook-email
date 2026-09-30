@@ -29,7 +29,8 @@ if not defined PY (
 %PY% -m venv .venv
 if errorlevel 1 exit /b 1
 ".venv\Scripts\python.exe" -m pip install --quiet --upgrade pip
-".venv\Scripts\python.exe" -m pip install --quiet -e .
+rem The OCR add-on reads scanned PDFs; if it can't install here, CloseDesk runs without it.
+".venv\Scripts\python.exe" -m pip install --quiet -e ".[ocr]" || ".venv\Scripts\python.exe" -m pip install --quiet -e .
 if errorlevel 1 exit /b 1
 echo Setup finished.
 exit /b 0

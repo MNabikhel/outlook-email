@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 
+import pytest
 from docx import Document
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
@@ -14,6 +15,7 @@ from controller_inbox.documents import (
     Part,
     compare_columns,
     outline,
+    pdf_text,
     read_cells,
     read_part,
     search_parts,
@@ -196,3 +198,45 @@ def test_big_sheets_are_cut_into_row_ranges():
     last = split_parts(text)[-1]
     assert "A300: Line 300" in last.text
     assert read_part(text, "Ledger").label == labels[1]
+
+
+def _scanned_pdf(lines: list[str]) -> bytes:
+    from PIL import Image, ImageDraw, ImageFont
+
+    page = Image.new("L", (1240, 1754), 255)
+    draw = ImageDraw.Draw(page)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 34)
+    except OSError:
+        font = ImageFont.load_default(size=34)
+    for n, line in enumerate(lines):
+        draw.text((100, 150 + n * 70), line, fill=0, font=font)
+    out = io.BytesIO()
+    page.save(out, "PDF", resolution=150)
+    return out.getvalue()
+
+
+def test_scanned_pdf_pages_are_read_with_ocr():
+    from controller_inbox import ocr
+
+    if not ocr.engine_name():
+        pytest.skip("no OCR engine installed")
+    text = pdf_text(_scanned_pdf(["INVOICE 4471", "Northwind Supply Co.", "Amount due: $12,480.00", "Due date: 15 October 2026"]))
+    assert text.startswith("[Scanned page 1 read with OCR")
+    assert "$12,480.00" in text and "Northwind Supply Co." in text and "15 October 2026" in text
+
+
+def test_scanned_pdf_without_ocr_says_how_to_add_it(monkeypatch):
+    from controller_inbox import ocr
+
+    monkeypatch.setattr(ocr, "engine_name", lambda: "")
+    text = pdf_text(_scanned_pdf(["Amount due: $12,480.00"]))
+    assert "looks scanned" in text and 'pip install -e ".[ocr]"' in text and "12,480" not in text
+
+
+def test_ocr_puts_back_dropped_spaces_without_splitting_codes_or_times():
+    from controller_inbox.ocr import _spaced
+
+    assert _spaced("Duedate:15October2026") == "Duedate: 15 October 2026"
+    for kept in ("INVOICE4471", "INV-4471 Q4 FY26", "Meeting at 10:30", "Total:$12,480.00"):
+        assert _spaced(kept) == kept

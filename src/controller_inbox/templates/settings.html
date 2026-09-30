@@ -27,6 +27,11 @@
       Anything that cannot be read goes to <code>{{ inbox_failed }}</code> with a note saying why.
       If attachments were saved separately, put them in <code>{{ inbox_attachments }}/&lt;same name as the message&gt;/</code>.
     </p>
+    {% if ocr_engine %}
+    <p class="muted">Scanned PDFs and pictures are read with {{ ocr_engine }} on this computer.</p>
+    {% else %}
+    <p class="muted">Scanned PDFs and pictures can't be read yet. To add it, run <code>pip install -e ".[ocr]"</code> in the CloseDesk folder (inside <code>.venv</code>).</p>
+    {% endif %}
   </article>
   <article class="panel llm-card">
     <h3>Local model</h3>
