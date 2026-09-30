@@ -230,7 +230,25 @@ def check_citations(answer: str, files: list[tuple[str, str]]) -> Review:
             new_chunk, note = fixed
             text = text[:start] + new_chunk + text[start + len(chunk):]
             checks.insert(0, note)
+        elif note := _other_file(chunk, paged, files):
+            checks.insert(0, note)
     return Review(text=text, checks=checks)
+
+
+def _other_file(chunk: str, paged: list[tuple[str, dict[int, str]]], files: list[tuple[str, str]]) -> str:
+    """A page of one file cited for figures that are only in another file."""
+    named = _named(chunk, paged)
+    if len(list(PAGE_RE.finditer(chunk))) != 1 or len(named) != 1:
+        return ""
+    name, pages = named[0]
+    figures = [n for n in numbers_in(chunk) if _is_claim(chunk, n)]
+    if not figures or any(Grounding(list(pages.values())).has(figure) for figure in figures):
+        return ""
+    holders = [other for other, body in files if other != name and all(Grounding([body]).has(figure) for figure in figures)]
+    if len(holders) != 1:
+        return ""
+    shown = ", ".join(figure.shown for figure in figures)
+    return f"{shown} is in {holders[0]}, not {name}: check where that figure comes from."
 
 
 def _named(chunk: str, files: list[tuple[str, object]]):

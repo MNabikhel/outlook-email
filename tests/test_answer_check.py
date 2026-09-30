@@ -69,3 +69,11 @@ def test_a_wrong_cell_is_corrected_when_one_cell_holds_the_figure():
     assert result.checks == ["Corrected the cell for 31,500 in Q4 budget.xlsx: it is in Summary!D2, not D3."]
     ambiguous = _review("Q4 budget.xlsx shows 31,000 in Summary!B2.")
     assert ambiguous.text.endswith("Summary!B2."), "31,000 is only on the Detail sheet, so the Summary cell isn't swapped"
+
+
+def test_a_figure_cited_to_the_wrong_file_is_pointed_out():
+    answer = "[1] · page 2 · Section 2.25: Marketing's Q4 budget is 115,500."
+    result = _review(answer)
+    assert result.text == answer
+    assert result.checks == ["115,500 is in Q4 budget.xlsx, not FY26 Audit.pdf: check where that figure comes from."]
+    assert _review("[1] · page 17: 3 vendor bank-detail changes were approved.").checks == []
