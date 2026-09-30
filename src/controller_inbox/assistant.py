@@ -319,6 +319,8 @@ def build_messages(
 
 
 def _source_block(number: int, email: EmailRecord, limit: int, *, on_screen: bool) -> str:
+    if email.source == "chat":
+        return f"[{number}] Files the user added to this chat (not an email)\n" + agent.files_line(email)
     label = DOCUMENT_LABELS.get(email.category, email.category.value)
     head = (
         f"[{number}] {email.received_at[:10]} · from {email.sender_name or email.sender_email} · "
@@ -354,6 +356,7 @@ def source_cards(sources: list[EmailRecord], settings: Settings | None = None) -
             "subject": email.subject,
             "sender": email.sender_name or email.sender_email,
             "fraud": is_fraud(email),
+            "chat": email.source == "chat",
             "files": [] if attachments_locked(email) else [
                 {
                     "n": number,
@@ -440,12 +443,29 @@ def answer_stream(
     email_id: str | None = None,
     focus: list[dict] | None = None,
     today: str = "",
+    uploads: EmailRecord | None = None,
+    past: str = "",
 ) -> Iterator[dict[str, Any]]:
-    """Events for the chat box: ``sources``, then ``delta`` pieces, then ``done``."""
+    """Events for the chat box: ``sources``, then ``delta`` pieces, then ``done``.
+
+    ``uploads``: the files added to the conversation, as a stand-in email. They lead unless the question is
+    about the email on screen (it points there, or only that email has its words). ``past``: what earlier conversations found, as background for the model.
+    """
     question = (question or "").strip()[:MAX_QUESTION]
     focus = focus or []
     searched: dict[str, Any] = {}
     sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings, report=searched)
+    if uploads is not None:
+        sources = [email for email in sources if email.id != uploads.id]
+        screen = next((email for email in sources if email.id == email_id), None)
+        about_screen = screen is not None and not agent.named_files(uploads.attachments, question) and (
+            on_screen_question(question) or (answered_here(screen, question) and not answered_here(uploads, question))
+        )
+        if not about_screen:
+            sources, email_id = [uploads] + sources, uploads.id
+        else:
+            sources = sources[:1] + [uploads] + sources[1:]
+        found = found | {uploads.id}
     if _HELP.search(question) and not found:
         yield {"type": "sources", "sources": [], "mode": "help"}
         yield {"type": "delta", "text": HELP_TEXT}
@@ -469,7 +489,7 @@ def answer_stream(
         yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id)}
         yield {"type": "done"}
         return
-    ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id)
+    ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id, past=past)
     state = {"wrote": False, "text": ""}
     if (ready := agent.summary_request(ws, question)) is not None:
         att, summary = ready
@@ -530,6 +550,7 @@ def _model_answer(ws: agent.Workspace, question: str, state: dict, *, history, f
                     today=today,
                     current_id=ws.current_id,
                     budget=_budget(settings, tools=False) // shrink,
+                    notes=ws.past,
                 )
                 yield from _stream(settings, messages, state)
             return
@@ -614,6 +635,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     budget = _budget(settings, tools=True) // shrink
     primary = ws.primary()
     notes = agent.earlier_findings(ws, primary) if primary is not None else ""
+    notes = "\n\n".join(part for part in (notes, ws.past) if part)
     files = agent.file_context(ws, question, int(budget * 0.5))
     for read in ws.reads:
         yield {"type": "step", "text": read}

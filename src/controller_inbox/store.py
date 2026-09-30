@@ -162,6 +162,36 @@ CREATE TABLE IF NOT EXISTS file_summaries (
     model TEXT,
     created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS chats (
+    id TEXT PRIMARY KEY,
+    title TEXT DEFAULT '',
+    created_at TEXT,
+    updated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS chat_turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    text TEXT DEFAULT '',
+    data TEXT DEFAULT '{}',
+    at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_turns ON chat_turns(chat_id);
+
+CREATE TABLE IF NOT EXISTS chat_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    content_type TEXT DEFAULT '',
+    size_bytes INTEGER DEFAULT 0,
+    sha256 TEXT DEFAULT '',
+    text TEXT DEFAULT '',
+    added_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_files ON chat_files(chat_id);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(category);
@@ -179,6 +209,10 @@ def _loads(value: str | None, default: Any) -> Any:
     if not value:
         return default
     return json.loads(value)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
 class Store:
@@ -799,6 +833,101 @@ class Store:
     def clear_findings(self, email_id: str) -> int:
         with self.connect() as conn:
             return conn.execute("DELETE FROM findings WHERE email_id = ?", (email_id,)).rowcount
+
+    # Ask CloseDesk conversations ---------------------------------------------------------------
+
+    def create_chat(self, chat_id: str, title: str = "") -> None:
+        now = _now()
+        with self.connect() as conn:
+            conn.execute("INSERT OR IGNORE INTO chats(id, title, created_at, updated_at) VALUES (?, ?, ?, ?)", (chat_id, title, now, now))
+
+    def chat(self, chat_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM chats WHERE id = ?", (chat_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_chats(self, query: str = "", *, limit: int = 100) -> list[dict[str, Any]]:
+        """Conversations with something in them, newest first; ``query`` matches titles and what was said."""
+        like = f"%{query.strip()}%"
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT c.*, (SELECT COUNT(*) FROM chat_turns t WHERE t.chat_id = c.id AND t.role = 'user') AS questions,
+                       (SELECT COUNT(*) FROM chat_files f WHERE f.chat_id = c.id) AS files
+                FROM chats c
+                WHERE (EXISTS (SELECT 1 FROM chat_turns t WHERE t.chat_id = c.id) OR EXISTS (SELECT 1 FROM chat_files f WHERE f.chat_id = c.id))
+                  AND (? = '%%' OR c.title LIKE ? OR EXISTS (SELECT 1 FROM chat_turns t WHERE t.chat_id = c.id AND t.text LIKE ?))
+                ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?
+                """,
+                (like, like, like, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def touch_chat(self, chat_id: str, *, title: str | None = None) -> None:
+        with self.connect() as conn:
+            if title is not None:
+                conn.execute("UPDATE chats SET updated_at = ?, title = ? WHERE id = ?", (_now(), title, chat_id))
+            else:
+                conn.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (_now(), chat_id))
+
+    def add_chat_turn(self, chat_id: str, role: str, text: str, data: dict[str, Any] | None = None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT INTO chat_turns(chat_id, role, text, data, at) VALUES (?, ?, ?, ?, ?)",
+                (chat_id, role, text, _dumps(data or {}), _now()),
+            )
+            conn.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (_now(), chat_id))
+
+    def chat_turns(self, chat_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT role, text, data, at FROM chat_turns WHERE chat_id = ? ORDER BY id", (chat_id,)).fetchall()
+        return [{**_loads(row["data"], {}), "role": row["role"], "text": row["text"], "at": row["at"]} for row in rows]
+
+    def past_exchanges(self, *, exclude: str = "", limit: int = 2_000) -> list[dict[str, Any]]:
+        """Question-and-answer pairs from other conversations, newest first."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT t.chat_id, t.role, t.text, t.at, c.title FROM chat_turns t JOIN chats c ON c.id = t.chat_id
+                WHERE t.chat_id != ? ORDER BY t.id DESC LIMIT ?
+                """,
+                (exclude, limit),
+            ).fetchall()
+        pairs: list[dict[str, Any]] = []
+        answer: dict[str, Any] | None = None
+        for row in rows:
+            if row["role"] == "assistant":
+                answer = dict(row)
+            elif answer is not None and answer["chat_id"] == row["chat_id"]:
+                pairs.append({"chat_id": row["chat_id"], "title": row["title"], "question": row["text"], "answer": answer["text"], "at": row["at"]})
+                answer = None
+        return pairs
+
+    def delete_chat(self, chat_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM chat_turns WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM chat_files WHERE chat_id = ?", (chat_id,))
+            conn.execute("DELETE FROM findings WHERE email_id = ?", (f"chat-{chat_id}",))
+            conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
+
+    def add_chat_file(self, chat_id: str, row: dict[str, Any]) -> None:
+        """Adds a file to the conversation, replacing one with the same name."""
+        with self.connect() as conn:
+            conn.execute("DELETE FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, row["filename"]))
+            conn.execute(
+                "INSERT INTO chat_files(chat_id, filename, content_type, size_bytes, sha256, text, added_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (chat_id, row["filename"], row.get("content_type", ""), row.get("size_bytes", 0), row.get("sha256", ""), row.get("text", ""), _now()),
+            )
+            conn.execute("UPDATE chats SET updated_at = ? WHERE id = ?", (_now(), chat_id))
+
+    def chat_files(self, chat_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM chat_files WHERE chat_id = ? ORDER BY id", (chat_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def remove_chat_file(self, chat_id: str, filename: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, filename))
 
     # File summaries written by the overnight run ------------------------------------------------
 
