@@ -369,3 +369,17 @@ table.weights td.down { color: var(--green); font-weight: 600; }
   .file-layout { grid-template-columns: 1fr; }
   .file-nav { position: static; max-height: 240px; }
 }
+
+.files-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.files-head form { margin: 0; }
+.search-state { display: inline-block; margin-top: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; padding: 2px 8px; border-radius: 10px; background: var(--chip); color: var(--muted); white-space: nowrap; vertical-align: middle; }
+.search-state.indexed { background: #e3efe5; color: var(--green); }
+h2 .search-state { margin-top: 0; }
+.search-box { margin: 14px 0 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.search-box h4 { margin: 0 0 4px; }
+.search-box p { margin: 0 0 8px; }
+.search-stats { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0 0 10px; font-size: 13px; color: var(--muted); }
+.search-stats b { color: var(--ink); }
+.search-action { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0; }
+.search-box .indexed { margin: 0; color: var(--green); font-weight: 600; }
+.search-box .search-job { margin: 0; }

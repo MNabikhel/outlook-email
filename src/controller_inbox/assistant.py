@@ -184,10 +184,12 @@ def pick_sources(
     email_id: str | None = None,
     focus: list[dict] | None = None,
     settings: Settings | None = None,
+    report: dict | None = None,
 ) -> tuple[list[EmailRecord], bool, set[str]]:
     """The emails the answer may use, best first; whether the question is about today; the search hits.
 
-    With ``settings`` and an embedding model, emails close in meaning join the keyword matches.
+    With ``settings`` and an embedding model, emails close in meaning join the keyword matches. When the
+    mail was searched, ``report`` gets how ("how") and how many emails only meaning found ("meaning_hits").
     """
     about_today = bool(_TODAY.search(question) or _MY_DAY.search(question))
     picked: dict[str, EmailRecord] = {}
@@ -207,7 +209,10 @@ def pick_sources(
     terms = keywords(_HELP.sub(" ", stripped))
     if terms:
         terms = keywords(stripped)
-    found += semantic.find_mail(store, settings, stripped, terms, limit=MAX_SOURCES)[0]
+    by_search, by_meaning, how = semantic.find_mail(store, settings, stripped, terms, limit=MAX_SOURCES)
+    found += by_search
+    if terms and report is not None:
+        report.update(how=how, meaning_hits=len(by_meaning))
     found = list({email.id: email for email in found}.values())[:MAX_SOURCES]
     for email in found:
         picked.setdefault(email.id, email)
@@ -439,7 +444,8 @@ def answer_stream(
     """Events for the chat box: ``sources``, then ``delta`` pieces, then ``done``."""
     question = (question or "").strip()[:MAX_QUESTION]
     focus = focus or []
-    sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings)
+    searched: dict[str, Any] = {}
+    sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings, report=searched)
     if _HELP.search(question) and not found:
         yield {"type": "sources", "sources": [], "mode": "help"}
         yield {"type": "delta", "text": HELP_TEXT}
@@ -457,6 +463,8 @@ def answer_stream(
         yield {"type": "done"}
         return
     yield event
+    if searched:
+        yield {"type": "step", "text": semantic.search_step(searched["how"], settings, searched["meaning_hits"])}
     if not use_model:
         yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id)}
         yield {"type": "done"}
@@ -607,6 +615,9 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     primary = ws.primary()
     notes = agent.earlier_findings(ws, primary) if primary is not None else ""
     files = agent.file_context(ws, question, int(budget * 0.5))
+    for read in ws.reads:
+        yield {"type": "step", "text": read}
+    ws.reads.clear()
     base = dict(history=history, today=today, current_id=ws.current_id, notes=notes)
     messages = build_messages(question, ws.sources, budget=budget, files=files, tools=True, **base)
     known = len(ws.sources)

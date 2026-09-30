@@ -26,6 +26,8 @@
     }, 1200);
   })();
 </script>
+{% elif job.state == 'done' and job.result and job.result.kind == 'index' %}
+<section class="job done"><strong>Indexed for search.</strong> <span>{{ job.result.indexed }} email{{ '' if job.result.indexed == 1 else 's' }} and file sections added. <a href="/settings#search">See Setup</a></span></section>
 {% elif job.state == 'done' and job.result %}
 <section class="job done">
   <strong>Processed.</strong>

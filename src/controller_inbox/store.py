@@ -839,10 +839,24 @@ class Store:
 
     # Vectors for search by meaning ---------------------------------------------------------------
 
-    def embedding_keys(self, model: str) -> dict[str, str]:
+    def embedding_keys(self, model: str, *, email_id: str | None = None) -> dict[str, str]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT key, text_key FROM embeddings WHERE model = ?", (model,)).fetchall()
+            if email_id is None:
+                rows = conn.execute("SELECT key, text_key FROM embeddings WHERE model = ?", (model,)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT key, text_key FROM embeddings WHERE model = ? AND email_id = ?", (model, email_id)
+                ).fetchall()
         return {row["key"]: row["text_key"] for row in rows}
+
+    def embedding_rows(self, model: str, *, prefix: str) -> list[tuple[str, str, bytes]]:
+        """(key, text key, vector bytes) for keys starting with ``prefix``."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT key, text_key, vector FROM embeddings WHERE model = ? AND substr(key, 1, ?) = ?",
+                (model, len(prefix), prefix),
+            ).fetchall()
+        return [(row["key"], row["text_key"], row["vector"]) for row in rows]
 
     def save_embeddings(self, model: str, rows: list[tuple[str, str, str, bytes]]) -> None:
         """``rows`` are (key, email id, text key, vector bytes)."""
