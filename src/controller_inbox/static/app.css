@@ -360,6 +360,8 @@ table.weights td.down { color: var(--green); font-weight: 600; }
 .msg-steps ul { margin: 4px 0 0; padding-left: 16px; }
 .msg-steps li.noted { color: var(--green); }
 .msg-context { margin: 8px 0 0; padding: 6px 8px; font-size: 12px; background: #f3ecda; border-left: 3px solid var(--gold); border-radius: 0 6px 6px 0; }
+.msg-check { margin: 8px 0 0; padding: 6px 8px 6px 24px; font-size: 12px; background: #f3ecda; border-left: 3px solid var(--gold); border-radius: 0 6px 6px 0; }
+.msg-check li { margin: 2px 0; }
 @media (max-width: 980px) {
   .file-layout { grid-template-columns: 1fr; }
   .file-nav { position: static; max-height: 240px; }

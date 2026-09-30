@@ -432,6 +432,26 @@ def test_the_slider_says_what_each_size_can_read():
     assert "slower without a GPU" in steps[-1]["text"]
 
 
+def test_the_chat_corrects_slips_in_the_finished_answer(store, settings, mail, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    answer = "Marketing went from 84,000 to 115,500, an increase of 31,000. Travel is $97,250."
+
+    def model(ws, question, state, **_kwargs):
+        state["wrote"], state["text"] = True, answer
+        yield {"type": "delta", "text": answer}
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _settings: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _settings: False)
+    monkeypatch.setattr(assistant, "_model_answer", model)
+    events = list(answer_stream(store, settings, "Did Marketing go from 84,000 to 115,500?", email_id=budget.id))
+    revised = [e["text"] for e in events if e["type"] == "revise"]
+    assert revised == ["Marketing went from 84,000 to 115,500, an increase of 31,500. Travel is $97,250."]
+    checks = next(e["items"] for e in events if e["type"] == "check")
+    assert checks[0] == "Corrected 31,000 to 31,500 (115,500 − 84,000)."
+    assert "$97,250 isn't in the emails or files I read" in checks[1]
+    assert events[-1] == {"type": "done"}
+
+
 def test_the_chat_says_when_it_reloads_the_model(store, settings, mail, monkeypatch):
     budget = mail["Q4 budget draft"]
     monkeypatch.setattr(assistant, "llm_active", lambda _settings: True)
