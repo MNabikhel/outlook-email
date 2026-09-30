@@ -101,9 +101,8 @@ def run_overnight(
             model=reading["model"],
             on_progress=(lambda i, n, name: on_progress("summarizing", i, n, name)) if on_progress else None,
         )
-    indexed = 0
-    if reading["model"]:
-        indexed = index_mail(store, settings, on_progress=(lambda i, n, _name: on_progress("indexing", i, n, "")) if on_progress else None)
+    # Runs whenever an embedding model answers, even with no chat model loaded.
+    indexed = max(0, index_mail(store, settings, on_progress=(lambda i, n, _name: on_progress("indexing", i, n, "")) if on_progress else None))
 
     if on_progress:
         on_progress("digest", 1, 1, "Writing the digest")

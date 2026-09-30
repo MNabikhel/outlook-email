@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 import time
 from array import array
 from collections.abc import Callable
+from datetime import datetime
 from typing import Any
 
 import httpx
@@ -28,7 +30,7 @@ from controller_inbox import documents
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import _headers
-from controller_inbox.models import EmailRecord
+from controller_inbox.models import AttachmentRecord, EmailRecord
 from controller_inbox.store import Store
 
 EMBED_CHARS = 1_500
@@ -40,6 +42,7 @@ MIN_SCORE = 0.6
 MIN_LIFT = 2.5
 NEAR_TOP = 0.08
 _CACHE_SECONDS = 60.0
+INDEXED_AT = "embeddings_indexed_at"
 _model_cache: dict[str, tuple[float, str]] = {}
 _vector_cache: dict[tuple[str, str], tuple[str, list[str], Any]] = {}
 
@@ -117,16 +120,21 @@ def _items(email: EmailRecord) -> list[tuple[str, str]]:
     if attachments_locked(email):
         return items
     for att in email.attachments:
-        text = att.extracted_text or ""
-        if not text.strip():
-            continue
-        pieces = [
-            (f"file:{att.id}:{part.label}" + (f":{start}" if start else ""), f"{att.filename} · {part.label}\n{part.text[start: start + EMBED_CHARS]}")
-            for part in documents.split_parts(text)
-            for start in range(0, max(len(part.text), 1), EMBED_CHARS)
-        ]
-        items += pieces[:MAX_PIECES]
+        items += _file_items(att)
     return items
+
+
+def _file_items(att: AttachmentRecord) -> list[tuple[str, str]]:
+    """(key, text) for each section of a file (PDF pages, sheets, slides, Word sections), long ones in pieces."""
+    text = att.extracted_text or ""
+    if not text.strip():
+        return []
+    pieces = [
+        (f"file:{att.id}:{part.label}" + (f":{start}" if start else ""), f"{att.filename} · {part.label}\n{part.text[start: start + EMBED_CHARS]}")
+        for part in documents.split_parts(text)
+        for start in range(0, max(len(part.text), 1), EMBED_CHARS)
+    ]
+    return pieces[:MAX_PIECES]
 
 
 def _key(text: str) -> str:
@@ -137,16 +145,18 @@ def index_mail(
     store: Store,
     settings: Settings,
     *,
+    emails: list[EmailRecord] | None = None,
     limit: int = 5_000,
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> int:
-    """Store vectors for emails and file sections that don't have one for their current text. Returns how many were added."""
+    """Store vectors for emails and file sections that don't have one for their current text (all mail, or
+    ``emails``). Returns how many were added, or -1 when the embedding model stopped answering."""
     model = embedding_model(settings)
     if not model:
         return 0
     have = store.embedding_keys(model)
     todo = []
-    for email in store.list_emails(order="newest", limit=limit):
+    for email in emails if emails is not None else store.list_emails(order="newest", limit=limit):
         for key, text in _items(email):
             if have.get(key) != _key(text):
                 todo.append((key, email.id, text))
@@ -157,10 +167,87 @@ def index_mail(
             on_progress(min(start + BATCH, len(todo)), len(todo), "")
         vectors = embed(settings, [text for _key_, _id, text in batch])
         if vectors is None:
-            break
+            return -1
         store.save_embeddings(model, [(key, email_id, _key(text), v.tobytes()) for (key, email_id, text), v in zip(batch, vectors)])
         added += len(batch)
+    if emails is None:
+        store.set_state(INDEXED_AT, datetime.now(settings.tz).isoformat(timespec="seconds"))
     return added
+
+
+def coverage(store: Store, settings: Settings, *, limit: int = 5_000) -> dict[str, Any]:
+    """How much of the mail search by meaning covers: the model, emails and file sections indexed for
+    their current text, and when the last full run finished. ``model`` is "" when there is none."""
+    model = embedding_model(settings)
+    out: dict[str, Any] = {"model": model, "emails": 0, "emails_done": 0, "sections": 0, "sections_done": 0}
+    if not model:
+        return out
+    have = store.embedding_keys(model)
+    for email in store.list_emails(order="newest", limit=limit):
+        current = [(key, have.get(key) == _key(text)) for key, text in _items(email)]
+        out["emails"] += 1
+        out["emails_done"] += all(done for _key_, done in current)
+        files = [done for key, done in current if key.startswith("file:")]
+        out["sections"] += len(files)
+        out["sections_done"] += sum(files)
+    out["waiting"] = out["emails"] - out["emails_done"]
+    out["indexed_at"] = store.get_state(INDEXED_AT) or ""
+    return out
+
+
+def file_states(store: Store, settings: Settings, email: EmailRecord) -> dict[str, str]:
+    """Each attachment's place in search by meaning: "indexed", "waiting" (not yet), "changed" (its text
+    changed since), "locked" (possible fraud), "no_text", or "off" (no embedding model)."""
+    model = embedding_model(settings)
+    have = store.embedding_keys(model, email_id=email.id) if model else {}
+    states = {}
+    for att in email.attachments:
+        items = _file_items(att)
+        if not items:
+            states[att.id] = "no_text"
+        elif attachments_locked(email):
+            states[att.id] = "locked"
+        elif not model:
+            states[att.id] = "off"
+        elif all(have.get(key) == _key(text) for key, text in items):
+            states[att.id] = "indexed"
+        else:
+            prefix = f"file:{att.id}:"
+            states[att.id] = "changed" if any(key.startswith(prefix) for key in have) else "waiting"
+    return states
+
+
+_question_cache: dict[tuple[str, str], array] = {}
+
+
+def rank_sections(store: Store, settings: Settings, att: AttachmentRecord, question: str, *, limit: int = 4) -> list[str]:
+    """Labels of the file's sections closest in meaning to ``question``, best first. [] when the file
+    isn't indexed for its current text or there is no embedding model."""
+    model = embedding_model(settings)
+    if not model or not question.strip():
+        return []
+    current = {key: _key(text) for key, text in _file_items(att)}
+    rows = [(key, blob) for key, text_key, blob in store.embedding_rows(model, prefix=f"file:{att.id}:") if current.get(key) == text_key]
+    if not rows:
+        return []
+    asked = _question_cache.get((model, question))
+    if asked is None:
+        vectors = embed(settings, [question], query=True)
+        if not vectors:
+            return []
+        if len(_question_cache) > 64:
+            _question_cache.clear()
+        asked = _question_cache[(model, question)] = vectors[0]
+    best: dict[str, float] = {}
+    prefix = len(f"file:{att.id}:")
+    for key, blob in rows:
+        vector = array("f")
+        vector.frombytes(blob)
+        if len(vector) != len(asked):
+            continue
+        label = re.sub(r":\d+$", "", key[prefix:])
+        best[label] = max(best.get(label, -1.0), sum(a * b for a, b in zip(asked, vector)))
+    return sorted(best, key=best.get, reverse=True)[:limit]
 
 
 def search(store: Store, settings: Settings, query: str, *, limit: int = 5) -> list[EmailRecord]:
@@ -204,8 +291,9 @@ def search(store: Store, settings: Settings, query: str, *, limit: int = 5) -> l
     return found
 
 
-def find_mail(store: Store, settings: Settings | None, query: str, terms: list[str], *, limit: int) -> tuple[list[EmailRecord], set[str]]:
-    """Keyword and meaning search together, best first, and the ids only meaning found.
+def find_mail(store: Store, settings: Settings | None, query: str, terms: list[str], *, limit: int) -> tuple[list[EmailRecord], set[str], str]:
+    """Keyword and meaning search together, best first, the ids only meaning found, and how it searched:
+    "meaning", "words" (every word matched, or no search terms), "no_model" or "no_index".
 
     An email with every word of the question leads. Otherwise the keyword hits share only some words
     ("team" in an audit report for "team trip in Portugal"), and a close match in meaning goes first.
@@ -213,11 +301,27 @@ def find_mail(store: Store, settings: Settings | None, query: str, terms: list[s
     by_words = store.search_ranked(terms, limit=limit) if terms else []
     exact = any(_has_all(email, terms) for email in by_words)
     if settings is None or not terms or (exact and len(by_words) >= limit):
-        return by_words[:limit], set()
+        return by_words[:limit], set(), "words"
+    if not embedding_model(settings):
+        return by_words[:limit], set(), "no_model"
+    if not store.has_embeddings():
+        return by_words[:limit], set(), "no_index"
     seen = {email.id for email in by_words}
     by_meaning = [email for email in search(store, settings, query, limit=limit) if email.id not in seen]
     found = by_words + by_meaning if exact else by_meaning + by_words
-    return found[:limit], {email.id for email in by_meaning}
+    return found[:limit], {email.id for email in by_meaning}, "meaning"
+
+
+def search_step(how: str, settings: Settings, meaning_hits: int) -> str:
+    """The chat's note on how it searched the mail."""
+    if how == "meaning":
+        found = f"{meaning_hits} email{'s' if meaning_hits != 1 else ''} found by meaning" if meaning_hits else "nothing extra by meaning"
+        return f"Searched your mail by words and meaning ({embedding_model(settings)}): {found}"
+    if how == "no_index":
+        return "Searched your mail by words only: it isn't indexed for meaning yet (Setup → Index all mail now)"
+    if how == "no_model":
+        return "Searched your mail by words only (no embedding model loaded)"
+    return "Searched your mail by words (every word matched)"
 
 
 def _has_all(email: EmailRecord, terms: list[str]) -> bool:
