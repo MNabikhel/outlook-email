@@ -14,7 +14,9 @@ Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get
 
 **Using it:**
 - **Open an email:** click it, and it opens right there. **Open in Outlook** opens the original.
-- **Ask a question:** use **Ask CloseDesk** (bottom-right), for example *what's urgent today?*
+- **Ask a question:** use **Ask CloseDesk** (bottom-right), for example *what's urgent today?* On an email, ask about it and its attachments: *summarize the draft*, *is the Q4 total right?*
+- **Read an attachment:** on the email page, **Read text** shows every page, sheet, or slide; **Summarize** and **Ask…** send it to the chat.
+- **Fraud check:** a flagged email says why, with points per signal. Answer **Not fraud**, **Trust** the sender or their domain, or **This is fraud**; it learns from that, and everything is logged on the **Fraud check** page.
 - **Search:** press `/` to search everything.
 - **Draft a reply:** open an email and click **Draft a reply**.
 - **Choose your inbox type:** **Setup** → *General* or *Finance*.
@@ -29,7 +31,7 @@ The full guide and troubleshooting are in [docs/SETUP.md](docs/SETUP.md). Prefer
 | Sorting into Needs you / Worth knowing / Reference | Yes (rules) | Yes (the model decides, with guard rails) |
 | One-line summaries | The email's key sentence | Written by the model |
 | Tasks, due dates, fraud warnings, digest | Yes | Yes |
-| **Ask CloseDesk** | Finds the emails and today's focus list | Writes an answer and cites the emails |
+| **Ask CloseDesk** | Finds the emails, today's focus list, and the matching passages in their files | Reads the email and its files (and other emails if needed), notes what it finds, checks its answer, and cites the emails |
 | **Draft a reply** | A starter template | A written draft; payment-change emails get safety advice instead |
 
 </details>
@@ -91,6 +93,22 @@ No configuration is needed: `CONTROLLER_INBOX_LLM=auto` (the default) uses a mod
 | Slow or crashed server | The model is resolved once per run; if the server stops answering or times out twice, the run stops asking and the mail stays filed. |
 
 Every correction a guard makes is shown on the message under **Why this was flagged**.
+
+### Attachments and Ask CloseDesk
+
+Attachments become text the model can find its way around: PDF pages (with a note when a page is a scan), every workbook sheet with cell references and formulas (`C4: 1,800 (=SUM(C2:C3))`), Word documents in reading order with tracked changes and comments, slides with speaker notes, and CSV tables. Emails attached to a `.msg` are opened too, with their own files.
+
+When you ask about an email, the chat starts from that email, its file list, and the sections that match your question, sized to the model's context window. If the server supports tools (LM Studio does), the model can also search other mail, open another email, read a page or sheet, read exact cells, trace a total back to its inputs, rank how every row changed between two columns (Q3 actual → Q4 budget), work out sums, percentages and deadlines exactly (small models get these wrong in their heads), and write down what it found. It then checks its answer against those notes before you see it. The notes stay on the email page (**Notes from Ask CloseDesk**) and come back when a later question is on the same subject.
+
+CloseDesk needs a context window of at least 16,384 tokens, enough for most attachments to be read whole (about 16 PDF or Word pages, or 1,400 workbook cells). If LM Studio loaded the model with less, the first question reloads it with 16,384, or goes back to the old size if memory runs short. The **Setup** slider changes this minimum, from Off to 131,072, and shows as you drag how many pages and cells each size reads at once and how much memory it takes (`CONTROLLER_INBOX_MIN_CONTEXT_TOKENS` sets the starting value). With other servers, or if that fails, the chat says which files it only partly read and how to raise it (LM Studio → My Models → Context Length). Asked to summarize a file that doesn't fit, it reads the opening plus the lines that differ from page to page (findings, totals, names), so a 24-page report still gets its page-17 finding.
+
+Files on an email flagged as possible payment fraud are never given to the model and don't download. You can still read their text on the page.
+
+### Fraud check
+
+Each email gets a score. A bank-detail change or gift-card request **in the sender's own words** blocks it (not the quoted thread, not a "we will never change our bank details" footer, not the model's opinion alone). Weaker signals — a reply-to on another domain, a lookalike of a known domain, a borrowed display name, pressure, a first email from an address — add up to a *double-check before paying* note that doesn't block anything. Trusted domains and senders count against the score, but a bank-change request always gets at least a caution. Replies are filed by what the sender wrote, so a colleague's "it wasn't them, ignore it" above a quoted scam is neither flagged nor filed as an invoice.
+
+Tell it when it is wrong: **Not fraud**, **Trust sender**, **Trust everyone at @domain**, **This is fraud**, **Report this sender**. Each answer is logged and changes how much each signal counts. The **Fraud check** page lists trusted and reported domains, what it has learned, the flagged mail, and the full log (CSV export). From a terminal: `python -m controller_inbox trust taz.com` and `python -m controller_inbox fraud-log`.
 
 ```env
 # Optional overrides (see .env.example)
@@ -243,6 +261,9 @@ src/controller_inbox/
   pipeline.py    Ingest → classify → store (scripts only, fast)
   folder_mail.py Drop folder: .msg / .eml / loose files, Message-ID dedupe, inbox/failed
   reading.py     Script drafts, model packets, and the guard rails on a model reading
+  documents.py   Attachments to navigable text (pages, sheets, slides), search, exact cells, formula tracing
+  fraud.py       Fraud score, trusted domains and senders, verdicts that teach, the fraud log
+  agent.py       Ask CloseDesk's read-only tools, notepad, and context budget
   local_llm.py   LM Studio / Ollama client built for small models
   overnight.py   One pass: drop folder → model → digest (run, overnight, watch, dashboard)
   learn.py       Corrections that teach the classifier
@@ -265,11 +286,11 @@ Data lives in `data/closedesk.db` (gitignored). Tokens live in `data/msal_token_
 pytest
 ```
 
-The suite classifies the demo mailbox end-to-end (including the fraud wire and duplicate invoice), drops real `.eml` files through the folder, exercises the small-model reader against a fake server (structured-output fallback, dead server, chatty replies, invented amounts and dates), checks the focus ranking and digest window, and hits the dashboard routes including background processing.
+The suite classifies the demo mailbox end-to-end (including the fraud wire and duplicate invoice), drops real `.eml` files through the folder, exercises the small-model reader against a fake server (structured-output fallback, dead server, chatty replies, invented amounts and dates), checks the focus ranking and digest window, and hits the dashboard routes including background processing. Real `.msg` files (built in `tests/msgfactory.py`) cover Exchange senders, nested forwarded emails, workbooks with formulas, and the fraud lock on their files; the chat's tool loop, verify pass, and context-overflow retry run against a fake model server.
 
 ## Privacy notes
 
 - Mail is processed on the machine that runs CloseDesk and stored in local SQLite.
 - Routing / account / IBAN values are redacted in stored bodies; only last-4 is kept for matching.
 - Outlook write-back is **off** until you set `CONTROLLER_INBOX_WRITEBACK=true`.
-- There is no cloud AI in the default path. The model, when used, runs on the laptop, and so do the chat box and reply drafts. The chat's history stays in the browser tab and is cleared when the tab closes. The fraud rules are deterministic so a $48,500 “new account” email cannot be quietly labeled “FYI”, whatever the model says.
+- There is no cloud AI in the default path. The model, when used, runs on the laptop, and so do the chat box and reply drafts. The chat's history stays in the browser tab and is cleared when the tab closes. The fraud rules are deterministic so a $48,500 “new account” email cannot be quietly labeled “FYI”, whatever the model says. The chat's tools only read; attachment text is given to the model as data, never as instructions, and files from fraud-flagged mail are never given to it. Dashboard forms refuse posts from other websites.

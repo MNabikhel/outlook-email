@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 from controller_inbox.actions import local_today
 from controller_inbox.digest import build_digest
 from controller_inbox.models import DocumentType, Importance

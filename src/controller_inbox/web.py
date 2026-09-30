@@ -26,13 +26,14 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
+from controller_inbox import agent, documents, fraud
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.classify import month_end
 from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
 from controller_inbox.config import PROFILES, Settings
 from controller_inbox.digest import build_digest, write_digest_files
-from controller_inbox.local_llm import check_model
+from controller_inbox.local_llm import check_model, context_target, needs_more_context, set_min_context
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.profile import active_profile, is_finance, set_profile
 from controller_inbox.store import Store
@@ -56,12 +57,32 @@ templates.env.filters["label_imp"] = lambda value: IMPORTANCE_LABELS.get(
     value if isinstance(value, Importance) else Importance(value), value
 )
 
+MIN_CONTEXT_KEY = "min_context_tokens"
+
 NOTICES = {
     "sample-blocked": "The sample mailbox was not loaded: it would erase your own mail. "
     "Run the sample from a separate data folder instead (see README).",
     "processing": "Processing started. This page updates as it goes.",
     "busy": "Already processing. This page updates as it goes.",
     "profile": "Saved. The digest and Today page now use this profile; new mail is sorted with it.",
+    "context": "Saved. If the model in LM Studio is loaded with less, the next question reloads it with this context.",
+    "context-off": "Saved. CloseDesk now uses the model as LM Studio loaded it.",
+    "fraud-safe": "Saved as not fraud. Mail it covers was checked again, and the fraud check learns from it.",
+    "fraud-reported": "Reported as fraud. Its files stay locked, and the fraud check learns from it.",
+    "fraud-freemail": "That is a free email service anyone can sign up for, so it can't be trusted as a whole. "
+    "Trust the sender's address instead.",
+    "fraud-invalid": "That didn't save. Use the buttons in the email's fraud check.",
+    "domain-invalid": "That didn't save: enter a domain such as taz.com.",
+    "trust-added": "Domain saved. Its mail was checked again.",
+    "trust-reported": "Domain reported. Its mail was checked again.",
+    "trust-removed": "Removed. Its mail was checked again.",
+    "findings-cleared": "Notes cleared. Ask CloseDesk reads the files fresh next time.",
+}
+
+# Files that download from the email page. Programs, scripts, and macro-enabled Office files stay in Outlook.
+DOWNLOADABLE = {
+    ".pdf", ".docx", ".doc", ".rtf", ".xlsx", ".xls", ".csv", ".pptx", ".txt", ".png", ".jpg", ".jpeg",
+    ".gif", ".tif", ".tiff", ".bmp", ".msg", ".eml", ".ics",
 }
 
 
@@ -95,13 +116,24 @@ class LocalHostOnly:
         self.allowed = allowed
 
     async def __call__(self, scope, receive, send) -> None:
-        if scope["type"] == "http" and "*" not in self.allowed:
+        if scope["type"] == "http":
             headers = dict(scope.get("headers") or [])
-            host = _host_name(headers.get(b"host", b"").decode("latin-1"))
-            if host not in self.allowed:
+            host = headers.get(b"host", b"").decode("latin-1")
+            if "*" not in self.allowed and _host_name(host) not in self.allowed:
                 await PlainTextResponse("CloseDesk only answers on this computer's own address.", status_code=400)(scope, receive, send)
                 return
+            if scope.get("method") == "POST" and not _same_origin(headers, host):
+                await PlainTextResponse("Use the CloseDesk page for this.", status_code=403)(scope, receive, send)
+                return
         await self.app(scope, receive, send)
+
+
+def _same_origin(headers: dict[bytes, bytes], host: str) -> bool:
+    """A form another website submits to this server carries that site's Origin; refuse it."""
+    origin = headers.get(b"origin", b"").decode("latin-1").strip()
+    if origin:
+        return origin.lower().split("://", 1)[-1].rstrip("/") == host.strip().lower()
+    return headers.get(b"sec-fetch-site", b"").decode("latin-1").lower() not in {"cross-site", "same-site"}
 
 
 def allowed_hosts(bind_host: str) -> set[str]:
@@ -173,10 +205,17 @@ class ProcessJob:
                 self.finished_at = datetime.now(timezone.utc).isoformat()
 
 
+def _nearest_step(tokens: int) -> int:
+    return min(range(len(agent.CONTEXT_STEPS)), key=lambda i: abs(agent.CONTEXT_STEPS[i] - tokens))
+
+
 def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:
     settings = settings or Settings()
     settings.ensure_data_dir()
     store = store or Store(settings.db_path)
+    saved_context = store.get_state(MIN_CONTEXT_KEY)
+    if saved_context and saved_context.isdigit():
+        set_min_context(settings, int(saved_context))
     app = FastAPI(title="CloseDesk", docs_url=None, redoc_url=None)
     app.add_middleware(LocalHostOnly, allowed=allowed_hosts(settings.host))
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
@@ -299,7 +338,167 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         email = store.get_email(email_id)
         if not email:
             return HTMLResponse("Not found", status_code=404)
-        return render(request, "detail.html", page="inbox", email=email, has_original=original_path(email) is not None)
+        return render(
+            request,
+            "detail.html",
+            page="inbox",
+            email=email,
+            has_original=original_path(email) is not None,
+            check=fraud_view(email),
+            files=file_cards(email),
+            locked=fraud.attachments_locked(email),
+            findings=store.findings(email.id, limit=20),
+            sender_domain=fraud.domain_of(email.sender_email),
+            freemail=fraud.domain_of(email.sender_email) in fraud.FREEMAIL,
+        )
+
+    def fraud_view(email) -> dict:
+        """The saved fraud check for the page, or a fresh one for mail stored before checks existed."""
+        saved = store.fraud_check(email.id)
+        if saved is None:
+            check = fraud.assess_email(store, fraud.trust_context(store, settings), email)
+            saved = {"level": check.level, "score": check.score, "signals": check.signal_dicts(), "checked_at": ""}
+        verdict = "safe" if "fraud_cleared" in email.flags else "fraud" if "fraud_confirmed" in email.flags else ""
+        return {**saved, "verdict": verdict}
+
+    def file_cards(email) -> list[dict]:
+        cards = []
+        for index, att in enumerate(email.attachments, start=1):
+            text = att.extracted_text or ""
+            suffix = Path(att.filename).suffix.lower()
+            cards.append(
+                {
+                    "n": index,
+                    "att": att,
+                    "kind": agent.file_kind(att),
+                    "sections": len(documents.split_parts(text)) if text.strip() else 0,
+                    "chars": len(text),
+                    "downloadable": suffix in DOWNLOADABLE and agent.original_file(settings, email, att) is not None,
+                    "blocked_type": suffix not in DOWNLOADABLE,
+                }
+            )
+        return cards
+
+    def email_file(email_id: str, n: int):
+        email = store.get_email(email_id)
+        if not email:
+            raise HTTPException(status_code=404, detail="Message not found")
+        if not 1 <= n <= len(email.attachments):
+            raise HTTPException(status_code=404, detail="No such file on this email")
+        return email, email.attachments[n - 1]
+
+    @app.get("/inbox/{email_id}/files/{n}", response_class=HTMLResponse)
+    def file_page(request: Request, email_id: str, n: int, q: str = ""):
+        email, att = email_file(email_id, n)
+        text = att.extracted_text or ""
+        parts = documents.split_parts(text) if text.strip() else []
+        query = q.strip()[:120]
+        matches = {part.label for part in documents.search_parts(text, query, limit=12)} if query else set()
+        return render(
+            request,
+            "file.html",
+            page="inbox",
+            email=email,
+            att=att,
+            n=n,
+            kind=agent.file_kind(att),
+            parts=parts,
+            matches=matches,
+            q=query,
+            locked=fraud.attachments_locked(email),
+            downloadable=Path(att.filename).suffix.lower() in DOWNLOADABLE and agent.original_file(settings, email, att) is not None,
+        )
+
+    @app.get("/inbox/{email_id}/files/{n}/download")
+    def file_download(email_id: str, n: int):
+        email, att = email_file(email_id, n)
+        if fraud.attachments_locked(email):
+            raise HTTPException(
+                status_code=403,
+                detail="This email is flagged as possible payment fraud, so its files don't download. "
+                "Verify it by phone, then mark it safe on the email page.",
+            )
+        if Path(att.filename).suffix.lower() not in DOWNLOADABLE:
+            raise HTTPException(status_code=403, detail="This kind of file only opens from Outlook.")
+        path = agent.original_file(settings, email, att)
+        if path is None:
+            raise HTTPException(status_code=404, detail="The original file wasn't kept for this email.")
+        return FileResponse(
+            path,
+            filename=att.filename,
+            media_type="application/octet-stream",
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
+
+    @app.post("/inbox/{email_id}/findings/clear")
+    def findings_clear(email_id: str):
+        store.clear_findings(email_id)
+        return RedirectResponse(f"/inbox/{email_id}?notice=findings-cleared#notes", status_code=303)
+
+    @app.post("/inbox/{email_id}/fraud")
+    def fraud_verdict(email_id: str, choice: str = Form(...), note: str = Form("")):
+        verdict, _, scope = choice.partition(":")
+        try:
+            fraud.record_fraud_verdict(store, settings, email_id, verdict=verdict, scope=scope or "email", note=note)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="Message not found") from None
+        except ValueError as exc:
+            notice = "fraud-freemail" if "free email" in str(exc) else "fraud-invalid"
+            return RedirectResponse(f"/inbox/{email_id}?notice={notice}#fraud", status_code=303)
+        notice = "fraud-safe" if verdict == "safe" else "fraud-reported"
+        return RedirectResponse(f"/inbox/{email_id}?notice={notice}#fraud", status_code=303)
+
+    @app.get("/fraud", response_class=HTMLResponse)
+    def fraud_page(request: Request):
+        entries = store.trust_entries()
+        weights = fraud.learned_weights(store)
+        return render(
+            request,
+            "fraud.html",
+            page="fraud",
+            configured=settings.trusted_domain_list,
+            domains=[row for row in entries if row["kind"] == "domain"],
+            senders=[row for row in entries if row["kind"] == "sender"],
+            suggestions=fraud.suggested_domains(store, settings),
+            weights=[
+                {"key": key, "label": fraud.LABELS.get(key, key), "points": fraud.POINTS[key], "weight": weights.get(key, 1.0)}
+                for key in sorted(fraud.LEARNABLE, key=lambda item: -fraud.POINTS[item])
+            ],
+            flagged=store.flagged(limit=100),
+            log=store.fraud_log(limit=60),
+            high_at=fraud.HIGH_AT,
+            caution_at=fraud.CAUTION_AT,
+        )
+
+    @app.post("/fraud/domain")
+    def fraud_domain(domain: str = Form(...), verdict: str = Form("safe"), note: str = Form("")):
+        try:
+            fraud.set_domain_trust(store, settings, domain, verdict="fraud" if verdict == "fraud" else "safe", note=note)
+        except ValueError as exc:
+            notice = "fraud-freemail" if "free email" in str(exc) else "domain-invalid"
+            return RedirectResponse(f"/fraud?notice={notice}", status_code=303)
+        return RedirectResponse(f"/fraud?notice={'trust-reported' if verdict == 'fraud' else 'trust-added'}", status_code=303)
+
+    @app.post("/fraud/domain/remove")
+    def fraud_domain_remove(domain: str = Form(...)):
+        try:
+            fraud.set_domain_trust(store, settings, domain, remove=True)
+        except ValueError:
+            return RedirectResponse("/fraud?notice=domain-invalid", status_code=303)
+        return RedirectResponse("/fraud?notice=trust-removed", status_code=303)
+
+    @app.post("/fraud/sender/remove")
+    def fraud_sender_remove(sender: str = Form(...)):
+        fraud.remove_sender_trust(store, settings, sender)
+        return RedirectResponse("/fraud?notice=trust-removed", status_code=303)
+
+    @app.get("/fraud/log.csv")
+    def fraud_log_csv():
+        return Response(
+            content=fraud.log_csv(store),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=closedesk-fraud-log.csv"},
+        )
 
     def original_path(email) -> Path | None:
         if not email.source_path:
@@ -321,6 +520,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             email=email,
             back=_local_path(next, "/"),
             has_original=original_path(email) is not None,
+            files=file_cards(email),
+            locked=fraud.attachments_locked(email),
         )
 
     @app.post("/inbox/{email_id}/open")
@@ -356,6 +557,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise HTTPException(status_code=404, detail="Message not found")
         path = original_path(email)
         if path is not None:
+            if fraud.attachments_locked(email) and email.attachments:
+                raise HTTPException(
+                    status_code=403,
+                    detail="This email may be payment fraud, so its original (with its files) doesn't download. Open it in Outlook.",
+                )
             return FileResponse(path, filename=path.name)
         return Response(
             content=_rebuilt_eml(email),
@@ -524,7 +730,27 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, recheck: int = 0):
         model = check_model(settings, use_cache=not recheck)
-        return render(request, "settings.html", page="settings", model=model, llm_enabled=model.active)
+        return render(
+            request,
+            "settings.html",
+            page="settings",
+            model=model,
+            llm_enabled=model.active,
+            recommended_context=agent.RECOMMENDED_CONTEXT,
+            context_steps=[agent.context_capacity(tokens, settings.chat_max_tokens) for tokens in agent.CONTEXT_STEPS],
+            context_step=_nearest_step(settings.min_context_tokens),
+            context_target=context_target(settings, model),
+            will_reload=needs_more_context(settings),
+        )
+
+    @app.post("/settings/context")
+    def save_context(step: int = Form(...)):
+        if not 0 <= step < len(agent.CONTEXT_STEPS):
+            raise HTTPException(status_code=400, detail="Unknown context size")
+        tokens = agent.CONTEXT_STEPS[step]
+        store.set_state(MIN_CONTEXT_KEY, str(tokens))
+        set_min_context(settings, tokens)
+        return RedirectResponse(f"/settings?notice={'context' if tokens else 'context-off'}#context", status_code=303)
 
     @app.post("/settings/profile")
     def save_profile(profile: str = Form(...)):

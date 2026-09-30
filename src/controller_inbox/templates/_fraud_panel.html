@@ -1,0 +1,52 @@
+{% set signal_keys = check.signals | map(attribute='key') | list %}
+<section class="panel fraud-panel {{ check.level }}" id="fraud">
+  <h3>Fraud check
+    <small>
+      {% if check.level == 'high' %}possible payment fraud{% elif check.level == 'caution' %}double-check before paying{% else %}nothing suspicious{% endif %}
+      · score {{ check.score }}
+    </small>
+  </h3>
+  {% if check.level == 'high' %}
+  <p>This reads like a payment-fraud attempt. Nothing on it is processed and its files are locked until you verify it by phone using a number you already have.</p>
+  {% elif check.level == 'caution' %}
+  <p>Worth a second look before any money moves. It doesn't block work.</p>
+  {% endif %}
+  {% if check.verdict == 'safe' %}
+  <p class="note">You marked this email as not fraud.</p>
+  {% elif check.verdict == 'fraud' %}
+  <p class="note">You reported this email as fraud.</p>
+  {% endif %}
+  {% if check.signals %}
+  <ul class="signals">
+    {% for signal in check.signals %}
+    <li>
+      <b class="points {{ 'minus' if signal.points < 0 else 'plus' }}">{{ '%+d' | format(signal.points) }}</b>
+      <span>{{ signal.label }}{% if signal.detail %}<small>{{ signal.detail }}</small>{% endif %}</span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+  <form method="post" action="/inbox/{{ email.id }}/fraud" class="verdict-form">
+    <label>Note for the log <span class="muted">(optional)</span>
+      <input type="text" name="note" maxlength="300" placeholder="e.g. Called Dana at the number on file, confirmed"/>
+    </label>
+    <div class="verdict-row">
+      {% if check.verdict != 'safe' and (check.level != 'none' or check.verdict == 'fraud') %}
+      <button type="submit" name="choice" value="safe:email">Not fraud</button>
+      {% endif %}
+      {% if email.sender_email and 'trusted_sender' not in signal_keys %}
+      <button type="submit" class="ghost" name="choice" value="safe:sender">Trust {{ email.sender_email }}</button>
+      {% endif %}
+      {% if sender_domain and not freemail and 'trusted_domain' not in signal_keys %}
+      <button type="submit" class="ghost" name="choice" value="safe:domain">Trust everyone at @{{ sender_domain }}</button>
+      {% endif %}
+      {% if check.verdict != 'fraud' %}
+      <button type="submit" class="danger" name="choice" value="fraud:email">This is fraud</button>
+      {% endif %}
+      {% if email.sender_email %}
+      <button type="submit" class="danger ghost" name="choice" value="fraud:sender">Report this sender</button>
+      {% endif %}
+    </div>
+    <p class="muted small">Every answer goes to the <a href="/fraud">fraud log</a> and changes how much these signals count next time. A request to change bank details always gets at least a caution, even from someone you trust.</p>
+  </form>
+</section>

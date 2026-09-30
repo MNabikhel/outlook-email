@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 
 from controller_inbox.models import DocumentType, ExtractedFields, Importance
 
@@ -359,6 +359,14 @@ def _haystack(subject: str, body: str, filename: str, sender: str, extracted_tex
     return "\n".join([subject or "", body or "", filename or "", sender or "", extracted_text or ""]).lower()
 
 
+FILENAME_BONUS = 25
+
+
+def _name_hit(filename: str, keyword: str) -> bool:
+    """``keyword`` starts a word of the file name: "nda" is in "NDA_signed.pdf" but not in "close_calendar.xlsx"."""
+    return re.search(rf"(?<![a-z]){re.escape(keyword)}", filename) is not None
+
+
 def score_rules(
     *,
     subject: str,
@@ -366,13 +374,21 @@ def score_rules(
     filename: str = "",
     sender: str = "",
     extracted_text: str = "",
+    payment_rule: bool = True,
 ) -> dict[DocumentType, tuple[int, list[str], list[str]]]:
-    full_blob = _haystack(subject, body, filename, sender, extracted_text)
     own_blob = f"{subject or ''}\n{own_words(body)}".lower()
-    file_low = (filename or "").lower()
+    # A reply with words of its own is about those words; the thread it quotes doesn't pick its category.
+    replied = bool(QUOTE_START_RE.search(body or "")) and own_blob.strip() != (subject or "").strip().lower()
+    if replied and not (filename or extracted_text):
+        full_blob = f"{own_blob}\n{(sender or '').lower()}"
+    else:
+        full_blob = _haystack(subject, body, filename, sender, extracted_text)
+    file_low = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", filename or "").lower()
     sender_low = (sender or "").lower()
     scores: dict[DocumentType, tuple[int, list[str], list[str]]] = {}
     for rule in RULES:
+        if not payment_rule and rule.document_type == DocumentType.PAYMENT_INSTRUCTION_CHANGE:
+            continue
         blob = own_blob if rule.own_words_only else full_blob
         hit = False
         reasons: list[str] = []
@@ -387,7 +403,7 @@ def score_rules(
         if any(rx.search(subject or "") for rx in rule.subject_regexes):
             hit = True
             reasons.append("subject")
-        if rule.filename_keywords and any(k in file_low for k in rule.filename_keywords):
+        if rule.filename_keywords and any(_name_hit(file_low, k) for k in rule.filename_keywords):
             hit = True
             reasons.append("filename")
         if rule.sender_keywords and any(k in sender_low for k in rule.sender_keywords):
@@ -397,8 +413,10 @@ def score_rules(
             continue
         prev = scores.get(rule.document_type, (0, [], []))
         flags = list(dict.fromkeys(list(prev[2]) + list(rule.flags)))
+        # What a file is called says more about it than one word somewhere in its pages.
+        named = FILENAME_BONUS if "filename" in reasons else 0
         scores[rule.document_type] = (
-            prev[0] + rule.weight,
+            prev[0] + rule.weight + named,
             list(dict.fromkeys(prev[1] + reasons + ([rule.reason] if rule.reason else []))),
             flags,
         )
@@ -423,13 +441,16 @@ def classify_document(
     extracted_text: str = "",
     content_type: str = "",
     has_text: bool | None = None,
+    payment_rule: bool = True,
 ) -> Classification:
+    """``payment_rule=False`` leaves bank-change wording to the fraud check in ``fraud.py``."""
     scores = score_rules(
         subject=subject,
         body=body,
         filename=filename,
         sender=sender,
         extracted_text=extracted_text,
+        payment_rule=payment_rule,
     )
     if not scores:
         ctype = (content_type or "").lower()
@@ -466,12 +487,23 @@ def classify_email(
     has_attachments: bool = False,
     duplicate_invoice: bool = False,
     finance: bool = True,
+    fraud: str | None = None,
 ) -> Classification:
+    """Pick the email's category and importance.
+
+    ``fraud`` is the level from ``fraud.assess``. When it is given, only a
+    ``high`` check makes the email a payment-instruction change; without it the
+    bank-change wording rule decides on its own.
+    """
+    if fraud is not None:
+        attachments = [item for item in attachments if item.document_type != DocumentType.PAYMENT_INSTRUCTION_CHANGE]
     attachment_types = [item.document_type for item in attachments]
     combined_flags: list[str] = []
     for item in attachments:
         combined_flags.extend(item.flags)
-    email_scores = score_rules(subject=subject, body=body, sender=sender, extracted_text="")
+    if fraud is not None:
+        combined_flags = [flag for flag in combined_flags if flag not in {"fraud_risk", "do_not_process"}]
+    email_scores = score_rules(subject=subject, body=body, sender=sender, extracted_text="", payment_rule=fraud is None)
     if email_scores:
         email_type, (weight, reasons, flags) = max(email_scores.items(), key=lambda item: item[1][0])
         combined_flags.extend(flags)
@@ -503,9 +535,11 @@ def classify_email(
         combined_flags.append("duplicate_invoice")
         reasons.append("Invoice number already seen on another email")
 
-    if category == DocumentType.PAYMENT_INSTRUCTION_CHANGE or "fraud_risk" in combined_flags:
+    if fraud == "high" or category == DocumentType.PAYMENT_INSTRUCTION_CHANGE or "fraud_risk" in combined_flags:
         combined_flags.extend(["fraud_risk", "do_not_process"])
         category = DocumentType.PAYMENT_INSTRUCTION_CHANGE
+    elif fraud == "caution":
+        combined_flags.append("payment_caution")
 
     importance, score, imp_reasons = _importance(
         category=category,
@@ -596,7 +630,7 @@ def _importance(
 ) -> tuple[Importance, int, list[str]]:
     score = 30
     reasons: list[str] = []
-    blob = f"{subject}\n{body}".lower()
+    blob = f"{subject}\n{own_words(body)}".lower()
     sender_low = (sender or "").lower()
 
     if "fraud_risk" in flags or category == DocumentType.PAYMENT_INSTRUCTION_CHANGE:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 
@@ -59,6 +60,10 @@ class ModelStatus:
     error: str = ""
     loaded: list[str] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
+    context_length: int = 0
+    # LM Studio's model key for the loaded instance and the longest context it supports, for reloading it.
+    key: str = ""
+    max_context: int = 0
 
     @property
     def active(self) -> bool:
@@ -84,6 +89,7 @@ class ModelStatus:
             "models": self.models,
             "base_url": self.base_url,
             "error": self.error,
+            "context_length": self.context_length,
             "message": self.describe(),
         }
 
@@ -105,18 +111,22 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         ids = [str(item.get("id")) for item in response.json().get("data", []) if item.get("id")]
         status.reachable = True
         status.models = ids
-        loaded, reasoning = _lm_studio_models(settings, base, timeout)
+        loaded, reasoning, contexts, reloadable = _lm_studio_models(settings, base, timeout)
         status.loaded = loaded
         status.model = _pick_model(settings.llm_model, ids, loaded)
         status.reasoning = reasoning.get(status.model, [])
+        status.context_length = contexts.get(status.model, 0)
+        status.key, status.max_context = reloadable.get(status.model, ("", 0))
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         status.error = _short_error(exc)
     _status_cache[key] = (time.monotonic(), status)
     return status
 
 
-def _lm_studio_models(settings: Settings, base: str, timeout: float) -> tuple[list[str], dict[str, list[str]]]:
-    """Loaded models and their reasoning options, from LM Studio's own API.
+def _lm_studio_models(
+    settings: Settings, base: str, timeout: float
+) -> tuple[list[str], dict[str, list[str]], dict[str, int], dict[str, tuple[str, int]]]:
+    """Loaded models, their reasoning options, the context length each was loaded with, and each one's model key and longest context.
 
     With just-in-time loading on, ``/v1/models`` lists every downloaded model, so
     picking from it can make LM Studio load a second, bigger model. Other servers
@@ -133,6 +143,8 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> tuple[li
             continue
         loaded: list[str] = []
         reasoning: dict[str, list[str]] = {}
+        contexts: dict[str, int] = {}
+        reloadable: dict[str, tuple[str, int]] = {}
         if isinstance(data.get("models"), list):
             for item in data["models"]:
                 if not isinstance(item, dict) or item.get("type") not in {"llm", "vlm"}:
@@ -146,15 +158,24 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> tuple[li
                     if isinstance(instance, dict) and instance.get("id"):
                         loaded.append(str(instance["id"]))
                         reasoning[str(instance["id"])] = options
-            return loaded, reasoning
+                        config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
+                        contexts[str(instance["id"])] = _int(config.get("context_length"))
+                        reloadable[str(instance["id"])] = (str(item.get("key") or instance["id"]), _int(item.get("max_context_length")))
+            return loaded, reasoning, contexts, reloadable
         if isinstance(data.get("data"), list):
-            loaded = [
-                str(item["id"])
-                for item in data["data"]
-                if isinstance(item, dict) and item.get("id") and item.get("state") == "loaded" and item.get("type") in {"llm", "vlm"}
-            ]
-            return loaded, reasoning
-    return [], {}
+            for item in data["data"]:
+                if isinstance(item, dict) and item.get("id") and item.get("state") == "loaded" and item.get("type") in {"llm", "vlm"}:
+                    loaded.append(str(item["id"]))
+                    contexts[str(item["id"])] = _int(item.get("loaded_context_length") or item.get("max_context_length"))
+            return loaded, reasoning, contexts, reloadable
+    return [], {}, {}, {}
+
+
+def _int(value) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def llm_active(settings: Settings) -> bool:
@@ -519,6 +540,11 @@ def _chat_plan(settings: Settings, max_tokens: int) -> tuple[str, str | None, in
     return model, effort, max(max_tokens, THINKING_ROOM) if _thinks(settings, model, effort) else max_tokens
 
 
+def reply_budget(settings: Settings, max_tokens: int) -> int:
+    """Tokens a chat reply may use, including room to think on reasoning models."""
+    return _chat_plan(settings, max_tokens)[2]
+
+
 def _retry_plan(model: str, effort: str | None, budget: int, reply: Reply) -> tuple[str | None, int] | None:
     """A reasoning model wrote no answer: turn thinking down and give it room, once."""
     if reply.content or not reply.reasoning:
@@ -539,7 +565,7 @@ def complete_text(settings: Settings, messages: list[dict], *, max_tokens: int =
         if effort:
             payload["reasoning_effort"] = effort
         response = _post_chat(httpx.post, url, payload, settings, timeout=_timeout(settings, budget))
-        response.raise_for_status()
+        _raise_for(response)
         try:
             data = response.json()
         except ValueError as exc:
@@ -585,7 +611,9 @@ def _stream_once(settings: Settings, messages: list[dict], budget: int, effort: 
             rejected = True
         else:
             rejected = False
-            response.raise_for_status()
+            if response.status_code >= 400:
+                response.read()
+            _raise_for(response)
             yield from _stream_pieces(response, reply)
     if rejected:
         yield from _stream_once(settings, messages, budget, None, reply)
@@ -628,6 +656,172 @@ def _stream_pieces(response: httpx.Response, reply: Reply):
     rest = thinking.flush()
     if rest:
         yield rest
+
+
+class ContextOverflow(RuntimeError):
+    """The prompt did not fit the context length the model was loaded with."""
+
+
+class ToolsUnsupported(RuntimeError):
+    """This server or model refused the ``tools`` parameter."""
+
+
+_OVERFLOW_RE = re.compile(
+    r"context (?:length|window|size|overflow)|n_ctx|too many tokens|prompt is too long|"
+    r"exceeds? (?:the )?(?:model'?s? )?(?:maximum |max )?(?:context|token)",
+    re.I,
+)
+_tools_rejected: set[str] = set()
+_context_raised: set[str] = set()
+_context_lock = threading.Lock()
+
+
+def _raise_for(response: httpx.Response) -> None:
+    if response.status_code >= 400:
+        text = response.text[:600]
+        if _OVERFLOW_RE.search(text):
+            raise ContextOverflow(" ".join(text.split())[:200])
+    response.raise_for_status()
+
+
+@dataclass
+class ToolReply:
+    content: str
+    calls: list[dict] = field(default_factory=list)
+    reasoning: str = ""
+    finish: str = ""
+
+
+def context_length(settings: Settings) -> int:
+    """Tokens the loaded model can take (LM Studio reports it), or the Setup value, or 0 when unknown."""
+    return check_model(settings).context_length or settings.chat_context_tokens
+
+
+def context_target(settings: Settings, status: ModelStatus | None = None) -> int:
+    """The context the model should have: ``min_context_tokens``, but no more than the model supports."""
+    status = status or check_model(settings)
+    want = settings.min_context_tokens
+    return min(want, status.max_context) if want and status.max_context else want
+
+
+def needs_more_context(settings: Settings) -> bool:
+    """LM Studio loaded the model with less than the minimum and CloseDesk hasn't tried to raise it yet."""
+    status = check_model(settings)
+    return bool(
+        status.active
+        and status.key
+        and 0 < status.context_length < context_target(settings, status)
+        and status.model not in _context_raised
+    )
+
+
+def set_min_context(settings: Settings, tokens: int) -> None:
+    """Change the minimum while running; a model that couldn't be raised before is tried again at the new size."""
+    settings.min_context_tokens = tokens
+    _context_raised.clear()
+
+
+def ensure_context(settings: Settings) -> str:
+    """Reload LM Studio's model with at least ``min_context_tokens`` when it was loaded with less.
+
+    Tried once per loaded instance, so a machine without the memory for it isn't asked again and again.
+    If the longer load fails, the model is loaded back as it was. Returns what happened ("" when nothing did).
+    """
+    with _context_lock:
+        if not needs_more_context(settings):
+            return ""
+        return _reload_with_context(settings)
+
+
+def _reload_with_context(settings: Settings) -> str:
+    status = check_model(settings)
+    want = context_target(settings, status)
+    _context_raised.add(status.model)
+    root = status.base_url[: -len("/v1")] if status.base_url.endswith("/v1") else status.base_url
+    timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
+    try:
+        httpx.post(root + "/api/v1/models/unload", json={"instance_id": status.model}, headers=_headers(settings), timeout=timeout).raise_for_status()
+    except httpx.HTTPError as exc:
+        return f"Couldn't reload {status.key} with a longer context ({_short_error(exc)})."
+    errors = []
+    for size in (want, status.context_length):
+        try:
+            reply = httpx.post(
+                root + "/api/v1/models/load", json={"model": status.key, "context_length": size}, headers=_headers(settings), timeout=timeout
+            )
+            reply.raise_for_status()
+        except httpx.HTTPError as exc:
+            errors.append(_short_error(exc))
+            continue
+        break
+    _status_cache.clear()
+    if not errors:
+        most = " (the most it supports)" if want < settings.min_context_tokens else ""
+        return f"Reloaded {status.key} in LM Studio with a {want:,}-token context{most} so whole attachments fit."
+    if len(errors) == 1:
+        return f"LM Studio couldn't load {status.key} with a {want:,}-token context ({errors[0]}), so it stays at {status.context_length:,}."
+    return f"LM Studio couldn't reload {status.key} ({errors[-1]}). Load it again in LM Studio."
+
+
+def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict], *, max_tokens: int = 500) -> ToolReply:
+    """One non-streamed turn that may ask for tools. Raises ``ToolsUnsupported`` when tools are refused."""
+    model, effort, budget = _chat_plan(settings, max_tokens)
+    if model in _tools_rejected:
+        raise ToolsUnsupported(model)
+    reply = ToolReply(content="")
+    for _attempt in range(2):
+        url, payload = _chat_request(settings, messages, budget, stream=False)
+        payload["tools"] = tools
+        if effort:
+            payload["reasoning_effort"] = effort
+        response = _post_chat(httpx.post, url, payload, settings, timeout=_timeout(settings, budget))
+        if response.status_code in {400, 404, 415, 422, 500, 501} and re.search(r"\btools?\b|function", response.text[:600], re.I):
+            if not _OVERFLOW_RE.search(response.text[:600]):
+                _tools_rejected.add(model)
+                raise ToolsUnsupported(" ".join(response.text.split())[:200])
+        _raise_for(response)
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
+        reply = _tool_reply(data)
+        if reply.content or reply.calls:
+            return reply
+        plan = _retry_plan(model, payload.get("reasoning_effort"), budget, Reply(reply.content, reply.reasoning, reply.finish))
+        if plan is None:
+            break
+        effort, budget = plan
+    raise EmptyReply(Reply(reply.content, reply.reasoning, reply.finish).why_unusable())
+
+
+_TEXT_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*(?:</tool_call>|\Z)", re.S)
+
+
+def _tool_reply(data) -> ToolReply:
+    choice = _first_choice(data)
+    message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+    base = _reply_from(data)
+    calls = []
+    for index, item in enumerate(message.get("tool_calls") or []):
+        function = item.get("function") if isinstance(item, dict) else None
+        if not isinstance(function, dict) or not function.get("name"):
+            continue
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            arguments = parse_json_object(arguments) or {}
+        calls.append({"id": str(item.get("id") or f"call_{index}"), "name": str(function["name"]), "arguments": arguments or {}})
+    content = base.content
+    if not calls and "<tool_call>" in content:
+        # Some chat templates leave the call in the text instead of tool_calls.
+        for index, raw in enumerate(_TEXT_CALL_RE.findall(content)):
+            parsed = parse_json_object(raw) or {}
+            if parsed.get("name"):
+                arguments = parsed.get("arguments") or parsed.get("parameters") or {}
+                if isinstance(arguments, str):
+                    arguments = parse_json_object(arguments) or {}
+                calls.append({"id": f"call_{index}", "name": str(parsed["name"]), "arguments": arguments})
+        content = _TEXT_CALL_RE.sub("", content).strip() if calls else content
+    return ToolReply(content=content, calls=calls, reasoning=base.reasoning, finish=base.finish)
 
 
 def read_packet(settings: Settings, packet: dict) -> dict | None:

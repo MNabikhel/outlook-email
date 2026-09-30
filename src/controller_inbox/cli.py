@@ -82,6 +82,16 @@ def main(argv: list[str] | None = None) -> int:
     overnight.add_argument("--limit", type=int, default=None, help="How many drafts Bionic reads this run.")
     overnight.add_argument("--no-graph", action="store_true", help="Skip Outlook even if it is configured.")
 
+    fraud_log = sub.add_parser("fraud-log", help="Show what the fraud check flagged and every verdict you gave it.")
+    fraud_log.add_argument("--limit", type=int, default=40)
+    fraud_log.add_argument("--csv", action="store_true", help="Print the whole log as CSV.")
+
+    trust = sub.add_parser("trust", help="Trust a sender domain (e.g. your company's), or list trusted domains.")
+    trust.add_argument("domain", nargs="?", default="")
+    trust.add_argument("--remove", action="store_true", help="Stop trusting the domain.")
+    trust.add_argument("--report", action="store_true", help="Report the domain as fraud instead.")
+    trust.add_argument("--note", default="")
+
     from controller_inbox.tools import TOOL_NAMES
 
     tool = sub.add_parser("tool", help="JSON tool for the local Bionic agent.")
@@ -178,6 +188,45 @@ def main(argv: list[str] | None = None) -> int:
             _print_run_summary(records, None)
         if args.serve:
             return _serve(settings, store, host=None, port=None)
+        return 0
+
+    if args.cmd == "fraud-log":
+        from controller_inbox.fraud import log_csv
+
+        if args.csv:
+            sys.stdout.write(log_csv(store))
+            return 0
+        rows = store.fraud_log(limit=args.limit)
+        if not rows:
+            print("Nothing logged yet.")
+        for row in reversed(rows):
+            what = row["subject"] or row["sender_email"] or ""
+            level = f" {row['level']} {row['score']}" if row["level"] else ""
+            signals = ", ".join(item["key"] for item in row["signals"] if isinstance(item, dict) and item.get("points", 0) > 0)
+            print(f"{row['at'][:16]}  {row['event']:<13}{level:<10} {what}")
+            if signals or row["note"]:
+                print(f"{'':>18}{signals}{' · ' if signals and row['note'] else ''}{row['note'] or ''}")
+        return 0
+
+    if args.cmd == "trust":
+        from controller_inbox.fraud import set_domain_trust
+
+        if args.domain:
+            try:
+                count = set_domain_trust(
+                    store, settings, args.domain, verdict="fraud" if args.report else "safe", note=args.note, remove=args.remove
+                )
+            except ValueError as exc:
+                print(exc)
+                return 2
+            done = "Removed" if args.remove else ("Reported" if args.report else "Trusted")
+            print(f"{done} {args.domain.strip().lower().lstrip('@')}. Checked {count} email(s) from it again.")
+        for domain in settings.trusted_domain_list:
+            print(f"trusted   @{domain}  (settings)")
+        for row in store.trust_entries():
+            verdict = "trusted" if row["verdict"] == "safe" else "reported"
+            name = "@" + row["value"] if row["kind"] == "domain" else row["value"]
+            print(f"{verdict:<9} {name}{'  — ' + row['note'] if row['note'] else ''}")
         return 0
 
     if args.cmd == "export":

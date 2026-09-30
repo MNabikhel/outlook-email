@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     lookback_hours: int = 72
     high_amount: float = 10_000.0
     vip_senders: str = ""
+    trusted_domains: str = ""
     writeback: bool = False
     digest_hour: int = 7
     digest_to: str = ""
@@ -62,6 +63,10 @@ class Settings(BaseSettings):
     digest_lookback_days: int = 1
     profile: str = "general"
     chat_max_tokens: int = 500
+    # The model's context window in tokens when the server doesn't report it (LM Studio does).
+    chat_context_tokens: int = 0
+    # Enough for most attachments to be read whole. LM Studio models loaded with less are reloaded with this; 0 = leave as loaded.
+    min_context_tokens: int = 16384
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"
@@ -167,6 +172,14 @@ class Settings(BaseSettings):
     @property
     def vip_list(self) -> list[str]:
         return [part.strip().lower() for part in self.vip_senders.split(",") if part.strip()]
+
+    @property
+    def trusted_domain_list(self) -> list[str]:
+        """Domains from the setting (``@taz.com`` or ``taz.com``) plus this mailbox's own domain."""
+        found = [part.strip().lower().lstrip("@").strip(".") for part in re.split(r"[,;\s]+", self.trusted_domains)]
+        if "@" in self.mailbox:
+            found.append(self.mailbox.rsplit("@", 1)[1].strip().lower())
+        return list(dict.fromkeys(part for part in found if "." in part))
 
     @property
     def graph_configured(self) -> bool:

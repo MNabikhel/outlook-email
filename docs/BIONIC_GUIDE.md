@@ -50,6 +50,9 @@ What CloseDesk does so a small model holds up:
 - Structured JSON output is requested when the server supports it; loose replies (code fences, chat around the JSON) are still parsed.
 - A summary that quotes an amount not in the email, or a due date not in the email, is not accepted. A task due this week keeps the email in Important. Payment-change warnings stay in Important with "verify by phone".
 - If the server stops answering, the run stops asking instead of waiting on every remaining message.
+- Each attachment in the packet is its section list, its opening, and the sections that match the email, not just the first lines. Files on an email flagged as possible fraud are left out.
+
+For **Ask CloseDesk**, the context window matters more: it sends the question's email with the matching parts of its files, sized to the window LM Studio reports. The default 4,096 tokens works a section at a time. For whole workbooks and long PDFs, CloseDesk reloads LM Studio's model with 16,384 tokens; the **Minimum context** slider in **Setup** changes that and shows, as you slide, how many pages and cells fit and the memory it needs. Other servers: set **Context Length** there. **Setup** shows the size CloseDesk sees. Models with tool calling (Qwen 2.5/3, Llama 3.1+, Mistral) can also look things up themselves — read a sheet, trace a formula, open another email — and write notes they check the answer against. Models without it still get the file passages.
 
 Leave the server running. Overnight has nothing to call if the server is asleep.
 
@@ -123,7 +126,8 @@ Open [http://127.0.0.1:8765](http://127.0.0.1:8765).
 | Reference | Statements, purchase orders, contracts, and other files to keep. Not tonight's work. |
 | All mail | The full list, when you need to search |
 | Attachments | Every file, by type |
-| Ask CloseDesk (bottom-right, every page) | Chat with the same local model about your mail. It answers from the emails it finds and cites them; click a citation to open the email |
+| Fraud check | Trusted and reported domains and senders, what the check has learned from your answers, flagged mail, and the log |
+| Ask CloseDesk (bottom-right, every page) | Chat with the same local model about your mail and its attachments. It answers from the emails and files it reads and cites them; click a citation to open the email |
 
 Click any email to open it in a side panel, with **Open in Outlook** and **Draft a reply**.
 

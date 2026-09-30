@@ -40,8 +40,46 @@
     {% if model.models %}
     <p class="muted">Loaded on the server: {{ model.models | join(', ') }}</p>
     {% endif %}
+    {% if model.active %}
+    {% set window = model.context_length or settings.chat_context_tokens %}
+    <p class="context-line {{ 'ok' if window >= recommended_context else 'short' }}">
+      Context window: <b>{{ '{:,}'.format(window) + ' tokens' if window else 'not reported' }}</b>.
+      {% if will_reload %}
+      The next time you ask something, CloseDesk reloads {{ model.key }} in LM Studio with <b>{{ '{:,}'.format(context_target) }} tokens</b> (the minimum set below).
+      If your computer runs short of memory, it goes back to the current size.
+      {% elif window >= recommended_context %}
+      Enough to read whole attachments when you ask about them.
+      {% else %}
+      Ask CloseDesk reads long attachments a section at a time with this.
+      {% if model.key and model.context_length and window < context_target %}
+      LM Studio couldn't load {{ model.key }} with {{ '{:,}'.format(context_target) }} tokens. Close other apps or pick a smaller minimum below, then Save to try again.
+      {% elif model.key and model.max_context and model.max_context < recommended_context %}
+      {{ model.key }} supports at most {{ '{:,}'.format(model.max_context) }} tokens. For whole workbooks and PDFs, load a model with a longer context.
+      {% elif model.key %}
+      For whole workbooks and PDFs, move the minimum below to 16k or more and Save.
+      {% else %}
+      For whole workbooks and PDFs, reload the model in LM Studio with
+      <b>Context Length {{ '{:,}'.format(recommended_context) }}</b> or more (My Models → the model's settings → Context Length).
+      {% endif %}
+      {% if not window %}If your server doesn't report it, set <code>CONTROLLER_INBOX_CHAT_CONTEXT_TOKENS</code>.{% endif %}
+      {% endif %}
+    </p>
+    {% endif %}
+    {% set chosen = context_steps[context_step] %}
+    <form method="post" action="/settings/context" class="context-form" id="context">
+      <label for="context-slider">Minimum context for Ask CloseDesk: <b data-context-label>{{ chosen.label }}</b></label>
+      <input type="range" id="context-slider" name="step" min="0" max="{{ context_steps | length - 1 }}" step="1"
+             value="{{ context_step }}" data-context-steps='{{ context_steps | tojson }}' aria-describedby="context-capacity"/>
+      <div class="context-ticks" aria-hidden="true">
+        {% for item in context_steps %}<span>{{ 'Off' if not item.tokens else ('{}k'.format(item.tokens // 1024)) }}</span>{% endfor %}
+      </div>
+      <p id="context-capacity" class="context-capacity {{ chosen.tier }}" data-context-text aria-live="polite">{{ chosen.text }}</p>
+      <button type="submit">Save</button>
+      <span class="muted"><small>LM Studio models loaded with less are reloaded with this on the next question. Other servers: set the context length there.</small></span>
+    </form>
     <p><a href="/settings?recheck=1">Check again</a></p>
     <p>The fast scripts pull text, amounts, dates, and file types, then file a draft. The model reads that short packet — never the raw files — and writes the category, folder, a one-line summary, and tasks. The most important mail is read first.</p>
+    <p>In <b>Ask CloseDesk</b>, the model reads the text pulled from attachments (PDF pages, workbook cells and formulas, Word drafts with tracked changes, slides) and can open other emails and their files to answer. It notes what it finds and checks its answer against those notes. Files on an email flagged as possible fraud are never given to it.</p>
     <p>Guard rails that hold even with a small model:</p>
     <ul class="plain">
       <li>A payment-instruction change stays in Important with “verify by phone”, whatever the model says.</li>
@@ -58,6 +96,7 @@
     <h3>Teaching it</h3>
     <p>When a category is wrong, open the message and use <b>Wrong category?</b>. Write one sentence on why. The next email from that sender follows your correction, the model never overwrites the message you fixed, and the example is saved to <code>data/training/corrections.jsonl</code>.</p>
     <p class="muted">Corrections saved: {{ correction_count }}. A saved correction cannot clear a payment-instruction warning on a new message.</p>
+    <p>For fraud flags, use the <b>Fraud check</b> panel on the email: “Not fraud”, trust the sender or their whole domain, or report it. Manage trusted domains (for example your own company's) on the <a href="/fraud">Fraud check page</a>, or list them in <code>CONTROLLER_INBOX_TRUSTED_DOMAINS</code>.</p>
   </article>
   <article class="panel">
     <h3>Running it every morning</h3>

@@ -1,3 +1,4 @@
+import copy
 import json
 
 import httpx
@@ -67,6 +68,24 @@ def test_prompt_stays_inside_the_budget(loaded):
     assert "Facts the scripts found:" in prompt and "INV-10482" in prompt
     assert "…[cut]" in prompt
     assert prompt.rstrip().endswith("}")
+
+
+def test_packet_gives_the_sections_that_match_the_email_and_skips_fraud_files(loaded):
+    email = loaded.get_email("demo-inv-10482")
+    email.subject = "Freight surcharge on the September invoice"
+    pages = [f"[page {n}]\n" + "Standard terms and conditions apply. " * 40 for n in range(1, 9)]
+    pages[5] = "[page 6]\nFreight surcharge: $1,240.00 added for expedited shipping."
+    email.attachments[0].extracted_text = "\n".join(pages)
+    text = build_packet(email, [])["attachments"][0]["text"]
+    assert len(text) <= 1500
+    assert text.startswith("Sections: page 1 / page 2")
+    assert "[page 1]" in text and "Freight surcharge: $1,240.00" in text
+
+    scam = loaded.get_email("demo-bec-wire")
+    scam.attachments = [copy.deepcopy(email.attachments[0])]
+    scam.attachments[0].extracted_text = "Remit to account ****8899"
+    locked = build_packet(scam, [])["attachments"][0]
+    assert locked["text"] == "" and "possible payment fraud" in locked["note"]
 
 
 def test_reader_falls_back_when_server_rejects_structured_output(settings):
