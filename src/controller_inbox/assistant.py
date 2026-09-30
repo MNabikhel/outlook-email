@@ -28,7 +28,9 @@ from controller_inbox.local_llm import (
     chat_with_tools,
     complete_text,
     context_length,
+    ensure_context,
     llm_active,
+    needs_more_context,
     reply_budget,
     stream_text,
 )
@@ -441,6 +443,9 @@ def answer_stream(
         return
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id)
     state = {"wrote": False}
+    if needs_more_context(settings):
+        yield {"type": "step", "text": f"Reloading the model in LM Studio with a {settings.min_context_tokens:,}-token context (once)"}
+        yield {"type": "step", "text": ensure_context(settings)}
     try:
         yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
     except Exception as exc:  # any model failure falls back to the lookup answer
@@ -514,7 +519,9 @@ _ECHO_RE = re.compile(
             "What you read with tools:", "Your draft answer:", "Your notes:", "Notes from earlier reading",
         )
     )
-    + r"|(?:^|\n)[^\n]*· \d+ sections? · [\d,]+ characters",
+    + r"|(?:^|\n)[^\n]*· \d+ sections? · [\d,]+ characters"
+    + r"|Today is \d{4}-\d\d-\d\d"
+    + r"|(?:(?<=[.!?]\s)|(?<=\n)|^)(?:[^.!?\n]|[.!?](?!\s))*\bnot asked about\b",
     re.IGNORECASE,
 )
 _HOLD = 120

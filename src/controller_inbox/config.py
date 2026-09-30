@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     chat_max_tokens: int = 500
     # The model's context window in tokens when the server doesn't report it (LM Studio does).
     chat_context_tokens: int = 0
+    # Enough for most attachments to be read whole. LM Studio models loaded with less are reloaded with this; 0 = leave as loaded.
+    min_context_tokens: int = 16384
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"

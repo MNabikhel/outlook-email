@@ -30,7 +30,13 @@ def _fresh_model_memory():
     """What a run learned about the loaded model must not leak between tests."""
     from controller_inbox import local_llm
 
-    caches = (local_llm._status_cache, local_llm._reasoning_seen, local_llm._effort_rejected, local_llm._tools_rejected)
+    caches = (
+        local_llm._status_cache,
+        local_llm._reasoning_seen,
+        local_llm._effort_rejected,
+        local_llm._tools_rejected,
+        local_llm._context_raised,
+    )
     for cache in caches:
         cache.clear()
     yield

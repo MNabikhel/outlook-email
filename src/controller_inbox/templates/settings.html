@@ -47,8 +47,14 @@
       {% if window >= recommended_context %}
       Enough to read whole attachments when you ask about them.
       {% else %}
-      Ask CloseDesk reads long attachments a section at a time with this. For whole workbooks and PDFs, reload the model in LM Studio with
+      Ask CloseDesk reads long attachments a section at a time with this.
+      {% if model.key and settings.min_context_tokens %}
+      The first time you ask it something, it reloads {{ model.key }} in LM Studio with <b>{{ '{:,}'.format(settings.min_context_tokens) }} tokens</b> so whole workbooks and PDFs fit.
+      If your computer runs short of memory, it goes back to the current size.
+      {% else %}
+      For whole workbooks and PDFs, reload the model in LM Studio with
       <b>Context Length {{ '{:,}'.format(recommended_context) }}</b> or more (My Models → the model's settings → Context Length).
+      {% endif %}
       {% if not window %}If your server doesn't report it, set <code>CONTROLLER_INBOX_CHAT_CONTEXT_TOKENS</code>.{% endif %}
       {% endif %}
     </p>

@@ -60,6 +60,8 @@ class ModelStatus:
     loaded: list[str] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
     context_length: int = 0
+    # LM Studio's model key for the loaded instance, used to reload it with a longer context.
+    key: str = ""
 
     @property
     def active(self) -> bool:
@@ -107,11 +109,12 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         ids = [str(item.get("id")) for item in response.json().get("data", []) if item.get("id")]
         status.reachable = True
         status.models = ids
-        loaded, reasoning, contexts = _lm_studio_models(settings, base, timeout)
+        loaded, reasoning, contexts, keys = _lm_studio_models(settings, base, timeout)
         status.loaded = loaded
         status.model = _pick_model(settings.llm_model, ids, loaded)
         status.reasoning = reasoning.get(status.model, [])
         status.context_length = contexts.get(status.model, 0)
+        status.key = keys.get(status.model, "")
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         status.error = _short_error(exc)
     _status_cache[key] = (time.monotonic(), status)
@@ -120,8 +123,8 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
 
 def _lm_studio_models(
     settings: Settings, base: str, timeout: float
-) -> tuple[list[str], dict[str, list[str]], dict[str, int]]:
-    """Loaded models, their reasoning options, and the context length each was loaded with.
+) -> tuple[list[str], dict[str, list[str]], dict[str, int], dict[str, str]]:
+    """Loaded models, their reasoning options, the context length each was loaded with, and each one's model key.
 
     With just-in-time loading on, ``/v1/models`` lists every downloaded model, so
     picking from it can make LM Studio load a second, bigger model. Other servers
@@ -139,6 +142,7 @@ def _lm_studio_models(
         loaded: list[str] = []
         reasoning: dict[str, list[str]] = {}
         contexts: dict[str, int] = {}
+        keys: dict[str, str] = {}
         if isinstance(data.get("models"), list):
             for item in data["models"]:
                 if not isinstance(item, dict) or item.get("type") not in {"llm", "vlm"}:
@@ -154,14 +158,15 @@ def _lm_studio_models(
                         reasoning[str(instance["id"])] = options
                         config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
                         contexts[str(instance["id"])] = _int(config.get("context_length"))
-            return loaded, reasoning, contexts
+                        keys[str(instance["id"])] = str(item.get("key") or instance["id"])
+            return loaded, reasoning, contexts, keys
         if isinstance(data.get("data"), list):
             for item in data["data"]:
                 if isinstance(item, dict) and item.get("id") and item.get("state") == "loaded" and item.get("type") in {"llm", "vlm"}:
                     loaded.append(str(item["id"]))
                     contexts[str(item["id"])] = _int(item.get("loaded_context_length") or item.get("max_context_length"))
-            return loaded, reasoning, contexts
-    return [], {}, {}
+            return loaded, reasoning, contexts, keys
+    return [], {}, {}, {}
 
 
 def _int(value) -> int:
@@ -665,6 +670,7 @@ _OVERFLOW_RE = re.compile(
     re.I,
 )
 _tools_rejected: set[str] = set()
+_context_raised: set[str] = set()
 
 
 def _raise_for(response: httpx.Response) -> None:
@@ -686,6 +692,54 @@ class ToolReply:
 def context_length(settings: Settings) -> int:
     """Tokens the loaded model can take (LM Studio reports it), or the Setup value, or 0 when unknown."""
     return check_model(settings).context_length or settings.chat_context_tokens
+
+
+def needs_more_context(settings: Settings) -> bool:
+    """LM Studio loaded the model with less than ``min_context_tokens`` and CloseDesk hasn't tried to raise it yet."""
+    status = check_model(settings)
+    return bool(
+        settings.min_context_tokens
+        and status.active
+        and status.key
+        and 0 < status.context_length < settings.min_context_tokens
+        and status.model not in _context_raised
+    )
+
+
+def ensure_context(settings: Settings) -> str:
+    """Reload LM Studio's model with at least ``min_context_tokens`` when it was loaded with less.
+
+    Tried once per loaded instance, so a machine without the memory for it isn't asked again and again.
+    If the longer load fails, the model is loaded back as it was. Returns what happened ("" when nothing did).
+    """
+    if not needs_more_context(settings):
+        return ""
+    want = settings.min_context_tokens
+    status = check_model(settings)
+    _context_raised.add(status.model)
+    root = status.base_url[: -len("/v1")] if status.base_url.endswith("/v1") else status.base_url
+    timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
+    try:
+        httpx.post(root + "/api/v1/models/unload", json={"instance_id": status.model}, headers=_headers(settings), timeout=timeout).raise_for_status()
+    except httpx.HTTPError as exc:
+        return f"Couldn't reload {status.key} with a longer context ({_short_error(exc)})."
+    errors = []
+    for size in (want, status.context_length):
+        try:
+            reply = httpx.post(
+                root + "/api/v1/models/load", json={"model": status.key, "context_length": size}, headers=_headers(settings), timeout=timeout
+            )
+            reply.raise_for_status()
+        except httpx.HTTPError as exc:
+            errors.append(_short_error(exc))
+            continue
+        break
+    _status_cache.clear()
+    if not errors:
+        return f"Reloaded {status.key} in LM Studio with a {want:,}-token context so whole attachments fit."
+    if len(errors) == 1:
+        return f"LM Studio couldn't load {status.key} with a {want:,}-token context ({errors[0]}), so it stays at {status.context_length:,}."
+    return f"LM Studio couldn't reload {status.key} ({errors[-1]}). Load it again in LM Studio."
 
 
 def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict], *, max_tokens: int = 500) -> ToolReply:

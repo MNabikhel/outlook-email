@@ -243,6 +243,9 @@ def test_an_answer_stops_where_the_model_starts_repeating_its_instructions():
     header = "\n\nFile: Offsite memo DRAFT.docx (Word document) · 1 section · 451 characters · part 1"
     assert "".join(assistant.without_echo(iter([answer, header]))) == answer
     assert "".join(assistant.without_echo(iter([answer + "\n\nNotes from earlier reading:\n- B8: Yes"]))) == answer
+    tail = "\n\nToday is 2026-09-29. The Q4 budget.xlsx is also attached, but it is not asked about."
+    assert "".join(assistant.without_echo(iter([answer, tail]))) == answer
+    assert "".join(assistant.without_echo(iter([answer + " The budget.xlsx is also attached, but it is not asked about."]))) == answer
     with pytest.raises(local_llm.EmptyReply):
         list(assistant.without_echo(iter(["Your draft answer:", " the memo..."])))
 
@@ -293,6 +296,65 @@ def test_lm_studio_context_length_and_tool_replies_are_read(settings, monkeypatc
         'Let me look.\n<tool_call>\n{"name": "find_in_file", "arguments": {"email": "1", "query": "deposit"}}\n</tool_call>'}}]})
     assert text.calls[0]["name"] == "find_in_file" and text.calls[0]["arguments"]["query"] == "deposit"
     assert text.content == "Let me look."
+
+
+class _FakeLMStudio:
+    """Just enough of LM Studio's native API to list, unload and load one model."""
+
+    def __init__(self, context: int, *, fail_above: int = 0):
+        self.context, self.fail_above, self.posts = context, fail_above, []
+
+    def get(self, url, **_kwargs):
+        request = httpx.Request("GET", url)
+        if url.endswith("/api/v1/models"):
+            instances = [{"id": "qwen/qwen3-4b", "config": {"context_length": self.context}}] if self.context else []
+            return httpx.Response(200, request=request, json={"models": [{"type": "llm", "key": "qwen/qwen3-4b", "loaded_instances": instances}]})
+        return httpx.Response(200, request=request, json={"data": [{"id": "qwen/qwen3-4b"}]})
+
+    def post(self, url, json=None, **_kwargs):
+        request = httpx.Request("POST", url)
+        self.posts.append((url.rsplit("/", 1)[-1], json))
+        if url.endswith("/unload"):
+            self.context = 0
+        elif self.fail_above and json["context_length"] > self.fail_above:
+            return httpx.Response(500, request=request, json={"error": "not enough memory"})
+        else:
+            self.context = json["context_length"]
+        return httpx.Response(200, request=request, json={"status": "loaded"})
+
+
+def test_a_model_loaded_with_a_short_context_is_reloaded_once_with_the_minimum(settings, monkeypatch):
+    server = _FakeLMStudio(4096)
+    monkeypatch.setattr(local_llm.httpx, "get", server.get)
+    monkeypatch.setattr(local_llm.httpx, "post", server.post)
+    settings.llm = True
+    assert settings.min_context_tokens == 16384 and local_llm.needs_more_context(settings)
+    assert local_llm.ensure_context(settings) == "Reloaded qwen/qwen3-4b in LM Studio with a 16,384-token context so whole attachments fit."
+    assert server.posts == [("unload", {"instance_id": "qwen/qwen3-4b"}), ("load", {"model": "qwen/qwen3-4b", "context_length": 16384})]
+    assert local_llm.context_length(settings) == 16384 and not local_llm.needs_more_context(settings)
+
+    low = _FakeLMStudio(4096, fail_above=8192)
+    monkeypatch.setattr(local_llm.httpx, "get", low.get)
+    monkeypatch.setattr(local_llm.httpx, "post", low.post)
+    local_llm._context_raised.clear()
+    local_llm._status_cache.clear()
+    assert "couldn't load qwen/qwen3-4b with a 16,384-token context" in local_llm.ensure_context(settings)
+    assert [call[1].get("context_length") for call in low.posts] == [None, 16384, 4096] and low.context == 4096
+    assert local_llm.ensure_context(settings) == "" and len(low.posts) == 3, "not tried again"
+
+    settings.min_context_tokens = 0
+    local_llm._context_raised.clear()
+    assert not local_llm.needs_more_context(settings)
+
+
+def test_the_chat_says_when_it_reloads_the_model(store, settings, mail, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    monkeypatch.setattr(assistant, "llm_active", lambda _settings: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _settings: True)
+    monkeypatch.setattr(assistant, "ensure_context", lambda _settings: "Reloaded m in LM Studio with a 16,384-token context so whole attachments fit.")
+    monkeypatch.setattr(assistant, "_model_answer", lambda *a, **k: iter([{"type": "delta", "text": "ok"}]))
+    steps = [e["text"] for e in answer_stream(store, settings, "summarize this", email_id=budget.id) if e["type"] == "step"]
+    assert steps == ["Reloading the model in LM Studio with a 16,384-token context (once)", "Reloaded m in LM Studio with a 16,384-token context so whole attachments fit."]
 
 
 def test_overflow_and_refused_tools_are_recognised(settings, monkeypatch):
