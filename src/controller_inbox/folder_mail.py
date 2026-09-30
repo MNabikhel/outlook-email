@@ -17,12 +17,13 @@ from pathlib import Path
 from controller_inbox.config import Settings
 from controller_inbox.extract import html_to_text, sha256_bytes
 from controller_inbox.models import RawAttachment, RawMessage
-from controller_inbox.pipeline import KEEP_READINGS, process_message
+from controller_inbox.pipeline import KEEP_READINGS, attachment_text, process_message
 from controller_inbox.store import Store
 
 
 # extract-msg logs every Outlook property it doesn't know; the file still reads fine.
 logging.getLogger("extract_msg").setLevel(logging.ERROR)
+log = logging.getLogger(__name__)
 
 MESSAGE_SUFFIXES = {".msg", ".eml"}
 SKIP_NAMES = {".gitkeep", ".ds_store"}
@@ -430,6 +431,42 @@ def _write_extracted(settings: Settings, raw: RawMessage) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     for att in raw.attachments:
         (dest / safe_filename(att.filename)).write_bytes(att.content or b"")
+
+
+READER_KEY = "attachment_reader"
+_REREAD = {".pdf", ".docx", ".pptx", ".xlsx", ".xlsm", ".xls", ".csv", ".tsv"}
+_MAX_REREAD_BYTES = 40_000_000
+
+
+def reread_attachments(store: Store, settings: Settings, *, on_progress: Callable[[int, int, str], None] | None = None) -> int:
+    """Once per new version of the attachment reader (``documents.READER_VERSION``), read the kept
+    originals again so files already in the inbox get the better text too. Scanned PDFs keep their
+    OCR text, and classifications stay as they are. Returns how many files changed."""
+    from controller_inbox.documents import READER_VERSION
+
+    if store.get_state(READER_KEY) == READER_VERSION:
+        return 0
+    todo = []
+    for attachment_id, email_id, filename, text in store.attachment_files():
+        if Path(filename).suffix.lower() not in _REREAD or "read with OCR" in text[:400] or text.startswith("[This PDF looks scanned"):
+            continue
+        path = settings.inbox_extracted / email_id / safe_filename(filename)
+        if path.is_file() and path.stat().st_size <= _MAX_REREAD_BYTES:
+            todo.append((attachment_id, filename, path, text))
+    changed = 0
+    for index, (attachment_id, filename, path, old) in enumerate(todo, start=1):
+        if on_progress:
+            on_progress(index, len(todo), filename)
+        try:
+            new = attachment_text(filename, "", path.read_bytes())
+        except Exception:
+            log.warning("Couldn't read %s again", path, exc_info=True)
+            continue
+        if new.strip() and new != old:
+            store.set_attachment_text(attachment_id, new)
+            changed += 1
+    store.set_state(READER_KEY, READER_VERSION)
+    return changed
 
 
 def safe_filename(name: str) -> str:

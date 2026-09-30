@@ -709,6 +709,16 @@ class Store:
         with self.connect() as conn:
             conn.execute("UPDATE emails SET source_path = ? WHERE id = ?", (path, email_id))
 
+    def attachment_files(self) -> list[tuple[str, str, str, str]]:
+        """Every attachment's id, email id, file name and stored text."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT id, email_id, filename, extracted_text FROM attachments").fetchall()
+        return [(row["id"], row["email_id"], row["filename"] or "", row["extracted_text"] or "") for row in rows]
+
+    def set_attachment_text(self, attachment_id: str, text: str) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE attachments SET extracted_text = ? WHERE id = ?", (text, attachment_id))
+
     def get_state(self, key: str) -> str | None:
         with self.connect() as conn:
             row = conn.execute("SELECT value FROM sync_state WHERE key = ?", (key,)).fetchone()
@@ -829,10 +839,24 @@ class Store:
 
     # Vectors for search by meaning ---------------------------------------------------------------
 
-    def embedding_keys(self, model: str) -> dict[str, str]:
+    def embedding_keys(self, model: str, *, email_id: str | None = None) -> dict[str, str]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT key, text_key FROM embeddings WHERE model = ?", (model,)).fetchall()
+            if email_id is None:
+                rows = conn.execute("SELECT key, text_key FROM embeddings WHERE model = ?", (model,)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT key, text_key FROM embeddings WHERE model = ? AND email_id = ?", (model, email_id)
+                ).fetchall()
         return {row["key"]: row["text_key"] for row in rows}
+
+    def embedding_rows(self, model: str, *, prefix: str) -> list[tuple[str, str, bytes]]:
+        """(key, text key, vector bytes) for keys starting with ``prefix``."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT key, text_key, vector FROM embeddings WHERE model = ? AND substr(key, 1, ?) = ?",
+                (model, len(prefix), prefix),
+            ).fetchall()
+        return [(row["key"], row["text_key"], row["vector"]) for row in rows]
 
     def save_embeddings(self, model: str, rows: list[tuple[str, str, str, bytes]]) -> None:
         """``rows`` are (key, email id, text key, vector bytes)."""

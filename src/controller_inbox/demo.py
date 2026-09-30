@@ -35,7 +35,7 @@ def make_pdf(pages: list[list[str | list[str]]]) -> bytes:
             f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {page_number + 1} 0 R "
             f"/Resources << /Font << /F1 {{font}} 0 R >> >> >>".encode()
         )
-        objects.append(b"<< /Length %d >>stream\n" % len(stream) + stream + b"\nendstream")
+        objects.append(b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream")
     font = len(objects) + 1
     objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
     objects[1] = f"<< /Type /Pages /Kids [{' '.join(kids)}] /Count {len(kids)} >>".encode()
@@ -44,7 +44,7 @@ def make_pdf(pages: list[list[str | list[str]]]) -> bytes:
     offsets = []
     for number, body in enumerate(objects, start=1):
         offsets.append(len(out))
-        out += b"%d 0 obj" % number + body + b"endobj\n"
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
     xref = len(out)
     out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
     out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)

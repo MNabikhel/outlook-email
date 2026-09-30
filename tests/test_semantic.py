@@ -150,3 +150,83 @@ def test_the_overnight_run_indexes_mail_for_search(store, settings, mail, server
     result = run_overnight(store, settings, limit=1, sync_graph=False, reader=AgreeingReader())
     assert result["indexed_for_search"] >= 5
     assert "added to search by meaning: " in open(result["log_path"], encoding="utf-8").read()
+
+
+def test_the_pages_show_what_is_indexed_and_index_on_request(store, settings, mail, server):
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import web
+
+    budget, scam = mail["Q4 budget draft"], mail["Updated remittance details"]
+    app = web.create_app(settings, store)
+    client = TestClient(app)
+
+    setup = client.get("/settings").text
+    assert "Search by meaning" in setup and MODEL in setup and "Index all mail now" in setup and "Last indexed <b>never</b>" in setup
+    page = client.get(f"/inbox/{budget.id}").text
+    assert "Index for search" in page and page.count("Not indexed yet") == 2 and "✓ Indexed" not in page
+    assert set(semantic.file_states(store, settings, scam).values()) == {"locked"}
+    assert "Index for search" not in client.get(f"/inbox/{scam.id}").text, "flagged mail's files are never indexed"
+
+    done = client.post(f"/inbox/{budget.id}/index", follow_redirects=False)
+    assert done.status_code == 303 and done.headers["location"] == f"/inbox/{budget.id}?notice=indexed#files"
+    page = client.get(f"/inbox/{budget.id}").text
+    assert page.count("✓ Indexed") == 2 and "Index for search" not in page, "no button once everything is indexed"
+    assert "✓ Indexed" in client.get(f"/inbox/{budget.id}/files/1").text
+    coverage = semantic.coverage(store, settings)
+    assert coverage["emails_done"] == 1 and coverage["waiting"] == coverage["emails"] - 1 and coverage["indexed_at"] == ""
+
+    started = client.post("/settings/index", follow_redirects=False)
+    assert started.headers["location"] == "/settings?notice=indexing#search"
+    for _ in range(100):
+        if app.state.job.snapshot()["state"] != "running":
+            break
+        time.sleep(0.05)
+    assert app.state.job.snapshot()["result"]["kind"] == "index"
+    setup = client.get("/settings").text
+    assert "✓ Everything is indexed" in setup and "Index all mail now" not in setup and "Last indexed <b>never</b>" not in setup
+    coverage = semantic.coverage(store, settings)
+    assert coverage["waiting"] == 0 and coverage["sections_done"] == coverage["sections"] > 0
+
+    memo = next(att for att in budget.attachments if att.filename == "Offsite memo.docx")
+    memo.extracted_text += "\nA late addition."
+    store.upsert_email(budget)
+    page = client.get(f"/inbox/{budget.id}").text
+    assert "Changed since indexed" in page and "Index for search" in page
+
+
+def test_a_long_file_is_read_where_it_matches_in_meaning(store, settings, mail, server):
+    budget = mail["Q4 budget draft"]
+    memo = next(att for att in budget.attachments if att.filename == "Offsite memo.docx")
+    memo.filename = "Notes.docx"
+    memo.extracted_text = "\n\n".join(
+        f"[page {n}]\n" + ("The retreat is booked in Porto for May. " if n == 25 else "Routine section. ") * 60 for n in range(1, 31)
+    )
+    store.upsert_email(budget)
+    budget = store.get_email(budget.id)
+    question = "Which country is the travel in?"
+
+    ws = agent.Workspace(store=store, settings=settings, sources=[budget], question=question, current_id=budget.id)
+    blocks = agent.file_context(ws, "Notes.docx: " + question, 6_000)
+    assert "Porto" not in blocks[budget.id], "not indexed: the file is read from the start"
+    assert any("from the start" in read for read in ws.reads)
+
+    semantic.index_mail(store, settings)
+    ws = agent.Workspace(store=store, settings=settings, sources=[budget], question=question, current_id=budget.id)
+    blocks = agent.file_context(ws, "Notes.docx: " + question, 6_000)
+    assert "The retreat is booked in Porto" in blocks[budget.id], "page 25 is picked by meaning"
+    assert any(read.startswith("Read ") and "sections of Notes.docx" in read and read.endswith("(picked by meaning)") for read in ws.reads)
+
+
+def test_the_chat_says_how_it_searched(store, settings, mail, server):
+    report: dict = {}
+    pick_sources(store, "Where is the team trip in Portugal?", settings=settings, report=report)
+    assert report == {"how": "no_index", "meaning_hits": 0}
+    assert "isn't indexed for meaning yet" in semantic.search_step(report["how"], settings, 0)
+
+    semantic.index_mail(store, settings)
+    pick_sources(store, "Where is the team trip in Portugal?", settings=settings, report=report)
+    assert report == {"how": "meaning", "meaning_hits": 1}
+    assert semantic.search_step("meaning", settings, 1) == f"Searched your mail by words and meaning ({MODEL}): 1 email found by meaning"

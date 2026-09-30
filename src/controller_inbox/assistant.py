@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -95,6 +96,7 @@ SYSTEM = (
     "- Use only the numbered emails and file text you are given or read with tools. Cite emails like [1] or [2]. "
     "When a fact comes from a file, also name the file and where in it the fact is: the page of a PDF, the sheet "
     "and cell of a workbook, the slide of a deck. Only name a page or cell you actually saw.\n"
+    "- In file tables each row reads \"Column: value\"; \"not listed\" means the file leaves that cell empty.\n"
     "- An email marked (open on screen) is the one the user is looking at. \"This\", \"it\", \"the attachment\" "
     "and \"the draft\" mean that email and its files unless the user names another.\n"
     "- If what you have doesn't show the answer, say so and say which file, page or email to check. Never invent "
@@ -182,10 +184,12 @@ def pick_sources(
     email_id: str | None = None,
     focus: list[dict] | None = None,
     settings: Settings | None = None,
+    report: dict | None = None,
 ) -> tuple[list[EmailRecord], bool, set[str]]:
     """The emails the answer may use, best first; whether the question is about today; the search hits.
 
-    With ``settings`` and an embedding model, emails close in meaning join the keyword matches.
+    With ``settings`` and an embedding model, emails close in meaning join the keyword matches. When the
+    mail was searched, ``report`` gets how ("how") and how many emails only meaning found ("meaning_hits").
     """
     about_today = bool(_TODAY.search(question) or _MY_DAY.search(question))
     picked: dict[str, EmailRecord] = {}
@@ -205,7 +209,10 @@ def pick_sources(
     terms = keywords(_HELP.sub(" ", stripped))
     if terms:
         terms = keywords(stripped)
-    found += semantic.find_mail(store, settings, stripped, terms, limit=MAX_SOURCES)[0]
+    by_search, by_meaning, how = semantic.find_mail(store, settings, stripped, terms, limit=MAX_SOURCES)
+    found += by_search
+    if terms and report is not None:
+        report.update(how=how, meaning_hits=len(by_meaning))
     found = list({email.id: email for email in found}.values())[:MAX_SOURCES]
     for email in found:
         picked.setdefault(email.id, email)
@@ -337,7 +344,9 @@ def _source_block(number: int, email: EmailRecord, limit: int, *, on_screen: boo
     return "\n".join(bits)
 
 
-def source_cards(sources: list[EmailRecord]) -> list[dict[str, Any]]:
+def source_cards(sources: list[EmailRecord], settings: Settings | None = None) -> list[dict[str, Any]]:
+    """The numbered emails the answer cites, with their files so a citation of a file can open it.
+    ``view``: the original opens in the browser (a PDF or picture that was kept); otherwise the text view."""
     return [
         {
             "n": index,
@@ -345,6 +354,17 @@ def source_cards(sources: list[EmailRecord]) -> list[dict[str, Any]]:
             "subject": email.subject,
             "sender": email.sender_name or email.sender_email,
             "fraud": is_fraud(email),
+            "files": [] if attachments_locked(email) else [
+                {
+                    "n": number,
+                    "name": att.filename,
+                    "text": bool((att.extracted_text or "").strip()),
+                    "view": settings is not None
+                    and Path(att.filename).suffix.lower() in agent.VIEWABLE
+                    and agent.original_file(settings, email, att) is not None,
+                }
+                for number, att in enumerate(email.attachments, start=1)
+            ],
         }
         for index, email in enumerate(sources, start=1)
     ]
@@ -424,14 +444,15 @@ def answer_stream(
     """Events for the chat box: ``sources``, then ``delta`` pieces, then ``done``."""
     question = (question or "").strip()[:MAX_QUESTION]
     focus = focus or []
-    sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings)
+    searched: dict[str, Any] = {}
+    sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings, report=searched)
     if _HELP.search(question) and not found:
         yield {"type": "sources", "sources": [], "mode": "help"}
         yield {"type": "delta", "text": HELP_TEXT}
         yield {"type": "done"}
         return
     use_model = llm_active(settings)
-    event: dict[str, Any] = {"type": "sources", "sources": source_cards(sources), "mode": "model" if use_model else "lookup"}
+    event: dict[str, Any] = {"type": "sources", "sources": source_cards(sources, settings), "mode": "model" if use_model else "lookup"}
     if any(is_fraud(email) for email in sources):
         event["warning"] = FRAUD_WARNING
     current = next((email for email in sources if email.id == email_id), None)
@@ -442,6 +463,8 @@ def answer_stream(
         yield {"type": "done"}
         return
     yield event
+    if searched:
+        yield {"type": "step", "text": semantic.search_step(searched["how"], settings, searched["meaning_hits"])}
     if not use_model:
         yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id)}
         yield {"type": "done"}
@@ -592,6 +615,9 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     primary = ws.primary()
     notes = agent.earlier_findings(ws, primary) if primary is not None else ""
     files = agent.file_context(ws, question, int(budget * 0.5))
+    for read in ws.reads:
+        yield {"type": "step", "text": read}
+    ws.reads.clear()
     base = dict(history=history, today=today, current_id=ws.current_id, notes=notes)
     messages = build_messages(question, ws.sources, budget=budget, files=files, tools=True, **base)
     known = len(ws.sources)
@@ -602,7 +628,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         messages = build_messages(question, ws.sources, budget=budget, files=files, **base)
         draft = complete_text(settings, messages, max_tokens=settings.chat_max_tokens)
     if len(ws.sources) > known:
-        yield {"type": "sources", "sources": source_cards(ws.sources), "mode": "model"}
+        yield {"type": "sources", "sources": source_cards(ws.sources, settings), "mode": "model"}
     draft = _ECHO_RE.split(draft, maxsplit=1)[0].rstrip()
     if not ws.read_files and not ws.evidence:
         if draft:

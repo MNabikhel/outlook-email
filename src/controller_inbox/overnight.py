@@ -14,7 +14,7 @@ from controller_inbox.actions import local_today
 from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.file_summaries import summarize_files
-from controller_inbox.folder_mail import ingest_folder
+from controller_inbox.folder_mail import ingest_folder, reread_attachments
 from controller_inbox.local_llm import LocalReader, check_model, llm_active
 from controller_inbox.profile import is_finance
 from controller_inbox.reading import build_packet, overlay_reading
@@ -82,6 +82,9 @@ def run_overnight(
         report=folder_report,
         on_progress=(lambda i, n, name: on_progress("importing", i, n, name)) if on_progress else None,
     )
+    reread = reread_attachments(
+        store, settings, on_progress=(lambda i, n, name: on_progress("rereading", i, n, name)) if on_progress else None
+    )
     graph_note = ""
     graph_count = 0
     if sync_graph and settings.graph_configured:
@@ -98,9 +101,8 @@ def run_overnight(
             model=reading["model"],
             on_progress=(lambda i, n, name: on_progress("summarizing", i, n, name)) if on_progress else None,
         )
-    indexed = 0
-    if reading["model"]:
-        indexed = index_mail(store, settings, on_progress=(lambda i, n, _name: on_progress("indexing", i, n, "")) if on_progress else None)
+    # Runs whenever an embedding model answers, even with no chat model loaded.
+    indexed = max(0, index_mail(store, settings, on_progress=(lambda i, n, _name: on_progress("indexing", i, n, "")) if on_progress else None))
 
     if on_progress:
         on_progress("digest", 1, 1, "Writing the digest")
@@ -125,6 +127,7 @@ def run_overnight(
         "graph_note": graph_note,
         "read_by_bionic": len(reading["read_ids"]),
         "files_summarized": summarized,
+        "files_reread": reread,
         "indexed_for_search": indexed,
         "waiting_on_bionic": counts["waiting_on_bionic"],
         "folders": {

@@ -120,3 +120,31 @@ def test_zip_and_office_files_are_read():
     )
     assert exploded[0].filename == "inside.txt"
     assert b"INV-42" in exploded[0].content
+
+
+def test_attachments_read_by_an_older_reader_are_read_again_once(store, settings, mail):
+    from controller_inbox.documents import READER_VERSION
+    from controller_inbox.folder_mail import READER_KEY, reread_attachments
+
+    budget = mail["Q4 budget draft"]
+    sheet = next(att for att in budget.attachments if att.filename == "Q4 budget.xlsx")
+    store.set_attachment_text(sheet.id, '[sheet "Budget" A1:E4]\nA2: Ads | B2: 1,000')
+    store.set_state(READER_KEY, "1")
+    seen = []
+    assert reread_attachments(store, settings, on_progress=lambda i, n, name: seen.append(name)) == 1
+    again = next(att for att in store.get_email(budget.id).attachments if att.filename == "Q4 budget.xlsx")
+    assert "A2 (Line): Ads" in again.extracted_text
+    assert "Q4 budget.xlsx" in seen and store.get_state(READER_KEY) == READER_VERSION
+    assert reread_attachments(store, settings) == 0
+
+
+def test_reading_again_keeps_account_numbers_masked(store, settings, mail):
+    from controller_inbox.folder_mail import READER_KEY, reread_attachments
+
+    scam = mail["Updated remittance details"]
+    letter = scam.attachments[0]
+    store.set_attachment_text(letter.id, "[page 1]\nold text")
+    store.set_state(READER_KEY, "1")
+    reread_attachments(store, settings)
+    text = store.get_email(scam.id).attachments[0].extracted_text
+    assert "****8899" in text and "5566778899" not in text

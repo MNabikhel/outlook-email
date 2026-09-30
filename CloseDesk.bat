@@ -9,6 +9,14 @@ if not exist ".venv\Scripts\python.exe" (
   if errorlevel 1 goto :fail
 )
 
+rem An update can add a package; install it before starting.
+".venv\Scripts\python.exe" scripts\check_deps.py >nul 2>&1
+if errorlevel 1 (
+  echo Installing what this update needs...
+  ".venv\Scripts\python.exe" -m pip install --quiet -e .
+  if errorlevel 1 goto :fail
+)
+
 ".venv\Scripts\python.exe" -m controller_inbox run %*
 if errorlevel 1 goto :fail
 exit /b 0

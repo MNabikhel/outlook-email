@@ -19,4 +19,14 @@ if [ ! -x .venv/bin/python ]; then
   echo "Setup finished."
 fi
 
+# An update can add a package; install it before starting.
+if ! .venv/bin/python scripts/check_deps.py >/dev/null 2>&1; then
+  echo "Installing what this update needs..."
+  if ! .venv/bin/python -m pip install --quiet -e .; then
+    echo "Install failed. The message above says why."
+    read -r -p "Press Enter to close. " _
+    exit 1
+  fi
+fi
+
 exec .venv/bin/python -m controller_inbox run "$@"

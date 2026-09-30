@@ -66,7 +66,7 @@ def test_summarize_this_file_is_answered_at_once_from_the_overnight_summary(stor
     events = list(answer_stream(store, settings, "Summarize the audit report", email_id=report.id))
     text = "".join(e["text"] for e in events if e["type"] == "delta")
     assert text.startswith("**Audit report.pdf**\n- 3 vendor bank-detail changes in July") and "Written overnight" in text
-    assert [e["text"] for e in events if e["type"] == "step"] == ["Used the summary of Audit report.pdf written during the overnight reading"]
+    assert [e["text"] for e in events if e["type"] == "step"][-1] == "Used the summary of Audit report.pdf written during the overnight reading"
 
     ws = agent.Workspace(store, settings, [report], question="summarize this email", current_id=report.id)
     assert agent.summary_request(ws, "summarize this email") is None, "the email itself, not a file"

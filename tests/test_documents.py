@@ -48,8 +48,9 @@ def test_workbook_keeps_cell_references_formulas_and_hidden_sheets():
     text = extract_text_from_bytes("budget.xlsx", "", _budget())
     assert 'Workbook with 2 sheets: "Budget", "Assumptions" (hidden)' in text
     assert '[sheet "Budget" A1:E4]' in text
-    assert "A2: Ads | B2: 1,000 | C2: 1,500 | D2: =C2-B2" in text
-    assert "B4: =SUM(B2:B3)" in text
+    assert "A1: Line | B1: Q3 | C1: Q4 | D1: Change" in text
+    assert "A2 (Line): Ads | B2 (Q3): 1,000 | C2 (Q4): 1,500 | D2 (Change): =C2-B2" in text
+    assert "B4 (Q3): =SUM(B2:B3)" in text
     assert "(4 rows with data, 6 formulas)" in text
     assert '[sheet "Assumptions" A1:B1 hidden]' in text
 
@@ -82,7 +83,7 @@ def test_pdf_pages_and_table_columns():
     )
     text = extract_text_from_bytes("inv.pdf", "application/pdf", data)
     assert text.startswith("[page 1]\nNorthwind Traders - Invoice INV-2231")
-    assert "Item | Qty | Amount" in text and "Consulting | 10 | $4,000.00" in text
+    assert "Item | Qty | Amount\nItem: Consulting | Qty: 10 | Amount: $4,000.00\nItem: Total | Qty: not listed | Amount: $4,350.00" in text
     assert "[page 2]\nTerms: net 30" in text
     assert read_part(text, "page 2").text.startswith("Terms: net 30")
 
@@ -125,13 +126,106 @@ def test_word_draft_in_order_with_tracked_changes_and_comments():
     assert lines[0].startswith("[This draft has tracked changes")
     assert "# Q4 Marketing Plan (DRAFT)" in lines
     assert "We propose raising the ads budget to $18,000[deleted: $12,000]" in lines
-    assert lines.index("| Agency | $6,000 |") < lines.index("Next steps come after the table.")
+    assert lines.index("Agency | $6,000") < lines.index("Next steps come after the table.")
     assert "- Priya: Has finance approved this?" in lines
 
 
 def test_csv_reads_like_a_sheet():
     text = extract_text_from_bytes("vendors.csv", "text/csv", "Vendor;Amount\nAcme;100\nGlobex;250\n".encode())
     assert text.splitlines() == ['[sheet "vendors.csv" A1:B3]', "A1: Vendor | B1: Amount", "A2: Acme | B2: 100", "A3: Globex | B3: 250"]
+
+
+def test_csv_rows_under_a_header_name_their_columns_and_blanks():
+    data = "Employee,Department,Manager,Salary\nMaya Chen,Finance,Priya Raman,98500\nJonathan Alvarez,,Priya Raman,112000\n"
+    lines = extract_text_from_bytes("staff.csv", "text/csv", data.encode()).splitlines()
+    assert lines[1] == "A1: Employee | B1: Department | C1: Manager | D1: Salary"
+    assert lines[3] == "A3 (Employee): Jonathan Alvarez | B3 (Department): not listed | C3 (Manager): Priya Raman | D3 (Salary): 112000"
+
+
+def _roster_book() -> bytes:
+    from openpyxl.styles import Font
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Staff"
+    sheet["A1"] = "Staff roster, September"
+    for column, label in enumerate(["Employee", "ID", "Department", "Manager", "Notes"], start=1):
+        sheet.cell(3, column, label).font = Font(bold=True)
+    sheet.append(["Maya Chen", "E-1001", "Finance", "Priya Raman", "Hybrid"])
+    sheet.append(["Jonathan Alvarez", "E-1002", None, "Priya Raman"])
+    sheet.append(["Sofia Rossi", "E-1003", "Operations"])
+    out = io.BytesIO()
+    book.save(out)
+    return out.getvalue()
+
+
+def test_workbook_rows_under_a_bold_header_name_their_columns():
+    lines = extract_text_from_bytes("roster.xlsx", "", _roster_book()).splitlines()
+    assert "A1: Staff roster, September" in lines
+    assert "A3: Employee | B3: ID | C3: Department | D3: Manager | E3: Notes" in lines
+    assert "A5 (Employee): Jonathan Alvarez | B5 (ID): E-1002 | C5 (Department): not listed | D5 (Manager): Priya Raman" in lines
+    assert "A6 (Employee): Sofia Rossi | B6 (ID): E-1003 | C6 (Department): Operations" in lines
+
+
+def test_labelled_sheet_parts_and_citations_still_find_their_cells():
+    from controller_inbox.answer_check import cells_of
+
+    text = extract_text_from_bytes("roster.xlsx", "", _roster_book())
+    cells = cells_of(text)
+    assert cells[("Staff", "C4")] == "Finance" and cells[("Staff", "C5")] == "not listed"
+    rows = "\n".join(f"A{r} (Employee): Person {r} | B{r} (Notes): " + "x" * 40 for r in range(2, 400))
+    parts = split_parts('[sheet "Staff" A1:B400]\nA1: Employee | B1: Notes\n' + rows, size=2000)
+    assert parts[1].label.startswith('sheet "Staff" rows ')
+
+
+def test_a_citation_finds_its_section_and_cell():
+    from controller_inbox.documents import locate
+
+    parts = split_parts(extract_text_from_bytes("roster.xlsx", "", _roster_book()) + "\n")
+    assert locate(parts, "Staff!C5") == (1, "A5 (Employee): Jonathan Alvarez | B5 (ID): E-1002 | C5 (Department): not listed | D5 (Manager): Priya Raman")
+    assert locate(parts, "c5")[0] == 1
+    assert locate(parts, 'sheet "Staff"') == (1, "")
+    pages = split_parts("[page 1]\nIntro\n[page 2]\nTerms\n[page 10]\nAppendix")
+    assert locate(pages, "page 1") == (0, "") and locate(pages, "Page 10") == (2, "")
+    assert locate(pages, "page 4") is None and locate(pages, "") is None
+
+
+def test_word_table_with_a_header_row_merged_cells_and_blanks():
+    document = Document()
+    table = document.add_table(rows=6, cols=4)
+    for column, label in enumerate(["Employee", "Department", "Manager", "Start date"]):
+        table.cell(0, column).paragraphs[0].add_run(label).bold = True
+    table.cell(1, 0).text, table.cell(1, 1).text, table.cell(1, 2).text, table.cell(1, 3).text = "Maya Chen", "Finance", "Priya Raman", "2021-03-01"
+    table.cell(2, 0).text, table.cell(2, 3).text = "Jonathan Alvarez", "2019-07-15"
+    table.cell(3, 0).text, table.cell(3, 1).text = "Sofia Rossi", "Operations"
+    table.cell(2, 2).merge(table.cell(3, 2)).paragraphs[0].text = "Priya Raman"
+    table.cell(4, 0).merge(table.cell(4, 3)).text = "Contractors"
+    table.cell(5, 0).text, table.cell(5, 1).text, table.cell(5, 3).text = "Omar Haddad", "Finance", "2026-01-05"
+    document.add_paragraph("After the table.")
+    out = io.BytesIO()
+    document.save(out)
+    lines = extract_text_from_bytes("staff.docx", "", out.getvalue()).splitlines()
+    assert lines[0] == "Employee | Department | Manager | Start date"
+    assert "Employee: Jonathan Alvarez | Department: not listed | Manager: Priya Raman | Start date: 2019-07-15" in lines
+    assert "Employee: Sofia Rossi | Department: Operations | Manager: Priya Raman | Start date: not listed" in lines
+    assert lines.index("Contractors") == lines.index("Employee: Omar Haddad | Department: Finance | Manager: not listed | Start date: 2026-01-05") - 1
+    assert lines[-1] == "After the table."
+
+
+def test_powerpoint_table_rows_name_their_columns():
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    deck = Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[5])
+    slide.shapes.title.text = "Headcount"
+    shape = slide.shapes.add_table(3, 3, Inches(1), Inches(2), Inches(6), Inches(2))
+    for (r, c), value in {(0, 0): "Team", (0, 1): "Lead", (0, 2): "Open roles", (1, 0): "Finance", (1, 1): "Priya Raman", (1, 2): "2", (2, 0): "Sales", (2, 2): "1"}.items():
+        shape.table.cell(r, c).text = value
+    out = io.BytesIO()
+    deck.save(out)
+    text = extract_text_from_bytes("headcount.pptx", "", out.getvalue())
+    assert "Team | Lead | Open roles\nTeam: Finance | Lead: Priya Raman | Open roles: 2\nTeam: Sales | Lead: not listed | Open roles: 1" in text
 
 
 def test_long_documents_split_into_labelled_parts_and_search_finds_the_right_one():

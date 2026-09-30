@@ -43,7 +43,7 @@ def test_file_page_shows_every_section_and_finds_words(client, mail):
     page = client.get(f"/inbox/{budget.id}/files/{_n(budget, 'Q4 budget.xlsx')}")
     assert page.status_code == 200
     assert "sheet &#34;Budget&#34;" in page.text
-    assert "C4: =SUM(C2:C3)" in page.text
+    assert "C4 (Q4): =SUM(C2:C3)" in page.text
 
     memo = client.get(f"/inbox/{budget.id}/files/{_n(budget, 'Offsite memo.docx')}", params={"q": "venue deposit"})
     assert "mention “venue deposit”" in memo.text
@@ -81,6 +81,42 @@ def test_fraud_email_files_are_readable_but_locked_until_cleared(client, store, 
     assert client.get(f"/inbox/{scam.id}/files/1/download").status_code == 200
     event = store.fraud_log(limit=5, events=("marked_safe",))[0]
     assert event["email_id"] == scam.id and "Called Acme" in event["note"]
+
+
+def test_a_cited_pdf_opens_in_the_browser_only_once_the_fraud_lock_is_lifted(client, mail):
+    scam = mail["Updated remittance details"]
+    assert client.get(f"/inbox/{scam.id}/files/1/view").status_code == 403
+    assert "Open original" not in client.get(f"/inbox/{scam.id}/files/1").text
+    client.post(f"/inbox/{scam.id}/fraud", data={"choice": "safe:email"})
+    response = client.get(f"/inbox/{scam.id}/files/1/view")
+    assert response.status_code == 200 and response.content.startswith(b"%PDF")
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["content-disposition"].startswith("inline")
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert f'href="/inbox/{scam.id}/files/1/view"' in client.get(f"/inbox/{scam.id}/files/1").text
+
+    budget = mail["Q4 budget draft"]
+    assert client.get(f"/inbox/{budget.id}/files/{_n(budget, 'Q4 budget.xlsx')}/view").status_code == 403
+
+
+def test_a_citation_opens_the_file_at_the_cited_cell_or_page(client, mail):
+    budget = mail["Q4 budget draft"]
+    page = client.get(f"/inbox/{budget.id}/files/{_n(budget, 'Q4 budget.xlsx')}", params={"at": "Budget!C4"})
+    assert 'file-part target' in page.text
+    assert '<mark class="cited">A4 (Line): Total' in page.text and "C4 (Q4): =SUM(C2:C3)" in page.text
+    memo = client.get(f"/inbox/{budget.id}/files/{_n(budget, 'Offsite memo.docx')}", params={"at": "page 9"})
+    assert memo.status_code == 200 and "file-part target" not in memo.text
+
+
+def test_chat_sources_list_their_files_so_citations_can_open_them(settings, mail):
+    from controller_inbox.assistant import source_cards
+
+    budget, scam = mail["Q4 budget draft"], mail["Updated remittance details"]
+    cards = source_cards([budget, scam], settings)
+    sheet = _n(budget, "Q4 budget.xlsx")
+    assert {"n": sheet, "name": "Q4 budget.xlsx", "text": True, "view": False} in cards[0]["files"]
+    assert len(cards[0]["files"]) == 2
+    assert cards[1]["files"] == [], "a possible fraud email's files don't open from the chat"
 
 
 def test_reporting_and_trusting_from_the_email_page(client, store, mail):

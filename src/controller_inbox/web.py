@@ -77,6 +77,10 @@ NOTICES = {
     "trust-reported": "Domain reported. Its mail was checked again.",
     "trust-removed": "Removed. Its mail was checked again.",
     "findings-cleared": "Notes cleared. Ask CloseDesk reads the files fresh next time.",
+    "indexing": "Indexing started. This page updates as it goes.",
+    "indexed": "Indexed for search. Ask CloseDesk can now find these files by meaning.",
+    "index-failed": "The embedding model didn't answer, so nothing was indexed. Load one in LM Studio and try again.",
+    "index-off": "No embedding model found. Load one in LM Studio (for example nomic-embed-text) and try again.",
 }
 
 # Files that download from the email page. Programs, scripts, and macro-enabled Office files stay in Outlook.
@@ -363,6 +367,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     def file_cards(email) -> list[dict]:
         cards = []
+        states = semantic.file_states(store, settings, email)
         for index, att in enumerate(email.attachments, start=1):
             text = att.extracted_text or ""
             suffix = Path(att.filename).suffix.lower()
@@ -375,6 +380,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                     "chars": len(text),
                     "downloadable": suffix in DOWNLOADABLE and agent.original_file(settings, email, att) is not None,
                     "blocked_type": suffix not in DOWNLOADABLE,
+                    "search": states.get(att.id, "no_text"),
                 }
             )
         return cards
@@ -388,12 +394,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return email, email.attachments[n - 1]
 
     @app.get("/inbox/{email_id}/files/{n}", response_class=HTMLResponse)
-    def file_page(request: Request, email_id: str, n: int, q: str = ""):
+    def file_page(request: Request, email_id: str, n: int, q: str = "", at: str = ""):
         email, att = email_file(email_id, n)
         text = att.extracted_text or ""
         parts = documents.split_parts(text) if text.strip() else []
         query = q.strip()[:120]
         matches = {part.label for part in documents.search_parts(text, query, limit=12)} if query else set()
+        target, marked = documents.locate(parts, at) or (None, "")
         return render(
             request,
             "file.html",
@@ -405,24 +412,56 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             parts=parts,
             matches=matches,
             q=query,
+            target=target,
+            marked=marked,
             locked=fraud.attachments_locked(email),
             downloadable=Path(att.filename).suffix.lower() in DOWNLOADABLE and agent.original_file(settings, email, att) is not None,
+            viewable=Path(att.filename).suffix.lower() in agent.VIEWABLE and agent.original_file(settings, email, att) is not None,
+            search=semantic.file_states(store, settings, email).get(att.id, "no_text"),
+        )
+
+    @app.post("/inbox/{email_id}/index")
+    def index_email(email_id: str):
+        email = store.get_email(email_id)
+        if not email:
+            raise HTTPException(status_code=404, detail="Message not found")
+        if not semantic.embedding_model(settings):
+            notice = "index-off"
+        else:
+            notice = "index-failed" if semantic.index_mail(store, settings, emails=[email]) < 0 else "indexed"
+        return RedirectResponse(f"/inbox/{email_id}?notice={notice}#files", status_code=303)
+
+    def original_or_refuse(email, att, allowed) -> Path:
+        if fraud.attachments_locked(email):
+            raise HTTPException(
+                status_code=403,
+                detail="This email is flagged as possible payment fraud, so its files don't open. "
+                "Verify it by phone, then mark it safe on the email page.",
+            )
+        if Path(att.filename).suffix.lower() not in allowed:
+            raise HTTPException(status_code=403, detail="This kind of file only opens from Outlook.")
+        path = agent.original_file(settings, email, att)
+        if path is None:
+            raise HTTPException(status_code=404, detail="The original file wasn't kept for this email.")
+        return path
+
+    @app.get("/inbox/{email_id}/files/{n}/view")
+    def file_view(email_id: str, n: int):
+        """The original PDF or picture shown in the browser; a citation adds #page=N to open at the page."""
+        email, att = email_file(email_id, n)
+        path = original_or_refuse(email, att, agent.VIEWABLE)
+        return FileResponse(
+            path,
+            media_type=agent.VIEWABLE[Path(att.filename).suffix.lower()],
+            content_disposition_type="inline",
+            filename=att.filename,
+            headers={"X-Content-Type-Options": "nosniff"},
         )
 
     @app.get("/inbox/{email_id}/files/{n}/download")
     def file_download(email_id: str, n: int):
         email, att = email_file(email_id, n)
-        if fraud.attachments_locked(email):
-            raise HTTPException(
-                status_code=403,
-                detail="This email is flagged as possible payment fraud, so its files don't download. "
-                "Verify it by phone, then mark it safe on the email page.",
-            )
-        if Path(att.filename).suffix.lower() not in DOWNLOADABLE:
-            raise HTTPException(status_code=403, detail="This kind of file only opens from Outlook.")
-        path = agent.original_file(settings, email, att)
-        if path is None:
-            raise HTTPException(status_code=404, detail="The original file wasn't kept for this email.")
+        path = original_or_refuse(email, att, DOWNLOADABLE)
         return FileResponse(
             path,
             filename=att.filename,
@@ -742,9 +781,20 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             context_target=context_target(settings, model),
             will_reload=needs_more_context(settings),
             ocr_engine=ocr.engine_name(),
-            embedding_model=semantic.embedding_model(settings) if model.active else "",
-            search_indexed=store.has_embeddings(),
+            search=semantic.coverage(store, settings),
         )
+
+    @app.post("/settings/index")
+    def index_all():
+        if not semantic.embedding_model(settings):
+            return RedirectResponse("/settings?notice=index-off#search", status_code=303)
+
+        def run(progress):
+            progress("indexing", 0, 0, "")
+            return {"kind": "index", "indexed": max(0, semantic.index_mail(store, settings, on_progress=lambda i, n, _name: progress("indexing", i, n, "")))}
+
+        started = job.start(run)
+        return RedirectResponse(f"/settings?notice={'indexing' if started else 'busy'}#search", status_code=303)
 
     @app.post("/settings/context")
     def save_context(step: int = Form(...)):

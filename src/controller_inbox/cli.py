@@ -316,7 +316,7 @@ def _run(settings: Settings, store: Store, args) -> int:
     print(f"CloseDesk — reading {settings.inbox_incoming}")
 
     def progress(stage: str, done: int, total: int, note: str) -> None:
-        label = {"importing": "Reading file", "reading": "Model reading", "digest": "Writing digest"}.get(stage, stage)
+        label = {"importing": "Reading file", "rereading": "Re-reading file", "reading": "Model reading", "digest": "Writing digest"}.get(stage, stage)
         suffix = f" {done}/{total}" if total > 1 else ""
         print(f"  {label}{suffix}: {note[:70]}", flush=True)
 
