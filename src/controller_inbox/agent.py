@@ -201,6 +201,43 @@ def prompt_budget(context_tokens: int, reply_tokens: int, *, tools: bool) -> int
     return max(2500, tokens * CHARS_PER_TOKEN)
 
 
+CONTEXT_STEPS = (0, 4096, 8192, 16384, 32768, 65536, 131072)
+PAGE_CHARS = 2500
+CELL_CHARS = 30
+PROMPT_RESERVE_CHARS = 3000
+# KV cache per token at 16-bit: Llama-3-8B-class models and Qwen2.5-3B.
+KV_BYTES_8B = 131_072
+KV_BYTES_3B = 36_864
+
+
+def _about(n: int) -> str:
+    step = 50 if n < 1000 else 100 if n < 10_000 else 1000
+    return f"{max(step, round(n / step) * step):,}"
+
+
+def context_capacity(tokens: int, reply_tokens: int = 500) -> dict[str, object]:
+    """What a minimum context of ``tokens`` lets Ask CloseDesk read in one go, for the Setup slider."""
+    if not tokens:
+        return {
+            "tokens": 0,
+            "label": "Off",
+            "text": "CloseDesk uses the model as LM Studio loaded it (often 4,096 tokens, about one page at a time) "
+            "and reads longer files a section at a time.",
+            "tier": "short",
+        }
+    room = prompt_budget(tokens, reply_tokens, tools=True) - PROMPT_RESERVE_CHARS
+    pages = max(1, room // PAGE_CHARS)
+    memory = f"about {tokens * KV_BYTES_8B / 2**30:.1f} GB more memory with a 7–8B model ({tokens * KV_BYTES_3B / 2**30:.1f} GB with a 3B)"
+    fits = f"About {pages:,} {'page' if pages == 1 else 'pages'} of a PDF or Word file, or about {_about(room // CELL_CHARS)} workbook cells, in one go"
+    if tokens < RECOMMENDED_CONTEXT:
+        tier, note = "short", "Longer files are read a section at a time and answers may miss parts."
+    elif tokens == RECOMMENDED_CONTEXT:
+        tier, note = "ok", "Recommended: most attachments are read whole."
+    else:
+        tier, note = "big", "Long reports and big workbooks fit whole, but answers are slower without a GPU."
+    return {"tokens": tokens, "label": f"{tokens:,} tokens", "text": f"{fits}; needs {memory}. {note}", "tier": tier}
+
+
 def context_advice(context_tokens: int, left_out: list[str]) -> str:
     if not left_out:
         return ""

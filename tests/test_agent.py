@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
-from controller_inbox import agent, assistant, local_llm
+from controller_inbox import agent, assistant, local_llm, web
 from controller_inbox.assistant import answer_stream, on_screen_question, pick_sources
+from controller_inbox.config import Settings
 from controller_inbox.demo import make_pdf
 from controller_inbox.extract import extract_text_from_bytes
 from controller_inbox.local_llm import ContextOverflow, ToolReply, ToolsUnsupported
@@ -345,6 +348,45 @@ def test_a_model_loaded_with_a_short_context_is_reloaded_once_with_the_minimum(s
     settings.min_context_tokens = 0
     local_llm._context_raised.clear()
     assert not local_llm.needs_more_context(settings)
+
+
+def test_the_setup_slider_saves_the_minimum_and_the_next_question_reloads_at_it(store, settings, monkeypatch):
+    server = _FakeLMStudio(16384, fail_above=16384)
+    monkeypatch.setattr(local_llm.httpx, "get", server.get)
+    monkeypatch.setattr(local_llm.httpx, "post", server.post)
+    settings.llm = True
+    client = TestClient(web.create_app(settings, store))
+    page = client.get("/settings").text
+    assert 'name="step"' in page and 'value="3"' in page and "Recommended: most attachments are read whole." in page
+
+    big = agent.CONTEXT_STEPS.index(32768)
+    saved = client.post("/settings/context", data={"step": big}, headers={"Origin": "http://testserver"}, follow_redirects=False)
+    assert saved.status_code == 303 and "notice=context" in saved.headers["location"]
+    assert settings.min_context_tokens == 32768 and store.get_state(web.MIN_CONTEXT_KEY) == "32768"
+    assert "32,768 tokens" in client.get("/settings").text
+
+    assert "couldn't load qwen/qwen3-4b with a 32,768-token context" in local_llm.ensure_context(settings)
+    assert server.context == 16384, "back to the size it had"
+    client.post("/settings/context", data={"step": big}, headers={"Origin": "http://testserver"})
+    assert local_llm.needs_more_context(settings), "saving again tries the new size again"
+
+    fresh = Settings(data_dir=settings.data_dir, inbox_dir=settings.inbox_dir, _env_file=None)
+    web.create_app(fresh, store)
+    assert fresh.min_context_tokens == 32768, "the Setup choice survives a restart"
+    assert client.post("/settings/context", data={"step": 99}, headers={"Origin": "http://testserver"}).status_code == 400
+    off = client.post("/settings/context", data={"step": 0}, headers={"Origin": "http://testserver"}, follow_redirects=False)
+    assert "notice=context-off" in off.headers["location"] and settings.min_context_tokens == 0
+    assert not local_llm.needs_more_context(settings)
+
+
+def test_the_slider_says_what_each_size_can_read():
+    steps = [agent.context_capacity(tokens) for tokens in agent.CONTEXT_STEPS]
+    assert steps[0]["label"] == "Off" and "as LM Studio loaded it" in steps[0]["text"]
+    pages = [int(re.search(r"About ([\d,]+) page", s["text"])[1].replace(",", "")) for s in steps[1:]]
+    assert pages == sorted(pages) and pages[0] < 5 and 10 <= pages[2] <= 20 and pages[-1] > 100
+    assert [s["tier"] for s in steps] == ["short", "short", "short", "ok", "big", "big", "big"]
+    assert "about 2.0 GB more memory with a 7–8B model" in steps[3]["text"]
+    assert "slower without a GPU" in steps[-1]["text"]
 
 
 def test_the_chat_says_when_it_reloads_the_model(store, settings, mail, monkeypatch):

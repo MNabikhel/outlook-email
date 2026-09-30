@@ -59,6 +59,18 @@
       {% endif %}
     </p>
     {% endif %}
+    {% set chosen = context_steps[context_step] %}
+    <form method="post" action="/settings/context" class="context-form" id="context">
+      <label for="context-slider">Minimum context for Ask CloseDesk: <b data-context-label>{{ chosen.label }}</b></label>
+      <input type="range" id="context-slider" name="step" min="0" max="{{ context_steps | length - 1 }}" step="1"
+             value="{{ context_step }}" data-context-steps='{{ context_steps | tojson }}' aria-describedby="context-capacity"/>
+      <div class="context-ticks" aria-hidden="true">
+        {% for item in context_steps %}<span>{{ 'Off' if not item.tokens else ('{}k'.format(item.tokens // 1024)) }}</span>{% endfor %}
+      </div>
+      <p id="context-capacity" class="context-capacity {{ chosen.tier }}" data-context-text aria-live="polite">{{ chosen.text }}</p>
+      <button type="submit">Save</button>
+      <span class="muted"><small>LM Studio models loaded with less are reloaded with this on the next question. Other servers: set the context length there.</small></span>
+    </form>
     <p><a href="/settings?recheck=1">Check again</a></p>
     <p>The fast scripts pull text, amounts, dates, and file types, then file a draft. The model reads that short packet — never the raw files — and writes the category, folder, a one-line summary, and tasks. The most important mail is read first.</p>
     <p>In <b>Ask CloseDesk</b>, the model reads the text pulled from attachments (PDF pages, workbook cells and formulas, Word drafts with tracked changes, slides) and can open other emails and their files to answer. It notes what it finds and checks its answer against those notes. Files on an email flagged as possible fraud are never given to it.</p>

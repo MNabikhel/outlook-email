@@ -706,6 +706,12 @@ def needs_more_context(settings: Settings) -> bool:
     )
 
 
+def set_min_context(settings: Settings, tokens: int) -> None:
+    """Change the minimum while running; a model that couldn't be raised before is tried again at the new size."""
+    settings.min_context_tokens = tokens
+    _context_raised.clear()
+
+
 def ensure_context(settings: Settings) -> str:
     """Reload LM Studio's model with at least ``min_context_tokens`` when it was loaded with less.
 

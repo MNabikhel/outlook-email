@@ -33,7 +33,7 @@ from controller_inbox.classify import month_end
 from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
 from controller_inbox.config import PROFILES, Settings
 from controller_inbox.digest import build_digest, write_digest_files
-from controller_inbox.local_llm import check_model
+from controller_inbox.local_llm import check_model, set_min_context
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.profile import active_profile, is_finance, set_profile
 from controller_inbox.store import Store
@@ -57,12 +57,16 @@ templates.env.filters["label_imp"] = lambda value: IMPORTANCE_LABELS.get(
     value if isinstance(value, Importance) else Importance(value), value
 )
 
+MIN_CONTEXT_KEY = "min_context_tokens"
+
 NOTICES = {
     "sample-blocked": "The sample mailbox was not loaded: it would erase your own mail. "
     "Run the sample from a separate data folder instead (see README).",
     "processing": "Processing started. This page updates as it goes.",
     "busy": "Already processing. This page updates as it goes.",
     "profile": "Saved. The digest and Today page now use this profile; new mail is sorted with it.",
+    "context": "Saved. If the model in LM Studio is loaded with less, the next question reloads it with this context.",
+    "context-off": "Saved. CloseDesk now uses the model as LM Studio loaded it.",
     "fraud-safe": "Saved as not fraud. Mail it covers was checked again, and the fraud check learns from it.",
     "fraud-reported": "Reported as fraud. Its files stay locked, and the fraud check learns from it.",
     "fraud-freemail": "That is a free email service anyone can sign up for, so it can't be trusted as a whole. "
@@ -201,10 +205,17 @@ class ProcessJob:
                 self.finished_at = datetime.now(timezone.utc).isoformat()
 
 
+def _nearest_step(tokens: int) -> int:
+    return min(range(len(agent.CONTEXT_STEPS)), key=lambda i: abs(agent.CONTEXT_STEPS[i] - tokens))
+
+
 def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:
     settings = settings or Settings()
     settings.ensure_data_dir()
     store = store or Store(settings.db_path)
+    saved_context = store.get_state(MIN_CONTEXT_KEY)
+    if saved_context and saved_context.isdigit():
+        set_min_context(settings, int(saved_context))
     app = FastAPI(title="CloseDesk", docs_url=None, redoc_url=None)
     app.add_middleware(LocalHostOnly, allowed=allowed_hosts(settings.host))
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
@@ -726,7 +737,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             model=model,
             llm_enabled=model.active,
             recommended_context=agent.RECOMMENDED_CONTEXT,
+            context_steps=[agent.context_capacity(tokens, settings.chat_max_tokens) for tokens in agent.CONTEXT_STEPS],
+            context_step=_nearest_step(settings.min_context_tokens),
         )
+
+    @app.post("/settings/context")
+    def save_context(step: int = Form(...)):
+        if not 0 <= step < len(agent.CONTEXT_STEPS):
+            raise HTTPException(status_code=400, detail="Unknown context size")
+        tokens = agent.CONTEXT_STEPS[step]
+        store.set_state(MIN_CONTEXT_KEY, str(tokens))
+        set_min_context(settings, tokens)
+        return RedirectResponse(f"/settings?notice={'context' if tokens else 'context-off'}#context", status_code=303)
 
     @app.post("/settings/profile")
     def save_profile(profile: str = Form(...)):

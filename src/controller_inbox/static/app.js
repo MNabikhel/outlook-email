@@ -419,6 +419,21 @@
     }
   });
 
+  const contextSlider = $("[data-context-steps]");
+  if (contextSlider) {
+    const steps = JSON.parse(contextSlider.dataset.contextSteps);
+    const form = contextSlider.closest("form");
+    const showStep = () => {
+      const step = steps[Number(contextSlider.value)] || steps[0];
+      $("[data-context-label]", form).textContent = step.label;
+      const text = $("[data-context-text]", form);
+      text.textContent = step.text;
+      text.className = `context-capacity ${step.tier}`;
+    };
+    contextSlider.addEventListener("input", showStep);
+    showStep();
+  }
+
   document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       if (closePreview() || closeChat()) event.preventDefault();
