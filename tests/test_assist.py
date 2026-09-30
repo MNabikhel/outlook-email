@@ -171,8 +171,9 @@ def test_chat_endpoint_streams_ndjson(client: TestClient):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/x-ndjson")
     events = _events(response)
-    assert events[0]["type"] == "sources" and events[0]["sources"]
-    assert events[0]["sources"][0]["id"] == "demo-bec-wire"
+    assert events[0]["type"] == "chat" and events[0]["title"] == "What's urgent today?"
+    assert events[1]["type"] == "sources" and events[1]["sources"]
+    assert events[1]["sources"][0]["id"] == "demo-bec-wire"
     assert events[-1] == {"type": "done"}
     assert client.post("/chat", json={"message": "  "}, headers=PAGE).status_code == 400
     assert client.post("/chat", content=b"not json", headers=PAGE).status_code == 400

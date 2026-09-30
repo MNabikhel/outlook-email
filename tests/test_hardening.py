@@ -150,7 +150,7 @@ def test_model_chat_end_to_end_through_the_page(settings: Settings, loaded: Stor
     _fake_server(monkeypatch, lambda _request: _sse("<think>which one?</think>", "Maya needs the headcount ", "[1]."))
     response = TestClient(create_app(settings, loaded)).post("/chat", headers=PAGE, json={"message": "What needs a reply?"})
     events = _events(response.text)
-    assert events[0]["mode"] == "model"
+    assert events[1]["mode"] == "model"
     assert _answer(events) == "Maya needs the headcount [1]."
 
 
@@ -172,7 +172,9 @@ def test_chat_stream_always_finishes(settings: Settings, loaded: Store, monkeypa
     monkeypatch.setattr(web, "answer_stream", broken)
     response = TestClient(create_app(settings, loaded)).post("/chat", headers=PAGE, json={"message": "hi"})
     events = _events(response.text)
-    assert [event["type"] for event in events] == ["sources", "error", "done"]
+    assert [event["type"] for event in events] == ["chat", "sources", "error", "done"]
+    saved = loaded.chat_turns(events[0]["id"])
+    assert [turn["role"] for turn in saved] == ["user", "assistant"] and "Something went wrong" in saved[1]["text"]
 
 
 # ---------- Search and chat intent ----------

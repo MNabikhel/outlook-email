@@ -12,7 +12,7 @@ from email.utils import formataddr, format_datetime
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
-from controller_inbox import agent, documents, fraud, ocr, semantic
+from controller_inbox import agent, chats, documents, fraud, ocr, semantic
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.classify import month_end
@@ -154,6 +154,37 @@ def _require_page(request: Request) -> None:
     """The page's own scripts send this header; other sites cannot without the browser blocking them."""
     if request.headers.get("x-closedesk") != "1":
         raise HTTPException(status_code=403, detail="Use the CloseDesk page for this.")
+
+
+class _AnswerLog:
+    """What the chat stream said, kept so the conversation can be shown again as it was."""
+
+    def __init__(self) -> None:
+        self.text = ""
+        self.data: dict = {"sources": [], "steps": [], "notes": []}
+
+    def take(self, event: dict) -> None:
+        kind = event.get("type")
+        if kind == "sources":
+            self.data["sources"] = event.get("sources") or []
+            self.data["mode"] = event.get("mode", "")
+            if event.get("warning"):
+                self.data["warning"] = event["warning"]
+        elif kind in {"step", "note"}:
+            self.data[kind + "s"].append(event.get("text", ""))
+        elif kind == "delta":
+            self.text += event.get("text", "")
+        elif kind == "revise":
+            self.text = event.get("text", "")
+        elif kind == "error":
+            self.text = (self.text + "\n\n" if self.text else "") + event.get("text", "")
+        elif kind == "check":
+            self.data["checks"] = event.get("items") or []
+        elif kind == "context":
+            self.data["context"] = event.get("text", "")
+        elif kind == "mode":
+            self.data["mode"] = event.get("mode", "")
+            self.data["note"] = event.get("note", "")
 
 
 class ProcessJob:
@@ -386,7 +417,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return cards
 
     def email_file(email_id: str, n: int):
-        email = store.get_email(email_id)
+        chat_id = chats.chat_id_of(email_id)
+        email = chats.chat_mail(store, chat_id) if chat_id else store.get_email(email_id)
         if not email:
             raise HTTPException(status_code=404, detail="Message not found")
         if not 1 <= n <= len(email.attachments):
@@ -417,7 +449,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             locked=fraud.attachments_locked(email),
             downloadable=Path(att.filename).suffix.lower() in DOWNLOADABLE and agent.original_file(settings, email, att) is not None,
             viewable=Path(att.filename).suffix.lower() in agent.VIEWABLE and agent.original_file(settings, email, att) is not None,
-            search=semantic.file_states(store, settings, email).get(att.id, "no_text"),
+            search="" if email.source == "chat" else semantic.file_states(store, settings, email).get(att.id, "no_text"),
         )
 
     @app.post("/inbox/{email_id}/index")
@@ -625,7 +657,17 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         question = str(data.get("message") or "").strip()
         if not question:
             raise HTTPException(status_code=400, detail="Ask a question first.")
-        history = [turn for turn in (data.get("history") or []) if isinstance(turn, dict)][-6:]
+        chat_id = str(data.get("chat_id") or "")
+        if not chats.valid_id(chat_id):
+            chat_id = chats.new_id()
+        store.create_chat(chat_id)
+        saved = store.chat_turns(chat_id)
+        history = [{"role": turn["role"], "text": turn["text"]} for turn in saved][-6:]
+        if not saved:
+            store.touch_chat(chat_id, title=chats.title_for(question))
+        store.add_chat_turn(chat_id, "user", question)
+        uploads = chats.chat_mail(store, chat_id)
+        past = chats.past_context(store, question, exclude=chat_id)
         email_id = str(data.get("email_id") or "") or None
         as_of = board_date()
         focus = build_digest(
@@ -640,18 +682,91 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
         def lines():
             finished = False
+            answer = _AnswerLog()
+            yield json.dumps({"type": "chat", "id": chat_id, "title": (store.chat(chat_id) or {}).get("title", "")}) + "\n"
             try:
                 for event in answer_stream(
-                    store, settings, question, history=history, email_id=email_id, focus=focus, today=as_of.isoformat()
+                    store,
+                    settings,
+                    question,
+                    history=history,
+                    email_id=email_id,
+                    focus=focus,
+                    today=as_of.isoformat(),
+                    uploads=uploads,
+                    past=past,
                 ):
+                    answer.take(event)
                     finished = finished or event.get("type") == "done"
                     yield json.dumps(event) + "\n"
             except Exception as exc:  # the chat box shows a message instead of hanging
-                yield json.dumps({"type": "error", "text": f"Something went wrong answering that ({type(exc).__name__})."}) + "\n"
+                event = {"type": "error", "text": f"Something went wrong answering that ({type(exc).__name__})."}
+                answer.take(event)
+                yield json.dumps(event) + "\n"
+            finally:
+                store.add_chat_turn(chat_id, "assistant", answer.text or "(No answer: the question was stopped.)", answer.data)
             if not finished:
                 yield json.dumps({"type": "done"}) + "\n"
 
         return StreamingResponse(lines(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
+
+    @app.get("/chats")
+    def chat_list(q: str = ""):
+        return JSONResponse({"chats": store.list_chats(q[:100])})
+
+    @app.post("/chats")
+    def chat_new(request: Request):
+        _require_page(request)
+        chat_id = chats.new_id()
+        store.create_chat(chat_id)
+        return JSONResponse({"id": chat_id})
+
+    def known_chat(chat_id: str) -> dict:
+        found = store.chat(chat_id) if chats.valid_id(chat_id) else None
+        if found is None:
+            raise HTTPException(status_code=404, detail="That conversation isn't saved here.")
+        return found
+
+    @app.get("/chats/{chat_id}")
+    def chat_show(chat_id: str):
+        found = known_chat(chat_id)
+        return JSONResponse({**found, "turns": store.chat_turns(chat_id), "files": chats.file_cards(store, chat_id)})
+
+    @app.post("/chats/{chat_id}/delete")
+    def chat_delete(request: Request, chat_id: str):
+        _require_page(request)
+        known_chat(chat_id)
+        chats.delete(store, settings, chat_id)
+        return JSONResponse({"ok": True})
+
+    @app.post("/chats/{chat_id}/files")
+    async def chat_add_files(request: Request, chat_id: str, files: list[UploadFile] = File(...)):
+        _require_page(request)
+        known_chat(chat_id)
+        problems = []
+        for upload in files[: chats.MAX_FILES]:
+            data = await upload.read(chats.MAX_UPLOAD_BYTES + 1)
+            try:
+                await run_in_threadpool(chats.add_file, store, settings, chat_id, upload.filename or "file", upload.content_type or "", data)
+            except ValueError as exc:
+                problems.append(str(exc))
+            except Exception as exc:  # a damaged file is reported, the others still go in
+                problems.append(f"{upload.filename}: couldn't be read ({type(exc).__name__}).")
+        return JSONResponse({"files": chats.file_cards(store, chat_id), "problems": problems})
+
+    @app.post("/chats/{chat_id}/files/{n}/delete")
+    def chat_remove_file(request: Request, chat_id: str, n: int):
+        _require_page(request)
+        known_chat(chat_id)
+        rows = store.chat_files(chat_id)
+        if not 1 <= n <= len(rows):
+            raise HTTPException(status_code=404, detail="No such file in this conversation")
+        chats.remove_file(store, settings, chat_id, rows[n - 1]["filename"])
+        return JSONResponse({"files": chats.file_cards(store, chat_id)})
+
+    @app.get("/chat/window", response_class=HTMLResponse)
+    def chat_window(request: Request):
+        return render(request, "chat_window.html", page="chat")
 
     @app.post("/inbox/{email_id}/correct")
     def correct_category(email_id: str, category: str = Form(...), reason: str = Form(...)):

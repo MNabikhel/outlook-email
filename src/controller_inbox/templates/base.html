@@ -85,33 +85,7 @@
     <div class="drawer-body"></div>
   </aside>
 
-  <button type="button" class="chat-fab" id="chat-toggle" aria-controls="chat" aria-expanded="false">
-    <span class="dot {{ 'on' if model.active else 'off' }}"></span> Ask CloseDesk
-  </button>
-  <section class="chat" id="chat" hidden aria-label="Ask CloseDesk">
-    <header class="chat-head">
-      <div>
-        <strong>Ask CloseDesk</strong>
-        <small>{% if model.active %}Answers from {{ model.model }} on this computer{% else %}No local model running: I'll look things up instead{% endif %}</small>
-      </div>
-      <button type="button" class="ghost tiny" data-action="clear-chat" title="Start over">Clear</button>
-      <button type="button" class="ghost tiny" data-action="close-chat" aria-label="Close chat">✕</button>
-    </header>
-    <div class="chat-log" aria-live="polite"></div>
-    <div class="chat-suggest">
-      {% if email is defined and email %}
-      <button type="button" class="ghost tiny" data-ask="Summarize this email and its attachments">Summarize this email</button>
-      {% endif %}
-      <button type="button" class="ghost tiny" data-ask="What's urgent today?">What's urgent today?</button>
-      <button type="button" class="ghost tiny" data-ask="What needs a reply from me?">Needs a reply</button>
-      <button type="button" class="ghost tiny" data-ask="Anything waiting for my approval?">Approvals</button>
-      <button type="button" class="ghost tiny" data-ask="How do I set this up?">Setup help</button>
-    </div>
-    <form class="chat-form">
-      <textarea rows="2" maxlength="1000" placeholder="Ask about your mail… (Enter to send)" aria-label="Your question"></textarea>
-      <button type="submit">Send</button>
-    </form>
-  </section>
+  {% include "_chat.html" %}
   <div class="toast" id="toast" role="status" hidden></div>
   <script src="/static/app.js?v={{ static_version }}" defer></script>
 </body>
