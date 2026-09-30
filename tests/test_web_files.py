@@ -43,7 +43,7 @@ def test_file_page_shows_every_section_and_finds_words(client, mail):
     page = client.get(f"/inbox/{budget.id}/files/{_n(budget, 'Q4 budget.xlsx')}")
     assert page.status_code == 200
     assert "sheet &#34;Budget&#34;" in page.text
-    assert "C4: =SUM(C2:C3)" in page.text
+    assert "C4 (Q4): =SUM(C2:C3)" in page.text
 
     memo = client.get(f"/inbox/{budget.id}/files/{_n(budget, 'Offsite memo.docx')}", params={"q": "venue deposit"})
     assert "mention “venue deposit”" in memo.text

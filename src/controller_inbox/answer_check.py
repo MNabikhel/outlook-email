@@ -27,7 +27,7 @@ PAGE_RE = re.compile(r"\b(?P<word>pages?|p\.)\s?(?P<page>\d{1,4})\b", re.I)
 CELL_RE = re.compile(r"(?:(?P<sheet>'[^'\n]+'|\"[^\"\n]+\"|[A-Za-z][\w]*)!)?\b(?P<cell>[A-Z]{1,3}\d{1,6})\b")
 _PAGE_SPLIT = re.compile(r"^\[page (\d+)\]\s*$", re.M)
 _SHEET_SPLIT = re.compile(r'^\[sheet "([^"]+)"[^\]]*\]\s*$', re.M)
-_CELL_VALUE = re.compile(r"(?:^|\| )([A-Z]{1,3}\d{1,6}): ([^|\n]*)")
+_CELL_VALUE = re.compile(r"(?:^|\| )([A-Z]{1,3}\d{1,6})(?: \((?:[^()\n]|\([^()\n]*\))*\))?: ([^|\n]*)")
 _WORKED_OUT_BEFORE = re.compile(
     r"\b(?:increase|decrease|difference|change|total|sum|gap|variance|rise|drop|growth|up|down|rose|fell|grew|shrank|"
     r"more|less|higher|lower)\b(?: \w+){0,2}\s*(?:of|by|is|was|=|:)?\s*[−-]?$",

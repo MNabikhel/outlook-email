@@ -54,7 +54,7 @@ def test_file_passages_are_sized_to_the_model_and_the_fraud_email_is_locked(stor
     blocks = agent.file_context(ws, "What is the Q4 total?", 3000)
     assert "── File: Q4 budget.xlsx" in blocks[budget.id]
     assert "C4: 1,800 (=SUM(C2:C3))" not in blocks[budget.id], "openpyxl-made files have no cached values"
-    assert "C4: =SUM(C2:C3)" in blocks[budget.id]
+    assert "C4 (Q4): =SUM(C2:C3)" in blocks[budget.id]
     assert blocks[scam.id] == agent.LOCKED
     assert agent.run_tool(ws, "read_file", {"email": "2", "file": "1"}, limit=2000) == agent.LOCKED
     assert "5566778899" not in json.dumps(blocks)
@@ -65,7 +65,7 @@ def test_files_that_fit_are_read_whole_in_order(store, settings, mail):
     budget = mail["Q4 budget draft"]
     ws = agent.Workspace(store, settings, [budget], question="What is the venue deposit?", current_id=budget.id)
     block = agent.file_context(ws, "What is the venue deposit?", 12000)[budget.id]
-    assert "venue deposit" in block and "C4: =SUM(C2:C3)" in block
+    assert "venue deposit" in block and "C4 (Q4): =SUM(C2:C3)" in block
     assert "Showing" not in block and ws.left_out == []
 
 

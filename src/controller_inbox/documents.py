@@ -24,11 +24,12 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
 
-from controller_inbox import ocr
+from controller_inbox import ocr, pdf_layout, tables
 
-# pypdf warns on the small defects many real PDFs have ("EOF marker not found") and still
-# reads them; with no logging set up, those warnings land in the user's terminal.
+# pypdf and pdfminer warn on the small defects many real PDFs have ("EOF marker not found") and
+# still read them; with no logging set up, those warnings land in the user's terminal.
 logging.getLogger("pypdf").setLevel(logging.ERROR)
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 MAX_TEXT = 400_000
 MAX_PDF_PAGES = 300
@@ -89,8 +90,16 @@ def pdf_text(data: bytes) -> str:
     words = 0
     scanned = []
     total = len(reader.pages)
+    layouts = _layouts(data)
+    previous: list[pdf_layout.Table] = []
     for number, page in enumerate(reader.pages[:MAX_PDF_PAGES], start=1):
-        text = _pdf_page(page)
+        layout = next(layouts, None)
+        text = ""
+        if layout is not None:
+            laid_out = pdf_layout.page_text(pdf_layout.glyphs_of(layout), previous)
+            text, previous = laid_out.text, laid_out.tables
+        if not text.strip():
+            text = _pdf_page(page)
         if not text.strip() and len(scanned) < MAX_OCR_PAGES:
             scanned.append(number)
             text = _ocr_page_images(page)
@@ -117,7 +126,18 @@ _OCR_HINT = ' [To read scanned pages, install the OCR add-on: pip install -e ".[
 MAX_OCR_PAGES = 40
 
 
+def _layouts(data: bytes):
+    """pdfminer's pages, with every character's position; nothing once pdfminer can't go on."""
+    try:
+        from pdfminer.high_level import extract_pages
+
+        yield from extract_pages(io.BytesIO(data), laparams=None, maxpages=MAX_PDF_PAGES)
+    except Exception:
+        return
+
+
 def _pdf_page(page) -> str:
+    """pypdf's text for a page, for the files pdfminer can't lay out."""
     try:
         text = page.extract_text(extraction_mode="layout")
     except Exception:
@@ -198,15 +218,48 @@ def _docx_paragraph(element) -> str:
 
 
 def _docx_table(element) -> list[str]:
-    rows = []
-    for row in element.iter(f"{_W}tr"):
-        cells = []
-        for cell in row.iter(f"{_W}tc"):
-            text = " ".join(_docx_paragraph(p) for p in cell.iter(f"{_W}p")).strip()
+    """Rows through ``tables``: a cell spanning columns is one cell, a vertically merged cell repeats
+    the value above it, and the header row is the one Word marks as repeating, or a bold first row."""
+    grid: list[list[str | None]] = []
+    marked = False
+    bold: list[bool] = []
+    for number, row in enumerate(element.findall(f"{_W}tr")):
+        if number == 0:
+            marked = row.find(f"{_W}trPr/{_W}tblHeader") is not None
+        cells: list[str | None] = []
+        for cell in _docx_cells(row):
+            text = " ".join(filter(None, (_docx_paragraph(p) for p in cell.iter(f"{_W}p")))).strip()
+            properties = cell.find(f"{_W}tcPr")
+            span = properties.find(f"{_W}gridSpan") if properties is not None else None
+            merge = properties.find(f"{_W}vMerge") if properties is not None else None
+            if merge is not None and merge.get(f"{_W}val", "continue") == "continue":
+                above = grid[-1] if grid else []
+                text = next((c for c in reversed(above[: len(cells) + 1]) if c is not None), "") if len(cells) < len(above) else ""
             cells.append(text)
-        if any(cells):
-            rows.append("| " + " | ".join(cells) + " |")
-    return rows
+            if span is not None and (span.get(f"{_W}val") or "1").isdigit():
+                cells.extend([None] * (int(span.get(f"{_W}val")) - 1))
+        grid.append(cells)
+        if number == 0:
+            runs = [r for r in row.iter(f"{_W}r") if "".join(t.text or "" for t in r.iter(f"{_W}t")).strip()]
+            bold.append(bool(runs) and all(_docx_bold(r) for r in runs))
+    header = tables.has_header(grid, marked=marked, bold_first=bool(bold and bold[0]))
+    return tables.table_lines(grid, header=header)
+
+
+def _docx_cells(row):
+    """A row's own cells, including those inside content controls, not those of a table nested in one."""
+    for child in row:
+        if child.tag == f"{_W}tc":
+            yield child
+        elif child.tag == f"{_W}sdt":
+            content = child.find(f"{_W}sdtContent")
+            if content is not None:
+                yield from _docx_cells(content)
+
+
+def _docx_bold(run) -> bool:
+    mark = run.find(f"{_W}rPr/{_W}b")
+    return mark is not None and mark.get(f"{_W}val", "true") not in ("0", "false", "off")
 
 
 def _docx_comments(document) -> list[str]:
@@ -257,10 +310,58 @@ def _defined_names(book) -> list[tuple[str, str]]:
         return []
 
 
+_HEADER_SEARCH = 10
+
+
+@dataclass
+class SheetRow:
+    number: int
+    cells: dict[int, str]
+    bold: bool = False
+
+
+def sheet_row_lines(rows: list[SheetRow]) -> list[str]:
+    """``A5: value | C5: value`` for each row. Under a header row each cell also names its column,
+    ``C5 (Department): Finance``, and a blank between filled cells is written ``C5 (Department): (blank)``,
+    so a row about one person or account reads on its own."""
+    from openpyxl.utils import get_column_letter
+
+    header = _sheet_header(rows)
+    labels = {c: v.replace("|", "/") for c, v in rows[header].cells.items()} if header is not None else {}
+    out = []
+    for index, row in enumerate(rows):
+        named = header is not None and index > header
+        columns = sorted(row.cells)
+        if named and len(columns) >= 2:
+            columns = sorted(set(columns) | {c for c in labels if columns[0] < c < columns[-1]})
+        cells = []
+        for column in columns:
+            ref = f"{get_column_letter(column)}{row.number}"
+            label = f" ({labels[column]})" if named and column in labels else ""
+            cells.append(f"{ref}{label}: {row.cells.get(column) or tables.BLANK}")
+        out.append(" | ".join(cells))
+    return out
+
+
+def _sheet_header(rows: list[SheetRow]) -> int | None:
+    """The index of the row naming the columns: one of the first rows, with two or more distinct labels,
+    bold over rows that aren't, or over a column of figures."""
+    for index, row in enumerate(rows[:_HEADER_SEARCH]):
+        if len(row.cells) < 2:
+            continue
+        below = rows[index + 1 : index + 31]
+        columns = range(min(row.cells), max(max(r.cells) for r in [row, *below]) + 1)
+        grid = [[r.cells.get(c, "") for c in columns] for r in [row, *below]]
+        bold = row.bold and not all(r.bold for r in below)
+        if tables.has_header(grid, bold_first=bold):
+            return index
+    return None
+
+
 def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
     from openpyxl.utils import get_column_letter
 
-    rows = []
+    rows: list[SheetRow] = []
     more = 0
     formula_count = 0
     last_col = 0
@@ -270,26 +371,30 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
             value_sheet.iter_rows(max_col=MAX_COLUMNS, values_only=True),
         )
     ):
-        cells = []
+        cells: dict[int, str] = {}
+        bold = len(rows) < _HEADER_SEARCH
         for column, cell in enumerate(frow):
             raw = getattr(cell, "value", None)
             value = vrow[column] if column < len(vrow) else None
             if raw is None and value is None:
                 continue
-            ref = f"{get_column_letter(column + 1)}{getattr(cell, 'row', index + 1)}"
             last_col = max(last_col, column + 1)
             if isinstance(raw, str) and raw.startswith("="):
                 formula_count += 1
                 shown = f"{_fmt(value)} ({raw})" if value is not None else raw
             else:
                 shown = _fmt(value if value is not None else raw)
-            cells.append(f"{ref}: {shown}")
+            if shown:
+                cells[column + 1] = shown
+                bold = bold and bool(getattr(getattr(cell, "font", None), "b", False))
         if not cells:
             continue
         if len(rows) >= MAX_ROWS:
             more += 1
             continue
-        rows.append(" | ".join(cells))
+        number = next((cell.row for cell in frow if getattr(cell, "row", None)), index + 1)
+        rows.append(SheetRow(number, cells, bold))
+    rows_text = sheet_row_lines(rows)
     extent = ""
     try:
         extent = formula_sheet.calculate_dimension()
@@ -300,7 +405,7 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
     note = f"({len(rows) + more} row{'s' if len(rows) + more != 1 else ''} with data" + (
         f", {formula_count} formula{'s' if formula_count != 1 else ''}" if formula_count else ""
     ) + ")"
-    out = [head, note, *rows]
+    out = [head, note, *rows_text]
     if more:
         out.append(f"[{more} more rows not shown; ask for a range such as rows {MAX_ROWS + 1}–{MAX_ROWS + 200}.]")
     return out
@@ -316,9 +421,9 @@ def xls_text(data: bytes) -> str:
         lines.append("")
         last = get_column_letter(max(1, min(sheet.ncols, MAX_COLUMNS)))
         lines.append(f'[sheet "{sheet.name}" A1:{last}{max(sheet.nrows, 1)}]')
-        shown = 0
+        rows: list[SheetRow] = []
         for r in range(sheet.nrows):
-            cells = []
+            cells: dict[int, str] = {}
             for c in range(min(sheet.ncols, MAX_COLUMNS)):
                 cell = sheet.cell(r, c)
                 if cell.value in ("", None):
@@ -329,13 +434,18 @@ def xls_text(data: bytes) -> str:
                         value = xlrd.xldate.xldate_as_datetime(cell.value, book.datemode)
                     except Exception:
                         pass
-                cells.append(f"{get_column_letter(c + 1)}{r + 1}: {_fmt(value)}")
+                if _fmt(value):
+                    cells[c + 1] = _fmt(value)
             if cells:
-                shown += 1
-                if shown > MAX_ROWS:
-                    lines.append(f"[{sheet.nrows - r} more rows not shown.]")
+                if len(rows) >= MAX_ROWS:
+                    rows_left = sheet.nrows - r
                     break
-                lines.append(" | ".join(cells))
+                rows.append(SheetRow(r + 1, cells))
+        else:
+            rows_left = 0
+        lines.extend(sheet_row_lines(rows))
+        if rows_left:
+            lines.append(f"[{rows_left} more rows not shown.]")
     return "\n".join(lines).strip()
 
 
@@ -350,10 +460,11 @@ def csv_text(data: bytes, filename: str) -> str:
     rows = list(csv.reader(io.StringIO(text), dialect))
     width = max((len(r) for r in rows), default=1)
     lines = [f'[sheet "{filename}" A1:{get_column_letter(max(1, min(width, MAX_COLUMNS)))}{max(len(rows), 1)}]']
-    for number, row in enumerate(rows[:MAX_ROWS], start=1):
-        cells = [f"{get_column_letter(c + 1)}{number}: {v.strip()}" for c, v in enumerate(row[:MAX_COLUMNS]) if v.strip()]
-        if cells:
-            lines.append(" | ".join(cells))
+    sheet = [
+        SheetRow(number, {c + 1: v.strip() for c, v in enumerate(row[:MAX_COLUMNS]) if v.strip()})
+        for number, row in enumerate(rows[:MAX_ROWS], start=1)
+    ]
+    lines.extend(sheet_row_lines([row for row in sheet if row.cells]))
     if len(rows) > MAX_ROWS:
         lines.append(f"[{len(rows) - MAX_ROWS} more rows not shown.]")
     return "\n".join(lines)
@@ -408,8 +519,7 @@ def pptx_text(data: bytes) -> str:
             if shape == slide.shapes.title:
                 continue
             if getattr(shape, "has_table", False) and shape.has_table:
-                for row in shape.table.rows:
-                    lines.append("| " + " | ".join(cell.text.strip() for cell in row.cells) + " |")
+                lines.extend(["", *_pptx_table(shape.table), ""])
             elif getattr(shape, "has_text_frame", False) and shape.has_text_frame:
                 text = shape.text_frame.text.strip()
                 if text:
@@ -418,8 +528,25 @@ def pptx_text(data: bytes) -> str:
             notes = slide.notes_slide.notes_text_frame.text.strip() if slide.notes_slide.notes_text_frame else ""
             if notes:
                 lines.append(f"Speaker notes: {notes}")
-        parts.append("\n".join(lines))
+        parts.append(re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip())
     return "\n\n".join(parts)
+
+
+def _pptx_table(table) -> list[str]:
+    """Rows through ``tables``; the header is the first row when the table is styled with one."""
+    grid: list[list[str | None]] = []
+    for row in table.rows:
+        cells: list[str | None] = []
+        for column, cell in enumerate(row.cells):
+            if cell._tc.get("hMerge") in ("1", "true"):
+                cells.append(None)
+            elif cell._tc.get("vMerge") in ("1", "true"):
+                cells.append(grid[-1][column] if grid and column < len(grid[-1]) else "")
+            else:
+                cells.append(cell.text.strip())
+        grid.append(cells)
+    marked = bool(getattr(table, "first_row", False))
+    return tables.table_lines(grid, header=tables.has_header(grid, marked=marked))
 
 
 # Navigating the text -------------------------------------------------------------------------
@@ -477,7 +604,7 @@ def _pieces(body: str, size: int) -> list[str]:
 def _sub_label(label: str, piece: str, n: int) -> str:
     if label.startswith("sheet"):
         name = re.match(r'sheet "([^"]*)"', label)
-        refs = re.findall(r"(?m)^[A-Z]{1,3}(\d+):", piece)
+        refs = re.findall(r"(?m)^[A-Z]{1,3}(\d+)(?::| \()", piece)
         if name and refs:
             return f'sheet "{name.group(1)}" rows {refs[0]}–{refs[-1]}'
     return f"{label} (cont. {n})"
