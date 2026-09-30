@@ -155,7 +155,9 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
     kinds = [e["type"] for e in events]
     assert kinds[0] == "sources" and kinds[-1] == "done"
     steps = [e["text"] for e in events if e["type"] == "step"]
-    assert steps == ["Tracing how Budget!D4 is calculated in Q4 budget.xlsx", "Checking the answer against what I read"]
+    assert steps[-2:] == ["Tracing how Budget!D4 is calculated in Q4 budget.xlsx", "Checking the answer against what I read"]
+    assert "Read Offsite memo.docx in full (1 section)" in steps[:-2], "the chat says what it read of each file"
+    assert all(step.startswith("Read ") for step in steps[:-2])
     assert [e["text"] for e in events if e["type"] == "note"][0].startswith("D4 (total change)")
     assert "(Q4 budget.xlsx, sheet Budget, D4) [1]" in _text(events)
 

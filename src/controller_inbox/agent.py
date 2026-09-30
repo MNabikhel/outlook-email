@@ -23,6 +23,7 @@ import operator
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from itertools import zip_longest
 from pathlib import Path
 
 from controller_inbox import documents, semantic
@@ -267,6 +268,7 @@ class Workspace:
     notes: list[str] = field(default_factory=list)
     evidence: list[str] = field(default_factory=list)
     left_out: list[str] = field(default_factory=list)
+    reads: list[str] = field(default_factory=list)
     read_files: bool = False
     last_email: str = ""
 
@@ -421,13 +423,27 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         if whole and len(parts) > 2 and len(text) > budget:
             block.append(_skimmed(att, parts, budget))
             ws.left_out.append(att.filename)
+            read = f"Skimmed {att.filename}: too long to read whole ({len(parts)} sections)"
         else:
-            block += _passages(ws, att, parts, matches, budget)
+            how = "picked by words" if matches else "from the start: no words matched"
+            if not whole and len(text) > budget:
+                by_meaning = semantic.rank_sections(ws.store, ws.settings, att, question)
+                if by_meaning:
+                    how = "picked by words and meaning" if matches else "picked by meaning"
+                    matches = _interleave(matches, [part for label in by_meaning for part in parts if part.label == label])
+            passages, shown, cut = _passages(ws, att, parts, matches, budget)
+            block += passages
+            if shown == len(parts) and not cut:
+                read = f"Read {att.filename} in full ({len(parts)} section{'s' if len(parts) != 1 else ''})"
+            else:
+                read = f"Read {shown} of {len(parts)} sections of {att.filename}{', one cut short' if cut else ''} ({how})"
         piece = "\n".join(block)
         if used + len(piece) > room and lines:
             ws.left_out.append(att.filename)
+            ws.reads.append(f"Left out {att.filename}: no room (the assistant can still open it)")
             lines.append(f"── File: {att.filename} (not shown; read it with read_file)")
             continue
+        ws.reads.append(read)
         lines.append(piece)
         used += len(piece)
     lines += [f"── File: {att.filename} ({file_kind(att)}; not asked about, read it with read_file)" for att in skipped]
@@ -448,8 +464,21 @@ def _skimmed(att: AttachmentRecord, parts: list[documents.Part], budget: int) ->
     )
 
 
-def _passages(ws: Workspace, att: AttachmentRecord, parts: list[documents.Part], matches: list[documents.Part], budget: int) -> list[str]:
-    """Matching sections first; the rest of the file fills whatever room is left. Shown in document order."""
+def _interleave(first: list[documents.Part], second: list[documents.Part], *, limit: int = 6) -> list[documents.Part]:
+    """Keyword and meaning matches taken in turn, without repeats."""
+    merged: dict[str, documents.Part] = {}
+    for pair in zip_longest(first, second):
+        for part in pair:
+            if part is not None and len(merged) < limit:
+                merged.setdefault(part.label, part)
+    return list(merged.values())
+
+
+def _passages(
+    ws: Workspace, att: AttachmentRecord, parts: list[documents.Part], matches: list[documents.Part], budget: int
+) -> tuple[list[str], int, bool]:
+    """Matching sections first; the rest of the file fills whatever room is left. Shown in document order,
+    with how many sections were shown and whether one was cut short."""
     wanted = {part.label for part in matches}
     picked: dict[str, str] = {}
     cut = False
@@ -465,7 +494,7 @@ def _passages(ws: Workspace, att: AttachmentRecord, parts: list[documents.Part],
     if cut or len(picked) < len(parts):
         ws.left_out.append(att.filename)
         block.append(f"(Showing {len(picked)} of {len(parts)} sections{', one cut short' if cut else ''}. Read others with read_file.)")
-    return block
+    return block, len(picked), cut
 
 
 SUMMARY_MIN_CHARS = 1_500
@@ -646,7 +675,7 @@ def _search_mail(ws: Workspace, query: str) -> str:
     terms = keywords(query)
     if not terms:
         return "Give a name, company, invoice number or file name to search for."
-    found, by_meaning = semantic.find_mail(ws.store, ws.settings, query, terms, limit=5)
+    found, by_meaning, _how = semantic.find_mail(ws.store, ws.settings, query, terms, limit=5)
     if not found:
         return f"No emails mention {query!r}."
     lines = [f"Emails matching {query!r}:"]
