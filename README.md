@@ -70,7 +70,7 @@ Originals move to `inbox/processed/`. Unpacked copies are written to `inbox/extr
 
 Mail is identified by its `Message-ID`, so the same email saved twice — or once as `.msg` and once as `.eml` — is one record. A message the model already read, or that you corrected, is never reset by dropping it again.
 
-Supported attachments: PDF, Excel (`.xlsx`, `.xlsm`, `.xls`), Word (`.docx`), PowerPoint (`.pptx`), CSV, TSV, TXT, RTF, HTML, and ZIP. Images are marked as scans. If Tesseract and Pillow are installed on the laptop, image text is read too.
+Supported attachments: PDF, Excel (`.xlsx`, `.xlsm`, `.xls`), Word (`.docx`), PowerPoint (`.pptx`), CSV, TSV, TXT, RTF, HTML, and ZIP. Scanned PDF pages and pictures are read with OCR on the laptop: the launchers install the RapidOCR add-on (`pip install -e ".[ocr]"`, Python 3.12 or older), and Tesseract is used instead if that's what is installed. A scanned page says so in the text, so figures from it can be checked against the file. **Setup** shows which OCR is in use.
 
 ## Scripts extract. The local model decides.
 
@@ -101,6 +101,12 @@ Attachments become text the model can find its way around: PDF pages (with a not
 When you ask about an email, the chat starts from that email, its file list, and the sections that match your question, sized to the model's context window. If the server supports tools (LM Studio does), the model can also search other mail, open another email, read a page or sheet, read exact cells, trace a total back to its inputs, rank how every row changed between two columns (Q3 actual → Q4 budget), work out sums, percentages and deadlines exactly (small models get these wrong in their heads), and write down what it found. It then checks its answer against those notes before you see it. The notes stay on the email page (**Notes from Ask CloseDesk**) and come back when a later question is on the same subject.
 
 CloseDesk needs a context window of at least 16,384 tokens, enough for most attachments to be read whole (about 16 PDF or Word pages, or 1,400 workbook cells). If LM Studio loaded the model with less, the first question reloads it with 16,384, or goes back to the old size if memory runs short. The **Setup** slider changes this minimum, from Off to 131,072, and shows as you drag how many pages and cells each size reads at once and how much memory it takes (`CONTROLLER_INBOX_MIN_CONTEXT_TOKENS` sets the starting value). With other servers, or if that fails, the chat says which files it only partly read and how to raise it (LM Studio → My Models → Context Length). Asked to summarize a file that doesn't fit, it reads the opening plus the lines that differ from page to page (findings, totals, names), so a 24-page report still gets its page-17 finding.
+
+Every written answer is checked against what was read before it's final. A worked-out figure (a change, total or percentage) is recomputed from the numbers beside it and corrected if the model slipped; a page or cell citation that points to the wrong place is corrected when one other page or cell clearly holds it; a figure cited to the wrong file is pointed out; and a figure that isn't in any email or file read is flagged under the answer. Corrections are listed under the answer, so nothing changes silently.
+
+The overnight run also summarizes the longest attachments (`CONTROLLER_INBOX_OVERNIGHT_FILE_SUMMARIES`, default 20 a night, most important mail first), with every figure and page checked against the file and unsupported lines dropped. "Summarize this file" is then answered at once, and a file too long to read whole gets the summary as its map. A summary is only used while the file's text is unchanged.
+
+Search by meaning: load an embedding model in LM Studio next to the chat model (LM Studio ships **nomic-embed-text**) and the overnight run indexes every email and every section of its files on the laptop. Ask CloseDesk and its search tool then also find mail that says the same thing in other words ("the team trip in Portugal" finds the memo about the Lisbon offsite). A match in meaning has to stand out from the rest of the mail to count; an email with every word of the question still comes first. Without an embedding model, search is keyword-only as before. `CONTROLLER_INBOX_EMBEDDING_MODEL` picks one (or `off`), and `CONTROLLER_INBOX_EMBEDDING_BASE_URL` points to another server.
 
 Files on an email flagged as possible payment fraud are never given to the model and don't download. You can still read their text on the page.
 
@@ -264,6 +270,10 @@ src/controller_inbox/
   documents.py   Attachments to navigable text (pages, sheets, slides), search, exact cells, formula tracing
   fraud.py       Fraud score, trusted domains and senders, verdicts that teach, the fraud log
   agent.py       Ask CloseDesk's read-only tools, notepad, and context budget
+  answer_check.py Checks a finished answer's figures and citations against what was read
+  file_summaries.py Overnight summaries of long attachments, checked against the file
+  semantic.py    Search by meaning with a local embedding model
+  ocr.py         Scanned pages and pictures to text (RapidOCR, else Tesseract)
   local_llm.py   LM Studio / Ollama client built for small models
   overnight.py   One pass: drop folder → model → digest (run, overnight, watch, dashboard)
   learn.py       Corrections that teach the classifier
