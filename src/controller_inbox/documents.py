@@ -17,13 +17,14 @@ original workbook for exact ranges and formula precedents.
 from __future__ import annotations
 
 import csv
-import importlib.util
 import io
 import logging
 import math
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
+
+from controller_inbox import ocr
 
 # pypdf warns on the small defects many real PDFs have ("EOF marker not found") and still
 # reads them; with no logging set up, those warnings land in the user's terminal.
@@ -86,24 +87,34 @@ def pdf_text(data: bytes) -> str:
             return "[This PDF is password-protected, so CloseDesk can't read it.]"
     pages = []
     words = 0
+    scanned = []
     total = len(reader.pages)
     for number, page in enumerate(reader.pages[:MAX_PDF_PAGES], start=1):
         text = _pdf_page(page)
-        if not text.strip():
+        if not text.strip() and len(scanned) < MAX_OCR_PAGES:
+            scanned.append(number)
             text = _ocr_page_images(page)
         words += len(text.split())
         pages.append(f"[page {number}]\n{text.strip() or '(no text on this page)'}")
     if total > MAX_PDF_PAGES:
         pages.append(f"[CloseDesk read the first {MAX_PDF_PAGES} of {total} pages.]")
     if total and words < 5 * total:
-        pages.insert(0, _SCANNED_NOTE)
+        pages.insert(0, _SCANNED_NOTE if ocr.engine_name() else _SCANNED_NOTE + _OCR_HINT)
+    elif scanned:
+        pages.insert(0, f"[Scanned {'page' if len(scanned) == 1 else 'pages'} {_page_list(scanned)} read with OCR: check figures against the file.]")
     return "\n\n".join(pages)
+
+
+def _page_list(numbers: list[int]) -> str:
+    return ", ".join(map(str, numbers[:8])) + (f" and {len(numbers) - 8} more" if len(numbers) > 8 else "")
 
 
 _SCANNED_NOTE = (
     "[This PDF looks scanned: its pages are pictures with little or no text layer. "
     "Text from it may be missing; open the file to read it.]"
 )
+_OCR_HINT = ' [To read scanned pages, install the OCR add-on: pip install -e ".[ocr]"]'
+MAX_OCR_PAGES = 40
 
 
 def _pdf_page(page) -> str:
@@ -124,15 +135,11 @@ def _pdf_page(page) -> str:
 
 
 def _ocr_page_images(page) -> str:
-    """OCR a scanned page's pictures when Tesseract is installed; otherwise nothing."""
-    if importlib.util.find_spec("pytesseract") is None:
-        return ""
-    from controller_inbox.extract import _image_text
-
+    """OCR a scanned page's pictures when an OCR engine is installed; otherwise nothing."""
     texts = []
     try:
         for image in page.images[:4]:
-            texts.append(_image_text(image.data))
+            texts.append(ocr.image_text(image.data))
     except Exception:
         return ""
     return "\n".join(t for t in texts if t)

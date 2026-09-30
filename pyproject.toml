@@ -29,6 +29,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "aspose-email-foss>=26.3,<27"]
+# Reads scanned PDFs and pictures on this computer. Not yet built for Python 3.13+, where Tesseract is used if installed.
+ocr = ["rapidocr-onnxruntime>=1.4,<2; python_version < '3.13'"]
 
 [project.scripts]
 controller-inbox = "controller_inbox.cli:main"

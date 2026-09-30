@@ -27,6 +27,11 @@
       Anything that cannot be read goes to <code>{{ inbox_failed }}</code> with a note saying why.
       If attachments were saved separately, put them in <code>{{ inbox_attachments }}/&lt;same name as the message&gt;/</code>.
     </p>
+    {% if ocr_engine %}
+    <p class="muted">Scanned PDFs and pictures are read with {{ ocr_engine }} on this computer.</p>
+    {% else %}
+    <p class="muted">Scanned PDFs and pictures can't be read yet. To add it, run <code>pip install -e ".[ocr]"</code> in the CloseDesk folder (inside <code>.venv</code>).</p>
+    {% endif %}
   </article>
   <article class="panel llm-card">
     <h3>Local model</h3>
@@ -64,6 +69,11 @@
       {% if not window %}If your server doesn't report it, set <code>CONTROLLER_INBOX_CHAT_CONTEXT_TOKENS</code>.{% endif %}
       {% endif %}
     </p>
+    {% if embedding_model %}
+    <p class="muted">Search by meaning uses {{ embedding_model }}{{ '.' if search_indexed else ': mail is added to it during the next overnight run.' }}</p>
+    {% else %}
+    <p class="muted">Search matches words. To also search by meaning, load an embedding model in LM Studio too (it ships <b>nomic-embed-text</b>); the next overnight run indexes the mail.</p>
+    {% endif %}
     {% endif %}
     {% set chosen = context_steps[context_step] %}
     <form method="post" action="/settings/context" class="context-form" id="context">

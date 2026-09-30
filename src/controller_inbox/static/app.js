@@ -203,6 +203,9 @@
       html += renderSteps(turn);
       const waiting = turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
       html += `<div>${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
+      if (turn.checks && turn.checks.length) {
+        html += `<ul class="msg-check">${turn.checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+      }
       if (turn.context) html += `<p class="msg-context">${escapeHtml(turn.context)} <a href="/settings">Setup</a></p>`;
       const cited =
         turn.mode === "model" ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
@@ -303,6 +306,12 @@
           } else if (event.type === "step" || event.type === "note") {
             const list = event.type === "step" ? (answer.steps = answer.steps || []) : (answer.notes = answer.notes || []);
             list.push(event.text);
+            renderTurn(answer, bubble);
+          } else if (event.type === "revise") {
+            answer.text = event.text;
+            renderTurn(answer, bubble);
+          } else if (event.type === "check") {
+            answer.checks = event.items || [];
             renderTurn(answer, bubble);
           } else if (event.type === "context") {
             answer.context = event.text;

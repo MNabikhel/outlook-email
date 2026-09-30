@@ -307,7 +307,10 @@ def test_lm_studio_context_length_and_tool_replies_are_read(settings, monkeypatc
 
 
 class _FakeLMStudio:
-    """Just enough of LM Studio's native API to list, unload and load one model."""
+    """LM Studio's REST API v1 as documented (lmstudio.ai/docs/developer/rest): list, unload and load.
+
+    An embedding model is loaded next to the chat model, as it is when search by meaning is on.
+    """
 
     def __init__(self, context: int, *, fail_above: int = 0, max_context: int = 0, delay: float = 0):
         self.context, self.fail_above, self.max_context, self.delay, self.posts = context, fail_above, max_context, delay, []
@@ -315,11 +318,24 @@ class _FakeLMStudio:
     def get(self, url, **_kwargs):
         request = httpx.Request("GET", url)
         if url.endswith("/api/v1/models"):
-            instances = [{"id": "qwen/qwen3-4b", "config": {"context_length": self.context}}] if self.context else []
-            model = {"type": "llm", "key": "qwen/qwen3-4b", "loaded_instances": instances}
+            instances = [{"id": "qwen/qwen3-4b", "config": {"context_length": self.context, "eval_batch_size": 512, "parallel": 4}}]
+            model = {
+                "type": "llm",
+                "publisher": "qwen",
+                "key": "qwen/qwen3-4b",
+                "loaded_instances": instances if self.context else [],
+                "format": "gguf",
+                "capabilities": {"vision": False, "trained_for_tool_use": True},
+            }
             if self.max_context:
                 model["max_context_length"] = self.max_context
-            return httpx.Response(200, request=request, json={"models": [model]})
+            embedding = {
+                "type": "embedding",
+                "key": "text-embedding-nomic-embed-text-v1.5",
+                "loaded_instances": [{"id": "text-embedding-nomic-embed-text-v1.5", "config": {"context_length": 2048}}],
+                "max_context_length": 2048,
+            }
+            return httpx.Response(200, request=request, json={"models": [model, embedding]})
         return httpx.Response(200, request=request, json={"data": [{"id": "qwen/qwen3-4b"}]})
 
     def post(self, url, json=None, **_kwargs):
@@ -328,11 +344,11 @@ class _FakeLMStudio:
         time.sleep(self.delay)
         if url.endswith("/unload"):
             self.context = 0
-        elif self.fail_above and json["context_length"] > self.fail_above:
+            return httpx.Response(200, request=request, json={"instance_id": json["instance_id"]})
+        if self.fail_above and json["context_length"] > self.fail_above:
             return httpx.Response(500, request=request, json={"error": "not enough memory"})
-        else:
-            self.context = json["context_length"]
-        return httpx.Response(200, request=request, json={"status": "loaded"})
+        self.context = json["context_length"]
+        return httpx.Response(200, request=request, json={"type": "llm", "instance_id": json["model"], "load_time_seconds": 2.1, "status": "loaded"})
 
 
 def test_a_model_loaded_with_a_short_context_is_reloaded_once_with_the_minimum(settings, monkeypatch):
@@ -430,6 +446,26 @@ def test_the_slider_says_what_each_size_can_read():
     assert [s["tier"] for s in steps] == ["short", "short", "short", "ok", "big", "big", "big"]
     assert "about 2.0 GB more memory with a 7–8B model" in steps[3]["text"]
     assert "slower without a GPU" in steps[-1]["text"]
+
+
+def test_the_chat_corrects_slips_in_the_finished_answer(store, settings, mail, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    answer = "Marketing went from 84,000 to 115,500, an increase of 31,000. Travel is $97,250."
+
+    def model(ws, question, state, **_kwargs):
+        state["wrote"], state["text"] = True, answer
+        yield {"type": "delta", "text": answer}
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _settings: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _settings: False)
+    monkeypatch.setattr(assistant, "_model_answer", model)
+    events = list(answer_stream(store, settings, "Did Marketing go from 84,000 to 115,500?", email_id=budget.id))
+    revised = [e["text"] for e in events if e["type"] == "revise"]
+    assert revised == ["Marketing went from 84,000 to 115,500, an increase of 31,500. Travel is $97,250."]
+    checks = next(e["items"] for e in events if e["type"] == "check")
+    assert checks[0] == "Corrected 31,000 to 31,500 (115,500 − 84,000)."
+    assert "$97,250 isn't in the emails or files I read" in checks[1]
+    assert events[-1] == {"type": "done"}
 
 
 def test_the_chat_says_when_it_reloads_the_model(store, settings, mail, monkeypatch):

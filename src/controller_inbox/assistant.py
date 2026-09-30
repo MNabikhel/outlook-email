@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from typing import Any
 from urllib.parse import quote
 
-from controller_inbox import agent
+from controller_inbox import agent, answer_check, semantic
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
@@ -181,8 +181,12 @@ def pick_sources(
     *,
     email_id: str | None = None,
     focus: list[dict] | None = None,
+    settings: Settings | None = None,
 ) -> tuple[list[EmailRecord], bool, set[str]]:
-    """The emails the answer may use, best first; whether the question is about today; the search hits."""
+    """The emails the answer may use, best first; whether the question is about today; the search hits.
+
+    With ``settings`` and an embedding model, emails close in meaning join the keyword matches.
+    """
     about_today = bool(_TODAY.search(question) or _MY_DAY.search(question))
     picked: dict[str, EmailRecord] = {}
     current = store.get_email(email_id) if email_id else None
@@ -201,7 +205,7 @@ def pick_sources(
     terms = keywords(_HELP.sub(" ", stripped))
     if terms:
         terms = keywords(stripped)
-    found += store.search_ranked(terms, limit=MAX_SOURCES)
+    found += semantic.find_mail(store, settings, stripped, terms, limit=MAX_SOURCES)[0]
     found = list({email.id: email for email in found}.values())[:MAX_SOURCES]
     for email in found:
         picked.setdefault(email.id, email)
@@ -420,7 +424,7 @@ def answer_stream(
     """Events for the chat box: ``sources``, then ``delta`` pieces, then ``done``."""
     question = (question or "").strip()[:MAX_QUESTION]
     focus = focus or []
-    sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus)
+    sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings)
     if _HELP.search(question) and not found:
         yield {"type": "sources", "sources": [], "mode": "help"}
         yield {"type": "delta", "text": HELP_TEXT}
@@ -443,7 +447,17 @@ def answer_stream(
         yield {"type": "done"}
         return
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id)
-    state = {"wrote": False}
+    state = {"wrote": False, "text": ""}
+    if (ready := agent.summary_request(ws, question)) is not None:
+        att, summary = ready
+        yield {"type": "step", "text": f"Used the summary of {att.filename} written during the overnight reading"}
+        yield {
+            "type": "delta",
+            "text": f"**{att.filename}**\n{summary}\n\n*Written overnight and checked against the file. "
+            "Ask about a page, sheet or figure to have it read again.*",
+        }
+        yield {"type": "done"}
+        return
     try:
         if needs_more_context(settings):
             yield {"type": "step", "text": f"Reloading the model in LM Studio with a {context_target(settings):,}-token context (once)"}
@@ -465,6 +479,8 @@ def answer_stream(
         if not state["wrote"]:
             yield {"type": "mode", "mode": "lookup", "note": "The local model sent an empty answer."}
             yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True)}
+        else:
+            yield from _checked(ws, state["text"], history=history, today=today)
     advice = agent.context_advice(context_length(settings), ws.left_out)
     if advice:
         yield {"type": "context", "text": advice}
@@ -509,7 +525,24 @@ def _budget(settings: Settings, *, tools: bool) -> int:
 def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[dict[str, Any]]:
     for piece in without_echo(stream_text(settings, messages, max_tokens=settings.chat_max_tokens)):
         state["wrote"] = True
+        state["text"] += piece
         yield {"type": "delta", "text": piece}
+
+
+def _checked(ws: agent.Workspace, answer: str, *, history, today: str) -> Iterator[dict[str, Any]]:
+    """Correct clear arithmetic and citation slips in the finished answer, and flag figures that weren't in what was read."""
+    material = [ws.question, today, *ws.evidence, *ws.notes]
+    material += [str(turn.get("text") or "") for turn in history or []]
+    files = []
+    for email in ws.sources:
+        material.append(f"{email.subject}\n{email.body_text}")
+        if not agent.attachments_locked(email):
+            files += [(att.filename, att.extracted_text) for att in email.attachments if att.extracted_text]
+    result = answer_check.review(answer, material=material, files=files)
+    if result.changed(answer):
+        yield {"type": "revise", "text": result.text}
+    if result.checks:
+        yield {"type": "check", "items": result.checks}
 
 
 # Small models sometimes carry on past their answer by copying the instructions they were given.
@@ -574,6 +607,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     if not ws.read_files and not ws.evidence:
         if draft:
             state["wrote"] = True
+            state["text"] += draft
             yield {"type": "delta", "text": draft}
             return
         yield from _stream(settings, build_messages(question, ws.sources, budget=budget, **base), state)

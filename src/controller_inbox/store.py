@@ -145,6 +145,23 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_findings_email ON findings(email_id);
+
+CREATE TABLE IF NOT EXISTS embeddings (
+    key TEXT NOT NULL,
+    model TEXT NOT NULL,
+    email_id TEXT NOT NULL,
+    text_key TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    PRIMARY KEY (key, model)
+);
+
+CREATE TABLE IF NOT EXISTS file_summaries (
+    attachment_id TEXT PRIMARY KEY,
+    text_key TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    model TEXT,
+    created_at TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(category);
@@ -772,6 +789,73 @@ class Store:
     def clear_findings(self, email_id: str) -> int:
         with self.connect() as conn:
             return conn.execute("DELETE FROM findings WHERE email_id = ?", (email_id,)).rowcount
+
+    # File summaries written by the overnight run ------------------------------------------------
+
+    def file_summary(self, attachment_id: str, text_key: str) -> str:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT summary FROM file_summaries WHERE attachment_id = ? AND text_key = ?", (attachment_id, text_key)
+            ).fetchone()
+        return row["summary"] if row else ""
+
+    def save_file_summary(self, attachment_id: str, text_key: str, summary: str, *, model: str = "", at: str = "") -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO file_summaries(attachment_id, text_key, summary, model, created_at) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(attachment_id) DO UPDATE SET text_key=excluded.text_key, summary=excluded.summary,
+                    model=excluded.model, created_at=excluded.created_at
+                """,
+                (attachment_id, text_key, summary, model, at),
+            )
+
+    def files_to_summarize(self, *, min_chars: int, limit: int) -> list[tuple[str, str]]:
+        """(email id, attachment id) of long files with no summary for their current text, most important mail first."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT a.email_id, a.id FROM attachments a
+                JOIN emails e ON e.id = a.email_id
+                LEFT JOIN file_summaries f ON f.attachment_id = a.id
+                WHERE length(a.extracted_text) >= ?
+                  AND (f.attachment_id IS NULL OR f.text_key != a.sha256 || ':' || length(a.extracted_text))
+                ORDER BY e.importance_score DESC, e.received_at DESC
+                LIMIT ?
+                """,
+                (min_chars, limit),
+            ).fetchall()
+        return [(row["email_id"], row["id"]) for row in rows]
+
+    # Vectors for search by meaning ---------------------------------------------------------------
+
+    def embedding_keys(self, model: str) -> dict[str, str]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT key, text_key FROM embeddings WHERE model = ?", (model,)).fetchall()
+        return {row["key"]: row["text_key"] for row in rows}
+
+    def save_embeddings(self, model: str, rows: list[tuple[str, str, str, bytes]]) -> None:
+        """``rows`` are (key, email id, text key, vector bytes)."""
+        with self.connect() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO embeddings(key, model, email_id, text_key, vector) VALUES (?, ?, ?, ?, ?)",
+                [(key, model, email_id, text_key, vector) for key, email_id, text_key, vector in rows],
+            )
+
+    def has_embeddings(self) -> bool:
+        with self.connect() as conn:
+            return conn.execute("SELECT 1 FROM embeddings LIMIT 1").fetchone() is not None
+
+    def embedding_vectors(self, model: str) -> list[tuple[str, bytes]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT email_id, vector FROM embeddings WHERE model = ?", (model,)).fetchall()
+        return [(row["email_id"], row["vector"]) for row in rows]
+
+    def embedding_version(self, model: str) -> str:
+        """Changes whenever vectors for ``model`` are added or replaced."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n, MAX(rowid) AS last FROM embeddings WHERE model = ?", (model,)).fetchone()
+        return f"{row['n']}:{row['last']}"
 
     # Fraud checks ------------------------------------------------------------------------------
 

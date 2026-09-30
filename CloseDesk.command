@@ -11,7 +11,7 @@ if [ ! -x .venv/bin/python ]; then
     read -r -p "Press Enter to close. " _
     exit 1
   fi
-  if ! { "$PY" -m venv .venv && .venv/bin/python -m pip install --quiet --upgrade pip && .venv/bin/python -m pip install --quiet -e .; }; then
+  if ! { "$PY" -m venv .venv && .venv/bin/python -m pip install --quiet --upgrade pip && { .venv/bin/python -m pip install --quiet -e ".[ocr]" || .venv/bin/python -m pip install --quiet -e .; }; }; then
     echo "Setup failed. The message above says why."
     read -r -p "Press Enter to close. " _
     exit 1
