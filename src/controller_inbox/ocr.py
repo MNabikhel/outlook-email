@@ -52,11 +52,13 @@ def _rapid(data: bytes) -> str:
 
 
 # On JPEG scans RapidOCR tends to drop spaces ("Duedate:15October2026"); put back the ones that are certain.
-_JOINS = re.compile(r"(?<=[a-z]{3})(?=\d)|(?<=\d)(?=[A-Z][a-z]{2})|(?<=[A-Za-z]:)(?=\w)")
+_JOINS = re.compile(r"(?<=[A-Za-z][a-z]{2})(?=\d)|(?<=\d)(?=[A-Z][a-z]{2})|(?<=[A-Za-z]:)(?=\w)")
+# ...and to read the O of October as a zero once the space is gone: "150ctober", "200ct 2026".
+_OCTOBER = re.compile(r"(?<![\d.,$])([1-9]|[12]\d|3[01])0(?=ctober|ct\.?\s*\d{4})")
 
 
 def _spaced(line: str) -> str:
-    return _JOINS.sub(" ", line)
+    return _JOINS.sub(" ", _OCTOBER.sub(r"\1 O", line))
 
 
 def _tesseract(data: bytes) -> str:

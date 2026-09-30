@@ -205,10 +205,8 @@ def _scanned_pdf(lines: list[str]) -> bytes:
 
     page = Image.new("L", (1240, 1754), 255)
     draw = ImageDraw.Draw(page)
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", 34)
-    except OSError:
-        font = ImageFont.load_default(size=34)
+    # Pillow's own font on every OS: it is set tight, like the scans that make OCR drop spaces.
+    font = ImageFont.load_default(size=34)
     for n, line in enumerate(lines):
         draw.text((100, 150 + n * 70), line, fill=0, font=font)
     out = io.BytesIO()
@@ -238,5 +236,7 @@ def test_ocr_puts_back_dropped_spaces_without_splitting_codes_or_times():
     from controller_inbox.ocr import _spaced
 
     assert _spaced("Duedate:15October2026") == "Duedate: 15 October 2026"
-    for kept in ("INVOICE4471", "INV-4471 Q4 FY26", "Meeting at 10:30", "Total:$12,480.00"):
+    assert _spaced("Due date: 150ctober 2026") == "Due date: 15 October 2026"
+    assert _spaced("Order 200ct2026, Due10ctober") == "Order 20 Oct 2026, Due 1 October"
+    for kept in ("INVOICE4471", "INV-4471 Q4 FY26", "Meeting at 10:30", "Total:$12,480.00", "Box of 500ct", "Paid $100ct 2026"):
         assert _spaced(kept) == kept
