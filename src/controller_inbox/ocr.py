@@ -172,11 +172,10 @@ def _engine_lines(engine, image) -> list[tuple[float, str]]:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     result, _elapsed = engine(buffer.getvalue(), text_score=0.2, box_thresh=0.2)
-    lines = []
-    for line in result or []:
-        top = min(point[1] for point in line[0])
-        lines.append((top, str(line[1])))
-    return lines
+    return [
+        (min(point[1] for point in line[0]), str(line[1]))
+        for line in result or []
+    ]
 
 
 def _spaced(line: str) -> str:
@@ -196,6 +195,10 @@ def _open_gaps(chars: list[str], boxes: list) -> str:
         return max(point[0] for point in box)
 
     gaps = [left(boxes[i]) - right(boxes[i - 1]) for i in range(1, len(chars))]
+    typical = sorted(gaps)[len(gaps) // 2] if gaps else 0
+    # In a paragraph the space between words is wider than the space inside a word, even when
+    # both letters are lowercase. 8pt keeps "September" intact and still splits "operating income".
+    prose = max(8, typical + 6)
     out = [chars[0]]
     for index, gap in enumerate(gaps, start=1):
         before, after = chars[index - 1], chars[index]
@@ -216,7 +219,9 @@ def _open_gaps(chars: list[str], boxes: list) -> str:
                 right_run += 1
             # "1234 1234", not a year ("2026") and not "15" before a misread letter.
             digit_group = (index - left_run) >= 3 and (right_run - index + 1) >= 3
-        if out[-1] != " " and (word_edge or punctuation or digit_group):
+        prose_space = len(chars) >= 40 and before.isalpha() and after.isalpha() and gap >= prose
+        money_space = gap >= 6 and before.isalpha() and after == "$"
+        if out[-1] != " " and (word_edge or punctuation or digit_group or prose_space or money_space):
             out.append(" ")
         if _divider(chars, index, gaps):
             if out[-1] != " ":
@@ -244,7 +249,7 @@ def _divider(chars: list[str], index: int, gaps: list[float]) -> bool:
 
 def _polish(line: str) -> str:
     """Break a run of words the scan glued together, and keep an ellipsis that lost its last dot."""
-    line = re.sub(r"[A-Za-z]{6,}", lambda match: _segment(match.group(0)), line)
+    line = re.sub(r"[A-Za-z]{5,}", lambda match: _segment(match.group(0)), line)
     line = re.sub(r",(?=[A-Za-z])", ", ", line)
     line = re.sub(r"(?<=\d),(?=\d{4}\b)", ", ", line)
     line = re.sub(r"(?<=[A-Za-z])(?=\()", " ", line)
