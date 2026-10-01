@@ -252,8 +252,9 @@ def _polish(line: str) -> str:
     line = re.sub(r"[A-Za-z]{5,}", lambda match: _segment(match.group(0)), line)
     line = re.sub(r",(?=[A-Za-z])", ", ", line)
     line = re.sub(r"(?<=\d),(?=\d{4}\b)", ", ", line)
-    line = re.sub(r"(?<=[A-Za-z])(?=\()", " ", line)
-    line = re.sub(r"(?<=[)\]])(?=[A-Za-z])", " ", line)
+    line = re.sub(r"(?<=[A-Za-z])(?=[(（])", " ", line)
+    line = re.sub(r"(?<=[)）\]])(?=[A-Za-z])", " ", line)
+    line = re.sub(r"(?<=[A-Za-z])(?=[\"“])", " ", line)
     line = re.sub(r"(?<=\d)(?=[A-Za-z]{3,})", " ", line)
     line = re.sub(r"(?<=[a-z]{2})(?=\d)", " ", line)
     line = re.sub(r"(?<=%)(?=[A-Za-z])", " ", line)
@@ -262,7 +263,11 @@ def _polish(line: str) -> str:
 
 
 def _segment(word: str) -> str:
-    """Split ``Totalrevenue`` into ``Total revenue`` when every piece is a known word."""
+    """Split ``Totalrevenue`` into ``Total revenue`` when every piece is a known word.
+
+    If any piece is unknown, the whole run is left as read. That keeps "October" and
+    "Northwind" intact instead of cutting them at a smaller word inside.
+    """
     lower = word.lower()
     size = len(lower)
     cost = [10**6] * (size + 1)
@@ -273,7 +278,7 @@ def _segment(word: str) -> str:
             continue
         for end in range(start + 1, min(size, start + 22) + 1):
             piece = lower[start:end]
-            if piece not in _WORDS:
+            if piece not in _WORDS or (end - start == 1 and piece not in {"a", "i"}):
                 continue
             if cost[start] + 1 < cost[end]:
                 cost[end] = cost[start] + 1
@@ -313,6 +318,8 @@ _WORDS = frozenset(
     minority investment partially offset revaluation seed portfolio hedges hedge private dividend network capital
     black rock blackrock
     this sample description order number invoice date due your city somewhere street suite business payment
+    primarily driven organic growth movement movements twelve collectively base average technology past
+    service services portfolio portfolios company
     within days day late subject choosing bank from date of thanks
     """.split()
 )
