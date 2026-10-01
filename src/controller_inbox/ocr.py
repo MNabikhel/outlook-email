@@ -112,6 +112,11 @@ def _polish(line: str) -> str:
     """Break a run of words the scan glued together, and keep an ellipsis that lost its last dot."""
     line = re.sub(r"[A-Za-z]{6,}", lambda match: _segment(match.group(0)), line)
     line = re.sub(r",(?=[A-Za-z])", ", ", line)
+    line = re.sub(r"(?<=[A-Za-z])(?=\()", " ", line)
+    line = re.sub(r"(?<=[)\]])(?=[A-Za-z])", " ", line)
+    line = re.sub(r"(?<=\d)(?=[A-Za-z]{3,})", " ", line)
+    line = re.sub(r"(?<=[a-z]{2})(?=\d)", " ", line)
+    line = re.sub(r"\.(?=[A-Z])", ". ", line)
     return re.sub(r"(?<!\.)\.\.(?!\.)", "...", line)
 
 
@@ -162,6 +167,7 @@ _WORDS = frozenset(
     reflected higher investment advisory administration fees fee noncash gains gain related strategic minority
     during partially offset mark seed capital portfolio hedges hedge private equity higher decreased decrease
     stockholders stockholder equity divided respective period end three months month nine ended september basis
+    executive summary
     generally accepted principles principle reflecting advisory administration noncash gains related strategic
     minority investment partially offset revaluation seed portfolio hedges hedge private dividend network capital
     black rock blackrock

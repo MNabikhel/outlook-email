@@ -356,6 +356,9 @@ def test_wide_gaps_and_glued_words_become_readable():
     assert _polish("Thisisasampledescription..") == "This is a sample description..."
     assert _polish("Cashdividendsdeclaredandpaidpershare") == "Cash dividends declared and paid per share"
     assert _polish("INV-3337") == "INV-3337"
+    assert _polish("within 30days from date of invoice.Late payment of5%") == "within 30 days from date of invoice. Late payment of 5%"
+    assert _polish("income(expense),less net") == "income (expense), less net"
+    assert _polish("EXECUTIVESUMMARY") == "EXECUTIVE SUMMARY"
 
 
 def test_ocr_puts_back_dropped_spaces_without_splitting_codes_or_times():
