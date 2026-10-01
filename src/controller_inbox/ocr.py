@@ -120,7 +120,11 @@ def _rows(hits: list[tuple[float, float, str]]) -> list[str]:
     lines = []
     for cells in rows:
         cells.sort(key=lambda hit: hit[1])
-        lines.append(" ".join(text.strip() for _top, _left, text in cells if text.strip()))
+        texts = [text.strip() for _top, _left, text in cells if text.strip()]
+        # A dollar sign on a scanned amount is often read as S when it sits alone between figures.
+        if any(any(ch.isdigit() for ch in text) for text in texts):
+            texts = ["$" if text in {"S", "s"} else text for text in texts]
+        lines.append(" ".join(texts))
     return lines
 
 
@@ -302,9 +306,32 @@ def _divider(chars: list[str], index: int, gaps: list[float]) -> bool:
     return chars[index + 1] == " " or (index < len(gaps) and gaps[index] >= 6)
 
 
+def _thousands(line: str) -> str:
+    """A comma read as a dot inside a thousands group is still a thousands separator.
+
+    28.412,414 and (1.097.978) are grouped in threes. 0.61 and 12,480.00 keep their decimals.
+    """
+
+    def fix(match: re.Match) -> str:
+        token = match.group(0)
+        wrapped = token.startswith("(") and token.endswith(")")
+        core = token[1:-1] if wrapped else token
+        parts = re.split(r"[.,]", core)
+        if len(parts) < 2 or not all(part.isdigit() for part in parts):
+            return token
+        if any(len(part) != 3 for part in parts[1:]):
+            return token
+        grouped = parts[0] + "".join("," + part for part in parts[1:])
+        return f"({grouped})" if wrapped else grouped
+
+    return re.sub(r"\(?\d{1,3}(?:[.,]\d{3})+\)?", fix, line)
+
+
 def _polish(line: str) -> str:
     """Break a run of words the scan glued together, and keep an ellipsis that lost its last dot."""
     line = line.translate(str.maketrans("（）【】［］｛｝", "()[][]{}"))
+    line = re.sub(r"(?<=['\d])O(?=\d)", "0", line)
+    line = _thousands(line)
     line = re.sub(r"[A-Za-z]{5,}", lambda match: _segment(match.group(0)), line)
     line = re.sub(r",(?=[A-Za-z])", ", ", line)
     line = re.sub(r"(?<=\d),(?=\d{4}\b)", ", ", line)
