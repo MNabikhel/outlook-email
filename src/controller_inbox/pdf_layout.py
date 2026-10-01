@@ -449,6 +449,7 @@ def _fact_lines(lines: list[str]) -> bool:
 
 
 _FACT = re.compile(r"^[A-Za-z][^:]{0,40}: \S")
+_PAGE_MARK = re.compile(r"^(?:page\s+\d{1,4}(?:\s+of\s+\d{1,4})?|\d{1,4}\s*/\s*\d{1,4})$", re.I)
 
 
 def _prose_chunks(lines: list[Line]) -> list[tuple[str, list[str]]]:
@@ -495,11 +496,22 @@ def _separate_table(role: str, previous: list[str], new: list[str]) -> bool:
     return new[0] not in previous
 
 
+def _without_page_marks(lines: list[str]) -> list[str]:
+    """Drop a running "Page 3" (or "2/14"). The real page is the [page N] marker around this text."""
+    kept = []
+    for line in lines:
+        parts = [part.strip() for part in line.split("|")]
+        parts = [part for part in parts if part and not _PAGE_MARK.match(part)]
+        if parts:
+            kept.append(" | ".join(parts))
+    return kept
+
+
 def _render_sections(chunks: list[tuple[str, list[str]]]) -> str:
     """One block is plain text. Several blocks are labeled so a model can read the part it needs."""
     merged: list[tuple[str, list[str]]] = []
     for role, lines in chunks:
-        lines = [line for line in lines if line.strip()]
+        lines = _without_page_marks([line for line in lines if line.strip()])
         if not lines:
             continue
         if merged and merged[-1][0] == role and not _separate_table(role, merged[-1][1], lines):

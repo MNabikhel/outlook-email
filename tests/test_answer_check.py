@@ -57,6 +57,17 @@ def test_figures_that_are_nowhere_in_what_was_read_are_flagged():
     assert result.checks == ["$97,250 isn't in the emails or files I read; check it before relying on it."]
 
 
+def test_a_cited_page_that_is_not_in_the_file_is_corrected():
+    roster = "[page 1]\nEmployee: Jonathan Alvarez | Department: not listed | Manager: Priya Raman | Salary: $112,000"
+    result = review(
+        "Jonathan Alvarez's salary is $112,000 (roster.pdf, page 2).",
+        material=[],
+        files=[("roster.pdf", roster)],
+    )
+    assert "page 1" in result.text and "page 2" not in result.text
+    assert result.checks == ["Corrected the page for roster.pdf: that is on page 1, not page 2."]
+
+
 def test_a_wrong_page_is_corrected_when_the_finding_is_on_one_other_page():
     result = _review("FY26 Audit.pdf page 12 says 3 vendor bank-detail changes in July were approved without a call-back.")
     assert "page 17 says" in result.text

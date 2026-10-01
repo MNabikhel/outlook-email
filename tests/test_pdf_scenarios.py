@@ -127,7 +127,7 @@ def test_a_repeated_table_on_the_next_page_is_not_named_twice():
     text = pdf_text(build_pdf(pages))
     assert "Vendor: Northwind | Vendor: Northwind" not in text
     assert text.count("Vendor: Northwind | Amount: $12,480") == 2
-    assert "Page 2" in text
+    assert "[page 2]" in text and "Page 2" not in text
 
 
 def test_a_group_label_stays_inside_the_table():
