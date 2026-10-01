@@ -65,11 +65,13 @@ _OCTOBER = re.compile(r"(?<![\d.,$])([1-9]|[12]\d|3[01])0(?=ctober|ct\.?\s*\d{4}
 
 
 def _already(text: str, known: list[str]) -> bool:
+    """True when this line is the same text already read, not a longer line that merely contains it."""
     plain = _plain(text)
     for other in known:
         if plain == other:
             return True
-        if len(plain) > 20 and (plain in other or other in plain):
+        short, long = sorted((plain, other), key=len)
+        if len(short) > 20 and short in long and len(short) >= 0.8 * len(long):
             return True
     return False
 
@@ -129,15 +131,25 @@ def _missed_lines(engine, image, hits: list[tuple[float, str]]) -> list[tuple[fl
             while y < height and ink[y] > 12 and not covered[y]:
                 y += 1
             if y - start >= 8:
-                crop = image.crop((0, max(0, start - 16), image.width, min(height, y + 16)))
+                # Pad so a bold line is not clipped, then keep only the words whose
+                # position falls inside this gap. Words from the pad belong to the lines
+                # above and below, and drawing them here stacks them on those lines.
+                pad = 16
+                crop_top = max(0, start - pad)
+                crop = image.crop((0, crop_top, image.width, min(height, y + pad)))
                 scaled = crop.resize((max(1, crop.width * 2), max(1, crop.height * 2)))
-                raw = _engine_lines(engine, scaled)
                 known = [_plain(text) for _top, text in hits]
-                found.extend(
-                    (float(start), text)
-                    for top, text in raw
-                    if _usable(text) and not _already(text, known)
-                )
+                for top, text in _engine_lines(engine, scaled):
+                    source_y = crop_top + top / 2
+                    # The line's top can sit a few pixels above the ink band. Keep it when
+                    # the line still overlaps the gap, and leave the padded neighbors out.
+                    # Also leave it out when it would sit on a line already read.
+                    if not (source_y <= y and source_y + 14 >= start):
+                        continue
+                    if any(abs(other - source_y) < 18 for other, _text in hits):
+                        continue
+                    if _usable(text) and not _already(text, known):
+                        found.append((source_y, text))
         else:
             y += 1
     return found

@@ -360,6 +360,12 @@ def test_wide_gaps_and_glued_words_become_readable():
     assert _polish("income(expense),less net") == "income (expense), less net"
     assert _polish("EXECUTIVESUMMARY") == "EXECUTIVE SUMMARY"
     assert _polish("September 30,2023") == "September 30, 2023"
+    from controller_inbox.ocr import _already
+    assert not _already(
+        "Three Months Ended September 30, 2023 Compared with Three Months Ended September 30, 2022",
+        ["threemonthsended"],
+    )
+    assert _already("Total revenue", ["totalrevenue"])
     assert _polish("$12,480.00") == "$12,480.00"
     invoices = list("InvoicesI ")
     gaps = [0] * (len(invoices) - 1)
