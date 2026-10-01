@@ -51,10 +51,10 @@ def _rapid(data: bytes) -> str:
     from PIL import Image
 
     image = Image.open(io.BytesIO(data)).convert("RGB")
-    hits = [_hit(line) for line in result or []]
+    hits = [cell for line in result or [] for cell in _cells(line)]
     hits += _missed_lines(_engine, image, hits)
     hits = [_reread_empty_parens(_engine, image, hit) for hit in hits]
-    return "\n".join(_polish(_spaced(text)) for text in _rows(hits) if text.strip())[:MAX_CHARS]
+    return "\n".join(line for line in _rows(hits) if line.strip())[:MAX_CHARS]
 
 
 # On JPEG scans RapidOCR tends to drop spaces ("Duedate:15October2026"); put back the ones that are certain.
@@ -87,29 +87,48 @@ def _plain(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
-def _hit(line) -> tuple[float, float, str]:
-    """One recognized line: its top, its left, and its text with spaces restored."""
+def _cells(line) -> list[tuple[float, float, float, str]]:
+    """One box per phrase. A wide gap inside a line is the next column, not a word space."""
     box = line[0]
     top = min(point[1] for point in box)
-    left = min(point[0] for point in box)
     chars = line[4] if len(line) > 5 and isinstance(line[4], list) else None
     boxes = line[3] if len(line) > 4 and isinstance(line[3], list) else None
-    text = _open_gaps(chars, boxes) if chars and boxes and len(chars) == len(boxes) else str(line[1])
-    return top, left, text
+    if not (chars and boxes and len(chars) == len(boxes)):
+        left = min(point[0] for point in box)
+        right = max(point[0] for point in box)
+        return [(top, left, right, str(line[1]))]
+
+    def left_of(item) -> float:
+        return min(point[0] for point in item)
+
+    def right_of(item) -> float:
+        return max(point[0] for point in item)
+
+    cuts = [0]
+    for index in range(1, len(chars)):
+        if left_of(boxes[index]) - right_of(boxes[index - 1]) >= 28:
+            cuts.append(index)
+    cuts.append(len(chars))
+    cells = []
+    for start, end in zip(cuts, cuts[1:]):
+        text = _open_gaps(chars[start:end], boxes[start:end])
+        if text.strip():
+            cells.append((top, left_of(boxes[start]), right_of(boxes[end - 1]), text))
+    return cells or [(top, min(point[0] for point in box), max(point[0] for point in box), str(line[1]))]
 
 
-def _rows(hits: list[tuple[float, float, str]]) -> list[str]:
-    """Put cells that share a baseline on one line, left to right.
+def _rows(hits: list[tuple]) -> list[str]:
+    """Put cells that share a baseline on one line, and name the column an amount sits in.
 
-    A table cell is its own box, and its top sits a few pixels off its row label.
-    Sorting by that top alone drops the amounts onto the next line. Cells within
-    a fraction of the page's line spacing stay together; the next row starts below that.
+    A blank cell is written ``not listed`` under its own column. Leaving the slot out is what
+    makes the next amount look like it belongs to the column before it.
     """
-    ordered = sorted(hits, key=lambda hit: (hit[0], hit[1]))
+    cells = [_prepared(hit) for hit in hits if _prepared(hit)[3]]
+    ordered = sorted(cells, key=lambda hit: (hit[0], hit[1]))
     gaps = [b[0] - a[0] for a, b in zip(ordered, ordered[1:]) if 12 <= b[0] - a[0] <= 80]
     pitch = sorted(gaps)[len(gaps) // 2] if gaps else 22
     tolerance = max(6.0, pitch * 0.4)
-    rows: list[list[tuple[float, float, str]]] = []
+    rows: list[list[tuple[float, float, float, str]]] = []
     anchors: list[float] = []
     for hit in ordered:
         if rows and hit[0] - anchors[-1] <= tolerance:
@@ -117,15 +136,162 @@ def _rows(hits: list[tuple[float, float, str]]) -> list[str]:
         else:
             rows.append([hit])
             anchors.append(hit[0])
+    rows = [_currency(row) for row in rows]
+    columns = _amount_columns(rows)
+    labels = _column_labels(rows, columns)
     lines = []
-    for cells in rows:
-        cells.sort(key=lambda hit: hit[1])
-        texts = [text.strip() for _top, _left, text in cells if text.strip()]
-        # A dollar sign on a scanned amount is often read as S when it sits alone between figures.
-        if any(any(ch.isdigit() for ch in text) for text in texts):
-            texts = ["$" if text in {"S", "s"} else text for text in texts]
-        lines.append(" ".join(texts))
+    for row in rows:
+        lines.append(_emit(row, columns, labels) if columns else _plain_row(row))
     return lines
+
+
+def _prepared(hit: tuple) -> tuple[float, float, float, str]:
+    """Polish one cell. A test hit without a right edge gets one from its text width."""
+    if len(hit) == 4:
+        top, left, right, text = hit
+    else:
+        top, left, text = hit
+        right = left + max(16.0, 7.5 * len(text))
+    text = _polish(_spaced(str(text))).strip()
+    return float(top), float(left), float(right), text
+
+
+def _plain_row(row: list[tuple[float, float, float, str]]) -> str:
+    cells = sorted(row, key=lambda hit: hit[1])
+    texts = [text for _top, _left, _right, text in cells if text]
+    if any(any(ch.isdigit() for ch in text) for text in texts):
+        texts = ["$" if text in {"S", "s"} else text for text in texts]
+    return " ".join(texts)
+
+
+def _currency(row: list[tuple[float, float, float, str]]) -> list[tuple[float, float, float, str]]:
+    """A lone S just left of a figure is the dollar sign."""
+    ordered = sorted(row, key=lambda hit: hit[1])
+    out: list[tuple[float, float, float, str]] = []
+    index = 0
+    while index < len(ordered):
+        top, left, right, text = ordered[index]
+        nxt = ordered[index + 1] if index + 1 < len(ordered) else None
+        if text in {"$", "S", "s"} and nxt and _is_amount(nxt[3]) and nxt[1] - right <= 36:
+            mark = "$"
+            amount = nxt[3] if nxt[3].startswith("$") else f"{mark}{nxt[3]}"
+            out.append((nxt[0], left, nxt[2], amount))
+            index += 2
+            continue
+        out.append((top, left, right, "$" if text in {"S", "s"} and _row_has_amount(ordered) else text))
+        index += 1
+    return out
+
+
+def _row_has_amount(row: list[tuple[float, float, float, str]]) -> bool:
+    return any(_is_amount(text) for _t, _l, _r, text in row)
+
+
+_AMOUNT = re.compile(r"^[$€£]?\(?\d[\d,.]*%?\)?$")
+_YEAR = re.compile(r"^(?:19|20)\d{2}$")
+
+
+def _is_amount(text: str) -> bool:
+    return bool(_AMOUNT.fullmatch(text.replace(" ", ""))) and not _YEAR.fullmatch(text.strip())
+
+
+def _amount_columns(rows: list[list[tuple[float, float, float, str]]]) -> list[float]:
+    """Right edges where amounts stack often enough to be a column, left to right."""
+    rights = sorted(right for row in rows for _top, _left, right, text in row if _is_amount(text))
+    if len(rights) < 6:
+        return []
+    gaps = [b - a for a, b in zip(rights, rights[1:]) if b > a]
+    typical = sorted(gaps)[len(gaps) // 2] if gaps else 40
+    cut = max(36.0, typical * 0.55)
+    clusters: list[list[float]] = [[rights[0]]]
+    for right in rights[1:]:
+        if right - clusters[-1][-1] <= cut:
+            clusters[-1].append(right)
+        else:
+            clusters.append([right])
+    columns = [sum(cluster) / len(cluster) for cluster in clusters if len(cluster) >= 3]
+    return columns if len(columns) >= 2 else []
+
+
+def _column_labels(rows: list[list[tuple[float, float, float, str]]], columns: list[float]) -> list[str]:
+    """The words that sit on a column: a year, or the heading above that column."""
+    if not columns:
+        return []
+    ranges = _ranges(columns)
+    first_data = next((index for index, row in enumerate(rows) if any(not _YEAR.fullmatch(text) and _is_amount(text) for _t, _l, _r, text in row)), len(rows))
+    labels = [""] * len(columns)
+    band = ranges[0][0]
+    for row in rows[:first_data]:
+        headings = [
+            (left, text)
+            for _top, left, right, text in row
+            if text and not _is_amount(text) and not _YEAR.fullmatch(text) and len(text) <= 48 and right >= band
+        ]
+        headings.sort()
+        for index, center in enumerate(columns):
+            # A heading covers the columns to its right, up to the next heading on that line.
+            covering = [text for left, text in headings if left <= center + 8]
+            if covering and covering[-1] not in labels[index]:
+                labels[index] = f"{labels[index]} {covering[-1]}".strip()
+    for row in rows[: first_data + 1]:
+        for _top, _left, right, text in row:
+            if not _YEAR.fullmatch(text):
+                continue
+            index = min(range(len(columns)), key=lambda item: abs(columns[item] - right))
+            if text not in labels[index]:
+                labels[index] = f"{labels[index]} {text}".strip()
+    return _unique_labels(labels)
+
+
+def _ranges(columns: list[float]) -> list[tuple[float, float]]:
+    ranges = []
+    for index, center in enumerate(columns):
+        start = (columns[index - 1] + center) / 2 if index else center - (columns[1] - center) / 2
+        end = (center + columns[index + 1]) / 2 if index + 1 < len(columns) else center + (center - columns[index - 1]) / 2
+        ranges.append((start, end))
+    return ranges
+
+
+def _unique_labels(labels: list[str]) -> list[str]:
+    """Two columns both named 2023 stay distinct: the later one keeps a count."""
+    seen: dict[str, int] = {}
+    out = []
+    for label in labels:
+        if not label:
+            out.append("")
+            continue
+        seen[label] = seen.get(label, 0) + 1
+        out.append(label if seen[label] == 1 else f"{label} ({seen[label]})")
+    return out
+
+
+def _emit(row: list[tuple[float, float, float, str]], columns: list[float], labels: list[str]) -> str:
+    ranges = _ranges(columns)
+    placed = [""] * len(columns)
+    label_parts: list[str] = []
+    used = False
+    for _top, left, right, text in sorted(row, key=lambda hit: hit[1]):
+        if not text or text in {"$", "S", "s"}:
+            continue
+        slot = None
+        if _is_amount(text) or _YEAR.fullmatch(text):
+            for index, (start, end) in enumerate(ranges):
+                if start <= right <= end or abs(right - columns[index]) <= (end - start) / 2:
+                    slot = index
+                    break
+        if slot is None:
+            if right < ranges[0][0]:
+                label_parts.append(text)
+            continue
+        used = True
+        placed[slot] = f"{placed[slot]} {text}".strip() if placed[slot] else text
+    if not used or all(_YEAR.fullmatch(text) for text in placed if text):
+        return _plain_row(row)
+    bits = [" ".join(label_parts)] if label_parts else []
+    for name, value in zip(labels, placed):
+        shown = value or "not listed"
+        bits.append(f"{name}: {shown}" if name else shown)
+    return " | ".join(bit for bit in bits if bit)
 
 
 def _read_gap(engine, image, start: int, end: int, height: int) -> list[tuple[float, str]]:
@@ -152,7 +318,7 @@ def _missed_lines(engine, image, hits: list[tuple[float, float, str]]) -> list[t
     ink = (gray < 170).sum(axis=1)
     height = len(ink)
     covered = np.zeros(height, dtype=bool)
-    for top, _left, _text in hits:
+    for top, _left, _right, _text in hits:
         y = int(top)
         near = [
             row
@@ -180,30 +346,31 @@ def _missed_lines(engine, image, hits: list[tuple[float, float, str]]) -> list[t
                 # A tight crop reads a short footnote. A bold heading needs padding, which also
                 # pulls in the lines above and below, so those words are dropped unless they
                 # sit in this gap.
-                known = [_plain(text) for _top, _left, text in hits]
+                known = [_plain(text) for _top, _left, _right, text in hits]
                 gap = _read_gap(engine, image, start, y, height)
                 # A footnote mark is small. The crop sometimes keeps the digit and drops the parentheses.
                 if any(re.fullmatch(r"\d", text.strip()) for _y, text in gap) and any(_usable(text) for _y, text in gap):
                     gap = [(gy, f"({text.strip()})" if re.fullmatch(r"\d", text.strip()) else text) for gy, text in gap]
                 for source_y, text in gap:
-                    if any(abs(other - source_y) < 12 for other, _left, _text in hits):
+                    if any(abs(other - source_y) < 12 for other, _left, _right, _text in hits):
                         continue
                     marker = bool(re.fullmatch(r"\(\d+\)", text.strip()))
                     if (marker or _usable(text)) and not _already(text, known):
                         # The mark sits at the left of the note. The sentence is the rest of that line.
-                        found.append((source_y, 0.0 if marker else 24.0, text))
+                        left = 0.0 if marker else 24.0
+                        found.append((source_y, left, left + max(16.0, 7.5 * len(text)), text))
         else:
             y += 1
     return found
 
 
-def _reread_empty_parens(engine, image, hit: tuple[float, float, str]) -> tuple[float, float, str]:
+def _reread_empty_parens(engine, image, hit: tuple) -> tuple:
     """A footnote marker read as () is too small. Read that line again, larger.
 
     Only the marker is replaced. A taller crop also contains the next footnote, and taking
     that whole line would number this note with the one below it.
     """
-    top, left, text = hit
+    top, left, right, text = hit
     if "()" not in text:
         return hit
     crop = image.crop((0, max(0, int(top) - 2), image.width, min(image.height, int(top) + 22)))
@@ -211,7 +378,7 @@ def _reread_empty_parens(engine, image, hit: tuple[float, float, str]) -> tuple[
     marker = _footnote_marker(line for _y, line in _engine_lines(engine, scaled))
     if not marker:
         return hit
-    return top, left, text.replace("()", marker, 1)
+    return top, left, right, text.replace("()", marker, 1)
 
 
 def _footnote_marker(lines) -> str:

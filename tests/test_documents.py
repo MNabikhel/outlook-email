@@ -419,6 +419,57 @@ def test_wide_gaps_and_glued_words_become_readable():
     assert "I" in _open_gaps(word, boxes(word, [0] * (len(word) - 1)))
 
 
+def test_a_missing_cell_stays_in_its_own_column():
+    """One amount on a row must not slide into the other year's column."""
+    from controller_inbox.ocr import _rows
+
+    def cell(top, left, right, text):
+        return (top, left, right, text)
+
+    hits = [cell(30, 150, 200, "2018"), cell(30, 270, 320, "2019")]
+    rows = [
+        ("Revenue", "24,544,049", "28,412,414"),
+        ("Cost of sales", "(15,421,144)", "(17,878,208)"),
+        ("Gross Profit", "9,122,905", "10,534,206"),
+        ("Share of results of associates", "", "7,792"),
+        ("Profit from discontinued operations", "41,555", ""),
+    ]
+    for index, (label, left, right) in enumerate(rows):
+        top = 80 + index * 24
+        hits.append(cell(top, 10, 140, label))
+        if left:
+            hits.append(cell(top, 150, 200, left))
+        if right:
+            hits.append(cell(top, 270, 320, right))
+    # A different shape: four columns, and a sentence that is not a row of the table.
+    hits.append(cell(400, 10, 500, "The audit found no exceptions in the sample."))
+    lines = _rows(hits)
+    text = "\n".join(lines)
+    assert "2018: 24,544,049" in text and "2019: 28,412,414" in text
+    assert "2018: not listed | 2019: 7,792" in text
+    assert "2018: 41,555 | 2019: not listed" in text
+    assert "The audit found no exceptions in the sample." in text
+
+    wide = []
+    for index, values in enumerate(
+        (
+            ("4,522", "4,311", "13,228", "13,536"),
+            ("2,885", "2,785", "8,538", "8,578"),
+            ("1,637", "1,526", "4,690", "4,958"),
+            ("", "", "15.00", "14.64"),
+        )
+    ):
+        top = 80 + index * 22
+        wide.append(cell(top, 10, 80, f"Row {index}"))
+        for number, value in enumerate(values):
+            if value:
+                left = 200 + number * 120
+                wide.append(cell(top, left, left + 50, value))
+    short = next(line for line in _rows(wide) if "Row 3" in line)
+    assert "15.00" in short and "14.64" in short and "not listed" in short
+    assert short.index("not listed") < short.index("15.00")
+
+
 def test_ocr_puts_back_dropped_spaces_without_splitting_codes_or_times():
     from controller_inbox.ocr import _spaced
 
