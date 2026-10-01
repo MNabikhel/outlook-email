@@ -336,6 +336,28 @@ def test_scanned_pdf_without_ocr_says_how_to_add_it(monkeypatch):
     assert "looks scanned" in text and 'pip install -e ".[ocr]"' in text and "12,480" not in text
 
 
+def test_wide_gaps_and_glued_words_become_readable():
+    from controller_inbox.ocr import _open_gaps, _polish
+
+    def boxes(chars: str, gaps: list[float]) -> list:
+        x = 0.0
+        made = []
+        for index, _char in enumerate(chars):
+            if index:
+                x += 8 + gaps[index - 1]
+            made.append([[x, 0], [x + 8, 0], [x + 8, 14], [x, 14]])
+        return made
+
+    assert _open_gaps(list("YourCityAZ12345"), boxes("YourCityAZ12345", [1, 1, 1, 9, 1, 1, 1, 10, 1, 10, 1, 1, 1, 1])) == "Your City AZ 12345"
+    assert _open_gaps(list("ACC #12341234"), boxes("ACC #12341234", [0, 0, 0, 0, 5, 0, 0, 1, 5, 0, 1, 0])) == "ACC # 1234 1234"
+    assert _open_gaps(list("OrderNumber"), boxes("OrderNumber", [0, 1, 0, 0, 5, 5, 0, 1, 0, 1])) == "OrderNumber"
+    assert _polish("OrderNumber") == "Order Number"
+    assert _polish("Totalrevenue") == "Total revenue"
+    assert _polish("Thisisasampledescription..") == "This is a sample description..."
+    assert _polish("Cashdividendsdeclaredandpaidpershare") == "Cash dividends declared and paid per share"
+    assert _polish("INV-3337") == "INV-3337"
+
+
 def test_ocr_puts_back_dropped_spaces_without_splitting_codes_or_times():
     from controller_inbox.ocr import _spaced
 
