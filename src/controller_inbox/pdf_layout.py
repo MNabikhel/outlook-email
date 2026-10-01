@@ -120,18 +120,18 @@ def page_text(glyphs: list[Glyph], previous: list[Table] | None = None) -> PageT
     for line in lines:
         line.segments = _segments(line)
     lines = [line for line in lines if line.segments]
-    out: list[str] = []
+    chunks: list[tuple[str, list[str]]] = []
     found: list[Table] = []
     index = 0
     for start, end in _table_blocks(lines):
-        out.extend(_dehyphenate([line.plain() for line in lines[index:start]]))
+        chunks.extend(_prose_chunks(lines[index:start]))
         text, table = _table(lines[start:end], None if found else previous)
-        out.extend(["", *text, ""])
         if table:
             found.append(table)
+        chunks.append((_chunk_role(text, table), text))
         index = end
-    out.extend(_dehyphenate([line.plain() for line in lines[index:]]))
-    return PageText(re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip(), found)
+    chunks.extend(_prose_chunks(lines[index:]))
+    return PageText(_render_sections(chunks), found)
 
 
 # Lines and words -------------------------------------------------------------------------------
@@ -219,19 +219,58 @@ def _table_blocks(lines: list[Line]) -> list[tuple[int, int]]:
 
 
 def _continues(lines: list[Line], start: int, index: int) -> bool:
-    """Whether line ``index`` is another row of the table that starts at ``start``."""
+    """Whether line ``index`` is another row of the table that starts at ``start``.
+
+    A line joins only when it sits on the same columns. A bold label after the data, or a
+    larger heading, ends the table, so the next section is not read as another row.
+    """
     line, before = lines[index], lines[index - 1]
     pitches = [lines[k - 1].mid - lines[k].mid for k in range(start + 1, index)]
     usual = statistics.median(pitches) if pitches else 2.0 * line.size
     gap = before.mid - line.mid
+    if gap > max(2.2 * usual, 3.0 * line.size):
+        return False
+    block = lines[start:index]
+    if line.size > statistics.median(ln.size for ln in block) * 1.35:
+        return False
+    data_started = any(not ln.bold for ln in block)
+    words = [word.text for seg in line.segments for word in seg]
+    if data_started and line.bold and words and not any(tables.is_value(word) for word in words):
+        return False
+    columns = _columns(block)
     if len(line.segments) >= 2:
-        return gap <= max(2.2 * usual, 3.0 * line.size)
-    # A row with one filled cell: it has to sit under a single column, at the table's row spacing.
+        return _fits_columns(line, columns)
     if gap > 1.6 * usual + 1:
         return False
     x0, x1 = line.segments[0][0].x0, line.segments[0][-1].x1
-    under = [c for c in _columns(lines[start:index]) if x0 < c[1] and x1 > c[0]]
+    under = [c for c in columns if x0 < c[1] and x1 > c[0]]
     return len(under) == 1
+
+
+def _fits_columns(line: Line, columns: list[tuple[float, float]]) -> bool:
+    """Every piece of the line sits in a column this table already has.
+
+    Columns are widened to the gap on either side, so a right-aligned number still belongs
+    to the heading drawn at the right edge of the same column.
+    """
+    if len(columns) < 2:
+        return False
+    spans = _spans(columns)
+    return all(_owns(segment, spans) for segment in line.segments)
+
+
+def _spans(columns: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    spans = []
+    for index, (left, right) in enumerate(columns):
+        lo = (columns[index - 1][1] + left) / 2 if index else left - 80
+        hi = (right + columns[index + 1][0]) / 2 if index + 1 < len(columns) else right + 80
+        spans.append((lo, hi))
+    return spans
+
+
+def _owns(segment: list[Word], spans: list[tuple[float, float]]) -> bool:
+    centre = (segment[0].x0 + segment[-1].x1) / 2
+    return any(lo <= centre <= hi for lo, hi in spans)
 
 
 def _columns(block: list[Line]) -> list[tuple[float, float]]:
@@ -331,6 +370,82 @@ def _prose(grid: list[list[str]]) -> bool:
 def _mostly_values(cells: tuple[str, ...]) -> bool:
     filled = [cell for cell in cells if cell.strip()]
     return len(filled) >= 2 and sum(map(tables.is_value, filled)) >= 0.6 * len(filled)
+
+
+def _chunk_role(text: list[str], table: Table | None) -> str:
+    body = [line for line in text if line.strip() and not line.startswith("[")]
+    if table is None and _fact_lines(body):
+        return "facts"
+    if table is None and body and statistics.median(len(line.split()) for line in body) >= 5:
+        return "columns"
+    if table is None:
+        return "notes"
+    return "table"
+
+
+def _fact_lines(lines: list[str]) -> bool:
+    if len(lines) < 2:
+        return False
+    hits = [line for line in lines if "|" not in line and len(line) <= 80 and _FACT.match(line)]
+    return len(hits) >= 0.7 * len(lines)
+
+
+_FACT = re.compile(r"^[A-Za-z][^:]{0,40}: \S")
+
+
+def _prose_chunks(lines: list[Line]) -> list[tuple[str, list[str]]]:
+    """Headings, key facts and ordinary lines, kept apart so a title is not a table row."""
+    if not lines:
+        return []
+    med = statistics.median(line.size for line in lines)
+    groups: list[tuple[str, list[str]]] = []
+    role = ""
+    buf: list[Line] = []
+
+    def flush() -> None:
+        nonlocal buf
+        if buf:
+            groups.append((role, _dehyphenate([line.plain() for line in buf])))
+            buf = []
+
+    for line in lines:
+        nxt = _prose_role(line, med)
+        if buf and nxt != role:
+            flush()
+        role = nxt
+        buf.append(line)
+    flush()
+    return groups
+
+
+def _prose_role(line: Line, med: float) -> str:
+    text = line.plain().strip()
+    words = text.split()
+    if "|" in text:
+        return "notes"
+    if (line.bold or line.size >= med * 1.2) and 0 < len(words) <= 10 and not text.endswith("."):
+        return "heading"
+    if "|" not in text and len(text) <= 80 and len(words) <= 6 and _FACT.match(text):
+        return "facts"
+    return "notes"
+
+
+def _render_sections(chunks: list[tuple[str, list[str]]]) -> str:
+    """One block is plain text. Several blocks are labeled so a model can read the part it needs."""
+    merged: list[tuple[str, list[str]]] = []
+    for role, lines in chunks:
+        lines = [line for line in lines if line.strip()]
+        if not lines:
+            continue
+        if merged and merged[-1][0] == role:
+            merged[-1][1].extend(lines)
+        else:
+            merged.append((role, list(lines)))
+    if not merged:
+        return ""
+    if len(merged) == 1:
+        return "\n".join(merged[0][1]).strip()
+    return "\n\n".join(f"[{role}]\n" + "\n".join(lines) for role, lines in merged)
 
 
 def _dehyphenate(lines: list[str]) -> list[str]:

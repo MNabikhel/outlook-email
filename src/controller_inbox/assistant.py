@@ -112,7 +112,8 @@ SYSTEM = (
 
 TOOLS_GUIDE = (
     "\nYou can read more before answering. A PDF is already parsed: pages, columns and tables are text you can "
-    "search, with \"Column: value\" rows and \"not listed\" for a blank cell. Work step by step: find the right "
+    "search, with \"Column: value\" rows and \"not listed\" for a blank cell. A page with more than one part is "
+    "labeled [heading], [facts], [table], [notes] or [columns]; read the part that has the figure. Work step by step: find the right "
     "email and file, read the part that answers the question (read_file, find_in_file), for spreadsheets check "
     "exact numbers with read_cells and how "
     "a total is built with trace_cell, for what went up or down most use compare_columns, and write each "

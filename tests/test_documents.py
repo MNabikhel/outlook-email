@@ -82,7 +82,7 @@ def test_pdf_pages_and_table_columns():
         ]
     )
     text = extract_text_from_bytes("inv.pdf", "application/pdf", data)
-    assert text.startswith("[page 1]\nNorthwind Traders - Invoice INV-2231")
+    assert text.startswith("[page 1]\n") and "Northwind Traders - Invoice INV-2231" in text
     assert "Item | Qty | Amount\nItem: Consulting | Qty: 10 | Amount: $4,000.00\nItem: Total | Qty: not listed | Amount: $4,350.00" in text
     assert "[page 2]\nTerms: net 30" in text
     assert read_part(text, "page 2").text.startswith("Terms: net 30")
