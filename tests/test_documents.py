@@ -359,6 +359,14 @@ def test_wide_gaps_and_glued_words_become_readable():
     assert _polish("within 30days from date of invoice.Late payment of5%") == "within 30 days from date of invoice. Late payment of 5%"
     assert _polish("income(expense),less net") == "income (expense), less net"
     assert _polish("EXECUTIVESUMMARY") == "EXECUTIVE SUMMARY"
+    assert _polish("September 30,2023") == "September 30, 2023"
+    assert _polish("$12,480.00") == "$12,480.00"
+    invoices = list("InvoicesI ")
+    gaps = [0] * (len(invoices) - 1)
+    gaps[7] = 7  # the gap before the bar that was read as I
+    assert "Invoices |" in _open_gaps(invoices, boxes(invoices, gaps))
+    word = list(" Invoices")
+    assert "I" in _open_gaps(word, boxes(word, [0] * (len(word) - 1)))
 
 
 def test_ocr_puts_back_dropped_spaces_without_splitting_codes_or_times():
