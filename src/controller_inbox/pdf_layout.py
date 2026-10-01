@@ -6,7 +6,8 @@ text stream gives two kinds of wrong text a model then repeats:
 * spaced-out letters ("J o h n  S m i t h") when a heading is letter-spaced or each
   character is placed on its own, and
 * shifted tables: a sheet saved as PDF has no separators, so a blank cell vanishes and the
-  values after it slide one column left (the manager's name read as the department).
+  values after it slide one column left (the manager's name read as the department), and
+* justified lines and short two-column pages, whose wide word spaces otherwise get read as columns.
 
 Here each character keeps its box (pdfminer). A word ends where the gap is clearly wider than
 the usual gap between letters on that line, so letter-spacing doesn't split words. Lines whose
@@ -123,13 +124,13 @@ def page_text(glyphs: list[Glyph], previous: list[Table] | None = None) -> PageT
     found: list[Table] = []
     index = 0
     for start, end in _table_blocks(lines):
-        out.extend(line.plain() for line in lines[index:start])
+        out.extend(_dehyphenate([line.plain() for line in lines[index:start]]))
         text, table = _table(lines[start:end], None if found else previous)
         out.extend(["", *text, ""])
         if table:
             found.append(table)
         index = end
-    out.extend(line.plain() for line in lines[index:])
+    out.extend(_dehyphenate([line.plain() for line in lines[index:]]))
     return PageText(re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip(), found)
 
 
@@ -168,12 +169,15 @@ def _segments(line: Line) -> list[list[Word]]:
         return []
     em = line.size
     gaps = [b.x0 - a.x1 for a, b in zip(glyphs, glyphs[1:])]
-    # The usual gap between letters on this line: about zero, or the tracking of letter-spaced text.
-    # Too few gaps to tell (a row of short numbers) means ordinary spacing.
-    small = sorted(max(0.0, gap) for gap in gaps if gap < 0.6 * em)
-    letter = min(small[len(small) // 4], 0.4 * em) if len(small) >= 4 else 0.0
-    word_gap = letter + 0.15 * em
-    piece_gap = max(word_gap + 0.35 * em, 2 * letter + 0.55 * em)
+    # Letter-spacing and kerning sit well under half an em. A word space is wider than that, and a
+    # column break is wider again. Justified prose stretches every word space, so the column break
+    # has to sit above the line's own word spacing or the sentence is read as a table.
+    tight = sorted(gap for gap in gaps if gap < 0.5 * em)
+    letter = min(max(tight[len(tight) // 4], 0.0), 0.45 * em) if len(tight) >= 4 else 0.0
+    word_gap = max(letter + 0.12 * em, 0.16 * em)
+    wordish = [gap for gap in gaps if word_gap < gap <= 2.2 * em]
+    typical = statistics.median(wordish) if len(wordish) >= 2 else max(0.25 * em, letter + 0.22 * em)
+    piece_gap = max(1.35 * em, typical * 2.4, letter + 0.9 * em)
     segments: list[list[Word]] = [[]]
     current = [glyphs[0]]
     for gap, glyph in zip(gaps, glyphs[1:]):
@@ -272,7 +276,7 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
     mids = [line.mid for line in block]
 
     if _prose(grid):
-        return [" ".join(row[c] for row in grid if row[c]) for c in range(len(columns))], None
+        return _dehyphenate([" ".join(row[c] for row in grid if row[c]) for c in range(len(columns))]), None
 
     bold_first = block[0].bold and not all(line.bold for line in block[1:])
     heads = 1
@@ -307,11 +311,37 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
 
 
 def _prose(grid: list[list[str]]) -> bool:
-    """Two or three columns of running text (a newsletter layout), not a table."""
-    if len(grid) < 5 or len(grid[0]) > 3:
+    """Two or three columns of running text (a newsletter layout), not a table.
+
+    A short page of two text columns is still prose. A column of amounts, dates or yes/no
+    keeps the block a table, so a description sitting next to a figure is not read down the page.
+    """
+    columns = len(grid[0]) if grid else 0
+    if columns < 2 or columns > 3:
+        return False
+    if len(grid) < (3 if columns == 2 else 5):
         return False
     words = [len(cell.split()) for row in grid for cell in row if cell]
-    return bool(words) and statistics.mean(words) >= 6
+    # Median, so one short wrapped leftover ("twelfth.") does not hide a page of sentences.
+    if not words or statistics.median(words) < 5:
+        return False
+    return not any(_mostly_values(column) for column in zip(*grid))
+
+
+def _mostly_values(cells: tuple[str, ...]) -> bool:
+    filled = [cell for cell in cells if cell.strip()]
+    return len(filled) >= 2 and sum(map(tables.is_value, filled)) >= 0.6 * len(filled)
+
+
+def _dehyphenate(lines: list[str]) -> list[str]:
+    """A word split at the end of a line ("non-" / "payment") is one word again."""
+    out: list[str] = []
+    for line in lines:
+        if out and out[-1].endswith("-") and not out[-1].endswith(" -") and line[:1].islower():
+            out[-1] = out[-1] + line
+        else:
+            out.append(line)
+    return out
 
 
 def _join_wrapped(grid: list[list[str]], mids: list[float], *, first: int) -> tuple[list[list[str]], list[float]]:

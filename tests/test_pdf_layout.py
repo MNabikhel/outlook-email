@@ -3,7 +3,7 @@ import io
 from pypdf import PdfReader
 
 from controller_inbox.documents import _pdf_page, pdf_text
-from pdffactory import Text, build_pdf, sheet_rows
+from pdffactory import Text, build_pdf, sheet_rows, width
 
 
 def _page(*items: Text) -> str:
@@ -87,6 +87,73 @@ def test_labels_and_values_on_one_line_stay_together():
         Text(72, 725, "Amount due:"), Text(200, 725, "$12,480.00"),
     )
     assert text.splitlines() == ["Invoice number: INV-4471", "Amount due: $12,480.00"]
+
+
+def _words_at(words: list[str], x: float, y: float, *, gap: float, size: float = 10, width_limit: float | None = None) -> list[Text]:
+    """Words placed one by one, the way a justified line or a text column is drawn."""
+    items = []
+    at = x
+    for word in words:
+        if width_limit is not None and at > x and at + width(word, size) > width_limit:
+            break
+        items.append(Text(at, y, word, size=size))
+        at += width(word, size) + gap
+    return items
+
+
+def test_justified_prose_stays_sentences_instead_of_fake_columns():
+    words = (
+        "The quarterly close requires every department to submit accruals before Friday. "
+        "Finance will review the Northwind invoice and confirm the amount due is $12,480.00. "
+        "Payment is due forty-five days after the invoice date of 15 March 2026."
+    ).split()
+    items = []
+    y = 740
+    chunk: list[str] = []
+    for word in words:
+        chunk.append(word)
+        if len(chunk) == 8:
+            items += _words_at(chunk, 72, y, gap=11)
+            chunk = []
+            y -= 14
+    items += _words_at(chunk, 72, y, gap=11)
+    text = _page(*items)
+    assert " | " not in text
+    assert "Finance will review the Northwind invoice and confirm the amount due is $12,480.00." in text.replace("\n", " ")
+    assert "15 March 2026" in text
+
+
+def test_a_short_two_column_page_is_read_down_each_column():
+    left = "Column one discusses the audit findings for inventory. The warehouse count was short by forty units of item SKU 4412. Management response is due by October twelfth.".split()
+    right = "Column two lists the cash position. The operating account ended at one million two hundred thousand. The reserve account holds four hundred thousand.".split()
+    items = []
+    for column, x in ((left, 72), (right, 340)):
+        y = 740
+        line: list[str] = []
+        at = x
+        for word in column:
+            if line and at + width(word, 10) > x + 200:
+                items += _words_at(line, x, y, gap=3)
+                y -= 14
+                line, at = [], x
+            line.append(word)
+            at += width(word, 10) + 3
+        items += _words_at(line, x, y, gap=3)
+    flat = " ".join(_page(*items).split())
+    assert flat.index("SKU 4412") < flat.index("cash position")
+    assert "Column one discusses the audit findings for inventory." in flat
+    assert "The operating account ended at one million two hundred thousand." in flat
+    assert " | " not in flat
+
+
+def test_a_line_break_hyphen_is_joined_and_a_figure_column_stays_a_table():
+    text = _page(
+        Text(72, 740, "The non-"),
+        Text(72, 726, "payment of the March invoice is held."),
+        *sheet_rows([(40, "left"), (220, "right")], [["Vendor", "Amount"], ["Northwind", "$12,480.00"], ["Globex", "$880.00"], ["Initech", "$450.00"]], top=680),
+    )
+    assert "non-payment of the March invoice is held." in text
+    assert "Vendor: Northwind | Amount: $12,480.00" in text
 
 
 def test_a_font_without_a_text_layer_falls_back_to_the_old_reader():
