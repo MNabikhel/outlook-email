@@ -368,7 +368,7 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
     def render(row: list[str], bold: bool = False) -> str:
         filled = [cell for cell in row if cell]
         if bold and len(filled) == 1:
-            return filled[0]
+            return f"Group: {filled[0]}"
         return tables.labelled_row(labels, row) if labels else tables.table_lines([row], header=False)[0]
 
     first_label = (labels[0] if labels else "") or ""
@@ -488,6 +488,13 @@ def _prose_role(line: Line, med: float) -> str:
     return "notes"
 
 
+def _separate_table(role: str, previous: list[str], new: list[str]) -> bool:
+    """A second table with its own header is not more rows of the table above it."""
+    if role != "table" or not new or "|" not in new[0]:
+        return False
+    return new[0] not in previous
+
+
 def _render_sections(chunks: list[tuple[str, list[str]]]) -> str:
     """One block is plain text. Several blocks are labeled so a model can read the part it needs."""
     merged: list[tuple[str, list[str]]] = []
@@ -495,7 +502,7 @@ def _render_sections(chunks: list[tuple[str, list[str]]]) -> str:
         lines = [line for line in lines if line.strip()]
         if not lines:
             continue
-        if merged and merged[-1][0] == role:
+        if merged and merged[-1][0] == role and not _separate_table(role, merged[-1][1], lines):
             merged[-1][1].extend(lines)
         else:
             merged.append((role, list(lines)))

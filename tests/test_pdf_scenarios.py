@@ -149,9 +149,25 @@ def test_a_group_label_stays_inside_the_table():
     ]
     text = _text(items)
     assert "Name Employees" not in text
-    assert "Employees" in text and "Name: Maya Chen | Role: Lead | Pay: $10" in text
-    assert "Contractors" in text and "Name: Sam Ortiz | Role: Temp | Pay: $6" in text
-    assert text.index("Employees") < text.index("Maya Chen") < text.index("Contractors") < text.index("Sam Ortiz")
+    assert "Group: Employees" in text and "Name: Maya Chen | Role: Lead | Pay: $10" in text
+    assert "Group: Contractors" in text and "Name: Sam Ortiz | Role: Temp | Pay: $6" in text
+    assert text.index("Group: Employees") < text.index("Maya Chen") < text.index("Group: Contractors") < text.index("Sam Ortiz")
+
+
+def test_two_tables_with_different_headers_stay_separate():
+    people = [
+        Text(40, 740, "Name", size=10, bold=True),
+        Text(200, 740, "Pay", size=10, bold=True),
+        Text(40, 724, "Maya Chen", size=10),
+        Text(200, 724, "$10", size=10),
+        Text(40, 708, "Sam Ortiz", size=10),
+        Text(200, 708, "$6", size=10),
+    ]
+    hours = sheet_rows([(40, "left"), (200, "right")], [["Code", "Hours"], ["C-3", "3"], ["A-1", "12"]], top=660, pitch=16, size=10)
+    text = _text(people + hours)
+    first, second = text.split("[table]\n")[1:]
+    assert "Name: Sam Ortiz" in first and "Code" not in first.split("\n\n", 1)[0]
+    assert second.startswith("Code | Hours") and "Name: Sam Ortiz" not in second
 
 
 def test_a_bold_total_stays_on_its_table():
