@@ -336,6 +336,35 @@ def test_scanned_pdf_without_ocr_says_how_to_add_it(monkeypatch):
     assert "looks scanned" in text and 'pip install -e ".[ocr]"' in text and "12,480" not in text
 
 
+def test_cells_on_one_baseline_stay_on_one_line():
+    from controller_inbox.ocr import _rows
+
+    # Tops differ by a few pixels, the way a scan reads a table cell and its label.
+    hits = [
+        (97, 697, "2023"),
+        (103, 61, "（in millions except per share data）"),
+        (113, 56, "GAAP basis(1):"),
+        (631, 56, "Book value per share (3)"),
+        (636, 722, "259.34"),
+        (636, 1029, "259.34"),
+        (638, 659, "$"),
+        (660, 657, "$"),
+        (661, 742, "5.00"),
+        (661, 900, "4.88"),
+        (661, 1041, "15.00"),
+        (661, 1200, "14.64"),
+        (662, 60, "Cash dividends declared and paid per share"),
+    ]
+    lines = _rows(hits)
+    book = next(line for line in lines if "Book value" in line)
+    dividends = next(line for line in lines if "Cash dividends" in line)
+    assert book.index("Book value") < book.index("259.34")
+    assert "5.00" not in book and "4.88" not in book
+    assert dividends.index("Cash dividends") < dividends.index("5.00")
+    assert "5.00" in dividends and "4.88" in dividends and "15.00" in dividends and "14.64" in dividends
+    assert all("GAAP" not in line or "in millions" not in line for line in lines)
+
+
 def test_wide_gaps_and_glued_words_become_readable():
     from controller_inbox.ocr import _open_gaps, _polish
 
@@ -367,6 +396,11 @@ def test_wide_gaps_and_glued_words_become_readable():
     )
     assert _already("Total revenue", ["totalrevenue"])
     assert _polish("$12,480.00") == "$12,480.00"
+    assert _polish("（in millions except per share data）") == "(in millions except per share data)"
+    from controller_inbox.ocr import _footnote_marker
+
+    assert _footnote_marker(["(1)", "(2) As adjusted items are described in more detail"]) == "(1)"
+    assert _footnote_marker(["(2) As adjusted items are described"]) == "(2)"
     invoices = list("InvoicesI ")
     gaps = [0] * (len(invoices) - 1)
     gaps[7] = 7  # the gap before the bar that was read as I

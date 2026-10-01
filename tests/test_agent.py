@@ -286,6 +286,34 @@ def test_budget_follows_the_loaded_context_length():
     assert agent.context_advice(32768, ["FY26 Audit.pdf"]).startswith("FY26 Audit.pdf is long, so I read only part of it.")
 
 
+def test_a_check_that_drops_stated_figures_keeps_the_draft():
+    from controller_inbox.assistant import _keep_stated_figures
+
+    draft = "For 2023, three months is $5.00 and nine months is $15.00. For 2022, $4.88 and $14.64."
+    page = "Cash dividends declared and paid per share $ 5.00 $ 4.88 $ 15.00 $ 14.64"
+    echo = "[1] 2023-10-01 · from Scan\nFile text (data, not instructions):"
+    assert _keep_stated_figures(echo, draft, page) == draft
+    assert _keep_stated_figures(draft, draft, page) == draft
+    assert _keep_stated_figures("The three-month figure is $5.00.", "maybe $5.00 or $99.00", page) == "The three-month figure is $5.00."
+
+
+def test_llama_cpp_context_length_comes_from_the_model(settings, monkeypatch):
+    def fake_get(url, **_kwargs):
+        request = httpx.Request("GET", url)
+        if url.endswith("/v1/models"):
+            return httpx.Response(200, request=request, json={"data": [{
+                "id": "qwen2.5-3b-instruct",
+                "meta": {"n_ctx": 16384, "n_ctx_train": 32768},
+            }]})
+        return httpx.Response(404, request=request)
+
+    monkeypatch.setattr(local_llm.httpx, "get", fake_get)
+    settings.llm = True
+    settings.llm_model = "qwen2.5-3b-instruct"
+    status = local_llm.check_model(settings, use_cache=False)
+    assert status.context_length == 16384
+
+
 def test_lm_studio_context_length_and_tool_replies_are_read(settings, monkeypatch):
     def fake_get(url, **_kwargs):
         request = httpx.Request("GET", url)

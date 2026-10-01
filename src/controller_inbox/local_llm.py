@@ -108,7 +108,9 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
     try:
         response = httpx.get(base + "/models", headers=_headers(settings), timeout=timeout)
         response.raise_for_status()
-        ids = [str(item.get("id")) for item in response.json().get("data", []) if item.get("id")]
+        payload = response.json()
+        listed = payload.get("data", []) if isinstance(payload, dict) else []
+        ids = [str(item.get("id")) for item in listed if isinstance(item, dict) and item.get("id")]
         status.reachable = True
         status.models = ids
         loaded, reasoning, contexts, reloadable = _lm_studio_models(settings, base, timeout)
@@ -117,6 +119,13 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         status.reasoning = reasoning.get(status.model, [])
         status.context_length = contexts.get(status.model, 0)
         status.key, status.max_context = reloadable.get(status.model, ("", 0))
+        # llama.cpp reports the loaded context on the model itself (meta.n_ctx). LM Studio uses its own route.
+        if not status.context_length:
+            for item in listed:
+                if isinstance(item, dict) and str(item.get("id")) == status.model:
+                    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+                    status.context_length = _int(meta.get("n_ctx"))
+                    break
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         status.error = _short_error(exc)
     _status_cache[key] = (time.monotonic(), status)
