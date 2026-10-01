@@ -82,7 +82,7 @@ def test_pdf_pages_and_table_columns():
         ]
     )
     text = extract_text_from_bytes("inv.pdf", "application/pdf", data)
-    assert text.startswith("[page 1]\nNorthwind Traders - Invoice INV-2231")
+    assert text.startswith("[page 1]\n") and "Northwind Traders - Invoice INV-2231" in text
     assert "Item | Qty | Amount\nItem: Consulting | Qty: 10 | Amount: $4,000.00\nItem: Total | Qty: not listed | Amount: $4,350.00" in text
     assert "[page 2]\nTerms: net 30" in text
     assert read_part(text, "page 2").text.startswith("Terms: net 30")
@@ -334,6 +334,31 @@ def test_scanned_pdf_without_ocr_says_how_to_add_it(monkeypatch):
     monkeypatch.setattr(ocr, "engine_name", lambda: "")
     text = pdf_text(_scanned_pdf(["Amount due: $12,480.00"]))
     assert "looks scanned" in text and 'pip install -e ".[ocr]"' in text and "12,480" not in text
+
+
+def test_wide_gaps_and_glued_words_become_readable():
+    from controller_inbox.ocr import _open_gaps, _polish
+
+    def boxes(chars: str, gaps: list[float]) -> list:
+        x = 0.0
+        made = []
+        for index, _char in enumerate(chars):
+            if index:
+                x += 8 + gaps[index - 1]
+            made.append([[x, 0], [x + 8, 0], [x + 8, 14], [x, 14]])
+        return made
+
+    assert _open_gaps(list("YourCityAZ12345"), boxes("YourCityAZ12345", [1, 1, 1, 9, 1, 1, 1, 10, 1, 10, 1, 1, 1, 1])) == "Your City AZ 12345"
+    assert _open_gaps(list("ACC #12341234"), boxes("ACC #12341234", [0, 0, 0, 0, 5, 0, 0, 1, 5, 0, 1, 0])) == "ACC # 1234 1234"
+    assert _open_gaps(list("OrderNumber"), boxes("OrderNumber", [0, 1, 0, 0, 5, 5, 0, 1, 0, 1])) == "OrderNumber"
+    assert _polish("OrderNumber") == "Order Number"
+    assert _polish("Totalrevenue") == "Total revenue"
+    assert _polish("Thisisasampledescription..") == "This is a sample description..."
+    assert _polish("Cashdividendsdeclaredandpaidpershare") == "Cash dividends declared and paid per share"
+    assert _polish("INV-3337") == "INV-3337"
+    assert _polish("within 30days from date of invoice.Late payment of5%") == "within 30 days from date of invoice. Late payment of 5%"
+    assert _polish("income(expense),less net") == "income (expense), less net"
+    assert _polish("EXECUTIVESUMMARY") == "EXECUTIVE SUMMARY"
 
 
 def test_ocr_puts_back_dropped_spaces_without_splitting_codes_or_times():

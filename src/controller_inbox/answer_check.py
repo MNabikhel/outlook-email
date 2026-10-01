@@ -221,7 +221,7 @@ def check_citations(answer: str, files: list[tuple[str, str]]) -> Review:
     text = answer
     checks: list[str] = []
     paged = [(name, pages_of(body)) for name, body in files]
-    paged = [(name, pages) for name, pages in paged if len(pages) > 1]
+    paged = [(name, pages) for name, pages in paged if pages]
     books = [(name, cells_of(body)) for name, body in files]
     books = [(name, cells) for name, cells in books if cells]
     for start, chunk in reversed(list(_sentences(answer))):
