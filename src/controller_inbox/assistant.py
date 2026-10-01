@@ -120,6 +120,8 @@ TOOLS_GUIDE = (
     "finding with note, saying where it came from. Work out "
     "every sum, difference, percentage and date with calculate, never in your head: for \"payment due 45 days after "
     "an invoice dated 15 March 2026\", call calculate with \"2026-03-15 + 45 days\". "
+    "If the file already states the figure, answer from that line and do not call calculate. "
+    "A heading such as three months or nine months beside a row of amounts is a column, not a date to work out. "
     "Stop and answer as soon as you have what you need."
 )
 
@@ -598,6 +600,24 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
         yield {"type": "delta", "text": piece}
 
 
+def _keep_stated_figures(checked: str, draft: str, file_text: str) -> str:
+    """Use the draft when the check drops figures that are both in the draft and in the file.
+
+    A small model sometimes copies the email header instead of the answer. The draft already
+    had the amounts, and those amounts are on the page, so that copy is not the answer.
+    """
+    if not draft.strip():
+        return checked
+    wanted = _figures(draft) & _figures(file_text)
+    if wanted and not wanted <= _figures(checked):
+        return draft
+    return checked
+
+
+def _figures(text: str) -> set[str]:
+    return set(re.findall(r"\d[\d,]*(?:\.\d+)?", text or ""))
+
+
 def _checked(ws: agent.Workspace, answer: str, *, history, today: str) -> Iterator[dict[str, Any]]:
     """Correct clear arithmetic and citation slips in the finished answer, and flag figures that weren't in what was read."""
     material = [ws.question, today, *ws.evidence, *ws.notes]
@@ -701,7 +721,13 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     files = agent.file_context(ws, question, room)
     messages = build_messages(question, ws.sources, budget=check_budget, files=files, tail="\n\n".join(parts), **base)
     yield {"type": "step", "text": "Checking the answer against what I read"}
+    before = len(state["text"])
     yield from _stream(settings, messages, state)
+    file_text = "\n".join(att.extracted_text or "" for email in ws.sources for att in email.attachments)
+    kept = _keep_stated_figures(state["text"][before:], draft, file_text)
+    if kept != state["text"][before:]:
+        state["text"] = state["text"][:before] + kept
+        yield {"type": "revise", "text": state["text"]}
 
 
 def _tool_loop(ws: agent.Workspace, messages: list[dict], budget: int):
@@ -719,7 +745,8 @@ def _tool_loop(ws: agent.Workspace, messages: list[dict], budget: int):
                 result = "Skipped: one step at a time." if not full else "No room left to read more. Answer with what you have."
             elif room < 900:
                 full = True
-                ws.left_out.append("the files")
+                # The file is already in the prompt. Running out of room for another tool
+                # call is not the same as leaving the file unread.
                 result = "No room left to read more. Answer with what you have."
             elif call["name"] == "note":
                 result = agent.run_tool(ws, "note", call["arguments"], limit=600)
