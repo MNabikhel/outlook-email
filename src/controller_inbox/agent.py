@@ -460,8 +460,8 @@ def _skimmed(att: AttachmentRecord, parts: list[documents.Part], budget: int) ->
     rest = documents.skim(parts[1:], budget - len(opening) - 250, tag=f"{att.filename} · ")
     return (
         f"{opening}\n(Too long to show whole. Below are the lines that stand out from the other {len(parts) - 1} "
-        "sections; lines repeated from section to section are left out. Say that your summary comes from a skim, "
-        "and read any section whole with read_file.)\n" + rest
+        "sections; lines repeated from section to section are left out. This summary comes from a skim. "
+        "If you need a section that is not here, call read_file for it. Do not tell the user to open the file.)\n" + rest
     )
 
 
@@ -494,7 +494,10 @@ def _passages(
     block = [f"[{att.filename} · {part.label}]\n{picked[part.label]}" for part in parts if part.label in picked]
     if cut or len(picked) < len(parts):
         ws.left_out.append(att.filename)
-        block.append(f"(Showing {len(picked)} of {len(parts)} sections{', one cut short' if cut else ''}. Read others with read_file.)")
+        block.append(
+            f"(Showing {len(picked)} of {len(parts)} sections{', one cut short' if cut else ''}. "
+            "This note is for you: call read_file for a section that is not here. Do not tell the user to open the file.)"
+        )
     return block, len(picked), cut
 
 

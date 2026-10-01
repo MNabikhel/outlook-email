@@ -496,6 +496,70 @@ def test_overflow_and_refused_tools_are_recognised(settings, monkeypatch):
         local_llm.chat_with_tools(settings, [{"role": "user", "content": "hi"}], agent.TOOLS)
 
 
+def test_asking_what_is_due_still_reads_the_open_pdf(store, settings, mail, monkeypatch):
+    budget = copy.deepcopy(mail["Q4 budget draft"])
+    report = budget.attachments[0]
+    report.filename = "Northwind statement.pdf"
+    report.extracted_text = (
+        "[page 1]\nPlease see the next page.\n\n[page 2]\n"
+        "The Northwind amount due is $12,480.00 on 15 March 2026.\n"
+        "Vendor: Globex | Note: not listed | Amount: $880.00"
+    )
+    budget.attachments = [report]
+    store.upsert_email(budget)
+    seen = []
+
+    def fake_tools(_settings, messages, tools, *, max_tokens):
+        seen.append(messages[-1]["content"])
+        return ToolReply("The Northwind amount due is $12,480.00 on 15 March 2026. Globex's note is not listed.")
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
+    monkeypatch.setattr(assistant, "chat_with_tools", fake_tools)
+    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: iter(["The Northwind amount due is $12,480.00 on 15 March 2026."]))
+    text = _text(answer_stream(store, settings, "What is the Northwind amount due, and when is it due?", email_id=budget.id))
+    assert seen and "$12,480.00" in seen[0]
+    assert "15 March 2026" in seen[0]
+    assert "12,480.00" in text
+
+
+def test_a_parsed_pdf_is_what_the_model_answers_from(store, settings, mail):
+    from controller_inbox.documents import pdf_text
+    from pdffactory import Text, build_pdf, sheet_rows, width
+
+    def place(words, x, y, gap, limit):
+        items, at = [], x
+        for word in words:
+            if at > x and at + width(word, 10) > limit:
+                return items, word
+            items.append(Text(at, y, word, size=10))
+            at += width(word, 10) + gap
+        return items, None
+
+    sentence = "Finance will review the Northwind invoice and confirm the amount due is $12,480.00.".split()
+    items, y = [], 740
+    pending = sentence
+    while pending:
+        drawn, rest = place(pending, 72, y, 11, 520)
+        items += drawn
+        pending = pending[len(drawn):]
+        if rest:
+            pending = [rest, *pending]
+        y -= 14
+    items += sheet_rows([(40, "left"), (200, "left"), (360, "right")], [["Vendor", "Note", "Amount"], ["Northwind", "Accrual", "$12,480.00"], ["Globex", "", "$880.00"]], top=y - 20)
+    budget = copy.deepcopy(mail["Q4 budget draft"])
+    report = budget.attachments[0]
+    report.filename = "Northwind invoice.pdf"
+    report.extracted_text = pdf_text(build_pdf([items]))
+    budget.attachments = [report]
+    ws = agent.Workspace(store, settings, [budget], question="What is the amount due on the Northwind invoice?", current_id=budget.id)
+    block = agent.file_context(ws, "What is the amount due on the Northwind invoice?", 8000)[budget.id]
+    assert "amount due is $12,480.00" in " ".join(block.split())
+    assert "Vendor: Northwind | Note: Accrual | Amount: $12,480.00" in block
+    assert "Vendor: Globex | Note: not listed | Amount: $880.00" in block
+    assert "do not tell the user to open the file" in assistant.SYSTEM
+
+
 def test_saved_originals_are_only_read_from_the_extracted_folder(store, settings, mail):
     budget = mail["Q4 budget draft"]
     ws = agent.Workspace(store, settings, [budget])
