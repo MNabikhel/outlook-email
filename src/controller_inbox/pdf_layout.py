@@ -13,7 +13,9 @@ Here each character keeps its box (pdfminer). A word ends where the gap is clear
 the usual gap between letters on that line, so letter-spacing doesn't split words. Lines whose
 pieces sit under the same columns as the lines around them are a table: every piece goes to
 the column it sits under, blanks stay blank, and with a header row each row names its
-columns (see ``tables``).
+columns (see ``tables``). A heading or a second table ends that run, and a page with more
+than one kind of text is labeled ``[heading]``, ``[facts]``, ``[table]``, ``[notes]`` or
+``[columns]`` so a small model can read the part that holds the figure.
 """
 
 from __future__ import annotations
@@ -125,10 +127,13 @@ def page_text(glyphs: list[Glyph], previous: list[Table] | None = None) -> PageT
     index = 0
     for start, end in _table_blocks(lines):
         chunks.extend(_prose_chunks(lines[index:start]))
-        text, table = _table(lines[start:end], None if found else previous)
+        text, table, facts = _table(lines[start:end], None if found else previous)
+        if facts:
+            chunks.append(("facts", facts))
         if table:
             found.append(table)
-        chunks.append((_chunk_role(text, table), text))
+        if text:
+            chunks.append((_chunk_role(text, table), text))
         index = end
     chunks.extend(_prose_chunks(lines[index:]))
     return PageText(_render_sections(chunks), found)
@@ -231,11 +236,21 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
     if gap > max(2.2 * usual, 3.0 * line.size):
         return False
     block = lines[start:index]
-    if line.size > statistics.median(ln.size for ln in block) * 1.35:
+    # A noticeably larger line is a section heading, not another row. A group label
+    # inside the table is the same size as the rows around it.
+    if line.size > statistics.median(ln.size for ln in block) * 1.15:
         return False
     data_started = any(not ln.bold for ln in block)
     words = [word.text for seg in line.segments for word in seg]
-    if data_started and line.bold and words and not any(tables.is_value(word) for word in words):
+    # A new bold header (several cells, no figures) starts a new table. A single bold label
+    # is a group row inside this table ("Employees", "Contractors").
+    if (
+        data_started
+        and line.bold
+        and len(line.segments) >= 2
+        and words
+        and not any(tables.is_value(word) for word in words)
+    ):
         return False
     columns = _columns(block)
     if len(line.segments) >= 2:
@@ -303,26 +318,42 @@ def _place(segment: list[Word], columns: list[tuple[float, float]]) -> int:
     return min(range(len(columns)), key=lambda i: min(abs(centre - columns[i][0]), abs(centre - columns[i][1])))
 
 
-def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], Table | None]:
+def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], Table | None, list[str]]:
     columns = _columns(block)
     grid: list[list[str]] = []
+    bolds: list[bool] = []
     for line in block:
         row = [""] * len(columns)
         for segment in line.segments:
             column = _place(segment, columns)
             row[column] = f"{row[column]} {' '.join(word.text for word in segment)}".strip()
         grid.append(row)
+        bolds.append(line.bold)
     mids = [line.mid for line in block]
 
-    if _prose(grid):
-        return _dehyphenate([" ".join(row[c] for row in grid if row[c]) for c in range(len(columns))]), None
+    peeled = _peel_side_facts(grid)
+    facts: list[str] = []
+    if peeled:
+        facts, grid = peeled
+        bolds = [False] * len(grid)
 
-    bold_first = block[0].bold and not all(line.bold for line in block[1:])
+    if _prose(grid):
+        width = len(grid[0]) if grid else 0
+        return _dehyphenate([" ".join(row[c] for row in grid if c < len(row) and row[c]) for c in range(width)]), None, facts
+
+    bold_first = bolds[0] and not all(bolds[1:])
     heads = 1
-    while bold_first and heads < min(3, len(block) - 2) and block[heads].bold and not any(tables.is_value(c) for c in grid[heads] if c):
+    while (
+        bold_first
+        and heads < min(3, len(grid) - 2)
+        and bolds[heads]
+        and sum(1 for cell in grid[heads] if cell) >= 2
+        and not any(tables.is_value(cell) for cell in grid[heads] if cell)
+    ):
         heads += 1
     if heads > 1:
-        grid = [[" ".join(row[c] for row in grid[:heads] if row[c]) for c in range(len(columns))]] + grid[heads:]
+        grid = [[" ".join(row[c] for row in grid[:heads] if row[c]) for c in range(len(grid[0]))]] + grid[heads:]
+        bolds = [True] + bolds[heads:]
         mids = [mids[0]] + mids[heads:]
 
     header = tables.has_header(grid, bold_first=bold_first)
@@ -330,23 +361,48 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
     labels = grid[0] if header else None
     body, body_mids = (grid[1:], mids[1:]) if header else (grid, mids)
 
-    def render(row: list[str]) -> str:
+    body_bold = bolds[1:] if header else bolds
+
+    def render(row: list[str], bold: bool = False) -> str:
+        filled = [cell for cell in row if cell]
+        if bold and len(filled) == 1:
+            return filled[0]
         return tables.labelled_row(labels, row) if labels else tables.table_lines([row], header=False)[0]
 
-    carried = _carried_over(body_mids, mids[0] if header else None, previous or [])
+    first_label = (labels[0] if labels else "") or ""
+    carried = _carried_over(body_mids, mids[0] if header else None, previous or [], first_label)
     if carried:
         prior, names = carried
         lines = [f"[These columns continue the table on the page before; each row starts with its {prior.row_label}.]"]
         if labels:
             lines.append(" | ".join(label for label in labels if label))
-        for row, name in zip(body, names):
-            line = render(row)
+        for row, name, bold in zip(body, names, body_bold):
+            line = render(row, bold)
             lines.append(f"{prior.row_label}: {name} | {line}" if name else line)
-        return lines, Table(mids[0] if header else None, prior.rows, prior.row_label)
+        return lines, Table(mids[0] if header else None, prior.rows, prior.row_label), facts
 
-    lines = ([" | ".join(label for label in labels if label)] if labels else []) + [render(row) for row in body]
+    lines = ([" | ".join(label for label in labels if label)] if labels else []) + [
+        render(row, bold) for row, bold in zip(body, body_bold)
+    ]
     rows = {round(mid): row[0] for mid, row in zip(body_mids, body) if row[0]}
-    return lines, Table(mids[0] if header else None, rows, (labels[0] if labels else "") or "")
+    return lines, Table(mids[0] if header else None, rows, first_label), facts
+
+
+def _peel_side_facts(grid: list[list[str]]) -> tuple[list[str], list[list[str]]] | None:
+    """A label column printed beside a table ("Invoice:" | INV-4471 | Item | Qty | Amount).
+
+    The labels become their own fact lines and the remaining columns stay the table, so the
+    two regions are not read as one row.
+    """
+    if len(grid) < 3 or not grid[0] or len(grid[0]) < 4:
+        return None
+    if sum(1 for row in grid if row[0].rstrip().endswith(":")) < 0.7 * len(grid):
+        return None
+    facts = [f"{row[0]} {row[1]}".strip() if row[0].endswith(":") else row[0] for row in grid]
+    rest = [row[2:] for row in grid]
+    if max((len(row) for row in rest), default=0) < 2:
+        return None
+    return facts, rest
 
 
 def _prose(grid: list[list[str]]) -> bool:
@@ -494,13 +550,21 @@ def _join_wrapped(grid: list[list[str]], mids: list[float], *, first: int) -> tu
     return rows, row_mids
 
 
-def _carried_over(body_mids: list[float], header_mid: float | None, previous: list[Table]) -> tuple[Table, list[str]] | None:
+def _carried_over(
+    body_mids: list[float], header_mid: float | None, previous: list[Table], first_label: str = ""
+) -> tuple[Table, list[str]] | None:
     """A sheet too wide for one page prints its other columns on the next page, row for row at the
-    same heights. Then each row is named by the first column on the page before."""
+    same heights. Then each row is named by the first column on the page before.
+
+    The same table printed again (the next page starts with the same first column) is not a
+    continuation, so its rows are not named twice.
+    """
     if not previous or not body_mids:
         return None
     prior = previous[-1]
     if not prior.rows or not prior.row_label:
+        return None
+    if first_label.strip().lower() == prior.row_label.strip().lower():
         return None
     if (header_mid is None) != (prior.header_mid is None):
         return None

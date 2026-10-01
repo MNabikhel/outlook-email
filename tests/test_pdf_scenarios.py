@@ -89,3 +89,76 @@ def test_a_heading_between_two_tables_does_not_become_a_row():
     assert "Item: Lodging | Cost: $1,200" in text
     hours, costs = text.split("[heading]", 1)
     assert "Travel" not in hours and "A-1" not in costs
+
+
+def test_facts_beside_a_table_stay_out_of_its_rows():
+    facts = []
+    y = 740
+    for label, value in (("Invoice:", "INV-4471"), ("Bill to:", "Northwind"), ("Due:", "15 March 2026"), ("Terms:", "Net 30")):
+        facts += [Text(40, y, label, size=10), Text(110, y, value, size=10)]
+        y -= 16
+    table = sheet_rows(
+        [(280, "left"), (380, "left"), (480, "right")],
+        [["Item", "Qty", "Amount"], ["Consulting", "10", "$4,000"], ["Travel", "1", "$350"], ["Total", "", "$4,350"]],
+        top=740,
+        pitch=16,
+        size=10,
+    )
+    text = _text(facts + table)
+    assert "Invoice: INV-4471" in text and "Bill to: Northwind" in text
+    assert "Item: Consulting | Qty: 10 | Amount: $4,000" in text
+    assert "Item: Total | Qty: not listed | Amount: $4,350" in text
+    assert "Invoice: INV-4471 | Item" not in text
+    facts_block = text.split("[facts]\n", 1)[1].split("\n\n", 1)[0]
+    assert "Consulting" not in facts_block
+
+
+def test_a_repeated_table_on_the_next_page_is_not_named_twice():
+    rows = [["Vendor", "Amount"], ["Northwind", "$12,480"], ["Globex", "$880"], ["Initech", "$450"]]
+    pages = []
+    for number in (1, 2):
+        pages.append(
+            [
+                Text(40, 770, "Acme Corp", size=8),
+                Text(480, 770, f"Page {number}", size=8),
+                *sheet_rows([(40, "left"), (200, "right")], rows, top=730, pitch=16, size=10),
+            ]
+        )
+    text = pdf_text(build_pdf(pages))
+    assert "Vendor: Northwind | Vendor: Northwind" not in text
+    assert text.count("Vendor: Northwind | Amount: $12,480") == 2
+    assert "Page 2" in text
+
+
+def test_a_group_label_stays_inside_the_table():
+    items = [
+        Text(40, 740, "Name", size=10, bold=True),
+        Text(180, 740, "Role", size=10, bold=True),
+        Text(320, 740, "Pay", size=10, bold=True),
+        Text(40, 724, "Employees", size=10, bold=True),
+        Text(40, 708, "Maya Chen", size=10),
+        Text(180, 708, "Lead", size=10),
+        Text(320, 708, "$10", size=10),
+        Text(40, 692, "Li Wei", size=10),
+        Text(180, 692, "Analyst", size=10),
+        Text(320, 692, "$8", size=10),
+        Text(40, 676, "Contractors", size=10, bold=True),
+        Text(40, 660, "Sam Ortiz", size=10),
+        Text(180, 660, "Temp", size=10),
+        Text(320, 660, "$6", size=10),
+    ]
+    text = _text(items)
+    assert "Name Employees" not in text
+    assert "Employees" in text and "Name: Maya Chen | Role: Lead | Pay: $10" in text
+    assert "Contractors" in text and "Name: Sam Ortiz | Role: Temp | Pay: $6" in text
+    assert text.index("Employees") < text.index("Maya Chen") < text.index("Contractors") < text.index("Sam Ortiz")
+
+
+def test_a_bold_total_stays_on_its_table():
+    items = [
+        *sheet_rows([(40, "left"), (200, "right")], [["Vendor", "Amount"], ["Northwind", "$100"], ["Globex", "$50"]], top=740, pitch=16, size=10),
+        Text(40, 740 - 48, "Total", size=10, bold=True),
+        Text(200, 740 - 48, "$150", size=10, bold=True, right=True),
+    ]
+    text = _text(items)
+    assert "Vendor: Total | Amount: $150" in text
