@@ -15,7 +15,9 @@ pieces sit under the same columns as the lines around them are a table: every pi
 the column it sits under, blanks stay blank, and with a header row each row names its
 columns (see ``tables``). A heading or a second table ends that run, and a page with more
 than one kind of text is labeled ``[heading]``, ``[facts]``, ``[table]``, ``[notes]`` or
-``[columns]`` so a small model can read the part that holds the figure.
+``[columns]`` so a small model can read the part that holds the figure. A label column
+printed beside a table is peeled off into ``[facts]``. A bold group label stays inside its
+table. The next page is extra columns only when it starts with a different first column.
 """
 
 from __future__ import annotations
