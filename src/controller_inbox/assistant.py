@@ -107,7 +107,13 @@ SYSTEM = (
     "number already on file. Never tell the user to pay, reply with details, or update an account.\n"
     "- When the question asks for a date, amount or count, give the actual date, amount or count, not just the rule "
     "for finding it.\n"
-    "- Answer briefly: one to five sentences or a short list, unless the user asks for a full summary."
+    "- Read the file as a whole. Column headings apply to every row under them, and a footnote mark such as (1) "
+    "belongs with the note that uses the same mark.\n"
+    "- A scan can misread a small mark: empty parentheses, or a footnote number that does not match its note. "
+    "If the page does not hold together, say what is wrong in one sentence. If the rest of the page shows what "
+    "the mark was meant to be, use that reading and say you corrected a scan error. Do not invent an amount "
+    "that is not written on the page.\n"
+    "- Answer briefly: one to five sentences or a short list, unless the user asks for a full summary or a table."
 )
 
 TOOLS_GUIDE = (
@@ -122,6 +128,10 @@ TOOLS_GUIDE = (
     "an invoice dated 15 March 2026\", call calculate with \"2026-03-15 + 45 days\". "
     "If the file already states the figure, answer from that line and do not call calculate. "
     "A heading such as three months or nine months beside a row of amounts is a column, not a date to work out. "
+    "When the file text is already in the prompt, that is the whole document: answer from it. "
+    "Do not call read_cells, trace_cell, or compare_columns on a picture or a PDF page. "
+    "part 1 and part 2 are pieces of the same page, not other pages. "
+    "If you are asked for a table, one markdown table of the rows you read is the whole answer. "
     "Stop and answer as soon as you have what you need."
 )
 
@@ -609,13 +619,15 @@ def _keep_stated_figures(checked: str, draft: str, file_text: str) -> str:
     if not draft.strip():
         return checked
     wanted = _figures(draft) & _figures(file_text)
-    if wanted and not wanted <= _figures(checked):
+    # Restore the draft only when the check kept none of those figures. A table that
+    # states them is the answer, even if it leaves out a number the draft also mentioned.
+    if wanted and not (wanted & _figures(checked)):
         return draft
     return checked
 
 
 def _figures(text: str) -> set[str]:
-    return set(re.findall(r"\d[\d,]*(?:\.\d+)?", text or ""))
+    return set(re.findall(r"\d[\d,]*\.\d+", text or ""))
 
 
 def _checked(ws: agent.Workspace, answer: str, *, history, today: str) -> Iterator[dict[str, Any]]:
