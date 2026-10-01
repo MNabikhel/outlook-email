@@ -48,21 +48,135 @@ def _rapid(data: bytes) -> str:
 
             _engine = RapidOCR()
         result, _elapsed = _engine(data, return_word_box=True)
-    lines = []
-    for line in result or []:
-        text = str(line[1])
-        chars = line[4] if len(line) > 5 and isinstance(line[4], list) else None
-        boxes = line[3] if len(line) > 4 and isinstance(line[3], list) else None
-        if chars and boxes and len(chars) == len(boxes):
-            text = _open_gaps(chars, boxes)
-        lines.append(_polish(_spaced(text)))
-    return "\n".join(lines)[:MAX_CHARS]
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(data)).convert("RGB")
+    hits = [_hit(line) for line in result or []]
+    hits += _missed_lines(_engine, image, hits)
+    hits = [_reread_empty_parens(_engine, image, hit) for hit in hits]
+    hits.sort(key=lambda hit: hit[0])
+    return "\n".join(_polish(_spaced(text)) for _y, text in hits if text.strip())[:MAX_CHARS]
 
 
 # On JPEG scans RapidOCR tends to drop spaces ("Duedate:15October2026"); put back the ones that are certain.
 _JOINS = re.compile(r"(?<=[A-Za-z][a-z]{2})(?=\d)|(?<=\d)(?=[A-Z][a-z]{2})|(?<=[A-Za-z]:)(?=\w)")
 # ...and to read the O of October as a zero once the space is gone: "150ctober", "200ct 2026".
 _OCTOBER = re.compile(r"(?<![\d.,$])([1-9]|[12]\d|3[01])0(?=ctober|ct\.?\s*\d{4})")
+
+
+def _already(text: str, known: list[str]) -> bool:
+    """True when this line is the same text already read, not a longer line that merely contains it."""
+    plain = _plain(text)
+    for other in known:
+        if plain == other:
+            return True
+        short, long = sorted((plain, other), key=len)
+        if len(short) > 20 and short in long and len(short) >= 0.8 * len(long):
+            return True
+    return False
+
+
+def _usable(text: str) -> bool:
+    """Drop a second-pass line that is only scattered one-letter noise."""
+    words = [word for word in re.split(r"\s+", text.strip()) if word]
+    if len(_plain(text)) < 8 or not words:
+        return False
+    return sum(len(word) >= 3 for word in words) >= max(1, len(words) // 3)
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _hit(line) -> tuple[float, str]:
+    """One recognized line: its top edge, and its text with spaces restored."""
+    box = line[0]
+    top = min(point[1] for point in box)
+    chars = line[4] if len(line) > 5 and isinstance(line[4], list) else None
+    boxes = line[3] if len(line) > 4 and isinstance(line[3], list) else None
+    text = _open_gaps(chars, boxes) if chars and boxes and len(chars) == len(boxes) else str(line[1])
+    return top, text
+
+
+def _missed_lines(engine, image, hits: list[tuple[float, str]]) -> list[tuple[float, str]]:
+    """Read a band of ink the first pass left blank, scaled up so a bold heading still resolves."""
+    import numpy as np
+
+    gray = np.array(image.convert("L"))
+    ink = (gray < 170).sum(axis=1)
+    height = len(ink)
+    covered = np.zeros(height, dtype=bool)
+    for top, _text in hits:
+        y = int(top)
+        near = [
+            row
+            for row in range(max(0, y - 6), min(height, y + 12))
+            if ink[row] > 12
+        ]
+        if not near:
+            continue
+        y = min(near, key=lambda row: abs(row - top))
+        start = y
+        while start > 0 and ink[start - 1] > 12:
+            start -= 1
+        end = y
+        while end + 1 < height and ink[end + 1] > 12:
+            end += 1
+        covered[start : end + 1] = True
+    found = []
+    y = 0
+    while y < height:
+        if ink[y] > 30 and not covered[y]:
+            start = y
+            while y < height and ink[y] > 12 and not covered[y]:
+                y += 1
+            if y - start >= 8:
+                # Pad so a bold line is not clipped, then keep only the words whose
+                # position falls inside this gap. Words from the pad belong to the lines
+                # above and below, and drawing them here stacks them on those lines.
+                pad = 16
+                crop_top = max(0, start - pad)
+                crop = image.crop((0, crop_top, image.width, min(height, y + pad)))
+                scaled = crop.resize((max(1, crop.width * 2), max(1, crop.height * 2)))
+                known = [_plain(text) for _top, text in hits]
+                for top, text in _engine_lines(engine, scaled):
+                    source_y = crop_top + top / 2
+                    # The line's top can sit a few pixels above the ink band. Keep it when
+                    # the line still overlaps the gap, and leave the padded neighbors out.
+                    # Also leave it out when it would sit on a line already read.
+                    if not (source_y <= y and source_y + 14 >= start):
+                        continue
+                    if any(abs(other - source_y) < 18 for other, _text in hits):
+                        continue
+                    if _usable(text) and not _already(text, known):
+                        found.append((source_y, text))
+        else:
+            y += 1
+    return found
+
+
+def _reread_empty_parens(engine, image, hit: tuple[float, str]) -> tuple[float, str]:
+    """A footnote marker read as () is too small. Read that line again, larger."""
+    top, text = hit
+    if "()" not in text:
+        return hit
+    crop = image.crop((0, max(0, int(top) - 4), image.width, min(image.height, int(top) + 36)))
+    scaled = crop.resize((crop.width * 2, crop.height * 2))
+    marked = [line for _top, line in _engine_lines(engine, scaled) if re.search(r"\(\d+\)", line)]
+    if marked:
+        return top, max(marked, key=len)
+    return hit
+
+
+def _engine_lines(engine, image) -> list[tuple[float, str]]:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    result, _elapsed = engine(buffer.getvalue(), text_score=0.2, box_thresh=0.2)
+    lines = []
+    for line in result or []:
+        top = min(point[1] for point in line[0])
+        lines.append((top, str(line[1])))
+    return lines
 
 
 def _spaced(line: str) -> str:
@@ -104,18 +218,40 @@ def _open_gaps(chars: list[str], boxes: list) -> str:
             digit_group = (index - left_run) >= 3 and (right_run - index + 1) >= 3
         if out[-1] != " " and (word_edge or punctuation or digit_group):
             out.append(" ")
+        if _divider(chars, index, gaps):
+            if out[-1] != " ":
+                out.append(" ")
+            out.append("|")
+            continue
         out.append(after)
-    return "".join(out)
+    return re.sub(r" {2,}", " ", "".join(out))
+
+
+def _divider(chars: list[str], index: int, gaps: list[float]) -> bool:
+    """A lone I jammed onto the previous word is a vertical rule, not the letter I.
+
+    The I that starts a word sits against the space before it. A rule has a gap after the
+    preceding word and a gap or a space after it.
+    """
+    if chars[index] not in "Il|":
+        return False
+    if index == 0 or not chars[index - 1].isalpha() or gaps[index - 1] < 6:
+        return False
+    if index + 1 >= len(chars):
+        return True
+    return chars[index + 1] == " " or (index < len(gaps) and gaps[index] >= 6)
 
 
 def _polish(line: str) -> str:
     """Break a run of words the scan glued together, and keep an ellipsis that lost its last dot."""
     line = re.sub(r"[A-Za-z]{6,}", lambda match: _segment(match.group(0)), line)
     line = re.sub(r",(?=[A-Za-z])", ", ", line)
+    line = re.sub(r"(?<=\d),(?=\d{4}\b)", ", ", line)
     line = re.sub(r"(?<=[A-Za-z])(?=\()", " ", line)
     line = re.sub(r"(?<=[)\]])(?=[A-Za-z])", " ", line)
     line = re.sub(r"(?<=\d)(?=[A-Za-z]{3,})", " ", line)
     line = re.sub(r"(?<=[a-z]{2})(?=\d)", " ", line)
+    line = re.sub(r"(?<=%)(?=[A-Za-z])", " ", line)
     line = re.sub(r"\.(?=[A-Z])", ". ", line)
     return re.sub(r"(?<!\.)\.\.(?!\.)", "...", line)
 
@@ -167,7 +303,7 @@ _WORDS = frozenset(
     reflected higher investment advisory administration fees fee noncash gains gain related strategic minority
     during partially offset mark seed capital portfolio hedges hedge private equity higher decreased decrease
     stockholders stockholder equity divided respective period end three months month nine ended september basis
-    executive summary
+    executive summary compared
     generally accepted principles principle reflecting advisory administration noncash gains related strategic
     minority investment partially offset revaluation seed portfolio hedges hedge private dividend network capital
     black rock blackrock
