@@ -396,6 +396,11 @@ def test_wide_gaps_and_glued_words_become_readable():
     )
     assert _already("Total revenue", ["totalrevenue"])
     assert _polish("$12,480.00") == "$12,480.00"
+    assert _polish("（in millions except per share data）") == "(in millions except per share data)"
+    from controller_inbox.ocr import _footnote_marker
+
+    assert _footnote_marker(["(1)", "(2) As adjusted items are described in more detail"]) == "(1)"
+    assert _footnote_marker(["(2) As adjusted items are described"]) == "(2)"
     invoices = list("InvoicesI ")
     gaps = [0] * (len(invoices) - 1)
     gaps[7] = 7  # the gap before the bar that was read as I

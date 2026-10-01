@@ -124,6 +124,22 @@ def _rows(hits: list[tuple[float, float, str]]) -> list[str]:
     return lines
 
 
+def _read_gap(engine, image, start: int, end: int, height: int) -> list[tuple[float, str]]:
+    """Words in an ink gap. Try the gap itself, then a padded crop for a bold heading."""
+    for pad in (2, 16):
+        crop_top = max(0, start - pad)
+        crop = image.crop((0, crop_top, image.width, min(height, end + pad)))
+        scaled = crop.resize((max(1, crop.width * 2), max(1, crop.height * 2)))
+        kept = []
+        for top, text in _engine_lines(engine, scaled):
+            source_y = crop_top + top / 2
+            if source_y <= end and source_y + 14 >= start and text.strip():
+                kept.append((source_y, text))
+        if any(_usable(text) for _y, text in kept):
+            return kept
+    return []
+
+
 def _missed_lines(engine, image, hits: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
     """Read a band of ink the first pass left blank, scaled up so a bold heading still resolves."""
     import numpy as np
@@ -157,41 +173,54 @@ def _missed_lines(engine, image, hits: list[tuple[float, float, str]]) -> list[t
             while y < height and ink[y] > 12 and not covered[y]:
                 y += 1
             if y - start >= 8:
-                # Pad so a bold line is not clipped, then keep only the words whose
-                # position falls inside this gap. Words from the pad belong to the lines
-                # above and below, and drawing them here stacks them on those lines.
-                pad = 16
-                crop_top = max(0, start - pad)
-                crop = image.crop((0, crop_top, image.width, min(height, y + pad)))
-                scaled = crop.resize((max(1, crop.width * 2), max(1, crop.height * 2)))
+                # A tight crop reads a short footnote. A bold heading needs padding, which also
+                # pulls in the lines above and below, so those words are dropped unless they
+                # sit in this gap.
                 known = [_plain(text) for _top, _left, text in hits]
-                for top, text in _engine_lines(engine, scaled):
-                    source_y = crop_top + top / 2
-                    # The line's top can sit a few pixels above the ink band. Keep it when
-                    # the line still overlaps the gap, and leave the padded neighbors out.
-                    # Also leave it out when it would sit on a line already read.
-                    if not (source_y <= y and source_y + 14 >= start):
+                gap = _read_gap(engine, image, start, y, height)
+                # A footnote mark is small. The crop sometimes keeps the digit and drops the parentheses.
+                if any(re.fullmatch(r"\d", text.strip()) for _y, text in gap) and any(_usable(text) for _y, text in gap):
+                    gap = [(gy, f"({text.strip()})" if re.fullmatch(r"\d", text.strip()) else text) for gy, text in gap]
+                for source_y, text in gap:
+                    if any(abs(other - source_y) < 12 for other, _left, _text in hits):
                         continue
-                    if any(abs(other - source_y) < 18 for other, _left, _text in hits):
-                        continue
-                    if _usable(text) and not _already(text, known):
-                        found.append((source_y, 0.0, text))
+                    marker = bool(re.fullmatch(r"\(\d+\)", text.strip()))
+                    if (marker or _usable(text)) and not _already(text, known):
+                        # The mark sits at the left of the note. The sentence is the rest of that line.
+                        found.append((source_y, 0.0 if marker else 24.0, text))
         else:
             y += 1
     return found
 
 
 def _reread_empty_parens(engine, image, hit: tuple[float, float, str]) -> tuple[float, float, str]:
-    """A footnote marker read as () is too small. Read that line again, larger."""
+    """A footnote marker read as () is too small. Read that line again, larger.
+
+    Only the marker is replaced. A taller crop also contains the next footnote, and taking
+    that whole line would number this note with the one below it.
+    """
     top, left, text = hit
     if "()" not in text:
         return hit
-    crop = image.crop((0, max(0, int(top) - 4), image.width, min(image.height, int(top) + 36)))
-    scaled = crop.resize((crop.width * 2, crop.height * 2))
-    marked = [line for _top, line in _engine_lines(engine, scaled) if re.search(r"\(\d+\)", line)]
-    if marked:
-        return top, left, max(marked, key=len)
-    return hit
+    crop = image.crop((0, max(0, int(top) - 2), image.width, min(image.height, int(top) + 22)))
+    scaled = crop.resize((max(1, crop.width * 2), max(1, crop.height * 2)))
+    marker = _footnote_marker(line for _y, line in _engine_lines(engine, scaled))
+    if not marker:
+        return hit
+    return top, left, text.replace("()", marker, 1)
+
+
+def _footnote_marker(lines) -> str:
+    """The footnote mark on this line, not a numbered note that leaked in from the next line."""
+    marked = []
+    for line in lines:
+        found = re.search(r"\(\d+\)", line or "")
+        if found:
+            marked.append((found.group(0), line.strip()))
+    for marker, line in marked:
+        if len(line) <= len(marker) + 2:
+            return marker
+    return marked[0][0] if marked else ""
 
 
 def _engine_lines(engine, image) -> list[tuple[float, str]]:
@@ -275,6 +304,7 @@ def _divider(chars: list[str], index: int, gaps: list[float]) -> bool:
 
 def _polish(line: str) -> str:
     """Break a run of words the scan glued together, and keep an ellipsis that lost its last dot."""
+    line = line.translate(str.maketrans("（）【】［］｛｝", "()[][]{}"))
     line = re.sub(r"[A-Za-z]{5,}", lambda match: _segment(match.group(0)), line)
     line = re.sub(r",(?=[A-Za-z])", ", ", line)
     line = re.sub(r"(?<=\d),(?=\d{4}\b)", ", ", line)
