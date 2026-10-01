@@ -397,6 +397,16 @@ def test_wide_gaps_and_glued_words_become_readable():
     assert _already("Total revenue", ["totalrevenue"])
     assert _polish("$12,480.00") == "$12,480.00"
     assert _polish("（in millions except per share data）") == "(in millions except per share data)"
+    assert _polish("28.412,414") == "28,412,414"
+    assert _polish("(1.097.978)") == "(1,097,978)"
+    assert _polish("7.792") == "7,792"
+    assert _polish("0.61") == "0.61"
+    assert _polish("$12,480.00") == "$12,480.00"
+    assert _polish("JS'O00") == "JS'000"
+    from controller_inbox.ocr import _rows
+    assert _rows([(10, 1, "From continuing"), (12, 700, "0.61"), (11, 800, "S"), (12, 880, "0.78")]) == [
+        "From continuing 0.61 $ 0.78"
+    ]
     from controller_inbox.ocr import _footnote_marker
 
     assert _footnote_marker(["(1)", "(2) As adjusted items are described in more detail"]) == "(1)"
