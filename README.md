@@ -212,7 +212,8 @@ CloseDesk talks to Outlook through **Microsoft Graph**. You need an Entra ID app
 ```env
 AZURE_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 AZURE_TENANT_ID=common
-CONTROLLER_INBOX_TIMEZONE=America/New_York
+# Time zone follows this computer. Set an IANA name to pin one, or change it in Setup.
+# CONTROLLER_INBOX_TIMEZONE=auto
 CONTROLLER_INBOX_WRITEBACK=false
 # CONTROLLER_INBOX_DIGEST_TO=you@yourco.com
 ```

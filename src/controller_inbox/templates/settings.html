@@ -15,6 +15,27 @@
   </form>
   <p class="muted">General works for anyone: replies, approvals, meetings, deadlines, and notifications. Finance adds the month-end countdown and close sections. Invoices and payment warnings are caught either way.</p>
 </section>
+<section class="panel" id="timezone">
+  <h3>Time zone</h3>
+  <p>Times follow this computer{% if computer_zone %} (<b>{{ computer_zone }}</b>){% endif %} unless you pick another. Mail stays stored in UTC, and a change here updates “today”, due dates, and every clock on screen.</p>
+  <form method="post" action="/settings/timezone" class="profile-form tz-form">
+    <label>
+      Time zone
+      <select name="zone" aria-label="Time zone">
+        <option value="auto" {{ 'selected' if timezone_choice == 'auto' else '' }}>This computer ({{ computer_zone }})</option>
+        {% for region, zones in timezone_groups %}
+        <optgroup label="{{ region }}">
+          {% for zone in zones %}
+          <option value="{{ zone }}" {{ 'selected' if timezone_choice == zone else '' }}>{{ zone }}</option>
+          {% endfor %}
+        </optgroup>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit">Save</button>
+  </form>
+  <p class="muted">Showing <b>{{ now_local }}</b> ({{ active_zone }}).</p>
+</section>
 <section class="split">
   <article class="panel">
     <h3>Getting mail in (no Outlook add-in or IT approval needed)</h3>

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from controller_inbox.actions import local_today
+from controller_inbox.clock import apply_saved_timezone
 from controller_inbox.config import Settings, load_settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.models import DOCUMENT_LABELS, IMPORTANCE_LABELS
@@ -104,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     settings = load_settings()
     store = Store(settings.db_path)
+    apply_saved_timezone(settings, store)
 
     if args.cmd == "run":
         return _run(settings, store, args)
