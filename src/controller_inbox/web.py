@@ -10,6 +10,7 @@ import threading
 from email.message import EmailMessage
 from email.utils import formataddr, format_datetime
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -36,6 +37,7 @@ from controller_inbox.clock import (
     computer_timezone,
     effective_timezone,
     format_when,
+    offset_label,
     set_timezone,
     timezone_groups,
 )
@@ -991,7 +993,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             search=semantic.coverage(store, settings),
             timezone_choice=settings.timezone,
             computer_zone=computer_timezone(),
+            computer_offset=offset_label(ZoneInfo(computer_timezone())),
             active_zone=effective_timezone(settings.timezone),
+            active_offset=offset_label(settings.tz),
             timezone_groups=timezone_groups(),
             now_local=datetime.now(settings.tz).strftime("%b %d, %Y · %H:%M"),
         )

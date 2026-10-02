@@ -12,7 +12,9 @@ from controller_inbox.clock import (
     effective_timezone,
     format_when,
     is_timezone,
+    offset_label,
     set_timezone,
+    timezone_groups,
 )
 from controller_inbox.config import Settings
 from controller_inbox.web import create_app
@@ -94,6 +96,32 @@ def test_setup_shows_the_computer_zone_and_a_saved_zone_changes_the_clock(settin
     shown = format_when(STAMP, ZoneInfo(computer_timezone()))
     assert shown in client.get("/").text
     assert client.post("/settings/timezone", data={"zone": "Mars/Olympus"}).status_code == 400
+
+
+def test_offsets_west_of_greenwich_are_negative():
+    winter = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    summer = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    assert offset_label(ZoneInfo("Atlantic/Cape_Verde"), winter) == "UTC-1"
+    assert offset_label(ZoneInfo("America/New_York"), winter) == "UTC-5"
+    assert offset_label(ZoneInfo("America/New_York"), summer) == "UTC-4"
+    assert offset_label(ZoneInfo("America/Chicago"), summer) == "UTC-5"
+    assert offset_label(ZoneInfo("Europe/Paris"), winter) == "UTC+1"
+    assert offset_label(ZoneInfo("Asia/Kolkata"), winter) == "UTC+5:30"
+    assert offset_label(ZoneInfo("UTC"), winter) == "UTC+0"
+    labels = [label for label, _zones in timezone_groups(winter)]
+    assert labels.index("UTC-1") < labels.index("UTC+0") < labels.index("UTC+1")
+    cape_verde = dict(dict(timezone_groups(winter))["UTC-1"])
+    assert cape_verde["Atlantic/Cape_Verde"] == "(UTC-1) Atlantic/Cape_Verde"
+
+
+def test_setup_shows_the_offset_as_a_minus_when_the_zone_is_behind_utc(settings, store):
+    client = TestClient(create_app(settings, store))
+    page = client.get("/settings").text
+    label = offset_label(ZoneInfo("America/New_York"))
+    assert label.startswith("UTC-")
+    assert 'value="America/New_York" selected' in page
+    assert f"({label}) America/New_York" in page
+    assert "Showing <b>" in page and label in page
 
 
 def test_a_stamp_with_z_matches_the_offset_form():
