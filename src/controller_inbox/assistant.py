@@ -96,7 +96,9 @@ SYSTEM = (
     "- Use only the numbered emails and file text you are given or read with tools. Cite emails like [1] or [2]. "
     "When a fact comes from a file, also name the file and where in it the fact is: the page of a PDF, the sheet "
     "and cell of a workbook, the slide of a deck. Only name a page or cell you actually saw.\n"
-    "- In file tables each row reads \"Column: value\"; \"not listed\" means the file leaves that cell empty.\n"
+    "- In file tables each row reads \"Column: value\"; \"not listed\" means the file leaves that cell empty. "
+    "A heading merged across columns is repeated on each of them (\"Q3 Actual\" and \"Q3 Budget\"). "
+    "\"Operating > Revenue\" means Revenue is under Operating.\n"
     "- An email marked (open on screen) is the one the user is looking at. \"This\", \"it\", \"the attachment\" "
     "and \"the draft\" mean that email and its files unless the user names another.\n"
     "- When the question needs a figure from an attachment, answer from the file text you were given or that you "
@@ -118,7 +120,8 @@ SYSTEM = (
 
 TOOLS_GUIDE = (
     "\nYou can read more before answering. A PDF is already parsed: pages, columns and tables are text you can "
-    "search, with \"Column: value\" rows and \"not listed\" for a blank cell. A page with more than one part is "
+    "search, with \"Column: value\" rows and \"not listed\" for a blank cell. A repeated heading is one merged "
+    "column group, and \"A > B\" means B is under category A. A page with more than one part is "
     "labeled [heading], [facts], [table], [notes] or [columns]; read the part that has the figure. Work step by step: find the right "
     "email and file, read the part that answers the question (read_file, find_in_file), for spreadsheets check "
     "exact numbers with read_cells and how "

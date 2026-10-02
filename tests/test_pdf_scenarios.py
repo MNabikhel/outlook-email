@@ -219,3 +219,200 @@ def test_a_bold_total_stays_on_its_table():
     ]
     text = _text(items)
     assert "Vendor: Total | Amount: $150" in text
+
+
+def test_a_heading_merged_across_columns_names_each_of_them():
+    # The group word may sit on the first sub-column or on the middle one. Both are one merge.
+    leaf = [
+        Text(40, 740, "Line", bold=True),
+        Text(160, 740, "Actual", bold=True),
+        Text(250, 740, "Budget", bold=True),
+        Text(340, 740, "Variance", bold=True),
+        Text(450, 740, "Actual", bold=True),
+        Text(540, 740, "Budget", bold=True),
+        Text(630, 740, "Variance", bold=True),
+        Text(40, 724, "Sales"),
+        Text(160, 724, "100"),
+        Text(250, 724, "90"),
+        Text(340, 724, "10"),
+        Text(450, 724, "120"),
+        Text(540, 724, "110"),
+        Text(630, 724, "10"),
+    ]
+    expected = "Line: Sales | Q3 Actual: 100 | Q3 Budget: 90 | Q3 Variance: 10 | Q4 Actual: 120 | Q4 Budget: 110 | Q4 Variance: 10"
+    centered = _text([Text(40, 756, "Line", bold=True), Text(250, 756, "Q3", bold=True), Text(540, 756, "Q4", bold=True), *leaf])
+    left = _text([Text(40, 756, "Line", bold=True), Text(160, 756, "Q3", bold=True), Text(450, 756, "Q4", bold=True), *leaf])
+    assert expected in centered
+    assert expected in left
+
+
+def test_a_wide_period_heading_keeps_the_year_on_every_column():
+    items = [
+        Text(40, 756, "Line", bold=True),
+        Text(155, 756, "Three months ended", bold=True),
+        Text(445, 756, "Nine months ended", bold=True),
+        Text(40, 740, "Line", bold=True),
+        Text(160, 740, "2024", bold=True),
+        Text(250, 740, "2023", bold=True),
+        Text(340, 740, "2022", bold=True),
+        Text(450, 740, "2024", bold=True),
+        Text(540, 740, "2023", bold=True),
+        Text(630, 740, "2022", bold=True),
+        Text(40, 724, "Revenue"),
+        Text(160, 724, "100"),
+        Text(250, 724, "90"),
+        Text(340, 724, "80"),
+        Text(450, 724, "300"),
+        Text(540, 724, "270"),
+        Text(630, 724, "240"),
+    ]
+    text = _text(items)
+    assert "Line: Revenue | Three months ended 2024: 100 | Three months ended 2023: 90 | Three months ended 2022: 80 | Nine months ended 2024: 300 | Nine months ended 2023: 270 | Nine months ended 2022: 240" in text
+    assert "\n2024 |" not in text and "2024: 2023" not in text
+
+
+def test_three_header_rows_stack_onto_each_column():
+    items = [
+        Text(40, 772, "Line", bold=True),
+        Text(200, 772, "2024", bold=True),
+        Text(520, 772, "2025", bold=True),
+        Text(40, 756, "Line", bold=True),
+        Text(160, 756, "Q1", bold=True),
+        Text(300, 756, "Q2", bold=True),
+        Text(440, 756, "Q1", bold=True),
+        Text(580, 756, "Q2", bold=True),
+        Text(40, 740, "Line", bold=True),
+        Text(160, 740, "Act", bold=True),
+        Text(230, 740, "Bud", bold=True),
+        Text(300, 740, "Act", bold=True),
+        Text(370, 740, "Bud", bold=True),
+        Text(440, 740, "Act", bold=True),
+        Text(510, 740, "Bud", bold=True),
+        Text(580, 740, "Act", bold=True),
+        Text(650, 740, "Bud", bold=True),
+        Text(40, 724, "Sales"),
+        Text(160, 724, "10"),
+        Text(230, 724, "9"),
+        Text(300, 724, "11"),
+        Text(370, 724, "8"),
+        Text(440, 724, "12"),
+        Text(510, 724, "7"),
+        Text(580, 724, "13"),
+        Text(650, 724, "6"),
+    ]
+    text = _text(items)
+    assert "Line: Sales | 2024 Q1 Act: 10 | 2024 Q1 Bud: 9 | 2024 Q2 Act: 11 | 2024 Q2 Bud: 8 | 2025 Q1 Act: 12 | 2025 Q1 Bud: 7 | 2025 Q2 Act: 13 | 2025 Q2 Bud: 6" in text
+
+
+def test_nested_categories_and_a_merged_quarter_stay_on_the_same_row():
+    items = [
+        Text(40, 756, "Line", bold=True),
+        Text(220, 756, "Q3", bold=True),
+        Text(400, 756, "Q4", bold=True),
+        Text(40, 740, "Line", bold=True),
+        Text(220, 740, "Actual", bold=True),
+        Text(310, 740, "Budget", bold=True),
+        Text(400, 740, "Actual", bold=True),
+        Text(490, 740, "Budget", bold=True),
+        Text(40, 724, "Operating", bold=True),
+        Text(56, 708, "Revenue", bold=True),
+        Text(72, 692, "Product"),
+        Text(220, 692, "100"),
+        Text(310, 692, "90"),
+        Text(400, 692, "80"),
+        Text(490, 692, "70"),
+        Text(40, 676, "Financing", bold=True),
+        Text(56, 660, "Interest"),
+        Text(220, 660, "5"),
+        Text(310, 660, "4"),
+        Text(400, 660, "3"),
+        Text(490, 660, "2"),
+    ]
+    text = _text(items)
+    assert "Group: Operating" in text and "Group: Revenue" in text
+    assert "Operating > Revenue | Line: Product | Q3 Actual: 100 | Q3 Budget: 90 | Q4 Actual: 80 | Q4 Budget: 70" in text
+    assert "Group: Financing" in text
+    assert "Financing | Line: Interest | Q3 Actual: 5 | Q3 Budget: 4 | Q4 Actual: 3 | Q4 Budget: 2" in text
+    assert text.index("Group: Operating") < text.index("Product") < text.index("Group: Financing")
+
+
+def test_a_category_merged_down_a_column_is_repeated_on_each_row():
+    # Drawn once, centered between the two rows it covers.
+    centered = [
+        Text(40, 740, "Region", bold=True),
+        Text(160, 740, "Line", bold=True),
+        Text(300, 740, "Amount", bold=True),
+        Text(40, 716, "North", bold=True),
+        Text(160, 724, "Sales"),
+        Text(300, 724, "100"),
+        Text(160, 708, "Costs"),
+        Text(300, 708, "40"),
+        Text(40, 684, "South", bold=True),
+        Text(160, 692, "Sales"),
+        Text(300, 692, "80"),
+        Text(160, 676, "Costs"),
+        Text(300, 676, "30"),
+    ]
+    text = _text(centered)
+    assert "Region: North | Line: Sales | Amount: 100" in text
+    assert "Region: North | Line: Costs | Amount: 40" in text
+    assert "Region: South | Line: Sales | Amount: 80" in text
+    assert "Region: South | Line: Costs | Amount: 30" in text
+    assert "Group: North" not in text and "Group: South" not in text
+
+    # The same merge with the name on the first row and the cells below left blank.
+    top = [
+        Text(40, 740, "Region", bold=True),
+        Text(160, 740, "Line", bold=True),
+        Text(300, 740, "Amount", bold=True),
+        Text(40, 724, "North"),
+        Text(160, 724, "Sales"),
+        Text(300, 724, "100"),
+        Text(160, 708, "Costs"),
+        Text(300, 708, "40"),
+        Text(40, 692, "South"),
+        Text(160, 692, "Sales"),
+        Text(300, 692, "80"),
+        Text(160, 676, "Costs"),
+        Text(300, 676, "30"),
+    ]
+    filled = _text(top)
+    assert "Region: North | Line: Costs | Amount: 40" in filled
+    assert "Region: South | Line: Costs | Amount: 30" in filled
+
+
+def test_an_unequal_merge_does_not_steal_the_next_column():
+    items = [
+        Text(40, 756, "Line", bold=True),
+        Text(160, 756, "Q3", bold=True),
+        Text(450, 756, "Full year", bold=True),
+        Text(40, 740, "Line", bold=True),
+        Text(160, 740, "Actual", bold=True),
+        Text(250, 740, "Budget", bold=True),
+        Text(340, 740, "Variance", bold=True),
+        Text(450, 740, "Amount", bold=True),
+        Text(40, 724, "Sales"),
+        Text(160, 724, "100"),
+        Text(250, 724, "90"),
+        Text(340, 724, "10"),
+        Text(450, 724, "400"),
+    ]
+    text = _text(items)
+    assert "Line: Sales | Q3 Actual: 100 | Q3 Budget: 90 | Q3 Variance: 10 | Full year Amount: 400" in text
+
+
+def test_an_indented_subtotal_names_the_rows_under_it():
+    items = [
+        Text(40, 756, "Line", bold=True),
+        Text(220, 756, "Amount", bold=True),
+        Text(40, 740, "Revenue", bold=True),
+        Text(220, 740, "120"),
+        Text(56, 724, "Product"),
+        Text(220, 724, "100"),
+        Text(56, 708, "Service"),
+        Text(220, 708, "20"),
+    ]
+    text = _text(items)
+    assert "Line: Revenue | Amount: 120" in text
+    assert "Revenue | Line: Product | Amount: 100" in text
+    assert "Revenue | Line: Service | Amount: 20" in text
