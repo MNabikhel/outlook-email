@@ -25,3 +25,4 @@ inbox/failed/*
 .coverage
 htmlcov/
 .DS_Store
+AP cost codes/

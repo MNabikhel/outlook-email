@@ -192,6 +192,19 @@ CREATE TABLE IF NOT EXISTS chat_files (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_files ON chat_files(chat_id);
+
+CREATE TABLE IF NOT EXISTS cost_codings (
+    email_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'unmatched',
+    codes TEXT DEFAULT '[]',
+    others TEXT DEFAULT '[]',
+    unlisted TEXT DEFAULT '[]',
+    signature TEXT DEFAULT '',
+    decided_at TEXT DEFAULT '',
+    checked_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_cost_codings_status ON cost_codings(status);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(category);
@@ -652,6 +665,109 @@ class Store:
             "read_by_bionic": read_by_model,
         }
 
+    def ap_invoice_ids(self) -> list[str]:
+        """Emails filed as AP invoices or carrying an AP invoice, and any that were coded before."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM emails WHERE category = 'ap_invoice'
+                   OR EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id AND a.document_type = 'ap_invoice')
+                UNION SELECT email_id FROM cost_codings
+                """
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def cost_coding(self, email_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM cost_codings WHERE email_id = ?", (email_id,)).fetchone()
+        return _coding_from_row(row) if row else None
+
+    def save_cost_coding(
+        self,
+        email_id: str,
+        *,
+        status: str,
+        codes: list[dict],
+        others: list[dict] | None = None,
+        unlisted: list[str] | None = None,
+        signature: str = "",
+        decided_at: str = "",
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cost_codings(email_id, status, codes, others, unlisted, signature, decided_at, checked_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(email_id) DO UPDATE SET status=excluded.status, codes=excluded.codes,
+                    others=excluded.others, unlisted=excluded.unlisted, signature=excluded.signature,
+                    decided_at=excluded.decided_at, checked_at=excluded.checked_at
+                """,
+                (email_id, status, _dumps(codes), _dumps(others or []), _dumps(unlisted or []), signature, decided_at, _now()),
+            )
+
+    def delete_cost_coding(self, email_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM cost_codings WHERE email_id = ?", (email_id,))
+
+    def cost_codings(self, *, status: str | None = None, q: str | None = None, limit: int = 300) -> list[dict[str, Any]]:
+        """AP invoices with their coding, newest first, joined with what the page shows of the email."""
+        clauses, params = ["1=1"], []
+        if status == "review":
+            clauses.append("c.status != 'confirmed'")
+        elif status:
+            clauses.append("c.status = ?")
+            params.append(status)
+        for word in (q or "").split()[:8]:
+            like = _contains(word)
+            clauses.append(
+                f"(c.codes {_LIKE} OR e.subject {_LIKE} OR e.sender_name {_LIKE} OR e.sender_email {_LIKE} OR e.extracted {_LIKE})"
+            )
+            params.extend([like] * 5)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT c.*, e.subject, e.sender_name, e.sender_email, e.received_at, e.extracted
+                FROM cost_codings c JOIN emails e ON e.id = c.email_id
+                WHERE {' AND '.join(clauses)} ORDER BY e.received_at DESC LIMIT ?
+                """,
+                [*params, limit],
+            ).fetchall()
+        out = []
+        for row in rows:
+            item = _coding_from_row(row)
+            item.update(
+                subject=row["subject"],
+                sender_name=row["sender_name"] or "",
+                sender_email=row["sender_email"] or "",
+                received_at=row["received_at"],
+                extracted=ExtractedFields.from_dict(_loads(row["extracted"], {})),
+            )
+            out.append(item)
+        return out
+
+    def coding_counts(self) -> dict[str, int]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT status, COUNT(*) AS n FROM cost_codings GROUP BY status").fetchall()
+        counts = {"suggested": 0, "unmatched": 0, "confirmed": 0, **{row["status"]: row["n"] for row in rows}}
+        counts["review"] = counts["suggested"] + counts["unmatched"]
+        counts["all"] = counts["review"] + counts["confirmed"]
+        return counts
+
+    def last_confirmed_codes(self, sender_email: str, *, exclude: str = "") -> list[dict]:
+        """The codes most recently confirmed for another invoice from this sender."""
+        if not sender_email:
+            return []
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT c.codes FROM cost_codings c JOIN emails e ON e.id = c.email_id
+                WHERE c.status = 'confirmed' AND lower(e.sender_email) = ? AND c.email_id != ?
+                ORDER BY c.decided_at DESC LIMIT 1
+                """,
+                (sender_email.lower(), exclude),
+            ).fetchone()
+        return _loads(row["codes"], []) if row else []
+
     def category_counts(self) -> dict[str, int]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -736,6 +852,7 @@ class Store:
             conn.execute(f"DELETE FROM corrections WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM fraud_checks WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM findings WHERE email_id IN ({sample})")
+            conn.execute(f"DELETE FROM cost_codings WHERE email_id IN ({sample})")
             conn.execute("DELETE FROM emails WHERE source = 'demo'")
             if not conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]:
                 conn.execute("DELETE FROM digests")
@@ -1165,6 +1282,19 @@ class Store:
         return out
 
 
+def _coding_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "email_id": row["email_id"],
+        "status": row["status"],
+        "codes": _loads(row["codes"], []),
+        "others": _loads(row["others"], []),
+        "unlisted": _loads(row["unlisted"], []),
+        "signature": row["signature"] or "",
+        "decided_at": row["decided_at"] or "",
+        "checked_at": row["checked_at"] or "",
+    }
+
+
 def _action_from_row(row: sqlite3.Row) -> ActionItem:
     return ActionItem(
         id=row["id"],
@@ -1237,7 +1367,9 @@ _LIKE = "LIKE ? ESCAPE '\\'"
 _MATCH_ANY = (
     f"(subject {_LIKE} OR sender_email {_LIKE} OR sender_name {_LIKE} OR summary {_LIKE} OR body_text {_LIKE}"
     " OR EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
-    f" AND (a.filename {_LIKE} OR a.extracted_text {_LIKE})))"
+    f" AND (a.filename {_LIKE} OR a.extracted_text {_LIKE}))"
+    # The cost code an AP invoice was coded to, and its description, find it too.
+    f" OR EXISTS (SELECT 1 FROM cost_codings c WHERE c.email_id = emails.id AND c.codes {_LIKE}))"
 )
 
 

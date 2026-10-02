@@ -1,0 +1,72 @@
+{# AP cost coding for one invoice. Needs: email, coding, codebook, back, coding_class. #}
+{% if coding %}
+{% set picks = coding_choices(codebook, coding) %}
+<section class="{{ coding_class }} coding {{ coding.status }}" id="coding">
+  <div class="coding-head">
+    <h3>AP coding</h3>
+    <span class="coding-state {{ coding.status }}">
+      {%- if coding.status == 'confirmed' %}Confirmed{% if coding.decided_at %} · {{ coding.decided_at | shortdt }}{% endif %}
+      {%- elif coding.status == 'suggested' %}Suggested · check and confirm
+      {%- else %}No code found{% endif -%}
+    </span>
+  </div>
+  {% if coding.codes %}
+  <ul class="coding-codes">
+    {% for item in coding.codes %}
+    <li>
+      <code class="cost-code">{{ item.code }}</code>
+      <span class="coding-what">
+        <b>{{ item.description or 'No description in the workbook' }}</b>
+        <small>{{ item.source | capitalize }}{% if item.where %} · {{ item.where }}{% endif %}</small>
+        {% if item.evidence %}<q>{{ item.evidence }}</q>{% endif %}
+      </span>
+    </li>
+    {% endfor %}
+  </ul>
+  {% elif codebook.codes %}
+  <p class="muted">None of your {{ codebook.codes | length }} cost codes is written on this invoice, and no description matches it. Choose one with <b>Revise</b>.</p>
+  {% else %}
+  <p class="muted">Your cost code workbook is empty. Fill it in from the <a data-full href="/coding">AP coding</a> page, and this invoice is checked against it.</p>
+  {% endif %}
+  {% if coding.others and coding.status != 'confirmed' %}
+  <p class="coding-also">Also possible:
+    {% for item in coding.others %}<code class="cost-code">{{ item.code }}</code> {{ item.description }}{{ ', ' if not loop.last else '' }}{% endfor %}
+  </p>
+  {% endif %}
+  {% if coding.unlisted %}
+  <p class="note">On the invoice but not in your workbook: {% for code in coding.unlisted %}<code>{{ code }}</code>{{ ', ' if not loop.last else '' }}{% endfor %}. If it is a real code, add it to the workbook.</p>
+  {% endif %}
+  {% if codebook.codes or coding.codes %}
+  <div class="coding-actions">
+    {% if coding.status != 'confirmed' and coding.codes %}
+    <form method="post" action="/inbox/{{ email.id }}/coding/confirm">
+      <input type="hidden" name="next" value="{{ back }}"/>
+      <button type="submit">Confirm {{ 'codes' if coding.codes | length > 1 else 'code' }}</button>
+    </form>
+    {% endif %}
+    {% if codebook.codes %}
+    <details class="coding-revise">
+      <summary>{{ 'Revise' if coding.codes else 'Choose a code' }}</summary>
+      <form method="post" action="/inbox/{{ email.id }}/coding/revise">
+        <input type="hidden" name="next" value="{{ back }}"/>
+        <input type="search" placeholder="Filter by code or description" aria-label="Filter cost codes" data-code-filter autocomplete="off"/>
+        <div class="code-pick">
+          {% for pick in picks %}
+          <label data-code-text="{{ (pick.code ~ ' ' ~ pick.description) | lower }}" class="{{ 'likely' if pick.likely else '' }}">
+            <input type="checkbox" name="codes" value="{{ pick.code }}" {{ 'checked' if pick.checked else '' }}/>
+            <code class="cost-code">{{ pick.code }}</code>
+            <span>{{ pick.description }}</span>
+            {% if pick.likely %}<small>possible</small>{% endif %}
+          </label>
+          {% endfor %}
+        </div>
+        <p class="muted small" data-code-none hidden>No code matches that filter.</p>
+        <p class="muted small">Tick more than one when the invoice is split across codes.</p>
+        <button type="submit">Save and confirm</button>
+      </form>
+    </details>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endif %}

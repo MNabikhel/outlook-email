@@ -40,6 +40,8 @@ class Settings(BaseSettings):
 
     data_dir: Path = Path("./data")
     inbox_dir: Path = Path("./inbox")
+    # The AP cost code workbook's folder. Empty = "AP cost codes" beside the inbox folder.
+    cost_codes_dir: Path | None = None
     timezone: str = "America/New_York"
     host: str = "127.0.0.1"
     port: int = 8765
@@ -83,6 +85,11 @@ class Settings(BaseSettings):
     @classmethod
     def _path(cls, value: str | Path) -> Path:
         return Path(value).expanduser()
+
+    @field_validator("cost_codes_dir", mode="before")
+    @classmethod
+    def _optional_path(cls, value: str | Path | None) -> Path | None:
+        return Path(value).expanduser() if value and str(value).strip() else None
 
     @field_validator("llm", mode="before")
     @classmethod
@@ -170,6 +177,10 @@ class Settings(BaseSettings):
         return self.inbox_dir / "failed"
 
     @property
+    def cost_codes_folder(self) -> Path:
+        return self.cost_codes_dir or self.inbox_dir.parent / "AP cost codes"
+
+    @property
     def llm_mode(self) -> str:
         if self.llm is None:
             return "auto"
@@ -208,6 +219,9 @@ class Settings(BaseSettings):
             self.inbox_failed,
         ):
             folder.mkdir(parents=True, exist_ok=True)
+        from controller_inbox.cost_codes import ensure_workbook
+
+        ensure_workbook(self)
 
 
 def load_settings() -> Settings:

@@ -150,6 +150,9 @@ def record_correction(
     assign_script_draft(email)
     email.model_status = "corrected"
     store.upsert_email(email)
+    from controller_inbox import cost_codes
+
+    cost_codes.refresh(store, settings, email_ids=[email.id])
     return row
 
 

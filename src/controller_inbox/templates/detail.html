@@ -24,6 +24,9 @@
       <div><span>Invoice</span><b>{{ email.extracted.primary_invoice or '—' }}</b></div>
       <div><span>Amount</span><b>{{ email.extracted.primary_amount | money or '—' }}</b></div>
       <div><span>Due</span><b>{{ email.extracted.primary_due or '—' }}</b></div>
+      {% if coding %}
+      <div><span>Cost code</span><b>{{ coding.codes | map(attribute='code') | join(', ') or '—' }}</b> <a class="tiny-link" href="#coding">{{ 'Confirmed' if coding.status == 'confirmed' else 'Review' }}</a></div>
+      {% endif %}
     </div>
   </header>
   {% include "_mail_tools.html" %}
@@ -36,6 +39,7 @@
   </div>
   {% endif %}
   {% if check.level != 'none' %}{% include "_fraud_panel.html" %}{% endif %}
+  {% with back="/inbox/" ~ email.id, coding_class="panel" %}{% include "_coding_panel.html" %}{% endwith %}
 
   {% if email.importance_reasons %}
   <section class="panel">

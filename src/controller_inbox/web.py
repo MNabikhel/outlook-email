@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
-from controller_inbox import agent, chats, documents, fraud, ocr, semantic
+from controller_inbox import agent, chats, cost_codes, documents, fraud, ocr, semantic
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.classify import month_end
@@ -49,6 +49,7 @@ templates.env.filters["shortdt"] = lambda value: (
     if value
     else ""
 )
+templates.env.globals["coding_choices"] = cost_codes.choices
 templates.env.filters["money"] = lambda value: "" if value is None else f"${value:,.2f}"
 templates.env.filters["label_doc"] = lambda value: DOCUMENT_LABELS.get(
     value if isinstance(value, DocumentType) else DocumentType(value), value
@@ -82,6 +83,9 @@ NOTICES = {
     "indexed": "Indexed for search. Ask CloseDesk can now find these files by meaning.",
     "index-failed": "The embedding model didn't answer, so nothing was indexed. Load one in LM Studio and try again.",
     "index-off": "No embedding model found. Load one in LM Studio (for example nomic-embed-text) and try again.",
+    "coding-confirmed": "Cost code confirmed. The next invoice from this sender is suggested the same code.",
+    "coding-revised": "Cost code changed and confirmed. The next invoice from this sender is suggested this code.",
+    "coding-checked": "Every AP invoice was checked against the workbook again. Confirmed codes were left as they are.",
 }
 
 # Files that download from the email page. Programs, scripts, and macro-enabled Office files stay in Outlook.
@@ -298,6 +302,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "profile": profile,
             "profiles": PROFILES,
             "finance": profile == "finance",
+            "coding_counts": store.coding_counts(),
         }
         base["llm_enabled"] = base["model"].active
         base.update(extra)
@@ -365,6 +370,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         flag: str = "",
         q: str = "",
     ):
+        if q:
+            cost_codes.refresh_if_changed(store, settings)
         emails = store.list_emails(
             importance=importance or None,
             category=category or None,
@@ -387,11 +394,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         email = store.get_email(email_id)
         if not email:
             return HTMLResponse("Not found", status_code=404)
+        cost_codes.refresh(store, settings, email_ids=[email.id])
         return render(
             request,
             "detail.html",
             page="inbox",
             email=email,
+            coding=store.cost_coding(email.id),
+            codebook=cost_codes.load(settings),
             has_original=original_path(email) is not None,
             check=fraud_view(email),
             files=file_cards(email),
@@ -599,10 +609,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         email = store.get_email(email_id)
         if not email:
             return HTMLResponse("<p class='muted'>This email is no longer here.</p>", status_code=404)
+        cost_codes.refresh(store, settings, email_ids=[email.id])
         return render(
             request,
             "_preview.html",
             email=email,
+            coding=store.cost_coding(email.id),
+            codebook=cost_codes.load(settings),
             back=_local_path(next, "/"),
             done=store.is_done(email.id),
             has_original=original_path(email) is not None,
@@ -804,6 +817,60 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         back = _local_path(next, f"/inbox/{email_id}")
         return RedirectResponse(back + ("&" if "?" in back else "?") + "notice=corrected", status_code=303)
 
+    @app.post("/inbox/{email_id}/coding/confirm")
+    def confirm_coding(email_id: str, next: str = Form("")):
+        if store.get_email(email_id) is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+        try:
+            cost_codes.confirm(store, settings, email_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return _back(next, f"/inbox/{email_id}", "coding-confirmed", "coding")
+
+    @app.post("/inbox/{email_id}/coding/revise")
+    def revise_coding(email_id: str, codes: list[str] = Form(default=[]), next: str = Form("")):
+        if store.get_email(email_id) is None:
+            raise HTTPException(status_code=404, detail="Message not found")
+        try:
+            cost_codes.revise(store, settings, email_id, codes)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return _back(next, f"/inbox/{email_id}", "coding-revised", "coding")
+
+    @app.get("/coding", response_class=HTMLResponse)
+    def coding_page(request: Request, status: str = "review", q: str = ""):
+        cost_codes.refresh_if_changed(store, settings)
+        status = status if status in {"review", "suggested", "unmatched", "confirmed", "all"} else "review"
+        return render(
+            request,
+            "coding.html",
+            page="coding",
+            rows=store.cost_codings(status=None if status == "all" else status, q=q or None),
+            status=status,
+            coding_q=q,
+            codebook=cost_codes.load(settings),
+            workbook=str(cost_codes.workbook_path(settings)),
+            coding_folder=str(settings.cost_codes_folder),
+        )
+
+    @app.post("/coding/check")
+    def coding_check():
+        cost_codes.ensure_workbook(settings)
+        cost_codes.refresh(store, settings, force=True)
+        return RedirectResponse("/coding?notice=coding-checked", status_code=303)
+
+    @app.post("/coding/open")
+    def coding_open(request: Request):
+        _require_page(request)
+        if request.client and request.client.host not in LOCAL_CLIENTS:
+            raise HTTPException(status_code=403, detail="Files open on the computer running CloseDesk only.")
+        path = cost_codes.ensure_workbook(settings)
+        try:
+            open_file(path if path.exists() else settings.cost_codes_folder)
+        except OSError as exc:
+            return JSONResponse({"ok": False, "message": f"Couldn't open it ({exc}). It is at {path}."})
+        return JSONResponse({"ok": True, "message": f"Opening {path.name}. Save it when you're done; CloseDesk reads it again by itself."})
+
     @app.post("/process")
     def process():
         from controller_inbox.overnight import run_overnight
@@ -1000,6 +1067,12 @@ def _rebuilt_eml(email) -> bytes:
         pass
     message.set_content(email.body_text or "")
     return bytes(message)
+
+
+def _back(next_path: str, fallback: str, notice: str, anchor: str = "") -> RedirectResponse:
+    back = _local_path(next_path, fallback).split("#", 1)[0]
+    back += ("&" if "?" in back else "?") + f"notice={notice}"
+    return RedirectResponse(back + (f"#{anchor}" if anchor else ""), status_code=303)
 
 
 def _local_path(value: str, fallback: str) -> str:
