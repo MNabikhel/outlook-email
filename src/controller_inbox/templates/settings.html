@@ -17,16 +17,16 @@
 </section>
 <section class="panel" id="timezone">
   <h3>Time zone</h3>
-  <p>Times follow this computer{% if computer_zone %} (<b>{{ computer_zone }}</b>){% endif %} unless you pick another. Mail stays stored in UTC, and a change here updates “today”, due dates, and every clock on screen.</p>
+  <p>Times follow this computer (<b>{{ computer_offset }}</b>{% if computer_zone and computer_zone != 'UTC' %}, {{ computer_zone }}{% endif %}) unless you pick another. A zone west of Greenwich is a minus, such as UTC-1 or UTC-5. Mail stays stored in UTC, and a change here updates “today”, due dates, and every clock on screen.</p>
   <form method="post" action="/settings/timezone" class="profile-form tz-form">
     <label>
       Time zone
       <select name="zone" aria-label="Time zone">
-        <option value="auto" {{ 'selected' if timezone_choice == 'auto' else '' }}>This computer ({{ computer_zone }})</option>
-        {% for region, zones in timezone_groups %}
-        <optgroup label="{{ region }}">
-          {% for zone in zones %}
-          <option value="{{ zone }}" {{ 'selected' if timezone_choice == zone else '' }}>{{ zone }}</option>
+        <option value="auto" {{ 'selected' if timezone_choice == 'auto' else '' }}>This computer ({{ computer_offset }})</option>
+        {% for offset, zones in timezone_groups %}
+        <optgroup label="{{ offset }}">
+          {% for zone, label in zones %}
+          <option value="{{ zone }}" {{ 'selected' if timezone_choice == zone else '' }}>{{ label }}</option>
           {% endfor %}
         </optgroup>
         {% endfor %}
@@ -34,7 +34,7 @@
     </label>
     <button type="submit">Save</button>
   </form>
-  <p class="muted">Showing <b>{{ now_local }}</b> ({{ active_zone }}).</p>
+  <p class="muted">Showing <b>{{ now_local }}</b> ({{ active_offset }}{% if active_zone != 'UTC' %} · {{ active_zone }}{% endif %}).</p>
 </section>
 <section class="split">
   <article class="panel">

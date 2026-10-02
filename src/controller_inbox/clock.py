@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timezone
-from functools import lru_cache
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, available_timezones
 
@@ -205,6 +204,17 @@ def set_timezone(store, settings, choice: str) -> None:
     settings.timezone = text
 
 
+def offset_label(zone: ZoneInfo, when: datetime | None = None) -> str:
+    """How far the zone is from UTC, the way people say it: ``UTC-1``, ``UTC+0``, ``UTC+5:30``.
+
+    West of Greenwich is negative. This is not the ``Etc/GMT`` name, which flips the sign.
+    """
+    moment = when or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return _offset_text(moment.astimezone(zone).utcoffset() or timedelta(0))
+
+
 def format_when(value: str, zone: ZoneInfo | None = None) -> str:
     """``Sep 22 · 16:00`` in ``zone``. A stamp with no offset is UTC, which is how mail is stored."""
     if not value:
@@ -220,17 +230,37 @@ def format_when(value: str, zone: ZoneInfo | None = None) -> str:
     return parsed.strftime("%b %d · %H:%M")
 
 
-@lru_cache(maxsize=1)
-def timezone_groups() -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """IANA names grouped by region, for the Setup page."""
+def timezone_groups(when: datetime | None = None) -> tuple[tuple[str, tuple[tuple[str, str], ...]], ...]:
+    """Zones grouped by their offset at ``when``, from UTC-12 toward UTC+14.
+
+    Each entry is ``(offset label, ((iana name, option label), ...))``. The option
+    reads ``(UTC-1) Atlantic/Cape_Verde``, so a zone behind UTC is a minus, not an
+    ``Etc/GMT`` plus.
+    """
+    moment = when or datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
     names = sorted(zone for zone in available_timezones() if "/" in zone and not zone.startswith("Etc/"))
-    groups: dict[str, list[str]] = {}
-    for name in names:
-        region, _, _ = name.partition("/")
-        groups.setdefault(region, []).append(name)
-    ordered = [("UTC", ("UTC",))]
-    ordered.extend((region, tuple(zones)) for region, zones in sorted(groups.items()))
-    return tuple(ordered)
+    buckets: dict[timedelta, list[tuple[str, str]]] = {}
+    for name in ["UTC", *names]:
+        zone = ZoneInfo(name)
+        delta = moment.astimezone(zone).utcoffset() or timedelta(0)
+        buckets.setdefault(delta, []).append((name, f"({offset_label(zone, moment)}) {name}"))
+    return tuple(
+        (_offset_text(delta), tuple(sorted(rows, key=lambda item: item[1])))
+        for delta, rows in sorted(buckets.items())
+    )
+
+
+def _offset_text(delta: timedelta) -> str:
+    total = int(delta.total_seconds())
+    sign = "-" if total < 0 else "+"
+    total = abs(total)
+    hours, rem = divmod(total, 3600)
+    minutes = rem // 60
+    if minutes:
+        return f"UTC{sign}{hours}:{minutes:02d}"
+    return f"UTC{sign}{hours}"
 
 
 def _named_zone() -> str:
