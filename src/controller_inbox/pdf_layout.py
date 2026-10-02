@@ -90,18 +90,28 @@ class PageText:
 
 
 def glyphs_of(layout) -> list[Glyph]:
-    """Characters of a pdfminer page (``extract_pages(..., laparams=None)``)."""
+    """Characters of a pdfminer page (``extract_pages(..., laparams=None)``).
+
+    A name turned on its side (a schedule's column headings) is not upright. Those letters
+    are gathered into the word and set down at the foot of the column, on one line with the
+    other names, so the row is readable instead of dropped.
+    """
     from pdfminer.layout import LTChar
 
     out: list[Glyph] = []
+    turned: list[tuple[str, float, float, float, float, float, bool, bool]] = []
 
     def walk(item) -> None:
         if isinstance(item, LTChar):
             text = item.get_text()
-            if item.upright and text and item.x1 > item.x0:
+            if text and item.x1 > item.x0 and item.y1 > item.y0:
                 font = (item.fontname or "").lower()
                 bold = any(mark in font for mark in ("bold", "black", "heavy", "semibold", "demi"))
-                out.append(Glyph(text, item.x0, item.x1, (item.y0 + item.y1) / 2, max(item.size, 1.0), bold))
+                if item.upright:
+                    out.append(Glyph(text, item.x0, item.x1, (item.y0 + item.y1) / 2, max(item.size, 1.0), bold))
+                else:
+                    _a, b, _c, _d, _e, _f = item.matrix
+                    turned.append((text, item.x0, item.x1, item.y0, item.y1, max(item.size, 1.0), bold, b > 0))
             return
         try:
             children = list(item)
@@ -111,7 +121,59 @@ def glyphs_of(layout) -> list[Glyph]:
             walk(child)
 
     walk(layout)
+    out.extend(_turned_words(turned))
     return out
+
+
+def _turned_words(chars: list[tuple[str, float, float, float, float, float, bool, bool]]) -> list[Glyph]:
+    """Letters stacked in one column, read in the direction they were drawn, as one word."""
+    if not chars:
+        return []
+    chars = sorted(chars, key=lambda item: (item[1] + item[2]) / 2)
+    columns: list[list[tuple]] = [[chars[0]]]
+    for char in chars[1:]:
+        size = max(char[5], 1.0)
+        centre = (char[1] + char[2]) / 2
+        previous = (columns[-1][-1][1] + columns[-1][-1][2]) / 2
+        if abs(centre - previous) <= 0.8 * size:
+            columns[-1].append(char)
+        else:
+            columns.append([char])
+    words: list[Glyph] = []
+    for column in columns:
+        column.sort(key=lambda item: item[3])
+        runs: list[list[tuple]] = [[column[0]]]
+        for char in column[1:]:
+            # A short letter such as "i" has a small box. The gap that ends a word is about
+            # a whole letter, measured from the wider of the two boxes, not from that short one.
+            previous = runs[-1][-1]
+            scale = max(char[2] - char[1], char[4] - char[3], previous[2] - previous[1], previous[4] - previous[3], 1.0)
+            # A space inside a name is about one letter. A new name in the same column
+            # leaves a clearly larger gap, so "Maya Chen" stays one heading.
+            if char[3] - previous[4] > 1.8 * scale:
+                runs.append([char])
+            else:
+                runs[-1].append(char)
+        for run in runs:
+            if len(run) < 2:
+                continue
+            upward = sum(1 for item in run if item[7]) >= len(run) / 2
+            ordered = sorted(run, key=lambda item: item[3] if upward else -item[3])
+            pieces = [ordered[0][0]]
+            for previous, item in zip(ordered, ordered[1:]):
+                gap = (item[3] - previous[4]) if upward else (previous[3] - item[4])
+                scale = max(item[2] - item[1], item[4] - item[3], previous[2] - previous[1], previous[4] - previous[3], 1.0)
+                if gap > 0.55 * scale:
+                    pieces.append(" ")
+                pieces.append(item[0])
+            name = "".join(pieces).strip()
+            if not name:
+                continue
+            x0, x1 = min(item[1] for item in run), max(item[2] for item in run)
+            size = statistics.median(item[5] for item in run)
+            foot = min(item[3] for item in run)
+            words.append(Glyph(name, x0, x1, foot + size * 0.35, max(size, 1.0), any(item[6] for item in run)))
+    return words
 
 
 def page_text(glyphs: list[Glyph], previous: list[Table] | None = None) -> PageText:
@@ -218,7 +280,8 @@ def _table_blocks(lines: list[Line]) -> list[tuple[int, int]]:
         while end < len(lines) and _continues(lines, i, end):
             end += 1
         if end - i >= 3 and len(_columns(lines[i:end])) >= 2:
-            blocks.append((i, end))
+            start = i - 1 if i > 0 and _labels_above(lines[i - 1], lines[i:end]) else i
+            blocks.append((start, end))
             i = end
         else:
             i += 1
@@ -262,6 +325,26 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
     x0, x1 = line.segments[0][0].x0, line.segments[0][-1].x1
     under = [c for c in columns if x0 < c[1] and x1 > c[0]]
     return len(under) == 1
+
+
+def _labels_above(line: Line, block: list[Line]) -> bool:
+    """A row of names sitting on the columns, even when it has no cell for the stub column.
+
+    Schedules often print the people sideways in the top row and the districts down the side.
+    The districts make one more column than the name row has, so the names would otherwise
+    be left off the table.
+    """
+    columns = _columns(block)
+    if len(line.segments) < 2 or len(columns) < 2:
+        return False
+    words = [word.text for segment in line.segments for word in segment]
+    if not words or sum(map(tables.is_value, words)) >= 0.5 * len(words):
+        return False
+    gap = line.mid - block[0].mid
+    usual = statistics.median(block[i].mid - block[i + 1].mid for i in range(len(block) - 1)) if len(block) > 1 else line.size
+    if gap <= 0 or gap > max(2.2 * usual, 3.0 * line.size):
+        return False
+    return all(_owns(segment, _spans(columns)) for segment in line.segments)
 
 
 def _fits_columns(line: Line, columns: list[tuple[float, float]]) -> bool:

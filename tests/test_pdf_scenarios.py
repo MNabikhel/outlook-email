@@ -130,6 +130,27 @@ def test_a_repeated_table_on_the_next_page_is_not_named_twice():
     assert "[page 2]" in text and "Page 2" not in text
 
 
+def test_names_turned_sideways_in_the_top_row_are_read():
+    names = [
+        Text(160, 690, "Maya Chen", size=9, bold=True, turn=90),
+        Text(250, 690, "Sam", size=9, bold=True, turn=90),
+        Text(340, 690, "Li", size=9, bold=True, turn=90),
+    ]
+    body = sheet_rows(
+        [(40, "left"), (160, "left"), (250, "left"), (340, "left")],
+        [["North", "1", "2", "3"], ["South", "4", "5", "6"], ["East", "7", "8", "9"]],
+        top=670,
+        pitch=16,
+        size=10,
+    )
+    text = _text([*names, *body, Text(40, 590, "Prepared by Maya Chen", size=9)])
+    assert "Maya Chen | Sam | Li" in text
+    assert "North" in text and "South" in text and "East" in text
+    assert "Prepared by Maya Chen" in text
+    assert "Maya Chen: 1" in text and "Sam: 2" in text and "Li: 3" in text
+    assert "Maya Chen: 4" in text and "Li: 9" in text
+
+
 def test_a_group_label_stays_inside_the_table():
     items = [
         Text(40, 740, "Name", size=10, bold=True),

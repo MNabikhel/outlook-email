@@ -42,6 +42,7 @@ class Text:
     kern: float = 0
     right: bool = False
     twice: bool = False
+    turn: int = 0
 
 
 def _escape(value: str) -> str:
@@ -50,6 +51,17 @@ def _escape(value: str) -> str:
 
 def _ops(item: Text) -> list[str]:
     font = "/F2" if item.bold else "/F1"
+    if item.turn:
+        # Letters stacked in the column. 90 reads upward from y; -90 reads downward.
+        step = item.size if item.turn > 0 else -item.size
+        matrix = "0 1 -1 0" if item.turn > 0 else "0 -1 1 0"
+        y = item.y
+        ops = []
+        for ch in item.text:
+            if ch != " ":
+                ops.append(f"BT {font} {item.size} Tf {matrix} {item.x:.2f} {y:.2f} Tm ({_escape(ch)}) Tj ET")
+            y += step
+        return ops
     x = item.x - width(item.text, item.size) - item.spacing * len(item.text) if item.right else item.x
     ops = [f"BT {font} {item.size} Tf {item.spacing} Tc 1 0 0 1 {x:.2f} {item.y} Tm"]
     if item.placed:
