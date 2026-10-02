@@ -21,6 +21,7 @@
   </div>
   {% if email.summary %}<p class="preview-summary">{{ email.summary }}</p>{% endif %}
   {% include "_mail_tools.html" %}
+  {% with coding_class="preview-part" %}{% include "_coding_panel.html" %}{% endwith %}
 
   {% if email.actions %}
   <section class="preview-part">

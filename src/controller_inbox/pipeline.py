@@ -187,6 +187,9 @@ def process_message(
     assign_script_draft(record)
     store.upsert_email(record)
     save_check(store, record, check, now=now)
+    from controller_inbox import cost_codes
+
+    cost_codes.refresh(store, settings, email_ids=[record.id])
     return store.get_email(record.id) or record
 
 

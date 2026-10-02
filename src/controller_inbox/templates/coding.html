@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}AP coding · CloseDesk{% endblock %}
+{% block heading %}AP coding{% endblock %}
+{% block body %}
+<section class="split coding-top">
+  <article class="panel">
+    <h3>Your cost code workbook</h3>
+    <p class="workbook-path"><code>{{ workbook }}</code></p>
+    {% if codebook.codes %}
+    <p><b>{{ codebook.codes | length }}</b> cost code{{ '' if codebook.codes | length == 1 else 's' }} loaded from {{ codebook.files | join(', ') }}.</p>
+    {% else %}
+    <p class="note">No codes yet. Open the workbook, fill in <b>Description</b> and <b>Cost Code</b> (one per row, for example <code>Office supplies</code> and <code>1100.6110.100</code>), and save it.</p>
+    {% endif %}
+    {% for warning in codebook.warnings %}<p class="warn-box">{{ warning }}</p>{% endfor %}
+    <div class="coding-buttons">
+      <button type="button" data-action="open-codes">Open workbook</button>
+      <form method="post" action="/coding/check"><button type="submit" class="ghost">Check invoices again</button></form>
+    </div>
+  </article>
+  <article class="panel">
+    <h3>How codes are matched</h3>
+    <ul class="plain">
+      <li><b>On the invoice</b>: a code from your workbook stamped or typed on the invoice or in the email, even where a scan read a period as a comma or an O for a zero.</li>
+      <li><b>You used it for this sender</b>: no code printed, so the code you last confirmed for the same sender.</li>
+      <li><b>Description matches</b>: otherwise, a description whose words are on the invoice.</li>
+    </ul>
+    <p class="muted">Nothing is final until you confirm it. Revise lets you pick other codes, or several for a split invoice. Search all mail finds an invoice by its code or description.</p>
+  </article>
+</section>
+
+<section class="toolbar coding-toolbar">
+  <div class="chips">
+    <a class="{{ 'on' if status == 'review' else '' }}" href="/coding?status=review">Needs review ({{ coding_counts.review }})</a>
+    <a class="{{ 'on' if status == 'suggested' else '' }}" href="/coding?status=suggested">Suggested ({{ coding_counts.suggested }})</a>
+    <a class="{{ 'on' if status == 'unmatched' else '' }}" href="/coding?status=unmatched">No code found ({{ coding_counts.unmatched }})</a>
+    <a class="{{ 'on' if status == 'confirmed' else '' }}" href="/coding?status=confirmed">Confirmed ({{ coding_counts.confirmed }})</a>
+    <a class="{{ 'on' if status == 'all' else '' }}" href="/coding?status=all">All ({{ coding_counts.all }})</a>
+  </div>
+  <form method="get" action="/coding" class="coding-filter" role="search">
+    <input type="hidden" name="status" value="{{ status }}"/>
+    <input type="search" name="q" value="{{ coding_q }}" placeholder="Code, description, vendor or invoice" aria-label="Filter AP invoices"/>
+  </form>
+</section>
+
+<section class="table-wrap">
+  <table class="mail coding-table">
+    <thead>
+      <tr>
+        <th>Received</th>
+        <th>From</th>
+        <th>Invoice</th>
+        <th>Amount</th>
+        <th>Cost code</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in rows %}
+      <tr data-email="{{ row.email_id }}">
+        <td class="nowrap">{{ row.received_at | shortdt }}</td>
+        <td>{{ row.sender_name or row.sender_email }}<br/><small class="muted">{{ row.sender_email if row.sender_name else '' }}</small></td>
+        <td><a href="/inbox/{{ row.email_id }}">{{ row.subject }}</a>{% if row.extracted.primary_invoice %}<br/><small class="muted">{{ row.extracted.primary_invoice }}</small>{% endif %}</td>
+        <td class="nowrap">{{ row.extracted.primary_amount | money or '—' }}</td>
+        <td>
+          {% for item in row.codes %}
+          <div class="coding-cell"><code class="cost-code">{{ item.code }}</code> {{ item.description }}<small class="muted">{{ item.source }}</small></div>
+          {% else %}
+          <span class="muted">—</span>
+          {% endfor %}
+        </td>
+        <td><span class="coding-state {{ row.status }}">{{ {'confirmed': 'Confirmed', 'suggested': 'Suggested', 'unmatched': 'No code found'}[row.status] }}</span></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">{% if coding_q %}No AP invoice matches “{{ coding_q }}”.{% elif status == 'review' %}Nothing waiting: every AP invoice is confirmed.{% else %}No AP invoices here yet.{% endif %}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

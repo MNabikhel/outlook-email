@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
+from controller_inbox import cost_codes
 from controller_inbox.actions import local_today
 from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, write_digest_files
@@ -91,6 +92,8 @@ def run_overnight(
         graph_count, graph_note = _sync_graph(store, settings, now)
 
     reading = read_queue(store, settings, limit=limit, now=now, reader=reader, on_progress=on_progress)
+    # After reading: the model may have filed more mail as AP invoices, and the workbook may have changed.
+    coded = cost_codes.refresh(store, settings)
     stats = reading["stats"]
     summarized = 0
     if reading["model"] and not (stats and stats.stopped_reason) and settings.overnight_file_summaries:
@@ -128,6 +131,7 @@ def run_overnight(
         "read_by_bionic": len(reading["read_ids"]),
         "files_summarized": summarized,
         "files_reread": reread,
+        "invoices_coded": coded,
         "indexed_for_search": indexed,
         "waiting_on_bionic": counts["waiting_on_bionic"],
         "folders": {

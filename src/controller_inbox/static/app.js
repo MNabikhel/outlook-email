@@ -97,6 +97,31 @@
     }
   }
 
+  async function openCodes() {
+    try {
+      const response = await fetch("/coding/open", { method: "POST", headers: JSON_HEADERS });
+      const data = await response.json();
+      toast(data.message || "Opening the workbook…", 6000);
+    } catch (error) {
+      toast("Couldn't open the workbook from here. Its location is on the AP coding page.", 6000);
+    }
+  }
+
+  // Revise: narrow the list of cost codes as you type.
+  document.addEventListener("input", (event) => {
+    const filter = event.target.closest("[data-code-filter]");
+    if (!filter) return;
+    const form = filter.closest("form");
+    const words = filter.value.toLowerCase().split(/\s+/).filter(Boolean);
+    let shown = 0;
+    $$("label[data-code-text]", form).forEach((label) => {
+      const match = words.every((word) => label.dataset.codeText.includes(word));
+      label.hidden = !match;
+      shown += match ? 1 : 0;
+    });
+    $("[data-code-none]", form).hidden = shown > 0;
+  });
+
   async function draftReply(id, button) {
     const scope = button.closest(".preview, .detail") || document;
     const box = $(`.draft-box[data-draft-for="${CSS.escape(id)}"]`, scope);
@@ -829,6 +854,8 @@
       switch (actionButton.dataset.action) {
         case "open-original":
           return openOriginal(id);
+        case "open-codes":
+          return openCodes();
         case "draft":
           return draftReply(id, actionButton);
         case "copy-draft":

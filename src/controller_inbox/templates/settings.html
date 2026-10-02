@@ -149,6 +149,11 @@
     <p class="muted">Unattended: schedule <code>python -m controller_inbox overnight</code> (see README), or leave <code>python -m controller_inbox watch</code> running. Last run: {{ last_run or 'never' }}.</p>
   </article>
 </section>
+<section class="panel" id="cost-codes">
+  <h3>AP cost codes</h3>
+  <p>Keep your JDE cost codes in <code>{{ settings.cost_codes_folder / 'AP cost codes.xlsx' }}</code>: one row each, with <b>Description</b> and <b>Cost Code</b> (for example <code>1100.6110.100</code>). Every AP invoice is checked against it, and the email page shows the code with <b>Confirm</b> and <b>Revise</b>.</p>
+  <p><button type="button" data-action="open-codes">Open workbook</button> <a href="/coding">Go to AP coding →</a></p>
+</section>
 <section class="split">
   <article class="panel">
     <h3>Outlook direct connection (optional, needs IT)</h3>

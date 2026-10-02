@@ -28,6 +28,7 @@
         <span class="nav-label">Everything</span>
         <a href="/inbox" class="{{ 'on' if page == 'inbox' else '' }}">All mail</a>
         <a href="/attachments" class="{{ 'on' if page == 'attachments' else '' }}">Attachments</a>
+        <a href="/coding" class="{{ 'on' if page == 'coding' else '' }}">AP coding{% if coding_counts.review %} <i>{{ coding_counts.review }}</i>{% endif %}</a>
         <a href="/fraud" class="{{ 'on' if page == 'fraud' else '' }}">Fraud check{% if counts.fraud_alerts %} <i>{{ counts.fraud_alerts }}</i>{% endif %}</a>
         <a href="/settings" class="{{ 'on' if page == 'settings' else '' }}">Setup</a>
       </nav>
