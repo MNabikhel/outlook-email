@@ -403,6 +403,11 @@ def test_wide_gaps_and_glued_words_become_readable():
     assert _polish("0.61") == "0.61"
     assert _polish("$12,480.00") == "$12,480.00"
     assert _polish("JS'O00") == "JS'000"
+    # Names are not in any word list: a capital marks where one starts, and two unknown capitalised pieces stay one name.
+    assert _polish("NetincomeattributabletoNorthwind") == "Net income attributable to Northwind"
+    assert _polish("TotalBlackRockstockholders'equity") == "Total BlackRock stockholders'equity"
+    assert _polish("NetProfitattributableto:") == "Net Profit attributable to:"
+    assert _polish("PayPal") == "PayPal" and _polish("McDonald") == "McDonald" and _polish("Chartwell") == "Chartwell"
     from controller_inbox.ocr import _rows
     assert _rows([(10, 1, "From continuing"), (12, 700, "0.61"), (11, 800, "S"), (12, 880, "0.78")]) == [
         "From continuing 0.61 $ 0.78"
@@ -468,6 +473,46 @@ def test_a_missing_cell_stays_in_its_own_column():
     short = next(line for line in _rows(wide) if "Row 3" in line)
     assert "15.00" in short and "14.64" in short and "not listed" in short
     assert short.index("not listed") < short.index("15.00")
+
+
+def test_scanned_invoice_lines_and_statement_dashes_keep_their_columns():
+    from controller_inbox.ocr import _rows
+
+    def cell(top, left, right, text):
+        return (top, left, right, text)
+
+    invoice = [cell(20, 10, 120, "Description"), cell(20, 300, 330, "Qty"), cell(20, 400, 480, "Unit Price"), cell(20, 560, 620, "Amount")]
+    for index, (item, qty, price, amount) in enumerate(
+        [("Paper A4", "10", "4.50", "45.00"), ("Toner", "2", "80.00", "160.00"), ("Shipping", "1", "12.00", "12.00"), ("Discount", "", "", "(5.00)")]
+    ):
+        top = 60 + index * 24
+        invoice.append(cell(top, 10, 150, item))
+        if qty:
+            invoice.append(cell(top, 315, 330, qty))
+        if price:
+            invoice.append(cell(top, 440, 480, price))
+        invoice.append(cell(top, 570, 620, amount))
+    text = "\n".join(_rows(invoice))
+    assert "Toner | Qty: 2 | Unit Price: 80.00 | Amount: 160.00" in text
+    assert "Discount | Qty: not listed | Unit Price: not listed | Amount: (5.00)" in text
+
+    # A dash or N/A printed in a column is that column's entry, and a reference beside the date stays on the row.
+    statement = [cell(10, 240, 300, "Debit"), cell(10, 370, 420, "Credit")]
+    entries = [
+        ("01/03/2024", "INV-1001", "1,200.00", "-"),
+        ("01/09/2024", "PMT-77", "-", "800.00"),
+        ("01/20/2024", "INV-1002", "450.00", "-"),
+        ("01/28/2024", "CRN-4", "N/A", "50.00"),
+        ("02/02/2024", "INV-1003", "75.00", "20.00"),
+    ]
+    for index, (date, reference, debit, credit) in enumerate(entries):
+        top = 40 + index * 22
+        statement += [cell(top, 10, 90, date), cell(top, 120, 190, reference)]
+        statement += [cell(top, 300 - 6 * len(debit), 300, debit), cell(top, 420 - 6 * len(credit), 420, credit)]
+    text = "\n".join(_rows(statement))
+    assert "01/03/2024 INV-1001 | Debit: 1,200.00 | Credit: -" in text
+    assert "01/09/2024 PMT-77 | Debit: - | Credit: 800.00" in text
+    assert "CRN-4 | Debit: N/A | Credit: 50.00" in text
 
 
 def test_ocr_puts_back_dropped_spaces_without_splitting_codes_or_times():

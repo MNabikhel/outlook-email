@@ -151,6 +151,26 @@ def test_names_turned_sideways_in_the_top_row_are_read():
     assert "Maya Chen: 4" in text and "Li: 9" in text
 
 
+def test_sideways_names_read_in_either_direction_with_or_without_a_stub_heading():
+    columns = [(40, "left"), (150, "left"), (200, "left"), (250, "left"), (300, "left")]
+    people = ["Ana", "Ben Ortiz", "Chloe", "Eli Park"]
+    body = [[district, *[str(row * 4 + col) for col in range(4)]] for row, district in enumerate(["North", "South", "East", "West"])]
+
+    def names(turn: int, y: float, spacing: float = 0) -> list[Text]:
+        return [Text(x, y, name, size=8, bold=True, turn=turn, spacing=spacing) for (x, _align), name in zip(columns[1:], people)]
+
+    expected = "North | Ana: 0 | Ben Ortiz: 1 | Chloe: 2 | Eli Park: 3"
+    rows = sheet_rows(columns, body, top=670, pitch=14, size=9)
+    # Reading downward, a long name hangs lower than a short one; they are still one row.
+    downward = _text([*names(-90, 722), *rows])
+    assert "Ana | Ben Ortiz | Chloe | Eli Park" in downward
+    assert expected in downward
+    stub = _text([Text(40, 690, "District", size=8, bold=True), *names(90, 690), *rows])
+    assert "District: North | Ana: 0 | Ben Ortiz: 1" in stub
+    tracked = _text([*names(90, 690, spacing=1.2), *rows])
+    assert expected in tracked
+
+
 def test_a_group_label_stays_inside_the_table():
     items = [
         Text(40, 740, "Name", size=10, bold=True),
