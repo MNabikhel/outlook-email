@@ -416,3 +416,151 @@ def test_an_indented_subtotal_names_the_rows_under_it():
     assert "Line: Revenue | Amount: 120" in text
     assert "Revenue | Line: Product | Amount: 100" in text
     assert "Revenue | Line: Service | Amount: 20" in text
+
+
+def test_date_headings_keep_right_aligned_figures():
+    items = [
+        Text(40, 756, "Line", bold=True),
+        Text(180, 756, "Three months ended", bold=True),
+        Text(420, 756, "Nine months ended", bold=True),
+        Text(180, 740, "31 March 2024", bold=True),
+        Text(300, 740, "31 March 2023", bold=True),
+        Text(420, 740, "31 March 2024", bold=True),
+        Text(540, 740, "31 March 2023", bold=True),
+        Text(40, 724, "Revenue"),
+        Text(250, 724, "1,240", right=True),
+        Text(370, 724, "1,100", right=True),
+        Text(490, 724, "3,600", right=True),
+        Text(610, 724, "3,200", right=True),
+        Text(40, 708, "Expenses"),
+        Text(250, 708, "(480)", right=True),
+        Text(370, 708, "(450)", right=True),
+        Text(490, 708, "(1,400)", right=True),
+        Text(610, 708, "(1,250)", right=True),
+    ]
+    text = _text(items)
+    assert (
+        "Line: Revenue | Three months ended 31 March 2024: 1,240 | Three months ended 31 March 2023: 1,100 | "
+        "Nine months ended 31 March 2024: 3,600 | Nine months ended 31 March 2023: 3,200"
+    ) in text
+    assert "Three months ended 31 March 2024: (480)" in text
+    assert "31 March 2024: 31 March 2023" not in text
+
+
+def test_right_aligned_figures_stay_under_short_headings():
+    items = [
+        Text(40, 756, "Line", bold=True),
+        Text(175, 756, "Q3", bold=True),
+        Text(430, 756, "Q4", bold=True),
+        Text(40, 740, "Line", bold=True),
+        Text(160, 740, "Actual", bold=True),
+        Text(260, 740, "Budget", bold=True),
+        Text(400, 740, "Actual", bold=True),
+        Text(500, 740, "Budget", bold=True),
+        Text(40, 724, "Sales"),
+        Text(240, 724, "1,240", right=True),
+        Text(360, 724, "1,100", right=True),
+        Text(480, 724, "3,600", right=True),
+        Text(600, 724, "3,200", right=True),
+    ]
+    text = _text(items)
+    assert "Line: Sales | Q3 Actual: 1,240 | Q3 Budget: 1,100 | Q4 Actual: 3,600 | Q4 Budget: 3,200" in text
+    assert "not listed" not in text
+
+
+def test_a_wide_column_keeps_a_short_figure_at_its_right_edge():
+    items = [
+        Text(40, 740, "Line", bold=True),
+        Text(180, 740, "Actual", bold=True),
+        Text(360, 740, "Budget", bold=True),
+        Text(40, 724, "Sales"),
+        Text(330, 724, "9", right=True),
+        Text(520, 724, "8", right=True),
+        Text(40, 708, "Costs"),
+        Text(330, 708, "4", right=True),
+        Text(520, 708, "3", right=True),
+    ]
+    text = _text(items)
+    assert "Line: Sales | Actual: 9 | Budget: 8" in text
+    assert "Line: Costs | Actual: 4 | Budget: 3" in text
+
+
+def test_a_year_and_a_change_column_name_the_row():
+    items = [
+        Text(40, 740, "Line", bold=True),
+        Text(180, 740, "2024", bold=True),
+        Text(280, 740, "2023", bold=True),
+        Text(380, 740, "Change", bold=True),
+        Text(480, 740, "%", bold=True),
+        Text(40, 724, "Sales"),
+        Text(180, 724, "100"),
+        Text(280, 724, "90"),
+        Text(380, 724, "10"),
+        Text(480, 724, "11%"),
+    ]
+    text = _text(items)
+    assert "Line: Sales | 2024: 100 | 2023: 90 | Change: 10 | %: 11%" in text
+
+
+def test_a_code_and_a_date_stay_in_their_columns():
+    items = [
+        Text(40, 740, "Code", bold=True),
+        Text(120, 740, "Description", bold=True),
+        Text(280, 740, "Due", bold=True),
+        Text(420, 740, "Amount", bold=True),
+        Text(40, 724, "4100"),
+        Text(120, 724, "Product"),
+        Text(280, 724, "15 March 2024"),
+        Text(420, 724, "1,240", right=True),
+        Text(40, 708, "5100"),
+        Text(120, 708, "Payroll"),
+        Text(280, 708, "31 March 2024"),
+        Text(420, 708, "480", right=True),
+    ]
+    text = _text(items)
+    assert "Code: 4100 | Description: Product | Due: 15 March 2024 | Amount: 1,240" in text
+    assert "Code: 5100 | Description: Payroll | Due: 31 March 2024 | Amount: 480" in text
+
+
+def test_a_larger_section_label_names_the_rows_under_it():
+    items = [
+        Text(40, 756, "Line", bold=True),
+        Text(220, 756, "Amount", bold=True),
+        Text(40, 736, "Operating", size=12),
+        Text(40, 716, "Product"),
+        Text(220, 716, "100"),
+        Text(40, 700, "Service"),
+        Text(220, 700, "40"),
+        Text(40, 680, "Financing", size=12),
+        Text(40, 660, "Interest"),
+        Text(220, 660, "5"),
+    ]
+    text = _text(items)
+    assert "Group: Operating" in text and "Group: Financing" in text
+    assert "Operating | Line: Product | Amount: 100" in text
+    assert "Operating | Line: Service | Amount: 40" in text
+    assert "Financing | Line: Interest | Amount: 5" in text
+    assert "Service Financing" not in text
+    assert "Amount: not listed" not in text
+
+
+def test_a_wrapped_note_stays_on_its_row():
+    items = [
+        Text(40, 740, "Item", bold=True),
+        Text(180, 740, "Amount", bold=True),
+        Text(300, 740, "Note", bold=True),
+        Text(40, 724, "Consulting"),
+        Text(180, 724, "4,000"),
+        Text(300, 724, "Signed in"),
+        Text(300, 712, "March"),
+        Text(40, 696, "Travel"),
+        Text(180, 696, "350"),
+        Text(40, 680, "Lodging"),
+        Text(180, 680, "1,200"),
+        Text(300, 680, "Prepaid"),
+    ]
+    text = _text(items)
+    assert "Item: Consulting | Amount: 4,000 | Note: Signed in March" in text
+    assert "Item: Travel | Amount: 350 | Note: not listed" in text
+    assert "Item: Lodging | Amount: 1,200 | Note: Prepaid" in text
+    assert "Note: March" not in text
