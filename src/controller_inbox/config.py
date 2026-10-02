@@ -7,6 +7,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from pydantic import field_validator, model_validator
+
+from controller_inbox.clock import AUTO, effective_timezone, is_timezone
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -42,7 +44,8 @@ class Settings(BaseSettings):
     inbox_dir: Path = Path("./inbox")
     # The AP cost code workbook's folder. Empty = "AP cost codes" beside the inbox folder.
     cost_codes_dir: Path | None = None
-    timezone: str = "America/New_York"
+    # ``auto`` follows this computer. A saved Setup choice or CONTROLLER_INBOX_TIMEZONE overrides it.
+    timezone: str = AUTO
     host: str = "127.0.0.1"
     port: int = 8765
     poll_seconds: int = 120
@@ -118,6 +121,14 @@ class Settings(BaseSettings):
             path = re.sub(r"^/api/v\d+(/chat|/models)?$", "", path)
         return f"{scheme}://{host}{path or '/v1'}"
 
+    @field_validator("timezone", mode="before")
+    @classmethod
+    def _timezone(cls, value) -> str:
+        text = str(value or AUTO).strip()
+        if not text or text.lower() == AUTO:
+            return AUTO
+        return text if is_timezone(text) else AUTO
+
     @field_validator("profile", mode="before")
     @classmethod
     def _profile(cls, value) -> str:
@@ -134,7 +145,7 @@ class Settings(BaseSettings):
 
     @property
     def tz(self) -> ZoneInfo:
-        return ZoneInfo(self.timezone)
+        return ZoneInfo(effective_timezone(self.timezone))
 
     @property
     def db_path(self) -> Path:

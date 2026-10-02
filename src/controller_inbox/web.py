@@ -31,6 +31,14 @@ from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.classify import month_end
 from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
+from controller_inbox.clock import (
+    apply_saved_timezone,
+    computer_timezone,
+    effective_timezone,
+    format_when,
+    set_timezone,
+    timezone_groups,
+)
 from controller_inbox.config import PROFILES, Settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.local_llm import check_model, context_target, needs_more_context, set_min_context
@@ -44,11 +52,7 @@ templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 templates.env.globals["static_version"] = hashlib.sha256(
     b"".join((PACKAGE_DIR / "static" / name).read_bytes() for name in ("app.css", "app.js"))
 ).hexdigest()[:10]
-templates.env.filters["shortdt"] = lambda value: (
-    (datetime.fromisoformat(value.replace("Z", "+00:00")).strftime("%b %d · %H:%M"))
-    if value
-    else ""
-)
+templates.env.filters["shortdt"] = lambda value: format_when(value or "", templates.env.globals.get("display_tz"))
 templates.env.globals["coding_choices"] = cost_codes.choices
 templates.env.filters["money"] = lambda value: "" if value is None else f"${value:,.2f}"
 templates.env.filters["label_doc"] = lambda value: DOCUMENT_LABELS.get(
@@ -66,6 +70,7 @@ NOTICES = {
     "processing": "Processing started. This page updates as it goes.",
     "busy": "Already processing. This page updates as it goes.",
     "profile": "Saved. The digest and Today page now use this profile; new mail is sorted with it.",
+    "timezone": "Saved. Times and “today” now use this time zone.",
     "context": "Saved. If the model in LM Studio is loaded with less, the next question reloads it with this context.",
     "context-off": "Saved. CloseDesk now uses the model as LM Studio loaded it.",
     "fraud-safe": "Saved as not fraud. Mail it covers was checked again, and the fraud check learns from it.",
@@ -256,6 +261,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     settings = settings or Settings()
     settings.ensure_data_dir()
     store = store or Store(settings.db_path)
+    apply_saved_timezone(settings, store)
     saved_context = store.get_state(MIN_CONTEXT_KEY)
     if saved_context and saved_context.isdigit():
         set_min_context(settings, int(saved_context))
@@ -276,6 +282,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         counts = store.counts()
         close = month_end(as_of)
         profile = active_profile(settings, store)
+        templates.env.globals["display_tz"] = settings.tz
         base = {
             "request": request,
             "settings": settings,
@@ -982,7 +989,20 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             will_reload=needs_more_context(settings),
             ocr_engine=ocr.engine_name(),
             search=semantic.coverage(store, settings),
+            timezone_choice=settings.timezone,
+            computer_zone=computer_timezone(),
+            active_zone=effective_timezone(settings.timezone),
+            timezone_groups=timezone_groups(),
+            now_local=datetime.now(settings.tz).strftime("%b %d, %Y · %H:%M"),
         )
+
+    @app.post("/settings/timezone")
+    def save_timezone(zone: str = Form(...)):
+        try:
+            set_timezone(store, settings, zone)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return RedirectResponse("/settings?notice=timezone#timezone", status_code=303)
 
     @app.post("/settings/index")
     def index_all():
