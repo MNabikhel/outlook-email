@@ -90,18 +90,28 @@ class PageText:
 
 
 def glyphs_of(layout) -> list[Glyph]:
-    """Characters of a pdfminer page (``extract_pages(..., laparams=None)``)."""
+    """Characters of a pdfminer page (``extract_pages(..., laparams=None)``).
+
+    A name turned on its side (a schedule's column headings) is not upright. Those letters
+    are gathered into the word and set down at the foot of the column, on one line with the
+    other names, so the row is readable instead of dropped.
+    """
     from pdfminer.layout import LTChar
 
     out: list[Glyph] = []
+    turned: list[_Turned] = []
 
     def walk(item) -> None:
         if isinstance(item, LTChar):
             text = item.get_text()
-            if item.upright and text and item.x1 > item.x0:
+            if text and item.x1 > item.x0 and item.y1 > item.y0:
                 font = (item.fontname or "").lower()
                 bold = any(mark in font for mark in ("bold", "black", "heavy", "semibold", "demi"))
-                out.append(Glyph(text, item.x0, item.x1, (item.y0 + item.y1) / 2, max(item.size, 1.0), bold))
+                if item.upright:
+                    out.append(Glyph(text, item.x0, item.x1, (item.y0 + item.y1) / 2, max(item.size, 1.0), bold))
+                else:
+                    upward = item.matrix[1] > 0
+                    turned.append(_Turned(text, item.x0, item.x1, item.y0, item.y1, max(item.size, 1.0), bold, upward))
             return
         try:
             children = list(item)
@@ -111,7 +121,144 @@ def glyphs_of(layout) -> list[Glyph]:
             walk(child)
 
     walk(layout)
+    out.extend(_turned_words(turned))
     return out
+
+
+@dataclass
+class _Turned:
+    """One character drawn on its side. ``y0``/``y1`` run along the word; ``upward`` is the reading direction."""
+
+    text: str
+    x0: float
+    x1: float
+    y0: float
+    y1: float
+    size: float
+    bold: bool
+    upward: bool
+
+    @property
+    def centre(self) -> float:
+        return (self.x0 + self.x1) / 2
+
+
+@dataclass
+class _TurnedWord:
+    text: str
+    x0: float
+    x1: float
+    foot: float
+    top: float
+    size: float
+    bold: bool
+    upward: bool
+
+    @property
+    def start(self) -> float:
+        """Where reading begins: the foot of an upward word, the top of a downward one."""
+        return self.foot if self.upward else self.top
+
+
+def _turned_words(chars: list[_Turned]) -> list[Glyph]:
+    """Words drawn on their side, set down as one line of headings at the foot of the row.
+
+    Letters stacked in one column are one word, read in the direction they were drawn. Words
+    that start (or end) level with each other are one row of headings, whichever way they read,
+    so a long name and a short one land on the same line.
+    """
+    words = [word for column in _turned_columns(chars) for word in _column_words(column)]
+    glyphs: list[Glyph] = []
+    for row in _turned_rows(words):
+        foot = min(word.foot for word in row)
+        size = statistics.median(word.size for word in row)
+        glyphs += [Glyph(word.text, word.x0, word.x1, foot + 0.35 * size, word.size, word.bold) for word in row]
+    return glyphs
+
+
+def _turned_columns(chars: list[_Turned]) -> list[list[_Turned]]:
+    columns: list[list[_Turned]] = []
+    for char in sorted(chars, key=lambda item: item.centre):
+        if columns and abs(char.centre - columns[-1][-1].centre) <= 0.8 * char.size:
+            columns[-1].append(char)
+        else:
+            columns.append([char])
+    return columns
+
+
+def _column_words(column: list[_Turned]) -> list[_TurnedWord]:
+    """Split a column where the gap is nearly two letters (the next name), then read each piece."""
+    column = sorted(column, key=lambda item: item.y0)
+    runs: list[list[_Turned]] = [[column[0]]]
+    for char in column[1:]:
+        if char.y0 - runs[-1][-1].y1 > 1.8 * char.size:
+            runs.append([char])
+        else:
+            runs[-1].append(char)
+    words = []
+    for run in runs:
+        letters = [char for char in run if not char.text.isspace()]
+        # A lone sideways letter is a mark or one letter of a diagonal watermark, not a heading.
+        if len(letters) < 2:
+            continue
+        upward = sum(char.upward for char in letters) >= len(letters) / 2
+        text = _read_turned(letters, run, upward)
+        words.append(
+            _TurnedWord(
+                text,
+                min(char.x0 for char in letters),
+                max(char.x1 for char in letters),
+                min(char.y0 for char in letters),
+                max(char.y1 for char in letters),
+                statistics.median(char.size for char in letters),
+                any(char.bold for char in letters),
+                upward,
+            )
+        )
+    return words
+
+
+def _read_turned(letters: list[_Turned], run: list[_Turned], upward: bool) -> str:
+    """The letters in reading order. A space is a space character, or a gap clearly wider than the usual one."""
+    ordered = sorted(run, key=lambda char: char.y0 if upward else -char.y0)
+
+    def gap(before: _Turned, after: _Turned) -> float:
+        return after.y0 - before.y1 if upward else before.y0 - after.y1
+
+    in_order = [char for char in ordered if not char.text.isspace()]
+    gaps = [gap(a, b) for a, b in zip(in_order, in_order[1:])]
+    usual = statistics.median(gaps) if gaps else 0.0
+    out = ""
+    previous = None
+    for char in ordered:
+        if char.text.isspace():
+            out += " "
+            continue
+        if previous is not None and gap(previous, char) > usual + 0.2 * char.size:
+            out += " "
+        out += char.text
+        previous = char
+    return re.sub(r"\s+", " ", out).strip()
+
+
+def _turned_rows(words: list[_TurnedWord]) -> list[list[_TurnedWord]]:
+    """Group headings whose starts, or whose ends, are level: a row of names however long each is."""
+    rows: list[list[_TurnedWord]] = []
+    for word in sorted(words, key=lambda item: item.x0):
+        tolerance = 0.6 * word.size
+
+        def level(other: _TurnedWord) -> bool:
+            if other.upward != word.upward:
+                return False
+            end, other_end = (word.top, other.top) if word.upward else (word.foot, other.foot)
+            return abs(other.start - word.start) <= tolerance or abs(other_end - end) <= tolerance
+
+        home = next((row for row in rows if any(level(other) for other in row)), None)
+        if home is None:
+            rows.append([word])
+        else:
+            home.append(word)
+    return rows
 
 
 def page_text(glyphs: list[Glyph], previous: list[Table] | None = None) -> PageText:
@@ -218,7 +365,8 @@ def _table_blocks(lines: list[Line]) -> list[tuple[int, int]]:
         while end < len(lines) and _continues(lines, i, end):
             end += 1
         if end - i >= 3 and len(_columns(lines[i:end])) >= 2:
-            blocks.append((i, end))
+            start = i - 1 if i > 0 and _labels_above(lines[i - 1], lines[i:end]) else i
+            blocks.append((start, end))
             i = end
         else:
             i += 1
@@ -262,6 +410,26 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
     x0, x1 = line.segments[0][0].x0, line.segments[0][-1].x1
     under = [c for c in columns if x0 < c[1] and x1 > c[0]]
     return len(under) == 1
+
+
+def _labels_above(line: Line, block: list[Line]) -> bool:
+    """A row of names sitting on the columns, even when it has no cell for the stub column.
+
+    Schedules often print the people sideways in the top row and the districts down the side.
+    The districts make one more column than the name row has, so the names would otherwise
+    be left off the table.
+    """
+    columns = _columns(block)
+    if len(line.segments) < 2 or len(columns) < 2:
+        return False
+    words = [word.text for segment in line.segments for word in segment]
+    if not words or sum(map(tables.is_value, words)) >= 0.5 * len(words):
+        return False
+    gap = line.mid - block[0].mid
+    usual = statistics.median(block[i].mid - block[i + 1].mid for i in range(len(block) - 1)) if len(block) > 1 else line.size
+    if gap <= 0 or gap > max(2.2 * usual, 3.0 * line.size):
+        return False
+    return all(_owns(segment, _spans(columns)) for segment in line.segments)
 
 
 def _fits_columns(line: Line, columns: list[tuple[float, float]]) -> bool:

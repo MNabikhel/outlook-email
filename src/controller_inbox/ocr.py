@@ -123,7 +123,7 @@ def _rows(hits: list[tuple]) -> list[str]:
     A blank cell is written ``not listed`` under its own column. Leaving the slot out is what
     makes the next amount look like it belongs to the column before it.
     """
-    cells = [_prepared(hit) for hit in hits if _prepared(hit)[3]]
+    cells = [cell for cell in map(_prepared, hits) if cell[3]]
     ordered = sorted(cells, key=lambda hit: (hit[0], hit[1]))
     gaps = [b[0] - a[0] for a, b in zip(ordered, ordered[1:]) if 12 <= b[0] - a[0] <= 80]
     pitch = sorted(gaps)[len(gaps) // 2] if gaps else 22
@@ -265,6 +265,9 @@ def _unique_labels(labels: list[str]) -> list[str]:
     return out
 
 
+_NIL = re.compile(r"^(?:[-–—]+|n/?a|nil|none|free)$", re.IGNORECASE)
+
+
 def _emit(row: list[tuple[float, float, float, str]], columns: list[float], labels: list[str]) -> str:
     ranges = _ranges(columns)
     placed = [""] * len(columns)
@@ -274,16 +277,17 @@ def _emit(row: list[tuple[float, float, float, str]], columns: list[float], labe
         if not text or text in {"$", "S", "s"}:
             continue
         slot = None
-        if _is_amount(text) or _YEAR.fullmatch(text):
+        # A dash or "N/A" printed in a column is that column's value, not a blank.
+        if _is_amount(text) or _YEAR.fullmatch(text) or _NIL.fullmatch(text):
             for index, (start, end) in enumerate(ranges):
                 if start <= right <= end or abs(right - columns[index]) <= (end - start) / 2:
                     slot = index
                     break
         if slot is None:
-            if right < ranges[0][0]:
-                label_parts.append(text)
+            # Words among the columns (a reference, a note) stay with the row instead of vanishing.
+            label_parts.append(text)
             continue
-        used = True
+        used = used or not _NIL.fullmatch(text)
         placed[slot] = f"{placed[slot]} {text}".strip() if placed[slot] else text
     if not used or all(_YEAR.fullmatch(text) for text in placed if text):
         return _plain_row(row)
@@ -310,7 +314,7 @@ def _read_gap(engine, image, start: int, end: int, height: int) -> list[tuple[fl
     return []
 
 
-def _missed_lines(engine, image, hits: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
+def _missed_lines(engine, image, hits: list[tuple[float, float, float, str]]) -> list[tuple[float, float, float, str]]:
     """Read a band of ink the first pass left blank, scaled up so a bold heading still resolves."""
     import numpy as np
 
@@ -499,7 +503,7 @@ def _polish(line: str) -> str:
     line = line.translate(str.maketrans("（）【】［］｛｝", "()[][]{}"))
     line = re.sub(r"(?<=['\d])O(?=\d)", "0", line)
     line = _thousands(line)
-    line = re.sub(r"[A-Za-z]{5,}", lambda match: _segment(match.group(0)), line)
+    line = re.sub(r"[A-Za-z]{5,}", lambda match: _unglue(match.group(0)), line)
     line = re.sub(r",(?=[A-Za-z])", ", ", line)
     line = re.sub(r"(?<=\d),(?=\d{4}\b)", ", ", line)
     line = re.sub(r"(?<=[A-Za-z])(?=[(（])", " ", line)
@@ -510,6 +514,52 @@ def _polish(line: str) -> str:
     line = re.sub(r"(?<=%)(?=[A-Za-z])", " ", line)
     line = re.sub(r"\.(?=[A-Z])", ". ", line)
     return re.sub(r"(?<!\.)\.\.(?!\.)", "...", line)
+
+
+def _unglue(run: str) -> str:
+    """Split a glued run of letters, keeping names CloseDesk has no list of.
+
+    A small letter followed by a capital ("attributabletoNorthwind") is usually where a word
+    ended. Each piece is split on its own. Two unknown capitalised pieces next to each other
+    are one name ("BlackRock", "PayPal") and stay together. A capitalised unknown piece may be
+    followed by known words ("Rockstockholders"), since the capital marks where the name began.
+    """
+    chunks = re.split(r"(?<=[a-z])(?=[A-Z])", run)
+    if len(chunks) == 1:
+        return _segment(run)
+    read: list[tuple[str, bool]] = []
+    for index, chunk in enumerate(chunks):
+        words = _known_words(chunk)
+        if words is None and index and len(chunk) >= 8:
+            words = _name_then_words(chunk)
+            read.append((" ".join(words), False) if words else (chunk, False))
+            continue
+        known = words is not None and (len(words) >= 2 or len(chunk) >= 3)
+        read.append((" ".join(words) if words else chunk, known))
+    out = read[0][0]
+    for (_before, left_known), (text, right_known) in zip(read, read[1:]):
+        out += (" " if left_known or right_known else "") + text
+    return out
+
+
+def _known_words(chunk: str) -> list[str] | None:
+    """The chunk as known words, or None when any piece is unknown."""
+    if chunk.lower() in _WORDS and len(chunk) > 1:
+        return [chunk]
+    split = _segment(chunk)
+    return split.split() if split != chunk else None
+
+
+def _name_then_words(chunk: str) -> list[str] | None:
+    """``Rockstockholders`` as ``Rock stockholders``: an unknown name, then at least six letters of known words.
+
+    The longest such name wins, so "Profitattributable" is not cut into "Pr of it".
+    """
+    for cut in range(len(chunk) - 6, 2, -1):
+        tail = _known_words(chunk[cut:])
+        if tail and sum(map(len, tail)) >= 6:
+            return [chunk[:cut], *tail]
+    return None
 
 
 def _segment(word: str) -> str:
@@ -566,7 +616,6 @@ _WORDS = frozenset(
     executive summary compared
     generally accepted principles principle reflecting advisory administration noncash gains related strategic
     minority investment partially offset revaluation seed portfolio hedges hedge private dividend network capital
-    black rock blackrock
     this sample description order number invoice date due your city somewhere street suite business payment
     primarily driven organic growth movement movements twelve collectively base average technology past
     service services portfolio portfolios company
