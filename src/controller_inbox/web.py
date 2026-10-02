@@ -33,13 +33,17 @@ from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.classify import month_end
 from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
 from controller_inbox.clock import (
+    AUTO,
     apply_saved_timezone,
     computer_timezone,
     effective_timezone,
     format_when,
     offset_label,
+    on_daylight_time,
     set_timezone,
-    timezone_groups,
+    zone_choices,
+    zone_name,
+    zone_option,
 )
 from controller_inbox.config import PROFILES, Settings
 from controller_inbox.digest import build_digest, write_digest_files
@@ -992,13 +996,30 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             ocr_engine=ocr.engine_name(),
             search=semantic.coverage(store, settings),
             timezone_choice=settings.timezone,
-            computer_zone=computer_timezone(),
-            computer_offset=offset_label(ZoneInfo(computer_timezone())),
-            active_zone=effective_timezone(settings.timezone),
+            timezone_options=_timezone_options(settings.timezone),
+            active_zone_name=zone_name(effective_timezone(settings.timezone)),
             active_offset=offset_label(settings.tz),
-            timezone_groups=timezone_groups(),
-            now_local=datetime.now(settings.tz).strftime("%b %d, %Y · %H:%M"),
+            active_daylight=on_daylight_time(settings.tz),
+            now_local=datetime.now(settings.tz).strftime("%a, %b %d, %Y · %H:%M"),
         )
+
+    def _timezone_options(choice: str) -> list[dict]:
+        now = datetime.now(timezone.utc)
+
+        def option(value: str, zone: str, label: str) -> dict:
+            info = ZoneInfo(zone)
+            return {
+                "value": value,
+                "zone": zone,
+                "label": label,
+                "now": offset_label(info, now),
+                "daylight": on_daylight_time(info, now),
+            }
+
+        computer = computer_timezone()
+        rows = [option(AUTO, computer, f"This computer: {zone_option(computer, now)}")]
+        rows.extend(option(name, name, label) for name, label in zone_choices(now, keep=choice))
+        return rows
 
     @app.post("/settings/timezone")
     def save_timezone(zone: str = Form(...)):

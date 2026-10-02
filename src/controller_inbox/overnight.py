@@ -54,7 +54,7 @@ def read_queue(
             break
         if not parsed:
             continue
-        overlay_reading(email, parsed, now=now)
+        overlay_reading(email, parsed, now=now, tz=settings.tz)
         store.upsert_email(email)
         result["read_ids"].append(email.id)
     result["stats"] = reader.stats

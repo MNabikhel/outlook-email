@@ -18,6 +18,31 @@
     toast.timer = setTimeout(() => (box.hidden = true), ms);
   }
 
+  /* Times on screen use the zone chosen in Setup, not the browser's. */
+  const displayZone = document.body.dataset.tz || undefined;
+
+  function zoneParts(when, zone = displayZone) {
+    const parts = {};
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: zone,
+      weekday: "short",
+      month: "short",
+      day: "2-digit",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(when)
+      .forEach((part) => (parts[part.type] = part.value));
+    return parts;
+  }
+
+  function zoneDay(when, zone = displayZone) {
+    const p = zoneParts(when, zone);
+    return Date.UTC(Number(p.year), new Date(`${p.month} 1, 2000`).getMonth(), Number(p.day));
+  }
+
   function isTyping(target) {
     return target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
   }
@@ -573,12 +598,11 @@
   function dayLabel(iso) {
     const when = new Date(iso);
     if (Number.isNaN(when.getTime())) return "";
-    const today = new Date();
-    const days = Math.round((new Date(today.toDateString()) - new Date(when.toDateString())) / 86400000);
+    const days = Math.round((zoneDay(new Date()) - zoneDay(when)) / 86400000);
     if (days === 0) return "Today";
     if (days === 1) return "Yesterday";
     if (days < 7) return "This week";
-    return when.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    return when.toLocaleDateString(undefined, { month: "long", year: "numeric", timeZone: displayZone });
   }
 
   async function showHistory() {
@@ -594,7 +618,7 @@
       .map((item) => {
         const label = dayLabel(item.updated_at);
         const heading = label !== group ? `<li class="chat-history-day">${escapeHtml((group = label))}</li>` : "";
-        const time = new Date(item.updated_at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+        const time = new Date(item.updated_at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", timeZone: displayZone });
         const bits = [`${item.questions} question${item.questions === 1 ? "" : "s"}`];
         if (item.files) bits.push(`${item.files} file${item.files === 1 ? "" : "s"}`);
         return (
@@ -936,4 +960,21 @@
       }
     }
   });
+
+  /* Setup: show the time in the zone being chosen, before it is saved. */
+  const tzSelect = $("[data-tz-select]");
+  const tzPreview = $("[data-tz-preview]");
+  if (tzSelect && tzPreview) {
+    const showZone = () => {
+      const option = tzSelect.selectedOptions[0];
+      if (!option) return;
+      const p = zoneParts(new Date(), option.dataset.zone);
+      const name = option.textContent.replace(/^This computer: /, "").replace(/^\([^)]*\)\s*/, "");
+      const daylight = option.dataset.daylight ? " (daylight saving time)" : "";
+      tzPreview.innerHTML =
+        `Time there now: <b>${escapeHtml(`${p.weekday}, ${p.month} ${p.day}, ${p.year} · ${p.hour}:${p.minute}`)}</b>` +
+        ` · ${escapeHtml(name)} is ${escapeHtml(option.dataset.now)} right now${daylight}.`;
+    };
+    tzSelect.addEventListener("change", showZone);
+  }
 })();

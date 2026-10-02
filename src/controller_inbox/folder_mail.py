@@ -491,7 +491,7 @@ def _quarantine(settings: Settings, paths: list[Path], exc: Exception) -> None:
 
 
 def _archive(settings: Settings, paths: list[Path]) -> list[Path]:
-    day = datetime.now().strftime("%Y-%m-%d")
+    day = datetime.now(settings.tz).strftime("%Y-%m-%d")
     dest_root = settings.inbox_processed / day
     dest_root.mkdir(parents=True, exist_ok=True)
     return _move_all(dest_root, paths)

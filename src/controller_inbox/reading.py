@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 
 from controller_inbox import documents
 from controller_inbox.classify import QUOTE_START_RE
@@ -223,7 +223,9 @@ def build_packet(email: EmailRecord, corrections: list[dict] | None = None) -> d
     }
 
 
-def overlay_reading(email: EmailRecord, parsed: dict, *, now: datetime | None = None) -> EmailRecord:
+def overlay_reading(
+    email: EmailRecord, parsed: dict, *, now: datetime | None = None, tz: tzinfo | None = None
+) -> EmailRecord:
     """Apply a model reading onto a message.
 
     Fraud cannot be talked out of Important. A small model's summary that
@@ -283,7 +285,7 @@ def overlay_reading(email: EmailRecord, parsed: dict, *, now: datetime | None = 
     email.flags = [flag for flag in email.flags if flag != "needs_model"]
     if "bionic" not in email.flags:
         email.flags.append("bionic")
-    as_of = _as_of(email)
+    as_of = _as_of(email, tz)
     provided = parsed.get("actions")
     if isinstance(provided, list) and provided:
         email.actions = _actions_from_model(email.id, provided, as_of, now, known_dates=_known_dates(email))
@@ -322,11 +324,11 @@ def overlay_reading(email: EmailRecord, parsed: dict, *, now: datetime | None = 
     return email
 
 
-def apply_bionic_reading(store, email_id: str, parsed: dict) -> EmailRecord:
+def apply_bionic_reading(store, email_id: str, parsed: dict, tz: tzinfo | None = None) -> EmailRecord:
     email = store.get_email(email_id)
     if email is None:
         raise KeyError(email_id)
-    overlay_reading(email, parsed)
+    overlay_reading(email, parsed, tz=tz)
     store.upsert_email(email)
     return store.get_email(email_id) or email
 
@@ -360,11 +362,16 @@ def _score(importance: Importance, fraud: bool) -> int:
     }[importance]
 
 
-def _as_of(email: EmailRecord) -> date:
+def _as_of(email: EmailRecord, tz: tzinfo | None = None) -> date:
+    """The day the message arrived where the user is. Evening mail west of UTC is already tomorrow in UTC."""
+    zone = tz or timezone.utc
     try:
-        return datetime.fromisoformat(email.received_at).date()
+        received = datetime.fromisoformat(email.received_at.replace("Z", "+00:00"))
     except ValueError:
-        return datetime.now(timezone.utc).date()
+        return datetime.now(zone).date()
+    if received.tzinfo is None:
+        received = received.replace(tzinfo=timezone.utc)
+    return received.astimezone(zone).date()
 
 
 _DATE_NOTE = "Model suggested due"

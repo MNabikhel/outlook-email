@@ -6,7 +6,7 @@ The agent should not open the raw PDFs. prepare_queue already did that.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, tzinfo
 
 from controller_inbox.actions import local_today
 from controller_inbox.config import Settings
@@ -58,12 +58,12 @@ def prepare_queue(store: Store, *, limit: int = 20) -> dict:
     return {"ok": True, "count": len(packets), "packets": packets}
 
 
-def save_reading(store: Store, payload: dict) -> dict:
+def save_reading(store: Store, payload: dict, tz: tzinfo | None = None) -> dict:
     email_id = str(payload.get("email_id") or "").strip()
     if not email_id:
         return {"ok": False, "error": "email_id is required"}
     try:
-        email = apply_bionic_reading(store, email_id, payload)
+        email = apply_bionic_reading(store, email_id, payload, tz)
     except KeyError:
         return {"ok": False, "error": f"No message with id {email_id}"}
     return {
@@ -188,7 +188,7 @@ def dispatch(store: Store, settings: Settings, name: str, args) -> dict:
             return {"ok": False, "error": f"Reading JSON is not valid: {exc}"}
         if not isinstance(payload, dict):
             return {"ok": False, "error": "Reading JSON must be an object."}
-        return save_reading(store, payload)
+        return save_reading(store, payload, settings.tz)
     if name == "list_folder":
         return list_folder(store, args.folder, limit=args.limit)
     if name == "build_digest":

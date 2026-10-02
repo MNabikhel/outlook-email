@@ -6,7 +6,7 @@
   <title>{% block title %}CloseDesk{% endblock %}</title>
   <link rel="stylesheet" href="/static/app.css?v={{ static_version }}"/>
 </head>
-<body{% if email is defined and email %} data-email-id="{{ email.id }}"{% endif %}>
+<body{% if email is defined and email %} data-email-id="{{ email.id }}"{% endif %}{% if display_tz %} data-tz="{{ display_tz.key }}"{% endif %}>
   <div class="shell">
     <aside class="rail">
       <a class="brand" href="/">
