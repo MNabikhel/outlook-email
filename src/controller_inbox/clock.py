@@ -7,157 +7,158 @@ Mail is stored in UTC. "Today", due dates, and the times on screen use the zone 
 from __future__ import annotations
 
 import os
-import sys
-from datetime import datetime, timezone
-from functools import lru_cache
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo, available_timezones
+from zoneinfo import ZoneInfo
 
 AUTO = "auto"
 STATE_KEY = "timezone"
 
-# Windows TimeZoneKeyName -> IANA. The names are the ones ZoneInfo ships.
-_WINDOWS_TO_IANA = {
-    "Dateline Standard Time": "Etc/GMT+12",
-    "UTC-11": "Etc/GMT+11",
-    "Aleutian Standard Time": "America/Adak",
-    "Hawaiian Standard Time": "Pacific/Honolulu",
-    "Marquesas Standard Time": "Pacific/Marquesas",
-    "Alaskan Standard Time": "America/Anchorage",
-    "UTC-09": "Etc/GMT+9",
-    "Pacific Standard Time (Mexico)": "America/Tijuana",
-    "UTC-08": "Etc/GMT+8",
-    "Pacific Standard Time": "America/Los_Angeles",
-    "US Mountain Standard Time": "America/Phoenix",
-    "Mountain Standard Time (Mexico)": "America/Mazatlan",
-    "Mountain Standard Time": "America/Denver",
-    "Yukon Standard Time": "America/Whitehorse",
-    "Central America Standard Time": "America/Guatemala",
-    "Central Standard Time": "America/Chicago",
-    "Easter Island Standard Time": "Pacific/Easter",
-    "Central Standard Time (Mexico)": "America/Mexico_City",
-    "Canada Central Standard Time": "America/Regina",
-    "SA Pacific Standard Time": "America/Bogota",
-    "Eastern Standard Time (Mexico)": "America/Cancun",
-    "Eastern Standard Time": "America/New_York",
-    "Haiti Standard Time": "America/Port-au-Prince",
-    "Cuba Standard Time": "America/Havana",
-    "US Eastern Standard Time": "America/Indiana/Indianapolis",
-    "Turks And Caicos Standard Time": "America/Grand_Turk",
-    "Paraguay Standard Time": "America/Asuncion",
-    "Atlantic Standard Time": "America/Halifax",
-    "Venezuela Standard Time": "America/Caracas",
-    "Central Brazilian Standard Time": "America/Cuiaba",
-    "SA Western Standard Time": "America/La_Paz",
-    "Pacific SA Standard Time": "America/Santiago",
-    "Newfoundland Standard Time": "America/St_Johns",
-    "Tocantins Standard Time": "America/Araguaina",
-    "E. South America Standard Time": "America/Sao_Paulo",
-    "SA Eastern Standard Time": "America/Cayenne",
-    "Argentina Standard Time": "America/Argentina/Buenos_Aires",
-    "Greenland Standard Time": "America/Nuuk",
-    "Montevideo Standard Time": "America/Montevideo",
-    "Magallanes Standard Time": "America/Punta_Arenas",
-    "Saint Pierre Standard Time": "America/Miquelon",
-    "Bahia Standard Time": "America/Bahia",
-    "UTC-02": "Etc/GMT+2",
-    "Azores Standard Time": "Atlantic/Azores",
-    "Cape Verde Standard Time": "Atlantic/Cape_Verde",
-    "UTC": "UTC",
-    "GMT Standard Time": "Europe/London",
-    "Greenwich Standard Time": "Atlantic/Reykjavik",
-    "Sao Tome Standard Time": "Africa/Sao_Tome",
-    "Morocco Standard Time": "Africa/Casablanca",
-    "W. Europe Standard Time": "Europe/Berlin",
-    "Central Europe Standard Time": "Europe/Budapest",
-    "Romance Standard Time": "Europe/Paris",
-    "Central European Standard Time": "Europe/Warsaw",
-    "W. Central Africa Standard Time": "Africa/Lagos",
-    "Jordan Standard Time": "Asia/Amman",
-    "GTB Standard Time": "Europe/Bucharest",
-    "Middle East Standard Time": "Asia/Beirut",
-    "Egypt Standard Time": "Africa/Cairo",
-    "E. Europe Standard Time": "Europe/Chisinau",
-    "Syria Standard Time": "Asia/Damascus",
-    "West Bank Standard Time": "Asia/Hebron",
-    "South Africa Standard Time": "Africa/Johannesburg",
-    "FLE Standard Time": "Europe/Kyiv",
-    "Israel Standard Time": "Asia/Jerusalem",
-    "South Sudan Standard Time": "Africa/Juba",
-    "Kaliningrad Standard Time": "Europe/Kaliningrad",
-    "Sudan Standard Time": "Africa/Khartoum",
-    "Libya Standard Time": "Africa/Tripoli",
-    "Namibia Standard Time": "Africa/Windhoek",
-    "Arabic Standard Time": "Asia/Baghdad",
-    "Turkey Standard Time": "Europe/Istanbul",
-    "Arab Standard Time": "Asia/Riyadh",
-    "Belarus Standard Time": "Europe/Minsk",
-    "Russian Standard Time": "Europe/Moscow",
-    "E. Africa Standard Time": "Africa/Nairobi",
-    "Iran Standard Time": "Asia/Tehran",
-    "Arabian Standard Time": "Asia/Dubai",
-    "Astrakhan Standard Time": "Europe/Astrakhan",
-    "Azerbaijan Standard Time": "Asia/Baku",
-    "Russia Time Zone 3": "Europe/Samara",
-    "Mauritius Standard Time": "Indian/Mauritius",
-    "Saratov Standard Time": "Europe/Saratov",
-    "Georgian Standard Time": "Asia/Tbilisi",
-    "Volgograd Standard Time": "Europe/Volgograd",
-    "Caucasus Standard Time": "Asia/Yerevan",
-    "Afghanistan Standard Time": "Asia/Kabul",
-    "West Asia Standard Time": "Asia/Tashkent",
-    "Ekaterinburg Standard Time": "Asia/Yekaterinburg",
-    "Pakistan Standard Time": "Asia/Karachi",
-    "Qyzylorda Standard Time": "Asia/Qyzylorda",
-    "India Standard Time": "Asia/Kolkata",
-    "Sri Lanka Standard Time": "Asia/Colombo",
-    "Nepal Standard Time": "Asia/Kathmandu",
-    "Central Asia Standard Time": "Asia/Almaty",
-    "Bangladesh Standard Time": "Asia/Dhaka",
-    "Omsk Standard Time": "Asia/Omsk",
-    "Myanmar Standard Time": "Asia/Yangon",
-    "SE Asia Standard Time": "Asia/Bangkok",
-    "Altai Standard Time": "Asia/Barnaul",
-    "W. Mongolia Standard Time": "Asia/Hovd",
-    "North Asia Standard Time": "Asia/Krasnoyarsk",
-    "N. Central Asia Standard Time": "Asia/Novosibirsk",
-    "Tomsk Standard Time": "Asia/Tomsk",
-    "China Standard Time": "Asia/Shanghai",
-    "North Asia East Standard Time": "Asia/Irkutsk",
-    "Singapore Standard Time": "Asia/Singapore",
-    "W. Australia Standard Time": "Australia/Perth",
-    "Taipei Standard Time": "Asia/Taipei",
-    "Ulaanbaatar Standard Time": "Asia/Ulaanbaatar",
-    "Aus Central W. Standard Time": "Australia/Eucla",
-    "Transbaikal Standard Time": "Asia/Chita",
-    "Tokyo Standard Time": "Asia/Tokyo",
-    "North Korea Standard Time": "Asia/Pyongyang",
-    "Korea Standard Time": "Asia/Seoul",
-    "Yakutsk Standard Time": "Asia/Yakutsk",
-    "Cen. Australia Standard Time": "Australia/Adelaide",
-    "AUS Central Standard Time": "Australia/Darwin",
-    "E. Australia Standard Time": "Australia/Brisbane",
-    "AUS Eastern Standard Time": "Australia/Sydney",
-    "West Pacific Standard Time": "Pacific/Port_Moresby",
-    "Tasmania Standard Time": "Australia/Hobart",
-    "Vladivostok Standard Time": "Asia/Vladivostok",
-    "Lord Howe Standard Time": "Australia/Lord_Howe",
-    "Bougainville Standard Time": "Pacific/Bougainville",
-    "Russia Time Zone 10": "Asia/Srednekolymsk",
-    "Magadan Standard Time": "Asia/Magadan",
-    "Norfolk Standard Time": "Pacific/Norfolk",
-    "Sakhalin Standard Time": "Asia/Sakhalin",
-    "Central Pacific Standard Time": "Pacific/Guadalcanal",
-    "Russia Time Zone 11": "Asia/Kamchatka",
-    "New Zealand Standard Time": "Pacific/Auckland",
-    "UTC+12": "Etc/GMT-12",
-    "Fiji Standard Time": "Pacific/Fiji",
-    "Chatham Islands Standard Time": "Pacific/Chatham",
-    "UTC+13": "Etc/GMT-13",
-    "Tonga Standard Time": "Pacific/Tongatapu",
-    "Samoa Standard Time": "Pacific/Apia",
-    "Line Islands Standard Time": "Pacific/Kiritimati",
-}
+# The list Windows and Outlook show, by IANA name. The offset in front is worked out from the
+# zone itself, so it stays right when a country changes its rules.
+ZONES: tuple[tuple[str, str], ...] = (
+    ("Etc/GMT+12", "International Date Line West"),
+    ("Etc/GMT+11", "Coordinated Universal Time-11"),
+    ("America/Adak", "Aleutian Islands"),
+    ("Pacific/Honolulu", "Hawaii"),
+    ("Pacific/Marquesas", "Marquesas Islands"),
+    ("America/Anchorage", "Alaska"),
+    ("Etc/GMT+9", "Coordinated Universal Time-09"),
+    ("America/Tijuana", "Baja California"),
+    ("Etc/GMT+8", "Coordinated Universal Time-08"),
+    ("America/Los_Angeles", "Pacific Time (US & Canada)"),
+    ("America/Phoenix", "Arizona"),
+    ("America/Mazatlan", "La Paz, Mazatlan"),
+    ("America/Denver", "Mountain Time (US & Canada)"),
+    ("America/Whitehorse", "Yukon"),
+    ("America/Guatemala", "Central America"),
+    ("America/Chicago", "Central Time (US & Canada)"),
+    ("Pacific/Easter", "Easter Island"),
+    ("America/Mexico_City", "Guadalajara, Mexico City, Monterrey"),
+    ("America/Regina", "Saskatchewan"),
+    ("America/Bogota", "Bogota, Lima, Quito, Rio Branco"),
+    ("America/Cancun", "Chetumal"),
+    ("America/New_York", "Eastern Time (US & Canada)"),
+    ("America/Port-au-Prince", "Haiti"),
+    ("America/Havana", "Havana"),
+    ("America/Indiana/Indianapolis", "Indiana (East)"),
+    ("America/Grand_Turk", "Turks and Caicos"),
+    ("America/Asuncion", "Asuncion"),
+    ("America/Halifax", "Atlantic Time (Canada)"),
+    ("America/Caracas", "Caracas"),
+    ("America/Cuiaba", "Cuiaba"),
+    ("America/La_Paz", "Georgetown, La Paz, Manaus, San Juan"),
+    ("America/Santiago", "Santiago"),
+    ("America/St_Johns", "Newfoundland"),
+    ("America/Araguaina", "Araguaina"),
+    ("America/Sao_Paulo", "Brasilia"),
+    ("America/Cayenne", "Cayenne, Fortaleza"),
+    ("America/Argentina/Buenos_Aires", "City of Buenos Aires"),
+    ("America/Nuuk", "Greenland"),
+    ("America/Montevideo", "Montevideo"),
+    ("America/Punta_Arenas", "Punta Arenas"),
+    ("America/Miquelon", "Saint Pierre and Miquelon"),
+    ("America/Bahia", "Salvador"),
+    ("Etc/GMT+2", "Coordinated Universal Time-02"),
+    ("Atlantic/Azores", "Azores"),
+    ("Atlantic/Cape_Verde", "Cabo Verde Is."),
+    ("UTC", "Coordinated Universal Time"),
+    ("Europe/London", "Dublin, Edinburgh, Lisbon, London"),
+    ("Atlantic/Reykjavik", "Monrovia, Reykjavik"),
+    ("Africa/Sao_Tome", "Sao Tome"),
+    ("Africa/Casablanca", "Casablanca"),
+    ("Europe/Berlin", "Amsterdam, Berlin, Bern, Rome, Stockholm, Vienna"),
+    ("Europe/Budapest", "Belgrade, Bratislava, Budapest, Ljubljana, Prague"),
+    ("Europe/Paris", "Brussels, Copenhagen, Madrid, Paris"),
+    ("Europe/Warsaw", "Sarajevo, Skopje, Warsaw, Zagreb"),
+    ("Africa/Lagos", "West Central Africa"),
+    ("Asia/Amman", "Amman"),
+    ("Europe/Bucharest", "Athens, Bucharest"),
+    ("Asia/Beirut", "Beirut"),
+    ("Africa/Cairo", "Cairo"),
+    ("Europe/Chisinau", "Chisinau"),
+    ("Asia/Damascus", "Damascus"),
+    ("Asia/Hebron", "Gaza, Hebron"),
+    ("Africa/Johannesburg", "Harare, Pretoria"),
+    ("Europe/Kyiv", "Helsinki, Kyiv, Riga, Sofia, Tallinn, Vilnius"),
+    ("Asia/Jerusalem", "Jerusalem"),
+    ("Africa/Juba", "Juba"),
+    ("Europe/Kaliningrad", "Kaliningrad"),
+    ("Africa/Khartoum", "Khartoum"),
+    ("Africa/Tripoli", "Tripoli"),
+    ("Africa/Windhoek", "Windhoek"),
+    ("Asia/Baghdad", "Baghdad"),
+    ("Europe/Istanbul", "Istanbul"),
+    ("Asia/Riyadh", "Kuwait, Riyadh"),
+    ("Europe/Minsk", "Minsk"),
+    ("Europe/Moscow", "Moscow, St. Petersburg"),
+    ("Africa/Nairobi", "Nairobi"),
+    ("Asia/Tehran", "Tehran"),
+    ("Asia/Dubai", "Abu Dhabi, Muscat"),
+    ("Europe/Astrakhan", "Astrakhan, Ulyanovsk"),
+    ("Asia/Baku", "Baku"),
+    ("Europe/Samara", "Izhevsk, Samara"),
+    ("Indian/Mauritius", "Port Louis"),
+    ("Europe/Saratov", "Saratov"),
+    ("Asia/Tbilisi", "Tbilisi"),
+    ("Europe/Volgograd", "Volgograd"),
+    ("Asia/Yerevan", "Yerevan"),
+    ("Asia/Kabul", "Kabul"),
+    ("Asia/Tashkent", "Ashgabat, Tashkent"),
+    ("Asia/Yekaterinburg", "Ekaterinburg"),
+    ("Asia/Karachi", "Islamabad, Karachi"),
+    ("Asia/Qyzylorda", "Qyzylorda"),
+    ("Asia/Kolkata", "Chennai, Kolkata, Mumbai, New Delhi"),
+    ("Asia/Colombo", "Sri Jayawardenepura"),
+    ("Asia/Kathmandu", "Kathmandu"),
+    ("Asia/Almaty", "Astana"),
+    ("Asia/Dhaka", "Dhaka"),
+    ("Asia/Omsk", "Omsk"),
+    ("Asia/Yangon", "Yangon (Rangoon)"),
+    ("Asia/Bangkok", "Bangkok, Hanoi, Jakarta"),
+    ("Asia/Barnaul", "Barnaul, Gorno-Altaysk"),
+    ("Asia/Hovd", "Hovd"),
+    ("Asia/Krasnoyarsk", "Krasnoyarsk"),
+    ("Asia/Novosibirsk", "Novosibirsk"),
+    ("Asia/Tomsk", "Tomsk"),
+    ("Asia/Shanghai", "Beijing, Chongqing, Hong Kong, Urumqi"),
+    ("Asia/Irkutsk", "Irkutsk"),
+    ("Asia/Singapore", "Kuala Lumpur, Singapore"),
+    ("Australia/Perth", "Perth"),
+    ("Asia/Taipei", "Taipei"),
+    ("Asia/Ulaanbaatar", "Ulaanbaatar"),
+    ("Australia/Eucla", "Eucla"),
+    ("Asia/Chita", "Chita"),
+    ("Asia/Tokyo", "Osaka, Sapporo, Tokyo"),
+    ("Asia/Pyongyang", "Pyongyang"),
+    ("Asia/Seoul", "Seoul"),
+    ("Asia/Yakutsk", "Yakutsk"),
+    ("Australia/Adelaide", "Adelaide"),
+    ("Australia/Darwin", "Darwin"),
+    ("Australia/Brisbane", "Brisbane"),
+    ("Australia/Sydney", "Canberra, Melbourne, Sydney"),
+    ("Pacific/Port_Moresby", "Guam, Port Moresby"),
+    ("Australia/Hobart", "Hobart"),
+    ("Asia/Vladivostok", "Vladivostok"),
+    ("Australia/Lord_Howe", "Lord Howe Island"),
+    ("Pacific/Bougainville", "Bougainville Island"),
+    ("Asia/Srednekolymsk", "Chokurdakh"),
+    ("Asia/Magadan", "Magadan"),
+    ("Pacific/Norfolk", "Norfolk Island"),
+    ("Asia/Sakhalin", "Sakhalin"),
+    ("Pacific/Guadalcanal", "Solomon Is., New Caledonia"),
+    ("Asia/Kamchatka", "Anadyr, Petropavlovsk-Kamchatsky"),
+    ("Pacific/Auckland", "Auckland, Wellington"),
+    ("Etc/GMT-12", "Coordinated Universal Time+12"),
+    ("Pacific/Fiji", "Fiji"),
+    ("Pacific/Chatham", "Chatham Islands"),
+    ("Etc/GMT-13", "Coordinated Universal Time+13"),
+    ("Pacific/Tongatapu", "Nuku'alofa"),
+    ("Pacific/Apia", "Samoa"),
+    ("Pacific/Kiritimati", "Kiritimati Island"),
+)
+_ZONE_NAMES = dict(ZONES)
 
 
 def is_timezone(name: str) -> bool:
@@ -205,6 +206,14 @@ def set_timezone(store, settings, choice: str) -> None:
     settings.timezone = text
 
 
+def offset_label(zone: ZoneInfo, when: datetime | None = None) -> str:
+    """How far the zone is from UTC, the way people say it: ``UTC-1``, ``UTC+0``, ``UTC+5:30``.
+
+    West of Greenwich is negative. This is not the ``Etc/GMT`` name, which flips the sign.
+    """
+    return _offset_text(_moment(when).astimezone(zone).utcoffset() or timedelta(0))
+
+
 def format_when(value: str, zone: ZoneInfo | None = None) -> str:
     """``Sep 22 · 16:00`` in ``zone``. A stamp with no offset is UTC, which is how mail is stored."""
     if not value:
@@ -220,25 +229,84 @@ def format_when(value: str, zone: ZoneInfo | None = None) -> str:
     return parsed.strftime("%b %d · %H:%M")
 
 
-@lru_cache(maxsize=1)
-def timezone_groups() -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """IANA names grouped by region, for the Setup page."""
-    names = sorted(zone for zone in available_timezones() if "/" in zone and not zone.startswith("Etc/"))
-    groups: dict[str, list[str]] = {}
-    for name in names:
-        region, _, _ = name.partition("/")
-        groups.setdefault(region, []).append(name)
-    ordered = [("UTC", ("UTC",))]
-    ordered.extend((region, tuple(zones)) for region, zones in sorted(groups.items()))
-    return tuple(ordered)
+def zone_name(name: str) -> str:
+    """The name Windows and Outlook use, such as ``Eastern Time (US & Canada)``."""
+    if name in _ZONE_NAMES:
+        return _ZONE_NAMES[name]
+    region, _, city = name.rpartition("/")
+    city = city.replace("_", " ")
+    return f"{city} ({region.replace('_', ' ')})" if region else city
+
+
+def standard_offset(zone: ZoneInfo, when: datetime | None = None) -> timedelta:
+    """The zone's offset outside daylight saving time. Windows and Outlook label zones by this."""
+    local = _moment(when).astimezone(zone)
+    return (local.utcoffset() or timedelta(0)) - (local.dst() or timedelta(0))
+
+
+def on_daylight_time(zone: ZoneInfo, when: datetime | None = None) -> bool:
+    return bool(_moment(when).astimezone(zone).dst())
+
+
+def zone_option(name: str, when: datetime | None = None) -> str:
+    """``(UTC-05:00) Eastern Time (US & Canada)``, written the way Windows and Outlook write it."""
+    if name == "UTC":
+        return f"(UTC) {zone_name(name)}"
+    return f"({_long_offset(standard_offset(ZoneInfo(name), when))}) {zone_name(name)}"
+
+
+def zone_choices(when: datetime | None = None, keep: str = "") -> tuple[tuple[str, str], ...]:
+    """``(iana name, option label)`` from UTC-12:00 to UTC+14:00, like the Windows list.
+
+    ``keep`` adds a saved zone that is not on the list, so a choice made by name still shows.
+    """
+    moment = _moment(when)
+    names = [name for name, _ in ZONES]
+    if keep and keep.lower() != AUTO and keep not in _ZONE_NAMES and is_timezone(keep):
+        names.append(keep)
+    rows = [(name, zone_option(name, moment)) for name in names]
+    rows.sort(key=lambda row: (standard_offset(ZoneInfo(row[0]), moment), row[1]))
+    return tuple(rows)
+
+
+def _moment(when: datetime | None) -> datetime:
+    moment = when or datetime.now(timezone.utc)
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _long_offset(delta: timedelta) -> str:
+    total = int(delta.total_seconds())
+    sign = "-" if total < 0 else "+"
+    hours, rem = divmod(abs(total), 3600)
+    return f"UTC{sign}{hours:02d}:{rem // 60:02d}"
+
+
+def _offset_text(delta: timedelta) -> str:
+    total = int(delta.total_seconds())
+    sign = "-" if total < 0 else "+"
+    total = abs(total)
+    hours, rem = divmod(total, 3600)
+    minutes = rem // 60
+    if minutes:
+        return f"UTC{sign}{hours}:{minutes:02d}"
+    return f"UTC{sign}{hours}"
 
 
 def _named_zone() -> str:
     forced = os.environ.get("TZ", "").strip()
     if forced and is_timezone(forced):
         return forced
-    named = _from_localtime() or _from_windows()
-    return named
+    return _from_tzlocal() or _from_localtime() or _matching_offset()
+
+
+def _from_tzlocal() -> str:
+    """tzlocal reads the Windows registry, macOS, and Linux settings, with the full Windows name map."""
+    try:
+        import tzlocal
+
+        return tzlocal.get_localzone_name() or ""
+    except Exception:
+        return ""
 
 
 def _from_localtime() -> str:
@@ -252,16 +320,13 @@ def _from_localtime() -> str:
     return "/".join(parts[parts.index("zoneinfo") + 1 :])
 
 
-def _from_windows() -> str:
-    if sys.platform != "win32":
-        return ""
-    try:
-        import winreg
-
-        with winreg.OpenKey(
-            winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\TimeZoneInformation"
-        ) as key:
-            windows_name, _ = winreg.QueryValueEx(key, "TimeZoneKeyName")
-    except OSError:
-        return ""
-    return _WINDOWS_TO_IANA.get(str(windows_name), "")
+def _matching_offset() -> str:
+    """A listed zone that keeps the same hours as the computer clock, when the computer gives no name."""
+    now = datetime.now(timezone.utc)
+    current = now.astimezone().utcoffset()
+    standard = -timedelta(seconds=time.timezone)
+    for name, _ in ZONES:
+        zone = ZoneInfo(name)
+        if now.astimezone(zone).utcoffset() == current and standard_offset(zone, now) == standard:
+            return name
+    return ""

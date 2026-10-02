@@ -485,7 +485,7 @@ def _watch(settings: Settings, store: Store, *, once: bool) -> int:
 
     def tick() -> None:
         result = watch_tick(settings, store, force_digest=once)
-        stamp = datetime.now().isoformat(timespec="seconds")
+        stamp = datetime.now(settings.tz).isoformat(timespec="seconds")
         print(f"{stamp} read {len(result['records'])} message(s); model read {result['read']}")
         payload = result["digest"]
         if payload:
