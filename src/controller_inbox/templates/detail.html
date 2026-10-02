@@ -30,7 +30,6 @@
     </div>
   </header>
   {% include "_mail_tools.html" %}
-  {% with back="/inbox/" ~ email.id, coding_class="panel" %}{% include "_coding_panel.html" %}{% endwith %}
 
   {% if email.flags %}
   <div class="flags big">
@@ -40,6 +39,7 @@
   </div>
   {% endif %}
   {% if check.level != 'none' %}{% include "_fraud_panel.html" %}{% endif %}
+  {% with back="/inbox/" ~ email.id, coding_class="panel" %}{% include "_coding_panel.html" %}{% endwith %}
 
   {% if email.importance_reasons %}
   <section class="panel">

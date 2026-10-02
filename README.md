@@ -129,6 +129,16 @@ CONTROLLER_INBOX_LLM_MODEL=local-model        # "whatever is loaded"; set an id 
 
 The Bionic Studio skill in `bionic/closedesk-inbox/` lets the agent do the reading in chat and answer "what do I need to do today?" with `tool focus`.
 
+### AP cost coding
+
+CloseDesk makes `AP cost codes/AP cost codes.xlsx` next to the `inbox` folder (`CONTROLLER_INBOX_COST_CODES_DIR` moves it). Fill in two columns, **Description** and **Cost Code** (JDE codes with their periods, such as `1100.6110.100`); more rows, sheets or workbooks in that folder are all read. Every AP invoice is checked against it:
+
+* a code from the workbook written on the invoice or in the email, even where a scan read a period as a comma, an O for a zero, or dropped the business unit's leading zeros;
+* otherwise the code you last confirmed for that sender;
+* otherwise a description whose words are on the invoice.
+
+The email page shows the code with **Confirm**, or **Revise** to pick other codes (several for a split invoice). A code-shaped number on the invoice that isn't in the workbook is pointed out. The **AP coding** page lists invoices waiting for review, and *Search all mail* finds an invoice by its code or description.
+
 ## Sample mailbox
 
 ```bash
