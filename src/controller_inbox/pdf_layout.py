@@ -356,7 +356,11 @@ def _word(glyphs: list[Glyph]) -> Word:
 
 
 def _table_blocks(lines: list[Line]) -> list[tuple[int, int]]:
-    """Runs of three or more lines that line up in two or more columns: [start, end) into ``lines``."""
+    """Runs of lines that line up in two or more columns: [start, end) into ``lines``.
+
+    Three lines is the usual table. Two lines still count when one is a header and the other
+    is a row of figures, so a section with a single data row keeps its column names.
+    """
     blocks: list[tuple[int, int]] = []
     i = 0
     while i < len(lines):
@@ -366,7 +370,7 @@ def _table_blocks(lines: list[Line]) -> list[tuple[int, int]]:
         end = i + 1
         while end < len(lines) and _continues(lines, i, end):
             end += 1
-        if end - i >= 3 and len(_columns(lines[i:end])) >= 2:
+        if _is_table(lines[i:end]) and len(_columns(lines[i:end])) >= 2:
             start = i - 1 if i > 0 and _labels_above(lines[i - 1], lines[i:end]) else i
             blocks.append((start, end))
             i = end
@@ -388,9 +392,15 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
     if gap > max(2.2 * usual, 3.0 * line.size):
         return False
     block = lines[start:index]
-    # A noticeably larger line is a section heading, not another row. A group label
-    # inside the table is the same size as the rows around it.
-    if line.size > statistics.median(ln.size for ln in block) * 1.15:
+    median = statistics.median(ln.size for ln in block)
+    # A noticeably larger line is a section heading, not another row. A one-word category can be a
+    # little larger than the rows it names and still belong, unless the next line is a new header.
+    limit = 1.15
+    if len(line.segments) == 1 and line.size <= median * 1.35:
+        nxt = lines[index + 1] if index + 1 < len(lines) else None
+        if nxt is not None and not _new_header(nxt):
+            limit = 1.35
+    if line.size > median * limit:
         return False
     data_started = any(not ln.bold for ln in block)
     words = [word.text for seg in line.segments for word in seg]
@@ -421,6 +431,16 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
     return len(under) == 1
 
 
+def _new_header(line: Line) -> bool:
+    """A row of column names. Years and dates count as names; a row that already has amounts does not."""
+    if len(line.segments) < 2:
+        return False
+    words = [word.text for segment in line.segments for word in segment]
+    if not words or any(word.endswith(":") for word in words):
+        return False
+    return not any(_amount_cell(word) for word in words)
+
+
 def _labels_above(line: Line, block: list[Line]) -> bool:
     """A row of names sitting on the columns, even when it has no cell for the stub column.
 
@@ -444,13 +464,20 @@ def _labels_above(line: Line, block: list[Line]) -> bool:
 def _fits_columns(line: Line, columns: list[tuple[float, float]]) -> bool:
     """Every piece of the line sits in a column this table already has.
 
-    Columns are widened to the gap on either side, so a right-aligned number still belongs
-    to the heading drawn at the right edge of the same column.
+    A right-aligned figure can sit well to the right of a short heading. It still belongs
+    when it lands in that heading's span or just past the last one.
     """
     if len(columns) < 2:
         return False
     spans = _spans(columns)
-    return all(_owns(segment, spans) for segment in line.segments)
+    last = columns[-1][1]
+    for segment in line.segments:
+        if _owns(segment, spans):
+            continue
+        if segment[0].x0 + 1 >= last and segment[0].x0 - last <= 180:
+            continue
+        return False
+    return True
 
 
 def _spans(columns: list[tuple[float, float]]) -> list[tuple[float, float]]:
@@ -468,26 +495,31 @@ def _owns(segment: list[Word], spans: list[tuple[float, float]]) -> bool:
 
 
 def _columns(block: list[Line]) -> list[tuple[float, float]]:
-    """Column extents, from the rows with the most cells.
+    """Column extents from one full row, widened by the cells that belong to those columns.
 
     A heading merged across columns is wider than the cells under it, and a short heading
     centered over a group can sit in the gap between them. Either one would glue two columns
-    together or invent a column. The leaf rows already have a cell in each column, so the
-    columns come from those rows only.
+    together or invent a column, so the columns come from a single full row. A right-aligned
+    figure sits just to the right of its heading and still belongs to that column.
     """
     most = max(len(line.segments) for line in block)
-    fullest = [line for line in block if len(line.segments) == most]
+    skeleton = next(line for line in block if len(line.segments) == most)
     merged: list[list[float]] = []
-    for x0, x1 in sorted((seg[0].x0, seg[-1].x1) for line in fullest for seg in line.segments):
+    for segment in skeleton.segments:
+        x0, x1 = segment[0].x0, segment[-1].x1
         # A right-aligned figure ends where its heading starts. Rounding leaves a hairline gap.
         if merged and x0 <= merged[-1][1] + 1:
             merged[-1][1] = max(merged[-1][1], x1)
         else:
             merged.append([x0, x1])
-    # An indented label is drawn a little to the right of the heading, so the fullest rows
-    # split one column in two. A word that crosses that small gap is the same column.
-    # A heading that spans real columns crosses a much wider gap and does not join them.
-    others = [line for line in block if line not in fullest]
+    for line in block:
+        if line is skeleton:
+            continue
+        for segment in line.segments:
+            _absorb_column(merged, segment[0].x0, segment[-1].x1, " ".join(word.text for word in segment))
+    # An indented label is drawn a little to the right of the heading, so two boxes are one
+    # column when a word crosses that small gap. A heading that spans real columns crosses a
+    # much wider gap and does not join them.
     changed = True
     while changed and len(merged) > 1:
         changed = False
@@ -497,7 +529,7 @@ def _columns(block: list[Line]) -> list[tuple[float, float]]:
         for index in range(len(merged) - 1):
             if centers[index + 1] - centers[index] >= 0.55 * typical:
                 continue
-            if not any(_crosses(seg, merged[index], merged[index + 1]) for line in others for seg in line.segments):
+            if not any(_crosses(seg, merged[index], merged[index + 1]) for line in block if line is not skeleton for seg in line.segments):
                 continue
             merged[index][0] = min(merged[index][0], merged[index + 1][0])
             merged[index][1] = max(merged[index][1], merged[index + 1][1])
@@ -505,6 +537,53 @@ def _columns(block: list[Line]) -> list[tuple[float, float]]:
             changed = True
             break
     return [(a, b) for a, b in merged]
+
+
+def _absorb_column(columns: list[list[float]], x0: float, x1: float, text: str = "") -> None:
+    """Widen the one column this piece belongs to.
+
+    A piece that covers two columns is a merged heading and is left out. A figure that only
+    reaches the next heading (a right-aligned amount ending where that heading starts) belongs
+    to that heading, not the column on its left. A figure sitting in the gap before the next
+    heading belongs to the heading on its left, even when the column is wide.
+    """
+    real = [index for index, (left, right) in enumerate(columns) if x0 <= right and x1 >= left]
+    if len(real) > 1:
+        return
+    if len(real) == 1:
+        _widen(columns, real[0], x0, x1)
+        return
+    # Less than a point is rounding. A real gap, even a small one, is the space before the next column.
+    hair = [index for index, (left, right) in enumerate(columns) if x0 <= right + 0.75 and x1 >= left - 0.75]
+    if len(hair) == 1:
+        _widen(columns, hair[0], x0, x1)
+        return
+    for index, (left, right) in enumerate(columns):
+        nxt = columns[index + 1][0] if index + 1 < len(columns) else 10**6
+        prev = columns[index - 1][1] if index else -10**6
+        if right < x0 and x1 <= nxt + 1:
+            gap_left = x0 - right
+            gap_right = nxt - x1
+            room = max(nxt - right, 1.0)
+            if gap_right <= 0.75 and index + 1 < len(columns):
+                _widen(columns, index + 1, x0, x1)
+            elif _amount_cell(text) or gap_left < min(0.55 * room, 60):
+                _widen(columns, index, x0, x1)
+            return
+        if x1 < left and x0 >= prev - 1:
+            # A heading drawn just to the left of its figures. A wide gap is a different column.
+            room = max(left - prev, 1.0)
+            if left - x1 <= 1.5 or left - x1 < min(0.55 * room, 60):
+                _widen(columns, index, x0, x1)
+            return
+
+
+def _widen(columns: list[list[float]], index: int, x0: float, x1: float) -> None:
+    """Grow a column toward this piece, stopping at the neighbouring column."""
+    prev = columns[index - 1][1] if index else x0
+    nxt = columns[index + 1][0] if index + 1 < len(columns) else x1
+    columns[index][0] = min(columns[index][0], max(x0, prev))
+    columns[index][1] = max(columns[index][1], min(x1, nxt))
 
 
 def _crosses(segment: list[Word], left: list[float], right: list[float]) -> bool:
@@ -527,12 +606,29 @@ def _place(segment: list[Word], columns: list[tuple[float, float]]) -> int:
 
 
 _YEAR = re.compile(r"^(?:19|20)\d{2}$")
+_MONTH_WORD = re.compile(r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*", re.I)
 
 
 def _amount_cell(cell: str) -> bool:
-    """A figure. A year is a column heading, not an amount."""
+    """A figure. A year or a date is a column heading on a statement, not an amount."""
     text = (cell or "").strip()
-    return bool(text) and tables.is_value(text) and not _YEAR.fullmatch(text)
+    if not text or not tables.is_value(text) or _YEAR.fullmatch(text):
+        return False
+    return _MONTH_WORD.search(text) is None
+
+
+def _is_table(rows: list[Line]) -> bool:
+    """Whether these aligned lines are a table. Two lines qualify when the first names columns and the second has figures."""
+    if len(rows) >= 3:
+        return True
+    if len(rows) != 2 or len(rows[0].segments) < 2 or len(rows[1].segments) < 2:
+        return False
+    top = [word.text for segment in rows[0].segments for word in segment]
+    bottom = [word.text for segment in rows[1].segments for word in segment]
+    # A year or a date in the top row is a column name. An amount there means this is not a header.
+    if not top or any(word.endswith(":") for word in top) or any(_amount_cell(word) for word in top):
+        return False
+    return any(tables.is_value(word) for word in bottom)
 
 
 def _label_row(row: list[str]) -> bool:
@@ -801,6 +897,7 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
         row_x.append(first_x)
         bolds.append(line.bold)
     mids = [line.mid for line in block]
+    sizes = [line.size for line in block]
 
     peeled = _peel_side_facts(grid)
     facts: list[str] = []
@@ -819,16 +916,18 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
     header_mid = mids[0]
     if spanned and (_usable_header(spanned, grid[heads:], bold_first) or heads > 1):
         labels = spanned
-        grid, bolds, mids, row_x, cell_x = grid[heads:], bolds[heads:], mids[heads:], row_x[heads:], cell_x[heads:]
+        grid, bolds, mids, row_x, cell_x, sizes = (
+            grid[heads:], bolds[heads:], mids[heads:], row_x[heads:], cell_x[heads:], sizes[heads:]
+        )
     else:
         labels = None
         header = tables.has_header(grid, bold_first=bold_first)
         if header:
             labels = [_clean_label(cell) for cell in grid[0]]
-            grid, bolds, mids, row_x, cell_x = grid[1:], bolds[1:], mids[1:], row_x[1:], cell_x[1:]
+            grid, bolds, mids, row_x, cell_x, sizes = grid[1:], bolds[1:], mids[1:], row_x[1:], cell_x[1:], sizes[1:]
     group_cols: list[int] = []
     if labels:
-        grid, mids, row_x, bolds = _join_body(grid, mids, row_x, bolds, cell_x)
+        grid, mids, row_x, bolds, sizes = _join_body(grid, mids, row_x, bolds, cell_x, sizes)
         group_cols = _fill_grouping_columns(grid, mids)
         kept = [index for index in range(len(grid)) if not _absorbed(grid, index)]
         grid = [grid[index] for index in kept]
@@ -836,11 +935,12 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
         row_x = [row_x[index] for index in kept]
         bolds = [bolds[index] for index in kept]
         cell_x = [cell_x[index] for index in kept]
+        sizes = [sizes[index] for index in kept]
 
     def render(row: list[str]) -> str:
         return tables.labelled_row(labels, row) if labels else tables.table_lines([row], header=False)[0]
 
-    body_lines = _grouped_lines(grid, row_x, bolds, render, group_cols, cell_x) if labels else [render(row) for row in grid]
+    body_lines = _grouped_lines(grid, row_x, bolds, render, group_cols, cell_x, sizes) if labels else [render(row) for row in grid]
     first_label = (labels[0] if labels else "") or ""
     carried = _carried_over(mids, header_mid if labels else None, previous or [], first_label)
     if carried and labels:
@@ -871,8 +971,13 @@ def _header_depth(grid: list[list[str]]) -> int:
 def _usable_header(labels: list[str], body: list[list[str]], bold_first: bool) -> bool:
     if tables.has_header([labels, *body], bold_first=bold_first):
         return True
-    filled = [label for label in labels if label.strip()]
-    return len(filled) >= 2 and all(_YEAR.fullmatch(label.strip()) for label in filled)
+    filled = [label.strip() for label in labels if label and label.strip()]
+    if len(filled) < 2 or any(label.endswith(":") or _amount_cell(label) for label in filled):
+        return False
+    # "2024" and "31 March 2024" are column names. has_header treats both as figures.
+    if all(_YEAR.fullmatch(label) for label in filled):
+        return True
+    return any(_amount_cell(cell) for row in body for cell in row)
 
 
 def _clean_label(cell: str) -> str:
@@ -885,9 +990,10 @@ def _join_body(
     xs: list[float],
     bolds: list[bool],
     cell_x: list[list[float]],
-) -> tuple[list[list[str]], list[float], list[float], list[bool]]:
-    rows, mids = _join_wrapped(rows, mids, first=0, extra=[xs, bolds, cell_x])
-    return rows, mids, xs, bolds
+    sizes: list[float],
+) -> tuple[list[list[str]], list[float], list[float], list[bool], list[float]]:
+    rows, mids = _join_wrapped(rows, mids, first=0, extra=[xs, bolds, cell_x, sizes], sizes=sizes)
+    return rows, mids, xs, bolds, sizes
 
 
 def _grouped_lines(
@@ -897,6 +1003,7 @@ def _grouped_lines(
     render,
     group_cols: list[int],
     cell_x: list[list[float]],
+    sizes: list[float],
 ) -> list[str]:
     """Category rows name the data rows under them. Indent nests: Operating > Revenue > Product.
 
@@ -910,7 +1017,7 @@ def _grouped_lines(
     grouped = set(group_cols)
     for index, (row, x) in enumerate(zip(rows, xs)):
         bold = bolds[index] if index < len(bolds) else False
-        label = _one_label(row) if bold else ""
+        label = _one_label(row) if bold or _indents_next(rows, cell_x, index, sizes) else ""
         if label:
             while groups and x <= groups[-1][0] + 1:
                 groups.pop()
@@ -936,6 +1043,19 @@ def _grouped_lines(
         if name:
             groups.append((stub, name, "data"))
     return lines
+
+
+def _indents_next(rows: list[list[str]], cell_x: list[list[float]], index: int, sizes: list[float] | None = None) -> bool:
+    """A category row that is not bold still names the rows under it when they are indented or smaller."""
+    if not _one_label(rows[index]) or index + 1 >= len(rows):
+        return False
+    this = _stub_x(rows[index], cell_x[index] if index < len(cell_x) else [])
+    nxt = _stub_x(rows[index + 1], cell_x[index + 1] if index + 1 < len(cell_x) else [])
+    if this is None:
+        return False
+    if nxt is not None and nxt > this + 4:
+        return True
+    return bool(sizes) and index + 1 < len(sizes) and sizes[index] > sizes[index + 1] + 0.5
 
 
 def _stub_x(row: list[str], xs: list[float]) -> float | None:
@@ -1101,7 +1221,12 @@ def _dehyphenate(lines: list[str]) -> list[str]:
 
 
 def _join_wrapped(
-    grid: list[list[str]], mids: list[float], *, first: int, extra: list[list] | None = None
+    grid: list[list[str]],
+    mids: list[float],
+    *,
+    first: int,
+    extra: list[list] | None = None,
+    sizes: list[float] | None = None,
 ) -> tuple[list[list[str]], list[float]]:
     """Fold a cell's wrapped line into its row: a line with few cells filled that sits closer to a
     fuller neighbouring row than rows usually are to each other.
@@ -1126,7 +1251,9 @@ def _join_wrapped(
         near = [
             (gap, target)
             for gap, target in filter(None, near)
-            if gap < 0.9 * usual and sum(1 for cell in rows[target] if cell) > filled
+            if gap < 0.95 * usual
+            and sum(1 for cell in rows[target] if cell) > filled
+            and (sizes is None or abs(sizes[k] - sizes[target]) <= 0.6)
         ]
         if not near:
             k += 1
