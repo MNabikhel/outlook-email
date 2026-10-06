@@ -72,3 +72,26 @@ def test_headings_that_look_like_cell_references_are_headings(texts):
 def test_a_lone_dash_is_a_zero_figure(texts):
     table = _table(texts, "AR Aging 9-30-26.pdf", "Customer")
     assert table.kinds["Over 90"] == "figure" and table.kinds["61 - 90"] == "figure"
+
+
+def test_a_heading_merged_down_two_heading_rows_stays_in_the_header(texts):
+    # "Total" is merged down beside "Chicago | Austin | Remote", so it prints on a line of its own above them;
+    # "Department" sits in the first column with nothing under it: that column's name, not a group.
+    table = _table(texts, "Headcount Salary Budget FY2027.pdf", "Department")
+    assert table.labels == (
+        "Department", "Chicago HC", "Chicago Salary", "Austin HC", "Austin Salary", "Remote HC", "Remote Salary", "Total HC", "Total Salary",
+    )
+    finance = next(row for row in table.rows if row.name == "Finance")
+    assert finance.value("Chicago HC") == "9" and finance.value("Total Salary") == "$1,327,000"
+
+
+def test_month_headings_with_words_before_them_are_months():
+    from controller_inbox.table_query import Tables
+
+    path = FIXTURES / "Sales Tax Collected Q3 2026.pdf"
+    tables = Tables([(path.name, extract_document(path.name, "application/pdf", path.read_bytes()))])
+    schema = tables.schema()
+    assert '"Month" as text YYYY-MM: 2026-07 (Tax Collected Jul-26) to 2026-09 (Tax Collected Sep-26)' in schema
+    # Two details on one line, above the table.
+    assert "Prepared by: R. Delgado; Date: 10/12/2026" in schema
+    assert tables.run("SELECT SUM(amount) FROM t1_cells WHERE state LIKE '%jersey%' AND month = '2026-09'")[1] == [(-412.3,)]

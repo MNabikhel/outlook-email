@@ -803,8 +803,10 @@ def _labels_above(line: Line, block: list[Line]) -> bool:
     be left off the table.
     """
     columns = _columns(block)
-    if len(line.segments) < 2 or len(columns) < 2:
+    if len(columns) < 2 or not line.segments:
         return False
+    if len(line.segments) == 1:
+        return _merged_heading_above(line, block, columns)
     words = [word.text for segment in line.segments for word in segment]
     if not words or sum(map(tables.is_value, words)) >= 0.5 * len(words):
         return False
@@ -816,6 +818,22 @@ def _labels_above(line: Line, block: list[Line]) -> bool:
     if gap <= 0 or gap > max(2.2 * usual, 3.0 * line.size):
         return False
     return all(_owns(segment, _spans(columns)) for segment in line.segments)
+
+
+def _merged_heading_above(line: Line, block: list[Line], columns: list[tuple[float, float]]) -> bool:
+    """A heading merged down two heading rows ("Total" beside "Chicago | Austin | Remote", over its own "HC |
+    Salary") is printed halfway between them, on a line of its own just above the table: it is part of the
+    heading row when it sits over columns that row leaves empty, closer than a row apart."""
+    segment = line.segments[0]
+    first = block[0]
+    words = [word.text for word in segment]
+    if len(block) < 3 or len(first.segments) < 2 or any(tables.is_value(word) for word in words) or words[-1].endswith(":"):
+        return False
+    gap = line.mid - first.mid
+    if gap <= 0 or gap > 0.8 * (first.mid - block[1].mid) or gap > 1.2 * line.size:
+        return False
+    taken = {_place(other, columns) for other in first.segments}
+    return _place(segment, columns) not in taken and _owns(segment, _spans(columns))
 
 
 def _fits_columns(line: Line, columns: list[tuple[float, float]]) -> bool:
@@ -1054,6 +1072,10 @@ def _covers(
         return covers
     covers: list[list[int] | None] = [None] * len(segs)
     stub = _stub_segment(segs, centers, below)
+    if stub is None and below and not below[0].strip() and len(columns) > 2 and segs[0][1] <= columns[1][0] + 2:
+        # A first heading inside the first column with nothing under it is that column's own name, merged down
+        # the heading rows ("Department" beside "Chicago" over "HC | Salary"), not a group.
+        stub = 0
     if stub is not None:
         covers[stub] = [min(range(len(centers)), key=lambda i: abs(centers[i] - (segs[stub][0] + segs[stub][1]) / 2))]
     groups = [index for index in range(len(segs)) if index != stub]

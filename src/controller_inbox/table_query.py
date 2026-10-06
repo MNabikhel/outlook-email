@@ -702,14 +702,17 @@ def _formulas(columns: list[Column], values: list[list]) -> None:
     found: dict[int, list[tuple[int, int]]] = {}
     for target in figures:
         position = figures.index(target)
-        runs = []
+        runs: list[tuple[list[int], bool]] = []
         for width in range(2, min(13, len(figures))):
             if position - width >= 0:
-                runs.append(figures[position - width : position])
+                runs.append((figures[position - width : position], False))
             if position + 1 + width <= len(figures):
-                runs.append(figures[position + 1 : position + 1 + width])
-        for run in runs:
-            signs = [(1,) * len(run)] if len(run) > 5 else [(1, *rest) for rest in itertools.product((1, -1), repeat=len(run) - 1)]
+                runs.append((figures[position + 1 : position + 1 + width], False))
+            # Every other column: "Total HC = Chicago HC + Austin HC + Remote HC" beside their Salary columns.
+            if width >= 3 and position - 2 * width >= 0:
+                runs.append((figures[position - 2 * width : position : 2], True))
+        for run, interleaved in runs:
+            signs = [(1,) * len(run)] if len(run) > 5 or interleaved else [(1, *rest) for rest in itertools.product((1, -1), repeat=len(run) - 1)]
             terms = next((list(zip(run, pattern)) for pattern in signs if _holds(values, target, list(zip(run, pattern)))), None)
             if terms:
                 found[target] = terms
@@ -761,7 +764,13 @@ def _family(columns: list[Column]) -> list[int]:
     """The columns a sheet lays one quantity across: the three or more its total adds up ("Total Due To = US01
     + CA02 + ..."), its month columns, or three or more text columns holding the same few values (each
     person's shift: "8-5", "OFF", "PTO")."""
-    sums = [column.parts for column in columns if len(column.parts) >= 3 and all(sign > 0 for _index, sign in column.parts)]
+    sums = [
+        column.parts
+        for column in columns
+        if len(column.parts) >= 3
+        and all(sign > 0 for _index, sign in column.parts)
+        and all(b - a == 1 for (a, _s), (b, _t) in zip(column.parts, column.parts[1:]))
+    ]
     if sums:
         return [index for index, _sign in max(sums, key=len)]
     months = [index for index, column in enumerate(columns) if column.kind == "figure" and _month(column.label)]
@@ -781,12 +790,12 @@ def _overlap(a: Column, b: Column) -> float:
     return len(first & second) / max(1, len(first | second))
 
 
-_MONTH_LABEL = re.compile(r"^([a-z]{3,9})\.?[\s\-'/]*(\d{2}|\d{4})$", re.I)
+_MONTH_LABEL = re.compile(r"(?:^|\s)([a-z]{3,9})\.?[\s\-'/]*(\d{2}|\d{4})$", re.I)
 
 
 def _month(label: str) -> str:
-    """ "Apr-26", "April 2026" as 2026-04, else ""."""
-    match = _MONTH_LABEL.match(label.strip())
+    """ "Apr-26", "April 2026", "Tax Collected Jul-26" as 2026-04 (2026-07), else ""."""
+    match = _MONTH_LABEL.search(label.strip())
     month = table_lookup._MONTHS.get(match.group(1).lower()) if match else None
     if not month:
         return ""
@@ -812,15 +821,22 @@ def _facts_in(lines: list[str]) -> list[tuple[str, str]]:
     """Details printed beside a file's tables as "Name: value" on a line of their own ("Pay Date: Oct 15,
     2026", "Prepared by: L. Wei 10/2/2026"); a table row has several of them and is left alone."""
     found: list[tuple[str, str]] = []
+    block = ""
     for line in lines:
+        if line.startswith("["):
+            block = line.strip()
+            continue
         pieces = [piece.strip() for piece in line.strip().split(" | ")]
         named = [piece for piece in pieces if ": " in piece]
-        if line.startswith("[") or len(named) != 1:
+        # In a table, a line of several "Name: value" pieces is a row; elsewhere it is several details
+        # ("Prepared by: R. Delgado | Date: 10/12/2026").
+        if not named or (block == "[table]" and len(named) != 1):
             continue
-        match = _FACT.match(named[0])
-        # "Group: Payroll" is how a table's section heading is written out (pdf_layout), not a detail.
-        if match and match.group(1) != "Group" and (match.group(1).strip(), match.group(2).strip()) not in found:
-            found.append((match.group(1).strip(), match.group(2).strip()))
+        for piece in named:
+            match = _FACT.match(piece)
+            # "Group: Payroll" is how a table's section heading is written out (pdf_layout), not a detail.
+            if match and match.group(1) != "Group" and (match.group(1).strip(), match.group(2).strip()) not in found:
+                found.append((match.group(1).strip(), match.group(2).strip()))
     return found[:30]
 
 
