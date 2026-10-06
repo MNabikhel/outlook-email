@@ -119,6 +119,21 @@ Rows: none.
 Value: none.
 SQL: NONE"""
 
+# The same rules and examples with a one-line plan in place of the Table, Rows and Value lines.
+PLAN_SYSTEM = re.sub(
+    r"Table: (.+)\nRows: (.+)\nValue: (.+)\n",
+    lambda m: f"Plan: {m.group(1)} {m.group(2)} {m.group(3)}\n",
+    SYSTEM.replace(
+        "Write four lines:\nTable: which table holds the answer, and why (one named in the schema).\n"
+        "Rows: which rows the question picks (all, or the ones it names), and the column that names them.\n"
+        "Value: which column or expression gives the answer, and what its heading means.\n",
+        "Write two lines:\nPlan: which table, which rows (all, or the ones the question names), what value each row "
+        "gives, and how they combine (list, sum, count, average, largest...).\n",
+    ),
+)
+
+PROMPT = SYSTEM
+
 # SQLite's words, which a column can't be called without quotes the model would leave off.
 _KEYWORDS = frozenset(
     """abort action add after all alter always analyze and as asc attach autoincrement before begin between by
@@ -485,6 +500,9 @@ def ask(settings, tables: Tables, question: str, *, complete=None, think: bool =
     if complete is None:
         from controller_inbox.local_llm import complete_text as complete
 
+    if CANDIDATES == 1:
+        outcome = _candidate(settings, tables, question, complete, temperature=None, think=think)
+        return None if outcome is _NO_QUERY else outcome
     seen: list[Result | None] = []
     for index in range(CANDIDATES):
         outcome = _candidate(settings, tables, question, complete, temperature=None if index == 0 else 0.7, think=think)
@@ -509,7 +527,7 @@ def _candidate(settings, tables: Tables, question: str, complete, *, temperature
     its queries ran and found something. A query that fails or finds nothing is tried again with what was
     wrong."""
     messages = [
-        {"role": "system", "content": SYSTEM},
+        {"role": "system", "content": PROMPT},
         {"role": "user", "content": f"Schema:\n{tables.schema()}\n\nQuestion: {question}"},
     ]
     for attempt in range(ATTEMPTS):
