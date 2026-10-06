@@ -7,7 +7,7 @@ import pytest
 from controller_inbox import local_llm
 from controller_inbox.local_llm import LocalReader, build_prompt, check_model, llm_active, parse_json_object
 from controller_inbox.overnight import read_queue
-from controller_inbox.reading import build_packet, overlay_reading
+from controller_inbox.reading import VERIFY_TITLE, build_packet, overlay_reading
 
 GOOD = {
     "category": "ap_invoice",
@@ -226,6 +226,7 @@ def test_made_up_due_date_on_undated_mail_is_dropped(loaded):
     email = next(
         e for e in loaded.list_emails(limit=100)
         if not e.extracted.due_dates and not any(a.extracted_fields.due_dates for a in e.attachments)
+        and "fraud_risk" not in e.flags  # fraud mail keeps only the verify-by-phone task
     )
     overlay_reading(email, {**GOOD, "actions": [{"title": "Reply", "due": "2031-01-01", "priority": "low"}]})
     action = next(a for a in email.actions if a.title == "Reply")
@@ -283,9 +284,9 @@ def test_model_treating_a_bank_change_as_routine_is_overruled(loaded):
     assert (email.folder, email.importance.value) == ("important", "critical")
     assert email.summary.startswith("Possible payment-instruction fraud")
     titles = [a.title for a in email.actions]
-    assert "Update the vendor bank account in the ERP" not in titles
-    assert "Call the vendor on the known number to verify" in titles
+    # Only the fixed verify-by-phone task survives; the model's own tasks (even a "call to verify") are dropped.
+    assert titles == [VERIFY_TITLE]
     guards = [r for r in email.importance_reasons if r.startswith("Guard:")]
     assert any("Kept in Important as critical" in g and "informational" in g for g in guards)
-    assert any("Removed 1 task" in g for g in guards)
+    assert any("Removed 2 task" in g for g in guards)
     assert any("fraud warning" in g for g in guards)

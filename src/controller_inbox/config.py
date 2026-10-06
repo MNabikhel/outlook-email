@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     timezone: str = AUTO
     host: str = "127.0.0.1"
     port: int = 8765
+    # Extra names or addresses the dashboard answers on when HOST is beyond this computer (comma-separated).
+    # This computer's own names and addresses are always allowed; "*" is not accepted.
+    allowed_hosts: str = ""
     poll_seconds: int = 120
     lookback_hours: int = 72
     high_amount: float = 10_000.0

@@ -46,10 +46,16 @@ python -m controller_inbox tool prepare_queue --limit 20
    - `actions` — only real tasks, each with `title`, `due` (`YYYY-MM-DD` or null), and `priority`
    - `why` — one sentence
 
-4. Save one reading at a time. Pass the JSON on stdin:
+4. Save one reading at a time. Pass the JSON with `--json`:
 
 ```bash
 python -m controller_inbox tool save_reading --json '{"email_id":"...","category":"ap_invoice","folder":"important","importance":"high","summary":"...","actions":[{"title":"Enter INV-10482","due":"2026-10-05","priority":"high"}],"why":"..."}'
+```
+
+Or, when the JSON is long or holds quotes, leave out `--json` and pipe it on stdin:
+
+```bash
+python -m controller_inbox tool save_reading < reading.json
 ```
 
 5. When the batch is filed, build the morning digest:

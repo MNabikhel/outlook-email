@@ -224,7 +224,7 @@ def rank_sections(store: Store, settings: Settings, att: AttachmentRecord, quest
     """Labels of the file's sections closest in meaning to ``question``, best first. [] when the file
     isn't indexed for its current text or there is no embedding model."""
     model = embedding_model(settings)
-    if not model or not question.strip():
+    if not model or not question.strip() or _locked(store, att.email_id):
         return []
     current = {key: _key(text) for key, text in _file_items(att)}
     rows = [(key, blob) for key, text_key, blob in store.embedding_rows(model, prefix=f"file:{att.id}:") if current.get(key) == text_key]
@@ -270,6 +270,9 @@ def search(store: Store, settings: Settings, query: str, *, limit: int = 5) -> l
     for email_id, score in zip(ids, scores):
         if score > best.get(email_id, -1.0):
             best[email_id] = score
+    _without_locked_files(store, model, asked[0], best)
+    if not best:
+        return []
     top = max(best.values())
     # One section among n can stand at most sqrt(n - 1) deviations out, so small mailboxes ask for less.
     lift = min(MIN_LIFT, 0.75 * math.sqrt(len(scores) - 1))
@@ -289,6 +292,31 @@ def search(store: Store, settings: Settings, query: str, *, limit: int = 5) -> l
         if len(found) == limit:
             break
     return found
+
+
+def _locked(store: Store, email_id: str) -> bool:
+    email = store.get_email(email_id) if email_id else None
+    return email is not None and attachments_locked(email)
+
+
+def _without_locked_files(store: Store, model: str, asked: array, best: dict[str, float]) -> None:
+    """Score mail flagged as possible fraud by its own text only. Vectors stored for its files before it was
+    flagged stay in the index, but they must not decide what the chat finds."""
+    for email_id in [email_id for email_id, score in best.items() if score >= MIN_SCORE - NEAR_TOP]:
+        if not _locked(store, email_id):
+            continue
+        own = []
+        for key, _text_key, blob in store.embedding_rows(model, prefix=f"email:{email_id}"):
+            if key != f"email:{email_id}":
+                continue
+            vector = array("f")
+            vector.frombytes(blob)
+            if len(vector) == len(asked):
+                own.append(sum(a * b for a, b in zip(asked, vector)))
+        if own:
+            best[email_id] = max(own)
+        else:
+            del best[email_id]
 
 
 def find_mail(store: Store, settings: Settings | None, query: str, terms: list[str], *, limit: int) -> tuple[list[EmailRecord], set[str], str]:

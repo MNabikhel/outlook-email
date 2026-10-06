@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, tzinfo
 from zoneinfo import ZoneInfo
 
 from controller_inbox.classify import own_words
@@ -45,7 +45,14 @@ def extract_actions(
     now: datetime | None = None,
     sender: str = "",
     has_invite: bool = False,
+    received_on: date | None = None,
 ) -> list[ActionItem]:
+    """Tasks for a message.
+
+    ``as_of`` is today: task priorities and "due today" are measured from it. Relative dates in
+    the text ("by Friday", "tomorrow") are read from ``received_on``, the day the message arrived
+    (``as_of`` when not given).
+    """
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     created = now.replace(microsecond=0).isoformat()
     items: list[ActionItem] = []
@@ -164,7 +171,7 @@ def extract_actions(
                 re.I,
             )
             if due_match:
-                sent_due = parse_due_date(due_match.group(1), as_of=as_of)
+                sent_due = parse_due_date(due_match.group(1), as_of=received_on or as_of)
             add(
                 _title_from_sentence(sentence),
                 sentence.strip(),
@@ -232,6 +239,25 @@ def _days_to_month_end(as_of: date) -> int:
 
 def _close_due(as_of: date) -> str:
     return _month_end(as_of).isoformat()
+
+
+def received_day(received_at, tz: tzinfo | None = None, *, fallback: date | None = None) -> date:
+    """The day a message arrived where the user is.
+
+    Relative dates in the message text ("by Friday") are anchored to this day. A timestamp
+    without a zone is UTC; a blank or malformed one gives ``fallback`` (default: today).
+    """
+    zone = tz or timezone.utc
+    if isinstance(received_at, datetime):
+        received = received_at
+    else:
+        try:
+            received = datetime.fromisoformat(str(received_at or "").strip().replace("Z", "+00:00"))
+        except ValueError:
+            return fallback or datetime.now(zone).date()
+    if received.tzinfo is None:
+        received = received.replace(tzinfo=timezone.utc)
+    return received.astimezone(zone).date()
 
 
 def local_today(tz: ZoneInfo, now: datetime | None = None) -> date:

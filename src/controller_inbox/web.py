@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -73,6 +74,7 @@ MIN_CONTEXT_KEY = "min_context_tokens"
 NOTICES = {
     "sample-blocked": "The sample mailbox was not loaded: it would erase your own mail. "
     "Run the sample from a separate data folder instead (see README).",
+    "sample-busy": "The sample mailbox was not loaded: mail is being processed right now. Try again when it finishes.",
     "processing": "Processing started. This page updates as it goes.",
     "busy": "Already processing. This page updates as it goes.",
     "profile": "Saved. The digest and Today page now use this profile; new mail is sorted with it.",
@@ -142,27 +144,74 @@ class LocalHostOnly:
             if "*" not in self.allowed and _host_name(host) not in self.allowed:
                 await PlainTextResponse("CloseDesk only answers on this computer's own address.", status_code=400)(scope, receive, send)
                 return
-            if scope.get("method") == "POST" and not _same_origin(headers, host):
+            if scope.get("method") == "POST" and not _same_origin(headers, host, self.allowed):
                 await PlainTextResponse("Use the CloseDesk page for this.", status_code=403)(scope, receive, send)
                 return
         await self.app(scope, receive, send)
 
 
-def _same_origin(headers: dict[bytes, bytes], host: str) -> bool:
+def _same_origin(headers: dict[bytes, bytes], host: str, allowed: set[str] | None = None) -> bool:
     """A form another website submits to this server carries that site's Origin; refuse it."""
     origin = headers.get(b"origin", b"").decode("latin-1").strip()
     if origin:
-        return origin.lower().split("://", 1)[-1].rstrip("/") == host.strip().lower()
+        origin_host = origin.lower().split("://", 1)[-1].rstrip("/")
+        if origin_host != host.strip().lower():
+            return False
+        return allowed is None or "*" in allowed or _host_name(origin_host) in allowed
     return headers.get(b"sec-fetch-site", b"").decode("latin-1").lower() not in {"cross-site", "same-site"}
 
 
-def allowed_hosts(bind_host: str) -> set[str]:
+LOOPBACK_NAMES = {"127.0.0.1", "localhost", "::1", "[::1]", "testserver"}
+WILDCARD_BINDS = {"", "0.0.0.0", "::", "[::]", "*"}
+
+
+def is_loopback(bind_host: str) -> bool:
+    bind = (bind_host or "").strip().lower().strip("[]")
+    return bind == "localhost" or bind == "::1" or bind.startswith("127.")
+
+
+def _bracketed(name: str) -> set[str]:
+    name = name.strip().lower()
+    if not name or name == "*":
+        return set()
+    if ":" in name and not name.startswith("["):
+        return {f"[{name}]"}
+    return {name}
+
+
+def _this_computer() -> set[str]:
+    """This computer's own names and network addresses, for a dashboard bound beyond loopback."""
+    found: set[str] = set()
+    try:
+        name = socket.gethostname()
+        found.update({name, socket.getfqdn()})
+        for info in socket.getaddrinfo(name, None):
+            found.add(str(info[4][0]).split("%", 1)[0])
+    except OSError:
+        pass
+    for family, probe in ((socket.AF_INET, ("192.0.2.1", 9)), (socket.AF_INET6, ("2001:db8::1", 9))):
+        try:  # the address used to reach the network; connecting a UDP socket sends nothing
+            with socket.socket(family, socket.SOCK_DGRAM) as sock:
+                sock.connect(probe)
+                found.add(sock.getsockname()[0].split("%", 1)[0])
+        except OSError:
+            pass
+    return found
+
+
+def allowed_hosts(bind_host: str, extra: str = "") -> set[str]:
+    """Names the dashboard answers to. Never everything: a page could otherwise rebind its own domain here."""
     bind = (bind_host or "").strip().lower()
-    if bind in {"", "0.0.0.0", "::", "[::]", "*"}:
-        return {"*"}
-    hosts = {"127.0.0.1", "localhost", "::1", "[::1]", "testserver", bind}
-    if ":" in bind and not bind.startswith("["):
-        hosts.add(f"[{bind}]")
+    hosts = set(LOOPBACK_NAMES)
+    if bind not in WILDCARD_BINDS:
+        hosts |= _bracketed(bind) | {bind}
+    if not is_loopback(bind):
+        for name in _this_computer():
+            hosts |= _bracketed(name)
+    for name in re.split(r"[,;\s]+", extra or ""):
+        hosts |= _bracketed(name)
+    hosts.discard("*")
+    hosts.discard("")
     return hosts
 
 
@@ -272,7 +321,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     if saved_context and saved_context.isdigit():
         set_min_context(settings, int(saved_context))
     app = FastAPI(title="CloseDesk", docs_url=None, redoc_url=None)
-    app.add_middleware(LocalHostOnly, allowed=allowed_hosts(settings.host))
+    app.add_middleware(LocalHostOnly, allowed=allowed_hosts(settings.host, settings.allowed_hosts))
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
     job = ProcessJob()
     app.state.job = job
@@ -305,6 +354,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "inbox_failed": str(settings.inbox_failed),
             "correction_count": store.correction_count(),
             "last_sync": store.get_state("last_sync_at"),
+            "last_folder": store.get_state("last_folder_ingest"),
             "last_run": store.get_state("last_overnight_at"),
             "doc_labels": DOCUMENT_LABELS,
             "filter_importance": "",
@@ -1060,9 +1110,16 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/demo/reload")
     def demo_reload():
+        from controller_inbox.overnight import RunBusy
+
         if store.real_mail_count():
             return RedirectResponse("/settings?notice=sample-blocked", status_code=303)
-        load_sample(store, settings)
+        if job.snapshot()["state"] == "running":
+            return RedirectResponse("/settings?notice=sample-busy", status_code=303)
+        try:
+            load_sample(store, settings)
+        except RunBusy:
+            return RedirectResponse("/settings?notice=sample-busy", status_code=303)
         return RedirectResponse("/", status_code=303)
 
     @app.get("/export/actions.csv")

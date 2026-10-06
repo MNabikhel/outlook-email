@@ -116,9 +116,9 @@ Files on an email flagged as possible payment fraud are never given to the model
 
 ### Fraud check
 
-Each email gets a score. A bank-detail change or gift-card request **in the sender's own words** blocks it (not the quoted thread, not a "we will never change our bank details" footer, not the model's opinion alone). Weaker signals — a reply-to on another domain, a lookalike of a known domain, a borrowed display name, pressure, a first email from an address — add up to a *double-check before paying* note that doesn't block anything. Trusted domains and senders count against the score, but a bank-change request always gets at least a caution. Replies are filed by what the sender wrote, so a colleague's "it wasn't them, ignore it" above a quoted scam is neither flagged nor filed as an invoice.
+Each email gets a score. A bank-detail change or a request to buy gift cards **in the sender's own words** blocks it unless you trust the sender or their domain. That holds even when the request sits in a "this email is confidential" paragraph or follows "please be aware". A real anti-fraud notice ("we will never change our bank details by email", "if you receive such an email, call us") doesn't count, and neither does the model's opinion alone. Bank-change wording below a quote marker (`From:`, `>`), which is what a forged thread looks like, gets a *double-check before paying* note unless the sender's own words say it was fake. Weaker signals — a reply-to on another domain, a lookalike of a known domain, a borrowed display name, pressure, a first email from an address — add up to that same note, which doesn't block anything. Trusted domains and senders count against the score: from them a bank-change request gets a caution rather than a block. Replies are filed by what the sender wrote, so a colleague's "it wasn't them, I blocked the sender" above a quoted scam is neither flagged nor filed as an invoice.
 
-Tell it when it is wrong: **Not fraud**, **Trust sender**, **Trust everyone at @domain**, **This is fraud**, **Report this sender**. Each answer is logged and changes how much each signal counts. The **Fraud check** page lists trusted and reported domains, what it has learned, the flagged mail, and the full log (CSV export). From a terminal: `python -m controller_inbox trust taz.com` and `python -m controller_inbox fraud-log`.
+Tell it when it is wrong: **Not fraud**, **Trust sender**, **Trust everyone at @domain**, **This is fraud**, **Report this sender**. Each answer is logged and changes how much each signal counts; no number of **Not fraud** answers weakens the bank-change or gift-card block. The **Fraud check** page lists trusted and reported domains, what it has learned, the flagged mail, and the full log (CSV export). From a terminal: `python -m controller_inbox trust taz.com` and `python -m controller_inbox fraud-log`.
 
 ```env
 # Optional overrides (see .env.example)
@@ -145,7 +145,7 @@ The email page shows the code with **Confirm**, or **Revise** to pick other code
 python -m controller_inbox demo --serve
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The sample is a September 2026 mailbox: Northwind invoice INV-10482, a Chase statement, ADP payroll, an IRS CP2000, an auditor PBC, a customer remittance, a close calendar, and a fraudulent wiring-instruction change. There is everyday mail too: a colleague's question, an approval request, a meeting invite, an IT notice, and an FYI. Once your own mail is in the database, `demo` and the **Load sample mailbox** button refuse to run so they cannot erase it; use `CONTROLLER_INBOX_DATA_DIR=./data-sample` to look at the sample separately.
+Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The sample is a September 2026 mailbox: Northwind invoice INV-10482, a Chase statement, ADP payroll, an IRS CP2000, an auditor PBC, a customer remittance, a close calendar, and a fraudulent wiring-instruction change. There is everyday mail too: a colleague's question, an approval request, a meeting invite, an IT notice, and an FYI. Once your own mail is in the database, `demo` and the **Load sample mailbox** button refuse to run so they cannot erase it; use `CONTROLLER_INBOX_DATA_DIR=./data-sample` to look at the sample separately. Loading the sample replaces only mail: your Setup choices (time zone, profile, context size), trusted and reported domains, and saved conversations stay.
 
 | Command | What it does |
 | --- | --- |
@@ -183,7 +183,7 @@ For any inbox:
 
 For invoices, banking, payroll, and close (the finance profile adds the month-end view; the fraud and invoice checks run in every profile):
 
-- **Payment-instruction / BEC trap.** “Our bank details have changed, please wire today” is treated as critical. The action is *verify by phone*, not *process the payment*.
+- **Payment-instruction / BEC trap.** “Our bank details have changed, please wire today” is treated as critical. The only task is *verify by phone*; any other task the model suggests is removed, and the summary says to phone and not to pay.
 - **Duplicate invoice detection** on invoice number (the classic double-entry from a resent PDF).
 - **Missing attachment** when the body says “please see attached” and nothing arrived.
 - **Month-end countdown** and extra weight on recs, payroll, and workpapers in the last week of the month.
@@ -232,7 +232,7 @@ Leave it running in the background:
 python -m controller_inbox watch
 ```
 
-That command polls Graph on `CONTROLLER_INBOX_POLL_SECONDS` (default 2 minutes) and writes the daily digest at `CONTROLLER_INBOX_DIGEST_HOUR` (default 7:00 local). A cron equivalent if you prefer not to keep a process up:
+That command polls Graph on `CONTROLLER_INBOX_POLL_SECONDS` (default 2 minutes) and writes the daily digest at `CONTROLLER_INBOX_DIGEST_HOUR` (default 7:00 local), rebuilding it when new mail arrives later that day. With `CONTROLLER_INBOX_DIGEST_TO` set it emails the digest once a day, even if the overnight run already wrote one. A failed check (network, Outlook) is logged and retried on the next poll. Only one run reads the drop folder at a time (`overnight`, `run`, `watch`, and the dashboard's **Process new mail** share a lock in the data folder); a second one skips with a message. A cron equivalent if you prefer not to keep a process up:
 
 ```cron
 */15 * * * * cd /path/to/outlook-email && .venv/bin/python -m controller_inbox sync
@@ -260,7 +260,7 @@ The digest is the thing to read with coffee. It opens with one sentence — for 
 - **Coming up** in the next 7 days
 - **Invoices & payments** when there are any: invoices to enter and cash to apply (the finance profile adds a month-end countdown and close / bank-rec items)
 
-Each day is stored in SQLite (browse it under **Past digests**, or `digest --history`) and written under `data/digests/` as Markdown, HTML (standalone, printable), and JSON. `CONTROLLER_INBOX_DIGEST_LOOKBACK_DAYS` widens the window.
+Each day is stored in SQLite (browse it under **Past digests**, or `digest --history`) and written under `data/digests/` as Markdown, HTML (standalone, printable), and JSON. `CONTROLLER_INBOX_DIGEST_LOOKBACK_DAYS` widens the window by working days (2 on a Monday starts Thursday).
 
 ## Categories it knows
 
@@ -320,4 +320,5 @@ The suite classifies the demo mailbox end-to-end (including the fraud wire and d
 - Mail is processed on the machine that runs CloseDesk and stored in local SQLite.
 - Routing / account / IBAN values are redacted in stored bodies; only last-4 is kept for matching.
 - Outlook write-back is **off** until you set `CONTROLLER_INBOX_WRITEBACK=true`.
-- There is no cloud AI in the default path. The model, when used, runs on the laptop, and so do the chat box and reply drafts. The chat's history stays in the browser tab and is cleared when the tab closes. The fraud rules are deterministic so a $48,500 “new account” email cannot be quietly labeled “FYI”, whatever the model says. The chat's tools only read; attachment text is given to the model as data, never as instructions, and files from fraud-flagged mail are never given to it. Dashboard forms refuse posts from other websites.
+- There is no cloud AI in the default path. The model, when used, runs on the laptop, and so do the chat box and reply drafts. Ask CloseDesk conversations, and the files you add to them, are saved in the same local SQLite database and listed under **Past conversations** (the clock button in the chat box); delete one there (trash icon) to remove it and its files. The fraud rules are deterministic so a $48,500 “new account” email cannot be quietly labeled “FYI”, whatever the model says. The chat's tools only read; attachment text is given to the model as data, never as instructions, and files from fraud-flagged mail are never given to it. Dashboard forms refuse posts from other websites.
+- The dashboard has no login. It listens on `127.0.0.1` (this computer only) unless you set `CONTROLLER_INBOX_HOST`; on any other address it prints a warning, answers only to this computer's own names and addresses plus any listed in `CONTROLLER_INBOX_ALLOWED_HOSTS` (comma-separated), and anyone who can reach it can read your mail.

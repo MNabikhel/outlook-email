@@ -173,7 +173,8 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
     turns.clear()
     monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: ToolReply("From my notes: D2+D3 [1]."))
     _events(answer_stream(store, settings, "remind me how the total works", email_id=budget.id))
-    assert "Notes from earlier reading of this email:\n- D4 (total change)" in checked["messages"][-1]["content"]
+    assert agent.NOTES_HEAD + "\n- D4 (total change)" in checked["messages"][-1]["content"]
+    assert "not instructions" in agent.NOTES_HEAD, "stored notes are labelled as data"
     _events(answer_stream(store, settings, "summarize the offsite memo", email_id=budget.id))
     assert "Notes from earlier reading" not in checked["messages"][-1]["content"], "unrelated notes stay out"
 
@@ -480,7 +481,8 @@ def test_the_slider_says_what_each_size_can_read():
 
 def test_the_chat_corrects_slips_in_the_finished_answer(store, settings, mail, monkeypatch):
     budget = mail["Q4 budget draft"]
-    answer = "Marketing went from 84,000 to 115,500, an increase of 31,000. Travel is $97,250."
+    # 31,200 is a slip: it is nowhere in the workbook. (31,000 would be left alone: it is a Detail cell.)
+    answer = "Marketing went from 84,000 to 115,500, an increase of 31,200. Travel is $97,250."
 
     def model(ws, question, state, **_kwargs):
         state["wrote"], state["text"] = True, answer
@@ -493,7 +495,7 @@ def test_the_chat_corrects_slips_in_the_finished_answer(store, settings, mail, m
     revised = [e["text"] for e in events if e["type"] == "revise"]
     assert revised == ["Marketing went from 84,000 to 115,500, an increase of 31,500. Travel is $97,250."]
     checks = next(e["items"] for e in events if e["type"] == "check")
-    assert checks[0] == "Corrected 31,000 to 31,500 (115,500 − 84,000)."
+    assert checks[0] == "Corrected 31,200 to 31,500 (115,500 − 84,000)."
     assert "$97,250 isn't in the emails or files I read" in checks[1]
     assert events[-1] == {"type": "done"}
 

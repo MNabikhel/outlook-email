@@ -48,15 +48,19 @@ DISCLAIMER_RE = re.compile(
 )
 
 
-def own_words(body: str) -> str:
-    """The part of a message the sender actually wrote: no quoted thread, no legal footer or banner."""
+def own_words(body: str, *, keep_disclaimers: bool = False) -> str:
+    """The part of a message the sender actually wrote: no quoted thread, no legal footer or banner.
+
+    ``keep_disclaimers=True`` keeps paragraphs that look like a legal footer, so the fraud
+    check can see a request someone tucked into one.
+    """
     text = (body or "").replace("\r\n", "\n")
     quote = QUOTE_START_RE.search(text)
     # A bare forward has nothing of its own, so the forwarded message is what was sent.
     if quote and text[: quote.start()].strip():
         text = text[: quote.start()]
     paragraphs = re.split(r"\n\s*\n", text)
-    kept = [p for p in paragraphs if not DISCLAIMER_RE.search(p)]
+    kept = [p for p in paragraphs if keep_disclaimers or not DISCLAIMER_RE.search(p)]
     return "\n\n".join(kept).strip()
 
 
@@ -71,8 +75,16 @@ PAYMENT_CHANGE_RE = re.compile(
     r"(?<!not )(?:changed|switched|moved)\s+(?:our\s+bank(?:s|ing\s+partner)?|banks|to\s+a\s+new\s+bank)\b|"
     r"update\s+(?:our|the|your\s+records\s+with\s+our)\s+(?:bank(?:ing)?|remittance|payment|wire|ach)\s+"
     r"(?:details|information|info|instructions)|"
-    r"(?:updated|new)\s+(?:remittance|bank(?:ing)?|payment|wire|ach)\s+(?:details|information|info)|"
-    r"(?:to|into)\s+(?:the|our)\s+new\s+(?:bank\s+)?account)",
+    r"(?:updated|new)\s+(?:remittance|remit[- ]to|bank(?:ing)?|payment|wire|ach)\s+(?:account\s+)?(?:details|information|info)|"
+    r"(?:to|into)\s+(?:the|our)\s+new\s+(?:bank\s+)?account|"
+    # "Our bank account details have changed", "remittance information has been updated".
+    r"\b(?:bank(?:ing)?|account|payment|remittance|remit[- ]to|wire|wiring|ach)(?:\s+account)?\s+"
+    r"(?:details|information|info|instructions|number)\s+(?:have|has)\s+(?:recently\s+)?(?:been\s+)?(?:changed|updated)|"
+    # "We have a new bank account", "our new banking account".
+    r"\b(?:a|our)\s+new\s+bank(?:ing)?\s+account\b|"
+    # "Kindly remit to the account below".
+    r"\b(?:remit|send|pay|wire|transfer|make)\w*\s+(?:all\s+|any\s+|future\s+|the\s+)*(?:payments?\s+|funds\s+)?"
+    r"(?:to|into)\s+(?:the|our)\s+(?:bank\s+)?account\s+(?:below|listed\s+below|shown\s+below|details\s+below|as\s+follows)\b)",
     re.IGNORECASE,
 )
 

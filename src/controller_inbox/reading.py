@@ -14,6 +14,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone, tzinfo
 
 from controller_inbox import documents
+from controller_inbox.actions import received_day
 from controller_inbox.classify import QUOTE_START_RE
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import (
@@ -65,8 +66,10 @@ FRAUD_SUMMARY = (
     "Possible payment-instruction fraud — verify by phone before anything else. "
     "Do not change bank details or pay from this email."
 )
-_PAY_WORDS = ("pay the", "process the wire", "release the", "new account", "updated wiring", "wire the funds")
-_BANK_WORDS = re.compile(r"\b(bank|account|routing|remit\w*|wire|ach|vendor (?:record|master|file)|pay\w*)\b")
+
+
+class ReadingRefused(ValueError):
+    """The message was corrected by the user, so a model reading may not replace it."""
 
 
 def script_folder(category: DocumentType, importance: Importance, flags: list[str]) -> str:
@@ -234,6 +237,7 @@ def overlay_reading(
     within a week stays in Important.
     """
     now = now or datetime.now(timezone.utc)
+    today = _today(now, tz)
     script_line = email.summary
     category = _category(parsed.get("category"), email.category)
     importance = _importance(parsed.get("importance"), email.importance)
@@ -286,6 +290,7 @@ def overlay_reading(
     if "bionic" not in email.flags:
         email.flags.append("bionic")
     as_of = _as_of(email, tz)
+    previous_actions = list(email.actions)
     provided = parsed.get("actions")
     if isinstance(provided, list) and provided:
         email.actions = _actions_from_model(email.id, provided, as_of, now, known_dates=_known_dates(email))
@@ -296,14 +301,19 @@ def overlay_reading(
                 + (" with the message's own date." if all(item.due_date for item in dropped) else ".")
             )
     if fraud:
-        unsafe = [item for item in email.actions if _unsafe_on_fraud(item.title)]
-        if unsafe:
-            email.actions = [item for item in email.actions if item not in unsafe]
-            guard_notes.append(f"Removed {len(unsafe)} task(s) that would act on the new bank details.")
-        if not any("phone" in item.title.lower() for item in email.actions):
-            email.actions.insert(0, _verify_action(email.id, as_of, now))
+        # Only the verify-by-phone task is safe on a suspected bank change: anything else the
+        # model suggests ("call them, then update the vendor record") could act on the new details.
+        verify = [item for item in email.actions if item.title == VERIFY_TITLE] or [
+            item for item in previous_actions if item.title == VERIFY_TITLE
+        ]
+        dropped = [item for item in email.actions if item.title != VERIFY_TITLE]
+        if dropped:
+            guard_notes.append(
+                f"Removed {len(dropped)} task(s): on a possible bank-detail change the only task is to verify by phone."
+            )
+        email.actions = verify[:1] or [_verify_action(email.id, today, now)]
     elif email.folder != "important":
-        soon = (as_of + timedelta(days=7)).isoformat()
+        soon = (today + timedelta(days=7)).isoformat()
         pressing = [
             item
             for item in email.actions
@@ -325,12 +335,19 @@ def overlay_reading(
 
 
 def apply_bionic_reading(store, email_id: str, parsed: dict, tz: tzinfo | None = None) -> EmailRecord:
+    """Save a model reading. A message the user corrected is never overwritten (``ReadingRefused``)."""
     email = store.get_email(email_id)
     if email is None:
         raise KeyError(email_id)
+    if is_corrected(email):
+        raise ReadingRefused(f"Message {email_id} was corrected by you; the model reading was not saved.")
     overlay_reading(email, parsed, tz=tz)
     store.upsert_email(email)
     return store.get_email(email_id) or email
+
+
+def is_corrected(email: EmailRecord) -> bool:
+    return email.model_status == "corrected" or "user_trained" in email.flags
 
 
 def _is_fraud(email: EmailRecord) -> bool:
@@ -364,14 +381,14 @@ def _score(importance: Importance, fraud: bool) -> int:
 
 def _as_of(email: EmailRecord, tz: tzinfo | None = None) -> date:
     """The day the message arrived where the user is. Evening mail west of UTC is already tomorrow in UTC."""
+    return received_day(email.received_at, tz)
+
+
+def _today(now: datetime, tz: tzinfo | None) -> date:
+    """Today where the user is: what due dates and "within a week" are measured against."""
     zone = tz or timezone.utc
-    try:
-        received = datetime.fromisoformat(email.received_at.replace("Z", "+00:00"))
-    except ValueError:
-        return datetime.now(zone).date()
-    if received.tzinfo is None:
-        received = received.replace(tzinfo=timezone.utc)
-    return received.astimezone(zone).date()
+    current = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    return current.astimezone(zone).date()
 
 
 _DATE_NOTE = "Model suggested due"
@@ -386,9 +403,17 @@ def _clean_sentence(value, *, limit: int = 240) -> str:
     return text
 
 
+_WARN_PHONE = re.compile(r"\b(?:phone|call|known\s+number|number\s+on\s+file)\b", re.I)
+_WARN_HOLD = re.compile(
+    r"\b(?:do\s+not|don'?t|never)\s+(?:pay|change|update|release|send|wire|act)\b|\bbefore\s+(?:any|paying|a)\s+payment\b",
+    re.I,
+)
+
+
 def _warns(summary: str) -> bool:
-    text = (summary or "").lower()
-    return any(word in text for word in ("verify", "phone", "fraud", "do not pay", "confirm by"))
+    """A fraud summary must say to phone and not to pay or change anything; "verify" alone is not a warning."""
+    text = summary or ""
+    return text == FRAUD_SUMMARY or bool(_WARN_PHONE.search(text) and _WARN_HOLD.search(text))
 
 
 def _haystack(email: EmailRecord) -> str:
@@ -413,10 +438,15 @@ def _ungrounded_amounts(summary: str, email: EmailRecord) -> list[str]:
             value *= 1_000_000 if match.group(2).strip().lower() == "m" else 1_000
             if any(abs(value - item) <= max(0.06 * item, 1) for item in known):
                 continue
-        elif any(abs(value - item) < 0.01 for item in known) or raw in haystack:
+        elif any(abs(value - item) < 0.01 for item in known) or _number_in(raw, haystack):
             continue
         invented.append(match.group(0).strip())
     return invented
+
+
+def _number_in(raw: str, haystack: str) -> bool:
+    """``raw`` appears as a whole number: "4850" is not in "48500", and "500" is not in "1500"."""
+    return re.search(rf"(?<![\d.]){re.escape(raw)}(?!\d)", haystack) is not None
 
 
 def _known_dates(email: EmailRecord) -> set[str]:
@@ -496,16 +526,3 @@ def _iso_date(text: str) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _looks_like_payment(title: str) -> bool:
-    text = title.lower()
-    return any(word in text for word in _PAY_WORDS)
-
-
-def _unsafe_on_fraud(title: str) -> bool:
-    """On a suspected bank-change email, only verification steps are safe to suggest."""
-    text = title.lower()
-    if re.search(r"\b(verify|call|phone|confirm by)\b", text):
-        return False
-    return _looks_like_payment(title) or bool(_BANK_WORDS.search(text))

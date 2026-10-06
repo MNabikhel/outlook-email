@@ -214,6 +214,12 @@ CREATE INDEX IF NOT EXISTS idx_att_hash ON attachments(sha256);
 """
 
 
+# Setup choices kept in sync_state. Loading the sample mailbox keeps these; everything else there is mail bookkeeping.
+SETTING_KEYS = frozenset({"timezone", "profile", "min_context_tokens"})
+
+BUSY_TIMEOUT_SECONDS = 30.0
+
+
 def _dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
@@ -236,13 +242,20 @@ class Store:
 
     def _init(self) -> None:
         with self.connect() as conn:
+            # Readers (the dashboard) never wait on the writer (a background run), and the mode sticks to the file.
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.DatabaseError:
+                pass  # a filesystem without shared memory keeps the default journal
             conn.executescript(SCHEMA)
             _migrate(conn)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path)
+        # Another process (the scheduled run, the dashboard) may be writing; wait for it instead of failing.
+        conn = sqlite3.connect(self.path, timeout=BUSY_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
+        conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}")
         conn.execute("PRAGMA foreign_keys = ON")
         try:
             yield conn
@@ -251,9 +264,32 @@ class Store:
             conn.close()
 
     def reset(self) -> None:
-        if self.path.exists():
-            self.path.unlink()
+        """Delete the database file (and its write-ahead log) and start empty."""
+        for path in (self.path, self.path.with_name(self.path.name + "-wal"), self.path.with_name(self.path.name + "-shm")):
+            if path.exists():
+                path.unlink()
         self._init()
+
+    def clear_mail(self) -> int:
+        """Remove every email and what was worked out from it, for loading the sample mailbox.
+
+        Kept: Setup choices (time zone, profile, context size), the fraud trust list, and Ask CloseDesk
+        conversations with their files. Mail bookkeeping (sync cursors, last run) starts over.
+        """
+        mail = "SELECT id FROM emails"
+        with self.connect() as conn:
+            removed = conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]
+            conn.execute(f"DELETE FROM file_summaries WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
+            conn.execute(f"DELETE FROM embeddings WHERE email_id IN ({mail})")
+            conn.execute(f"DELETE FROM fraud_log WHERE email_id IN ({mail})")
+            conn.execute(f"DELETE FROM findings WHERE email_id IN ({mail})")
+            for table in ("attachments", "action_items", "corrections", "fraud_checks", "cost_codings"):
+                conn.execute(f"DELETE FROM {table} WHERE email_id IN ({mail})")
+            conn.execute("DELETE FROM emails")
+            conn.execute("DELETE FROM digests")
+            keep = ", ".join("?" for _ in SETTING_KEYS)
+            conn.execute(f"DELETE FROM sync_state WHERE key NOT IN ({keep})", sorted(SETTING_KEYS))
+        return removed
 
     def upsert_email(self, email: EmailRecord) -> None:
         with self.connect() as conn:
@@ -444,6 +480,10 @@ class Store:
         if model_status:
             clauses.append("model_status = ?")
             params.append(model_status)
+        if flag:
+            # Flags are a JSON list of strings; match the quoted string so "fraud" doesn't match "fraud_risk".
+            clauses.append(f"flags {_LIKE}")
+            params.append(_json_contains(flag))
         for word in (q or "").split()[:8]:
             clauses.append(_MATCH_ANY)
             params.extend([_contains(word)] * _MATCH_ANY.count("?"))
@@ -611,17 +651,17 @@ class Store:
                 FROM emails e
                 WHERE e.id != ?
                   AND (
-                    e.extracted LIKE ?
+                    e.extracted LIKE ? ESCAPE '\\'
                     OR EXISTS (
                         SELECT 1 FROM attachments a
-                        WHERE a.email_id = e.id AND a.extracted_fields LIKE ?
+                        WHERE a.email_id = e.id AND a.extracted_fields LIKE ? ESCAPE '\\'
                     )
                   )
                 """,
                 (
                     exclude_email_id,
-                    f'%"{invoice_number}"%',
-                    f'%"{invoice_number}"%',
+                    _json_contains(invoice_number),
+                    _json_contains(invoice_number),
                 ),
             ).fetchall()
         return [row["id"] for row in rows]
@@ -847,6 +887,11 @@ class Store:
             removed = conn.execute("SELECT COUNT(*) AS n FROM emails WHERE source = 'demo'").fetchone()["n"]
             if not removed:
                 return 0
+            conn.execute(
+                f"DELETE FROM file_summaries WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({sample}))"
+            )
+            conn.execute(f"DELETE FROM embeddings WHERE email_id IN ({sample})")
+            conn.execute(f"DELETE FROM fraud_log WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM attachments WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM action_items WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM corrections WHERE email_id IN ({sample})")
@@ -985,18 +1030,19 @@ class Store:
 
     def list_chats(self, query: str = "", *, limit: int = 100) -> list[dict[str, Any]]:
         """Conversations with something in them, newest first; ``query`` matches titles and what was said."""
-        like = f"%{query.strip()}%"
+        query = query.strip()
+        like = _contains(query)
         with self.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT c.*, (SELECT COUNT(*) FROM chat_turns t WHERE t.chat_id = c.id AND t.role = 'user') AS questions,
                        (SELECT COUNT(*) FROM chat_files f WHERE f.chat_id = c.id) AS files
                 FROM chats c
                 WHERE (EXISTS (SELECT 1 FROM chat_turns t WHERE t.chat_id = c.id) OR EXISTS (SELECT 1 FROM chat_files f WHERE f.chat_id = c.id))
-                  AND (? = '%%' OR c.title LIKE ? OR EXISTS (SELECT 1 FROM chat_turns t WHERE t.chat_id = c.id AND t.text LIKE ?))
+                  AND (? = '' OR c.title {_LIKE} OR EXISTS (SELECT 1 FROM chat_turns t WHERE t.chat_id = c.id AND t.text {_LIKE}))
                 ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?
                 """,
-                (like, like, like, limit),
+                (query, like, like, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1249,8 +1295,8 @@ class Store:
             elif domain:
                 domain = domain.lower()
                 rows = conn.execute(
-                    "SELECT id FROM emails WHERE lower(sender_email) LIKE ? OR lower(sender_email) LIKE ?",
-                    (f"%@{domain}", f"%.{domain}"),
+                    f"SELECT id FROM emails WHERE lower(sender_email) {_LIKE} OR lower(sender_email) {_LIKE}",
+                    (f"%@{_like_escape(domain)}", f"%.{_like_escape(domain)}"),
                 ).fetchall()
             else:
                 return []
@@ -1373,9 +1419,19 @@ _MATCH_ANY = (
 )
 
 
+def _like_escape(text: str) -> str:
+    """``text`` with LIKE's wildcards (and the escape character) made literal, for ``ESCAPE '\\'``."""
+    return re.sub(r"([\\%_])", r"\\\1", text)
+
+
 def _contains(word: str) -> str:
     """A LIKE pattern that treats % and _ in what was typed as plain characters."""
-    return "%" + re.sub(r"([\\%_])", r"\\\1", word) + "%"
+    return "%" + _like_escape(word) + "%"
+
+
+def _json_contains(value: str) -> str:
+    """A LIKE pattern for ``value`` as a whole JSON string inside a stored JSON document."""
+    return "%" + _like_escape(_dumps(value)) + "%"
 
 
 def _col(row: sqlite3.Row, name: str, default: Any) -> Any:

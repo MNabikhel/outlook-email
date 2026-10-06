@@ -76,8 +76,11 @@ def test_host_parsing_and_lan_mode():
     assert _host_name("[::1]:8765") == "[::1]"
     assert _host_name("LocalHost:8765") == "localhost"
     assert _host_name("127.0.0.1") == "127.0.0.1"
-    assert allowed_hosts("0.0.0.0") == {"*"}
+    lan = allowed_hosts("0.0.0.0")
+    assert "*" not in lan, "binding to every address must not let any hostname in (DNS rebinding)"
+    assert {"127.0.0.1", "localhost"} <= lan
     assert "192.168.1.20" in allowed_hosts("192.168.1.20")
+    assert "closedesk.corp" in allowed_hosts("0.0.0.0", "closedesk.corp, *")
 
 
 def test_rebuilt_eml_keeps_a_comma_in_the_sender_name(settings: Settings, loaded: Store):

@@ -82,14 +82,35 @@ FREEMAIL = {
     "yandex.com", "zoho.com", "zohomail.com", "fastmail.com", "tutanota.com",
 }
 
-NOTICE_RE = re.compile(
+# A warning that frames the sentence as hypothetical ("we will never…", "if you receive…").
+STRONG_NOTICE_RE = re.compile(
     r"(\bnever\s+(?:change|ask|request|send|update|contact|email)\b|\b(?:will\s+not|won'?t)\s+(?:change|ask|request)\b|"
-    r"\bbeware\b|\bbe\s+(?:aware|alert|vigilant)\b|\bif\s+you\s+(?:receive|get|are\s+contacted)\b|"
-    r"\balways\s+(?:call|verify|confirm)\b|\b(?:scam|phishing|fraudulent|spoofed)\s+(?:e-?mails?|messages?|requests?|calls?)\b)",
+    r"\bif\s+you\s+(?:receive|get|are\s+contacted)\b|"
+    r"\b(?:scam|phishing|fraudulent|spoofed)\s+(?:e-?mails?|messages?|requests?|calls?)\b)",
+    re.I,
+)
+# A warning word that can just as well introduce a real request ("please be aware our bank details have changed").
+WEAK_NOTICE_RE = re.compile(r"(\bbeware\b|\bbe\s+(?:aware|alert|vigilant)\b|\balways\s+(?:call|verify|confirm)\b)", re.I)
+NOTICE_RE = re.compile(f"{STRONG_NOTICE_RE.pattern}|{WEAK_NOTICE_RE.pattern}", re.I)
+# What a real warning tells the reader to do.
+PROTECTIVE_RE = re.compile(
+    r"\b(?:call|phone|telephone|verify|verbally|contact\s+(?:us|your)|known\s+number|on\s+file|report|ignore|delete)\b", re.I
+)
+# A colleague saying the quoted request was fake.
+DISAVOW_RE = re.compile(
+    r"\b(?:(?:was|is|it'?s)\s+not\s+(?:them|legit\w*|genuine|real)|(?:wasn'?t|isn'?t)\s+(?:them|legit\w*|genuine|real)|"
+    r"(?:is|was|looks\s+like|seems\s+like)\s+(?:a\s+)?(?:scam|phish\w*|fake|spoof\w*)|phishing|"
+    r"blocked\s+(?:the|this)\s+sender|reported\s+(?:it|this|the\s+sender))\b",
     re.I,
 )
 GIFT_RE = re.compile(
-    r"\b(?:gift|itunes|apple|google\s+play|steam|amazon|visa)\s*cards?\b(?![^.\n]{0,40}\b(?:program|policy|balance)\b)",
+    r"(?:\b(?:(?:itunes|apple|google\s+play|steam|amazon|visa|target|walmart|ebay|best\s*buy)\s+)?gift\s*-?\s*cards?\b|"
+    r"\b(?:itunes|google\s+play|steam)\s+cards?\b)(?![^.\n]{0,40}\b(?:program|policy|balance)\b)",
+    re.I,
+)
+# Gift cards only count when someone is asked to get them or hand over their codes.
+GIFT_ASK_RE = re.compile(
+    r"\b(?:buy|purchase|pick\s+up|get\s+(?:me|us|some|them|a\s+few)|grab|send\s+(?:me|us)|need|scratch|codes?|card\s+numbers|pins?)\b",
     re.I,
 )
 ACCOUNT_RE = re.compile(
@@ -192,15 +213,45 @@ def learned_weights(store: "Store") -> dict[str, float]:
                 counts[0 if row["event"] == "marked_fraud" else 1] += 1
     weights = {}
     for key, (fraud_n, safe_n) in tally.items():
-        floor = 0.8 if key in CORE else 0.5
+        # A bank-change or gift-card request always blocks; "not fraud" answers never weaken it.
+        floor = 1.0 if key in CORE else 0.5
         weights[key] = round(max(floor, min(1.6, 1 + 0.15 * (fraud_n - safe_n))), 2)
     return weights
 
 
+def _asks(text: str) -> bool:
+    """The sentence itself asks for a bank change or gift cards."""
+    return bool(PAYMENT_CHANGE_RE.search(text) or _gift_ask(text))
+
+
+def _is_notice(sentence: str) -> bool:
+    strong = STRONG_NOTICE_RE.search(sentence)
+    if strong:
+        # "If you receive an email saying our bank details have changed, call us" is a warning;
+        # "we will never ask for gift cards, but our bank details have changed" is a request.
+        return not _asks(sentence) or bool(PROTECTIVE_RE.search(STRONG_NOTICE_RE.sub(" ", sentence)))
+    # "Beware of scams" is a notice; "please be aware our bank details have changed" is not.
+    return bool(WEAK_NOTICE_RE.search(sentence)) and not _asks(sentence)
+
+
 def strip_notices(text: str) -> str:
-    """Drop anti-fraud notices ("we will never change our bank details by email") before looking for a request."""
+    """Drop anti-fraud notices ("we will never change our bank details by email") before looking for a request.
+
+    Only warnings are dropped: a sentence that asserts a change ("please be aware our banking
+    details have changed") stays, whatever warning word it starts with.
+    """
     parts = re.split(r"(?<=[.!?])\s+|\n+", text or "")
-    return " ".join(part for part in parts if not NOTICE_RE.search(part))
+    return " ".join(part for part in parts if not _is_notice(part))
+
+
+def _gift_ask(text: str) -> re.Match[str] | None:
+    """A gift-card mention in a sentence that asks someone to buy them or send their codes."""
+    for match in GIFT_RE.finditer(text or ""):
+        start = max(text.rfind(".", 0, match.start()), text.rfind("\n", 0, match.start())) + 1
+        ends = [i for i in (text.find(".", match.end()), text.find("\n", match.end())) if i >= 0]
+        if GIFT_ASK_RE.search(text[start : min(ends) if ends else len(text)]):
+            return match
+    return None
 
 
 def assess(
@@ -229,10 +280,18 @@ def assess(
     mine = strip_notices(own_words(body))
     own = mine if is_reply else f"{subject or ''}. {mine}"
     everything = strip_notices(f"{subject or ''}\n{body or ''}")
+    # The sender's words with legal-footer paragraphs kept: a request tucked into a
+    # "this email is confidential" paragraph is still the sender's request.
+    mine_full = strip_notices(own_words(body, keep_disclaimers=True))
+    own_full = mine_full if is_reply else f"{subject or ''}. {mine_full}"
 
+    text = own
     match = PAYMENT_CHANGE_RE.search(own)
+    if not match:
+        text = own_full
+        match = PAYMENT_CHANGE_RE.search(own_full)
     if match:
-        add("bank_change", _quote(own, match))
+        add("bank_change", _quote(text, match))
     else:
         quoted = PAYMENT_CHANGE_RE.search(everything)
         if quoted:
@@ -242,9 +301,9 @@ def assess(
             if hit:
                 add("bank_change_attachment", filename)
                 break
-    gift = GIFT_RE.search(own)
+    gift = _gift_ask(own) or _gift_ask(own_full)
     if gift:
-        add("gift_cards", _quote(own, gift))
+        add("gift_cards", _quote(gift.string, gift))
     account = ACCOUNT_RE.search(own)
     if account:
         add("account_numbers", _quote(own, account))
@@ -304,10 +363,17 @@ def assess(
         level = "high"
     elif verdict == "safe":
         level = "none"
-    elif score >= HIGH_AT and (keys & CORE or (keys & SOFT_BANK and score >= HIGH_AT + 10)):
+    elif keys & CORE:
+        # The sender asks, in their own words, to change bank details or buy gift cards: that blocks
+        # unless you trust them. From someone trusted it is still worth a phone call.
+        level = "high" if not trust or score >= HIGH_AT else "caution"
+    elif keys & SOFT_BANK and score >= HIGH_AT + 10:
         level = "high"
-    elif (score >= CAUTION_AT and keys & CONTEXT) or keys & CORE:
-        # A bank change is always worth a phone call, even from someone trusted.
+    elif score >= CAUTION_AT and keys & CONTEXT:
+        level = "caution"
+    elif "bank_change_quoted" in keys and not trust and not DISAVOW_RE.search(mine):
+        # Bank-change wording below a quote marker ("From:", ">") can be a forged thread.
+        # Only a colleague saying it was fake ("it was not them") keeps it quiet.
         level = "caution"
     else:
         level = "none"
