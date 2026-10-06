@@ -448,7 +448,9 @@ def query_tables(ws: Workspace, question: str, complete) -> Iterator[dict]:
     ``complete``: the model call. Anything going wrong leaves the answer to the file text: a model that is
     down fails again on the answer, and says so there."""
     email = ws.primary()
-    if email is None or email.id in ws.worked or not email.attachments or attachments_locked(email) or SUMMARY_RE.search(question):
+    if not ws.settings.table_queries or email is None or email.id in ws.worked or not email.attachments:
+        return
+    if attachments_locked(email) or SUMMARY_RE.search(question):
         return
     ws.worked[email.id] = ""
     readable = [att for att in email.attachments if (att.extracted_text or "").strip()]
@@ -458,13 +460,13 @@ def query_tables(ws: Workspace, question: str, complete) -> Iterator[dict]:
         tables = table_query.Tables([(att.filename, att.extracted_text or "") for att in readable])
         if not tables or not tables.about(question):
             return
-        yield {"type": "step", "text": "Writing a query over the tables for the question"}
-        found = table_query.ask(ws.settings, tables, question, complete=complete)
+        yield {"type": "step", "text": "Writing queries over the tables for the question"}
+        found = table_query.ask(ws.settings, tables, question, complete=complete, think=ws.settings.table_query_thinking)
         if found is None:
             return
         ws.worked[email.id] = tables.render(found)
         count = len(found.rows)
-        yield {"type": "step", "text": f"Worked out from the tables with a query ({count} row{'s' if count != 1 else ''})"}
+        yield {"type": "step", "text": f"Worked out from the tables: two queries agree ({count} row{'s' if count != 1 else ''})"}
     except Exception:
         return
     finally:

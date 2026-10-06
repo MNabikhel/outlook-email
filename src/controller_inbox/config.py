@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     chat_context_tokens: int = 0
     # Enough for most attachments to be read whole. LM Studio models loaded with less are reloaded with this; 0 = leave as loaded.
     min_context_tokens: int = 16384
+    # A question about a file's tables is first turned into queries the model writes and CloseDesk runs
+    # exactly; two must agree. A model that can think is let to think them through (slower, more often right).
+    table_queries: bool = True
+    table_query_thinking: bool = True
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"

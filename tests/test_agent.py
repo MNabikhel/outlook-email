@@ -162,7 +162,7 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
     assert steps[-2:] == ["Tracing how Budget!D4 is calculated in Q4 budget.xlsx", "Checking the answer against what I read"]
     assert "Read Offsite memo.docx in full (1 section)" in steps[:-2], "the chat says what it read of each file"
     # The workbook's table was offered to a query first; the model found none fits a question about a formula.
-    assert steps[0] == "Writing a query over the tables for the question"
+    assert steps[0] == "Writing queries over the tables for the question"
     assert all(step.startswith("Read ") for step in steps[1:-2])
     assert [e["text"] for e in events if e["type"] == "note"][0].startswith("D4 (total change)")
     assert "(Q4 budget.xlsx, sheet Budget, D4) [1]" in _text(events)

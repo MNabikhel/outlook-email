@@ -291,3 +291,22 @@ def test_thinking_requests_get_a_longer_timeout(auto, monkeypatch):
     reader._structured = False
     assert reader.read({"subject": "one", "body": "x"})
     assert seen == [auto.llm_timeout, local_llm.THINKING_TIMEOUT]
+
+
+def test_a_query_call_may_think_and_the_rest_stay_quick(auto, monkeypatch):
+    server = FakeLMStudio()
+    _serve(monkeypatch, server)
+    assert complete_text(auto, [{"role": "user", "content": "hi"}], max_tokens=300) == "Start with [1]; it needs you today."
+    assert server.calls[-1]["reasoning_effort"] == "none", "an ordinary call turns thinking off"
+    complete_text(auto, [{"role": "user", "content": "hi"}], max_tokens=300, think=True, temperature=0.7)
+    asked = server.calls[-1]
+    assert asked["reasoning_effort"] == "low" and asked["max_tokens"] >= local_llm.THINKING_ROOM and asked["temperature"] == 0.7
+
+
+def test_thinking_asked_of_a_server_that_reports_no_options_is_left_to_the_model(auto, monkeypatch):
+    server = FakeLMStudio(options=())
+    _serve(monkeypatch, server)
+    assert complete_text(auto, [{"role": "user", "content": "hi"}], max_tokens=300, think=True) == "Start with [1]; it needs you today."
+    assert "reasoning_effort" not in server.calls[0], "nothing to ask for"
+    # This one thinks anyway and ran out of room: the retry turns thinking down, as for any call.
+    assert server.calls[-1]["reasoning_effort"] == "none" and server.calls[-1]["max_tokens"] >= local_llm.THINKING_ROOM

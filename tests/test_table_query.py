@@ -66,25 +66,54 @@ def test_a_query_can_only_read(aging, sql):
 
 
 def test_the_reply_s_query_is_read_from_its_sql_line():
-    assert parse("Plan: the named row.\nSQL: SELECT a FROM t1;\n\nThat gives the answer.") == ("the named row.", "SELECT a FROM t1")
-    assert parse("Plan: x\n```sql\nSELECT b\nFROM t1\n```") == ("x", "SELECT b\nFROM t1")
+    assert parse("Table: t1.\nRows: the named row.\nValue: a.\nSQL: SELECT a FROM t1;\n\nThat gives the answer.") == (
+        "Table: t1. Rows: the named row. Value: a.",
+        "SELECT a FROM t1",
+    )
+    assert parse("Plan: x\n```sql\nSELECT b\nFROM t1\n```") == ("Plan: x", "SELECT b\nFROM t1")
     assert parse("Plan: no column has 2025.\nSQL: NONE")[1] == ""
 
 
+def _replies(*replies: str):
+    """A fake model call answering ``replies`` in turn, keeping each call's messages and options."""
+    queue = iter(replies)
+    calls: list[tuple[list[dict], dict]] = []
+
+    def complete(_settings, messages, **options):
+        calls.append((list(messages), options))
+        return next(queue)
+
+    complete.calls = calls
+    return complete
+
+
 def test_a_failed_query_is_tried_once_more_with_the_error(aging):
-    replies = iter([
-        "Plan: the row.\nSQL: SELECT name FROM t1",
-        "Plan: the row.\nSQL: SELECT customer, over_90 FROM t1 WHERE customer LIKE '%juniper%'",
-    ])
-    seen: list[list[dict]] = []
+    right = "Table: t1.\nRows: Juniper.\nValue: over_90.\nSQL: SELECT customer, over_90 FROM t1 WHERE customer LIKE '%juniper%'"
+    complete = _replies("Table: t1.\nRows: the row.\nValue: x.\nSQL: SELECT name FROM t1", right, right)
+    found = table_query.ask(None, aging, "what's juniper's over 90 balance", complete=complete)
+    assert found is not None and found.rows == [("Juniper Ridge Apartments", 7615.29)] and found.checks == 2
+    assert "no such column: name" in complete.calls[1][0][-1]["content"]
+    # The second try is written apart, more freely.
+    assert complete.calls[0][1]["temperature"] is None and complete.calls[2][1]["temperature"] == 0.7
 
-    def fake(settings, messages, *, max_tokens=400):
-        seen.append(list(messages))
-        return next(replies)
 
-    found = table_query.ask(None, aging, "what's juniper's over 90 balance", complete=fake)
-    assert found is not None and found.rows == [("Juniper Ridge Apartments", 7615.29)]
-    assert "no such column: name" in seen[1][-1]["content"]
+def test_tries_that_disagree_give_no_answer(aging):
+    one = "Table: t1.\nRows: all.\nValue: total.\nSQL: SELECT SUM(total_balance) FROM t1"
+    other = "Table: t1.\nRows: all.\nValue: current.\nSQL: SELECT SUM(current_col) FROM t1"
+    third = "Table: t1.\nRows: all.\nValue: over 90.\nSQL: SELECT SUM(over_90) FROM t1"
+    assert table_query.ask(None, aging, "total AR", complete=_replies(one, other, third)) is None
+    # A third try settles a disagreement, and the answer showing more columns is kept.
+    fuller = "Table: t1.\nRows: all.\nValue: total.\nSQL: SELECT SUM(total_balance) AS total, COUNT(*) AS customers FROM t1"
+    found = table_query.ask(None, aging, "total AR", complete=_replies(one, other, fuller))
+    assert found is not None and found.names == ["total", "customers"] and found.rows == [(323110.0, 15)]
+
+
+def test_tries_that_agree_the_sheet_lacks_it_give_no_answer(aging):
+    none = "Table: none: no column holds credit limits.\nRows: none.\nValue: none.\nSQL: NONE"
+    some = "Table: t1.\nRows: Dunmore.\nValue: total.\nSQL: SELECT total_balance FROM t1 WHERE customer LIKE '%dunmore%'"
+    complete = _replies(none, some, none)
+    assert table_query.ask(None, aging, "what's Dunmore's credit limit", complete=complete) is None
+    assert len(complete.calls) == 3
 
 
 def test_none_is_no_answer(aging):
@@ -92,6 +121,38 @@ def test_none_is_no_answer(aging):
         return "Plan: no credit limits shown.\nSQL: NONE"
 
     assert table_query.ask(None, aging, "what's Dunmore's credit limit", complete=none) is None
+
+
+def test_a_matrix_is_also_a_list_of_who_owes_whom():
+    matrix = _tables(MORE / "Intercompany Matrix 9-30-26.pdf")
+    schema = matrix.schema()
+    assert '"MX04" figure, under "Due From (payable entity)"' in schema
+    assert "CREATE TABLE t1_cells (  -- t1 again, one row per value under \"Due From (payable entity)\" (its columns us01 ... sg06)" in schema
+    owed = matrix.run("SELECT due_from_payable_entity FROM t1_cells WHERE due_to_receivable_entity LIKE 'sg06%' AND amount > 0")[1]
+    assert owed == [("US01",), ("UK03",), ("MX04",)]
+
+
+def test_people_across_the_columns_can_be_counted():
+    coverage = _tables(FIRST / "October Close Coverage.pdf")
+    rows = coverage.run("SELECT heading, COUNT(*) FROM t1_cells WHERE value = 'PTO' GROUP BY heading ORDER BY heading")[1]
+    assert rows == [("Grace Kim", 1), ("Priya Raman", 2), ("Sam Ortiz", 1), ("Tom Becker", 2)]
+
+
+def test_month_columns_are_months_to_pick_a_quarter():
+    revenue = _tables(MORE / "Revenue by Customer FY2026.pdf")
+    assert '"Month" as text YYYY-MM: 2026-01 (Jan-26) to 2026-12 (Dec-26)' in revenue.schema()
+    names, rows, more = revenue.run(
+        "SELECT month, amount FROM t1_cells WHERE customer LIKE '%cedar%' AND month BETWEEN '2026-04' AND '2026-06' ORDER BY month"
+    )
+    assert rows[0] == ("2026-04", 22527.27) and len(rows) == 3
+    assert revenue.render(table_query.Result("", "q", names, rows, more)).splitlines()[3] == "Month: Apr-26 | Amount: 22,527.27"
+
+
+def test_details_beside_a_table_are_facts():
+    payroll = _tables(MORE / "Payroll Register 10-15-26.pdf")
+    assert "Pay Date: Oct 15, 2026" in payroll.schema()
+    assert payroll.run("SELECT value FROM facts WHERE name LIKE '%pay date%'")[1] == [("Oct 15, 2026",)]
+    assert payroll.about("what's the pay date on this register")
 
 
 @pytest.fixture(scope="module")
@@ -130,6 +191,7 @@ def test_a_worked_out_figure_takes_the_sheet_s_decimals():
 def test_a_plan_that_says_the_sheet_lacks_it_is_no_answer(aging):
     def reply(*_args, **_kwargs):
         return "Plan: sum q3 actual (since Q2 is not in the table).\nSQL: SELECT SUM(total_balance) FROM t1"
+
 
     assert table_query.ask(None, aging, "what were Q2 collections", complete=reply) is None
 

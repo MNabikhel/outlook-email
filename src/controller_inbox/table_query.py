@@ -19,6 +19,7 @@ import re
 import sqlite3
 import time
 import unicodedata
+from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
@@ -36,52 +37,86 @@ QUERY_SECONDS = 2.0
 MAX_VALUE_BYTES = 100_000
 # Rows checked for the columns a row works out from others.
 FORMULA_ROWS = 200
-ATTEMPTS = 3
+# Tries at a query, each with one more go when its query fails or finds nothing.
+CANDIDATES = 3
+ATTEMPTS = 2
 WORKED_HEAD = "Worked out with a query over the table (check it is what was asked; the whole file follows):"
 
 SYSTEM = """You answer questions about a spreadsheet by writing ONE SQLite query over its tables.
-Write two lines:
-Plan: which rows (all, or the ones the question names), what value each row gives, and how they combine (list, sum, count, average, largest...).
+Write four lines:
+Table: which table holds the answer, and why (one named in the schema).
+Rows: which rows the question picks (all, or the ones it names), and the column that names them.
+Value: which column or expression gives the answer, and what its heading means.
 SQL: the query, on one line.
 Rules:
 - Use only the schema's tables and columns. Total and subtotal rows are left out of the tables, so add them up with SUM.
 - A figure sits in a row and a column: pick the row with WHERE on the column that names the rows, and the column with SELECT. A name the schema lists as a column is never a value in WHERE.
+- A table ending _cells holds the same values as its table, one per row, with the heading each was under: use it to count, filter or add across those columns ("which entities owe X", "how many days is X on PTO").
+- Read the headings: on a sheet of who owes whom, the row and column headings say which side owes.
+- facts holds details printed beside the tables (who prepared it, the pay date, the period).
 - Filter only on rows the question picks out, never on the sheet's own subject (in an inventory sheet "inventory" is every row). Match a name with LIKE '%word%'.
-- Dates are text 'YYYY-MM-DD' (or 'MM-DD' when the sheet shows no year). A '-' figure is 0; a blank one is NULL.
+- Dates are text 'YYYY-MM-DD' (or 'MM-DD' when the sheet shows no year), months 'YYYY-MM'. A '-' figure is 0; a blank one is NULL.
 - Q1 is Jan-Mar, Q2 Apr-Jun, Q3 Jul-Sep, Q4 Oct-Dec; H1 is Jan-Jun, H2 Jul-Dec.
 - A column the schema says is worked out from others ("= a + b on every row") already holds that result: use it, don't add its parts to it.
 - Show the row's name column beside each figure.
 - If no column holds what is asked (another period, or a figure the sheet doesn't show), write SQL: NONE. Never answer with a different column in its place.
 
 Example schema:
-CREATE TABLE t1 (  -- Inventory, 40 rows
-  sku TEXT, description TEXT, category TEXT,  -- category: Raw, WIP, Finished
-  qty_jun REAL, qty_sep REAL, unit_cost REAL, ext_value REAL,  -- ext_value = qty_sep * unit_cost on every row
-  last_count TEXT  -- date YYYY-MM-DD
+CREATE TABLE t1 (  -- Stock.xlsx / Stock by Warehouse: 40 rows, total rows left out
+  sku TEXT,  -- "SKU": A-100, A-101, B-200, ...
+  category TEXT,  -- "Category": Raw, WIP, Finished
+  east REAL,  -- "East" figure, under "Warehouse"
+  west REAL,  -- "West" figure, under "Warehouse"
+  total_units REAL,  -- "Total Units" figure = east + west on every row
+  unit_cost REAL,  -- "Unit Cost" figure
+  last_count TEXT  -- "Last Count" date as text YYYY-MM-DD
 );
-Question: what's in the WIP category
-Plan: rows with category WIP; list each with its value.
-SQL: SELECT sku, description, ext_value FROM t1 WHERE category LIKE '%wip%'
-Question: which category is worth the most
-Plan: all rows; ext_value; summed per category, largest first.
-SQL: SELECT category, SUM(ext_value) AS value FROM t1 GROUP BY category ORDER BY value DESC LIMIT 1
-Question: how many finished items weren't counted since march
-Plan: rows with category Finished and last_count before 2026-03-01; count them.
-SQL: SELECT COUNT(*) AS items FROM t1 WHERE category LIKE '%finished%' AND last_count < '2026-03-01'
-Question: which sku dropped the most in quantity from june to sept
-Plan: all rows; qty_sep - qty_jun; the smallest change.
-SQL: SELECT sku, description, qty_jun, qty_sep, qty_sep - qty_jun AS change FROM t1 ORDER BY change ASC LIMIT 1
-Question: how many more units did we hold in sept than june overall
-Plan: all rows; qty_sep and qty_jun; the difference of their totals.
-SQL: SELECT SUM(qty_sep) - SUM(qty_jun) AS more_units FROM t1
-Question: unit cost of the blue widget vs the red one
-Plan: the two named rows; unit_cost; their difference.
-SQL: SELECT (SELECT unit_cost FROM t1 WHERE description LIKE '%blue widget%') - (SELECT unit_cost FROM t1 WHERE description LIKE '%red widget%') AS difference
+CREATE TABLE t1_cells (  -- t1 again, one row per figure under "Warehouse" (east, west)
+  sku TEXT,  -- as in t1
+  category TEXT,  -- as in t1
+  warehouse TEXT,  -- the heading the figure is under: East, West
+  amount REAL
+);
+CREATE TABLE facts (file TEXT, name TEXT, value TEXT);  -- details printed beside the tables: Counted by: J. Ruiz; As of: 6/30/2026
+Question: how many units of a-101 are in the west warehouse
+Table: t1, one row per SKU.
+Rows: the row whose sku is A-101.
+Value: west, the West column under "Warehouse".
+SQL: SELECT sku, west FROM t1 WHERE sku LIKE '%a-101%'
+Question: which category holds the most units
+Table: t1.
+Rows: all, grouped by category.
+Value: total_units, already the sum of the warehouses; summed per category, largest first.
+SQL: SELECT category, SUM(total_units) AS units FROM t1 GROUP BY category ORDER BY units DESC LIMIT 1
+Question: in how many warehouses is b-200 out of stock
+Table: t1_cells, to count across the warehouse columns.
+Rows: sku B-200 where the amount is 0.
+Value: the number of such rows.
+SQL: SELECT COUNT(*) AS warehouses FROM t1_cells WHERE sku LIKE '%b-200%' AND amount = 0
+Question: whats in WIP
+Table: t1.
+Rows: category WIP; each one listed.
+Value: total_units beside each sku.
+SQL: SELECT sku, total_units FROM t1 WHERE category LIKE '%wip%'
+Question: how many items weren't counted since march
+Table: t1.
+Rows: last_count before 2026-03-01.
+Value: the number of such rows.
+SQL: SELECT COUNT(*) AS items FROM t1 WHERE last_count < '2026-03-01'
+Question: how many more units in east than west overall
+Table: t1.
+Rows: all.
+Value: the total of east less the total of west.
+SQL: SELECT SUM(east) - SUM(west) AS more_units FROM t1
+Question: who counted the stock
+Table: facts.
+Rows: the fact named Counted by.
+Value: its value.
+SQL: SELECT value FROM facts WHERE name LIKE '%counted by%'
 Question: what was the inventory worth at the end of last year
-Plan: no column holds a value at last year end (only jun and sep quantities); the tables cannot answer it.
-SQL: NONE
-Question: what's our inventory turnover
-Plan: turnover needs cost of goods sold, which no column holds; the tables cannot answer it.
+Table: none: no column holds a value at last year end; the tables cannot answer it.
+Rows: none.
+Value: none.
 SQL: NONE"""
 
 # SQLite's words, which a column can't be called without quotes the model would leave off.
@@ -116,7 +151,8 @@ _JOIN = re.compile(r"(?i)\bJOIN\s+t\d+((?:\s+\w+){0,3})")
 _QUOTED = re.compile(r'"([^"]+)"')
 _ALIAS = re.compile(r'(?i)\bAS\s+"([^"]+)"')
 _SQL_LINE = re.compile(r"(?is)\bSQL:\s*(.*)")
-_PLAN_LINE = re.compile(r"(?i)\bPlan:\s*(.*)")
+# The reasoning lines before the query (and "Plan:", which the model sometimes writes instead).
+_REASONING = re.compile(r"(?im)^\s*\**(Plan|Table|Rows|Value)\**:\s*(.+?)\s*$")
 _FENCE = re.compile(r"```(?:sql)?\s*(.*?)```", re.S)
 
 
@@ -127,7 +163,10 @@ class Column:
     kind: str  # "figure", "date" or "text"
     samples: list[str] = field(default_factory=list)  # the cells as the sheet writes them
     formula: str = ""
-    written: dict[str, str] = field(default_factory=dict)  # a date as stored -> as the sheet writes it
+    parts: list[tuple[int, int]] = field(default_factory=list)  # (column index, sign) of the formula's terms
+    written: dict[str, str] = field(default_factory=dict)  # a value as stored -> as the sheet writes it
+    under: str = ""  # the heading merged over this column and its neighbours ("Due From (payable entity)")
+    same_as: str = ""  # in a _cells table: the table whose column this repeats
 
 
 @dataclass
@@ -137,6 +176,8 @@ class Sheet:
     note: str
     columns: list[Column]
     rows: int
+    of: str = ""  # a _cells table: the table it lays out one value per row
+    across: str = ""  # its columns that were laid out (the first ... the last)
 
 
 @dataclass
@@ -146,6 +187,7 @@ class Result:
     names: list[str]
     rows: list[tuple]
     more: bool = False
+    checks: int = 1  # how many tries written apart gave it
 
 
 class Tables:
@@ -162,11 +204,22 @@ class Tables:
         # SQLite's LIKE ignores case for A-Z only: "Müller" would not match '%müller%'.
         self._db.create_function("like", 2, _like, deterministic=True)
         self._db.create_function("like", 3, _like, deterministic=True)
+        self.facts: list[tuple[str, str, str]] = []
+        count = 0
         for source, text in files:
             lines = (text or "").splitlines()
+            loaded = False
             for table in table_lookup.tables_in(text):
-                if len(table.body) >= 2 and len(self.sheets) < MAX_TABLES:
-                    self._load(f"t{len(self.sheets) + 1}", table, lines, source)
+                if len(table.body) >= 2 and count < MAX_TABLES:
+                    count += 1
+                    self._load(f"t{count}", table, lines, source)
+                    loaded = True
+            if loaded:
+                self.facts += [(source, name, value) for name, value in _facts_in(lines)]
+        if self.facts:
+            self._db.execute("CREATE TABLE facts (file TEXT COLLATE NOCASE, name TEXT COLLATE NOCASE, value TEXT COLLATE NOCASE)")
+            self._db.executemany("INSERT INTO facts VALUES (?, ?, ?)", self.facts)
+            self._names |= {"facts", "file", "name", "value"}
         self._db.execute("PRAGMA query_only = ON")
         self._db.set_authorizer(_authorize)
 
@@ -180,6 +233,8 @@ class Tables:
         if asked.op != "find" or asked.conditions or asked.group or asked.budget:
             return True
         known: set[str] = set()
+        for _source, name, _value in self.facts:
+            known.update(table_lookup._label_words(name))
         for sheet in self.sheets:
             known.update(table_lookup._words(sheet.title))
             for column in sheet.columns:
@@ -220,31 +275,83 @@ class Tables:
         self._db.executemany(f"INSERT INTO {name} VALUES ({', '.join('?' * len(columns))})", values)
         # A workbook's sheets are told apart by name ("Aug 2026", "Sep 2026"), a PDF's tables by their headings.
         sheet = table.where if table.where.startswith("sheet") else ""
-        title = " / ".join(part for part in (source, sheet, _heading_above(lines, table.rows[0].at)) if part)
-        self.sheets.append(Sheet(name, title, _notes(lines), columns, len(values)))
-        for column in columns:
+        headings = _headings_above(lines, table.rows[0].at)
+        title = " / ".join(part for part in (source, sheet, " / ".join(headings[:3])) if part)
+        self._register(Sheet(name, title, _notes(lines), columns, len(values)))
+        family = _family(columns)
+        if family:
+            self._load_cells(self.sheets[-1], family, values, _over(headings, columns, family))
+
+    def _load_cells(self, sheet: Sheet, family: list[int], values: list[list], over: str) -> None:
+        """The same values one per row, with the heading each was under: a sheet that lays one quantity across
+        its columns (entities owed, months, accounts, each person's shift) asked "which", "how many" or "how
+        much in all" across them, as a list the query filters and counts like any other."""
+        columns = sheet.columns
+        months = [_month(columns[index].label) for index in family]
+        keys = [index for index, column in enumerate(columns) if index not in family and column.kind != "figure"]
+        taken = {columns[index].name for index in keys}
+        figures = columns[family[0]].kind == "figure"
+        axis = Column(over or ("Month" if all(months) else "heading"), _ident(over or ("month" if all(months) else "heading"), taken), "text")
+        axis.samples = [columns[index].label for index in family]
+        if all(months):
+            axis.written = {month: columns[index].label for month, index in zip(months, family)}
+        value = Column("Amount" if figures else "Value", _ident("amount" if figures else "value", taken), "figure" if figures else "text")
+        value.samples = [sample for index in family for sample in columns[index].samples]
+        cells_columns = [
+            Column(columns[index].label, columns[index].name, columns[index].kind, columns[index].samples, written=columns[index].written, same_as=sheet.name)
+            for index in keys
+        ] + [axis, value]
+        rows = [
+            [row[index] for index in keys] + [month or columns[index].label, row[index]]
+            for row in values
+            for index, month in zip(family, months)
+        ]
+        name = f"{sheet.name}_cells"
+        self._db.execute(f"CREATE TABLE {name} ({', '.join(f'{c.name} {_sql_type(c.kind)}' for c in cells_columns)})")
+        self._db.executemany(f"INSERT INTO {name} VALUES ({', '.join('?' * len(cells_columns))})", rows)
+        across = f"{columns[family[0]].name} ... {columns[family[-1]].name}"
+        if over:
+            for index in family:
+                columns[index].under = over
+        self._register(Sheet(name, sheet.title, "", cells_columns, len(rows), of=sheet.name, across=across))
+
+    def _register(self, sheet: Sheet) -> None:
+        self.sheets.append(sheet)
+        for column in sheet.columns:
             known = self._labels.get(column.name, column)
             same = known is not None and (known.label, _style(known)) == (column.label, _style(column))
             self._labels[column.name] = known if same else None
-        self._names |= {name, *(column.name for column in columns)}
+        self._names |= {sheet.name, *(column.name for column in sheet.columns)}
 
     def schema(self) -> str:
         """The tables as the model sees them: each column's name, what it holds, and the names it lists. A
         long one lists fewer names, then leaves out the last tables, to stay within ``SCHEMA_CHARS``."""
+        facts = self._facts_line()
+        room = SCHEMA_CHARS - len(facts)
         for names in (MAX_NAMES, 12, 4):
             text = "\n".join(self._create(sheet, names) for sheet in self.sheets)
-            if len(text) <= SCHEMA_CHARS:
-                return text
+            if len(text) <= room:
+                return "\n".join(part for part in (text, facts) if part)
         kept: list[str] = []
         for sheet in self.sheets:
             create = self._create(sheet, 4)
-            if kept and len("\n".join(kept)) + len(create) > SCHEMA_CHARS:
+            if kept and len("\n".join(kept)) + len(create) > room:
                 break
             kept.append(create)
-        return "\n".join(kept)
+        return "\n".join(kept + ([facts] if facts else []))
+
+    def _facts_line(self) -> str:
+        if not self.facts:
+            return ""
+        listed = "; ".join(f"{name}: {value}" for _source, name, value in self.facts)
+        return f"CREATE TABLE facts (file TEXT, name TEXT, value TEXT);  -- details printed beside the tables: {listed[:500]}"
 
     def _create(self, sheet: Sheet, names: int) -> str:
-        head = f"CREATE TABLE {sheet.name} (  -- {sheet.title + ': ' if sheet.title else ''}{sheet.rows} rows, total rows left out"
+        if sheet.of:
+            under = f'under "{sheet.columns[-2].label}" ' if sheet.columns[-2].label not in ("heading", "Month") else ""
+            head = f"CREATE TABLE {sheet.name} (  -- {sheet.of} again, one row per value {under}(its columns {sheet.across})"
+        else:
+            head = f"CREATE TABLE {sheet.name} (  -- {sheet.title + ': ' if sheet.title else ''}{sheet.rows} rows, total rows left out"
         lines = [head]
         for index, column in enumerate(sheet.columns):
             comma = "," if index < len(sheet.columns) - 1 else ""
@@ -287,7 +394,8 @@ class Tables:
         if not found.rows:
             lines.append("It returned no rows.")
             return "\n".join(lines)
-        lines.append(f"Result ({len(found.rows)} row{'s' if len(found.rows) != 1 else ''}{', more not shown' if found.more else ''}):")
+        agreed = ", the same from two queries written apart" if found.checks > 1 else ""
+        lines.append(f"Result ({len(found.rows)} row{'s' if len(found.rows) != 1 else ''}{', more not shown' if found.more else ''}{agreed}):")
         for row in found.rows:
             cells = [f"{self._heading(name)}: {self._shown(name, value)}" for name, value in zip(found.names, row)]
             lines.append(" | ".join(cells))
@@ -317,8 +425,8 @@ class Tables:
                 samples.append("0.0000" if abs(number) < 1 else "0.00")
             return table_lookup._format(number, samples)
         column = self._labels.get(name.lower())
-        if column and column.kind == "date":
-            # Stored as 2026-10-08 to compare; shown as the sheet writes it ("Thu 10/08").
+        if column and column.written:
+            # Stored as 2026-10-08 to compare; shown as the sheet writes it ("Thu 10/08", "Apr-26").
             return column.written.get(str(value), str(value))
         return str(value)[:300]
 
@@ -362,19 +470,47 @@ class Tables:
         return found
 
 
-def ask(settings, tables: Tables, question: str, *, complete=None) -> Result | None:
-    """The model's query for the question, run on ``tables``; None when it says the tables can't answer it
-    or no query it writes will run. A query that fails or finds nothing is tried again with what was wrong. ``complete``:
-    the model call (``local_llm.complete_text``)."""
+def ask(settings, tables: Tables, question: str, *, complete=None, think: bool = False) -> Result | None:
+    """A query for the question that two of the model's tries agree on, run on ``tables``; None when they
+    agree the tables can't answer it, or don't agree at all.
+
+    A small model's query is right most of the time, and a wrong one returns a wrong figure that looks as
+    good as a right one. Two tries written apart (the second worded more freely) seldom go wrong the same
+    way, so a result both give is used, and a third try settles a disagreement. ``complete``: the model call
+    (``local_llm.complete_text``); ``think``: let a model that can think do so before each query.
+    """
     if complete is None:
         from controller_inbox.local_llm import complete_text as complete
 
+    seen: list[Result | None] = []
+    for index in range(CANDIDATES):
+        outcome = _candidate(settings, tables, question, complete, temperature=None if index == 0 else 0.7, think=think)
+        if outcome is _NO_QUERY:
+            continue
+        for earlier in seen:
+            if _agree(earlier, outcome):
+                if outcome is None or earlier is None:
+                    return None
+                found = max((earlier, outcome), key=lambda result: len(result.names))
+                found.checks = 2
+                return found
+        seen.append(outcome)
+    return None
+
+
+_NO_QUERY = object()
+
+
+def _candidate(settings, tables: Tables, question: str, complete, *, temperature: float | None, think: bool):
+    """One try: a Result, None when the model says the tables can't answer it, or ``_NO_QUERY`` when none of
+    its queries ran and found something. A query that fails or finds nothing is tried again with what was
+    wrong."""
     messages = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": f"Schema:\n{tables.schema()}\n\nQuestion: {question}"},
     ]
     for attempt in range(ATTEMPTS):
-        reply = complete(settings, messages, max_tokens=400)
+        reply = complete(settings, messages, max_tokens=500, temperature=temperature, think=think)
         plan, sql = parse(reply)
         if not sql or _cannot(plan):
             # "Sum q3 actual (since Q2 is not in the table)" answers another question under this one's name.
@@ -391,32 +527,51 @@ def ask(settings, tables: Tables, question: str, *, complete=None) -> Result | N
             # Nothing found, after another try, is a filter the sheet doesn't have, not an answer.
             problem = "That query found nothing. Check each filter against the names the schema lists."
         if attempt == ATTEMPTS - 1:
-            return None
+            break
         hints = " ".join(tables.hints(sql, error))
         messages += [
             {"role": "assistant", "content": reply},
-            {"role": "user", "content": f"{problem} {hints} Write the Plan and SQL lines again.".replace("  ", " ")},
+            {"role": "user", "content": f"{problem} {hints} Write the Table, Rows, Value and SQL lines again.".replace("  ", " ")},
         ]
-    return None
+    return _NO_QUERY
+
+
+def _agree(first: Result | None, second: Result | None) -> bool:
+    """Two tries give the same answer: both say the tables can't answer, or they return as many rows with
+    the same figures (one may show more columns: a name beside the amount, a date) or, with no figures, the
+    same names."""
+    if first is None or second is None:
+        return first is None and second is None
+    if len(first.rows) != len(second.rows):
+        return False
+    figures = [Counter(round(float(v), 2) for row in r.rows for v in row if isinstance(v, (int, float))) for r in (first, second)]
+    if figures[0] and figures[1]:
+        return figures[0] <= figures[1] or figures[1] <= figures[0]
+    names = [{str(v).strip().casefold() for row in r.rows for v in row if isinstance(v, str) and v.strip()} for r in (first, second)]
+    return bool(names[0] and names[1]) and (names[0] <= names[1] or names[1] <= names[0])
 
 
 def _cannot(plan: str) -> bool:
-    """The plan says the sheet doesn't hold what was asked ("Q2 is not in the table")."""
+    """The plan says the sheet doesn't hold what was asked ("Q2 is not in the table", "Table: none")."""
+    if re.search(r"(?i)\btable:\s*none\b", plan):
+        return True
     return any(_CANNOT.search(part) and not _TOTAL_ROWS.search(part) for part in re.split(r"[;,.()]", plan))
 
 
 def parse(reply: str) -> tuple[str, str]:
-    """(plan, sql) from the model's reply; sql is "" when it wrote NONE or no query."""
+    """(plan, sql) from the model's reply: its Table, Rows and Value lines as one plan, and the query; sql is
+    "" when it wrote NONE or no query."""
     text = reply or ""
     fenced = _FENCE.search(text)
-    plan = _PLAN_LINE.search(text)
     sql_line = _SQL_LINE.search(text)
+    before = text[: sql_line.start()] if sql_line else text[: fenced.start()] if fenced else text
+    plan = " ".join(f"{m.group(1)}: {m.group(2)}" for m in _REASONING.finditer(before))
     sql = fenced.group(1) if fenced else sql_line.group(1) if sql_line else text
     # Anything the model wrote after the query, past a blank line, is not part of it.
     sql = sql.strip().split("\n\n")[0].strip("`").strip().rstrip(";").strip()
     if not re.match(r"(?is)^(select|with)\b", sql):
         sql = ""
-    return (plan.group(1).strip() if plan else ""), sql
+    return plan, sql
 
 
 # Building the tables ----------------------------------------------------------------------------
@@ -517,8 +672,13 @@ def _style(column: Column) -> tuple:
 
 
 def _describe(column: Column, names: int = MAX_NAMES) -> str:
+    if column.same_as:
+        return f"as in {column.same_as}"
+    if column.written and all(len(stored) == 7 for stored in column.written):
+        months = list(column.written.items())
+        return f'"{column.label}" as text YYYY-MM: {months[0][0]} ({months[0][1]}) to {months[-1][0]} ({months[-1][1]})'
     if column.kind == "figure":
-        note = f'"{column.label}" figure'
+        note = f'"{column.label}" figure' + (f', under "{column.under}"' if column.under else "")
         if column.samples and all("%" in sample for sample in column.samples):
             note += ", a percent (6.3 means 6.3%)"
         return f"{note} = {column.formula} on every row" if column.formula else note
@@ -562,6 +722,7 @@ def _formulas(columns: list[Column], values: list[list]) -> None:
             if other in found and target in found and any(index == target for index, _s in found[other]):
                 found.pop(min(target, other, key=kept))
     for target, terms in found.items():
+        columns[target].parts = terms
         columns[target].formula = " ".join(("+ " if sign > 0 else "- ") + columns[index].name for index, sign in terms).removeprefix("+ ")
 
 
@@ -582,8 +743,8 @@ def _holds(values: list[list], target: int, terms: list[tuple[int, int]]) -> boo
     return used >= 3 and nonzero >= 2 and good >= 0.9 * used and max(copies) < 0.8 * used
 
 
-def _heading_above(lines: list[str], at: int) -> str:
-    """The heading lines nearest above a table ("Accrued Liabilities Rollforward / Quarter Ended ...")."""
+def _headings_above(lines: list[str], at: int) -> list[str]:
+    """The heading lines nearest above a table ("Accrued Liabilities Rollforward", "Quarter Ended ...")."""
     for index in range(min(at, len(lines)) - 1, -1, -1):
         if lines[index].strip() != "[heading]":
             continue
@@ -591,9 +752,76 @@ def _heading_above(lines: list[str], at: int) -> str:
         for line in lines[index + 1 :]:
             if not line.strip() or line.startswith("["):
                 break
-            heads.append(line.strip())
-        return " / ".join(heads[:3])[:160]
-    return ""
+            heads.append(line.strip()[:80])
+        return heads
+    return []
+
+
+def _family(columns: list[Column]) -> list[int]:
+    """The columns a sheet lays one quantity across: the three or more its total adds up ("Total Due To = US01
+    + CA02 + ..."), its month columns, or three or more text columns holding the same few values (each
+    person's shift: "8-5", "OFF", "PTO")."""
+    sums = [column.parts for column in columns if len(column.parts) >= 3 and all(sign > 0 for _index, sign in column.parts)]
+    if sums:
+        return [index for index, _sign in max(sums, key=len)]
+    months = [index for index, column in enumerate(columns) if column.kind == "figure" and _month(column.label)]
+    if len(months) >= 3:
+        return months
+    texts = [index for index, column in enumerate(columns) if column.kind == "text" and len(column.samples) >= 3 and len({s.casefold() for s in column.samples}) <= 12]
+    best: list[int] = []
+    for index in texts:
+        group = [other for other in texts if _overlap(columns[index], columns[other]) >= 0.4]
+        if len(group) > len(best):
+            best = group
+    return best if len(best) >= 3 else []
+
+
+def _overlap(a: Column, b: Column) -> float:
+    first, second = {s.casefold() for s in a.samples}, {s.casefold() for s in b.samples}
+    return len(first & second) / max(1, len(first | second))
+
+
+_MONTH_LABEL = re.compile(r"^([a-z]{3,9})\.?[\s\-'/]*(\d{2}|\d{4})$", re.I)
+
+
+def _month(label: str) -> str:
+    """ "Apr-26", "April 2026" as 2026-04, else ""."""
+    match = _MONTH_LABEL.match(label.strip())
+    month = table_lookup._MONTHS.get(match.group(1).lower()) if match else None
+    if not month:
+        return ""
+    year = int(match.group(2))
+    return f"{year + 2000 if year < 100 else year:04d}-{month:02d}"
+
+
+def _over(headings: list[str], columns: list[Column], family: list[int]) -> str:
+    """The heading merged over a family of columns ("Due From (payable entity)", "Days Past Due"): the last
+    heading line above the table, when it is short, isn't the title and isn't a date."""
+    if len(headings) < 2:
+        return ""
+    last = headings[-1]
+    if len(last.split()) > 5 or any(ch.isdigit() for ch in last) or last in {columns[index].label for index in family}:
+        return ""
+    return last
+
+
+_FACT = re.compile(r"^([A-Z][\w .&/()#'-]{1,40}?):\s+(\S.{0,100})$")
+
+
+def _facts_in(lines: list[str]) -> list[tuple[str, str]]:
+    """Details printed beside a file's tables as "Name: value" on a line of their own ("Pay Date: Oct 15,
+    2026", "Prepared by: L. Wei 10/2/2026"); a table row has several of them and is left alone."""
+    found: list[tuple[str, str]] = []
+    for line in lines:
+        pieces = [piece.strip() for piece in line.strip().split(" | ")]
+        named = [piece for piece in pieces if ": " in piece]
+        if line.startswith("[") or len(named) != 1:
+            continue
+        match = _FACT.match(named[0])
+        # "Group: Payroll" is how a table's section heading is written out (pdf_layout), not a detail.
+        if match and match.group(1) != "Group" and (match.group(1).strip(), match.group(2).strip()) not in found:
+            found.append((match.group(1).strip(), match.group(2).strip()))
+    return found[:30]
 
 
 def _notes(lines: list[str]) -> str:
