@@ -131,3 +131,43 @@ def test_a_question_over_a_column_gets_that_column_for_every_row(texts):
 def test_nothing_is_picked_when_the_question_names_no_row_or_column(texts):
     assert lookup(texts["AP Aging 9-30-26.pdf"], "Summarize this for me") == ""
     assert lookup(texts["AP Aging 9-30-26.pdf"], "Is this the latest aging?") == ""
+
+
+def _schedule_email(store, settings, name: str):
+    from email.message import EmailMessage
+
+    from controller_inbox.folder_mail import ingest_folder
+
+    settings.ensure_data_dir()
+    msg = EmailMessage()
+    msg["From"] = "Maya Chen <maya@taz.com>"
+    msg["To"] = "controller@taz.com"
+    msg["Subject"] = name.removesuffix(".pdf")
+    msg["Date"] = "Mon, 05 Oct 2026 09:00:00 -0500"
+    msg["Message-ID"] = "<schedule-1@taz.com>"
+    msg.set_content("Hi,\n\nThe schedule is attached for your review.\n\nMaya")
+    msg.add_attachment((FIXTURES / name).read_bytes(), maintype="application", subtype="pdf", filename=name)
+    (settings.inbox_incoming / "schedule.eml").write_bytes(bytes(msg))
+    return ingest_folder(store, settings)[0]
+
+
+def test_the_model_starts_from_the_rows_the_question_names(store, settings):
+    from controller_inbox import agent
+
+    email = _schedule_email(store, settings, "AP Aging 9-30-26.pdf")
+    ws = agent.Workspace(store, settings, [email], question="How much do we owe Harbor Steel in the 31-60 day bucket?", current_id=email.id)
+    block = agent.file_context(ws, ws.question, 12_000)[email.id]
+    rows_at = block.index("Rows that match the question")
+    assert "Harbor Steel LLC → 31 - 60 Days: $22,150.00" in block
+    assert rows_at < block.index("[AP Aging 9-30-26.pdf · page 1"), "the matching rows come before the file text"
+    assert any("picked out the table rows" in read for read in ws.reads)
+
+
+def test_without_a_model_the_lookup_answer_shows_the_row(store, settings):
+    from controller_inbox.assistant import answer_stream
+
+    email = _schedule_email(store, settings, "AP Aging 9-30-26.pdf")
+    events = list(answer_stream(store, settings, "How much do we owe Harbor Steel in the 31-60 day bucket?", email_id=email.id))
+    text = "".join(event.get("text", "") for event in events if event["type"] == "delta")
+    assert "From the table in AP Aging 9-30-26.pdf:" in text
+    assert "Harbor Steel LLC → 31 - 60 Days: $22,150.00" in text
