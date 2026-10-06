@@ -90,3 +90,23 @@ def test_a_limit_that_is_a_column_heading_names_the_column():
     asked = read_question("Which vendors have balances over 90 days?")
     assert asked.op == "list" and [c.phrase for c in asked.conditions] == ["over 90"]
     # The table decides: with an "Over 90 Days" column, "over 90" is that column (see the cases above).
+
+
+def test_a_unit_after_a_figure_is_a_whole_word():
+    assert [(c.op, c.value) for c in read_question("assets with a useful life of more than 60 months").conditions] == [(">", 60)]
+    assert [(c.op, c.value) for c in read_question("vendors over $30k").conditions] == [(">", 30000)]
+    assert [(c.op, c.value) for c in read_question("anything under 2.5 million?").conditions] == [("<", 2500000)]
+
+
+def test_a_year_says_nothing_about_dates_written_without_one(texts):
+    # The coverage schedule's dates are "10/14": "in 2027" can't pick its rows, so it is not applied.
+    found = lookup(texts[STAFF], "How many days is Priya Raman on PTO in 2027?")
+    assert "where Date in 2027" not in found
+
+
+def test_the_question_s_first_word_is_not_a_name():
+    from controller_inbox.assistant import _distinctive
+
+    assert not _distinctive("payroll", "Payroll accrual variance for March?")
+    assert _distinctive("march", "Payroll accrual variance for March?")
+    assert _distinctive("31-60", "how much is in 31-60?")

@@ -50,7 +50,7 @@ _ASKING = frozenset(
     total sum add added combined altogether average mean count number largest biggest highest most greatest
     maximum max top smallest lowest least fewest minimum min first earliest last latest final difference
     compare compared versus vs more less higher lower over under above below than exceed exceeds exceeding
-    between after before since until through during within left remaining still again still paid due
+    between after before since until through during within left remaining still again paid due
     """.split()
 )
 # Short forms a schedule's headings use for the words a question uses.
@@ -89,7 +89,7 @@ _HOW_MUCH = re.compile(r"\bhow much\b", re.I)
 _NUM_COND = re.compile(
     r"(?:\b(more than|greater than|higher than|larger than|bigger than|over|above|exceed(?:s|ing)?|at least|no less than|"
     r"less than|lower than|smaller than|fewer than|under|below|at most|no more than|up to|equal to|exactly)|(>=|<=|>|<))"
-    r"\s*(?:\$\s*)?(-?\d[\d,]*(?:\.\d+)?)\s*(k|m|mm|thousand|million|%)?(?![\w/.-]*\d)",
+    r"\s*(?:\$\s*)?(-?\d[\d,]*(?:\.\d+)?)(?:\s*(%)|\s*(k|m|mm|thousand|million)\b)?(?![\w/.-]*\d)",
     re.I,
 )
 _NUM_OPS = {
@@ -209,17 +209,25 @@ class Answer:
 
 def lookup(text: str, question: str, *, limit: int = MAX_CHARS) -> str:
     """The rows of ``text``'s tables that answer the question, and anything worked out from them, or ""."""
+    found = answer(text, question)
+    return render(found, limit) if found else ""
+
+
+def answer(text: str, question: str) -> Answer | None:
+    """The best answer any of ``text``'s tables gives, with how well it matched (``weight``), or None."""
     asked = read_question(question)
     if not asked.words and not asked.conditions:
-        return ""
+        return None
     best: Answer | None = None
     for table in tables_in(text):
         found = _answer(table, asked)
         if found and (best is None or found.weight > best.weight):
             best = found
-    if best is None:
-        return ""
-    out = best.head + "\n" + "\n".join(best.lines)
+    return best
+
+
+def render(found: Answer, limit: int = MAX_CHARS) -> str:
+    out = found.head + "\n" + "\n".join(found.lines)
     if len(out) > limit:
         out = out[:limit].rsplit("\n", 1)[0] + "\n…"
     return out
@@ -341,8 +349,7 @@ def read_question(question: str) -> Question:
     for match in _NUM_COND.finditer(text):
         word = (match.group(1) or match.group(2)).lower()
         number = Decimal(match.group(3).replace(",", ""))
-        unit = (match.group(4) or "").lower()
-        number *= _SCALE.get(unit, 1)
+        number *= _SCALE.get((match.group(5) or "").lower(), 1)
         conditions.append(Condition("number", _NUM_OPS.get(word, ">"), number, match.group(0).strip(), match.start()))
     for match in _DATE_COND.finditer(text):
         if match.group(1):
@@ -431,6 +438,19 @@ def _answer(table: Table, asked: Question) -> Answer | None:
     if op == "find" and limited and not named:
         op = "sum" if _HOW_MUCH.search(asked.text) and figures else "list"
     reading = _reading(conditions, by_column, budget, asked.budget, named, words, scores) or reading_extra
+    # How much of the question this table answered: the columns it names, the rows its words pick out, and the
+    # limits it could apply. An email's other tables are weighed against it, so a table that only fell back on
+    # its "Total" column doesn't win over one that has the column and the rows asked about.
+    quality = (
+        2 * sum(1 for hits in columns.values() if hits)
+        + (max(scores[id(row)][0] for row in named) if named else 0)
+        + len(conditions) + len(by_column) + (2 if budget else 0)
+    )
+
+    def done(found: Answer | None) -> Answer | None:
+        if found is not None:
+            found.weight = quality + found.weight / 100
+        return found
 
     if op != "find" and not columns and not limited:
         # "Is this the latest aging?" names no column and no rows: it is not a question about the table.
@@ -440,22 +460,22 @@ def _answer(table: Table, asked: Question) -> Answer | None:
     if op == "difference":
         found = _difference(table, asked, columns, figures, chosen, rows, words)
         if found:
-            return found
+            return done(found)
         op = "find"
     if asked.group and op in {"sum", "average", "count"}:
         found = _per_group(table, asked, figures, chosen if limited else table.body, op, reading)
         if found:
-            return found
+            return done(found)
     if op in {"sum", "average", "count", "max", "min", "first", "last"}:
         found = _worked(table, op, figures, columns, chosen if limited else table.body, totals, reading)
         if found:
-            return found
+            return done(found)
         op = "list" if limited else "find"
     if not chosen:
         if columns and figures and (op == "list" or asked.op != "find"):
-            return _column_view(table, figures, asked)
+            return done(_column_view(table, figures, asked))
         return None
-    return _found(table, chosen, columns, scores, figures, reading, budget)
+    return done(_found(table, chosen, columns, scores, figures, reading, budget))
 
 
 def _columns_named(table: Table, asked: Question) -> dict[str, set[str]]:
@@ -520,8 +540,20 @@ def _placed(table: Table, asked: Question, columns: dict[str, set[str]]) -> list
             return min((abs(spot - condition.at) for spot in spots), default=10_000)
 
         column = min(candidates, key=lambda label: (distance(label), table.labels.index(label)))
+        if condition.kind == "date" and _whole_years(condition.value) and not _dated_with_years(table, column):
+            # "In 2027" says nothing about dates written without a year ("10/14").
+            continue
         placed.append(Condition(condition.kind, condition.op, condition.value, condition.phrase, condition.at, column))
     return placed
+
+
+def _whole_years(span: tuple[When, When]) -> bool:
+    low, high = span
+    return low[0] is not None and (low[1], low[2]) == (1, 1) and (high[1], high[2]) == (12, 31)
+
+
+def _dated_with_years(table: Table, label: str) -> bool:
+    return any((when := _when(row.value(label))) is not None and when[0] is not None for row in table.rows)
 
 
 def _in_heading(condition: Condition, table: Table) -> bool:

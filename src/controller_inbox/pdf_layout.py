@@ -551,8 +551,7 @@ def _column_cuts(lines: list[Line], rules: list[Rule]) -> dict[int, list[float]]
         for index in region:
             line = lines[index]
             if index in rows or (rows[0] < index <= last and len(line.words) <= 4):
-                own = [rule.x for rule in rules if rule.y0 - 2 <= line.mid <= rule.y1 + 2]
-                cuts[index] = sorted(edges + own)
+                cuts[index] = edges
                 line.grid = grid
     return cuts
 
@@ -856,7 +855,6 @@ def _columns(block: list[Line]) -> list[tuple[float, float]]:
         hi = max(grid[-1], *(segment[-1].x1 for line in block for segment in line.segments))
         bounds = [lo, *grid[1:-1], hi]
         return list(zip(bounds, bounds[1:]))
-    most = max(len(line.segments) for line in block)
     skeleton = next(line for line in block if len(line.segments) == most)
     merged: list[list[float]] = []
     for segment in skeleton.segments:

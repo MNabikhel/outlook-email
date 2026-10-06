@@ -238,12 +238,19 @@ TOOL_SCHEMA_TOKENS = int(len(json.dumps(TOOLS)) / 3.3) + 80
 
 
 def clip(text: str, room: int, *, mark: str = "\n…") -> str:
-    """``text`` cut at a line so its ``prompt_size`` fits ``room``."""
-    size = prompt_size(text)
-    if size <= room:
+    """``text`` cut at a line so it and ``mark`` fit ``room`` (as ``prompt_size`` counts them)."""
+    if prompt_size(text) <= room:
         return text
-    keep = max(0, int(room * len(text) / max(1, size)) - len(mark))
-    return text[:keep].rsplit("\n", 1)[0] + mark
+    room -= prompt_size(mark)
+    keep = len(text)
+    while keep > 0:
+        # Figures cost more than words, so a cut at the average rate can still be too long: cut again.
+        keep = max(0, int(keep * room / max(1, prompt_size(text[:keep]))))
+        cut = text[:keep].rsplit("\n", 1)[0] if "\n" in text[:keep] else text[:keep]
+        if prompt_size(cut) <= room:
+            return cut + mark
+        keep = len(cut) - 1
+    return mark.lstrip("\n")
 
 
 def prompt_budget(context_tokens: int, reply_tokens: int, *, tools: bool) -> int:
@@ -473,26 +480,28 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             labels = [p.label for p in parts[:12]] + ([f"… {len(parts) - 12} more"] if len(parts) > 12 else [])
             block.append("Sections: " + " / ".join(labels))
         budget = per_file - prompt_size(head) - 200
+        size = prompt_size(text)
         # The table rows the question names, and anything worked out from them, so a small model starts from the
-        # right cell. A file that fits whole comes first; one too long to show gets this index whatever it costs.
+        # right cell. A file that fits whole comes first; one too long to show gets this index whatever it costs,
+        # since it points into the parts that are left out.
         rows = "" if whole else table_lookup.lookup(text, question, limit=table_lookup.MAX_CHARS)
-        spare = budget - prompt_size(text) - 2 * len(parts) * 12
+        spare = budget - size - 2 * len(parts) * 12
         space = spare if spare >= 0 else budget // 3
         rows = clip(rows, space) if rows and space >= 200 else ""
         if rows:
             block.append(rows)
             budget -= prompt_size(rows) + 1
-        summary = overnight_summary(ws.store, att) if prompt_size(text) > budget else ""
+        summary = overnight_summary(ws.store, att) if size > budget else ""
         if summary:
             block.append("Summary written overnight (checked against the file):\n" + summary[:900])
             budget -= prompt_size(summary[:900]) + 60
-        if whole and len(parts) > 2 and prompt_size(text) > budget:
+        if whole and len(parts) > 2 and size > budget:
             block.append(_skimmed(att, parts, budget))
             ws.left_out.append(att.filename)
             read = f"Skimmed {att.filename}: too long to read whole ({len(parts)} sections)"
         else:
             how = "picked by words" if matches else "from the start: no words matched"
-            if not whole and prompt_size(text) > budget:
+            if not whole and size > budget:
                 by_meaning = semantic.rank_sections(ws.store, ws.settings, att, question)
                 if by_meaning:
                     how = "picked by words and meaning" if matches else "picked by meaning"
@@ -782,10 +791,11 @@ def _ask_table(ws: Workspace, email: EmailRecord, question: str, file) -> str:
     else:
         candidates = [att for att in email.attachments if (att.extracted_text or "").strip()]
     ws.read_files = True
-    for att in candidates:
-        found = table_lookup.lookup(att.extracted_text or "", question, limit=2500)
-        if found:
-            return f"From {att.filename}:\n{found}"
+    # The file whose table answers best, not just the first with any match.
+    found = [(answer, att) for att in candidates if (answer := table_lookup.answer(att.extracted_text or "", question))]
+    if found:
+        best, att = max(found, key=lambda item: item[0].weight)
+        return f"From {att.filename}:\n{table_lookup.render(best, 2500)}"
     return (
         f"No table rows in {', '.join(att.filename for att in candidates) or 'its files'} answer {question!r}. "
         "Ask with the words of the table's columns and rows, or use find_in_file."

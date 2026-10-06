@@ -284,7 +284,7 @@ def answered_here(email: EmailRecord, question: str) -> bool:
     if len(found) >= 2 and len(found) * 2 >= len(terms):
         return True
     # The names, codes and figures the question turns on ("Harbor Steel", "31-60", "F-150") are all here.
-    named = [term for term in terms if re.search(rf"\b{re.escape(term)}", question, re.I) and _distinctive(term, question)]
+    named = [term for term in terms if _distinctive(term, question)]
     return len(found) >= 2 and bool(named) and all(term in found for term in named)
 
 
@@ -294,10 +294,11 @@ def _spaced(text: str) -> str:
 
 
 def _distinctive(term: str, question: str) -> bool:
-    """A name (capitalized in the question), or a word with a digit in it."""
+    """A name (capitalized in the question, not just as its first word), or a word with a digit in it."""
     if any(ch.isdigit() for ch in term):
         return True
-    return bool(re.search(rf"\b{re.escape(term[:1].upper() + term[1:])}", question))
+    rest = re.sub(r"^\W*\w+", "", question)
+    return bool(re.search(rf"\b{re.escape(term[:1].upper() + term[1:])}", rest))
 
 
 def on_screen_question(question: str) -> bool:
@@ -834,7 +835,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     found = agent.evidence_text(ws, int(avail * 0.5))
     if found:
         parts.insert(0, "What you read with tools:\n" + found)
-    files = agent.file_context(ws, question, max(MIN_FILE_ROOM // 2, avail - len(found) - 40))
+    files = agent.file_context(ws, question, max(MIN_FILE_ROOM // 2, avail - agent.prompt_size(found) - 40))
     messages = build_messages(question, ws.sources, budget=check_budget, files=files, tail="\n\n".join(parts), **base)
     yield {"type": "step", "text": "Checking the answer against what I read"}
     before = len(state["text"])
