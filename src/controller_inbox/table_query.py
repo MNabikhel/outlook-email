@@ -14,20 +14,28 @@ can only read it: anything else is refused, and one that runs too long is stoppe
 from __future__ import annotations
 
 import itertools
+import math
 import re
 import sqlite3
 import time
+import unicodedata
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
-from controller_inbox import table_lookup
+from controller_inbox import table_lookup, tables
 from controller_inbox.table_lookup import Table
 
 MAX_TABLES = 6
 MAX_RESULT_ROWS = 25
 # Distinct names listed for a text column, so the model writes them as the sheet does.
 MAX_NAMES = 30
+# The schema shown to the model, in characters: fewer names listed, then fewer tables, past this.
+SCHEMA_CHARS = 7000
 QUERY_SECONDS = 2.0
+# The longest text a query may build, so a query can't fill memory before the time limit stops it.
+MAX_VALUE_BYTES = 100_000
+# Rows checked for the columns a row works out from others.
+FORMULA_ROWS = 200
 ATTEMPTS = 3
 WORKED_HEAD = "Worked out with a query over the table (check it is what was asked; the whole file follows):"
 
@@ -39,7 +47,7 @@ Rules:
 - Use only the schema's tables and columns. Total and subtotal rows are left out of the tables, so add them up with SUM.
 - A figure sits in a row and a column: pick the row with WHERE on the column that names the rows, and the column with SELECT. A name the schema lists as a column is never a value in WHERE.
 - Filter only on rows the question picks out, never on the sheet's own subject (in an inventory sheet "inventory" is every row). Match a name with LIKE '%word%'.
-- Dates are text 'YYYY-MM-DD' (or 'MM-DD' when the sheet shows no year). A blank or '-' figure is 0.
+- Dates are text 'YYYY-MM-DD' (or 'MM-DD' when the sheet shows no year). A '-' figure is 0; a blank one is NULL.
 - Q1 is Jan-Mar, Q2 Apr-Jun, Q3 Jul-Sep, Q4 Oct-Dec; H1 is Jan-Jun, H2 Jul-Dec.
 - A column the schema says is worked out from others ("= a + b on every row") already holds that result: use it, don't add its parts to it.
 - Show the row's name column beside each figure.
@@ -90,6 +98,8 @@ _KEYWORDS = frozenset(
     with without""".split()
 )
 _ALLOWED = {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, getattr(sqlite3, "SQLITE_RECURSIVE", 33)}
+# Functions that build large values from nothing, or reach outside the database.
+_REFUSED = frozenset({"load_extension", "zeroblob", "randomblob"})
 _RESULT_WORDS = re.compile(r"\b(?:total|net|ending|end|closing|variance|change|difference|balance)\b", re.I)
 _CANNOT = re.compile(
     r"\bnot\s+(?:in|on|shown\s+in|listed\s+in|available\s+in|part\s+of)\s+the\s+(?:tables?|sheets?|schema|data)\b|"
@@ -98,6 +108,8 @@ _CANNOT = re.compile(
     r"\b(?:cannot|can't|can\s+not)\s+(?:be\s+)?answer",
     re.I,
 )
+# "Totals are not in the table, so SUM them" is about the left-out total rows, not the question.
+_TOTAL_ROWS = re.compile(r"\b(?:sub)?total(?:s|\s+rows?)\b", re.I)
 _LITERAL = re.compile(r"'((?:[^']|'')*)'")
 _QUOTED = re.compile(r'"([^"]+)"')
 _ALIAS = re.compile(r'(?i)\bAS\s+"([^"]+)"')
@@ -139,9 +151,14 @@ class Tables:
     def __init__(self, files: list[tuple[str, str]]):
         """``files``: (file name, extracted text) for each file whose tables the question may be about."""
         self.sheets: list[Sheet] = []
-        self._labels: dict[str, Column] = {}
+        # Each column name's column, or None when two tables use the name for different columns.
+        self._labels: dict[str, Column | None] = {}
         self._names: set[str] = set()
         self._db = sqlite3.connect(":memory:", check_same_thread=False)
+        self._db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
+        # SQLite's LIKE ignores case for A-Z only: "Müller" would not match '%müller%'.
+        self._db.create_function("like", 2, _like, deterministic=True)
+        self._db.create_function("like", 3, _like, deterministic=True)
         for source, text in files:
             lines = (text or "").splitlines()
             for table in table_lookup.tables_in(text):
@@ -181,8 +198,9 @@ class Tables:
         values: list[list] = []
         for row in table.body:
             cells = [row.group or None] if section else []
-            for column in columns[1 if section else 0 :]:
-                raw = row.value(column.label)
+            # By position: a sheet can head two columns alike ("Date | Amount | Date | Amount").
+            for column, (_label, raw) in zip(columns[1 if section else 0 :], row.cells):
+                raw = "" if raw == tables.BLANK else raw
                 if raw:
                     column.samples.append(raw)
                 cells.append(_stored(raw, column.kind))
@@ -194,23 +212,39 @@ class Tables:
             f"CREATE TABLE {name} ({', '.join(f'{c.name} {_sql_type(c.kind)}' for c in columns)})"
         )
         self._db.executemany(f"INSERT INTO {name} VALUES ({', '.join('?' * len(columns))})", values)
-        title = " / ".join(part for part in (source, _heading_above(lines, table.rows[0].at)) if part)
+        # A workbook's sheets are told apart by name ("Aug 2026", "Sep 2026"), a PDF's tables by their headings.
+        sheet = table.where if table.where.startswith("sheet") else ""
+        title = " / ".join(part for part in (source, sheet, _heading_above(lines, table.rows[0].at)) if part)
         self.sheets.append(Sheet(name, title, _notes(lines), columns, len(values)))
         for column in columns:
-            self._labels.setdefault(column.name, column)
+            known = self._labels.get(column.name, column)
+            same = known is not None and (known.label, _style(known)) == (column.label, _style(column))
+            self._labels[column.name] = known if same else None
         self._names |= {name, *(column.name for column in columns)}
 
     def schema(self) -> str:
-        """The tables as the model sees them: each column's name, what it holds, and the names it lists."""
-        out = []
+        """The tables as the model sees them: each column's name, what it holds, and the names it lists. A
+        long one lists fewer names, then leaves out the last tables, to stay within ``SCHEMA_CHARS``."""
+        for names in (MAX_NAMES, 12, 4):
+            text = "\n".join(self._create(sheet, names) for sheet in self.sheets)
+            if len(text) <= SCHEMA_CHARS:
+                return text
+        kept: list[str] = []
         for sheet in self.sheets:
-            head = f"CREATE TABLE {sheet.name} (  -- {sheet.title + ': ' if sheet.title else ''}{sheet.rows} rows, total rows left out"
-            lines = [head]
-            for column in sheet.columns:
-                lines.append(f"  {column.name} {_sql_type(column.kind)},  -- {_describe(column)}")
-            lines.append(");" + (f"  -- note: {sheet.note}" if sheet.note else ""))
-            out.append("\n".join(lines))
-        return "\n".join(out)
+            create = self._create(sheet, 4)
+            if kept and len("\n".join(kept)) + len(create) > SCHEMA_CHARS:
+                break
+            kept.append(create)
+        return "\n".join(kept)
+
+    def _create(self, sheet: Sheet, names: int) -> str:
+        head = f"CREATE TABLE {sheet.name} (  -- {sheet.title + ': ' if sheet.title else ''}{sheet.rows} rows, total rows left out"
+        lines = [head]
+        for index, column in enumerate(sheet.columns):
+            comma = "," if index < len(sheet.columns) - 1 else ""
+            lines.append(f"  {column.name} {_sql_type(column.kind)}{comma}  -- {_describe(column, names)}")
+        lines.append(");" + (f"  -- note: {sheet.note}" if sheet.note else ""))
+        return "\n".join(lines)
 
     def run(self, sql: str) -> tuple[list[str], list[tuple], bool]:
         """Run one SELECT: (column names, rows, whether there were more). Raises ``ValueError`` or
@@ -258,14 +292,22 @@ class Tables:
         if value is None:
             return "blank"
         if isinstance(value, float):
-            number = Decimal(repr(value)).quantize(Decimal("0.0001")).normalize()
+            if not math.isfinite(value) or abs(value) >= 1e15:
+                return f"{value:g}"
+            try:
+                number = Decimal(repr(value)).quantize(Decimal("0.0001")).normalize()
+            except InvalidOperation:
+                return f"{value:g}"
             column = self._labels.get(name.lower())
             if column and column.kind == "figure":
                 return table_lookup._format(number, column.samples)
-            # A figure the query worked out (a sum, an average): the sheet's decimals, two when it isn't whole.
-            samples = self._figure_samples() + ([] if number == number.to_integral_value() else ["0.00"])
+            # A figure the query worked out (a sum, an average): the sheet's decimals, two when it isn't whole,
+            # four for a ratio under one ("0.0347", not "0.03").
+            samples = self._figure_samples()
+            if number != number.to_integral_value():
+                samples.append("0.0000" if abs(number) < 1 else "0.00")
             return table_lookup._format(number, samples)
-        return str(value)
+        return str(value)[:300]
 
     def _figure_samples(self) -> list[str]:
         """How the sheet writes its amounts, for a result the query worked out: their decimals, without a
@@ -321,7 +363,7 @@ def ask(settings, tables: Tables, question: str, *, complete=None) -> Result | N
     for attempt in range(ATTEMPTS):
         reply = complete(settings, messages, max_tokens=400)
         plan, sql = parse(reply)
-        if not sql or _CANNOT.search(plan):
+        if not sql or _cannot(plan):
             # "Sum q3 actual (since Q2 is not in the table)" answers another question under this one's name.
             return None
         error = ""
@@ -345,6 +387,11 @@ def ask(settings, tables: Tables, question: str, *, complete=None) -> Result | N
     return None
 
 
+def _cannot(plan: str) -> bool:
+    """The plan says the sheet doesn't hold what was asked ("Q2 is not in the table")."""
+    return any(_CANNOT.search(part) and not _TOTAL_ROWS.search(part) for part in re.split(r"[;,.()]", plan))
+
+
 def parse(reply: str) -> tuple[str, str]:
     """(plan, sql) from the model's reply; sql is "" when it wrote NONE or no query."""
     text = reply or ""
@@ -362,15 +409,64 @@ def parse(reply: str) -> tuple[str, str]:
 # Building the tables ----------------------------------------------------------------------------
 
 
-def _authorize(action: int, _arg1, _arg2, _db, _trigger) -> int:
-    if action in _ALLOWED and not (action == sqlite3.SQLITE_FUNCTION and str(_arg2).lower() == "load_extension"):
+def _authorize(action: int, _table, function, _db, _trigger) -> int:
+    """Reading and the built-in functions only; for a function call SQLite passes its name third."""
+    if action in _ALLOWED and not (action == sqlite3.SQLITE_FUNCTION and str(function).lower() in _REFUSED):
         return sqlite3.SQLITE_OK
     return sqlite3.SQLITE_DENY
 
 
+_ANY = object()
+_STAR = object()
+
+
+def _like(pattern, value, escape=None):
+    """SQL's LIKE with case folded for every letter: % any run of characters, _ any one."""
+    if pattern is None or value is None:
+        return None
+    tokens: list = []
+    text = str(pattern).casefold()
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if escape is not None and char == str(escape).casefold() and index + 1 < len(text):
+            tokens.append(text[index + 1])
+            index += 2
+            continue
+        if char == "%":
+            if not tokens or tokens[-1] is not _STAR:
+                tokens.append(_STAR)
+        else:
+            tokens.append(_ANY if char == "_" else char)
+        index += 1
+    return _wildcard(tokens, str(value).casefold())
+
+
+def _wildcard(tokens: list, text: str) -> bool:
+    """Whether ``tokens`` match all of ``text``, going back only to the last % (no runaway backtracking)."""
+    at = position = 0
+    star, mark = -1, 0
+    while position < len(text):
+        if at < len(tokens) and tokens[at] is not _STAR and (tokens[at] is _ANY or tokens[at] == text[position]):
+            at += 1
+            position += 1
+        elif at < len(tokens) and tokens[at] is _STAR:
+            star, mark = at, position
+            at += 1
+        elif star != -1:
+            at, mark = star + 1, mark + 1
+            position = mark
+        else:
+            return False
+    while at < len(tokens) and tokens[at] is _STAR:
+        at += 1
+    return at == len(tokens)
+
+
 def _ident(label: str, taken: set[str]) -> str:
     """A column name the model can write bare: "31 - 60 Days" is c_31_60_days, "Check #" check_no."""
-    name = re.sub(r"[^a-z0-9]+", "_", label.lower().replace("#", " no ").replace("%", " pct ")).strip("_") or "col"
+    plain = unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode()
+    name = re.sub(r"[^a-z0-9]+", "_", plain.lower().replace("#", " no ").replace("%", " pct ")).strip("_") or "col"
     if name[0].isdigit():
         name = f"c_{name}"
     if name in _KEYWORDS:
@@ -388,9 +484,9 @@ def _sql_type(kind: str) -> str:
 
 def _stored(raw: str, kind: str):
     if kind == "figure":
+        # A "-" is the accounting format's zero; a blank cell is no figure at all (MIN and AVG skip it).
         number = table_lookup._number(raw)
-        # A blank cell in a column of figures is nothing there: 0.
-        return float(number) if number is not None else 0.0 if not raw else None
+        return float(number) if number is not None else None
     if kind == "date":
         when = table_lookup._when(raw)
         if when:
@@ -399,16 +495,26 @@ def _stored(raw: str, kind: str):
     return raw or None
 
 
-def _describe(column: Column) -> str:
+def _style(column: Column) -> tuple:
+    """How a column writes its cells: its kind, and for figures a percent, a currency sign, the decimals."""
+    if column.kind != "figure":
+        return (column.kind,)
+    places = max((len(m.group(1)) for sample in column.samples for m in [re.search(r"\.(\d+)", sample)] if m), default=0)
+    return ("figure", all("%" in s for s in column.samples), any("$" in s for s in column.samples), places)
+
+
+def _describe(column: Column, names: int = MAX_NAMES) -> str:
     if column.kind == "figure":
         note = f'"{column.label}" figure'
+        if column.samples and all("%" in sample for sample in column.samples):
+            note += ", a percent (6.3 means 6.3%)"
         return f"{note} = {column.formula} on every row" if column.formula else note
     if column.kind == "date":
         stored = next((_stored(s, "date") for s in column.samples if table_lookup._when(s)), "")
         shape = "YYYY-MM-DD" if len(stored or "") == 10 else "MM-DD"
         return f'"{column.label}" date as text {shape}' + (f", e.g. {stored}" if stored else "")
-    names = list(dict.fromkeys(column.samples))
-    shown = ", ".join(name[:48] for name in names[:MAX_NAMES]) + (", …" if len(names) > MAX_NAMES else "")
+    listed = list(dict.fromkeys(column.samples))
+    shown = ", ".join(name[:48] for name in listed[:names]) + (", …" if len(listed) > names else "")
     return f'"{column.label}": {shown}'
 
 
@@ -419,6 +525,7 @@ def _formulas(columns: list[Column], values: list[list]) -> None:
     total - current"), the result is the column headed like one (a total, net, ending or variance), else
     the one further right."""
     figures = [index for index, column in enumerate(columns) if column.kind == "figure"]
+    values = values[:FORMULA_ROWS]
     found: dict[int, list[tuple[int, int]]] = {}
     for target in figures:
         position = figures.index(target)
@@ -449,8 +556,9 @@ def _holds(values: list[list], target: int, terms: list[tuple[int, int]]) -> boo
     used = good = 0
     copies = [0] * len(terms)
     for row in values:
-        parts = [row[index] for index, _sign in terms]
-        if row[target] is None or any(part is None for part in parts):
+        # A blank part adds nothing, as in the sheet's SUM.
+        parts = [row[index] or 0.0 for index, _sign in terms]
+        if row[target] is None:
             continue
         used += 1
         good += abs(sum(sign * part for (_index, sign), part in zip(terms, parts)) - row[target]) <= 0.015 * len(terms)

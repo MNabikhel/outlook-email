@@ -21,6 +21,7 @@ import calendar
 import json
 import operator
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from itertools import zip_longest
@@ -441,31 +442,34 @@ def files_line(email: EmailRecord) -> str:
     return "Files: " + "; ".join(names) + locked
 
 
-def query_tables(ws: Workspace, question: str, complete):
+def query_tables(ws: Workspace, question: str, complete) -> Iterator[dict]:
     """Have the model write a query over the tables in the files the question is about, and run it, once
     per question. Yields chat ``step`` events; the result is kept in ``ws.worked`` for ``file_context``.
-    ``complete``: the model call."""
+    ``complete``: the model call. Anything going wrong leaves the answer to the file text: a model that is
+    down fails again on the answer, and says so there."""
     email = ws.primary()
     if email is None or email.id in ws.worked or not email.attachments or attachments_locked(email) or SUMMARY_RE.search(question):
         return
     ws.worked[email.id] = ""
     readable = [att for att in email.attachments if (att.extracted_text or "").strip()]
     readable = named_files(readable, question) or readable
-    tables = table_query.Tables([(att.filename, att.extracted_text or "") for att in readable])
+    tables = None
     try:
+        tables = table_query.Tables([(att.filename, att.extracted_text or "") for att in readable])
         if not tables or not tables.about(question):
             return
-        try:
-            found = table_query.ask(ws.settings, tables, question, complete=complete)
-        except Exception:  # the answer goes on from the file text (a model that is down fails there, and says so)
-            return
+        yield {"type": "step", "text": "Writing a query over the tables for the question"}
+        found = table_query.ask(ws.settings, tables, question, complete=complete)
         if found is None:
             return
         ws.worked[email.id] = tables.render(found)
         count = len(found.rows)
         yield {"type": "step", "text": f"Worked out from the tables with a query ({count} row{'s' if count != 1 else ''})"}
+    except Exception:
+        return
     finally:
-        tables.close()
+        if tables is not None:
+            tables.close()
 
 
 def file_context(ws: Workspace, question: str, room: int) -> dict[str, str]:
@@ -494,9 +498,10 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
     skipped = [att for att in readable if att not in named] if named else []
     readable = named or readable
     lines: list[str] = []
+    files_shown = 0
     used = 0
     # The query worked out over the tables answers the question as asked; it leads, ahead of the files.
-    worked = clip(ws.worked.get(email.id, ""), room // 3) if ws.worked.get(email.id) and not whole else ""
+    worked = "" if whole else _worked_block(ws.worked.get(email.id, ""), room // 3)
     if worked:
         lines.append(worked)
         used += prompt_size(worked)
@@ -550,16 +555,27 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             else:
                 read = f"Read {shown} of {len(parts)} sections of {att.filename}{', one cut short' if cut else ''} ({how})"
         piece = "\n".join(block)
-        if used + prompt_size(piece) > room and lines:
+        if used + prompt_size(piece) > room and files_shown:
             ws.left_out.append(att.filename)
             ws.reads.append(f"Left out {att.filename}: no room (the assistant can still open it)")
             lines.append(f"── File: {att.filename} (not shown; read it with read_file)")
             continue
         ws.reads.append(f"{read}; picked out the table rows the question names" if rows else read)
         lines.append(piece)
+        files_shown += 1
         used += prompt_size(piece)
     lines += [f"── File: {att.filename} ({file_kind(att)}; not asked about, read it with read_file)" for att in skipped]
     return "\n".join(lines)
+
+
+def _worked_block(block: str, room: int) -> str:
+    """The query's block cut to ``room`` at a line, or "" when not even its first result row fits."""
+    if not block:
+        return ""
+    cut = clip(block, room)
+    lines = cut.splitlines()
+    result = next((index for index, line in enumerate(lines) if line.startswith("Result (")), None)
+    return cut if result is not None and len(lines) > result + 1 and not lines[result + 1].startswith("…") else ""
 
 
 def _skimmed(att: AttachmentRecord, parts: list[documents.Part], budget: int) -> str:

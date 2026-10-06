@@ -132,3 +132,80 @@ def test_a_plan_that_says_the_sheet_lacks_it_is_no_answer(aging):
         return "Plan: sum q3 actual (since Q2 is not in the table).\nSQL: SELECT SUM(total_balance) FROM t1"
 
     assert table_query.ask(None, aging, "what were Q2 collections", complete=reply) is None
+
+
+def _text_tables(text: str) -> Tables:
+    return Tables([("book.xlsx", text)])
+
+
+def test_sheets_with_the_same_columns_are_separate_tables():
+    book = _text_tables(
+        '[sheet "Aug 2026"]\nCustomer: Acme | Balance: 1,000\nCustomer: Bolt | Balance: 2,150\n'
+        '[sheet "Sep 2026"]\nCustomer: Acme | Balance: 1,150\nCustomer: Bolt | Balance: 1,000\n'
+    )
+    assert [sheet.title for sheet in book.sheets] == ['book.xlsx / sheet "Aug 2026"', 'book.xlsx / sheet "Sep 2026"']
+    assert book.run("SELECT SUM(balance) FROM t2")[1] == [(2150.0,)]
+
+
+def test_columns_headed_alike_keep_their_own_cells():
+    book = _text_tables(
+        "Customer: Acme | Date: 9/1/2026 | Amount: 1,000 | Date: 9/20/2026 | Amount: 600\n"
+        "Customer: Bolt | Date: 9/3/2026 | Amount: 2,000 | Date: 9/25/2026 | Amount: 2,000\n"
+    )
+    assert book.run("SELECT amount, amount_2, date_2 FROM t1 WHERE customer LIKE '%acme%'")[1] == [(1000.0, 600.0, "2026-09-20")]
+
+
+def test_a_blank_figure_is_no_figure_and_a_dash_is_zero():
+    book = _text_tables(
+        "Employee: Ava | Hours: 80.00 | Rate: 52.40\nEmployee: Marcus | Hours: not listed | Rate: not listed\n"
+        "Employee: Nina | Hours: 72.50 | Rate: -\n"
+    )
+    assert book.run("SELECT MIN(hours), AVG(hours), MIN(rate) FROM t1")[1] == [(72.5, 76.25, 0.0)]
+
+
+def test_a_description_ending_in_total_is_not_a_total_row():
+    book = _text_tables(
+        "Dept: Ops | Basis: Share of revenue total | Allocated: 20,000\nDept: IT | Basis: Headcount | Allocated: 10,000\n"
+        "Dept: HR | Basis: Headcount | Allocated: 20,000\nDept: Company Total | Basis: not listed | Allocated: 50,000\n"
+    )
+    assert book.run("SELECT COUNT(*), SUM(allocated) FROM t1")[1] == [(3, 50000.0)]
+
+
+def test_dashes_in_a_column_of_references_leave_it_text():
+    book = _text_tables("Ref: - | Amount: 10\nRef: - | Amount: 20\nRef: INV-2231 | Amount: 30\nRef: WIRE-88 | Amount: 40\nRef: - | Amount: 50\n")
+    assert book.run("SELECT amount FROM t1 WHERE ref LIKE '%inv-2231%'")[1] == [(30.0,)]
+
+
+def test_headings_like_q1_to_q4_are_headings():
+    book = _text_tables("Revenue | Q1: 1,200 | Q2: 1,300 | Q3: 1,400 | Q4: 1,500\nExpenses | Q1: 900 | Q2: 950 | Q3: 980 | Q4: 1,000\n")
+    assert book.run("SELECT q2 FROM t1 WHERE line LIKE '%revenue%'")[1] == [(1300.0,)]
+
+
+def test_names_match_whatever_their_case_in_any_alphabet():
+    book = _text_tables("Vendor: Müller GmbH | Total: 1,500.00\nVendor: Électricité de France | Total: 2,250.00\n")
+    assert book.run("SELECT total FROM t1 WHERE vendor LIKE '%MÜLLER%' OR vendor LIKE '%électricité%'")[1] == [(1500.0,), (2250.0,)]
+
+
+def test_a_ratio_keeps_its_decimals_and_a_column_shared_by_two_tables_its_own_format():
+    book = _text_tables(
+        "Line: Ads | Change: 4.1%\nLine: Travel | Change: 6.3%\n\n"
+        "Vendor: Acme | Change: $2,500.00\nVendor: Bolt | Change: $1,200.00\n"
+    )
+    names, rows, more = book.run("SELECT change, 1.0 / 6 AS share FROM t2 WHERE vendor LIKE '%acme%'")
+    assert book.render(table_query.Result("", "q", names, rows, more)).endswith("change: 2,500.00 | share: 0.1667")
+
+
+def test_a_plan_about_the_left_out_total_rows_is_still_an_answer(aging):
+    def reply(*_args, **_kwargs):
+        return "Plan: all rows (totals are not in the table, so SUM them); sum total_balance.\nSQL: SELECT SUM(total_balance) FROM t1"
+
+    found = table_query.ask(None, aging, "total AR", complete=reply)
+    assert found is not None and found.rows == [(323110.0,)]
+
+
+def test_a_query_block_without_room_for_its_result_is_left_out():
+    from controller_inbox.agent import _worked_block
+
+    block = "Worked out with a query over the table (check it is what was asked; the whole file follows):\nQuery: SELECT x\nResult (1 row):\nx: 12,345.67"
+    assert _worked_block(block, 2000) == block
+    assert _worked_block(block, 60) == ""

@@ -121,8 +121,9 @@ _DATE_COND = re.compile(
 _BUDGET = re.compile(r"\b(over|under|below|above|missed|beat|exceeded|within)\s+(?:\w+\s+){0,2}?budget\b", re.I)
 _GROUP = re.compile(r"\b(?:by|per|for each|for every|each)\s+([a-z][a-z#&-]*)", re.I)
 _RANGE = re.compile(r"^\s*(?:through|thru|to|until|-|–)\s*$", re.I)
-# "Total Vehicles", "Grand Total", "Subtotal", "% of revenue", and at the end "Finance Subtotal", "Company Total".
-_TOTAL = re.compile(r"^(?:grand\s+|sub-?)?totals?\b|^%|\b(?:sub-?)?totals?$", re.I)
+_TOTAL = re.compile(r"^(?:grand\s+|sub-?)?totals?\b|^%", re.I)
+# A row's own label can name its total last ("Finance Subtotal", "Company Total"); a description can't.
+_TOTAL_LAST = re.compile(r"\b(?:sub-?)?totals?$", re.I)
 _DATE = re.compile(r"(?<![\d/])(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?![\d/])")
 _ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
 _MONTH_DAY = re.compile(
@@ -258,7 +259,9 @@ def tables_in(text: str) -> list[Table]:
     found: list[Table] = []
     for row in parsed:
         labels = tuple(label for label, _value in row.cells)
-        if not found or found[-1].labels != labels:
+        # A PDF's table runs on over its pages; a workbook's sheets with the same columns are different tables.
+        new_sheet = bool(found) and row.page.startswith("sheet") and row.page != found[-1].rows[-1].page
+        if not found or found[-1].labels != labels or new_sheet:
             found.append(Table(labels))
         found[-1].rows.append(row)
     for table in found:
@@ -337,10 +340,10 @@ def _row(line: str, page: str) -> Row | None:
     """A table row, or None. A workbook row names each cell with its reference ("E10 (31 - 60 Days): 22,150");
     a workbook line of bare references ("A5: Vendor | B5: Vendor #") is its heading row, not data."""
     parts = [part.strip() for part in line.split(" | ")]
-    # Every cell of a workbook row is named by its reference. Column headings that only look like one
-    # ("US01", "CA02" entity codes) are names when the line's other labels are words.
-    named = [part.partition(": ")[0].strip() for part in parts if ": " in part]
-    workbook = bool(named) and all(_CELL_REF.match(label) for label in named)
+    # Every cell of a workbook row is named by its reference, all on one row ("A5", "B5"). Headings that only
+    # look like references ("US01", "CA02" entity codes, "Q1" ... "Q4") are names.
+    named = [_CELL_REF.match(part.partition(": ")[0].strip()) for part in parts if ": " in part]
+    workbook = bool(named) and all(named) and len({re.sub(r"^[A-Z]+", "", ref.group(1)) for ref in named}) == 1
     group: list[str] = []
     cells: list[tuple[str, str]] = []
     refs: list[str] = []
@@ -367,7 +370,7 @@ def _row(line: str, page: str) -> Row | None:
 def _name_rows(table: Table) -> None:
     """Name each row by its first text cell that no other row repeats (the asset or vendor, not the category
     merged down the rows), with the next one when that is a short code ("V-302 · Ford F-150 pickup"). A row
-    named "Total ...", "Grand Total" or "% of ..." is a total."""
+    named "Total ...", "Grand Total", "% of ..." or "... Subtotal" is a total (see ``_is_total``)."""
     counts: dict[tuple[str, str], int] = {}
     for row in table.rows:
         for cell in row.cells:
@@ -375,7 +378,7 @@ def _name_rows(table: Table) -> None:
     key = _key_column(table)
     for row in table.rows:
         texts = [(label, value) for label, value in row.cells if value and value != tables.BLANK and not tables.is_value(value)]
-        row.total = any(_TOTAL.search(value) for _label, value in texts)
+        row.total = _is_total(row)
         first = row.cells[0]
         if first[1] and first[1] != tables.BLANK and counts[first] == 1 and tables.is_value(first[1]):
             # A row keyed by a date or a number ("Date: 10/14", "Pmt #: 24") is named by it.
@@ -391,10 +394,17 @@ def _name_rows(table: Table) -> None:
         row.name = name
 
 
+def _is_total(row: Row) -> bool:
+    """A total or subtotal row: a cell starts "Total", "Grand Total", "Subtotal" or "%", or the row's label
+    (its first text) ends with "Total" or "Subtotal"."""
+    texts = [value for _label, value in row.cells if value and value != tables.BLANK and not tables.is_value(value)]
+    return any(_TOTAL.match(value) for value in texts) or bool(texts and _TOTAL_LAST.search(texts[0]))
+
+
 def _key_column(table: Table) -> str:
     """The column that tells the rows apart (Asset ID, Vendor, Task): the first one of text whose values
     nearly every row has and no two rows share. A category merged down the rows repeats, so it is not."""
-    rows = [row for row in table.rows if not any(_TOTAL.search(value) for _label, value in row.cells if value)]
+    rows = [row for row in table.rows if not _is_total(row)]
     for label in table.labels:
         values = [row.value(label) for row in rows if row.value(label)]
         if len(values) >= max(2, 0.8 * len(rows)) and len(set(values)) == len(values) and not all(tables.is_value(v) for v in values):
@@ -406,7 +416,10 @@ def _kinds(table: Table) -> dict[str, str]:
     """Each column's kind from the cells of its ordinary rows: "date", "figure" or "text"."""
     kinds = {}
     for label in table.labels:
-        values = [row.value(label) for row in table.body if row.value(label)]
+        cells = [row.value(label) for row in table.body if row.value(label)]
+        # A "-" reads as the accounting format's zero, but a column of text can have dashes for "none" too:
+        # the other cells decide.
+        values = [value for value in cells if value.strip() not in _DASHES] or cells
         if not values:
             kinds[label] = "text"
             continue

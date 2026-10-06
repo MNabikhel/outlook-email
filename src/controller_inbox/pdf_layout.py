@@ -635,7 +635,8 @@ def _lined_up(lines: list[Line], rows: list[int], lo: float, hi: float) -> bool:
 def _flush(lines: list[Line], rows: list[int], lo: float, hi: float, slack: float) -> tuple[tuple[int, int], tuple[int, int]]:
     """(rows ending within ``slack`` of the strip's left side, rows with text there) and (rows starting within
     ``slack`` of its right side, rows with text there): whether a right-aligned column ends at it and a
-    left-aligned one starts after it."""
+    left-aligned one starts after it. A figure may end short of it by a parenthesis, a zero dash by a couple of
+    digits more: the accounting format pads them so they line up with "(1,215.00)"."""
     ends = starts = left_rows = right_rows = 0
     for index in rows:
         words = lines[index].words
@@ -1290,11 +1291,13 @@ def _whole_names(rows: list[list[str]], column: int, blocks: list[int]) -> None:
 
 
 _TOTAL = re.compile(r"^(?:grand\s+|sub-?)?totals?\b", re.I)
+_TOTAL_LAST = re.compile(r"\b(?:sub-?)?totals?$", re.I)
 
 
 def _total_row(row: list[str]) -> bool:
+    """A subtotal or total row: its label starts "Total"/"Subtotal" or ends with it ("Finance Subtotal")."""
     first = next((cell.strip() for cell in row if cell.strip()), "")
-    return bool(_TOTAL.match(first))
+    return bool(_TOTAL.match(first) or _TOTAL_LAST.search(first))
 
 
 def _join_label_lines(
@@ -1484,8 +1487,10 @@ def _wrapped_headings(grid: list[list[str]], mids: list[float]) -> list[list[int
     A heading cell's text wraps onto a second line, and a one-line heading beside it is centered
     between the two, so one row of headings is printed as two or three lines. Those lines sit closer
     together than the rows of figures under them, and each fills the same cells as the lines above
-    it or cells none of them filled. A group heading over several columns ("Q3 2026" over "Actual",
-    "Budget") is a row of its own: the row under it fills more cells than it does.
+    it or cells none of them filled, or the cells above and fewer new ones (a one-line "Total" set halfway
+    down three wrapped headings). Excel's wrapped lines sit under 0.9 of a row apart. A group heading over
+    several columns ("Q3 2026" over "Actual", "Budget") is a row of its own: the row under it fills more new
+    cells than it shares.
     """
     def figures_in(row: list[str]) -> bool:
         # A date on a heading line is part of a column name ("Accum. Depr." over "12/31/25").
