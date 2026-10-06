@@ -7,6 +7,7 @@ import logging
 import mimetypes
 import re
 import shutil
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from email import policy
@@ -46,28 +47,28 @@ def ingest_folder(
     """
     settings.ensure_data_dir()
     report = report if report is not None else {}
-    report.update({"read": 0, "already_read": 0, "failed": []})
+    report.update({"read": 0, "already_read": 0, "failed": [], "waiting": []})
     records = []
     seen: set[str] = set()
     batches = collect_batches(settings)
+    busy = _still_copying([file for path, sidecars in batches for file in (path, *sidecars)])
     sample_checked = False
     for index, (path, sidecars) in enumerate(batches, start=1):
         if on_progress:
             on_progress(index, len(batches), path.name)
         owned = [path, *sidecars] if path.suffix.lower() in MESSAGE_SUFFIXES else [path]
+        if any(file in busy for file in owned):
+            # Still being copied in: leave it for the next run instead of reading half a file.
+            report["waiting"].append(path.name)
+            continue
+        cleared = 0
         try:
-            if path.suffix.lower() in MESSAGE_SUFFIXES:
-                raw = _parse_message(path)
-                for extra in sidecars:
-                    raw.attachments.append(_file_attachment(extra))
-                    raw.has_attachments = True
-            else:
-                raw = _standalone(path)
+            raw = _read_batch(path, sidecars)
             existing = store.get_email(raw.id)
             if raw.id in seen or (existing is not None and existing.model_status in KEEP_READINGS):
                 report["already_read"] += 1
                 archived = _archive(settings, owned)
-                if existing is not None and not existing.source_path and archived:
+                if existing is not None and not existing.source_path and archived and archived[0]:
                     store.set_source_path(raw.id, str(archived[0]))
                 continue
             seen.add(raw.id)
@@ -75,11 +76,12 @@ def ingest_folder(
                 # Only once a real message has parsed, so a bad file cannot empty the board.
                 sample_checked = True
                 if not store.real_mail_count():
-                    report["sample_cleared"] = store.clear_sample()
+                    cleared = store.clear_sample()
+                    report["sample_cleared"] = cleared
             record = process_message(raw, store, settings, now=now)
             _write_extracted(settings, raw)
             archived = _archive(settings, owned)
-            if archived:
+            if archived and archived[0]:
                 store.set_source_path(record.id, str(archived[0]))
                 record.source_path = str(archived[0])
             records.append(record)
@@ -87,28 +89,93 @@ def ingest_folder(
                 report["read"] += 1
             else:
                 report["already_read"] += 1
+        except PermissionError:
+            # Windows: another program (Outlook, Explorer's copy) still holds the file open.
+            log.info("%s is in use; it will be read on the next run", path)
+            report["waiting"].append(path.name)
+            if cleared:
+                sample_checked = _restore_sample(store, settings, report, now)
         except Exception as exc:
             report["failed"].append({"file": path.name, "error": str(exc)[:300]})
             _quarantine(settings, owned, exc)
+            if cleared:
+                sample_checked = _restore_sample(store, settings, report, now)
     if records:
         stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        # Not ``last_sync_at``: that is the Graph cursor, and a folder import must not move it.
         store.set_state("last_folder_ingest", stamp)
-        store.set_state("last_sync_at", stamp)
     return records
+
+
+def _restore_sample(store: Store, settings: Settings, report: dict, now: datetime | None) -> bool:
+    """The first real message failed after the sample was cleared: put the sample back, so a bad
+    file never leaves an empty board. Returns whether the sample check is still done."""
+    if store.real_mail_count():
+        return True
+    from controller_inbox.pipeline import ingest_demo
+
+    try:
+        ingest_demo(store, settings, now=now)
+    except Exception:
+        log.warning("Couldn't restore the sample mailbox", exc_info=True)
+    report.pop("sample_cleared", None)
+    return False
+
+
+def _read_batch(path: Path, sidecars: list[Path]) -> RawMessage:
+    """One message (with its sidecar files) or one loose file, with attachment names made unique."""
+    if path.suffix.lower() in MESSAGE_SUFFIXES:
+        raw = _parse_message(path)
+        for extra in sidecars:
+            raw.attachments.append(_file_attachment(extra))
+            raw.has_attachments = True
+    else:
+        raw = _standalone(path)
+    raw.attachments = unique_attachments(raw.attachments)
+    return raw
+
+
+SETTLE_SECONDS = 2.0
+SETTLE_PROBE_SECONDS = 0.25
+
+
+def _still_copying(paths: list[Path]) -> set[Path]:
+    """Files written in the last couple of seconds that are still growing or still locked.
+
+    One short pause covers every fresh file at once; a file that has finished copying is read now.
+    """
+    fresh: dict[Path, tuple[int, int]] = {}
+    now = time.time()
+    for path in paths:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if now - stat.st_mtime < SETTLE_SECONDS:
+            fresh[path] = (stat.st_size, stat.st_mtime_ns)
+    if not fresh:
+        return set()
+    time.sleep(SETTLE_PROBE_SECONDS)
+    busy: set[Path] = set()
+    for path, before in fresh.items():
+        try:
+            stat = path.stat()
+            with path.open("rb"):
+                pass
+        except OSError:
+            busy.add(path)
+            continue
+        if (stat.st_size, stat.st_mtime_ns) != before:
+            busy.add(path)
+    return busy
 
 
 def collect_messages(settings: Settings) -> list[tuple[RawMessage, list[Path]]]:
     """Backwards-compatible helper used by tests that inspect parsed messages."""
     parsed = []
     for path, sidecars in collect_batches(settings):
-        if path.suffix.lower() in MESSAGE_SUFFIXES:
-            raw = _parse_message(path)
-            for extra in sidecars:
-                raw.attachments.append(_file_attachment(extra))
-                raw.has_attachments = True
-            parsed.append((raw, [path, *sidecars]))
-        else:
-            parsed.append((_standalone(path), [path]))
+        owned = [path, *sidecars] if path.suffix.lower() in MESSAGE_SUFFIXES else [path]
+        parsed.append((_read_batch(path, sidecars), owned))
     return parsed
 
 
@@ -120,8 +187,9 @@ def collect_batches(settings: Settings) -> list[tuple[Path, list[Path]]]:
     consumed: set[Path] = set()
     batches: list[tuple[Path, list[Path]]] = []
 
+    roots = {settings.inbox_incoming.resolve(), settings.inbox_attachments.resolve()}
     for path in messages:
-        sidecars = _sidecars_for(path, loose + attachment_files, consumed)
+        sidecars = _sidecars_for(path, loose + attachment_files, consumed, roots)
         consumed.update(sidecars)
         batches.append((path, sidecars))
 
@@ -135,7 +203,11 @@ def collect_batches(settings: Settings) -> list[tuple[Path, list[Path]]]:
     return batches
 
 
-def _sidecars_for(message_path: Path, candidates: list[Path], consumed: set[Path]) -> list[Path]:
+def _sidecars_for(
+    message_path: Path, candidates: list[Path], consumed: set[Path], roots: set[Path] = frozenset()
+) -> list[Path]:
+    """Files that belong to a message: "<stem>.pdf" beside it, or anything in a folder named "<stem>".
+    The drop folders themselves never count as such a folder, so "incoming.eml" doesn't take every loose file."""
     stem = message_path.stem.casefold()
     matched: list[Path] = []
     for path in candidates:
@@ -143,7 +215,7 @@ def _sidecars_for(message_path: Path, candidates: list[Path], consumed: set[Path
             continue
         parent = path.parent.name.casefold()
         sibling = path.parent.resolve() == message_path.parent.resolve() and path.stem.casefold() == stem
-        folder = parent == stem
+        folder = parent == stem and path.parent.resolve() not in roots
         if sibling or folder:
             matched.append(path)
     return matched
@@ -161,38 +233,93 @@ def _parse_eml(path: Path) -> RawMessage:
     subject = str(parsed.get("subject") or path.stem)
     sender_name, sender_email = _split_address(str(parsed.get("from") or ""))
     received = _email_date(parsed.get("date"), path)
+    body, attachments = _eml_content(parsed)
+    message_id = str(parsed.get("message-id") or "").strip()
+    raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
+    raw.reply_to = _reply_address(str(parsed.get("reply-to") or ""))
+    return raw
+
+
+def _eml_content(message, prefix: str = "", depth: int = 0) -> tuple[str, list[RawAttachment]]:
+    """A MIME message's body text and files. An email attached to it (``message/rfc822``) is kept
+    apart, as the .msg reader keeps one: its text as "<name>.txt", its files as "<name> › file"."""
     body_parts: list[str] = []
     attachments: list[RawAttachment] = []
     html_fallback = ""
-    for part in parsed.walk():
-        if part.is_multipart():
-            continue
+    for part in _eml_leaves(message):
         filename = part.get_filename()
+        ctype = part.get_content_type()
+        if ctype == "message/rfc822":
+            attachments.extend(_attached_email(part, filename or "", prefix, depth))
+            continue
         disposition = (part.get_content_disposition() or "").lower()
         payload = part.get_payload(decode=True) or b""
-        if _inline_picture(part.get_content_type(), filename or "", len(payload), disposition != "attachment" and bool(part.get("content-id"))):
+        if _inline_picture(ctype, filename or "", len(payload), disposition != "attachment" and bool(part.get("content-id"))):
             continue
         if filename or disposition == "attachment":
             attachments.append(
                 RawAttachment(
-                    id=filename or f"part-{len(attachments)+1}",
-                    filename=filename or f"attachment-{len(attachments)+1}",
-                    content_type=part.get_content_type(),
+                    id=prefix + (filename or f"part-{len(attachments)+1}"),
+                    filename=prefix + (filename or f"attachment-{len(attachments)+1}"),
+                    content_type=ctype,
                     size_bytes=len(payload),
                     content=payload,
                 )
             )
             continue
-        ctype = part.get_content_type()
         if ctype == "text/plain":
             body_parts.append(_decode_text_part(part, payload))
         elif ctype == "text/html" and not html_fallback:
             html_fallback = html_to_text(_decode_text_part(part, payload))
     body = "\n".join(p for p in body_parts if p).strip() or html_fallback
-    message_id = str(parsed.get("message-id") or "").strip()
-    raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
-    raw.reply_to = _reply_address(str(parsed.get("reply-to") or ""))
-    return raw
+    return body, attachments
+
+
+def _eml_leaves(part):
+    """The parts that hold content, without descending into an attached email."""
+    if part.get_content_type() == "message/rfc822":
+        yield part
+    elif part.is_multipart():
+        for sub in part.get_payload() or []:
+            yield from _eml_leaves(sub)
+    else:
+        yield part
+
+
+def _attached_email(part, filename: str, prefix: str, depth: int) -> list[RawAttachment]:
+    payload = part.get_payload()
+    inner = payload[0] if isinstance(payload, list) and payload else None
+    if inner is None:
+        data = part.as_bytes() if hasattr(part, "as_bytes") else b""
+        return [_attachment(prefix + (filename or "forwarded message.eml"), "message/rfc822", data)]
+    return forwarded_attachments(inner, filename, prefix, depth)
+
+
+def forwarded_attachments(inner, filename: str = "", prefix: str = "", depth: int = 0) -> list[RawAttachment]:
+    """A forwarded email (a parsed MIME message) as attachments: its text, then the files it carried.
+
+    Used for .eml files and for Graph item attachments, so both read like a forwarded .msg.
+    """
+    subject = _tidy(str(inner.get("subject") or ""))
+    stem = _forward_stem(filename, subject)
+    body, files = _eml_content(inner, f"{prefix}{stem} › ", depth + 1)
+    text = _forward_text(
+        subject,
+        _tidy(str(inner.get("from") or "")),
+        _tidy(str(inner.get("date") or "")),
+        [att.filename.rsplit(" › ", 1)[-1] for att in files],
+        body,
+    )
+    found = [_attachment(f"{prefix}{stem}.txt", "text/plain", text.encode("utf-8"))]
+    if depth < MAX_NESTING:
+        found.extend(files)
+    return found
+
+
+def _forward_stem(filename: str, subject: str) -> str:
+    stem = Path(filename).stem if filename else ""
+    stem = stem or subject or "forwarded message"
+    return re.sub(r"[\\/]", "_", stem).strip()[:80] or "forwarded message"
 
 
 def _parse_msg(path: Path) -> RawMessage:
@@ -303,7 +430,11 @@ def _embedded_message_text(item, filenames: list[str] | None = None) -> str:
     body = getattr(item, "body", "") or ""
     if isinstance(body, bytes):
         body = body.decode("utf-8", errors="replace")
-    files = [name for name in filenames or [] if name]
+    return _forward_text(subject, sender, date, filenames or [], body)
+
+
+def _forward_text(subject, sender, date, filenames: list[str], body: str) -> str:
+    files = [name for name in filenames if name]
     attached = f"\nAttachments: {', '.join(files)}" if files else ""
     return f"Forwarded message\nSubject: {subject}\nFrom: {sender}\nDate: {date}{attached}\n\n{body}".strip()
 
@@ -476,36 +607,75 @@ def safe_filename(name: str) -> str:
     return cleaned[:150] or "attachment"
 
 
+def unique_attachments(attachments: list[RawAttachment]) -> list[RawAttachment]:
+    """Give a repeated file name a number ("invoice.pdf", "invoice (2).pdf"), in order.
+
+    Two attachments with one name would share an attachment id and a file under inbox/extracted.
+    Names are compared as saved on disk (``safe_filename``, any case), and a name that is not
+    repeated keeps its name and id, so files already stored still match.
+    """
+    taken: set[str] = set()
+    for att in attachments:
+        key = safe_filename(att.filename).casefold()
+        if key in taken:
+            name = att.filename
+            dot = name.rfind(".")
+            base, suffix = (name[:dot], name[dot:]) if 0 < dot and len(name) - dot <= 10 and " " not in name[dot:] else (name, "")
+            number = 2
+            while True:
+                tail = f" ({number}){suffix}"
+                candidate = base[: max(1, 150 - len(tail))] + tail
+                if safe_filename(candidate).casefold() not in taken:
+                    break
+                number += 1
+            if att.id == att.filename:
+                att.id = candidate
+            att.filename = candidate
+            key = safe_filename(candidate).casefold()
+        taken.add(key)
+    return attachments
+
+
 def _quarantine(settings: Settings, paths: list[Path], exc: Exception) -> None:
+    """Move an unreadable file to inbox/failed with a note. A file that can't be moved (locked) stays put."""
     dest_root = settings.inbox_failed
-    dest_root.mkdir(parents=True, exist_ok=True)
-    _move_all(dest_root, paths)
-    if paths:
-        note = dest_root / f"{paths[0].name}.why.txt"
-        note.write_text(
-            "CloseDesk could not read this file.\n"
-            f"Reason: {exc}\n\n"
-            "If it is an Outlook message, save it again as .msg or .eml and drop it back in inbox/incoming.\n",
-            encoding="utf-8",
-        )
+    try:
+        dest_root.mkdir(parents=True, exist_ok=True)
+        _move_all(dest_root, paths)
+        if paths:
+            note = dest_root / f"{paths[0].name}.why.txt"
+            note.write_text(
+                "CloseDesk could not read this file.\n"
+                f"Reason: {exc}\n\n"
+                "If it is an Outlook message, save it again as .msg or .eml and drop it back in inbox/incoming.\n",
+                encoding="utf-8",
+            )
+    except OSError:
+        log.warning("Couldn't move %s to the failed folder", paths[0] if paths else dest_root, exc_info=True)
 
 
-def _archive(settings: Settings, paths: list[Path]) -> list[Path]:
+def _archive(settings: Settings, paths: list[Path]) -> list[Path | None]:
     day = datetime.now(settings.tz).strftime("%Y-%m-%d")
     dest_root = settings.inbox_processed / day
     dest_root.mkdir(parents=True, exist_ok=True)
     return _move_all(dest_root, paths)
 
 
-def _move_all(dest_root: Path, paths: list[Path]) -> list[Path]:
-    """Move files into ``dest_root``; returns where each one landed, in order."""
-    moved = []
+def _move_all(dest_root: Path, paths: list[Path]) -> list[Path | None]:
+    """Move files into ``dest_root``; returns where each one landed, in order (None when it could not move)."""
+    moved: list[Path | None] = []
     for path in paths:
         if not path.exists():
+            moved.append(None)
             continue
         target = dest_root / path.name
-        if target.exists():
-            target = dest_root / f"{path.stem}-{sha256_bytes(path.read_bytes())[:8]}{path.suffix}"
-        shutil.move(str(path), str(target))
+        try:
+            if target.exists():
+                target = dest_root / f"{path.stem}-{sha256_bytes(path.read_bytes())[:8]}{path.suffix}"
+            shutil.move(str(path), str(target))
+        except OSError:
+            log.warning("Couldn't move %s to %s", path, dest_root, exc_info=True)
+            moved.append(None)
+            continue
         moved.append(target.resolve())
     return moved

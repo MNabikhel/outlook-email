@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import base64
-import json
 from datetime import datetime, timezone
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -102,6 +103,9 @@ class GraphClient:
     def get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.request("GET", path, params=params).json()
 
+    def get_bytes(self, path: str) -> bytes:
+        return self.request("GET", path).content
+
     def signed_in_user(self) -> dict[str, Any]:
         if self.mailbox:
             return self.get_json(f"/users/{self.mailbox}")
@@ -113,10 +117,11 @@ class GraphMailbox:
         self.client = client
 
     def list_messages(self, received_after: datetime | None = None) -> Iterable[RawMessage]:
-        filters = ["isDraft eq false"]
-        if received_after:
-            stamp = received_after.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            filters.append(f"receivedDateTime ge {stamp}")
+        # Graph rejects a sort on a property unless the filter names it first ("InefficientFilter"),
+        # so receivedDateTime always leads, with an open lower bound when there is no cursor.
+        since = received_after or datetime(1970, 1, 1, tzinfo=timezone.utc)
+        stamp = since.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        filters = [f"receivedDateTime ge {stamp}", "isDraft eq false"]
         params = {
             "$top": "50",
             "$orderby": "receivedDateTime desc",
@@ -151,24 +156,24 @@ class GraphMailbox:
                     )
                 )
             elif odata_type.endswith("itemAttachment"):
-                nested = self.client.get_json(
-                    f"{self.client._user_root()}/messages/{message_id}/attachments/{item['id']}/$value"
-                )
-                # $value for item attachments may be MIME; keep a text fallback.
-                if isinstance(nested, dict):
-                    text = json.dumps(nested)[:20_000].encode()
-                else:
-                    text = b""
-                attachments.append(
-                    RawAttachment(
-                        id=item.get("id"),
-                        filename=item.get("name") or "forwarded-item",
-                        content_type="message/rfc822",
-                        size_bytes=len(text),
-                        content=text,
-                    )
-                )
+                attachments.extend(self._item_attachment(message_id, item))
         return attachments
+
+    def _item_attachment(self, message_id: str, item: dict[str, Any]) -> list[RawAttachment]:
+        """A forwarded email (or other Outlook item) attached as an item. ``$value`` is its MIME,
+        read like a forwarded .eml: its text, then the files it carried."""
+        from controller_inbox.folder_mail import forwarded_attachments
+
+        item_id = item.get("id") or item.get("name") or "item"
+        name = item.get("name") or "forwarded item"
+        mime = self.client.get_bytes(
+            f"{self.client._user_root()}/messages/{message_id}/attachments/{item_id}/$value"
+        )
+        inner = BytesParser(policy=policy.default).parsebytes(mime or b"")
+        found = forwarded_attachments(inner, f"{name}.eml")
+        for att in found:
+            att.id = f"{item_id}:{att.filename}"
+        return found
 
     def apply_categories(self, message_id: str, categories: list[str], flag: bool) -> str:
         body: dict[str, Any] = {"categories": categories}
