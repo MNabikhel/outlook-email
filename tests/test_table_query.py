@@ -209,3 +209,17 @@ def test_a_query_block_without_room_for_its_result_is_left_out():
     block = "Worked out with a query over the table (check it is what was asked; the whole file follows):\nQuery: SELECT x\nResult (1 row):\nx: 12,345.67"
     assert _worked_block(block, 2000) == block
     assert _worked_block(block, 60) == ""
+
+
+def test_tables_are_not_crossed_without_a_column_they_share():
+    matrix = _tables(MORE / "Intercompany Matrix 9-30-26.pdf")
+    for sql in ["SELECT SUM(t1.total_due_to) + SUM(t2.net_receivable_payable) FROM t1, t2", "SELECT * FROM t1 JOIN t2"]:
+        with pytest.raises(ValueError, match="JOIN them ON"):
+            matrix.run(sql)
+    assert matrix.run("SELECT SUM(total_due_to) FROM t1")[1][0][0] == pytest.approx(7185625.98)
+
+
+def test_a_date_is_shown_as_the_sheet_writes_it():
+    calendar = _tables(FIRST / "Sept Close Calendar.pdf")
+    names, rows, more = calendar.run("SELECT task, date FROM t1 WHERE date > '10-06' ORDER BY date DESC LIMIT 1")
+    assert calendar.render(table_query.Result("", "q", names, rows, more)).endswith("Task: Close package to CFO | Date: Thu 10/08")

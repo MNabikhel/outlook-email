@@ -111,6 +111,8 @@ _CANNOT = re.compile(
 # "Totals are not in the table, so SUM them" is about the left-out total rows, not the question.
 _TOTAL_ROWS = re.compile(r"\b(?:sub)?total(?:s|\s+rows?)\b", re.I)
 _LITERAL = re.compile(r"'((?:[^']|'')*)'")
+_CROSS = re.compile(r"(?i)\bFROM\s+t\d+(?:\s+(?:AS\s+)?\w+)?\s*,")
+_JOIN = re.compile(r"(?i)\bJOIN\s+t\d+((?:\s+\w+){0,3})")
 _QUOTED = re.compile(r'"([^"]+)"')
 _ALIAS = re.compile(r'(?i)\bAS\s+"([^"]+)"')
 _SQL_LINE = re.compile(r"(?is)\bSQL:\s*(.*)")
@@ -125,6 +127,7 @@ class Column:
     kind: str  # "figure", "date" or "text"
     samples: list[str] = field(default_factory=list)  # the cells as the sheet writes them
     formula: str = ""
+    written: dict[str, str] = field(default_factory=dict)  # a date as stored -> as the sheet writes it
 
 
 @dataclass
@@ -203,7 +206,10 @@ class Tables:
                 raw = "" if raw == tables.BLANK else raw
                 if raw:
                     column.samples.append(raw)
-                cells.append(_stored(raw, column.kind))
+                stored = _stored(raw, column.kind)
+                if column.kind == "date" and isinstance(stored, str):
+                    column.written.setdefault(stored, raw)
+                cells.append(stored)
             values.append(cells)
         if section:
             columns[0].samples = [row.group for row in table.body if row.group]
@@ -259,6 +265,9 @@ class Tables:
         for quoted in _QUOTED.findall(bare):
             if quoted.lower() not in self._names | aliases:
                 raise ValueError(f'no such column: "{quoted}"')
+        if _CROSS.search(bare) or any(not re.match(r"(?i)\s*(?:\w+\s+)?(?:ON|USING)\b", rest) for rest in _JOIN.findall(bare)):
+            # Every row of one table against every row of another: its sums are many times too large.
+            raise ValueError("the tables are separate lists: query one at a time, or JOIN them ON a column they share")
         started = time.monotonic()
         self._db.set_progress_handler(lambda: int(time.monotonic() - started > QUERY_SECONDS), 10_000)
         try:
@@ -307,6 +316,10 @@ class Tables:
             if number != number.to_integral_value():
                 samples.append("0.0000" if abs(number) < 1 else "0.00")
             return table_lookup._format(number, samples)
+        column = self._labels.get(name.lower())
+        if column and column.kind == "date":
+            # Stored as 2026-10-08 to compare; shown as the sheet writes it ("Thu 10/08").
+            return column.written.get(str(value), str(value))
         return str(value)[:300]
 
     def _figure_samples(self) -> list[str]:
