@@ -194,3 +194,9 @@ def test_a_workbook_row_is_picked_out_with_its_cell():
     assert "Harbor Steel LLC → C5 (31 - 60 Days): 22,150" in found
     over = lookup(text, "Which vendors are over 90 days?")
     assert "Orion Software: 18,600 (D6)" in over and "Zero or blank: Acme Industrial Supply, Harbor Steel LLC" in over
+
+
+def test_several_matching_rows_are_counted(texts):
+    found = lookup(texts["Sept Close Calendar.pdf"], "Which of Priya Raman's tasks are not started?")
+    assert "2 of the table's 12 rows match (priya, raman, not, started):" in found
+    assert "Intercompany reconciliation" not in found

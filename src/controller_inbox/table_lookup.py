@@ -189,11 +189,17 @@ def _answer_lines(table: Table, question: str, words: list[str]) -> tuple[float,
     columns = _columns_named(table, words)
     used = {word for label in columns for word in _label_words(label) if word in words and _numeric(word)}
     row_words = [word for word in words if word not in used]
-    scored = [(score, index) for index, row in enumerate(table.rows) if (score := _row_score(row, row_words, question)) > 0]
+    hits = {index: _row_score(row, row_words, question) for index, row in enumerate(table.rows)}
+    scored = [(score, index) for index, (score, _words) in hits.items() if score > 0]
     lines: list[str] = []
     if scored:
         top = max(score for score, _index in scored)
-        rows = [table.rows[index] for score, index in sorted(scored, key=lambda item: (-item[0], item[1])) if score >= top][:MAX_ROWS]
+        best = [index for score, index in sorted(scored, key=lambda item: (-item[0], item[1])) if score >= top]
+        rows = [table.rows[index] for index in best[:MAX_ROWS]]
+        if len(best) > 1:
+            # A count keeps a small model from adding the row next to them ("Priya has three tasks").
+            named = ", ".join(dict.fromkeys(word for index in best for word in hits[index][1]))
+            lines.append(f"{len(best)} of the table's {len(table.rows)} rows match ({named}):")
         for row in rows:
             where = f"{row.page} · " if row.page else ""
             picked = [row.cell(index) for index, (label, value) in enumerate(row.cells) if label in columns and value != tables.BLANK]
@@ -232,8 +238,9 @@ def _columns_named(table: Table, words: list[str]) -> list[str]:
     ]
 
 
-def _row_score(row: Row, words: list[str], question: str) -> float:
-    """How many of the question's words name this row: its text cells, its first cell, its group, a date in it."""
+def _row_score(row: Row, words: list[str], question: str) -> tuple[float, list[str]]:
+    """How many of the question's words name this row (its text cells, its first cell, its group, a date in
+    it), and which."""
     own: set[str] = set()
     for index, (_label, value) in enumerate(row.cells):
         if value == tables.BLANK:
@@ -243,14 +250,16 @@ def _row_score(row: Row, words: list[str], question: str) -> float:
         own.update(_dates(value))
     own.update(_words(row.group))
     score = 0.0
+    hits = []
     for word in words:
         if word in own or (
             len(word) >= 4 and word.isalpha() and any(len(mine) >= 4 and mine.isalpha() and (mine.startswith(word) or word.startswith(mine)) for mine in own)
         ):
             score += 2 if _numeric(word) or "/" in word else 1
+            hits.append(word)
     if _TOTAL.match(row.name) and not re.search(r"\btotal", question, re.I):
         score -= 0.5
-    return score
+    return score, hits
 
 
 def _column_view(table: Table, columns: list[str], question: str) -> list[str]:
