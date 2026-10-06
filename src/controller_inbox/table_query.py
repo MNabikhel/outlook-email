@@ -289,6 +289,9 @@ class Tables:
         columns = sheet.columns
         months = [_month(columns[index].label) for index in family]
         keys = [index for index, column in enumerate(columns) if index not in family and column.kind != "figure"]
+        if not keys:
+            # Nothing would tell its rows apart.
+            return
         taken = {columns[index].name for index in keys}
         figures = columns[family[0]].kind == "figure"
         axis = Column(over or ("Month" if all(months) else "heading"), _ident(over or ("month" if all(months) else "heading"), taken), "text")
