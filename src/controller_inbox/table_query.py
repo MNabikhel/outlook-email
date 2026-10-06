@@ -38,9 +38,10 @@ Rules:
 - Use only the schema's tables and columns. Total and subtotal rows are left out of the tables, so add them up with SUM.
 - Filter only on rows the question picks out, never on the sheet's own subject (in an inventory sheet "inventory" is every row). Match a name with LIKE '%word%'.
 - Dates are text 'YYYY-MM-DD' (or 'MM-DD' when the sheet shows no year). A blank or '-' figure is 0.
+- Q1 is Jan-Mar, Q2 Apr-Jun, Q3 Jul-Sep, Q4 Oct-Dec; H1 is Jan-Jun, H2 Jul-Dec.
 - A column the schema says is worked out from others ("= a + b on every row") already holds that result: use it, don't add its parts to it.
 - Show the row's name column beside each figure.
-- If no column holds what is asked (another period, a figure the sheet doesn't show), write SQL: NONE
+- If no column holds what is asked (another period, or a figure the sheet doesn't show), write SQL: NONE. Never answer with a different column in its place.
 
 Example schema:
 CREATE TABLE t1 (  -- Inventory, 40 rows
@@ -68,6 +69,9 @@ Plan: the two named rows; unit_cost; their difference.
 SQL: SELECT (SELECT unit_cost FROM t1 WHERE description LIKE '%blue widget%') - (SELECT unit_cost FROM t1 WHERE description LIKE '%red widget%') AS difference
 Question: what was the inventory worth at the end of last year
 Plan: no column holds a value at last year end (only jun and sep quantities); the tables cannot answer it.
+SQL: NONE
+Question: what's our inventory turnover
+Plan: turnover needs cost of goods sold, which no column holds; the tables cannot answer it.
 SQL: NONE"""
 
 # SQLite's words, which a column can't be called without quotes the model would leave off.
@@ -85,6 +89,13 @@ _KEYWORDS = frozenset(
 )
 _ALLOWED = {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, getattr(sqlite3, "SQLITE_RECURSIVE", 33)}
 _RESULT_WORDS = re.compile(r"\b(?:total|net|ending|end|closing|variance|change|difference|balance)\b", re.I)
+_CANNOT = re.compile(
+    r"\bnot\s+(?:in|on|shown\s+in|listed\s+in|available\s+in|part\s+of)\s+the\s+(?:tables?|sheets?|schema|data)\b|"
+    r"\b(?:tables?|sheets?|schema)\s+(?:does|do)\s*n[o']?t\s+(?:have|show|hold|include|contain|list)\b|"
+    r"\bno\s+columns?\s+(?:for|holds?|has|have|shows?|gives?)\b|"
+    r"\b(?:cannot|can't|can\s+not)\s+(?:be\s+)?answer",
+    re.I,
+)
 _SQL_LINE = re.compile(r"(?is)\bSQL:\s*(.*)")
 _PLAN_LINE = re.compile(r"(?i)\bPlan:\s*(.*)")
 _FENCE = re.compile(r"```(?:sql)?\s*(.*?)```", re.S)
@@ -178,7 +189,7 @@ class Tables:
         )
         self._db.executemany(f"INSERT INTO {name} VALUES ({', '.join('?' * len(columns))})", values)
         title = " / ".join(part for part in (source, _heading_above(lines, table.rows[0].at)) if part)
-        self.sheets.append(Sheet(name, title, _note_below(lines, table.rows[-1].at), columns, len(values)))
+        self.sheets.append(Sheet(name, title, _notes(lines), columns, len(values)))
         for column in columns:
             self._labels.setdefault(column.name, column)
 
@@ -259,7 +270,8 @@ def ask(settings, tables: Tables, question: str, *, complete=None) -> Result | N
     for attempt in range(2):
         reply = complete(settings, messages, max_tokens=400)
         plan, sql = parse(reply)
-        if not sql:
+        if not sql or _CANNOT.search(plan):
+            # "Sum q3 actual (since Q2 is not in the table)" answers another question under this one's name.
             return None
         try:
             names, rows, more = tables.run(sql)
@@ -409,11 +421,16 @@ def _heading_above(lines: list[str], at: int) -> str:
     return ""
 
 
-def _note_below(lines: list[str], at: int) -> str:
-    """The note printed under a table ("Read across: each cell is owed TO the row entity BY the column")."""
-    index = at + 1
-    while index < len(lines) and not lines[index].strip():
-        index += 1
-    if index < len(lines) and lines[index].strip() == "[notes]":
-        return " ".join(line.strip() for line in lines[index + 1 : index + 3] if line.strip() and not line.startswith("["))[:240]
-    return ""
+def _notes(lines: list[str]) -> str:
+    """The notes printed in the file ("Read across: each cell is owed TO the row entity BY the column entity"),
+    which explain its tables wherever they sit: a note under the last table often reads the one above."""
+    notes: list[str] = []
+    inside = False
+    for line in lines:
+        text = line.strip()
+        if text.startswith("["):
+            inside = text == "[notes]"
+            continue
+        if inside and text and text not in notes:
+            notes.append(text)
+    return " ".join(notes)[:300]

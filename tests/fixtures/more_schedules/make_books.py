@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -428,7 +429,6 @@ def bank_recs() -> str:
     wb = Workbook()
     ws = wb.active
     ws.title = "Bank Recs"
-    accounts = ["Operating", "Payroll", "Lockbox"]
     heads = ["Operating\nFirst Lakes Bank\nAcct x4471", "Payroll\nHarborview Bank\nAcct x0932",
              "Lockbox\nFirst Lakes Bank\nAcct x2205", "Total"]
     checks = [
@@ -1045,13 +1045,15 @@ def self_check(path: Path) -> None:
 
 
 def convert() -> None:
-    PROFILE.mkdir(exist_ok=True)
     books = sorted(XLSX.glob("*.xlsx"))
     for old in PDF.glob("*.pdf"):
         old.unlink()
-    subprocess.run(["soffice", f"-env:UserInstallation=file://{PROFILE}", "--headless", "--calc",
-                    "--convert-to", "pdf", "--outdir", str(PDF), *map(str, books)],
-                   check=True, capture_output=True, timeout=300)
+    try:
+        subprocess.run(["soffice", f"-env:UserInstallation=file://{PROFILE}", "--headless", "--calc",
+                        "--convert-to", "pdf", "--outdir", str(PDF), *map(str, books)],
+                       check=True, capture_output=True, timeout=300)
+    finally:
+        shutil.rmtree(PROFILE, ignore_errors=True)
 
 
 def verify_pdfs() -> None:
