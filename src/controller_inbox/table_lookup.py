@@ -74,9 +74,15 @@ class Row:
     group: str
     cells: list[tuple[str, str]]
     line: str
-
+    # Each cell's reference in a workbook ("E10"), "" elsewhere.
+    refs: list[str] = field(default_factory=list)
     # What the row is called (set from its table, see ``_name_rows``).
     name: str = ""
+
+    def cell(self, index: int) -> str:
+        label, value = self.cells[index]
+        ref = self.refs[index] if index < len(self.refs) else ""
+        return f"{ref} ({label}): {value}" if ref else f"{label}: {value}"
 
 
 @dataclass
@@ -149,21 +155,34 @@ def _name_rows(table: Table) -> None:
         row.name = name
 
 
+_CELL_REF = re.compile(r"^([A-Z]{1,3}\d{1,7})(?: \((.+)\))?$")
+
+
 def _row(line: str, page: str) -> Row | None:
+    """A table row, or None. A workbook row names each cell with its reference ("E10 (31 - 60 Days): 22,150");
+    a workbook line of bare references ("A5: Vendor | B5: Vendor #") is its heading row, not data."""
     parts = [part.strip() for part in line.split(" | ")]
     group: list[str] = []
     cells: list[tuple[str, str]] = []
+    refs: list[str] = []
     for part in parts:
         label, sep, value = part.partition(": ")
+        label = label.strip()
         if sep and 0 < len(label) <= 60 and not _figure(label):
-            cells.append((label.strip(), value.strip()))
+            ref = ""
+            if cell := _CELL_REF.match(label):
+                if not cell.group(2):
+                    return None
+                ref, label = cell.group(1), cell.group(2)
+            cells.append((label, value.strip()))
+            refs.append(ref)
         elif not cells:
             group.append(part)
         else:
             return None
     if len(cells) < 2:
         return None
-    return Row(page, " > ".join(group), cells, line)
+    return Row(page, " > ".join(group), cells, line, refs)
 
 
 def _answer_lines(table: Table, question: str, words: list[str]) -> tuple[float, list[str]] | None:
@@ -177,7 +196,7 @@ def _answer_lines(table: Table, question: str, words: list[str]) -> tuple[float,
         rows = [table.rows[index] for score, index in sorted(scored, key=lambda item: (-item[0], item[1])) if score >= top][:MAX_ROWS]
         for row in rows:
             where = f"{row.page} · " if row.page else ""
-            picked = [f"{label}: {value}" for label, value in row.cells if label in columns and value != tables.BLANK]
+            picked = [row.cell(index) for index, (label, value) in enumerate(row.cells) if label in columns and value != tables.BLANK]
             head = f"- {where}{row.name}" + (f" → {' | '.join(picked)}" if picked else "")
             lines.append(head if picked and len(row.cells) <= len(picked) + 1 else f"{head}\n  row: {row.line}")
         weight = top + (1 if columns else 0)
@@ -242,10 +261,12 @@ def _column_view(table: Table, columns: list[str], question: str) -> list[str]:
     for label in columns[:2]:
         values = []
         for row in table.rows:
-            value = dict(row.cells).get(label, "")
-            values.append((row, value))
-        filled = [(row, value) for row, value in values if value and value != tables.BLANK and _figure_value(value) not in (None, 0.0)]
-        empty = [row for row, value in values if (row, value) not in filled]
+            index = next((i for i, (name, _value) in enumerate(row.cells) if name == label), None)
+            value = row.cells[index][1] if index is not None else ""
+            ref = row.refs[index] if index is not None and index < len(row.refs) else ""
+            values.append((row, value, ref))
+        filled = [item for item in values if item[1] and item[1] != tables.BLANK and _figure_value(item[1]) not in (None, 0.0)]
+        empty = [item[0] for item in values if item not in filled]
         order = "in the table's order"
         if _LARGEST.search(question) or _SMALLEST.search(question):
             body = [item for item in filled if not _TOTAL.match(item[0].name)]
@@ -255,7 +276,7 @@ def _column_view(table: Table, columns: list[str], question: str) -> list[str]:
             order = "largest first" if _LARGEST.search(question) else "smallest first"
         page = next((row.page for row in table.rows if row.page), "")
         where = f" ({page})" if page else ""
-        shown = "; ".join(f"{_named(row)}: {value}" for row, value in filled[:40])
+        shown = "; ".join(f"{_named(row)}: {value}" + (f" ({ref})" if ref else "") for row, value, ref in filled[:40])
         line = f'- "{label}" for every row{where}, {order}: {shown or "none"}.'
         if empty:
             names = ", ".join(_named(row) for row in empty[:12]) + (" …" if len(empty) > 12 else "")
@@ -331,14 +352,13 @@ def _figure(value: str) -> bool:
     return tables.is_value(value)
 
 
+_LEADING_FIGURE = re.compile(r"\s*([(\-−])?\s*[$€£¥]?\s*([(\-−])?\s*(\d[\d,]*(?:\.\d+)?|\.\d+)")
+
+
 def _figure_value(value: str) -> float | None:
-    text = (value or "").strip()
-    negative = text.startswith("(") and text.endswith(")") or text.startswith("-")
-    digits = re.sub(r"[^\d.]", "", text)
-    if not digits or digits.count(".") > 1:
+    """The figure a cell starts with ("(87,550)", "$(1,250.00)", "1,800 (=SUM(C2:C3))"), or None."""
+    match = _LEADING_FIGURE.match(value or "")
+    if not match:
         return None
-    try:
-        number = float(digits)
-    except ValueError:
-        return None
-    return -number if negative else number
+    number = float(match.group(3).replace(",", ""))
+    return -number if match.group(1) or match.group(2) else number

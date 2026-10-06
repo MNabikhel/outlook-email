@@ -171,3 +171,26 @@ def test_without_a_model_the_lookup_answer_shows_the_row(store, settings):
     text = "".join(event.get("text", "") for event in events if event["type"] == "delta")
     assert "From the table in AP Aging 9-30-26.pdf:" in text
     assert "Harbor Steel LLC → 31 - 60 Days: $22,150.00" in text
+
+
+def test_a_workbook_row_is_picked_out_with_its_cell():
+    import io
+
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Aging"
+    sheet.append(["AP aging as of September 30"])
+    sheet.append([])
+    sheet.append(["Vendor", "Current", "31 - 60 Days", "Over 90 Days"])
+    sheet.append(["Acme Industrial Supply", 24310.5, 0, 0])
+    sheet.append(["Harbor Steel LLC", 48500, 22150, 0])
+    sheet.append(["Orion Software", 0, 0, 18600])
+    out = io.BytesIO()
+    book.save(out)
+    text = extract_document("aging.xlsx", "", out.getvalue())
+    found = lookup(text, "How much do we owe Harbor Steel in the 31-60 day bucket?")
+    assert "Harbor Steel LLC → C5 (31 - 60 Days): 22,150" in found
+    over = lookup(text, "Which vendors are over 90 days?")
+    assert "Orion Software: 18,600 (D6)" in over and "Zero or blank: Acme Industrial Supply, Harbor Steel LLC" in over
