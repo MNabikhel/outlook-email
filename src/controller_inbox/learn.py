@@ -11,7 +11,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from controller_inbox.actions import extract_actions
+from controller_inbox.actions import extract_actions, local_today, received_day
 from controller_inbox.classify import Classification
 from controller_inbox.config import Settings
 from controller_inbox.models import DOCUMENT_LABELS, DocumentType, Importance
@@ -19,16 +19,25 @@ from controller_inbox.store import Store
 
 
 def match_correction(store: Store, *, sender_email: str, subject: str) -> dict | None:
+    """The correction for this sender, else one for the same subject from the same company.
+
+    A subject match never crosses to another company's mail (or to another person's
+    free-mail address): one vendor's "Invoice" correction must not refile everyone's invoices.
+    """
+    from controller_inbox.fraud import FREEMAIL, domain_of
+
     sender = (sender_email or "").strip().lower()
-    if sender:
-        row = store.latest_correction(sender_email=sender)
-        if row:
-            return row
+    if not sender:
+        return None
+    row = store.latest_correction(sender_email=sender)
+    if row:
+        return row
     normalized = _norm(subject)
-    if not normalized:
+    domain = domain_of(sender)
+    if not normalized or not domain or domain in FREEMAIL:
         return None
     for row in store.list_corrections():
-        if _norm(row["subject"]) == normalized:
+        if _norm(row["subject"]) == normalized and domain_of(row.get("sender_email") or "") == domain:
             return row
     return None
 
@@ -125,8 +134,9 @@ def record_correction(
             }
         )
 
-    received = datetime.fromisoformat(email.received_at)
-    as_of = received.astimezone(settings.tz).date()
+    # Text dates are read from the day it arrived; priorities are measured from today.
+    today = local_today(settings.tz)
+    received_on = received_day(email.received_at, settings.tz, fallback=today)
     email.category = learned.document_type
     email.category_confidence = learned.confidence
     email.flags = list(dict.fromkeys(learned.flags))
@@ -143,7 +153,8 @@ def record_correction(
         importance=email.importance,
         fields=email.extracted,
         flags=email.flags,
-        as_of=as_of,
+        as_of=today,
+        received_on=received_on,
     )
     from controller_inbox.reading import assign_script_draft
 

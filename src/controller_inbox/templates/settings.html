@@ -162,7 +162,7 @@
   <article class="panel">
     <h3>Running it every morning</h3>
     <p>Double-click <code>CloseDesk.bat</code> (Windows) or <code>CloseDesk.command</code> (Mac) in the project folder. It reads the drop folder, lets the model read, writes today's digest, and opens this dashboard.</p>
-    <p class="muted">Unattended: schedule <code>python -m controller_inbox overnight</code> (see README), or leave <code>python -m controller_inbox watch</code> running. Last run: {{ last_run or 'never' }}.</p>
+    <p class="muted">Unattended: schedule <code>python -m controller_inbox overnight</code> (see README), or leave <code>python -m controller_inbox watch</code> running. Last run: {{ last_run | shortdt if last_run else 'never' }} · drop folder last read: {{ last_folder | shortdt if last_folder else 'never' }}.</p>
   </article>
 </section>
 <section class="panel" id="cost-codes">
@@ -174,7 +174,7 @@
   <article class="panel">
     <h3>Outlook direct connection (optional, needs IT)</h3>
     <p>If IT later approves a Microsoft Entra app with delegated <code>Mail.Read</code>, set <code>AZURE_CLIENT_ID</code>, then run <code>python -m controller_inbox auth</code> and <code>sync</code>. The drop folder keeps working either way.</p>
-    <p>Status: <strong>{{ 'ready to sign in' if graph_configured else 'not configured' }}</strong> · Last sync: {{ last_sync or 'never' }}</p>
+    <p>Status: <strong>{{ 'ready to sign in' if graph_configured else 'not configured' }}</strong> · Last Outlook sync: {{ last_sync | shortdt if last_sync else 'never' }}</p>
   </article>
   <article class="panel">
     <h3>Sample mailbox</h3>

@@ -4,9 +4,10 @@ Small local models copy most figures correctly but get arithmetic and page numbe
 now and then. After the answer is written:
 
 - a number that isn't in the emails, files, tool results or question is flagged, and when
-  it sits next to the figures it was worked out from, it is recomputed and corrected;
-- "page N" or a cell like B12 is corrected when the figures in that sentence are on a
-  different page or in a different cell, and only one.
+  the sentence says it was worked out from the figures beside it, it is recomputed and
+  corrected. A number that is in that material is never changed;
+- "page N" or a cell like Summary!B12 or "cell B12" is corrected when the figures in that
+  sentence are not on the cited page or in the cited cell but on one other page or cell.
 """
 
 from __future__ import annotations
@@ -164,10 +165,13 @@ def check_numbers(answer: str, grounding: Grounding) -> Review:
         numbers = [n for n in numbers_in(chunk) if _is_claim(chunk, n)]
         grounded = [n for n in numbers if grounding.has(n)]
         for number in reversed(numbers):
-            worked_out = bool(_WORKED_OUT_BEFORE.search(chunk[max(0, number.start - 30): number.start]))
-            if number in grounded and not worked_out:
+            # A figure that is in what the model read is never rewritten, even beside words like "total":
+            # "$10,800 total from $9,000 and $1,750" may leave out a fee the file adds.
+            if number in grounded:
                 continue
-            fix = _worked_out(number, [n for n in grounded if n is not number])
+            # Only a figure the sentence says was worked out ("an increase of", "rose", "total") is recomputed.
+            worked_out = bool(_WORKED_OUT_BEFORE.search(chunk[max(0, number.start - 30): number.start]))
+            fix = _worked_out(number, [n for n in grounded if n is not number]) if worked_out else None
             if fix is not None:
                 value, how = fix
                 right = _format_like(value, number)
@@ -281,6 +285,9 @@ def _fix_page(chunk: str, paged: list[tuple[str, dict[int, str]]]):
         return None
     if figures and best[0] < len(figures):
         return None
+    if figures and here[0] >= len(figures):
+        # The cited page has every figure: it is a right citation, even if another page repeats them.
+        return None
     if here[0] >= best[0] and best[1] < here[1] + 2:
         return None
     right = leaders[0]
@@ -289,12 +296,24 @@ def _fix_page(chunk: str, paged: list[tuple[str, dict[int, str]]]):
     return new, f"Corrected the page for {name}: that is on page {right}, not page {page}."
 
 
+_CELL_WORD_BEFORE = re.compile(r"\bcells?\s+(?:[A-Z]{1,3}\d{1,6}\s*(?:,|and|to|:)\s*)*$", re.I)
+
+
+def _is_cell_ref(chunk: str, match: re.Match) -> bool:
+    """A cell reference, not a word shaped like one ("H1 revenue", "Q3 actual"): it has a sheet
+    prefix (Summary!D2) or the word "cell" before it (cell D2, cells B2 and C2)."""
+    return bool(match["sheet"]) or bool(_CELL_WORD_BEFORE.search(chunk[max(0, match.start() - 40): match.start()]))
+
+
 def _fix_cell(chunk: str, books: list[tuple[str, dict[tuple[str, str], str]]]):
     named = _named(chunk, books)
     if not named or len(named) > 1:
         return None
     name, cells = named[0]
-    refs = [m for m in CELL_RE.finditer(chunk) if any(cell == m["cell"] for _sheet, cell in cells)]
+    refs = [
+        m for m in CELL_RE.finditer(chunk)
+        if _is_cell_ref(chunk, m) and any(cell == m["cell"] for _sheet, cell in cells)
+    ]
     if len(refs) != 1:
         return None
     ref = refs[0]

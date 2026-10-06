@@ -4,6 +4,7 @@ import argparse
 import csv
 import io
 import json
+import logging
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -15,10 +16,14 @@ from controller_inbox.config import Settings, load_settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.models import DOCUMENT_LABELS, IMPORTANCE_LABELS
 from controller_inbox.pipeline import ingest_demo, ingest_mailbox
-from controller_inbox.profile import STATE_KEY as PROFILE_KEY, is_finance
+from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
 
 DEMO_NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+# The day ``watch`` last emailed the digest. Kept apart from "a digest was saved", which other runs do too.
+DIGEST_SENT_KEY = "digest_sent_on"
+
+log = logging.getLogger("controller_inbox")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -120,7 +125,13 @@ def main(argv: list[str] | None = None) -> int:
                 "or pass --force to replace it anyway."
             )
             return 2
-        records, payload = load_sample(store, settings)
+        from controller_inbox.overnight import RunBusy
+
+        try:
+            records, payload = load_sample(store, settings)
+        except RunBusy as exc:
+            print(exc)
+            return 2
         _print_run_summary(records, payload)
         if args.serve:
             return _serve(settings, store, host=args.host, port=args.port)
@@ -175,9 +186,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "ingest":
         from controller_inbox.folder_mail import ingest_folder
+        from controller_inbox.overnight import RunBusy, run_lock
 
         report: dict = {}
-        records = ingest_folder(store, settings, report=report)
+        with run_lock(settings) as locked:
+            if not locked:
+                print(RunBusy())
+                return 0
+            records = ingest_folder(store, settings, report=report)
         print(f"Read {len(records)} file(s) from {settings.inbox_incoming}")
         if report.get("already_read"):
             print(f"{report['already_read']} were already filed earlier and were left as they were.")
@@ -251,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
             "graph_configured": settings.graph_configured,
             "local_model": model.to_dict(),
             "last_sync": store.get_state("last_sync_at"),
+            "last_folder_read": store.get_state("last_folder_ingest"),
             "last_run": store.get_state("last_overnight_at"),
             "counts": counts,
         }
@@ -270,9 +287,13 @@ def main(argv: list[str] | None = None) -> int:
         return _llm_check(settings, store, sample=not args.no_sample)
 
     if args.cmd == "overnight":
-        from controller_inbox.overnight import run_overnight
+        from controller_inbox.overnight import RunBusy, run_overnight
 
-        result = run_overnight(store, settings, limit=args.limit, sync_graph=not args.no_graph)
+        try:
+            result = run_overnight(store, settings, limit=args.limit, sync_graph=not args.no_graph)
+        except RunBusy as exc:
+            print(exc)
+            return 0
         _print_overnight(result)
         return 0
 
@@ -301,19 +322,23 @@ def make_digest(store: Store, settings: Settings, *, as_of, now: datetime) -> di
 
 
 def load_sample(store: Store, settings: Settings):
-    chosen = store.get_state(PROFILE_KEY)
-    store.reset()
-    if chosen:
-        store.set_state(PROFILE_KEY, chosen)
-    records = ingest_demo(store, settings, now=DEMO_NOW)
-    as_of = local_today(settings.tz, DEMO_NOW)
-    payload = make_digest(store, settings, as_of=as_of, now=DEMO_NOW.astimezone(settings.tz))
-    write_digest_files(payload, settings.digest_dir, as_of.isoformat())
+    """Replace the mail with the sample mailbox. Setup choices, the trust list and conversations stay.
+    Raises ``RunBusy`` while a run is reading mail, rather than clearing the database under it."""
+    from controller_inbox.overnight import RunBusy, run_lock
+
+    with run_lock(settings) as locked:
+        if not locked:
+            raise RunBusy()
+        store.clear_mail()
+        records = ingest_demo(store, settings, now=DEMO_NOW)
+        as_of = local_today(settings.tz, DEMO_NOW)
+        payload = make_digest(store, settings, as_of=as_of, now=DEMO_NOW.astimezone(settings.tz))
+        write_digest_files(payload, settings.digest_dir, as_of.isoformat())
     return records, payload
 
 
 def _run(settings: Settings, store: Store, args) -> int:
-    from controller_inbox.overnight import run_overnight
+    from controller_inbox.overnight import RunBusy, run_overnight
 
     print(f"CloseDesk — reading {settings.inbox_incoming}")
 
@@ -322,9 +347,13 @@ def _run(settings: Settings, store: Store, args) -> int:
         suffix = f" {done}/{total}" if total > 1 else ""
         print(f"  {label}{suffix}: {note[:70]}", flush=True)
 
-    result = run_overnight(store, settings, limit=args.limit, on_progress=progress)
-    print()
-    _print_overnight(result)
+    try:
+        result = run_overnight(store, settings, limit=args.limit, on_progress=progress)
+    except RunBusy as exc:
+        print(exc)
+    else:
+        print()
+        _print_overnight(result)
     if args.no_serve:
         return 0
     host = args.host or settings.host
@@ -398,10 +427,10 @@ def _llm_check(settings: Settings, store: Store, *, sample: bool) -> int:
         "extracted": {"invoice_numbers": ["INV-2201"], "amounts": [2200.0], "due_dates": ["2026-10-01"]},
         "script_draft": {"category": "ap_invoice", "folder": "important", "importance": "medium", "flags": []},
     }
-    reader = LocalReader(settings, model=status.model)
-    started = time.monotonic()
-    parsed = reader.read(packet)
-    elapsed = time.monotonic() - started
+    with LocalReader(settings, model=status.model) as reader:
+        started = time.monotonic()
+        parsed = reader.read(packet)
+        elapsed = time.monotonic() - started
     if not parsed:
         print(f"The model answered, but not with usable JSON ({reader.stats.last_error or 'unparseable reply'}).")
         print("Try a stronger instruction-following model, e.g. a 7B/8B instruct model.")
@@ -448,54 +477,85 @@ def _graph_mailbox(settings: Settings):
 def _serve(settings: Settings, store: Store, host: str | None, port: int | None) -> int:
     import uvicorn
 
-    from controller_inbox.web import create_app
+    from controller_inbox.web import allowed_hosts, create_app, is_loopback
 
     if host:
         settings.host = host
     app = create_app(settings, store)
+    if not is_loopback(settings.host):
+        names = ", ".join(sorted(allowed_hosts(settings.host, settings.allowed_hosts)))
+        print(
+            f"\nWARNING: CloseDesk is listening on {settings.host}, beyond this computer. There is no login: "
+            "anyone who can reach this address can read your mail.\n"
+            f"Addresses it answers on: {names}\n"
+            "Use CONTROLLER_INBOX_HOST=127.0.0.1 to keep it on this computer only.\n",
+            flush=True,
+        )
     uvicorn.run(app, host=host or settings.host, port=port or settings.port, log_level="warning")
     return 0
 
 
 def watch_tick(settings: Settings, store: Store, *, force_digest: bool = False, now: datetime | None = None) -> dict:
-    """One watch cycle. Never touches the sample mailbox."""
+    """One watch cycle. Never touches the sample mailbox.
+
+    After the digest hour, today's digest is (re)built when there is none yet or new mail came in, even if
+    another run already saved one. ``send`` is True until the digest has been emailed today (``DIGEST_SENT_KEY``).
+    """
     from controller_inbox.folder_mail import ingest_folder
-    from controller_inbox.overnight import read_queue
+    from controller_inbox.overnight import read_queue, run_lock
 
     records = []
-    if settings.graph_configured:
-        last = store.get_state("last_sync_at")
-        after = datetime.fromisoformat(last) if last else datetime.now(timezone.utc) - timedelta(hours=settings.lookback_hours)
-        records = ingest_mailbox(_graph_mailbox(settings), store, settings, received_after=after)
-    records.extend(ingest_folder(store, settings))
-    reading = read_queue(store, settings) if records or store.counts()["waiting_on_bionic"] else {"read_ids": []}
+    reading: dict = {"read_ids": []}
+    with run_lock(settings) as locked:
+        if locked:
+            if settings.graph_configured:
+                last = store.get_state("last_sync_at")
+                after = datetime.fromisoformat(last) if last else datetime.now(timezone.utc) - timedelta(hours=settings.lookback_hours)
+                records = ingest_mailbox(_graph_mailbox(settings), store, settings, received_after=after)
+            records.extend(ingest_folder(store, settings))
+            if records or store.counts()["waiting_on_bionic"]:
+                reading = read_queue(store, settings)
     now = now or datetime.now(settings.tz)
     as_of = local_today(settings.tz, now)
     wrote = None
-    if now.hour >= settings.digest_hour and (force_digest or not store.get_digest(as_of.isoformat())):
-        payload = make_digest(store, settings, as_of=as_of, now=now)
-        write_digest_files(payload, settings.digest_dir, as_of.isoformat())
-        wrote = payload
-    return {"records": records, "read": len(reading["read_ids"]), "digest": wrote}
+    send = False
+    if now.hour >= settings.digest_hour:
+        send = bool(settings.digest_to and settings.graph_configured) and store.get_state(DIGEST_SENT_KEY) != as_of.isoformat()
+        changed = bool(records or reading["read_ids"])
+        if force_digest or changed or send or not store.get_digest(as_of.isoformat()):
+            payload = make_digest(store, settings, as_of=as_of, now=now)
+            write_digest_files(payload, settings.digest_dir, as_of.isoformat())
+            wrote = payload
+    return {"records": records, "read": len(reading["read_ids"]), "digest": wrote, "send": send, "busy": not locked}
 
 
 def _watch(settings: Settings, store: Store, *, once: bool) -> int:
     source = "Outlook and the drop folder" if settings.graph_configured else f"the drop folder {settings.inbox_incoming}"
     print(f"Watching {source}. Digest at {settings.digest_hour}:00 each day. Ctrl+C to stop.")
 
-    def tick() -> None:
-        result = watch_tick(settings, store, force_digest=once)
+    def tick() -> bool:
         stamp = datetime.now(settings.tz).isoformat(timespec="seconds")
-        print(f"{stamp} read {len(result['records'])} message(s); model read {result['read']}")
-        payload = result["digest"]
-        if payload:
-            print(f"Digest {payload['date']} written: {payload['headline']}")
-            if settings.digest_to and settings.graph_configured:
-                _send_digest(settings, payload, payload["date"])
+        try:
+            result = watch_tick(settings, store, force_digest=once)
+            if result.get("busy"):
+                print(f"{stamp} another run is processing mail; checking again next time.")
+            else:
+                print(f"{stamp} read {len(result['records'])} message(s); model read {result['read']}")
+            payload = result["digest"]
+            if payload:
+                print(f"Digest {payload['date']} written: {payload['headline']}")
+                if result.get("send"):
+                    _send_digest(settings, payload, payload["date"])
+                    store.set_state(DIGEST_SENT_KEY, payload["date"])
+        except Exception as exc:  # one bad check (network, Outlook, a file) must not stop the watch
+            log.exception("watch check failed")
+            print(f"{stamp} this check failed ({type(exc).__name__}: {exc}). Trying again in {max(30, settings.poll_seconds)}s.", flush=True)
+            return False
+        return True
 
-    tick()
+    ok = tick()
     if once:
-        return 0
+        return 0 if ok else 1
     while True:
         time.sleep(max(30, settings.poll_seconds))
         tick()

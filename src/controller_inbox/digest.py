@@ -38,10 +38,14 @@ _PRIORITY_WEIGHT = {"critical": 60, "high": 40, "medium": 10, "low": 0}
 
 
 def digest_window(as_of: date, tz: tzinfo, lookback_days: int = 1) -> tuple[datetime, datetime]:
-    """Start of the previous working day (Friday for a Monday) through the end of ``as_of``."""
-    start_day = as_of - timedelta(days=max(1, lookback_days))
-    while start_day.weekday() >= 5:
+    """Start of the ``lookback_days``-th working day before ``as_of`` (Friday for a Monday; Thursday for a Monday
+    with two) through the end of ``as_of``. Weekends are skipped, not counted."""
+    start_day = as_of
+    remaining = max(1, lookback_days)
+    while remaining:
         start_day -= timedelta(days=1)
+        if start_day.weekday() < 5:
+            remaining -= 1
     start = datetime.combine(start_day, time.min, tzinfo=tz)
     end = datetime.combine(as_of + timedelta(days=1), time.min, tzinfo=tz)
     return start, end

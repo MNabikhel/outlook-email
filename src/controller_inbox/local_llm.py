@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+import weakref
 import time
 from dataclasses import dataclass, field
 
@@ -301,12 +302,20 @@ def _timeout(settings: Settings, budget: int) -> float:
 
 
 def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> httpx.Response:
-    """POST, dropping ``reasoning_effort`` if this server build refuses it."""
+    """POST, dropping ``reasoning_effort`` if this server build refuses it.
+
+    The model is only remembered as refusing ``reasoning_effort`` when the same request
+    without it goes through. When that retry fails too, something else (``response_format``,
+    ``tools``) was the problem: the first answer comes back and the payload keeps its effort.
+    """
     response = post(url, json=payload, headers=_headers(settings), **options)
     if "reasoning_effort" in payload and response.status_code in _RETRYABLE:
-        _effort_rejected.add(str(payload.get("model")))
-        payload.pop("reasoning_effort")
-        response = post(url, json=payload, headers=_headers(settings), **options)
+        effort = payload.pop("reasoning_effort")
+        retry = post(url, json=payload, headers=_headers(settings), **options)
+        if retry.status_code < 400:
+            _effort_rejected.add(str(payload.get("model")))
+            return retry
+        payload["reasoning_effort"] = effort
     return response
 
 
@@ -330,6 +339,8 @@ class LocalReader:
         self.settings = settings
         self.model = model or resolve_model(settings)
         self.client = client or httpx.Client(timeout=settings.llm_timeout)
+        # A client this reader made is closed with it (or when it is garbage-collected); a passed-in one is the caller's.
+        self._closer = weakref.finalize(self, self.client.close) if client is None else None
         self.stats = ReaderStats()
         self._structured = True
         self._effort = reasoning_effort(settings, self.model)
@@ -337,6 +348,16 @@ class LocalReader:
         if _thinks(settings, self.model, self._effort):
             self._max_tokens = max(self._max_tokens, THINKING_ROOM)
         self._consecutive_failures = 0
+
+    def close(self) -> None:
+        if self._closer is not None:
+            self._closer()
+
+    def __enter__(self) -> "LocalReader":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
 
     @property
     def stopped(self) -> bool:
@@ -413,9 +434,11 @@ class LocalReader:
                 # Older LM Studio / Ollama builds reject response_format. Ask again, plain.
                 self._structured = False
                 payload.pop("response_format", None)
-                response = self.client.post(
-                    url, json=payload, headers=_headers(self.settings), timeout=_timeout(self.settings, self._max_tokens)
+                response = _post_chat(
+                    self.client.post, url, payload, self.settings, timeout=_timeout(self.settings, self._max_tokens)
                 )
+                if "reasoning_effort" not in payload:
+                    self._effort = None
             response.raise_for_status()
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as exc:
             raise ModelUnavailable(f"the local model server stopped answering ({_short_error(exc)})") from exc
@@ -609,23 +632,28 @@ def stream_text(settings: Settings, messages: list[dict], *, max_tokens: int = 5
     raise EmptyReply(reply.why_unusable())
 
 
-def _stream_once(settings: Settings, messages: list[dict], budget: int, effort: str | None, reply: Reply):
+def _stream_once(
+    settings: Settings, messages: list[dict], budget: int, effort: str | None, reply: Reply, *, rejected_effort: str = ""
+):
+    """``rejected_effort`` names the model whose ``reasoning_effort`` the last try sent; it is
+    remembered as refusing it only if this try, without it, is accepted."""
     url, payload = _chat_request(settings, messages, budget, stream=True)
     if effort:
         payload["reasoning_effort"] = effort
     timeout = httpx.Timeout(settings.llm_timeout, connect=5.0)
     with httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
         if effort and response.status_code in _RETRYABLE:
-            _effort_rejected.add(str(payload.get("model")))
             rejected = True
         else:
             rejected = False
             if response.status_code >= 400:
                 response.read()
             _raise_for(response)
+            if rejected_effort:
+                _effort_rejected.add(rejected_effort)
             yield from _stream_pieces(response, reply)
     if rejected:
-        yield from _stream_once(settings, messages, budget, None, reply)
+        yield from _stream_once(settings, messages, budget, None, reply, rejected_effort=str(payload.get("model")))
 
 
 def _stream_pieces(response: httpx.Response, reply: Reply):
@@ -837,7 +865,8 @@ def read_packet(settings: Settings, packet: dict) -> dict | None:
     """One-off read. Runs that read many messages should share a LocalReader."""
     if not llm_active(settings):
         return None
-    return LocalReader(settings).read(packet)
+    with LocalReader(settings, model=check_model(settings).model or None) as reader:
+        return reader.read(packet)
 
 
 def build_prompt(packet: dict, *, budget: int = 6000) -> str:

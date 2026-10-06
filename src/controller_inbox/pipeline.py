@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -24,6 +26,8 @@ VERDICT_FLAGS = {"fraud_cleared", "fraud_confirmed"}
 # A message the model already read, or the user corrected, is not re-scored
 # when the same mail is dropped or synced again.
 KEEP_READINGS = {"bionic", "corrected"}
+
+log = logging.getLogger(__name__)
 
 
 class Mailbox(Protocol):
@@ -53,22 +57,33 @@ def process_message(
     existing = store.get_email(raw.id)
     if existing is not None and existing.model_status in KEEP_READINGS:
         return existing
+    # Two dates. "By Friday" and "October 15" in the text are read against the day the mail was
+    # sent (``anchor``); how urgent or overdue it is now is judged against today (``as_of``).
     as_of = as_of or now.astimezone(settings.tz).date()
+    anchor = sent_date(raw.received_at, settings, fallback=as_of)
+    # The raw text is kept for field extraction (it needs the account digits to see that a bank
+    # change is asked for); everything stored or shown is built from the masked text.
+    clean = replace(
+        raw,
+        body_text=redact_financial_secrets(raw.body_text),
+        body_preview=redact_financial_secrets(raw.body_preview or raw.body_text[:240]),
+    )
     attachments_raw = explode_archives(list(raw.attachments))
     if mailbox is not None and not attachments_raw and raw.has_attachments:
         attachments_raw = list(mailbox.get_attachments(raw.id))
+    attachments_raw = _unique_ids(attachments_raw)
 
     att_records: list[AttachmentRecord] = []
     att_classifications: list[Classification] = []
     merged_fields = extract_fields(
         f"{raw.subject}\n{raw.body_text}",
-        as_of=as_of,
+        as_of=anchor,
         extra_vendor=raw.sender_name,
     )
 
     for raw_att in attachments_raw:
         text = attachment_text(raw_att.filename, raw_att.content_type, raw_att.content)
-        fields = extract_fields(f"{raw_att.filename}\n{text}", as_of=as_of, extra_vendor=raw.sender_name)
+        fields = extract_fields(f"{raw_att.filename}\n{text}", as_of=anchor, extra_vendor=raw.sender_name)
         merged_fields = merged_fields.merged_with(fields)
         classified = classify_document(
             subject=raw.subject,
@@ -97,7 +112,7 @@ def process_message(
             )
         )
 
-    body_text = redact_financial_secrets(raw.body_text)
+    body_text = clean.body_text
     verdicts = [flag for flag in (existing.flags if existing else []) if flag in VERDICT_FLAGS]
     check = assess(
         trust_context(store, settings),
@@ -134,7 +149,7 @@ def process_message(
     actions = extract_actions(
         email_id=raw.id,
         subject=raw.subject,
-        body=raw.body_text,
+        body=body_text,
         category=classified_email.document_type,
         importance=classified_email.importance,
         fields=merged_fields,
@@ -143,6 +158,7 @@ def process_message(
         now=now,
         sender=raw.sender_name or raw.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in att_records),
+        received_on=anchor,
     )
 
     writeback_status = "skipped"
@@ -162,7 +178,7 @@ def process_message(
         sender_email=raw.sender_email,
         received_at=raw.received_at.astimezone(timezone.utc).isoformat(),
         body_text=body_text[:50_000],
-        body_preview=(raw.body_preview or raw.body_text[:240])[:500],
+        body_preview=clean.body_preview[:500],
         has_attachments=has_files,
         outlook_importance=raw.outlook_importance,
         is_read=raw.is_read,
@@ -193,6 +209,36 @@ def process_message(
     return store.get_email(record.id) or record
 
 
+def sent_date(received_at, settings: Settings, *, fallback):
+    """The day a message was sent, in the user's time zone: what "tomorrow" in its text means."""
+    try:
+        when = received_at if isinstance(received_at, datetime) else datetime.fromisoformat(str(received_at))
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when.astimezone(settings.tz).date()
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+
+
+def _unique_ids(attachments: list) -> list:
+    """Attachment ids must be unique within a message (they key the stored record); a repeat gets a number."""
+    seen: set[str] = set()
+    out = []
+    for att in attachments:
+        att_id = str(att.id)
+        if att_id in seen:
+            number = 2
+            while f"{att_id} ({number})" in seen:
+                number += 1
+            att = replace(att, id=f"{att_id} ({number})")
+        seen.add(str(att.id))
+        out.append(att)
+    return out
+
+
+SYNC_CURSOR = "last_sync_at"
+
+
 def ingest_mailbox(
     mailbox: Mailbox,
     store: Store,
@@ -200,12 +246,27 @@ def ingest_mailbox(
     *,
     received_after: datetime | None = None,
     now: datetime | None = None,
+    report: dict | None = None,
+    cursor: str | None = SYNC_CURSOR,
 ) -> list[EmailRecord]:
+    """Read every message since ``received_after``. One message that can't be read is logged in
+    ``report["failed"]`` and skipped; the rest are still read and the cursor still moves.
+
+    The cursor is the time the sync started, so mail that arrives while it runs is read next time.
+    ``cursor=None`` leaves it alone (the sample mailbox is not a sync).
+    """
+    started = now or datetime.now(timezone.utc)
+    report = report if report is not None else {}
+    report.setdefault("failed", [])
     processed: list[EmailRecord] = []
     for raw in mailbox.list_messages(received_after=received_after):
-        processed.append(process_message(raw, store, settings, mailbox, now=now))
-    last = now or datetime.now(timezone.utc)
-    store.set_state("last_sync_at", last.astimezone(timezone.utc).isoformat())
+        try:
+            processed.append(process_message(raw, store, settings, mailbox, now=now))
+        except Exception as exc:
+            log.warning("Couldn't read message %s (%s)", raw.id, raw.subject, exc_info=True)
+            report["failed"].append({"id": raw.id, "subject": raw.subject, "error": str(exc)[:300]})
+    if cursor:
+        store.set_state(cursor, started.astimezone(timezone.utc).isoformat())
     return processed
 
 
@@ -213,7 +274,7 @@ def ingest_demo(store: Store, settings: Settings, *, now: datetime | None = None
     from controller_inbox.demo import DemoMailbox
 
     mailbox = DemoMailbox(now=now)
-    return ingest_mailbox(mailbox, store, settings, now=now)
+    return ingest_mailbox(mailbox, store, settings, now=now, cursor=None)
 
 
 def _classify(
@@ -259,16 +320,17 @@ def _classify(
     return apply_learned(classified, learned) if learned else classified
 
 
-def rescore_stored(store: Store, settings: Settings, email: EmailRecord, check) -> EmailRecord:
+def rescore_stored(
+    store: Store, settings: Settings, email: EmailRecord, check, *, now: datetime | None = None
+) -> EmailRecord:
     """Refile a stored email after its fraud level changed (a verdict, a trusted domain, a report).
 
     The script draft is rebuilt from the stored text, so an overnight reading made
     under the old level is read again. Tasks already done or dismissed are kept.
+    As in ``process_message``, urgency is judged against today; the stored fields were
+    already read against the day the mail was sent.
     """
-    try:
-        as_of = datetime.fromisoformat(email.received_at).astimezone(settings.tz).date()
-    except ValueError:
-        as_of = datetime.now(settings.tz).date()
+    as_of = (now or datetime.now(timezone.utc)).astimezone(settings.tz).date()
     attachments = [
         classify_document(
             subject=email.subject,
@@ -318,6 +380,7 @@ def rescore_stored(store: Store, settings: Settings, email: EmailRecord, check) 
         as_of=as_of,
         sender=email.sender_name or email.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in email.attachments),
+        received_on=sent_date(email.received_at, settings, fallback=as_of),
     )
     fresh_keys = {key(item) for item in fresh}
     finished = [item for item in email.actions if item.status != ActionStatus.OPEN and key(item) not in fresh_keys]

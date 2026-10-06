@@ -178,7 +178,7 @@ def docx_text(data: bytes) -> str:
 
     document = Document(io.BytesIO(data))
     lines: list[str] = []
-    for block in document.element.body.iterchildren():
+    for block in _docx_blocks(document.element.body):
         if block.tag == f"{_W}p":
             line = _docx_paragraph(block)
             if line:
@@ -192,6 +192,18 @@ def docx_text(data: bytes) -> str:
     if any("[deleted:" in line for line in lines):
         lines.insert(0, "[This draft has tracked changes: inserted text is shown, deletions are marked [deleted: …].]")
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def _docx_blocks(parent):
+    """Paragraphs and tables in order, including those inside content controls (``w:sdt``), which
+    templates use for cover pages, form fields and amounts."""
+    for child in parent.iterchildren():
+        if child.tag == f"{_W}sdt":
+            content = child.find(f"{_W}sdtContent")
+            if content is not None:
+                yield from _docx_blocks(content)
+        else:
+            yield child
 
 
 def _docx_paragraph(element) -> str:
@@ -455,7 +467,7 @@ def xls_text(data: bytes) -> str:
 def csv_text(data: bytes, filename: str) -> str:
     from openpyxl.utils import get_column_letter
 
-    text = _decode(data)
+    text = decode_text(data).replace("\x00", "")
     try:
         dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
     except csv.Error:
@@ -473,13 +485,22 @@ def csv_text(data: bytes, filename: str) -> str:
     return "\n".join(lines)
 
 
-def _decode(data: bytes) -> str:
+def decode_text(data: bytes) -> str:
+    """Text from a file of unknown encoding: UTF-16 with a byte-order mark (or the NUL pattern
+    of one without), UTF-8, then Windows-1252."""
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        return data.decode("utf-16", errors="replace")
+    head = data[:4096]
+    if len(head) >= 4 and head.count(b"\x00") >= len(head) // 3:
+        odd, even = head[1::2].count(b"\x00"), head[0::2].count(b"\x00")
+        return data.decode("utf-16-le" if odd >= even else "utf-16-be", errors="replace")
     for encoding in ("utf-8-sig", "cp1252"):
         try:
             return data.decode(encoding)
         except UnicodeDecodeError:
             continue
     return data.decode("utf-8", errors="replace")
+
 
 
 def _fmt(value) -> str:
@@ -518,7 +539,7 @@ def pptx_text(data: bytes) -> str:
         title = slide.shapes.title.text.strip() if slide.shapes.title is not None and slide.shapes.title.has_text_frame else ""
         if title:
             lines.append(f"# {title}")
-        for shape in slide.shapes:
+        for shape in _pptx_shapes(slide.shapes):
             if shape == slide.shapes.title:
                 continue
             if getattr(shape, "has_table", False) and shape.has_table:
@@ -533,6 +554,16 @@ def pptx_text(data: bytes) -> str:
                 lines.append(f"Speaker notes: {notes}")
         parts.append(re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip())
     return "\n\n".join(parts)
+
+
+def _pptx_shapes(shapes):
+    """Every shape on a slide, including those inside groups, in drawing order."""
+    for shape in shapes:
+        inner = getattr(shape, "shapes", None) if getattr(shape, "shape_type", None) == 6 else None  # MSO_SHAPE_TYPE.GROUP
+        if inner is not None:
+            yield from _pptx_shapes(inner)
+        else:
+            yield shape
 
 
 def _pptx_table(table) -> list[str]:
@@ -914,10 +945,15 @@ def _columns(ws, first: str, second: str):
     picked = []
     for wanted in (first, second):
         text = (wanted or "").strip().strip("'\"")
-        if re.fullmatch(r"[A-Za-z]{1,3}", text):
-            picked.append((None, column_index_from_string(text.upper())))
-            continue
-        hit = headers.get(text.lower()) or next((spot for head, spot in headers.items() if text and text.lower() in head), None)
+        # A header that is exactly this text wins over reading it as column letters ("Jan", "Qty", "Net").
+        hit = headers.get(text.lower())
+        if hit is None and re.fullmatch(r"[A-Za-z]{1,3}", text):
+            try:
+                picked.append((None, column_index_from_string(text.upper())))
+                continue
+            except ValueError:
+                pass
+        hit = hit or next((spot for head, spot in headers.items() if text and text.lower() in head), None)
         if hit is None:
             shown = ", ".join(f'"{head}"' for head in list(headers)[:20])
             return f"No column called {wanted!r}. Give column letters like C and D, or one of these headers: {shown}"

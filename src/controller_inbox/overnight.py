@@ -7,7 +7,9 @@ from the script draft, so the morning board is usable either way.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 from controller_inbox import cost_codes
@@ -23,6 +25,67 @@ from controller_inbox.semantic import index_mail
 from controller_inbox.store import Store
 
 Progress = Callable[[str, int, int, str], None]
+
+LOCK_NAME = "closedesk-run.lock"
+
+
+class RunBusy(RuntimeError):
+    """Another run (the scheduled job, the dashboard button, ``watch``) is reading the drop folder right now."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Another CloseDesk run is already processing mail (the scheduled run, watch, or the dashboard). "
+            "This one was skipped; try again when it finishes."
+        )
+
+
+@contextmanager
+def run_lock(settings: Settings) -> Iterator[bool]:
+    """Hold the data folder's run lock while reading the drop folder and the queue. Yields False when another
+    process or thread holds it. The operating system lets go if a run crashes, so a lock is never left stuck."""
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    handle = open(settings.data_dir / LOCK_NAME, "a+b")
+    try:
+        if not _try_lock(handle):
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            _unlock(handle)
+    finally:
+        handle.close()
+
+
+def _try_lock(handle) -> bool:
+    try:
+        if sys.platform.startswith("win"):
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(handle) -> None:
+    try:
+        if sys.platform.startswith("win"):
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
 
 
 def read_queue(
@@ -41,7 +104,8 @@ def read_queue(
         if not llm_active(settings):
             result["note"] = check_model(settings).describe()
             return result
-        reader = LocalReader(settings)
+        with LocalReader(settings) as own_reader:
+            return read_queue(store, settings, limit=limit, now=now, reader=own_reader, on_progress=on_progress)
     result["model"] = reader.model
     batch = limit if limit is not None else settings.overnight_batch
     waiting = store.list_emails(model_status="script_draft", order="queue", limit=max(1, batch))
@@ -72,6 +136,23 @@ def run_overnight(
     sync_graph: bool = True,
     reader: LocalReader | None = None,
     on_progress: Progress | None = None,
+) -> dict:
+    """One full pass. Raises ``RunBusy`` instead of racing another run over the same drop folder."""
+    with run_lock(settings) as locked:
+        if not locked:
+            raise RunBusy()
+        return _run_overnight(store, settings, now=now, limit=limit, sync_graph=sync_graph, reader=reader, on_progress=on_progress)
+
+
+def _run_overnight(
+    store: Store,
+    settings: Settings,
+    *,
+    now: datetime | None,
+    limit: int | None,
+    sync_graph: bool,
+    reader: LocalReader | None,
+    on_progress: Progress | None,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     settings.ensure_data_dir()

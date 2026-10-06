@@ -7,7 +7,7 @@ python -m controller_inbox tool queue_status
 python -m controller_inbox tool prepare_queue --limit 20
 python -m controller_inbox tool list_folder --folder important
 python -m controller_inbox tool build_digest
-python -m controller_inbox tool save_reading --json '<object>'
+python -m controller_inbox tool save_reading --json '<object>'   # or pipe the object on stdin without --json
 python -m controller_inbox tool focus
 python -m controller_inbox tool digest_history --limit 14
 ```

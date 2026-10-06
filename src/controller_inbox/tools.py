@@ -14,7 +14,7 @@ from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.local_llm import check_model
 from controller_inbox.models import FOLDERS, FOLDER_LABELS
 from controller_inbox.profile import is_finance
-from controller_inbox.reading import apply_bionic_reading, build_packet
+from controller_inbox.reading import ReadingRefused, apply_bionic_reading, build_packet
 from controller_inbox.store import Store
 
 TOOL_NAMES = [
@@ -66,6 +66,8 @@ def save_reading(store: Store, payload: dict, tz: tzinfo | None = None) -> dict:
         email = apply_bionic_reading(store, email_id, payload, tz)
     except KeyError:
         return {"ok": False, "error": f"No message with id {email_id}"}
+    except ReadingRefused as exc:
+        return {"ok": False, "error": str(exc)}
     return {
         "ok": True,
         "email_id": email.id,
@@ -191,10 +193,16 @@ def dispatch(store: Store, settings: Settings, name: str, args) -> dict:
         return save_reading(store, payload, settings.tz)
     if name == "list_folder":
         return list_folder(store, args.folder, limit=args.limit)
-    if name == "build_digest":
-        return build_digest_tool(store, settings, on=args.date)
-    if name == "focus":
-        return focus_tool(store, settings, on=args.date)
+    if name in {"build_digest", "focus"}:
+        on = getattr(args, "date", None)
+        if on:
+            try:
+                datetime.strptime(on, "%Y-%m-%d")
+            except ValueError:
+                return {"ok": False, "error": f"--date must be a real date written YYYY-MM-DD, not {on!r}."}
+        if name == "build_digest":
+            return build_digest_tool(store, settings, on=on)
+        return focus_tool(store, settings, on=on)
     if name == "digest_history":
         return digest_history(store, limit=args.limit)
     return {"ok": False, "error": "Unknown tool. Use one of: " + ", ".join(TOOL_NAMES) + "."}

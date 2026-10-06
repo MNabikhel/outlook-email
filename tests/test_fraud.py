@@ -168,8 +168,8 @@ def test_verdicts_teach_how_much_a_signal_counts(store, settings):
         record_fraud_verdict(store, settings, f"w{n}", verdict="safe")
     weights = learned_weights(store)
     assert weights["pressure"] < 1 and weights["payment_request"] < 1
-    assert weights["bank_change"] >= 0.8
-    assert weights["bank_change"] < 1
+    # "Not fraud" answers never weaken a bank-change request: it must still block.
+    assert weights["bank_change"] == 1.0
 
 
 def test_model_alone_cannot_block_an_email(store, settings):

@@ -32,9 +32,12 @@ def _review(answer: str):
 
 
 def test_worked_out_figures_are_recomputed_from_the_figures_beside_them():
-    result = _review("Marketing went up the most, from 84,000 to 115,500, an increase of 31,000 [1].")
+    result = _review("Marketing went up the most, from 84,000 to 115,500, an increase of 31,200 [1].")
     assert result.text == "Marketing went up the most, from 84,000 to 115,500, an increase of 31,500 [1]."
-    assert result.checks == ["Corrected 31,000 to 31,500 (115,500 − 84,000)."]
+    assert result.checks == ["Corrected 31,200 to 31,500 (115,500 − 84,000)."]
+    # A figure that is in the files (31,000 is Detail!C2) is never rewritten, even beside "increase of".
+    grounded = _review("Marketing went up the most, from 84,000 to 115,500, an increase of 31,000 [1].")
+    assert grounded.text.endswith("an increase of 31,000 [1].")
 
     percent = _review("Marketing rose 36% (Summary!E2), from 84,000 to 115,500.")
     assert percent.text.startswith("Marketing rose 37.5% ")
