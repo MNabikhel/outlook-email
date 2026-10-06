@@ -28,6 +28,7 @@ MAX_RESULT_ROWS = 25
 # Distinct names listed for a text column, so the model writes them as the sheet does.
 MAX_NAMES = 30
 QUERY_SECONDS = 2.0
+ATTEMPTS = 3
 WORKED_HEAD = "Worked out with a query over the table (check it is what was asked; the whole file follows):"
 
 SYSTEM = """You answer questions about a spreadsheet by writing ONE SQLite query over its tables.
@@ -36,6 +37,7 @@ Plan: which rows (all, or the ones the question names), what value each row give
 SQL: the query, on one line.
 Rules:
 - Use only the schema's tables and columns. Total and subtotal rows are left out of the tables, so add them up with SUM.
+- A figure sits in a row and a column: pick the row with WHERE on the column that names the rows, and the column with SELECT. A name the schema lists as a column is never a value in WHERE.
 - Filter only on rows the question picks out, never on the sheet's own subject (in an inventory sheet "inventory" is every row). Match a name with LIKE '%word%'.
 - Dates are text 'YYYY-MM-DD' (or 'MM-DD' when the sheet shows no year). A blank or '-' figure is 0.
 - Q1 is Jan-Mar, Q2 Apr-Jun, Q3 Jul-Sep, Q4 Oct-Dec; H1 is Jan-Jun, H2 Jul-Dec.
@@ -96,6 +98,9 @@ _CANNOT = re.compile(
     r"\b(?:cannot|can't|can\s+not)\s+(?:be\s+)?answer",
     re.I,
 )
+_LITERAL = re.compile(r"'((?:[^']|'')*)'")
+_QUOTED = re.compile(r'"([^"]+)"')
+_ALIAS = re.compile(r'(?i)\bAS\s+"([^"]+)"')
 _SQL_LINE = re.compile(r"(?is)\bSQL:\s*(.*)")
 _PLAN_LINE = re.compile(r"(?i)\bPlan:\s*(.*)")
 _FENCE = re.compile(r"```(?:sql)?\s*(.*?)```", re.S)
@@ -135,6 +140,7 @@ class Tables:
         """``files``: (file name, extracted text) for each file whose tables the question may be about."""
         self.sheets: list[Sheet] = []
         self._labels: dict[str, Column] = {}
+        self._names: set[str] = set()
         self._db = sqlite3.connect(":memory:", check_same_thread=False)
         for source, text in files:
             lines = (text or "").splitlines()
@@ -192,6 +198,7 @@ class Tables:
         self.sheets.append(Sheet(name, title, _notes(lines), columns, len(values)))
         for column in columns:
             self._labels.setdefault(column.name, column)
+        self._names |= {name, *(column.name for column in columns)}
 
     def schema(self) -> str:
         """The tables as the model sees them: each column's name, what it holds, and the names it lists."""
@@ -211,6 +218,13 @@ class Tables:
         sql = (sql or "").strip().rstrip(";").strip()
         if not re.match(r"(?is)^(select|with)\b", sql):
             raise ValueError("write one SELECT statement")
+        # SQLite reads "Adjusted bank balance" as a string when no column has that name, so a query that names
+        # a row as if it were a column runs and finds nothing. It is an error here, so the model hears why.
+        bare = _LITERAL.sub("''", sql)
+        aliases = {alias.lower() for alias in _ALIAS.findall(bare)}
+        for quoted in _QUOTED.findall(bare):
+            if quoted.lower() not in self._names | aliases:
+                raise ValueError(f'no such column: "{quoted}"')
         started = time.monotonic()
         self._db.set_progress_handler(lambda: int(time.monotonic() - started > QUERY_SECONDS), 10_000)
         try:
@@ -244,21 +258,58 @@ class Tables:
         if value is None:
             return "blank"
         if isinstance(value, float):
+            number = Decimal(repr(value)).quantize(Decimal("0.0001")).normalize()
             column = self._labels.get(name.lower())
-            samples = column.samples if column and column.kind == "figure" else self._figure_samples()
-            return table_lookup._format(Decimal(repr(value)).quantize(Decimal("0.0001")).normalize(), samples)
+            if column and column.kind == "figure":
+                return table_lookup._format(number, column.samples)
+            # A figure the query worked out (a sum, an average): the sheet's decimals, two when it isn't whole.
+            samples = self._figure_samples() + ([] if number == number.to_integral_value() else ["0.00"])
+            return table_lookup._format(number, samples)
         return str(value)
 
     def _figure_samples(self) -> list[str]:
-        """How the sheet writes figures, for a result the query worked out (a sum, a difference): its
-        decimals, without a currency sign or percent that might not apply."""
+        """How the sheet writes its amounts, for a result the query worked out: their decimals, without a
+        currency sign that might not apply, and not a percent column's."""
         samples = [s for sheet in self.sheets for c in sheet.columns if c.kind == "figure" for s in c.samples[:5]]
-        return [s.replace("$", "").replace("%", "") for s in samples]
+        return [s.replace("$", "") for s in samples if "%" not in s]
+
+    def hints(self, sql: str, error: str = "") -> list[str]:
+        """What a query that failed or found nothing got wrong, in words the model can act on: a column
+        named as if it were a row ("payroll" in WHERE line LIKE ...), a row named as if it were a column
+        ("Adjusted bank balance"), or a filter on what every row of the table is (its title)."""
+        found: list[str] = []
+        used = set(re.findall(r"\b(t\d+)\b", _LITERAL.sub("''", sql)))
+        sheets = [sheet for sheet in self.sheets if sheet.name in used] or self.sheets
+        for literal in _LITERAL.findall(sql):
+            text = literal.replace("''", "'").strip("% ").lower()
+            words = set(table_lookup._words(text))
+            if len(text) < 3 or not words:
+                continue
+            for sheet in sheets:
+                in_rows = any(text in sample.lower() for c in sheet.columns if c.kind == "text" for sample in c.samples)
+                if in_rows:
+                    continue
+                column = next((c for c in sheet.columns if c.kind != "text" and words <= set(table_lookup._words(c.label)) | {c.name}), None)
+                if column is not None:
+                    found.append(f"'{text}' is the column {column.name} of {sheet.name}, not a name in a row: use {column.name} itself.")
+                    break
+                if words <= set(table_lookup._words(sheet.title)):
+                    found.append(f"Every row of {sheet.name} is '{text}' (its title says so): don't filter on it.")
+                    break
+        missing = re.search(r'no such column: "?([^"]+)"?', error or "")
+        if missing:
+            name = missing.group(1).split(".")[-1].strip().lower()
+            for sheet in sheets:
+                column = next((c for c in sheet.columns if c.kind == "text" and any(name in sample.lower() for sample in c.samples)), None)
+                if column is not None:
+                    found.append(f"'{missing.group(1)}' is a row of {sheet.name}, named in {column.name}: use {column.name} LIKE '%{name}%'.")
+                    break
+        return found
 
 
 def ask(settings, tables: Tables, question: str, *, complete=None) -> Result | None:
     """The model's query for the question, run on ``tables``; None when it says the tables can't answer it
-    or no query it writes will run. One second try when the first fails or finds nothing. ``complete``:
+    or no query it writes will run. A query that fails or finds nothing is tried again with what was wrong. ``complete``:
     the model call (``local_llm.complete_text``)."""
     if complete is None:
         from controller_inbox.local_llm import complete_text as complete
@@ -267,26 +318,29 @@ def ask(settings, tables: Tables, question: str, *, complete=None) -> Result | N
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": f"Schema:\n{tables.schema()}\n\nQuestion: {question}"},
     ]
-    for attempt in range(2):
+    for attempt in range(ATTEMPTS):
         reply = complete(settings, messages, max_tokens=400)
         plan, sql = parse(reply)
         if not sql or _CANNOT.search(plan):
             # "Sum q3 actual (since Q2 is not in the table)" answers another question under this one's name.
             return None
+        error = ""
         try:
             names, rows, more = tables.run(sql)
         except (ValueError, sqlite3.Error) as exc:
-            problem = f"That query failed: {str(exc)[:200]}."
+            error = str(exc)[:200]
+            problem = f"That query failed: {error}."
         else:
             if rows and any(value is not None for value in rows[0]):
                 return Result(plan, sql, names, rows, more)
-            # Nothing found twice is a filter the sheet doesn't have, not an answer.
+            # Nothing found, after another try, is a filter the sheet doesn't have, not an answer.
             problem = "That query found nothing. Check each filter against the names the schema lists."
-        if attempt:
+        if attempt == ATTEMPTS - 1:
             return None
+        hints = " ".join(tables.hints(sql, error))
         messages += [
             {"role": "assistant", "content": reply},
-            {"role": "user", "content": problem + " Write the Plan and SQL lines again."},
+            {"role": "user", "content": f"{problem} {hints} Write the Plan and SQL lines again.".replace("  ", " ")},
         ]
     return None
 

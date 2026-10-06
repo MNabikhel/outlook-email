@@ -92,3 +92,43 @@ def test_none_is_no_answer(aging):
         return "Plan: no credit limits shown.\nSQL: NONE"
 
     assert table_query.ask(None, aging, "what's Dunmore's credit limit", complete=none) is None
+
+
+@pytest.fixture(scope="module")
+def recs() -> Tables:
+    return _tables(MORE / "Bank Reconciliations 9-30-26.pdf")
+
+
+def test_a_row_named_as_a_column_is_an_error_with_the_way_to_name_it(recs):
+    # SQLite would read "Adjusted bank balance" as a string and find nothing; the model hears why instead.
+    sql = """SELECT "Adjusted bank balance" FROM t1 WHERE line LIKE '%payroll harborview bank acct x0932%'"""
+    with pytest.raises(ValueError, match="no such column"):
+        recs.run(sql)
+    hints = recs.hints(sql, 'no such column: "Adjusted bank balance"')
+    assert "'payroll harborview bank acct x0932' is the column payroll_harborview_bank_acct_x0932 of t1" in hints[0]
+    assert "use line LIKE '%adjusted bank balance%'" in hints[1]
+    # An alias in quotes is a name the query gives itself.
+    assert recs.run('SELECT SUM(amount) AS "Total Owed" FROM t2 ORDER BY "Total Owed"')[1] == [(143887.19,)]
+
+
+def test_a_filter_on_what_every_row_is_is_named(recs):
+    hints = recs.hints("SELECT payee, amount FROM t2 WHERE payee LIKE '%operating%'")
+    assert hints == ["Every row of t2 is 'operating' (its title says so): don't filter on it."]
+
+
+def test_a_worked_out_figure_takes_the_sheet_s_decimals():
+    budget = _tables(FIRST / "Budget vs Actual Q3 2026.pdf")
+    def shown(sql: str) -> str:
+        names, rows, more = budget.run(sql)
+        return budget.render(table_query.Result("", "q", names, rows, more)).splitlines()[-1]
+
+    # Whole dollars like the sheet (not the "6.3%" column's one decimal); two decimals when not whole.
+    assert shown("SELECT q4_2026_forecast - q3_2026_actual AS difference FROM t1 WHERE department LIKE '%marketing%'") == "difference: 45,780"
+    assert shown("SELECT AVG(q3_2026_actual) AS mean FROM t1") == "mean: 1,320,707.50"
+
+
+def test_a_plan_that_says_the_sheet_lacks_it_is_no_answer(aging):
+    def reply(*_args, **_kwargs):
+        return "Plan: sum q3 actual (since Q2 is not in the table).\nSQL: SELECT SUM(total_balance) FROM t1"
+
+    assert table_query.ask(None, aging, "what were Q2 collections", complete=reply) is None
