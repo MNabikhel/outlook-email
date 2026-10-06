@@ -74,6 +74,8 @@ def test_wrapped_headings_and_categories_merged_down_the_rows(texts):
     # A subtotal that runs into the empty cells beside it closes its category; it is not the next one's.
     assert "Category: not listed | Asset ID: Total Machinery & Equipment" in text
     assert "Category: Vehicles | Asset ID: Total" not in text
+    # A two-line category merged over two rows puts a line beside each; its subtotal names it whole.
+    assert "Category: Computer Equipment | Asset ID: C-410" in text and "Category: Computer Equipment | Asset ID: C-412" in text
 
 
 def test_names_on_their_side_and_short_dates_head_their_columns(texts):

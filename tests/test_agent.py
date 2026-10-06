@@ -153,6 +153,8 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
     monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
     monkeypatch.setattr(assistant, "chat_with_tools", fake_tools)
     monkeypatch.setattr(assistant, "stream_text", fake_stream)
+    # Asked for a query over the workbook's table, the model finds none fits a question about a formula.
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "Plan: the formula is not a value in the table.\nSQL: NONE")
     events = _events(answer_stream(store, settings, "How is the total change worked out?", email_id=budget.id))
     kinds = [e["type"] for e in events]
     assert kinds[0] == "sources" and kinds[-1] == "done"

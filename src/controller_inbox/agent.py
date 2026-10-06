@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 from itertools import zip_longest
 from pathlib import Path
 
-from controller_inbox import documents, semantic, table_lookup
+from controller_inbox import documents, semantic, table_lookup, table_query
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
@@ -331,6 +331,8 @@ class Workspace:
     read_files: bool = False
     last_email: str = ""
     opened: set[str] = field(default_factory=set)
+    # The query worked out over each email's tables for the question, by email id ("" when none fits).
+    worked: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # The emails in the prompt, plus those the model opens with a tool: the only ones it may write notes on.
@@ -439,6 +441,33 @@ def files_line(email: EmailRecord) -> str:
     return "Files: " + "; ".join(names) + locked
 
 
+def query_tables(ws: Workspace, question: str, complete):
+    """Have the model write a query over the tables in the files the question is about, and run it, once
+    per question. Yields chat ``step`` events; the result is kept in ``ws.worked`` for ``file_context``.
+    ``complete``: the model call."""
+    email = ws.primary()
+    if email is None or email.id in ws.worked or not email.attachments or attachments_locked(email) or SUMMARY_RE.search(question):
+        return
+    ws.worked[email.id] = ""
+    readable = [att for att in email.attachments if (att.extracted_text or "").strip()]
+    readable = named_files(readable, question) or readable
+    tables = table_query.Tables([(att.filename, att.extracted_text or "") for att in readable])
+    try:
+        if not tables or not tables.about(question):
+            return
+        try:
+            found = table_query.ask(ws.settings, tables, question, complete=complete)
+        except Exception:  # the answer goes on from the file text (a model that is down fails there, and says so)
+            return
+        if found is None:
+            return
+        ws.worked[email.id] = tables.render(found)
+        count = len(found.rows)
+        yield {"type": "step", "text": f"Worked out from the tables with a query ({count} row{'s' if count != 1 else ''})"}
+    finally:
+        tables.close()
+
+
 def file_context(ws: Workspace, question: str, room: int) -> dict[str, str]:
     """Outline and the passages that matter, for the email(s) the question is about, within ``room`` characters."""
     blocks: dict[str, str] = {}
@@ -466,7 +495,12 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
     readable = named or readable
     lines: list[str] = []
     used = 0
-    per_file = max(600, room // len(readable))
+    # The query worked out over the tables answers the question as asked; it leads, ahead of the files.
+    worked = clip(ws.worked.get(email.id, ""), room // 3) if ws.worked.get(email.id) and not whole else ""
+    if worked:
+        lines.append(worked)
+        used += prompt_size(worked)
+    per_file = max(600, (room - used) // len(readable))
     for att in readable:
         text = att.extracted_text
         parts = documents.split_parts(text)
@@ -485,6 +519,9 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         # right cell. A file that fits whole comes first; one too long to show gets this index whatever it costs,
         # since it points into the parts that are left out.
         rows = "" if whole else table_lookup.lookup(text, question, limit=table_lookup.MAX_CHARS)
+        if worked and rows.startswith(table_lookup.WORKED_HEAD):
+            # Two workings of one question would leave the model to pick a figure; the query read it as asked.
+            rows = ""
         spare = budget - size - 2 * len(parts) * 12
         space = spare if spare >= 0 else budget // 3
         rows = clip(rows, space) if rows and space >= 200 else ""

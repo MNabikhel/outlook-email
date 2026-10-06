@@ -121,7 +121,8 @@ _DATE_COND = re.compile(
 _BUDGET = re.compile(r"\b(over|under|below|above|missed|beat|exceeded|within)\s+(?:\w+\s+){0,2}?budget\b", re.I)
 _GROUP = re.compile(r"\b(?:by|per|for each|for every|each)\s+([a-z][a-z#&-]*)", re.I)
 _RANGE = re.compile(r"^\s*(?:through|thru|to|until|-|–)\s*$", re.I)
-_TOTAL = re.compile(r"^(?:grand\s+|sub-?)?totals?\b|^%", re.I)
+# "Total Vehicles", "Grand Total", "Subtotal", "% of revenue", and at the end "Finance Subtotal", "Company Total".
+_TOTAL = re.compile(r"^(?:grand\s+|sub-?)?totals?\b|^%|\b(?:sub-?)?totals?$", re.I)
 _DATE = re.compile(r"(?<![\d/])(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?![\d/])")
 _ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
 _MONTH_DAY = re.compile(
@@ -132,6 +133,7 @@ _DAY_MONTH = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTH_NAMES})\b(?:
 _WEEKDAY = re.compile(r"^(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*\.?,?$", re.I)
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9&]*|#|%")
 _CELL_REF = re.compile(r"^([A-Z]{1,3}\d{1,7})(?: \((.+)\))?$")
+_DASHES = frozenset({"-", "–", "—", "$ -", "$-"})
 _LEADING_FIGURE = re.compile(r"\s*([(\-−])?\s*([$€£¥])?\s*([(\-−])?\s*(\d[\d,]*(?:\.\d+)?|\.\d+)")
 
 When = tuple  # (year or None, month, day)
@@ -148,6 +150,8 @@ class Row:
     # What the row is called, and whether it is a total or subtotal (set from its table, see ``_name_rows``).
     name: str = ""
     total: bool = False
+    # Which line of the text it is.
+    at: int = 0
 
     def value(self, label: str) -> str:
         for name, value in self.cells:
@@ -238,31 +242,105 @@ def render(found: Answer, limit: int = MAX_CHARS) -> str:
 
 def tables_in(text: str) -> list[Table]:
     """Every run of rows written as ``Label: value | Label: value`` with the same columns, with each row's page."""
-    found: list[Table] = []
+    parsed: list[Row] = []
     page = ""
-    for raw in (text or "").splitlines():
+    for at, raw in enumerate((text or "").splitlines()):
         line = raw.strip()
         marker = MARKER_RE.match(line)
         if marker:
             page = marker.group(1)
             continue
         row = _row(line, page)
-        if row is None:
-            continue
+        if row is not None:
+            row.at = at
+            parsed.append(row)
+    _with_colon_labels(parsed)
+    found: list[Table] = []
+    for row in parsed:
         labels = tuple(label for label, _value in row.cells)
         if not found or found[-1].labels != labels:
             found.append(Table(labels))
         found[-1].rows.append(row)
+    for table in found:
+        _with_row_labels(table)
+    found = _joined_across_pages(found)
     for table in found:
         _name_rows(table)
         table.kinds = _kinds(table)
     return found
 
 
+def _with_colon_labels(rows: list[Row]) -> None:
+    """A bare row label with a colon in it ("Add: Deposits in transit | Operating: 86,412.50") reads as a
+    cell named "Add". When the rows around it have bare labels and the same columns as the rest of it,
+    it is a row label too."""
+    for index, row in enumerate(rows):
+        if row.group or row.refs and any(row.refs) or len(row.cells) < 3:
+            continue
+        label, value = row.cells[0]
+        if len(label) > 25 or not value or tables.is_value(value):
+            continue
+        rest = [name for name, _value in row.cells[1:]]
+        near = rows[max(0, index - 8) : index] + rows[index + 1 : index + 9]
+        if any(other.group and other.page == row.page and [name for name, _value in other.cells] == rest for other in near):
+            row.group = f"{label}: {value}"
+            row.cells = row.cells[1:]
+            row.refs = row.refs[1:]
+
+
+# The heading a row-label column gets when the sheet left it blank.
+ROW_LABEL = "Line"
+
+
+def _with_row_labels(table: Table) -> None:
+    """A row-label column without a heading ("Adjusted bank balance" down the side of a reconciliation)
+    is written bare before the labelled cells, like a section name. A section repeats down its rows; a
+    row label names one row, so it is made the table's first column."""
+    leads = [row.group for row in table.rows]
+    if len(leads) < 2 or not all(leads) or len(set(leads)) < 0.9 * len(leads):
+        return
+    table.labels = (ROW_LABEL, *table.labels)
+    for row in table.rows:
+        row.cells.insert(0, (ROW_LABEL, row.group))
+        if row.refs:
+            row.refs.insert(0, "")
+        row.group = ""
+
+
+def _joined_across_pages(found: list[Table]) -> list[Table]:
+    """A sheet too wide for its page prints its last columns on the next page, the row-name columns
+    repeated ("Customer", "Region" again before "Sep-26 ... FY Total"). Those columns are the same rows:
+    they are joined onto them, so a question over the whole year sees every month."""
+    out: list[Table] = []
+    for table in found:
+        before = out[-1] if out else None
+        if before is not None and before.rows and table.rows and table.rows[0].page != before.rows[-1].page:
+            shared = [label for label in table.labels if label in before.labels]
+            names = [tuple(row.value(label) for label in shared) for row in table.rows]
+            if shared and shared == list(table.labels[: len(shared)]) and names == [
+                tuple(row.value(label) for label in shared) for row in before.rows
+            ] and len(set(table.labels) - set(shared)) >= 1:
+                added = [label for label in table.labels if label not in shared]
+                before.labels = (*before.labels, *added)
+                for mine, theirs in zip(before.rows, table.rows):
+                    index = {label: position for position, (label, _value) in enumerate(theirs.cells)}
+                    for label in added:
+                        mine.cells.append((label, theirs.cells[index[label]][1]))
+                        if mine.refs:
+                            mine.refs.append(theirs.refs[index[label]] if index[label] < len(theirs.refs) else "")
+                continue
+        out.append(table)
+    return out
+
+
 def _row(line: str, page: str) -> Row | None:
     """A table row, or None. A workbook row names each cell with its reference ("E10 (31 - 60 Days): 22,150");
     a workbook line of bare references ("A5: Vendor | B5: Vendor #") is its heading row, not data."""
     parts = [part.strip() for part in line.split(" | ")]
+    # Every cell of a workbook row is named by its reference. Column headings that only look like one
+    # ("US01", "CA02" entity codes) are names when the line's other labels are words.
+    named = [part.partition(": ")[0].strip() for part in parts if ": " in part]
+    workbook = bool(named) and all(_CELL_REF.match(label) for label in named)
     group: list[str] = []
     cells: list[tuple[str, str]] = []
     refs: list[str] = []
@@ -271,7 +349,7 @@ def _row(line: str, page: str) -> Row | None:
         label = label.strip()
         if sep and 0 < len(label) <= 60 and not tables.is_value(label):
             ref = ""
-            if cell := _CELL_REF.match(label):
+            if workbook and (cell := _CELL_REF.match(label)):
                 if not cell.group(2):
                     return None
                 ref, label = cell.group(1), cell.group(2)
@@ -297,7 +375,7 @@ def _name_rows(table: Table) -> None:
     key = _key_column(table)
     for row in table.rows:
         texts = [(label, value) for label, value in row.cells if value and value != tables.BLANK and not tables.is_value(value)]
-        row.total = any(_TOTAL.match(value) for _label, value in texts)
+        row.total = any(_TOTAL.search(value) for _label, value in texts)
         first = row.cells[0]
         if first[1] and first[1] != tables.BLANK and counts[first] == 1 and tables.is_value(first[1]):
             # A row keyed by a date or a number ("Date: 10/14", "Pmt #: 24") is named by it.
@@ -316,7 +394,7 @@ def _name_rows(table: Table) -> None:
 def _key_column(table: Table) -> str:
     """The column that tells the rows apart (Asset ID, Vendor, Task): the first one of text whose values
     nearly every row has and no two rows share. A category merged down the rows repeats, so it is not."""
-    rows = [row for row in table.rows if not any(_TOTAL.match(value) for _label, value in row.cells if value)]
+    rows = [row for row in table.rows if not any(_TOTAL.search(value) for _label, value in row.cells if value)]
     for label in table.labels:
         values = [row.value(label) for row in rows if row.value(label)]
         if len(values) >= max(2, 0.8 * len(rows)) and len(set(values)) == len(values) and not all(tables.is_value(v) for v in values):
@@ -940,6 +1018,9 @@ def _number(value: str) -> Decimal | None:
     """The figure in a cell ("(87,550)", "$(1,250.00)", "4.1%", "1,800 (=SUM(C2:C3))"), or None for a date,
     a code like "8-5" or "V-302", or text."""
     text = (value or "").strip()
+    if text in _DASHES:
+        # The accounting format's zero.
+        return Decimal(0)
     if not text or _when(text) is not None:
         return None
     match = _LEADING_FIGURE.match(text)

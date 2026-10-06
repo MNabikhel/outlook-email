@@ -102,8 +102,9 @@ SYSTEM = (
     "- In file tables each row reads \"Column: value\"; \"not listed\" means the file leaves that cell empty. "
     "A heading merged across columns is repeated on each of them (\"Q3 Actual\" and \"Q3 Budget\"). "
     "\"Operating > Revenue\" means Revenue is under Operating.\n"
-    "- \"Rows that match the question\" and \"Worked out from the table\" are copied or added up exactly from the "
-    "file's table (\"Harbor Steel LLC → 31 - 60 Days: $22,150.00\"); start from them when they fit the question.\n"
+    "- \"Rows that match the question\" and the \"Worked out\" blocks are copied or worked out exactly from the "
+    "file's tables (\"Harbor Steel LLC → 31 - 60 Days: $22,150.00\"); start from them when they fit the question. "
+    "A query's result answers what its query asks: check that is the question.\n"
     "- An email marked (open on screen) is the one the user is looking at. \"This\", \"it\", \"the attachment\" "
     "and \"the draft\" mean that email and its files unless the user names another.\n"
     "- When the question needs a figure from an attachment, answer from the file text you were given or that you "
@@ -797,6 +798,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     # The first prompt leaves room for what the tools return; the file text gets most of the rest.
     target = budget - min(budget // 3, TOOL_ROOM)
     overhead = prompt_chars(build_messages(question, ws.sources, budget=target, tools=True, bodies=False, **base))
+    yield from agent.query_tables(ws, question, complete_text)
     files = agent.file_context(ws, question, max(MIN_FILE_ROOM, int((target - overhead) * 0.75)))
     for read in ws.reads:
         yield {"type": "step", "text": read}

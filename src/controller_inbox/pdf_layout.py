@@ -456,6 +456,8 @@ def _word(glyphs: list[Glyph]) -> Word:
 # its right, with a dash for zero: "$       1,845.20" and "$      -".
 _CURRENCY = {"$", "US$", "C$", "A$", "€", "£", "¥"}
 _FIGURE = re.compile(r"^\(?-?[\d.,]*\d[\d.,]*\)?%?$|^[-–—]$")
+# A zero in the accounting format, alone or with its currency sign (see ``_with_currency``).
+_ZERO_DASHES = {"-", "–", "—", *(f"{sign}0" for sign in _CURRENCY)}
 
 
 def _with_currency(words: list[Word]) -> list[Word]:
@@ -641,7 +643,15 @@ def _flush(lines: list[Line], rows: list[int], lo: float, hi: float, slack: floa
         right = [word for word in words if word.x0 >= hi - 0.05]
         if left:
             left_rows += 1
-            ends += lo - left[-1].x1 <= slack
+            # The accounting format ends a positive figure a parenthesis short of where "(1,215.00)" ends,
+            # and its zero dash a couple of digits shorter again.
+            last = left[-1].text
+            room = slack
+            if last in _ZERO_DASHES:
+                room = max(slack, 0.9 * lines[index].size)
+            elif _amount_cell(last):
+                room = max(slack, 0.4 * lines[index].size)
+            ends += lo - left[-1].x1 <= room
         if right:
             right_rows += 1
             # Figures are drawn from the right of their cell; equal widths start level by chance.
@@ -796,6 +806,9 @@ def _labels_above(line: Line, block: list[Line]) -> bool:
         return False
     words = [word.text for segment in line.segments for word in segment]
     if not words or sum(map(tables.is_value, words)) >= 0.5 * len(words):
+        return False
+    if line.segments[0][-1].text.endswith(":"):
+        # "Pay Group:  Hourly & Salaried": a fact about the sheet above it, not its column names.
         return False
     gap = line.mid - block[0].mid
     usual = statistics.median(block[i].mid - block[i + 1].mid for i in range(len(block) - 1)) if len(block) > 1 else line.size
@@ -1257,7 +1270,23 @@ def _fill_grouping_columns(rows: list[list[str]], mids: list[float]) -> list[int
             near = [anchor for anchor in anchors if blocks[anchor] == blocks[index]] or anchors
             nearest = min(near, key=lambda anchor: (abs(mids[anchor] - mids[index]), anchor > index, anchor))
             row[column] = rows[nearest][column]
+        _whole_names(rows, column, blocks)
     return columns
+
+
+def _whole_names(rows: list[list[str]], column: int, blocks: list[int]) -> None:
+    """A two-line category merged over two rows prints one line beside each ("Computer", "Equipment"). The
+    subtotal under them names it whole ("Total Computer Equipment"): when the pieces read that name in
+    order, every row of the block takes it."""
+    for index, row in enumerate(rows):
+        if not _total_row(row):
+            continue
+        name = _TOTAL.sub("", next(cell.strip() for cell in row if cell.strip())).strip()
+        members = [k for k in range(index) if blocks[k] == blocks[index] and column < len(rows[k]) and not _total_row(rows[k])]
+        pieces = list(dict.fromkeys(rows[k][column].strip() for k in members if rows[k][column].strip()))
+        if len(pieces) >= 2 and " ".join(" ".join(pieces).split()).lower() == " ".join(name.split()).lower():
+            for k in members:
+                rows[k][column] = name
 
 
 _TOTAL = re.compile(r"^(?:grand\s+|sub-?)?totals?\b", re.I)
@@ -1474,7 +1503,11 @@ def _wrapped_headings(grid: list[list[str]], mids: list[float]) -> list[list[int
     filled = {c for c, cell in enumerate(grid[0]) if cell}
     for k in range(1, lead):
         mine = {c for c, cell in enumerate(grid[k]) if cell}
-        if mids[k - 1] - mids[k] < 0.8 * pitch and (mine <= filled or not mine & filled):
+        # A line that fills the cells above and a few more is the same row: a one-line heading ("Total")
+        # sits halfway down the wrapped ones beside it. A group heading has more columns under it than
+        # it fills itself.
+        wider = filled < mine and len(mine - filled) < len(filled)
+        if mids[k - 1] - mids[k] < 0.9 * pitch and (mine <= filled or not mine & filled or wider):
             groups[-1].append(k)
             filled |= mine
         else:
