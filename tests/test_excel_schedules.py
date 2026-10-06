@@ -125,7 +125,7 @@ def test_a_question_over_a_column_gets_that_column_for_every_row(texts):
     assert "Evergreen Electric: $13,275.00; Johnson Controls: $2,115.00; Orion Software: $18,600.00" in found
     assert "Zero or blank: Acme Industrial Supply" in found
     largest = lookup(texts["Fixed Asset Schedule 9-30-26.pdf"], "Which asset has the largest 2026 YTD depreciation?")
-    assert '"2026 YTD Depr." for every row (page 1), largest first: B-100 · Elk Grove warehouse: $47,115.38;' in largest
+    assert 'Largest "2026 YTD Depr." (page 1): B-100 · Elk Grove warehouse — $47,115.38' in largest
 
 
 def test_nothing_is_picked_when_the_question_names_no_row_or_column(texts):
@@ -198,5 +198,5 @@ def test_a_workbook_row_is_picked_out_with_its_cell():
 
 def test_several_matching_rows_are_counted(texts):
     found = lookup(texts["Sept Close Calendar.pdf"], "Which of Priya Raman's tasks are not started?")
-    assert "2 of the table's 12 rows match (priya, raman, not, started):" in found
+    assert "2 of the table's 12 rows match, where the row names priya, raman, not, started:" in found
     assert "Intercompany reconciliation" not in found

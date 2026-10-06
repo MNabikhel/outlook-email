@@ -36,7 +36,6 @@ MAX_STEPS = 6
 CHARS_PER_TOKEN = 3
 DEFAULT_CONTEXT = 4096
 RECOMMENDED_CONTEXT = 16384
-TOOL_SCHEMA_TOKENS = 1000
 MAX_FILE_BYTES = 40_000_000
 
 LOCKED = (
@@ -110,6 +109,23 @@ TOOLS = [
                     "file": {"type": "string"},
                 },
                 "required": ["email", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_table",
+            "description": "Answer from a table in an email's files exactly: matching rows, a total, average, count, largest, "
+            "first or last, filtered by names, amounts or dates. Plain words, e.g. \"total Interest for payments in 2027\".",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email": {"type": "string", "description": "The email's number, like 1"},
+                    "question": {"type": "string", "description": "The question about the table, in plain words"},
+                    "file": {"type": "string", "description": "File name or number; leave empty for all its files"},
+                },
+                "required": ["email", "question"],
             },
         },
     },
@@ -195,8 +211,43 @@ TOOLS = [
 ]
 
 
+_LETTERS = re.compile(r"[^\W\d_]+")
+
+
+def prompt_size(text: str) -> int:
+    """How many characters ``text`` is for a prompt budget, which allows three characters a token.
+
+    Its length alone is far off either way: a model's tokenizer takes an English word as one token but most
+    numbers a digit at a time, and table punctuation ("| Label: $1,234.00") a token a mark. So the tokens are
+    estimated from the words, digits and marks (fitted to Qwen's tokenizer on mail, guides and schedules, with
+    a tenth to spare) and written as three characters each.
+    """
+    text = text or ""
+    words = _LETTERS.findall(text)
+    digits = sum(ch.isdigit() for ch in text)
+    marks = sum(1 for ch in text if not ch.isalnum() and not ch.isspace())
+    # A run of letters far longer than a word is split into many tokens.
+    long = sum(max(0, len(word) - 15) for word in words) / 3
+    tokens = 0.8 * len(words) + 0.07 * sum(map(len, words)) + long + 1.3 * digits + 1.2 * marks
+    return int(tokens * CHARS_PER_TOKEN) + 1
+
+
+# What the tool definitions take of the context: their JSON runs about 3.4 characters a token (measured on
+# Qwen's tokenizer), and the chat template wraps it in a few dozen more.
+TOOL_SCHEMA_TOKENS = int(len(json.dumps(TOOLS)) / 3.3) + 80
+
+
+def clip(text: str, room: int, *, mark: str = "\n…") -> str:
+    """``text`` cut at a line so its ``prompt_size`` fits ``room``."""
+    size = prompt_size(text)
+    if size <= room:
+        return text
+    keep = max(0, int(room * len(text) / max(1, size)) - len(mark))
+    return text[:keep].rsplit("\n", 1)[0] + mark
+
+
 def prompt_budget(context_tokens: int, reply_tokens: int, *, tools: bool) -> int:
-    """Characters of prompt that fit the model's context next to its reply."""
+    """Characters of prompt (as ``prompt_size`` counts them) that fit the model's context next to its reply."""
     overhead = TOOL_SCHEMA_TOKENS if tools else 250
     tokens = (context_tokens or DEFAULT_CONTEXT) - reply_tokens - overhead
     return max(2500, tokens * CHARS_PER_TOKEN)
@@ -421,23 +472,27 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         if len(parts) > 1:
             labels = [p.label for p in parts[:12]] + ([f"… {len(parts) - 12} more"] if len(parts) > 12 else [])
             block.append("Sections: " + " / ".join(labels))
-        budget = per_file - len(head) - 200
-        # The table rows and columns the question names, so a small model starts from the right cell.
-        rows = "" if whole else table_lookup.lookup(text, question, limit=max(400, min(table_lookup.MAX_CHARS, budget // 3)))
+        budget = per_file - prompt_size(head) - 200
+        # The table rows the question names, and anything worked out from them, so a small model starts from the
+        # right cell. A file that fits whole comes first; one too long to show gets this index whatever it costs.
+        rows = "" if whole else table_lookup.lookup(text, question, limit=table_lookup.MAX_CHARS)
+        spare = budget - prompt_size(text) - 2 * len(parts) * 12
+        space = spare if spare >= 0 else budget // 3
+        rows = clip(rows, space) if rows and space >= 200 else ""
         if rows:
             block.append(rows)
-            budget -= len(rows) + 1
-        summary = overnight_summary(ws.store, att) if len(text) > budget else ""
+            budget -= prompt_size(rows) + 1
+        summary = overnight_summary(ws.store, att) if prompt_size(text) > budget else ""
         if summary:
             block.append("Summary written overnight (checked against the file):\n" + summary[:900])
-            budget -= min(len(summary), 900) + 60
-        if whole and len(parts) > 2 and len(text) > budget:
+            budget -= prompt_size(summary[:900]) + 60
+        if whole and len(parts) > 2 and prompt_size(text) > budget:
             block.append(_skimmed(att, parts, budget))
             ws.left_out.append(att.filename)
             read = f"Skimmed {att.filename}: too long to read whole ({len(parts)} sections)"
         else:
             how = "picked by words" if matches else "from the start: no words matched"
-            if not whole and len(text) > budget:
+            if not whole and prompt_size(text) > budget:
                 by_meaning = semantic.rank_sections(ws.store, ws.settings, att, question)
                 if by_meaning:
                     how = "picked by words and meaning" if matches else "picked by meaning"
@@ -449,25 +504,25 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             else:
                 read = f"Read {shown} of {len(parts)} sections of {att.filename}{', one cut short' if cut else ''} ({how})"
         piece = "\n".join(block)
-        if used + len(piece) > room and lines:
+        if used + prompt_size(piece) > room and lines:
             ws.left_out.append(att.filename)
             ws.reads.append(f"Left out {att.filename}: no room (the assistant can still open it)")
             lines.append(f"── File: {att.filename} (not shown; read it with read_file)")
             continue
         ws.reads.append(f"{read}; picked out the table rows the question names" if rows else read)
         lines.append(piece)
-        used += len(piece)
+        used += prompt_size(piece)
     lines += [f"── File: {att.filename} ({file_kind(att)}; not asked about, read it with read_file)" for att in skipped]
     return "\n".join(lines)
 
 
 def _skimmed(att: AttachmentRecord, parts: list[documents.Part], budget: int) -> str:
     """For a summary of a file too long to show: its opening, then the lines that stand out from every other section."""
-    first = parts[0].text
-    if len(first) > budget // 3:
-        first = first[: budget // 3].rsplit("\n", 1)[0] + "\n…"
+    first = clip(parts[0].text, budget // 3)
     opening = f"[{att.filename} · {parts[0].label}]\n{first}"
-    rest = documents.skim(parts[1:], budget - len(opening) - 250, tag=f"{att.filename} · ")
+    text = "\n".join(part.text for part in parts[1:])
+    room = budget - prompt_size(opening) - 250
+    rest = documents.skim(parts[1:], int(room * len(text) / max(1, prompt_size(text))), tag=f"{att.filename} · ")
     return (
         f"{opening}\n(Too long to show whole. Below are the lines that stand out from the other {len(parts) - 1} "
         "sections; lines repeated from section to section are left out. This summary comes from a skim. "
@@ -497,10 +552,10 @@ def _passages(
         if budget <= 200:
             break
         body = part.text
-        if len(body) > budget:
-            body, cut = body[:budget].rsplit("\n", 1)[0] + "\n…", True
+        if prompt_size(body) > budget:
+            body, cut = clip(body, budget), True
         picked[part.label] = body
-        budget -= len(body) + len(part.label) + 4
+        budget -= prompt_size(body) + len(part.label) + 4
     block = [f"[{att.filename} · {part.label}]\n{picked[part.label]}" for part in parts if part.label in picked]
     if cut or len(picked) < len(parts):
         ws.left_out.append(att.filename)
@@ -642,6 +697,8 @@ def step_label(name: str, args, ws: Workspace) -> str:
         return f"Reading {fname}" + (f" · {args['part']}" if args.get("part") else "")
     if name == "find_in_file":
         return f"Looking for “{args.get('query', '')}” in {fname}"
+    if name == "ask_table":
+        return f"Asking the table in {fname}: “{str(args.get('question', ''))[:80]}”"
     if name == "read_cells":
         return f"Reading cells {_sheet_ref(args)}{args.get('cells', '')} in {fname}"
     if name == "trace_cell":
@@ -664,8 +721,7 @@ def run_tool(ws: Workspace, name: str, args: dict, *, limit: int) -> str:
         text = _dispatch(ws, name, args)
     except Exception as exc:  # a broken file or odd argument is reported back to the model, not raised
         text = f"That didn't work ({type(exc).__name__}: {str(exc)[:120]})."
-    if len(text) > limit:
-        text = text[:limit].rsplit("\n", 1)[0] + "\n[Cut here to fit. Ask for a narrower part to see more.]"
+    text = clip(text, limit, mark="\n[Cut here to fit. Ask for a narrower part to see more.]")
     if name not in {"note", "search_mail"}:
         ws.evidence.append(f"{step_label(name, args, ws)}:\n{text}")
     return text
@@ -689,6 +745,8 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
         return LOCKED
     if name == "find_in_file":
         return _find_in_file(ws, email, str(args.get("query") or ""), args.get("file"))
+    if name == "ask_table":
+        return _ask_table(ws, email, str(args.get("question") or ""), args.get("file"))
     att = ws.file(email, args.get("file"))
     if att is None:
         return f"No file like {args.get('file')!r} on [{ws.number(email)}]. " + (files_line(email) or "It has no files.")
@@ -710,6 +768,28 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
             return documents.compare_columns(data, str(args.get("sheet") or ""), str(args.get("from") or ""), str(args.get("to") or ""))
         return documents.trace_cell(data, str(args.get("sheet") or ""), str(args.get("cell") or ""))
     return f"There is no tool called {name}."
+
+
+def _ask_table(ws: Workspace, email: EmailRecord, question: str, file) -> str:
+    """The table rows, and anything worked out from them, that answer ``question`` in one file or each of them."""
+    if not question.strip():
+        return "Say what to ask the table, like \"total Cost for Vehicles\"."
+    if file:
+        att = ws.file(email, file)
+        if att is None:
+            return f"No file like {file!r} on [{ws.number(email)}]. " + (files_line(email) or "It has no files.")
+        candidates = [att]
+    else:
+        candidates = [att for att in email.attachments if (att.extracted_text or "").strip()]
+    ws.read_files = True
+    for att in candidates:
+        found = table_lookup.lookup(att.extracted_text or "", question, limit=2500)
+        if found:
+            return f"From {att.filename}:\n{found}"
+    return (
+        f"No table rows in {', '.join(att.filename for att in candidates) or 'its files'} answer {question!r}. "
+        "Ask with the words of the table's columns and rows, or use find_in_file."
+    )
 
 
 def _search_mail(ws: Workspace, query: str) -> str:
@@ -882,11 +962,11 @@ def evidence_text(ws: Workspace, room: int) -> str:
     kept: list[str] = []
     used = 0
     for item in reversed(ws.evidence):
-        piece = item if len(item) <= 1800 else item[:1800].rsplit("\n", 1)[0] + "\n…"
-        if used + len(piece) > room:
+        piece = clip(item, 1800)
+        if used + prompt_size(piece) > room:
             break
         kept.append(piece)
-        used += len(piece)
+        used += prompt_size(piece)
     return "\n\n".join(reversed(kept))
 
 

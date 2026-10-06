@@ -149,6 +149,8 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
         yield "The Q4 total change in D4 adds the Ads and Travel changes (Q4 budget.xlsx, sheet Budget, D4) [1]."
 
     monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    # Room for both files beside the tool definitions (a 4,096-token context leaves the workbook to read_file).
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
     monkeypatch.setattr(assistant, "chat_with_tools", fake_tools)
     monkeypatch.setattr(assistant, "stream_text", fake_stream)
     events = _events(answer_stream(store, settings, "How is the total change worked out?", email_id=budget.id))
