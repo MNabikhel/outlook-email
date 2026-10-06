@@ -26,7 +26,7 @@ from datetime import date, datetime, timedelta, timezone
 from itertools import zip_longest
 from pathlib import Path
 
-from controller_inbox import documents, semantic
+from controller_inbox import documents, semantic, table_lookup
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
@@ -422,6 +422,11 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             labels = [p.label for p in parts[:12]] + ([f"… {len(parts) - 12} more"] if len(parts) > 12 else [])
             block.append("Sections: " + " / ".join(labels))
         budget = per_file - len(head) - 200
+        # The table rows and columns the question names, so a small model starts from the right cell.
+        rows = "" if whole else table_lookup.lookup(text, question, limit=max(400, min(table_lookup.MAX_CHARS, budget // 3)))
+        if rows:
+            block.append(rows)
+            budget -= len(rows) + 1
         summary = overnight_summary(ws.store, att) if len(text) > budget else ""
         if summary:
             block.append("Summary written overnight (checked against the file):\n" + summary[:900])
@@ -449,7 +454,7 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             ws.reads.append(f"Left out {att.filename}: no room (the assistant can still open it)")
             lines.append(f"── File: {att.filename} (not shown; read it with read_file)")
             continue
-        ws.reads.append(read)
+        ws.reads.append(f"{read}; picked out the table rows the question names" if rows else read)
         lines.append(piece)
         used += len(piece)
     lines += [f"── File: {att.filename} ({file_kind(att)}; not asked about, read it with read_file)" for att in skipped]

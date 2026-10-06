@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from controller_inbox import agent, answer_check, semantic
+from controller_inbox import agent, answer_check, semantic, table_lookup
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
@@ -102,6 +102,9 @@ SYSTEM = (
     "- In file tables each row reads \"Column: value\"; \"not listed\" means the file leaves that cell empty. "
     "A heading merged across columns is repeated on each of them (\"Q3 Actual\" and \"Q3 Budget\"). "
     "\"Operating > Revenue\" means Revenue is under Operating.\n"
+    "- \"Rows that match the question\" lists the table rows and columns the question names, copied from the file: "
+    "\"Harbor Steel LLC → 31 - 60 Days: $22,150.00\" is that row's value in that column. Start from those lines, and "
+    "check the whole row and the file text when the question needs more.\n"
     "- An email marked (open on screen) is the one the user is looking at. \"This\", \"it\", \"the attachment\" "
     "and \"the draft\" mean that email and its files unless the user names another.\n"
     "- When the question needs a figure from an attachment, answer from the file text you were given or that you "
@@ -276,9 +279,25 @@ def answered_here(email: EmailRecord, question: str) -> bool:
     terms = keywords(question)
     if len(terms) < 2:
         return False
-    text = " ".join([email.subject, email.body_text or ""] + [att.extracted_text or "" for att in email.attachments]).lower()
-    hits = sum(1 for term in terms if term in text)
-    return hits >= 2 and hits * 2 >= len(terms)
+    text = _spaced(" ".join([email.subject, email.body_text or ""] + [att.extracted_text or "" for att in email.attachments]))
+    found = [term for term in terms if _spaced(term) in text]
+    if len(found) >= 2 and len(found) * 2 >= len(terms):
+        return True
+    # The names, codes and figures the question turns on ("Harbor Steel", "31-60", "F-150") are all here.
+    named = [term for term in terms if re.search(rf"\b{re.escape(term)}", question, re.I) and _distinctive(term, question)]
+    return len(found) >= 2 and bool(named) and all(term in found for term in named)
+
+
+def _spaced(text: str) -> str:
+    """Lowercase, with a range written "31 - 60" or "31–60" the same as "31-60"."""
+    return re.sub(r"\s*[-–—]\s*", "-", (text or "").lower())
+
+
+def _distinctive(term: str, question: str) -> bool:
+    """A name (capitalized in the question), or a word with a digit in it."""
+    if any(ch.isdigit() for ch in term):
+        return True
+    return bool(re.search(rf"\b{re.escape(term[:1].upper() + term[1:])}", question))
 
 
 def on_screen_question(question: str) -> bool:
@@ -473,6 +492,12 @@ def offline_answer(
             lines.append("Open tasks: " + "; ".join(t.rstrip(".") for t in tasks[:3]) + ".")
         if is_fraud(current):
             lines.append(FRAUD_WARNING)
+        if not agent.attachments_locked(current):
+            for att in current.attachments:
+                rows = table_lookup.lookup(att.extracted_text or "", question)
+                if rows:
+                    lines.append(f"From the table in {att.filename}:")
+                    lines += rows.splitlines()[1:]
         matches = agent.file_matches(current, question)
         if matches:
             lines.append("In the files:")

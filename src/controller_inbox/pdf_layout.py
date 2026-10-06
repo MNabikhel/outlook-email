@@ -20,6 +20,14 @@ than one kind of text is labeled ``[heading]``, ``[facts]``, ``[table]``, ``[not
 ``[columns]`` so a small model can read the part that holds the figure. A label column
 printed beside a table is peeled off into ``[facts]``. A bold group label stays inside its
 table. The next page is extra columns only when it starts with a different first column.
+
+A sheet saved from a spreadsheet can put two cells closer together than two words of a sentence
+(a right-aligned date against a left-aligned task, the accounting format's "$" against the figure
+before it), so a table's column edges are found across its rows, not on one line: a strip no row
+of figures writes across, a border drawn down the page, or text that lines up row after row.
+Within those columns a heading wrapped onto two lines is one heading, a heading merged across
+columns is matched to the run it is centered on, and names turned on their side join the upright
+headings in their row. The accounting format's "$ -" is a zero.
 """
 
 from __future__ import annotations
@@ -41,6 +49,8 @@ class Glyph:
     mid: float
     size: float
     bold: bool
+    # A heading drawn on its side, set down at the foot of its column (see ``glyphs_of``).
+    turned: bool = False
 
 
 @dataclass
@@ -57,6 +67,11 @@ class Line:
     size: float
     glyphs: list[Glyph] = field(default_factory=list)
     segments: list[list[Word]] = field(default_factory=list)
+    words: list[Word] = field(default_factory=list)
+    # A gap wider than this between two words starts a new piece (a table cell).
+    piece_gap: float = 0.0
+    # The column edges of the table region this line is in, outer bounds included (empty when none were found).
+    grid: tuple[float, ...] = ()
 
     @property
     def bold(self) -> bool:
@@ -174,7 +189,7 @@ def _turned_words(chars: list[_Turned]) -> list[Glyph]:
     for row in _turned_rows(words):
         foot = min(word.foot for word in row)
         size = statistics.median(word.size for word in row)
-        glyphs += [Glyph(word.text, word.x0, word.x1, foot + 0.35 * size, word.size, word.bold) for word in row]
+        glyphs += [Glyph(word.text, word.x0, word.x1, foot + 0.35 * size, word.size, word.bold, True) for word in row]
     return glyphs
 
 
@@ -263,15 +278,52 @@ def _turned_rows(words: list[_TurnedWord]) -> list[list[_TurnedWord]]:
     return rows
 
 
-def page_text(glyphs: list[Glyph], previous: list[Table] | None = None) -> PageText:
-    """The page as text: plain lines, and tables row by row. ``previous``: the tables on the page before."""
+@dataclass
+class Rule:
+    """A line drawn straight down the page (a cell border), from ``y0`` up to ``y1``."""
+
+    x: float
+    y0: float
+    y1: float
+
+
+def rules_of(layout) -> list[Rule]:
+    """The vertical borders drawn on a pdfminer page: thin lines and rectangles running down it."""
+    from pdfminer.layout import LTCurve
+
+    found: list[Rule] = []
+
+    def walk(item) -> None:
+        if isinstance(item, LTCurve):
+            width, height = item.x1 - item.x0, item.y1 - item.y0
+            if width <= 2.0 and height >= 4.0:
+                found.append(Rule((item.x0 + item.x1) / 2, item.y0, item.y1))
+            return
+        try:
+            children = list(item)
+        except TypeError:
+            return
+        for child in children:
+            walk(child)
+
+    walk(layout)
+    return found
+
+
+def page_text(glyphs: list[Glyph], previous: list[Table] | None = None, rules: list[Rule] | None = None) -> PageText:
+    """The page as text: plain lines, and tables row by row. ``previous``: the tables on the page before.
+    ``rules``: the cell borders drawn on the page, which mark column edges exactly."""
     if not glyphs:
         return PageText("", [])
     if sum(1 for g in glyphs if _CID.fullmatch(g.text)) > 0.2 * len(glyphs):
         return PageText("", [], unreadable=True)
     lines = _lines([g for g in glyphs if not _CID.fullmatch(g.text)])
     for line in lines:
-        line.segments = _segments(line)
+        line.words, line.piece_gap = _words(line)
+    lines = [line for line in lines if line.words]
+    cuts = _column_cuts(lines, rules or [])
+    for index, line in enumerate(lines):
+        line.segments = _segments(line, cuts.get(index, ()))
     lines = [line for line in lines if line.segments]
     chunks: list[tuple[str, list[str]]] = []
     found: list[Table] = []
@@ -305,7 +357,42 @@ def _lines(glyphs: list[Glyph]) -> list[Line]:
     for line in lines:
         line.size = statistics.median(g.size for g in line.glyphs)
         line.glyphs = _dedupe(sorted(line.glyphs, key=lambda g: g.x0))
-    return lines
+    return _with_turned_headings(lines)
+
+
+def _with_turned_headings(lines: list[Line]) -> list[Line]:
+    """Names turned on their side and the upright headings beside them ("Date", "Day") are one header row.
+
+    The turned names are set down at the foot of their column, a few points off the upright text's
+    middle, so they would otherwise be a row of their own with no stub columns.
+    """
+    out: list[Line] = []
+    for line in lines:
+        pair = _turned_and_upright(out[-1], line) if out else None
+        if pair is not None:
+            turned, upright = pair
+            out[-1] = Line(upright.mid, upright.size, sorted(upright.glyphs + turned.glyphs, key=lambda g: g.x0))
+            continue
+        out.append(line)
+    return out
+
+
+def _turned_and_upright(first: Line, second: Line) -> tuple[Line, Line] | None:
+    """(turned names, upright headings) when one line is all turned names, the other has none, and they sit
+    side by side within most of a letter's height."""
+    def turned(line: Line) -> bool | None:
+        kinds = {glyph.turned for glyph in line.glyphs}
+        return kinds.pop() if len(kinds) == 1 else None
+
+    kinds = (turned(first), turned(second))
+    if kinds not in ((True, False), (False, True)):
+        return None
+    names, upright = (first, second) if kinds[0] else (second, first)
+    if abs(first.mid - second.mid) > 0.8 * upright.size:
+        return None
+    if any(g.x0 < h.x1 and g.x1 > h.x0 for g in names.glyphs for h in upright.glyphs):
+        return None
+    return names, upright
 
 
 def _dedupe(glyphs: list[Glyph]) -> list[Glyph]:
@@ -318,11 +405,11 @@ def _dedupe(glyphs: list[Glyph]) -> list[Glyph]:
     return out
 
 
-def _segments(line: Line) -> list[list[Word]]:
-    """The line's words, grouped into pieces that are separated by a wide gap (table cells)."""
+def _words(line: Line) -> tuple[list[Word], float]:
+    """The line's words, and the gap wider than which two words are separate pieces (table cells)."""
     glyphs = [g for g in line.glyphs if g.text.strip()]
     if not glyphs:
-        return []
+        return [], 0.0
     em = line.size
     gaps = [b.x0 - a.x1 for a, b in zip(glyphs, glyphs[1:])]
     # Letter-spacing and kerning sit well under half an em. A word space is wider than that, and a
@@ -334,22 +421,265 @@ def _segments(line: Line) -> list[list[Word]]:
     wordish = [gap for gap in gaps if word_gap < gap <= 2.2 * em]
     typical = statistics.median(wordish) if len(wordish) >= 2 else max(0.25 * em, letter + 0.22 * em)
     piece_gap = max(1.35 * em, typical * 2.4, letter + 0.9 * em)
-    segments: list[list[Word]] = [[]]
+    words: list[Word] = []
     current = [glyphs[0]]
     for gap, glyph in zip(gaps, glyphs[1:]):
         if gap <= word_gap:
             current.append(glyph)
             continue
-        segments[-1].append(_word(current))
-        if gap > piece_gap:
-            segments.append([])
+        words.append(_word(current))
         current = [glyph]
-    segments[-1].append(_word(current))
+    words.append(_word(current))
+    return _with_currency(words), piece_gap
+
+
+def _segments(line: Line, cuts: list[float] | tuple[float, ...] = ()) -> list[list[Word]]:
+    """The line's words, grouped into pieces that are separated by a wide gap or a column edge (table cells)."""
+    words = line.words
+    if not words:
+        return []
+    segments: list[list[Word]] = [[words[0]]]
+    for before, word in zip(words, words[1:]):
+        gap = word.x0 - before.x1
+        if gap > line.piece_gap or any(before.x1 - 0.3 <= cut <= word.x0 + 0.3 for cut in cuts):
+            segments.append([word])
+        else:
+            segments[-1].append(word)
     return segments
 
 
 def _word(glyphs: list[Glyph]) -> Word:
     return Word("".join(g.text for g in glyphs).strip(), glyphs[0].x0, glyphs[-1].x1, all(g.bold for g in glyphs))
+
+
+# A spreadsheet's accounting format draws the currency sign at the cell's left edge and the figure at
+# its right, with a dash for zero: "$       1,845.20" and "$      -".
+_CURRENCY = {"$", "US$", "C$", "A$", "€", "£", "¥"}
+_FIGURE = re.compile(r"^\(?-?[\d.,]*\d[\d.,]*\)?%?$|^[-–—]$")
+
+
+def _with_currency(words: list[Word]) -> list[Word]:
+    """A currency sign drawn apart from its figure is one word with it, so the sign is not read as the
+    previous cell's. "$ -" is the accounting format's zero."""
+    out: list[Word] = []
+    index = 0
+    while index < len(words):
+        word = words[index]
+        nxt = words[index + 1] if index + 1 < len(words) else None
+        if word.text in _CURRENCY and nxt is not None and _FIGURE.match(nxt.text):
+            figure = "0" if nxt.text in {"-", "–", "—"} else nxt.text
+            out.append(Word(f"{word.text}{figure}", word.x0, nxt.x1, word.bold and nxt.bold))
+            index += 2
+            continue
+        out.append(word)
+        index += 1
+    return out
+
+
+# Column edges ----------------------------------------------------------------------------------
+
+
+_PROSE_WORD = re.compile(r"^[a-z][a-z'’-]*[,.;:!?]?$")
+
+
+def _row_like(line: Line) -> bool:
+    """Words in cells: at least one gap on the line is a whole letter-height wide, and the line is not a
+    sentence (justified text stretches its word spaces, but its words are mostly lowercase)."""
+    words = line.words
+    if len(words) < 2 or max(b.x0 - a.x1 for a, b in zip(words, words[1:])) < line.size:
+        return False
+    return len(words) < 5 or sum(bool(_PROSE_WORD.match(word.text)) for word in words) < 0.6 * len(words)
+
+
+def _column_cuts(lines: list[Line], rules: list[Rule]) -> dict[int, list[float]]:
+    """Where each table line crosses from one column to the next, by line index.
+
+    A sheet saved as PDF has the same columns on every row, but its cells can sit closer together than
+    two words of a sentence: a date pushed to the right of its cell runs into the task left-aligned in
+    the next, and an accounting "$" sits just after the previous cell's figure. So a column edge is
+    found across the rows, not on one line: a strip of the page that no row writes across. A wide strip
+    is an edge. A strip narrower than a letter is an edge only when a border is drawn there, or when
+    the text beside it lines up row after row and no heading is written across it (so "Mon 09/28" under
+    "Date" stays one cell).
+    """
+    cuts: dict[int, list[float]] = {}
+    for region in _regions(lines):
+        rows = [index for index in region if _row_like(lines[index])]
+        if len(rows) < 3:
+            continue
+        em = statistics.median(lines[index].size for index in rows)
+        top = max(lines[index].mid for index in region) + em
+        bottom = min(lines[index].mid for index in region) - em
+        drawn = [rule.x for rule in rules if rule.y1 >= bottom and rule.y0 <= top]
+        # Headings are often merged across columns, so the gaps come from the rows from the first figure
+        # down. The heading lines above only veto a narrow gap one of their words is written across.
+        first = next((pos for pos, index in enumerate(rows) if any(_amount_cell(w.text) for w in lines[index].words)), None)
+        # Fewer than three rows of figures is too little to find columns from (each line's own gaps do);
+        # a table with no figures at all (a task list) is read from all its rows.
+        body = rows if first is None else rows[first:] if len(rows) - first >= 3 else []
+        heads = [word for index in rows if index not in body for word in lines[index].words]
+        tolerance = 0 if len(body) < 6 else max(1, round(0.08 * len(body)))
+        edges: list[float] = []
+        for lo, hi, strict, at in _strips(lines, body, tolerance):
+            border = [x for x in drawn if lo - 0.5 <= x <= hi + 0.5]
+            if border:
+                edges.append(border[0])
+            elif hi - lo >= 0.9 * em:
+                edges.append(_edge_at(lines, body, lo, hi, at, heads, 0.4 * em))
+            elif strict and _lined_up(lines, body, lo, hi):
+                cut = _edge_at(lines, body, lo, hi, at, heads, 0.6)
+                if not any(word.x0 < cut < word.x1 for word in heads):
+                    edges.append(cut)
+        # A drawn border is a column edge even where a long label runs across it into an empty cell
+        # ("Total Machinery & Equipment"), as long as most rows stay on their side of it.
+        for x in drawn:
+            crossing = sum(1 for index in rows if any(w.x0 < x - 0.5 and w.x1 > x + 0.5 for w in lines[index].words))
+            if crossing <= 0.3 * len(rows):
+                edges.append(x)
+        edges = _distinct(edges)
+        if not edges:
+            continue
+        lo = min(lines[index].words[0].x0 for index in rows)
+        hi = max(lines[index].words[-1].x1 for index in rows)
+        grid = (lo, *sorted(edge for edge in set(edges) if lo < edge < hi), hi)
+        # A short line between the rows, or right after the last at the rows' spacing, is a row with blank
+        # cells ("10/10 Sat"); a title above them is not.
+        pitch = statistics.median(lines[a].mid - lines[b].mid for a, b in zip(rows, rows[1:]))
+        last = rows[-1]
+        while last + 1 in region and lines[last].mid - lines[last + 1].mid <= 1.5 * pitch and len(lines[last + 1].words) <= 4:
+            last += 1
+        for index in region:
+            line = lines[index]
+            if index in rows or (rows[0] < index <= last and len(line.words) <= 4):
+                own = [rule.x for rule in rules if rule.y0 - 2 <= line.mid <= rule.y1 + 2]
+                cuts[index] = sorted(edges + own)
+                line.grid = grid
+    return cuts
+
+
+def _distinct(edges: list[float]) -> list[float]:
+    """Edges less than a point and a half apart are one edge (a border drawn twice, or a strip and its border)."""
+    out: list[float] = []
+    for edge in sorted(edges):
+        if not out or edge - out[-1] > 1.5:
+            out.append(edge)
+    return out
+
+
+def _regions(lines: list[Line]) -> list[list[int]]:
+    """Runs of lines close enough together to be one sheet's rows (a blank row or two included)."""
+    regions: list[list[int]] = []
+    for index, line in enumerate(lines):
+        if regions and lines[index - 1].mid - line.mid <= 3.2 * max(line.size, lines[index - 1].size):
+            regions[-1].append(index)
+        else:
+            regions.append([index])
+    return regions
+
+
+def _strips(lines: list[Line], rows: list[int], tolerance: int) -> list[tuple[float, float, bool, float]]:
+    """Strips of the page between the rows' first and last words that at most ``tolerance`` rows write
+    across: (left, right, whether no row does, where to cut). The cut is the middle of the widest
+    stretch the fewest rows cross, so a heading centered over the next column is not cut through."""
+    events: list[tuple[float, int]] = []
+    for index in rows:
+        spans: list[list[float]] = []
+        for word in lines[index].words:
+            if spans and word.x0 <= spans[-1][1] + 0.05:
+                spans[-1][1] = max(spans[-1][1], word.x1)
+            else:
+                spans.append([word.x0, word.x1])
+        for x0, x1 in spans:
+            events += [(x0, 1), (x1, -1)]
+    if not events:
+        return []
+    events.sort(key=lambda event: (event[0], -event[1]))
+    left = events[0][0]
+    right = max(x for x, _delta in events)
+    strips: list[tuple[float, float, bool, float]] = []
+    depth = 0
+    start: float | None = None
+    stretches: list[tuple[int, float, float]] = []  # (depth, from, to) inside the open strip
+    for x, delta in events:
+        before = depth
+        depth += delta
+        if start is not None and stretches and x > stretches[-1][1]:
+            stretches[-1] = (stretches[-1][0], stretches[-1][1], x)
+        if before > tolerance >= depth and left < x < right:
+            start = x
+            stretches = [(depth, x, x)]
+        elif start is not None and depth <= tolerance:
+            stretches.append((depth, x, x))
+        elif start is not None and before <= tolerance < depth:
+            if x > start:
+                low = min(stretch[0] for stretch in stretches)
+                best = max((stretch for stretch in stretches if stretch[0] == low), key=lambda s: s[2] - s[1])
+                strips.append((start, x, low == 0, (best[1] + best[2]) / 2))
+            start = None
+            stretches = []
+    return strips
+
+
+def _lined_up(lines: list[Line], rows: list[int], lo: float, hi: float) -> bool:
+    """Most rows with text on both sides of a narrow strip end flush against it, or start flush after it."""
+    beside = sum(
+        1
+        for index in rows
+        if any(word.x1 <= lo + 0.05 for word in lines[index].words) and any(word.x0 >= hi - 0.05 for word in lines[index].words)
+    )
+    (ends, _left), (starts, _right) = _flush(lines, rows, lo, hi, 0.6)
+    return beside >= 3 and max(ends, starts) >= max(3, 0.6 * beside)
+
+
+def _flush(lines: list[Line], rows: list[int], lo: float, hi: float, slack: float) -> tuple[tuple[int, int], tuple[int, int]]:
+    """(rows ending within ``slack`` of the strip's left side, rows with text there) and (rows starting within
+    ``slack`` of its right side, rows with text there): whether a right-aligned column ends at it and a
+    left-aligned one starts after it."""
+    ends = starts = left_rows = right_rows = 0
+    for index in rows:
+        words = lines[index].words
+        left = [word for word in words if word.x1 <= lo + 0.05]
+        right = [word for word in words if word.x0 >= hi - 0.05]
+        if left:
+            left_rows += 1
+            ends += lo - left[-1].x1 <= slack
+        if right:
+            right_rows += 1
+            # Figures are drawn from the right of their cell; equal widths start level by chance.
+            starts += right[0].x0 - hi <= slack and not _amount_cell(right[0].text)
+    return (ends, left_rows), (starts, right_rows)
+
+
+def _edge_at(lines: list[Line], rows: list[int], lo: float, hi: float, at: float, heads: list[Word], slack: float) -> float:
+    """Where the cell border is in a strip: just past a right-aligned column's figures, just before a
+    left-aligned column's text, midway when both line up. Otherwise in the stretch the fewest rows cross,
+    off any heading word when the strip has room beside it ("Variance $ | Variance %")."""
+    (ends, left_rows), (starts, right_rows) = _flush(lines, rows, lo, hi, slack)
+    flush_left = ends >= 3 and ends >= 0.8 * left_rows
+    flush_right = starts >= 3 and starts >= 0.8 * right_rows
+    pad = min(2.5, (hi - lo) / 2)
+    if flush_left and flush_right:
+        return (lo + hi) / 2
+    if flush_left:
+        return lo + pad
+    if flush_right:
+        return hi - pad
+    if not any(word.x0 < at < word.x1 for word in heads):
+        return at
+    covered: list[list[float]] = []
+    for word in sorted(heads, key=lambda w: w.x0):
+        if word.x1 <= lo or word.x0 >= hi:
+            continue
+        if covered and word.x0 <= covered[-1][1]:
+            covered[-1][1] = max(covered[-1][1], word.x1)
+        else:
+            covered.append([word.x0, word.x1])
+    bounds = [lo, *(x for span in covered for x in span), hi]
+    gaps = [(a, b) for a, b in zip(bounds[::2], bounds[1::2]) if b - a > 1.0]
+    if not gaps:
+        return at
+    a, b = min(gaps, key=lambda gap: abs((gap[0] + gap[1]) / 2 - at))
+    return (a + b) / 2
 
 
 # Tables ----------------------------------------------------------------------------------------
@@ -387,7 +717,8 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
     """
     line, before = lines[index], lines[index - 1]
     pitches = [lines[k - 1].mid - lines[k].mid for k in range(start + 1, index)]
-    usual = statistics.median(pitches) if pitches else 2.0 * line.size
+    # Wrapped heading lines sit closer than rows do, so they don't set how far apart rows are.
+    usual = max(statistics.median(pitches), 1.2 * line.size) if pitches else 2.0 * line.size
     gap = before.mid - line.mid
     if gap > max(2.2 * usual, 3.0 * line.size):
         return False
@@ -424,11 +755,24 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
             spans = _spans(_columns([line]))
             return all(_owns(seg, spans) for ln in block for seg in ln.segments)
         return False
-    if gap > 1.6 * usual + 1:
-        return False
     x0, x1 = line.segments[0][0].x0, line.segments[0][-1].x1
-    under = [c for c in columns if x0 < c[1] and x1 > c[0]]
-    return len(under) == 1
+    # A label may run a little into the empty cell beside it ("Operating Expenses" past a narrow column);
+    # a title written across the table covers whole columns.
+    under = [c for c in columns if x0 < c[1] and x1 > c[0] and (c[0] <= x0 or min(x1, c[1]) - c[0] >= 0.3 * (c[1] - c[0]))]
+    if len(under) != 1:
+        return False
+    if gap <= 1.6 * usual + 1:
+        return True
+    # A section label after a blank row ("Operating Expenses") still belongs when rows on the same
+    # columns follow it.
+    nxt = lines[index + 1] if index + 1 < len(lines) else None
+    return (
+        nxt is not None
+        and len(nxt.segments) >= 2
+        and line.mid - nxt.mid <= 1.6 * usual + 1
+        and _fits_columns(nxt, columns)
+        and any(_amount_cell(word.text) for segment in nxt.segments for word in segment)
+    )
 
 
 def _new_header(line: Line) -> bool:
@@ -501,7 +845,17 @@ def _columns(block: list[Line]) -> list[tuple[float, float]]:
     centered over a group can sit in the gap between them. Either one would glue two columns
     together or invent a column, so the columns come from a single full row. A right-aligned
     figure sits just to the right of its heading and still belongs to that column.
+
+    When the rows' column edges were found across the page (``Line.grid``), those are the columns.
     """
+    grid = block[0].grid
+    most = max(len(line.segments) for line in block)
+    # The page's columns, unless they are fewer than a row's cells (a lone border, not the whole grid).
+    if len(grid) - 1 >= most and all(line.grid == grid for line in block):
+        lo = min(grid[0], *(segment[0].x0 for line in block for segment in line.segments))
+        hi = max(grid[-1], *(segment[-1].x1 for line in block for segment in line.segments))
+        bounds = [lo, *grid[1:-1], hi]
+        return list(zip(bounds, bounds[1:]))
     most = max(len(line.segments) for line in block)
     skeleton = next(line for line in block if len(line.segments) == most)
     merged: list[list[float]] = []
@@ -606,6 +960,7 @@ def _place(segment: list[Word], columns: list[tuple[float, float]]) -> int:
 
 
 _YEAR = re.compile(r"^(?:19|20)\d{2}$")
+_DATE_CELL = re.compile(r"\d{1,4}[-/.]\d{1,2}(?:[-/.]\d{1,4})?")
 _MONTH_WORD = re.compile(r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*", re.I)
 
 
@@ -696,6 +1051,19 @@ def _covers(
             for index, columns_ in zip(groups, repeated):
                 covers[index] = columns_
             return [covered or [] for covered in covers]
+    if len(groups) >= 2 and below and len(columns) > 2:
+        centred = list(covers)
+        heads, first = list(groups), 1 if stub is not None else 0
+        # A first heading inside the first column with nothing under it is that column's own name,
+        # merged down the heading rows ("Department" beside "Q3 2026" and "Actual").
+        if stub is None and segs[heads[0]][1] <= columns[1][0] + 2 and not below[0].strip():
+            centred[heads[0]] = [0]
+            heads, first = heads[1:], 1
+        runs = _centred_runs([segs[index] for index in heads], columns, first)
+        if runs:
+            for index, run in zip(heads, runs):
+                centred[index] = run
+            return [covered or [] for covered in centred]
     for index in groups:
         x0, x1, _text = segs[index]
         under = [column for column, center in enumerate(centers) if x0 - 4 <= center <= x1 + 4]
@@ -730,6 +1098,45 @@ def _covers(
             mid = (segs[index][0] + segs[index][1]) / 2
             covers[index] = [min(range(len(centers)), key=lambda i: abs(centers[i] - mid))]
     return [covered or [] for covered in covers]
+
+
+def _centred_runs(heads: list[tuple[float, float, str]], columns: list[tuple[float, float]], first: int) -> list[list[int]] | None:
+    """Columns ``first`` onward split into one run per heading, side by side, each heading centered over
+    its run or starting at its left: how a spreadsheet draws a heading merged across columns. None when
+    some heading doesn't sit that way over any run, so the other readings get their turn."""
+    count, n = len(heads), len(columns)
+    if not count or n - first < count:
+        return None
+
+    def cost(head: tuple[float, float, str], a: int, b: int) -> float:
+        left, right = columns[a][0], columns[b][1]
+        if head[0] < left - 3 or head[1] > right + 3:
+            return float("inf")
+        off = min(abs((head[0] + head[1]) / 2 - (left + right) / 2), abs(head[0] - left))
+        return off if off <= max(6.0, 0.12 * (right - left)) else float("inf")
+
+    inf = float("inf")
+    # best[i][end]: headings[:i] placed with the i-th run ending just before column ``end``.
+    best = [[inf] * (n + 1) for _ in range(count + 1)]
+    back = [[0] * (n + 1) for _ in range(count + 1)]
+    for end in range(first + 1, n + 1):
+        best[1][end] = cost(heads[0], first, end - 1)
+        back[1][end] = first
+    for i in range(2, count + 1):
+        for end in range(first + i, n + 1):
+            for start in range(first + i - 1, end):
+                total = best[i - 1][start] + cost(heads[i - 1], start, end - 1)
+                if total < best[i][end]:
+                    best[i][end], back[i][end] = total, start
+    if best[count][n] == inf:
+        return None
+    runs: list[list[int]] = []
+    end = n
+    for i in range(count, 0, -1):
+        start = back[i][end]
+        runs.append(list(range(start, end)))
+        end = start
+    return runs[::-1]
 
 
 def _stub_segment(
@@ -833,16 +1240,82 @@ def _fill_grouping_columns(rows: list[list[str]], mids: list[float]) -> list[int
     """
     columns = _grouping_columns(rows)
     value_cols = _value_columns(rows)
+    # A subtotal ends its category: rows on either side of one never share a category, and the subtotal
+    # row itself ("Total Vehicles") already names what it adds up.
+    block, blocks = 0, []
+    for row in rows:
+        blocks.append(block)
+        block += _total_row(row)
     for column in columns:
-        anchors = [index for index, row in enumerate(rows) if column < len(row) and row[column].strip()]
+        anchors = [
+            index for index, row in enumerate(rows)
+            if column < len(row) and row[column].strip() and not _TOTAL.match(row[column].strip())
+        ]
         if not anchors:
             continue
         for index, row in enumerate(rows):
-            if column >= len(row) or row[column].strip() or not _has_value(row, value_cols):
+            if column >= len(row) or row[column].strip() or not _has_value(row, value_cols) or _total_row(row):
                 continue
-            nearest = min(anchors, key=lambda anchor: (abs(mids[anchor] - mids[index]), anchor > index, anchor))
+            near = [anchor for anchor in anchors if blocks[anchor] == blocks[index]] or anchors
+            nearest = min(near, key=lambda anchor: (abs(mids[anchor] - mids[index]), anchor > index, anchor))
             row[column] = rows[nearest][column]
     return columns
+
+
+_TOTAL = re.compile(r"^(?:grand\s+|sub-?)?totals?\b", re.I)
+
+
+def _total_row(row: list[str]) -> bool:
+    first = next((cell.strip() for cell in row if cell.strip()), "")
+    return bool(_TOTAL.match(first))
+
+
+def _join_label_lines(
+    rows: list[list[str]], mids: list[float], spans: list[list[tuple[float, float]]], extra: list[list]
+) -> tuple[list[list[str]], list[float]]:
+    """A category name wrapped onto two lines in a cell merged down several rows ("Computer" over
+    "Equipment") is one name. Lines holding only that cell, in the same column, drawn at the same left
+    edge or the same centre, closer together than rows are, are joined top to bottom. (An indented label
+    under another is a nested category, not the rest of its name.) ``spans``: each cell's extent on the
+    page. ``extra`` lists lose the same lines."""
+    pitch = _row_pitch(rows, mids, 0)
+    if not pitch:
+        return rows, mids
+    rows, mids = [list(row) for row in rows], list(mids)
+
+    def only(row: list[str]) -> int | None:
+        filled = [c for c, cell in enumerate(row) if cell.strip()]
+        return filled[0] if len(filled) == 1 and not tables.is_value(row[filled[0]]) else None
+
+    def aligned(a: tuple[float, float], b: tuple[float, float]) -> bool:
+        return abs(a[0] - b[0]) <= 1.5 or abs((a[0] + a[1]) / 2 - (b[0] + b[1]) / 2) <= 1.5
+
+    k = 0
+    while k + 1 < len(rows):
+        column = only(rows[k])
+        if (
+            column is not None
+            and only(rows[k + 1]) == column
+            and mids[k] - mids[k + 1] < 0.8 * pitch
+            and aligned(spans[k][column], spans[k + 1][column])
+        ):
+            rows[k][column] = f"{rows[k][column]} {rows[k + 1][column]}"
+            mids[k] = (mids[k] + mids[k + 1]) / 2
+            spans[k][column] = (min(spans[k][column][0], spans[k + 1][column][0]), max(spans[k][column][1], spans[k + 1][column][1]))
+            del rows[k + 1], mids[k + 1], spans[k + 1]
+            for sequence in extra:
+                del sequence[k + 1]
+            continue
+        k += 1
+    return rows, mids
+
+
+def _row_pitch(rows: list[list[str]], mids: list[float], start: int, figures=None) -> float:
+    """How far apart rows are: two rows of figures one after the other, else any two lines from ``start``."""
+    figures = figures or (lambda row: any(_amount_cell(cell) for cell in row))
+    pitches = [mids[k] - mids[k + 1] for k in range(start, len(rows) - 1) if figures(rows[k]) and figures(rows[k + 1])]
+    pitches = pitches or [mids[k] - mids[k + 1] for k in range(start, len(rows) - 1)]
+    return statistics.median(pitches) if pitches else 0.0
 
 
 def _has_value(row: list[str], value_cols: list[bool]) -> bool:
@@ -871,14 +1344,19 @@ def _absorbed(rows: list[list[str]], index: int) -> bool:
 
 def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], Table | None, list[str]]:
     columns = _columns(block)
+    # Columns found across the page can be empty in this block (another table's columns).
+    used = sorted({_place(segment, columns) for line in block for segment in line.segments})
+    columns = [columns[index] for index in used]
     grid: list[list[str]] = []
     bolds: list[bool] = []
     seg_rows: list[list[tuple[float, float, str]]] = []
     row_x: list[float] = []
     cell_x: list[list[float]] = []
+    cell_end: list[list[float]] = []
     for line in block:
         row = [""] * len(columns)
         xs = [0.0] * len(columns)
+        ends = [0.0] * len(columns)
         segs: list[tuple[float, float, str]] = []
         first_x = 0.0
         for segment in line.segments:
@@ -891,13 +1369,25 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
             if text:
                 row[column] = f"{row[column]} {text}".strip()
                 xs[column] = x0
+                ends[column] = x1
         grid.append(row)
         cell_x.append(xs)
+        cell_end.append(ends)
         seg_rows.append(segs)
         row_x.append(first_x)
         bolds.append(line.bold)
     mids = [line.mid for line in block]
     sizes = [line.size for line in block]
+    groups = _wrapped_headings(grid, mids)
+    if groups:
+        grid = [_stack_cells([grid[k] for k in group]) for group in groups]
+        seg_rows = [_stack_segments([seg_rows[k] for k in group], columns) for group in groups]
+        cell_x = [[min((cell_x[k][c] for k in group if cell_x[k][c]), default=0.0) for c in range(len(columns))] for group in groups]
+        cell_end = [[max(cell_end[k][c] for k in group) for c in range(len(columns))] for group in groups]
+        bolds = [all(bolds[k] for k in group) for group in groups]
+        row_x = [min(row_x[k] for k in group) for group in groups]
+        sizes = [max(sizes[k] for k in group) for group in groups]
+        mids = [mids[group[0]] for group in groups]
 
     peeled = _peel_side_facts(grid)
     facts: list[str] = []
@@ -905,6 +1395,7 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
         facts, grid = peeled
         bolds = [False] * len(grid)
         cell_x = [row[2:] for row in cell_x]
+        cell_end = [row[2:] for row in cell_end]
 
     if _prose(grid):
         width = len(grid[0]) if grid else 0
@@ -916,17 +1407,21 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
     header_mid = mids[0]
     if spanned and (_usable_header(spanned, grid[heads:], bold_first) or heads > 1):
         labels = spanned
-        grid, bolds, mids, row_x, cell_x, sizes = (
-            grid[heads:], bolds[heads:], mids[heads:], row_x[heads:], cell_x[heads:], sizes[heads:]
+        grid, bolds, mids, row_x, cell_x, cell_end, sizes = (
+            grid[heads:], bolds[heads:], mids[heads:], row_x[heads:], cell_x[heads:], cell_end[heads:], sizes[heads:]
         )
     else:
         labels = None
         header = tables.has_header(grid, bold_first=bold_first)
         if header:
             labels = [_clean_label(cell) for cell in grid[0]]
-            grid, bolds, mids, row_x, cell_x, sizes = grid[1:], bolds[1:], mids[1:], row_x[1:], cell_x[1:], sizes[1:]
+            grid, bolds, mids, row_x, cell_x, cell_end, sizes = (
+                grid[1:], bolds[1:], mids[1:], row_x[1:], cell_x[1:], cell_end[1:], sizes[1:]
+            )
     group_cols: list[int] = []
     if labels:
+        spans = [list(zip(starts, ends)) for starts, ends in zip(cell_x, cell_end)]
+        grid, mids = _join_label_lines(grid, mids, spans, [row_x, bolds, cell_x, sizes])
         grid, mids, row_x, bolds, sizes = _join_body(grid, mids, row_x, bolds, cell_x, sizes)
         group_cols = _fill_grouping_columns(grid, mids)
         kept = [index for index in range(len(grid)) if not _absorbed(grid, index)]
@@ -954,6 +1449,65 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
     lines = ([" | ".join(label for label in labels if label)] if labels else []) + body_lines
     rows = {round(mid): row[0] for mid, row in zip(mids, grid) if row and row[0]}
     return lines, Table(header_mid if labels else None, rows, first_label), facts
+
+
+def _wrapped_headings(grid: list[list[str]], mids: list[float]) -> list[list[int]] | None:
+    """Heading lines that are one sheet row, as groups of row indexes (every other row on its own).
+
+    A heading cell's text wraps onto a second line, and a one-line heading beside it is centered
+    between the two, so one row of headings is printed as two or three lines. Those lines sit closer
+    together than the rows of figures under them, and each fills the same cells as the lines above
+    it or cells none of them filled. A group heading over several columns ("Q3 2026" over "Actual",
+    "Budget") is a row of its own: the row under it fills more cells than it does.
+    """
+    def figures_in(row: list[str]) -> bool:
+        # A date on a heading line is part of a column name ("Accum. Depr." over "12/31/25").
+        return any(_amount_cell(cell) and not _DATE_CELL.fullmatch(cell.strip()) for cell in row)
+
+    lead = 0
+    while lead < min(len(grid), 6) and not figures_in(grid[lead]):
+        lead += 1
+    if lead < 2 or lead >= len(grid):
+        return None
+    pitch = _row_pitch(grid, mids, lead, figures_in)
+    if not pitch:
+        return None
+    groups = [[0]]
+    filled = {c for c, cell in enumerate(grid[0]) if cell}
+    for k in range(1, lead):
+        mine = {c for c, cell in enumerate(grid[k]) if cell}
+        if mids[k - 1] - mids[k] < 0.8 * pitch and (mine <= filled or not mine & filled):
+            groups[-1].append(k)
+            filled |= mine
+        else:
+            groups.append([k])
+            filled = mine
+    if all(len(group) == 1 for group in groups):
+        return None
+    return groups + [[k] for k in range(lead, len(grid))]
+
+
+def _stack_cells(rows: list[list[str]]) -> list[str]:
+    """Lines of one row, each column's text read top to bottom."""
+    return [" ".join(row[c] for row in rows if row[c]).strip() for c in range(len(rows[0]))]
+
+
+def _stack_segments(rows: list[list[tuple[float, float, str]]], columns: list[tuple[float, float]]) -> list[tuple[float, float, str]]:
+    """The pieces of one row's lines: pieces that start in the same column are one, read top to bottom."""
+    by_column: dict[int, list[tuple[float, float, str]]] = {}
+    for segs in rows:
+        for seg in segs:
+            if seg[2]:
+                by_column.setdefault(_place_span(seg, columns), []).append(seg)
+    stacked = [
+        (min(seg[0] for seg in segs), max(seg[1] for seg in segs), " ".join(seg[2] for seg in segs))
+        for _column, segs in sorted(by_column.items())
+    ]
+    return stacked
+
+
+def _place_span(seg: tuple[float, float, str], columns: list[tuple[float, float]]) -> int:
+    return _place([Word(seg[2], seg[0], seg[1], False)], columns)
 
 
 def _header_depth(grid: list[list[str]]) -> int:
@@ -1133,7 +1687,9 @@ def _fact_lines(lines: list[str]) -> bool:
 
 
 _FACT = re.compile(r"^[A-Za-z][^:]{0,40}: \S")
-_PAGE_MARK = re.compile(r"^(?:page\s+\d{1,4}(?:\s+of\s+\d{1,4})?|\d{1,4}\s*/\s*\d{1,4})$", re.I)
+_PAGE_MARK = re.compile(r"^page\s+\d{1,4}(?:\s+of\s+\d{1,4})?$", re.I)
+# "2/14" alone on a line is a page count; in a row it is a date ("10/1").
+_PAGE_COUNT = re.compile(r"^\d{1,4}\s*/\s*\d{1,4}$")
 
 
 def _prose_chunks(lines: list[Line]) -> list[tuple[str, list[str]]]:
@@ -1184,6 +1740,8 @@ def _without_page_marks(lines: list[str]) -> list[str]:
     """Drop a running "Page 3" (or "2/14"). The real page is the [page N] marker around this text."""
     kept = []
     for line in lines:
+        if _PAGE_COUNT.match(line.strip()):
+            continue
         parts = [part.strip() for part in line.split("|")]
         parts = [part for part in parts if part and not _PAGE_MARK.match(part)]
         if parts:

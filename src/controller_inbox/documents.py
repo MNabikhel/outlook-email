@@ -32,7 +32,7 @@ logging.getLogger("pypdf").setLevel(logging.ERROR)
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 # Raise when attachments read differently, so text stored by an older reader is read again.
-READER_VERSION = "16"
+READER_VERSION = "17"
 MAX_TEXT = 400_000
 MAX_PDF_PAGES = 300
 MAX_SHEETS = 40
@@ -98,7 +98,7 @@ def pdf_text(data: bytes) -> str:
         layout = next(layouts, None)
         text = ""
         if layout is not None:
-            laid_out = pdf_layout.page_text(pdf_layout.glyphs_of(layout), previous)
+            laid_out = pdf_layout.page_text(pdf_layout.glyphs_of(layout), previous, pdf_layout.rules_of(layout))
             text, previous = laid_out.text, laid_out.tables
         if not text.strip():
             text = _pdf_page(page)
