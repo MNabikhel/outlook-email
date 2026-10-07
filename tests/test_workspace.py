@@ -54,3 +54,22 @@ def test_scripts_never_put_server_text_into_html_unescaped():
         else:
             assert uses == 0, path.name
     assert "escapeHtml(sentence)" in (folder / "format.js").read_text()
+
+
+def test_a_file_name_with_a_bracketed_number_stays_one_link(tmp_path):
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js isn't installed")
+    sources = [{"n": 1, "id": "e1", "subject": "Remittance", "files": [{"n": 1, "name": "Invoice [1].pdf", "text": True}]}]
+    script = tmp_path / "answer.mjs"
+    script.write_text(
+        f"import {{ formatAnswer }} from {json.dumps((UI / 'format.js').as_uri())};\n"
+        f"console.log(formatAnswer('See Invoice [1].pdf for the total [1].', {json.dumps(sources)}));\n"
+    )
+    html = subprocess.run([node, str(script)], capture_output=True, text=True, check=True).stdout
+    assert html.count("<a ") == 2 and "<a" not in html.split("Invoice [1].pdf</a>")[0].split("<a ", 2)[-1].split(">", 1)[1]
+    assert 'title="Open Invoice [1].pdf">Invoice [1].pdf</a> for the total <a class="cite"' in html

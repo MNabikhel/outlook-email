@@ -88,14 +88,33 @@ function inline(sentence, context, sources, names, whole) {
       return hit ? fileLink(fileHref(hit.source, hit.file, context), hit.file.name, match, "cite-name") : match;
     });
   }
-  return html.replace(/\[(\d{1,2})\]/g, (match, n) => {
-    const source = sources.find((item) => String(item.n) === n);
-    if (!source) return match;
-    const target = citeTarget(source, context, whole);
-    if (target) return fileLink(target.href, target.file.name, `[${n}]`, "cite");
-    const external = source.chat ? ' target="_blank" rel="noopener"' : " data-nav";
-    return `<a class="cite" href="${escapeHtml(mailHref(source))}"${external} title="${escapeHtml(source.subject)}">[${n}]</a>`;
-  });
+  return outsideLinks(html, (text) =>
+    text.replace(/\[(\d{1,2})\]/g, (match, n) => {
+      const source = sources.find((item) => String(item.n) === n);
+      if (!source) return match;
+      const target = citeTarget(source, context, whole);
+      if (target) return fileLink(target.href, target.file.name, `[${n}]`, "cite");
+      const external = source.chat ? ' target="_blank" rel="noopener"' : " data-nav";
+      return `<a class="cite" href="${escapeHtml(mailHref(source))}"${external} title="${escapeHtml(source.subject)}">[${n}]</a>`;
+    })
+  );
+}
+
+/** Apply ``replace`` to the text of ``html`` that is outside tags and links: a file named "Invoice [1].pdf"
+ * is already a link, and its "[1]" is not a citation. */
+function outsideLinks(html, replace) {
+  let depth = 0;
+  return html
+    .split(/(<[^>]*>)/)
+    .map((part) => {
+      if (part.startsWith("<")) {
+        if (/^<a[\s>]/i.test(part)) depth += 1;
+        else if (/^<\/a>/i.test(part)) depth = Math.max(0, depth - 1);
+        return part;
+      }
+      return depth ? part : replace(part);
+    })
+    .join("");
 }
 
 function fileNames(sources) {
