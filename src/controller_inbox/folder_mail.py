@@ -12,7 +12,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
-from email.utils import parsedate_to_datetime
+from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 
 from controller_inbox.config import Settings
@@ -516,15 +516,19 @@ def _files(folder: Path) -> list[Path]:
 
 
 def _split_address(raw: str) -> tuple[str, str]:
+    """(name, address) from a From or Reply-To header. The address is the one after any quoted name, as mail
+    programs read it: a name can itself look like an address ("Acme Billing <billing@acme.com>" <x@acme-pay.net>),
+    and taking that one would pass a lookalike sender off as a trusted one."""
     raw = (raw or "").strip()
-    match = re.search(r"<([^>]+)>", raw)
-    if match:
-        email = match.group(1).strip()
-        name = raw[: match.start()].strip().strip('"')
-        return name or email, email
-    if "@" in raw:
-        return raw, raw
-    return raw, ""
+    name, email = parseaddr(raw)
+    if "@" not in email:
+        # A header the strict parser gives up on ("Chen, Maya <maya@x.com>"): the last <...> is the address.
+        brackets = list(re.finditer(r"<([^<>]+)>", raw))
+        if not brackets:
+            return (raw, raw) if "@" in raw else (raw, "")
+        email = brackets[-1].group(1).strip()
+        name = raw[: brackets[-1].start()].strip().strip('"')
+    return name.strip() or email, email
 
 
 def _email_date(value, path: Path) -> datetime:

@@ -443,3 +443,22 @@ def test_a_message_that_fails_after_parsing_keeps_the_sample(settings: Settings,
     ingest_folder(loaded, settings, report=report)
     assert len(report["failed"]) == 1 and "sample_cleared" not in report
     assert loaded.counts()["emails"] == before and not loaded.real_mail_count()
+
+
+def test_an_address_in_the_display_name_is_not_the_sender(store: Store, settings: Settings):
+    # "Acme Billing <billing@acme.com>" is only the name: the mail comes from acme-payments.net.
+    settings.ensure_data_dir()
+    settings.trusted_domains = "acme.com"
+    path = settings.inbox_incoming / "spoof.eml"
+    path.write_bytes(
+        b'From: "Acme Billing <billing@acme.com>" <billing@acme-payments.net>\r\nTo: ap@co.com\r\n'
+        b"Subject: Updated remittance details\r\nMessage-ID: <sp1@x>\r\nDate: Mon, 05 Oct 2026 10:00:00 -0400\r\n\r\n"
+        b"Our bank details have changed. Please use the new account for all payments from today.\r\n"
+    )
+    _age(path)
+    record = ingest_folder(store, settings)[0]
+    assert record.sender_email == "billing@acme-payments.net"
+    assert store.fraud_check(record.id)["level"] == "high" and "do_not_process" in record.flags
+    # Headers the strict parser gives up on still give the address in the brackets.
+    assert folder_mail._split_address("Chen, Maya <maya@x.com>") == ("Chen, Maya", "maya@x.com")
+    assert folder_mail._split_address("Maya Chen") == ("Maya Chen", "")
