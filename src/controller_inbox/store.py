@@ -234,6 +234,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _text(value: str | None) -> str:
+    """Attachment text as stored: without NUL characters, where SQLite's length() would stop counting."""
+    return (value or "").replace("\x00", "")
+
+
 class Store:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -368,7 +373,7 @@ class Store:
                         att.content_type,
                         att.size_bytes,
                         att.sha256,
-                        att.extracted_text,
+                        _text(att.extracted_text),
                         att.document_type.value,
                         att.document_confidence,
                         _dumps(att.extracted_fields.to_dict()),
@@ -894,15 +899,20 @@ class Store:
         with self.connect() as conn:
             conn.execute("UPDATE emails SET source_path = ? WHERE id = ?", (path, email_id))
 
-    def attachment_files(self) -> list[tuple[str, str, str, str]]:
-        """Every attachment's id, email id, file name and stored text."""
+    def attachment_files(self) -> list[tuple[str, str, str, str, str]]:
+        """Every attachment's id, email id, file name, SHA-256 and stored text, one email's files together."""
         with self.connect() as conn:
-            rows = conn.execute("SELECT id, email_id, filename, extracted_text FROM attachments").fetchall()
-        return [(row["id"], row["email_id"], row["filename"] or "", row["extracted_text"] or "") for row in rows]
+            rows = conn.execute(
+                "SELECT id, email_id, filename, sha256, extracted_text FROM attachments ORDER BY email_id"
+            ).fetchall()
+        return [
+            (row["id"], row["email_id"], row["filename"] or "", row["sha256"] or "", row["extracted_text"] or "")
+            for row in rows
+        ]
 
     def set_attachment_text(self, attachment_id: str, text: str) -> None:
         with self.connect() as conn:
-            conn.execute("UPDATE attachments SET extracted_text = ? WHERE id = ?", (text, attachment_id))
+            conn.execute("UPDATE attachments SET extracted_text = ? WHERE id = ?", (_text(text), attachment_id))
 
     def get_state(self, key: str) -> str | None:
         with self.connect() as conn:
@@ -1120,20 +1130,27 @@ class Store:
                 (attachment_id, text_key, summary, model, at),
             )
 
-    def files_to_summarize(self, *, min_chars: int, limit: int) -> list[tuple[str, str]]:
-        """(email id, attachment id) of long files with no summary for their current text, most important mail first."""
+    def files_to_summarize(self, *, min_chars: int, limit: int, model: str = "") -> list[tuple[str, str]]:
+        """(email id, attachment id) of long files with no summary for their current text, most important mail first.
+
+        Files on mail suspected of fraud (as ``fraud.attachments_locked`` decides) are left out here, so they
+        never use up the night's quota. A file the model gave no usable summary for is tried again only when
+        another model is loaded.
+        """
         with self.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT a.email_id, a.id FROM attachments a
                 JOIN emails e ON e.id = a.email_id
                 LEFT JOIN file_summaries f ON f.attachment_id = a.id
                 WHERE length(a.extracted_text) >= ?
-                  AND (f.attachment_id IS NULL OR f.text_key != a.sha256 || ':' || length(a.extracted_text))
+                  AND (e.flags {_LIKE} OR (e.flags NOT {_LIKE} AND e.category != 'payment_instruction_change'))
+                  AND (f.attachment_id IS NULL OR f.text_key != a.sha256 || ':' || length(a.extracted_text)
+                       OR (f.summary = '' AND COALESCE(f.model, '') != ?))
                 ORDER BY e.importance_score DESC, e.received_at DESC
                 LIMIT ?
                 """,
-                (min_chars, limit),
+                (min_chars, _json_contains("fraud_cleared"), _json_contains("fraud_risk"), model, limit),
             ).fetchall()
         return [(row["email_id"], row["id"]) for row in rows]
 
@@ -1444,5 +1461,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE emails ADD COLUMN done_at TEXT DEFAULT ''")
     if "reply_to" not in cols:
         conn.execute("ALTER TABLE emails ADD COLUMN reply_to TEXT DEFAULT ''")
+    if not conn.execute("SELECT 1 FROM sync_state WHERE key = 'attachment_text_without_nul'").fetchone():
+        # Text stored before NUL characters were dropped: summaries keyed by its length never matched.
+        rows = conn.execute("SELECT id, extracted_text FROM attachments WHERE instr(extracted_text, char(0)) > 0").fetchall()
+        conn.executemany("UPDATE attachments SET extracted_text = ? WHERE id = ?", [(_text(row[1]), row[0]) for row in rows])
+        conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('attachment_text_without_nul', '1')")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_model ON emails(model_status)")

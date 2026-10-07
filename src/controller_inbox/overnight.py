@@ -108,18 +108,26 @@ def read_queue(
             return read_queue(store, settings, limit=limit, now=now, reader=own_reader, on_progress=on_progress)
     result["model"] = reader.model
     batch = limit if limit is not None else settings.overnight_batch
-    waiting = store.list_emails(model_status="script_draft", order="queue", limit=max(1, batch))
+    # 0 means read none (SQLite would read everything for a negative LIMIT).
+    waiting = store.list_emails(model_status="script_draft", order="queue", limit=max(0, batch))
     corrections = store.list_corrections()
     for index, email in enumerate(waiting, start=1):
         if on_progress:
             on_progress("reading", index, len(waiting), email.subject)
-        parsed = reader.read(build_packet(email, corrections))
+        packet = build_packet(email, corrections)
+        parsed = reader.read(packet)
         if reader.stopped:
             break
         if not parsed:
             continue
-        overlay_reading(email, parsed, now=now, tz=settings.tz)
-        store.upsert_email(email)
+        # The model takes a while. Meanwhile the user may have corrected this email or given a fraud verdict
+        # on it, or another reader may have saved one. The reading is saved onto the email as it is now, and
+        # only while it is still the draft the model read; otherwise it waits for the next run.
+        current = store.get_email(email.id)
+        if current is None or current.model_status != "script_draft" or build_packet(current, corrections) != packet:
+            continue
+        overlay_reading(current, parsed, now=now, tz=settings.tz)
+        store.upsert_email(current)
         result["read_ids"].append(email.id)
     result["stats"] = reader.stats
     if reader.stats.stopped_reason:
