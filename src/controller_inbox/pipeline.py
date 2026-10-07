@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -287,6 +288,8 @@ def _unique_ids(attachments: list, taken: set[str] = frozenset()) -> list:
 
 
 SYNC_CURSOR = "last_sync_at"
+# How many syncs in a row a message that fails (Outlook throttling, a dropped connection) holds the cursor back for.
+MAX_SYNC_TRIES = 10
 
 
 def ingest_mailbox(
@@ -300,7 +303,8 @@ def ingest_mailbox(
     cursor: str | None = SYNC_CURSOR,
 ) -> list[EmailRecord]:
     """Read every message since ``received_after``. One message that can't be read is logged in
-    ``report["failed"]`` and skipped; the rest are still read and the cursor still moves.
+    ``report["failed"]`` and skipped; the rest are still read and the cursor still moves, but not past
+    the earliest message that failed, so the next sync tries it again (up to ``MAX_SYNC_TRIES`` times).
 
     The cursor is the time the sync started, so mail that arrives while it runs is read next time.
     ``cursor=None`` leaves it alone (the sample mailbox is not a sync).
@@ -309,15 +313,36 @@ def ingest_mailbox(
     report = report if report is not None else {}
     report.setdefault("failed", [])
     processed: list[EmailRecord] = []
+    retry_key = f"{cursor}_retry"
+    retry = json.loads(store.get_state(retry_key) or "{}") if cursor else {}
+    tries: dict[str, int] = retry.get("tries", {})
+    # Resuming from a cursor held back for a failed message: the mail around it was read by the last sync.
+    resumed = bool(retry) and received_after is not None and _utc(received_after) == datetime.fromisoformat(retry["cursor"])
+    read_before = datetime.fromisoformat(retry["until"]) if resumed else None
+    failed: dict[str, int] = {}
+    held: list[datetime] = []
     for raw in mailbox.list_messages(received_after=received_after):
+        received = _utc(raw.received_at)
+        if read_before and received < read_before and raw.id not in tries and store.get_email(raw.id) is not None:
+            continue  # listed again only because the cursor waited for a message that failed
         try:
             processed.append(process_message(raw, store, settings, mailbox, now=now))
         except Exception as exc:
             log.warning("Couldn't read message %s (%s)", raw.id, raw.subject, exc_info=True)
             report["failed"].append({"id": raw.id, "subject": raw.subject, "error": str(exc)[:300]})
+            failed[raw.id] = tries.get(raw.id, 0) + 1
+            if failed[raw.id] < MAX_SYNC_TRIES:
+                held.append(received)
     if cursor:
-        store.set_state(cursor, started.astimezone(timezone.utc).isoformat())
+        started = started.astimezone(timezone.utc)
+        mark = min([started, *held]).isoformat()
+        store.set_state(cursor, mark)
+        store.set_state(retry_key, json.dumps({"cursor": mark, "until": started.isoformat(), "tries": failed}) if failed else "")
     return processed
+
+
+def _utc(when: datetime) -> datetime:
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
 def ingest_demo(store: Store, settings: Settings, *, now: datetime | None = None) -> list[EmailRecord]:

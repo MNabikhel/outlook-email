@@ -601,3 +601,66 @@ def test_different_emails_with_one_message_id_are_kept_apart(settings: Settings,
     report = {}
     ingest_folder(store, settings, report=report)
     assert report["already_read"] == 1 and store.counts()["emails"] == 3
+
+
+# 18. A message that failed on one sync is read on the next -------------------------------------
+
+
+class _FlakyMailbox(_Mailbox):
+    """Lists messages by their received time, as Graph does; ``failures`` says how often each one fails first."""
+
+    def __init__(self, raws, failures):
+        super().__init__(raws)
+        self.failures = dict(failures)
+        self.fetched: list[str] = []
+
+    def list_messages(self, received_after=None):
+        return iter([raw for raw in self.raws if received_after is None or raw.received_at >= received_after])
+
+    def get_attachments(self, message_id):
+        self.fetched.append(message_id)
+        if self.failures.get(message_id, 0):
+            self.failures[message_id] -= 1
+            from controller_inbox.graph import GraphError
+
+            raise GraphError("Microsoft Graph throttled the request (HTTP 429). Wait and retry.")
+        return []
+
+
+def _graph_raw(message_id: str, received: datetime) -> RawMessage:
+    raw = _raw("Invoice attached", received=received)
+    raw.id, raw.source, raw.has_attachments = message_id, "graph", True
+    return raw
+
+
+def test_a_message_that_failed_on_a_sync_is_read_on_the_next(store: Store, settings: Settings):
+    from datetime import timedelta
+
+    t0 = datetime(2026, 10, 6, 9, 0, tzinfo=timezone.utc)
+    mailbox = _FlakyMailbox([_graph_raw("throttled", t0), _graph_raw("fine", t0 + timedelta(minutes=1))], {"throttled": 1})
+    report: dict = {}
+    ingest_mailbox(mailbox, store, settings, received_after=t0 - timedelta(hours=72), now=t0 + timedelta(minutes=5), report=report)
+    assert [row["id"] for row in report["failed"]] == ["throttled"] and store.get_email("fine")
+    cursor = datetime.fromisoformat(store.get_state("last_sync_at"))
+    assert cursor <= t0, "the cursor waits for the message that failed"
+
+    mailbox.fetched.clear()
+    ingest_mailbox(mailbox, store, settings, received_after=cursor, now=t0 + timedelta(hours=1))
+    assert store.get_email("throttled") is not None
+    assert mailbox.fetched == ["throttled"], "the message read last time is not fetched again"
+    assert store.get_state("last_sync_at") == (t0 + timedelta(hours=1)).isoformat()
+
+
+def test_a_message_that_always_fails_stops_holding_the_cursor(store: Store, settings: Settings, monkeypatch):
+    from datetime import timedelta
+
+    from controller_inbox import pipeline
+
+    monkeypatch.setattr(pipeline, "MAX_SYNC_TRIES", 2)
+    t0 = datetime(2026, 10, 6, 9, 0, tzinfo=timezone.utc)
+    mailbox = _FlakyMailbox([_graph_raw("broken", t0)], {"broken": 99})
+    ingest_mailbox(mailbox, store, settings, now=t0 + timedelta(minutes=5))
+    assert store.get_state("last_sync_at") == t0.isoformat()
+    later = t0 + timedelta(hours=1)
+    ingest_mailbox(mailbox, store, settings, received_after=t0, now=later)
+    assert store.get_state("last_sync_at") == later.isoformat(), "after the last try the sync moves on"
