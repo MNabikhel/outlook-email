@@ -1002,3 +1002,23 @@ def test_scans_without_a_subject_that_share_a_message_id_are_still_kept_apart(se
     report = {}
     ingest_folder(store, settings, report=report)
     assert report["already_read"] == 1 and store.counts()["emails"] == 2
+
+
+# 30. VIP senders copied from Outlook count by their addresses, not the words of their names ------
+
+
+def test_vip_senders_copied_from_outlook_count_by_their_addresses(store: Store, settings: Settings):
+    pasted = Settings(vip_senders="Chen, Maya <maya@taz.com>; Bob Lee <Bob@taz.com>", _env_file=None)
+    assert pasted.vip_list == ["maya@taz.com", "bob@taz.com"]
+    assert Settings(vip_senders="cfo@taz.com ceo@taz.com; irs.gov, Maya Chen", _env_file=None).vip_list == [
+        "cfo@taz.com", "ceo@taz.com", "irs.gov"
+    ]
+    assert Settings(vip_senders="treasurer", _env_file=None).vip_list == ["treasurer"]
+
+    settings.vip_senders = pasted.vip_senders
+    vip = {}
+    for n, sender in enumerate(["maya@taz.com", "colleen@randomvendor.com", "noreply@bobcat-rentals.com"]):
+        raw = _raw("Just checking in.", received=NOW)
+        raw.id, raw.sender_email = f"v{n}", sender
+        vip[sender] = "VIP / elevated sender" in process_message(raw, store, settings, now=NOW).importance_reasons
+    assert vip == {"maya@taz.com": True, "colleen@randomvendor.com": False, "noreply@bobcat-rentals.com": False}
