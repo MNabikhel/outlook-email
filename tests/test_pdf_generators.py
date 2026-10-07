@@ -112,3 +112,30 @@ def test_a_column_edge_is_not_moved_into_the_space_inside_a_heading_phrase():
              Word("Sales", 433.4, 460.5, True), Word("Amount", 491.2, 530.9, True)]
     cut = _edge_at(lines, list(range(5)), 460.8, 499.4, 475.2, heads, 4.0)
     assert not 458.8 < cut < 461.9
+
+
+def test_a_trial_balance_whose_sections_leave_different_columns_empty_is_one_grid():
+    # Balance sheet accounts fill the credit column and expense accounts the adjusting debits, so the rows above
+    # a wrapped account name and the rows under it each write where the other leaves a gap. Read apart, the
+    # expense rows' columns would end at their last figure and no longer match the rows above.
+    from controller_inbox.pdf_layout import Line, Rule, Word, _column_cuts
+
+    def figure(text: str, right: float) -> Word:
+        return Word(text, right - 5.5 * len(text), right, False)
+
+    rows = []
+    for n in range(8):
+        words = [Word(f"2{n}00", 40, 60, False), Word("Liability", 80, 120, False)]
+        words += [figure("618,942.37", 316)] if n % 4 else [figure("412,806.55", 246)]
+        rows.append(words + ([figure("4,200.00", 436)] if n == 3 else []))
+    for n in range(6):
+        rows.append([Word(f"6{n}00", 40, 60, False), Word("Expense", 80, 118, False), figure("121,006.40", 246), figure("4,779.72", 376)])
+    lines, y = [], 700.0
+    for index, words in enumerate(rows):
+        if index == 8:  # "Inventory Shrink and / Obsolescence": a name on two lines
+            lines.append(Line(y, 10, words=[Word("Inventory", 80, 118, False), Word("Shrink", 121, 150, False)]))
+            y -= 13
+        lines.append(Line(y, 10, words=words))
+        y -= 13
+    _column_cuts(lines, [Rule(x, y - 10, 712) for x in (36, 76, 180, 250, 320, 380, 440)])
+    assert len({line.grid for line in lines if len(line.words) > 2}) == 1
