@@ -156,13 +156,70 @@ def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> st
     return ""
 
 
+_RTF_TOKEN = re.compile(r"\\([a-zA-Z]+)(-?\d+)? ?|\\'([0-9a-fA-F]{2})|\\([^a-zA-Z'])|([{}])|([^\\{}\r\n]+)|[\r\n]+")
+# Groups that hold no document text: tables of fonts, colours and styles, document properties, pictures,
+# embedded objects and the instructions of a field (its result is the text shown).
+_RTF_HIDDEN = {
+    "fonttbl", "colortbl", "stylesheet", "info", "pict", "object", "fldinst", "themedata", "colorschememapping",
+    "datastore", "latentstyles", "listtable", "listoverridetable", "rsidtbl", "generator", "xmlnstbl", "filetbl",
+}
+_RTF_BREAKS = {"par": "\n", "line": "\n", "sect": "\n", "page": "\n", "row": "\n", "tab": "\t", "cell": " | "}
+_RTF_MARKS = {
+    "emdash": "—", "endash": "–", "bullet": "•", "lquote": "‘", "rquote": "’", "ldblquote": "“", "rdblquote": "”",
+    "emspace": " ", "enspace": " ", "qmspace": " ",
+}
+
+
 def _rtf_text(data: bytes) -> str:
-    raw = data.decode("latin-1", errors="replace")
-    raw = re.sub(r"\\'[0-9a-fA-F]{2}", " ", raw)
-    raw = re.sub(r"\\[a-zA-Z]+-?\d* ?", " ", raw)
-    raw = raw.replace("\\", " ")
-    raw = re.sub(r"[{}]", " ", raw)
-    return collapse_ws(raw)
+    """The text of an RTF document. Characters written as codes (\\'a3 for £, \\u8364 for €) are decoded in
+    the document's code page; font and colour tables, pictures and other hidden groups are left out."""
+    raw = data.decode("latin-1")
+    page = re.search(r"\\ansicpg(\d+)", raw[:4096])
+    encoding = f"cp{page.group(1)}" if page else "cp1252"
+    try:
+        b"".decode(encoding)
+    except LookupError:
+        encoding = "cp1252"
+    out: list[str] = []
+    coded = bytearray()  # \'hh bytes, decoded together so a two-byte character stays whole
+    groups: list[tuple[bool, int]] = []
+    hidden, fallback, drop = False, 1, 0  # after \uN, the next ``fallback`` characters repeat it for old readers
+    for match in _RTF_TOKEN.finditer(raw):
+        word, number, code, symbol, brace, text = match.groups()
+        if coded and code is None:
+            out.append(coded.decode(encoding, errors="replace"))
+            coded.clear()
+        if brace == "{":
+            groups.append((hidden, fallback))
+        elif brace == "}":
+            hidden, fallback = groups.pop() if groups else (hidden, fallback)
+            drop = 0
+        elif symbol == "*" or word in _RTF_HIDDEN:
+            hidden = True
+        elif hidden:
+            continue
+        elif code:
+            if drop:
+                drop -= 1
+            else:
+                coded.append(int(code, 16))
+        elif word == "uc":
+            fallback = int(number or 1)
+        elif word == "u" and number:
+            out.append(chr(int(number) % 65536))
+            drop = fallback
+        elif word:
+            out.append(_RTF_BREAKS.get(word) or _RTF_MARKS.get(word, ""))
+        elif symbol:
+            out.append({"~": " ", "_": "-", "\r": "\n", "\n": "\n"}.get(symbol, symbol if symbol in "\\{}" else ""))
+        elif text:
+            if drop:
+                text, drop = text[drop:], max(0, drop - len(text))
+            out.append(text)
+    if coded:
+        out.append(coded.decode(encoding, errors="replace"))
+    text = "".join(out).encode("utf-16", "surrogatepass").decode("utf-16", errors="replace")
+    return collapse_ws(re.sub(r"(?: \| )+(?=\n|$)", "", text))
 
 
 def explode_archives(items: list, *, limit: int = 40) -> list:
@@ -180,6 +237,12 @@ def explode_archives(items: list, *, limit: int = 40) -> list:
     return exploded
 
 
+# A zip bomb is a small file that unpacks to gigabytes: zipped zeros shrink a thousandfold, documents
+# a few times. Unpack at most this much in all, and skip a large entry packed tighter than this.
+MAX_UNZIPPED = 100_000_000
+MAX_ZIP_RATIO = 100
+
+
 def _unzip(item, *, limit: int) -> list:
     import zipfile
 
@@ -192,10 +255,16 @@ def _unzip(item, *, limit: int) -> list:
     except zipfile.BadZipFile:
         return []
     out = []
+    total = 0
     for info in archive.infolist():
         if info.is_dir() or len(out) >= limit:
             continue
         if info.file_size > 30_000_000 or info.filename.startswith("__MACOSX"):
+            continue
+        # zipfile stops reading an entry at its stated size, so the stated sizes bound what is unpacked.
+        if total + info.file_size > MAX_UNZIPPED:
+            continue
+        if info.file_size > 1_000_000 and info.file_size > MAX_ZIP_RATIO * info.compress_size:
             continue
         filename = _basename(info.filename)
         if not filename or filename.startswith("."):
@@ -204,6 +273,7 @@ def _unzip(item, *, limit: int) -> list:
             payload = archive.read(info)
         except Exception:
             continue
+        total += len(payload)
         out.append(
             RawAttachment(
                 id=f"{item.id}:{filename}",

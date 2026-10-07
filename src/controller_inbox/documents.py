@@ -32,7 +32,7 @@ logging.getLogger("pypdf").setLevel(logging.ERROR)
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 # Raise when attachments read differently, so text stored by an older reader is read again.
-READER_VERSION = "17"
+READER_VERSION = "18"
 MAX_TEXT = 400_000
 MAX_PDF_PAGES = 300
 MAX_SHEETS = 40
@@ -61,7 +61,7 @@ def extract_document(filename: str, content_type: str, data: bytes) -> str:
     if name.endswith(SPREADSHEET_SUFFIXES) or "spreadsheetml" in ctype:
         return _cap(xlsx_text(data))
     if name.endswith(".xls") or ctype == "application/vnd.ms-excel":
-        return _cap(xls_text(data))
+        return _cap(_excel_named_text(data, filename or "table.csv"))
     if name.endswith(".pptx") or "presentationml" in ctype:
         return _cap(pptx_text(data))
     if name.endswith((".csv", ".tsv")) or ctype in {"text/csv", "application/csv", "text/tab-separated-values"}:
@@ -206,10 +206,20 @@ def _docx_blocks(parent):
             yield child
 
 
-def _docx_paragraph(element) -> str:
-    parts = []
-    for node in element.iter():
-        if node.tag == f"{_W}t" and node.text:
+_MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+
+
+def _docx_runs(element, parts: list[str]) -> None:
+    """The text under ``element``. A text box is stored twice (a drawing, then an older VML copy as the
+    ``mc:Fallback``), so the copy is skipped; its paragraphs go on lines of their own."""
+    for node in element:
+        if node.tag in (_MC_FALLBACK, f"{_W}pPr"):
+            continue
+        if node.tag == f"{_W}p":
+            parts.append("\x00")
+            _docx_runs(node, parts)
+            parts.append("\x00")
+        elif node.tag == f"{_W}t" and node.text:
             parts.append(node.text)
         elif node.tag == f"{_W}delText" and node.text:
             parts.append(f"[deleted: {node.text}]")
@@ -217,7 +227,14 @@ def _docx_paragraph(element) -> str:
             parts.append("\t")
         elif node.tag in {f"{_W}br", f"{_W}cr"}:
             parts.append("\n")
-    text = "".join(parts).strip()
+        else:
+            _docx_runs(node, parts)
+
+
+def _docx_paragraph(element) -> str:
+    parts: list[str] = []
+    _docx_runs(element, parts)
+    text = re.sub(r"\s*\x00[\x00\s]*", "\n", "".join(parts)).strip()
     if not text:
         return ""
     style = element.find(f"{_W}pPr/{_W}pStyle")
@@ -240,9 +257,10 @@ def _docx_table(element) -> list[str]:
     for number, row in enumerate(element.findall(f"{_W}tr")):
         if number == 0:
             marked = row.find(f"{_W}trPr/{_W}tblHeader") is not None
-        cells: list[str | None] = []
+        # A row that starts further right (Word's "grid before") has no cells for the columns it skips.
+        cells: list[str | None] = [""] * _docx_count(row.find(f"{_W}trPr/{_W}gridBefore"), 0)
         for cell in _docx_cells(row):
-            text = " ".join(filter(None, (_docx_paragraph(p) for p in cell.iter(f"{_W}p")))).strip()
+            text = " ".join(filter(None, (_docx_paragraph(p) for p in cell.iter(f"{_W}p") if _docx_own(p, cell)))).strip()
             properties = cell.find(f"{_W}tcPr")
             span = properties.find(f"{_W}gridSpan") if properties is not None else None
             merge = properties.find(f"{_W}vMerge") if properties is not None else None
@@ -250,14 +268,31 @@ def _docx_table(element) -> list[str]:
                 above = grid[-1] if grid else []
                 text = next((c for c in reversed(above[: len(cells) + 1]) if c is not None), "") if len(cells) < len(above) else ""
             cells.append(text)
-            if span is not None and (span.get(f"{_W}val") or "1").isdigit():
-                cells.extend([None] * (int(span.get(f"{_W}val")) - 1))
+            cells.extend([None] * (_docx_count(span, 1) - 1))
         grid.append(cells)
         if number == 0:
             runs = [r for r in row.iter(f"{_W}r") if "".join(t.text or "" for t in r.iter(f"{_W}t")).strip()]
             bold.append(bool(runs) and all(_docx_bold(r) for r in runs))
     header = tables.has_header(grid, marked=marked, bold_first=bool(bold and bold[0]))
     return tables.table_lines(grid, header=header)
+
+
+def _docx_count(element, default: int) -> int:
+    """A column count such as ``w:gridSpan``: the default when it is missing or unreadable, and no more
+    columns than a Word table can have."""
+    value = (element.get(f"{_W}val") or "") if element is not None else ""
+    return min(int(value), 63) if value.isdigit() else default
+
+
+def _docx_own(paragraph, cell) -> bool:
+    """Whether a paragraph is the cell's own (or a nested table's), not one in a text box, which the
+    paragraph holding the box already reads."""
+    for parent in paragraph.iterancestors():
+        if parent is cell:
+            return True
+        if parent.tag in (f"{_W}p", _MC_FALLBACK):
+            return False
+    return True
 
 
 def _docx_cells(row):
@@ -374,12 +409,20 @@ def _sheet_header(rows: list[SheetRow], *, first_names_columns: bool = False) ->
 
 
 def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
-    from openpyxl.utils import get_column_letter
+    from openpyxl.utils import get_column_letter, range_boundaries
 
+    try:
+        declared = formula_sheet.calculate_dimension()
+    except Exception:
+        declared = ""
+    # Writers other than Excel often store too small a size (<dimension ref="A1"/>), and read-only mode
+    # stops there; forget it, so every row in the file is read.
+    formula_sheet.reset_dimensions()
+    value_sheet.reset_dimensions()
     rows: list[SheetRow] = []
     more = 0
     formula_count = 0
-    last_col = 0
+    first_col = first_row = last_col = last_row = 0
     for index, (frow, vrow) in enumerate(
         zip(
             formula_sheet.iter_rows(max_col=MAX_COLUMNS),
@@ -393,12 +436,13 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
             value = vrow[column] if column < len(vrow) else None
             if raw is None and value is None:
                 continue
-            last_col = max(last_col, column + 1)
+            first_col, last_col = min(first_col or column + 1, column + 1), max(last_col, column + 1)
+            first_row, last_row = (first_row or index + 1), index + 1
             if isinstance(raw, str) and raw.startswith("="):
                 formula_count += 1
-                shown = f"{_fmt(value)} ({raw})" if value is not None else raw
+                shown = f"{_formatted(value, cell)} ({raw})" if value is not None else raw
             else:
-                shown = _fmt(value if value is not None else raw)
+                shown = _formatted(value if value is not None else raw, cell)
             if shown:
                 cells[column + 1] = shown
                 bold = bold and bool(getattr(getattr(cell, "font", None), "b", False))
@@ -410,11 +454,14 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
         number = next((cell.row for cell in frow if getattr(cell, "row", None)), index + 1)
         rows.append(SheetRow(number, cells, bold))
     rows_text = sheet_row_lines(rows)
-    extent = ""
     try:
-        extent = formula_sheet.calculate_dimension()
-    except Exception:
-        extent = f"A1:{get_column_letter(max(last_col, 1))}{len(rows)}"
+        min_col, min_row, max_col, max_row = range_boundaries(declared)
+        fits = min_col <= first_col and min_row <= first_row and last_col <= max_col and last_row <= max_row
+    except (ValueError, TypeError):
+        fits = False
+    extent = declared or "A1:A1"
+    if last_row and not fits:
+        extent = f"{get_column_letter(first_col)}{first_row}:{get_column_letter(last_col)}{last_row}"
     hidden = " hidden" if formula_sheet.sheet_state != "visible" else ""
     head = f'[sheet "{formula_sheet.title}" {extent}{hidden}]'
     note = f"({len(rows) + more} row{'s' if len(rows) + more != 1 else ''} with data" + (
@@ -443,14 +490,9 @@ def xls_text(data: bytes) -> str:
                 cell = sheet.cell(r, c)
                 if cell.value in ("", None):
                     continue
-                value = cell.value
-                if cell.ctype == xlrd.XL_CELL_DATE:
-                    try:
-                        value = xlrd.xldate.xldate_as_datetime(cell.value, book.datemode)
-                    except Exception:
-                        pass
-                if _fmt(value):
-                    cells[c + 1] = _fmt(value)
+                shown = _fmt(_xls_value(cell, book.datemode))
+                if shown:
+                    cells[c + 1] = shown
             if cells:
                 if len(rows) >= MAX_ROWS:
                     rows_left = sheet.nrows - r
@@ -464,19 +506,149 @@ def xls_text(data: bytes) -> str:
     return "\n".join(lines).strip()
 
 
-def csv_text(data: bytes, filename: str) -> str:
-    from openpyxl.utils import get_column_letter
+def _xls_value(cell, datemode: int):
+    """An Excel 97-2003 cell's value as the sheet shows it. xlrd gives an error such as #N/A as its code
+    (42) and TRUE as 1, which would read as figures."""
+    import xlrd
 
+    if cell.ctype == xlrd.XL_CELL_ERROR:
+        return xlrd.error_text_from_code.get(cell.value, "#ERROR")
+    if cell.ctype == xlrd.XL_CELL_BOOLEAN:
+        return bool(cell.value)
+    if cell.ctype == xlrd.XL_CELL_DATE:
+        try:
+            return xlrd.xldate.xldate_as_datetime(cell.value, datemode)
+        except Exception:
+            pass
+    return cell.value
+
+
+def _excel_named_text(data: bytes, filename: str) -> str:
+    """A file called a workbook, by its name or by the type Windows gives every .csv, read as what it
+    is: an Excel 97-2003 workbook, an .xlsx renamed, a web page table saved as .xls, or delimited text."""
+    if data[:4] == b"\xd0\xcf\x11\xe0":
+        return xls_text(data)
+    if data[:4] == b"PK\x03\x04":
+        return xlsx_text(data)
+    text = decode_text(data[:4096]).lstrip("﻿ \t\r\n")
+    if re.match(r"(?is)(?:<!--.*?-->\s*)*<(?:!doctype\s+html|html|head|body|meta|table|\?xml)\b", text):
+        return markup_table_text(data, filename)
+    return csv_text(data, filename)
+
+
+def markup_table_text(data: bytes, filename: str) -> str:
+    """The rows of the tables in a web page, as a sheet. "Export to Excel" in many web apps sends one
+    named .xls; an Excel 2003 XML workbook has the same shape (``Row`` and ``Cell``)."""
+    from html.parser import HTMLParser
+
+    rows: list[list[str]] = []
+    loose: list[str] = []
+    cell: list[str] = []
+    state = {"in_cell": False, "span": 1, "skip": 0}
+
+    def end_cell() -> None:
+        if state["in_cell"]:
+            rows[-1].append(re.sub(r"\s+", " ", "".join(cell)).strip())
+            rows[-1].extend([""] * (state["span"] - 1))
+            cell.clear()
+            state["in_cell"] = False
+
+    class Reader(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            tag = tag.rsplit(":", 1)[-1]
+            found = {name.rsplit(":", 1)[-1]: value or "" for name, value in attrs}
+            if tag in ("script", "style"):
+                state["skip"] += 1
+            elif tag in ("tr", "row"):
+                end_cell()
+                rows.append([])
+            elif tag in ("td", "th", "cell"):
+                end_cell()
+                if not rows:
+                    rows.append([])
+                # An XML workbook leaves out empty cells and gives the next one's column.
+                if found.get("index", "").isdigit():
+                    rows[-1].extend([""] * (min(int(found["index"]), MAX_COLUMNS) - 1 - len(rows[-1])))
+                span, across = found.get("colspan", ""), found.get("mergeacross", "")
+                span = int(span) if span.isdigit() else int(across) + 1 if across.isdigit() else 1
+                state["span"] = max(1, min(span, MAX_COLUMNS))
+                state["in_cell"] = True
+            elif tag in ("br", "p", "div") and state["in_cell"]:
+                cell.append(" ")
+
+        def handle_endtag(self, tag):
+            tag = tag.rsplit(":", 1)[-1]
+            if tag in ("script", "style"):
+                state["skip"] = max(0, state["skip"] - 1)
+            elif tag in ("td", "th", "cell", "tr", "row", "table"):
+                end_cell()
+
+        def handle_data(self, text):
+            if state["skip"]:
+                return
+            (cell if state["in_cell"] else loose).append(text)
+
+    reader = Reader(convert_charrefs=True)
+    reader.feed(decode_text(data))
+    reader.close()
+    end_cell()
+    if not any(any(row) for row in rows):
+        return re.sub(r"\s+", " ", " ".join(loose)).strip()
+    return _rows_text(rows, filename)
+
+
+def csv_text(data: bytes, filename: str) -> str:
     text = decode_text(data).replace("\x00", "")
     try:
         dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
     except csv.Error:
         dialect = csv.excel_tab if filename.lower().endswith(".tsv") else csv.excel
-    rows = list(csv.reader(io.StringIO(text), dialect))
+    quote = getattr(dialect, "quotechar", None) or '"'
+    try:
+        rows = list(csv.reader(io.StringIO(text), dialect))
+        broken = _swallowed(rows, text, dialect.delimiter, quote)
+    except csv.Error:  # a cell over 128 KB, as one opened by a stray quote can be
+        broken = True
+    if broken:
+        rows = [_csv_line(line, dialect, quote) for line in text.splitlines()]
+    return _rows_text(rows, filename)
+
+
+def _swallowed(rows: list[list[str]], text: str, delimiter: str, quote: str) -> bool:
+    """Whether a quote that never closed ran one cell over the rows below it: the cell runs to the end of
+    the file, or holds lines shaped like the file's rows."""
+    if not rows:
+        return False
+    if "\n" in "".join(rows[-1][-1:]) and not text.rstrip().endswith(quote):
+        return True
+    width = len(rows[0]) - 1
+    for row in rows:
+        for cell in row:
+            if width >= 1 and cell.count("\n") >= 2:
+                if sum(line.count(delimiter) == width for line in cell.split("\n")[1:]) >= 2:
+                    return True
+    return False
+
+
+def _csv_line(line: str, dialect, quote: str) -> list[str]:
+    """One line of a file whose quotes don't pair up. Quoted cells on a line with whole pairs still read as
+    one cell each; a line with a stray quote is split at every delimiter, the quote kept as a character."""
+    try:
+        if line.count(quote) % 2 == 0:
+            return next(csv.reader([line], dialect), [])
+        return next(csv.reader([line], dialect, quoting=csv.QUOTE_NONE), [])
+    except csv.Error:
+        return line.split(dialect.delimiter)
+
+
+def _rows_text(rows: list[list[str]], filename: str) -> str:
+    """Rows of text cells as one sheet named after the file; the first row is its header when it names the columns."""
+    from openpyxl.utils import get_column_letter
+
     width = max((len(r) for r in rows), default=1)
     lines = [f'[sheet "{filename}" A1:{get_column_letter(max(1, min(width, MAX_COLUMNS)))}{max(len(rows), 1)}]']
     sheet = [
-        SheetRow(number, {c + 1: v.strip() for c, v in enumerate(row[:MAX_COLUMNS]) if v.strip()})
+        SheetRow(number, {c + 1: _fmt(v) for c, v in enumerate(row[:MAX_COLUMNS]) if v.strip()})
         for number, row in enumerate(rows[:MAX_ROWS], start=1)
     ]
     lines.extend(sheet_row_lines([row for row in sheet if row.cells], first_names_columns=True))
@@ -501,6 +673,35 @@ def decode_text(data: bytes) -> str:
             continue
     return data.decode("utf-8", errors="replace")
 
+
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
+_DATE_PART = re.compile(r'(?i)"([^"]*)"|\\(.)|mmmm|mmm|mm|m|yyyy|yy|[^a-z]')
+
+
+def _formatted(value, cell) -> str:
+    """A workbook value as the sheet shows it where that reads differently from the value itself: a
+    percentage (0.15 formatted 0.0% is 15.0%) and a month (a date formatted mmm-yy is Mar-26, not the
+    first of the month). Other numbers, and dates with a day, keep the plain form ``_fmt`` gives them."""
+    number_format = getattr(cell, "number_format", None)
+    if not isinstance(number_format, str) or number_format == "General":
+        return _fmt(value)
+    # The format for positive values, without its colour or locale, padding and fill; then without its literal text.
+    section = re.sub(r"\[[^\]]*\]|[_*].", "", number_format.split(";")[0])
+    bare = re.sub(r'"[^"]*"|\\.', "", section)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and "%" in bare and math.isfinite(value):
+        decimals = re.search(r"\.([0#?]+)", bare)
+        return f"{value * 100:,.{len(decimals.group(1)) if decimals else 0}f}%"
+    if isinstance(value, (datetime, date)) and "m" in bare.lower() and "y" in bare.lower():
+        parts = list(_DATE_PART.finditer(section))
+        if "".join(part.group(0) for part in parts) == section:
+            month, year = _MONTHS[value.month - 1], value.year
+            words = {"mmmm": month, "mmm": month[:3], "mm": f"{value.month:02d}", "m": str(value.month), "yyyy": f"{year:04d}", "yy": f"{year % 100:02d}"}
+            shown = []
+            for part in parts:
+                literal = part.group(1) if part.group(1) is not None else part.group(2)
+                shown.append(literal if literal is not None else words.get(part.group(0).lower(), part.group(0)))
+            return "".join(shown).strip()
+    return _fmt(value)
 
 
 def _fmt(value) -> str:
@@ -812,9 +1013,13 @@ def read_part(text: str, label: str) -> Part | None:
 
 # Exact cells from the original workbook ------------------------------------------------------
 
+# Not part of a longer name (LOG10, ATAN2, 1.5E10) or of a link to another workbook ([1]Sheet1!B2),
+# and not a function's name (LOG10( ).
 _FORMULA_REF = re.compile(
-    r"(?:'((?:[^']|'')+)'!|([A-Za-z0-9_.]+)!)?\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?"
+    r"(?<![\w.\]!$'])(?:'((?:[^']|'')+)'!|([A-Za-z0-9_.]+)!)?\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?(?![\w(!])"
 )
+_FORMULA_TEXT = re.compile(r'"(?:[^"]|"")*"')
+_FORMULA_LINK = re.compile(r"'?\[[^\[\]]+\][^\[\]!(),;+\-*/^&=<>]*!\$?[A-Za-z_]*\$?\d*(?::\$?[A-Z]{1,3}\$?\d+)?")
 
 
 def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200) -> str:
@@ -838,11 +1043,13 @@ def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200) -> str:
         max_row = min(max_row or ws.max_row, ws.max_row)
         lines = [f'Sheet "{ws.title}" {get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}']
         shown = 0
-        for r in range(min_row, max_row + 1):
+        held = _held(ws, min_col, min_row, max_col, max_row)
+        held_values = _held(vs, min_col, min_row, max_col, max_row)
+        for r in sorted({r for r, _c in held} | {r for r, _c in held_values}):
             row = []
             for c in range(min_col, max_col + 1):
-                raw = ws.cell(r, c).value
-                value = vs.cell(r, c).value
+                raw = getattr(held.get((r, c)), "value", None)
+                value = getattr(held_values.get((r, c)), "value", None)
                 if raw is None and value is None:
                     continue
                 ref = f"{get_column_letter(c)}{r}"
@@ -862,6 +1069,16 @@ def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200) -> str:
     finally:
         values.close()
         formulas.close()
+
+
+def _held(ws, min_col: int, min_row: int, max_col: int, max_row: int) -> dict:
+    """The cells of a range the sheet holds, by (row, column) in order, without making a cell for every
+    empty address in it as ``ws.cell`` does: a sheet formatted down to row 1,048,576 would take minutes."""
+    return {
+        key: cell
+        for key, cell in sorted(ws._cells.items())
+        if min_row <= key[0] <= max_row and min_col <= key[1] <= max_col
+    }
 
 
 def trace_cell(data: bytes, sheet: str, cell: str, *, depth: int = 2) -> str:
@@ -988,7 +1205,10 @@ def _trace(formulas, values, sheet: str, ref: str, depth: int, level: int, lines
         lines.append(f"{indent}{where}{shown} ← {raw}")
         if level >= depth:
             return
-        for match in _FORMULA_REF.finditer(raw[1:]):
+        formula = _FORMULA_TEXT.sub('""', raw[1:])
+        for link in dict.fromkeys(_FORMULA_LINK.findall(formula)):
+            lines.append(f"{indent}  {link}: in another workbook, not in this file")
+        for match in _FORMULA_REF.finditer(formula):
             target = (match.group(1) or match.group(2) or sheet).replace("''", "'")
             if target not in formulas.sheetnames:
                 continue
@@ -996,21 +1216,21 @@ def _trace(formulas, values, sheet: str, ref: str, depth: int, level: int, lines
             if match.group(5):
                 end = f"{match.group(5)}{match.group(6)}"
                 min_col, min_row, max_col, max_row = range_boundaries(f"{start}:{end}")
-                cells = [
-                    f"{get_column_letter(c)}{r}"
-                    for r in range(min_row, max_row + 1)
-                    for c in range(min_col, max_col + 1)
-                ]
-                if len(cells) > 12:
-                    total = [values[target][c].value for c in cells]
-                    numbers = [v for v in total if isinstance(v, (int, float))]
+                # Only the part the sheet uses: an old lookup's A1:Z65536 is a few hundred cells, not 1.7 million.
+                used = values[target]
+                max_col, max_row = min(max_col, used.max_column), min(max_row, used.max_row)
+                count = max(0, max_col - min_col + 1) * max(0, max_row - min_row + 1)
+                if count > 12:
+                    filled = [c.value for c in _held(used, min_col, min_row, max_col, max_row).values() if c.value is not None]
+                    numbers = [v for v in filled if isinstance(v, (int, float)) and not isinstance(v, bool)]
                     lines.append(
-                        f"{indent}  {target}!{start}:{end}: {len(cells)} cells"
+                        f"{indent}  {target}!{start}:{end}: {len(filled)} filled cells"
                         + (f", {len(numbers)} numbers adding to {_fmt(sum(numbers))}" if numbers else "")
                     )
                     continue
-                for c in cells:
-                    _trace(formulas, values, target, c, depth, level + 1, lines, seen)
+                for r in range(min_row, max_row + 1):
+                    for c in range(min_col, max_col + 1):
+                        _trace(formulas, values, target, f"{get_column_letter(c)}{r}", depth, level + 1, lines, seen)
             else:
                 _trace(formulas, values, target, start, depth, level + 1, lines, seen)
     else:
