@@ -332,6 +332,9 @@ class _Running:
         self.group: list[Decimal] = []
         self.body: list[Decimal] = []
         self.subtotals: list[Decimal] = []
+        # The last total of a whole section ("Total liabilities"), which a statement's last line adds to the
+        # sections after it ("Total liabilities and stockholders' equity").
+        self.section: list[Decimal] = []
         self.places = 0
 
     def add(self, value: Decimal | None, raw: str) -> None:
@@ -355,7 +358,8 @@ class _Running:
         slack = Decimal(1).scaleb(-self.places) * (Decimal("0.5") * (len(self.body) + 1))
         if self.group and abs(sum(self.group) - value) <= slack:
             return "group"
-        if any(parts and abs(sum(parts) - value) <= slack for parts in (self.body, self.subtotals, self.subtotals + self.group)):
+        candidates = (self.body, self.subtotals, self.subtotals + self.group, self.section + self.subtotals + self.group)
+        if any(parts and abs(sum(parts) - value) <= slack for parts in candidates):
             return "all"
         return ""
 
@@ -366,6 +370,7 @@ class _Running:
             self.subtotals.append(value)
         elif held == "all":
             self.subtotals = []
+            self.section = [value]
         self.group = []
         return bool(held)
 
@@ -445,10 +450,13 @@ def _with_row_labels(table: Table) -> None:
         return
     table.labels = (ROW_LABEL, *table.labels)
     for row in table.rows:
-        row.cells.insert(0, (ROW_LABEL, row.group))
+        # Indented under a section ("Current assets > Cash and cash equivalents"), the row label is the last
+        # name and the section stays the row's group.
+        section, _sep, label = row.group.rpartition(" > ")
+        row.cells.insert(0, (ROW_LABEL, label))
         if row.refs:
             row.refs.insert(0, "")
-        row.group = ""
+        row.group = section
 
 
 def _joined_across_pages(found: list[Table]) -> list[Table]:
@@ -491,7 +499,9 @@ def _row(line: str, page: str) -> Row | None:
     for part in parts:
         label, sep, value = part.partition(": ")
         label = label.strip()
-        if sep and 0 < len(label) <= 60 and not tables.is_value(label):
+        # Columns headed by a year or a date ("2009: $5,920", "Dec 31, 2025: 4,210") are a comparative
+        # statement's figure columns.
+        if sep and 0 < len(label) <= 60:
             ref = ""
             if workbook and (cell := _CELL_REF.match(label)):
                 if not cell.group(2):

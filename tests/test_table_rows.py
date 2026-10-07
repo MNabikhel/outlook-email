@@ -64,3 +64,60 @@ Payee: Total outstanding checks | Check #: not listed | Amount: 5,950.00
     tables = Tables([("Bank Recs.pdf", text)])
     assert "CREATE TABLE t2 (  -- Bank Recs.pdf / Outstanding Checks - Payroll x0932" in tables.schema()
     assert tables.run("SELECT SUM(amount) FROM t2")[1] == [(5950.0,)]
+
+
+def _balance_sheet() -> bytes:
+    """A 10-K balance sheet: year columns, dot leaders to the figures, "Current assets:" over its items and each
+    total indented past them."""
+    from pdffactory import Text, build_pdf, width
+
+    items = [Text(40, 760, "CONSOLIDATED BALANCE SHEETS", size=12, bold=True), Text(40, 744, "(in thousands)")]
+    items += [Text(430, 726, "2025", right=True, bold=True), Text(520, 726, "2024", right=True, bold=True)]
+    lines = [
+        (40, "Current assets:", None),
+        (50, "Cash and cash equivalents", ("$290,291", "$508,053")),
+        (50, "Short-term investments", ("457,787", "289,758")),
+        (50, "Other current assets", ("64,622", "57,330")),
+        (60, "Total current assets", ("812,700", "855,141")),
+        (50, "Property and equipment, net", ("131,681", "136,353")),
+        (60, "Total assets", ("$944,381", "$991,494")),
+        (40, "Current liabilities:", None),
+        (50, "Accounts payable", ("86,468", "86,992")),
+        (50, "Accrued expenses", ("53,139", "54,231")),
+        (60, "Total current liabilities", ("139,607", "141,223")),
+        (50, "Long-term debt", ("200,000", "200,000")),
+        (60, "Total liabilities", ("339,607", "341,223")),
+        (50, "Total stockholders' equity", ("604,774", "650,271")),
+        (60, "Total liabilities and stockholders' equity", ("$944,381", "$991,494")),
+    ]
+    y = 708
+    for x, label, figures in lines:
+        if figures:
+            # Dot leaders run from the label to the first figure column.
+            dots = int((370 - x - width(label + " ", 10)) / width(". ", 10))
+            items.append(Text(x, y, label + " " + ". " * dots))
+            items += [Text(430, y, figures[0], right=True), Text(520, y, figures[1], right=True)]
+        else:
+            items.append(Text(x, y, label))
+        y -= 15
+    return build_pdf([items])
+
+
+def test_a_balance_sheet_reads_as_one_table_whose_totals_add_up():
+    from controller_inbox.documents import pdf_text
+    from controller_inbox.table_lookup import verify
+
+    text = pdf_text(_balance_sheet())
+    assert ". . ." not in text, "dot leaders are the gap between a label and its figures"
+    [table] = tables_in(text)
+    assert table.labels == ("Line", "2025", "2024"), "years name a statement's columns"
+    named = {row.name: row for row in table.rows}
+    cash = named["Cash and cash equivalents"]
+    assert (cash.group, cash.value("2025"), cash.value("2024"), cash.total) == ("Current assets", "$290,291", "$508,053", False)
+    assert named["Total current assets"].group == "Current assets", "an indented total is not the line item above it"
+    assert [row.name for row in table.rows if row.total] == [
+        "Total current assets", "Total assets", "Total current liabilities", "Total liabilities",
+        "Total liabilities and stockholders' equity",
+    ]
+    verdict = verify(table)
+    assert verdict.mismatched == [] and verdict.matched == 10, "liabilities and equity add up as total liabilities plus equity"

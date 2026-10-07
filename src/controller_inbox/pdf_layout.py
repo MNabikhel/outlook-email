@@ -377,6 +377,7 @@ def page_text(glyphs: list[Glyph], previous: list[Table] | None = None, rules: l
         return PageText("", [], unreadable=True)
     lines = _lines([g for g in glyphs if not _CID.fullmatch(g.text)])
     for line in lines:
+        line.glyphs = _without_leaders(line.glyphs)
         line.words, line.piece_gap = _words(line)
     lines = [line for line in lines if line.words]
     cuts = _column_cuts(lines, rules or [])
@@ -463,6 +464,31 @@ def _dedupe(glyphs: list[Glyph]) -> list[Glyph]:
         if any(other.text == glyph.text and abs(other.x0 - glyph.x0) < near for other in out[-3:]):
             continue
         out.append(glyph)
+    return out
+
+
+_LEADER_DOTS = {".": 1, "·": 1, "․": 1, "‥": 2, "…": 3}
+
+
+def _without_leaders(glyphs: list[Glyph]) -> list[Glyph]:
+    """Dot leaders ("Cash and cash equivalents . . . . . $290,291") lead the eye from a label to its figures
+    across the gap between two cells: they are that gap, not text. Up to three dots are an ellipsis."""
+    out: list[Glyph] = []
+    run: list[Glyph] = []
+
+    def settle() -> None:
+        if sum(_LEADER_DOTS.get(glyph.text.strip(), 0) for glyph in run) < 4:
+            out.extend(run)
+        run.clear()
+
+    for glyph in glyphs:
+        text = glyph.text.strip()
+        if text in _LEADER_DOTS or (run and not text):
+            run.append(glyph)
+            continue
+        settle()
+        out.append(glyph)
+    settle()
     return out
 
 
@@ -877,6 +903,8 @@ def _table_blocks(lines: list[Line]) -> list[tuple[int, int]]:
             end += 1
         if _is_table(lines[i:end]) and len(_columns(lines[i:end])) >= 2:
             start = i - 1 if i > 0 and _labels_above(lines[i - 1], lines[i:end]) else i
+            if start == i and _section_under_names(lines, i, end):
+                start = i - 2
             blocks.append((start, end))
             i = end
         else:
@@ -934,6 +962,12 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
     # A label may run a little into the empty cell beside it ("Operating Expenses" past a narrow column);
     # a title written across the table covers whole columns.
     under = [c for c in columns if x0 < c[1] and x1 > c[0] and (c[0] <= x0 or min(x1, c[1]) - c[0] >= 0.3 * (c[1] - c[0]))]
+    if not under and columns and _outdented(line, columns):
+        # A section's name, unless a table of its own starts under it (a title over its column names).
+        nxt = lines[index + 1] if index + 1 < len(lines) else None
+        if nxt is None or _new_header(nxt):
+            return False
+        under = columns[:1]
     if len(under) != 1:
         return False
     if gap <= 1.6 * usual + 1:
@@ -948,6 +982,33 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
         and _fits_columns(nxt, columns)
         and any(_amount_cell(word.text) for segment in nxt.segments for word in segment)
     )
+
+
+def _outdented(line: Line, columns: list[tuple[float, float]]) -> bool:
+    """A statement's section name ("Current liabilities:") is one label set out to the left of the line items
+    under it, ending inside their column."""
+    if len(line.segments) != 1:
+        return False
+    x0, x1 = line.segments[0][0].x0, line.segments[0][-1].x1
+    return x0 < columns[0][0] and columns[0][0] < x1 <= columns[0][1]
+
+
+def _section_under_names(lines: list[Line], start: int, end: int) -> bool:
+    """Column names, then the first section's name ("Current assets:") over the table's first row."""
+    if start < 2:
+        return False
+    section, block = lines[start - 1], lines[start:end]
+    columns = _columns(block)
+    # A table with its own column names under a title is a new table, not the section of one above.
+    if len(section.segments) != 1 or len(columns) < 2 or _new_header(block[0]):
+        return False
+    x0, x1 = section.segments[0][0].x0, section.segments[0][-1].x1
+    pitch = block[0].mid - block[1].mid if len(block) > 1 else 1.5 * section.size
+    if not 0 < section.mid - block[0].mid <= 1.6 * pitch + 1:
+        return False
+    if not (_outdented(section, columns) or columns[0][0] <= x0 < x1 <= columns[0][1]):
+        return False
+    return _labels_above(lines[start - 2], lines[start - 1 : end])
 
 
 def _new_header(line: Line) -> bool:
@@ -973,7 +1034,8 @@ def _labels_above(line: Line, block: list[Line]) -> bool:
     if len(line.segments) == 1:
         return _merged_heading_above(line, block, columns)
     words = [word.text for segment in line.segments for word in segment]
-    if not words or sum(map(tables.is_value, words)) >= 0.5 * len(words):
+    # Years and dates name a statement's columns ("2009 | 2008"); amounts make a row of figures.
+    if not words or sum(map(_amount_cell, words)) >= 0.5 * len(words):
         return False
     if line.segments[0][-1].text.endswith(":"):
         # "Pay Group:  Hourly & Salaried": a fact about the sheet above it, not its column names.
@@ -1829,24 +1891,23 @@ def _grouped_lines(
         if label:
             while groups and x <= groups[-1][0] + 1:
                 groups.pop()
-            groups.append((x, label, "group"))
+            # "Current assets:" names the rows under it; its colon would read as a cell's ("Current assets: > Cash").
+            groups.append((x, label.rstrip(": ") or label, "group"))
             lines.append(f"Group: {label}")
             continue
         stub = _stub_x(row, cell_x[index] if index < len(cell_x) else [])
-        if stub is None:
-            while groups and groups[-1][2] == "data":
-                groups.pop()
-            prefix = " > ".join(group for _at, group, _kind in groups)
-            line = render(row)
-            lines.append(f"{prefix} | {line}" if prefix else line)
-            continue
-        while groups and groups[-1][2] == "data" and stub <= groups[-1][0] + 1:
+        # A statement indents its totals past the line items ("Total current assets" under "Other current
+        # assets"): a total is never one item's detail.
+        total = _total_row(row)
+        while groups and groups[-1][2] == "data" and (stub is None or total or stub <= groups[-1][0] + 1):
             groups.pop()
-        while groups and groups[-1][2] == "group" and stub < groups[-1][0] - 1:
+        while stub is not None and groups and groups[-1][2] == "group" and stub < groups[-1][0] - 1:
             groups.pop()
         prefix = " > ".join(group for _at, group, _kind in groups)
         line = render(row)
         lines.append(f"{prefix} | {line}" if prefix else line)
+        if stub is None or total:
+            continue
         name, _name_x = _detail(row, cell_x[index] if index < len(cell_x) else [], grouped, stub)
         if name:
             groups.append((stub, name, "data"))
