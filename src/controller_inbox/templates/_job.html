@@ -1,4 +1,4 @@
-{% set stage_labels = {'starting': 'Starting', 'importing': 'Reading files', 'rereading': 'Re-reading attachments', 'reading': 'Local model reading', 'summarizing': 'Summarizing attachments', 'indexing': 'Indexing for search', 'digest': 'Writing the digest'} %}
+{% set stage_labels = {'starting': 'Starting', 'importing': 'Reading files', 'rereading': 'Re-reading attachments', 'reading': 'Local model reading', 'summarizing': 'Summarizing attachments', 'vision': 'Reading scans with the vision model', 'indexing': 'Indexing for search', 'digest': 'Writing the digest'} %}
 {% if job.state == 'running' %}
 <section class="job running" data-poll="/process/status">
   <div>
@@ -26,6 +26,8 @@
     }, 1200);
   })();
 </script>
+{% elif job.state == 'done' and job.result and job.result.kind == 'vision' %}
+<section class="job done"><strong>Read with the vision model.</strong> <span>{{ job.result.message }} <a href="{{ job.result.href }}">See the file</a></span></section>
 {% elif job.state == 'done' and job.result and job.result.kind == 'index' %}
 <section class="job done"><strong>Indexed for search.</strong> <span>{{ job.result.indexed }} email{{ '' if job.result.indexed == 1 else 's' }} and file sections added. <a href="/settings#search">See Setup</a></span></section>
 {% elif job.state == 'done' and job.result %}

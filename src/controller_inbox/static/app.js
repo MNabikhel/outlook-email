@@ -393,6 +393,7 @@
         html += `<ul class="msg-check">${turn.checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
       }
       if (turn.context) html += `<p class="msg-context">${escapeHtml(turn.context)} <a href="/settings">Setup</a></p>`;
+      if (turn.vision && !turn.pending) html += visionOffer(turn.vision);
       const cited =
         turn.mode === "model" ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
       if (!turn.pending && cited.length) {
@@ -572,6 +573,8 @@
             answer.mode = event.mode;
             answer.note = event.note || "";
             renderTurn(answer, bubble);
+          } else if (event.type === "vision") {
+            answer.vision = event;
           } else if (event.type === "error") {
             answer.text = (answer.text ? answer.text + "\n\n" : "") + event.text;
             renderTurn(answer, bubble);
@@ -592,6 +595,66 @@
     turns.push(answer);
     renderTurn(answer, bubble);
     chatInput.focus({ preventScroll: true });
+  }
+
+  /* ---------- Reading a scan with the vision model ---------- */
+
+  function visionOffer(offer) {
+    const href = `/inbox/${encodeURIComponent(offer.email_id)}/files/${Number(offer.n)}/vision`;
+    return (
+      `<div class="vision-offer"><p>${escapeHtml(offer.text || "")}</p>` +
+      `<button type="button" class="ghost" data-action="vision-read" data-href="${escapeHtml(href)}" data-question="${escapeHtml(offer.question || "")}">Read with the vision model</button>` +
+      `<span class="vision-status" data-vision-status aria-live="polite"></span></div>`
+    );
+  }
+
+  /* Starts the read (a background job, one at a time) and follows it. On the file page the page then shows both
+     readings; in the chat, the question can be asked again to use them. */
+  async function visionRead(button) {
+    const box = button.closest(".vision-offer, .vision-box") || button.parentElement;
+    const status = $("[data-vision-status]", box);
+    const say = (text) => {
+      if (status) status.textContent = text;
+    };
+    button.disabled = true;
+    try {
+      const response = await fetch(button.dataset.href, { method: "POST", headers: { "X-CloseDesk": "1" } });
+      const reply = await response.json().catch(() => ({}));
+      if (!reply.started) {
+        say(reply.message || `It didn't start (the server said ${response.status}).`);
+        button.disabled = false;
+        return;
+      }
+      say(reply.message || "Reading…");
+      for (;;) {
+        await new Promise((done) => setTimeout(done, 2000));
+        const job = await (await fetch("/process/status")).json();
+        if (job.state === "running") {
+          say(`Reading ${job.note || ""}${job.total > 1 ? ` · ${job.done} of ${job.total}` : ""}…`);
+          continue;
+        }
+        if (job.state === "error") {
+          say(`It stopped: ${job.error}`);
+          button.disabled = false;
+          return;
+        }
+        if (box.hasAttribute("data-reload")) return location.reload();
+        say((job.result && job.result.message) || "Done.");
+        if (button.dataset.question) {
+          const again = document.createElement("button");
+          again.type = "button";
+          again.className = "ghost";
+          again.dataset.ask = button.dataset.question;
+          again.textContent = "Ask again";
+          box.append(again);
+        }
+        button.remove();
+        return;
+      }
+    } catch (error) {
+      say(`Couldn't follow the read (${error.message}). It may still be running; see Setup.`);
+      button.disabled = false;
+    }
   }
 
   function askFile(id, file, mode) {
@@ -936,6 +999,8 @@
           return popOut();
         case "attach-file":
           return fileInput.click();
+        case "vision-read":
+          return visionRead(actionButton);
       }
     }
 

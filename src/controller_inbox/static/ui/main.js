@@ -517,7 +517,48 @@ const ctx = {
   emailUrl: () => mailUrl(S.email.id),
   reload: () => reloadEmail(),
   categories: () => (S.meta ? S.meta.categories : []),
+  visionRead,
 };
+
+/* Reading a file's pages with the vision model: started from the file view or from an answer's offer, it runs as
+   the background job; when it finishes the file view shows both readings and the chat offers to ask again. */
+async function visionRead(emailId, n, again = false) {
+  try {
+    const result = await postJSON(`/api/mail/${enc(emailId)}/files/${Number(n)}/vision${again ? "?again=1" : ""}`);
+    if (result.started) {
+      toast(result.message, { ms: 8000 });
+      if (S.meta) {
+        S.meta.job = { state: "running", stage: "vision", stage_label: "Reading pages with the vision model", done: 0, total: result.pages.length, note: "" };
+        renderTop();
+      }
+      clearTimeout(S.poll);
+      S.poll = setTimeout(poll, 600);
+    } else toast(result.message);
+    return result;
+  } catch (error) {
+    toast(error.message, { tone: "error", ms: 9000 });
+    return null;
+  }
+}
+
+function visionDone(result) {
+  const key = `${result.email_id}:${result.n}`;
+  S.files.delete(key);
+  const here = S.route && S.route.emailId === result.email_id && S.route.file === result.n;
+  if (here && S.email) {
+    S.shown = "";
+    showFile(S.email, result.n, S.route.tab, S.emailToken);
+  }
+  window.dispatchEvent(new CustomEvent("closedesk:vision", { detail: result }));
+  // A file added to a conversation has no page here: it opens on its classic page.
+  const fromChat = String(result.email_id).startsWith("chat-");
+  toast(result.message, {
+    tone: result.pages ? "ok" : "error",
+    ms: 10000,
+    action: here ? "" : "See the file",
+    onAction: here ? null : () => (fromChat ? window.open(result.href, "_blank", "noopener") : navigate(fileUrl(result.email_id, result.n, "text"))),
+  });
+}
 
 function drawEmail({ keepScroll = false } = {}) {
   const top = reader.scrollTop;
@@ -843,6 +884,7 @@ function finished(job) {
   if (job.state === "error") return toast(`Processing stopped: ${job.error}`, { tone: "error", ms: 9000 });
   const result = job.result || {};
   if (result.kind === "index") return toast(`Indexed for search: ${result.indexed} emails and file sections.`, { tone: "ok" });
+  if (result.kind === "vision") return visionDone(result);
   const read = typeof result.ingested === "number" ? `Read ${plural(result.ingested, "new file")}.` : "";
   toast(`Processed. ${read}`, { tone: "ok", ms: 6000 });
 }
@@ -870,6 +912,7 @@ document.addEventListener("visibilitychange", () => {
 
 const chat = createChat({
   root: $("#chat"),
+  visionRead: (emailId, n) => visionRead(emailId, n),
   onToggle(open) {
     const button = $("#chat-btn");
     button.setAttribute("aria-expanded", String(open));

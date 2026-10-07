@@ -20,9 +20,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
-from controller_inbox import agent, cost_codes, documents, fraud, semantic, table_lookup
+from controller_inbox import agent, chats, cost_codes, documents, fraud, semantic, table_lookup, vision
 from controller_inbox.digest import build_digest
 from controller_inbox.local_llm import check_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
@@ -50,6 +50,7 @@ STAGES = {
     "rereading": "Re-reading attachments",
     "reading": "Local model reading",
     "summarizing": "Summarizing attachments",
+    "vision": "Reading scans with the vision model",
     "indexing": "Indexing for search",
     "digest": "Writing the digest",
 }
@@ -422,7 +423,22 @@ def register_workspace(
             "parts": [{"label": part.label, "text": part.text} for part in documents.split_parts(text)] if text.strip() else [],
             "tables": [table_json(table, number) for number, table in enumerate(found[:MAX_TABLES], start=1)],
             "more_tables": max(0, len(found) - MAX_TABLES),
+            "vision": {
+                "offer": vision.offer(store, settings, email, att) if vision.readable_file(att.filename) else None,
+                "readings": vision.readings_json(store.page_readings(att.id, att.sha256)),
+            },
         }
+
+    @api.post("/mail/{email_id}/files/{n}/vision")
+    def mail_file_vision(email_id: str, n: int, again: int = 0):
+        """Read the file's pages with the vision model too, in the background (the process job). A file added to a
+        conversation can be read too: the chat offers it like any other."""
+        chat_id = chats.chat_id_of(email_id)
+        email = chats.chat_mail(store, chat_id) if chat_id else known(email_id)
+        if email is None or not 1 <= n <= len(email.attachments):
+            raise HTTPException(status_code=404, detail="No such file on this email")
+        reply, status = vision.start(store, settings, job, email, email.attachments[n - 1], n, again=bool(again))
+        return JSONResponse(reply, status_code=status)
 
     @api.get("/tasks")
     def tasks(status: str = "open"):
@@ -627,7 +643,9 @@ def register_workspace(
     def process():
         from controller_inbox.overnight import run_overnight
 
-        started = job.start(lambda progress: run_overnight(store, settings, sync_graph=False, on_progress=progress))
+        started = job.start(
+            lambda progress: run_overnight(store, settings, sync_graph=False, on_progress=progress, vision_minutes=vision.QUICK_SECONDS / 60)
+        )
         return {"ok": True, "started": started, "job": job.snapshot()}
 
     app.include_router(api)

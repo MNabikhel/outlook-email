@@ -554,6 +554,100 @@ function highlight(text, words) {
   return text.split(pattern).map((piece, i) => (i % 2 ? h("mark", null, piece) : piece));
 }
 
+/* ---------- Pages read two ways (OCR and the vision model) ---------- */
+
+function marked(text, marks) {
+  const wanted = [...new Set(marks || [])].filter(Boolean).sort((a, b) => b.length - a.length);
+  if (!wanted.length) return [text];
+  const pattern = new RegExp(`(?<![\\w.,])(${wanted.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\w])`, "g");
+  return text.split(pattern).map((piece, i) => (i % 2 ? h("mark", null, piece) : piece));
+}
+
+function modelReading(blocks, marks) {
+  return blocks.map((block) =>
+    block.kind === "table"
+      ? h(
+          "div",
+          { class: "vision-table-wrap" },
+          h(
+            "table",
+            { class: "vision-table" },
+            h("thead", null, h("tr", null, block.header.map((cell) => h("th", null, marked(cell, marks))))),
+            h("tbody", null, block.rows.map((row) => h("tr", null, row.map((cell) => h("td", null, marked(cell, marks))))))
+          )
+        )
+      : h("p", null, marked(block.text, marks))
+  );
+}
+
+function visionBox(data, ctx) {
+  const vision = data.vision || {};
+  const offer = vision.offer;
+  const readings = vision.readings || [];
+  if (!offer || !(offer.pages.length || readings.length || (offer.reason && !data.parts.length))) return null;
+  const { email, file } = data;
+  const status = h("span", { class: "muted small", "aria-live": "polite" });
+  const start = (again) => async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    status.textContent = "Starting…";
+    const result = await ctx.visionRead(email.id, file.n, again);
+    status.textContent = result ? result.message : "";
+    if (!result || !result.started) button.disabled = false;
+  };
+  let body;
+  if (offer.available && offer.pages.length) {
+    const which = `${offer.pages.length === 1 ? "page" : "pages"} ${offer.pages.join(", ")}`;
+    body = [
+      h("p", null, `${offer.text} The model looks at ${which} itself, and its reading is compared with the first one figure by figure.`),
+      h("div", { class: "vision-go" }, btn("Read with the vision model", { class: "btn-sm btn-primary", onclick: start(false) }, "eye"), status),
+    ];
+  } else if (offer.reason) {
+    body = [h("p", { class: "muted" }, offer.reason)];
+  } else {
+    body = [
+      h("p", { class: "muted" }, "Every page that needed it has been read both ways (below)."),
+      offer.available ? h("div", { class: "vision-go" }, btn("Read them again", { class: "btn-sm btn-quiet", onclick: start(true) }, "refresh"), status) : null,
+    ];
+  }
+  const pages = readings.map((r) => {
+    const c = r.comparison;
+    const shown = c.choice === "model" ? "the vision model's" : `${r.first_name}'s`;
+    return h(
+      "article",
+      { class: "vision-page", id: `vision-p${r.page}` },
+      h(
+        "h3",
+        null,
+        `Page ${r.page} · ${c.confirmed} of ${c.figures} figures read the same`,
+        c.differ.length ? ` · ${c.differ.length} read differently` : "",
+        ` · shown: ${shown} reading`,
+        r.seconds ? ` · read in ${r.seconds}s` : ""
+      ),
+      h(
+        "div",
+        { class: "vision-columns" },
+        h("div", null, h("h4", null, r.first_name), h("pre", { class: "vision-first" }, marked(r.first_text, r.marks_first))),
+        h("div", null, h("h4", null, r.model ? `Vision model (${r.model})` : "Vision model"), h("div", { class: "vision-reading" }, modelReading(r.model_blocks, r.marks_model)))
+      )
+    );
+  });
+  return h(
+    "section",
+    { class: "vision-box" },
+    h("h2", { class: "rd-h" }, icon("eye", 15), "Read with the vision model too"),
+    body,
+    readings.length
+      ? h(
+          "div",
+          { class: "vision-pages" },
+          h("p", { class: "muted small" }, "Figures both readings have are confirmed. A ", h("mark", null, "marked"), " figure was read differently, or by one of them only: check it against the original. Ask CloseDesk reads each page as shown here."),
+          pages
+        )
+      : null
+  );
+}
+
 export function fileView(data, tab, ctx) {
   const { email, file } = data;
   const base = filePath(email.id, file.n);
@@ -627,6 +721,7 @@ export function fileView(data, tab, ctx) {
         "div",
         { class: "rd-inner wide" },
         h("header", { class: "rd-head" }, h("div", { class: "rd-tags" }, h("span", { class: "rd-tag" }, file.kind), h("span", { class: "rd-tag" }, file.size), h("span", { class: "rd-tag" }, file.type_label)), h("h1", { class: "rd-subject" }, file.name), h("p", { class: "rd-from muted" }, `From ${email.sender} · `, h("a", { href: ctx.emailUrl(), dataset: { nav: "" } }, email.subject))),
+        visionBox(data, ctx),
         tabs,
         content
       )
