@@ -648,6 +648,11 @@ def register_workspace(
         )
         return {"ok": True, "started": started, "job": job.snapshot()}
 
+    @api.post("/process/stop")
+    def process_stop():
+        """A vision read stops before its next page."""
+        return {"ok": True, "stopping": job.request_stop()}
+
     app.include_router(api)
 
     def ui_scripts() -> dict[str, str]:

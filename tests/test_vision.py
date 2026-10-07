@@ -363,7 +363,7 @@ def test_files_of_a_suspected_fraud_email_are_never_sent_to_the_model(mail, stor
     client = TestClient(web.create_app(settings, store))
     for path in (f"/inbox/{scam.id}/files/1/vision", f"/api/mail/{scam.id}/files/1/vision"):
         refused = client.post(path, headers=PAGE)
-        assert refused.status_code == 409 and "payment fraud" in refused.json()["message"]
+        assert refused.status_code == 403 and "payment fraud" in refused.json()["message"]
     assert client.get(f"/api/mail/{scam.id}/files/1", headers=PAGE).status_code == 403
     assert seeing.calls == []
 
@@ -476,7 +476,7 @@ def test_process_new_mail_reads_only_pages_this_computer_reads_quickly(store, se
 
     given = []
     monkeypatch.setattr(overnight, "run_overnight", lambda *_a, vision_minutes=None, **_k: given.append(vision_minutes) or {})
-    monkeypatch.setattr(web.ProcessJob, "start", lambda self, target: target(lambda *_a: None) is not None)
+    monkeypatch.setattr(web.ProcessJob, "start", lambda self, target, **_kw: target(lambda *_a: None) is not None)
     client = TestClient(web.create_app(settings, store))
     client.post("/process", follow_redirects=False)
     client.post("/api/process", headers=PAGE)
@@ -534,7 +534,7 @@ def test_the_workspace_file_view_gets_the_offer_and_the_readings_as_data(scan, s
 
 def test_a_read_isnt_started_while_another_job_runs(scan, store, settings, seeing, monkeypatch):
     client = TestClient(web.create_app(settings, store))
-    monkeypatch.setattr(web.ProcessJob, "start", lambda self, target: False)
+    monkeypatch.setattr(web.ProcessJob, "start", lambda self, target, **_kw: False)
     for path in (f"/inbox/{scan.id}/files/1/vision", f"/api/mail/{scan.id}/files/1/vision"):
         busy = client.post(path, headers=PAGE)
         assert busy.status_code == 409 and "busy" in busy.json()["message"]
@@ -552,3 +552,261 @@ def test_setup_saves_the_choice_across_restarts(store, settings):
     assert fresh.vision_mode == "ask"
     with pytest.raises(ValueError):
         vision.save_mode(settings, store, "always")
+
+
+# What the review found ----------------------------------------------------------------------------------------
+
+
+def test_account_and_routing_numbers_the_model_reads_are_masked(scan, store, settings, seeing):
+    seeing.page = BALANCE + "\nRemit to account number 123456789, routing number 021000021.\n"
+    _read(store, settings, scan.id)
+    att = store.get_email(scan.id).attachments[0]
+    [row] = store.page_readings(att.id, att.sha256).values()
+    for text in (row["model_text"], att.extracted_text, json.dumps(vision.readings_json({1: row}))):
+        assert "123456789" not in text and "021000021" not in text
+    assert "6789" in row["model_text"]
+
+
+def test_a_reading_that_stops_early_doesnt_hide_the_rest_of_the_page():
+    first = "\n".join(f"Line {n} | Amount: {1000 + 37 * n:,}.00" for n in range(1, 31))
+    part = "| Line | Amount |\n|---|---|\n| Line 1 | 1,037.00 |\n| Line 2 | 1,074.00 |\n"
+    comparison = vision.compare(first, vision.page_text(part))
+    assert (comparison.figures, comparison.confirmed, comparison.first_figures) == (2, 2, 30)
+    assert comparison.choice == "first", "two figures of thirty is not the page"
+
+
+def test_when_the_models_reading_is_shown_what_only_ocr_read_is_kept_under_it():
+    extra = OCR_TEXT + "\nNote: deposit of 4,750.00 held in escrow"
+    comparison = vision.compare(extra, vision.page_text(BALANCE))
+    page = vision.merged_page(extra, BALANCE, comparison, first_name="OCR", model=MODEL)
+    assert comparison.choice == "model" and page.endswith("[Read only by OCR: 4,750.00]")
+
+
+def test_a_reading_cut_off_at_the_length_limit_is_not_kept(scan, store, settings, monkeypatch):
+    settings.llm = None
+
+    class CutShort(FakeVisionServer):
+        def __call__(self, request):
+            response = super().__call__(request)
+            if request.url.path.endswith("/chat/completions"):
+                body = response.content.decode().replace('"finish_reason": "stop"', '"finish_reason": "length"')
+                return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+            return response
+
+    _serve(monkeypatch, CutShort())
+    result = _read(store, settings, scan.id)
+    assert result.pages == 0 and "limit before the end of the page" in result.failed[0]
+    att = store.get_email(scan.id).attachments[0]
+    assert store.page_readings(att.id) == {} and store.page_failures(att.id, att.sha256) == {1: 1}
+
+
+def test_a_blank_page_is_read_as_blank_not_failed(scan, store, settings, monkeypatch):
+    monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: (_ for _ in ()).throw(vision.EmptyReply("nothing")))
+    assert _read(store, settings, scan.id).pages == 1
+    shown = store.get_email(scan.id).attachments[0].extracted_text
+    assert "no figures to compare. Shown: OCR's reading" in shown and "30,256" in shown
+
+
+def test_a_page_that_keeps_failing_is_left_for_the_user_and_the_night_moves_on(store, settings, monkeypatch):
+    first = _ingest_scan(store, settings, monkeypatch, subject="Older scan")
+    second = _ingest_scan(store, settings, monkeypatch, subject="Newer scan")
+    monkeypatch.setattr(vision, "available", lambda _s: True)
+    bad = store.get_email(second.id).attachments[0].id
+    read = []
+
+    def flaky(store_, settings_, email, att, data, pages, **kw):
+        if att.id == bad:
+            store.note_page_failure(att.id, pages[0], sha256=att.sha256, error="model crashed")
+            return vision.Result(failed=["page 1: model crashed"])
+        read.append(att.id)
+        return vision.Result(pages=1, seconds=60)
+
+    monkeypatch.setattr(vision, "read_pages", flaky)
+    _seconds_per_page(store, 60)
+    vision.read_waiting(store, settings, minutes=30)
+    assert read == [store.get_email(first.id).attachments[0].id], "one failing file doesn't stop the run"
+    vision.read_waiting(store, settings, minutes=30)
+    assert store.page_failures(bad) == {1: 2}
+    att = store.get_email(second.id).attachments[0]
+    data = agent.original_file(settings, store.get_email(second.id), att).read_bytes()
+    assert vision.unread_pages(store, att, data) == [], "after two failures it isn't tried unasked"
+    assert vision.unread_pages(store, att, data, retry_failed=True) == [1], "but the file's page still offers it"
+
+
+def test_a_file_kept_under_the_same_name_but_different_isnt_read(scan, store, settings, seeing):
+    email = store.get_email(scan.id)
+    att = email.attachments[0]
+    path = agent.original_file(settings, email, att)
+    path.write_bytes(_scan_pdf(2))  # another file of that name, from a zip beside it
+    assert vision.original_bytes(settings, email, att) is None
+    assert vision.files_to_read(store, settings, email) == []
+    assert "wasn't kept" in vision.offer(store, settings, email, att)["reason"]
+    result = vision.read_pages(store, settings, email, att, path.read_bytes(), [1])
+    assert result.pages == 0 and seeing.calls == []
+
+
+def test_a_file_read_both_ways_is_summarized_once(scan, store, settings, seeing):
+    _read(store, settings, scan.id)
+    att = store.get_email(scan.id).attachments[0]
+    assert (scan.id, att.id) in store.files_to_summarize(min_chars=10, limit=10)
+    store.save_file_summary(att.id, agent.summary_key(att), "A balance sheet.", model=MODEL)
+    assert (scan.id, att.id) not in store.files_to_summarize(min_chars=10, limit=10), "its key is the shown text's"
+    assert agent.overnight_summary(store, att) == "A balance sheet." or len(att.extracted_text) < agent.SUMMARY_MIN_CHARS
+
+
+def test_a_section_name_with_a_number_counts_once():
+    ledger = (
+        "| | Amount |\n|---|---|\n| 6100 Office Supplies | |\n| Paper | 120.50 |\n| Toner | 310.00 |\n| Pens | 45.25 |\n"
+        "| Total 6100 | 475.75 |\n"
+    )
+    page = vision.page_text(ledger)
+    assert page.count("6100 Office Supplies") == 5, "the section row, then once on each row in it"
+    first = "6100 Office Supplies\nPaper 120.50\nToner 310.00\nPens 45.25\nTotal 6100 475.75"
+    comparison = vision.compare(first, page)
+    assert comparison.figures == comparison.confirmed == comparison.first_figures == 6
+    assert comparison.only_model == []
+
+
+def test_figures_read_differently_are_paired_with_the_closest_one():
+    pairs, model_left, first_left = vision._pairs(
+        vision.Counter({vision.Decimal("1246.00"): 1, vision.Decimal("1200.00"): 1}),
+        vision.Counter({vision.Decimal("1206.00"): 1, vision.Decimal("1240.00"): 1}),
+    )
+    assert sorted(pairs) == [(vision.Decimal("1200.00"), vision.Decimal("1206.00")), (vision.Decimal("1246.00"), vision.Decimal("1240.00"))]
+    assert model_left == first_left == []
+
+
+def test_reading_again_compares_with_the_first_reading_as_stored_now(scan, store, settings, seeing):
+    _read(store, settings, scan.id)
+    att = store.get_email(scan.id).attachments[0]
+    with store.connect() as conn:  # a reader update read the scan better
+        conn.execute("UPDATE attachments SET extracted_text = replace(extracted_text, '30,256', '30,250') WHERE id = ?", (att.id,))
+    _read(store, settings, scan.id)
+    [row] = store.page_readings(att.id, att.sha256).values()
+    assert "30,256" not in row["first"] and json.loads(row["comparison"])["confirmed"] == 8
+
+
+def test_the_note_after_the_last_page_stays_after_it():
+    text = f"[page 1]\n{OCR_TEXT}\n\n[CloseDesk read the first 300 of 412 pages.]"
+    assert vision.page_bodies(text) == [(1, OCR_TEXT)]
+    row = {"first": OCR_TEXT, "model_text": BALANCE, "model": MODEL, "comparison": "{}"}
+    shown = vision.shown_text(text, {1: row})
+    assert shown.endswith("\n\n[CloseDesk read the first 300 of 412 pages.]") and "Shown: the vision model's reading" in shown
+    assert vision.shown_text(shown, {1: row}) == shown
+
+
+def test_a_pdf_without_page_marks_gets_each_page_read_after_its_note():
+    saved = json.dumps({**vision.compare("", vision.page_text(BALANCE)).to_dict(), "first_name": "OCR", "kind": "unmarked"})
+    rows = {page: {"first": "", "model_text": BALANCE, "model": MODEL, "comparison": saved} for page in (1, 2)}
+    shown = vision.shown_text("[extraction error: broken xref]", rows)
+    assert shown.startswith("[extraction error: broken xref]\n\n[page 1]\n")
+    assert "\n\n[page 2]\n" in shown and shown.count("found no text on this page") == 2
+    assert vision.shown_text(shown, rows) == shown
+
+
+def test_a_stored_comparison_that_cant_be_read_doesnt_break_loading_mail():
+    for broken in ("null", "[]", "{not json", None):
+        row = {"first": OCR_TEXT, "model_text": BALANCE, "model": MODEL, "comparison": broken}
+        assert "[Read two ways" in vision.shown_text(f"[page 1]\n{OCR_TEXT}", {1: row})
+        assert vision.readings_json({1: row})[0]["page"] == 1 and vision.side_by_side({1: row})[0]["page"] == 1
+
+
+def test_when_ocrs_reading_is_shown_the_models_differing_figure_is_still_flagged():
+    first = vision.page_text(BALANCE)
+    wrong = BALANCE.replace("| Cash | 12,400 |", "| Cash | 12,900 |")
+    comparison = vision.compare(first, vision.page_text(wrong))
+    page = vision.merged_page(first, wrong, comparison, first_name="the PDF's text", model=MODEL)
+    assert comparison.choice == "first" and "(the PDF's text / the vision model): 12,400 / 12,900" in page
+    assert vision.unconfirmed(page) == {vision.Decimal("12900"): "the PDF's text read 12,400"}
+
+
+def test_marks_never_split_a_longer_figure():
+    html = vision._marked("Qty 100 at 100.25; 1,250,000; (1,250) and 1,250", {"100", "1,250", "(1,250)"})
+    assert html == "Qty <mark>100</mark> at 100.25; 1,250,000; <mark>(1,250)</mark> and <mark>1,250</mark>"
+
+
+def test_the_chat_offers_nothing_for_a_question_not_about_the_file(scan, store, settings, monkeypatch):
+    _chat_model(monkeypatch, answer="Maya Chen is at maya@taz.com [1].")
+    _seconds_per_page(store, 600)
+    events = list(assistant.answer_stream(store, settings, "Who is Maya Chen and how do I reach her?", email_id=scan.id))
+    assert not [event for event in events if event["type"] == "vision"]
+
+
+def test_the_chat_offers_nothing_while_a_read_is_running(scan, store, settings, monkeypatch):
+    _chat_model(monkeypatch)
+    _seconds_per_page(store, 600)
+    monkeypatch.setattr(vision, "_reading", 1)
+    events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=scan.id))
+    assert not [event for event in events if event["type"] == "vision"]
+
+
+def test_the_offer_comes_with_an_overnight_summary_too(scan, store, settings, monkeypatch):
+    _chat_model(monkeypatch)
+    _seconds_per_page(store, 600)
+    att = store.get_email(scan.id).attachments[0]
+    monkeypatch.setattr(assistant.agent, "summary_request", lambda _ws, _q: (att, "A balance sheet as of October 31."))
+    events = list(assistant.answer_stream(store, settings, "Summarize the balance sheet file", email_id=scan.id))
+    assert [event["type"] for event in events][-2:] == ["vision", "done"]
+
+
+def test_a_budget_too_small_for_one_page_doesnt_look_through_the_mail(scan, store, settings, monkeypatch):
+    monkeypatch.setattr(vision, "available", lambda _s: True)
+    monkeypatch.setattr(vision, "files_to_read", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("looked")))
+    assert vision.read_waiting(store, settings, minutes=0).pages == 0
+    _seconds_per_page(store, 300)
+    assert vision.read_waiting(store, settings, minutes=1).pages == 0
+
+
+def test_a_read_can_be_stopped_between_pages(store, settings, monkeypatch, seeing):
+    email = _ingest_scan(store, settings, monkeypatch, pages=3)
+    asked = []
+    result = _read_stopping(store, settings, email.id, asked)
+    assert result.pages == 1 and result.stopped and "Stopped as asked" in vision.result_text(result)
+    client = TestClient(web.create_app(settings, store))
+    assert client.post("/api/process/stop", headers=PAGE).json() == {"ok": True, "stopping": False}, "nothing running"
+
+
+def _read_stopping(store, settings, email_id, asked):
+    email = store.get_email(email_id)
+    att = email.attachments[0]
+    data = agent.original_file(settings, email, att).read_bytes()
+    return vision.read_pages(
+        store, settings, email, att, data, [1, 2, 3],
+        on_progress=lambda i, _k, _n: asked.append(i), should_stop=lambda: len(store.page_readings(att.id)) >= 1,
+    )
+
+
+def test_the_job_says_what_it_is_reading_and_can_be_told_to_stop():
+    job = web.ProcessJob()
+    gate = __import__("threading").Event()
+    assert job.start(lambda progress: gate.wait(5) and {"kind": "vision"}, about={"kind": "vision", "email_id": "e1", "n": 2})
+    state = job.snapshot()
+    assert state["about"] == {"kind": "vision", "email_id": "e1", "n": 2} and state["stopping"] is False
+    assert job.request_stop() and job.snapshot()["stopping"] and job.stopping
+    gate.set()
+    deadline = time.monotonic() + 30
+    while job.snapshot()["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert job.snapshot()["state"] == "done" and not job.request_stop()
+
+
+def test_a_reading_that_loops_on_one_line_is_stopped_and_kept_without_the_loop(settings, monkeypatch):
+    """Greedy decoding can fall into writing an empty table row until the token limit: on a laptop, many minutes."""
+    settings.llm = None
+    looping = BALANCE + "| | | |\n" * 300
+
+    class Loops(FakeVisionServer):
+        def __call__(self, request):
+            response = super().__call__(request)
+            if request.url.path.endswith("/chat/completions"):
+                body = response.content.decode().replace('"finish_reason": "stop"', '"finish_reason": "length"')
+                return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+            return response
+
+    _serve(monkeypatch, Loops(page=looping))
+    seen = []
+    text = vision.transcribe(settings, b"png", on_piece=seen.append)
+    assert text == BALANCE.strip(), "the rows read stay, the loop goes"
+    assert seen[-1] < len(looping) / 2, "the reading stopped soon after the loop began"
+    assert vision.trim_loop("| a | 1 |\n" + "| x | 9 |\n" * 20 + "| x |") == ("| a | 1 |\n| x | 9 |", True)
+    assert vision.trim_loop("| a | 1 |\n| | |\n| | |\n| b | 2 |")[1] is False, "a few blank rows are the page's"

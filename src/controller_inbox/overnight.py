@@ -7,6 +7,7 @@ from the script draft, so the morning board is usable either way.
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -24,6 +25,8 @@ from controller_inbox.reading import build_packet, overlay_reading
 from controller_inbox.semantic import index_mail
 from controller_inbox.store import Store
 from controller_inbox.vision import Result, read_waiting
+
+log = logging.getLogger(__name__)
 
 Progress = Callable[[str, int, int, str], None]
 
@@ -190,6 +193,15 @@ def _run_overnight(
     # After reading: the model may have filed more mail as AP invoices, and the workbook may have changed.
     coded = cost_codes.refresh(store, settings)
     stats = reading["stats"]
+    # Scans first, so the summaries below are written from the pages as read both ways.
+    looked = Result()
+    if reading["model"] and not (stats and stats.stopped_reason):
+        try:
+            looked = read_waiting(
+                store, settings, minutes=vision_minutes, on_progress=(lambda i, n, name: on_progress("vision", i, n, name)) if on_progress else None
+            )
+        except Exception:  # the rest of the run (search index, digest) still happens
+            log.warning("Reading scans with the vision model failed", exc_info=True)
     summarized = 0
     if reading["model"] and not (stats and stats.stopped_reason) and settings.overnight_file_summaries:
         summarized = summarize_files(
@@ -198,11 +210,6 @@ def _run_overnight(
             limit=settings.overnight_file_summaries,
             model=reading["model"],
             on_progress=(lambda i, n, name: on_progress("summarizing", i, n, name)) if on_progress else None,
-        )
-    looked = Result()
-    if reading["model"] and not (stats and stats.stopped_reason):
-        looked = read_waiting(
-            store, settings, minutes=vision_minutes, on_progress=(lambda i, n, name: on_progress("vision", i, n, name)) if on_progress else None
         )
     # Runs whenever an embedding model answers, even with no chat model loaded.
     indexed = max(0, index_mail(store, settings, on_progress=(lambda i, n, _name: on_progress("indexing", i, n, "")) if on_progress else None))

@@ -615,6 +615,8 @@ def answer_stream(
             "text": f"**{att.filename}**\n{summary}\n\n*Written overnight and checked against the file. "
             "Ask about a page, sheet or figure to have it read again.*",
         }
+        if offer:
+            yield offer
         yield {"type": "done"}
         return
     try:
@@ -648,11 +650,21 @@ def answer_stream(
     yield {"type": "done"}
 
 
+# A question about a scan's contents (as opposed to its sender, or a reply to write).
+_ABOUT_FILES = re.compile(
+    r"\b(attach\w*|files?|pdfs?|scan\w*|pages?|tables?|rows?|columns?|lines?|totals?|subtotals?|amounts?|balances?|"
+    r"figures?|numbers?|sum|summar\w*|reports?|statements?|invoices?|schedules?|forecasts?|ledgers?|registers?|"
+    r"costs?|fees?|paid|owe\w*|due|how much|how many|what does it say|read)\b|[$€£%]|\d",
+    re.I,
+)
+
+
 def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current: EmailRecord, question: str):
-    """Pages of the email's scans, pictures and doubtful tables the vision model hasn't read. In "auto", with this
-    computer's speed known and the pages quick to read, they are read before answering; otherwise the answer comes
-    from what was read before, and the event returned offers the read with the time it would take."""
-    if not vision.can_render() or not vision.available(settings):
+    """Pages of the email's scans, pictures and doubtful tables the vision model hasn't read, when the question is
+    about what is in them. In "auto", with this computer's speed known and the pages quick to read, they are read
+    before answering; otherwise the answer comes from what was read before, and the event returned offers the read
+    with the time it would take. Nothing is read or offered while a read is already running."""
+    if not vision.can_render() or not vision.available(settings) or vision.busy():
         return None
     try:
         files = vision.files_to_read(store, settings, current)
@@ -660,6 +672,8 @@ def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current
         log.warning("Couldn't check %s for pages to read with the vision model", current.id, exc_info=True)
         return None
     named = [item for item in files if item[1].filename.lower() in question.lower()]
+    if not named and not _ABOUT_FILES.search(question):
+        return None
     files = named or files
     if not files:
         return None
@@ -668,7 +682,10 @@ def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current
     if settings.vision_mode == "auto" and seconds is not None and seconds <= vision.QUICK_SECONDS:
         for _position, att, data, todo in files:
             yield {"type": "step", "text": f"Reading {att.filename} with the vision model ({vision.duration(vision.estimate(store, settings, len(todo)) or 0)})"}
-            vision.read_pages(store, settings, current, att, data, todo)
+            try:
+                vision.read_pages(store, settings, current, att, data, todo)
+            except Exception:  # the answer still comes, from what was read before
+                log.warning("Reading %s with the vision model failed", att.filename, exc_info=True)
         fresh = chats.chat_mail(store, chats.chat_id_of(current.id)) if chats.chat_id_of(current.id) else store.get_email(current.id)
         if fresh is not None:
             ws.sources[:] = [fresh if email.id == current.id else email for email in ws.sources]

@@ -14,6 +14,7 @@ before a long read (``Settings.vision_mode``).
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -21,6 +22,7 @@ import logging
 import math
 import re
 import statistics
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -30,7 +32,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from controller_inbox import tables
-from controller_inbox.documents import MAX_OCR_PAGES, MAX_PDF_PAGES
+from controller_inbox.documents import MAX_PDF_PAGES
 from controller_inbox.local_llm import EmptyReply, check_model, strip_thinking, stream_text
 
 if TYPE_CHECKING:
@@ -39,6 +41,8 @@ if TYPE_CHECKING:
     from controller_inbox.store import Store
 
 log = logging.getLogger(__name__)
+# PDFium can't be used from two threads at once (a read in the background, a file page opened meanwhile).
+_PDFIUM = threading.Lock()
 
 PROMPT = (
     "Transcribe this document page exactly. Return all the text as it appears, top to bottom. "
@@ -50,7 +54,8 @@ PROMPT = (
 # 100 DPI reads a printed page well; the long side is capped so a large sheet doesn't cost thousands of image tokens.
 DPI = 100
 MAX_SIDE = 1600
-MAX_TOKENS = 6000
+# A dense full page (a 12-column register) is some 4,000 tokens; a reading stops sooner when the model loops.
+MAX_TOKENS = 8192
 # A laptop without a graphics card can look at a page for minutes before writing the first word.
 WAIT_SECONDS = 900.0
 # In "auto", pages are read while the question waits when they take no longer than this all told; longer reads are
@@ -66,6 +71,8 @@ MODEL_NAME = "the vision model"
 ALONE = "found no text on this page"
 # How many differing or model-only figures a page's note lists; the answer check flags each one listed.
 LISTED = 40
+# After this many failures in a row on the same file, a page is only read when the user asks.
+TRIES = 2
 
 
 # Whether it can be used ------------------------------------------------------------------------
@@ -129,27 +136,26 @@ def scanned_pages(data: bytes) -> list[int]:
     except ImportError:
         return []
     found = []
-    try:
-        pdf = pdfium.PdfDocument(data)
-    except Exception:
-        return []
-    try:
-        for index in range(min(len(pdf), MAX_PDF_PAGES)):
-            page = pdf[index]
-            try:
-                textpage = page.get_textpage()
-                words = len(textpage.get_text_range().split())
-                textpage.close()
-            except Exception:
-                words = 0
-            finally:
-                page.close()
-            if words < 5:
-                found.append(index + 1)
-            if len(found) >= MAX_OCR_PAGES:
-                break
-    finally:
-        pdf.close()
+    with _PDFIUM:
+        try:
+            pdf = pdfium.PdfDocument(data)
+        except Exception:
+            return []
+        try:
+            for index in range(min(len(pdf), MAX_PDF_PAGES)):
+                page = pdf[index]
+                try:
+                    textpage = page.get_textpage()
+                    words = len(textpage.get_text_range().split())
+                    textpage.close()
+                except Exception:
+                    words = 0
+                finally:
+                    page.close()
+                if words < 5:
+                    found.append(index + 1)
+        finally:
+            pdf.close()
     return found
 
 
@@ -167,6 +173,8 @@ def doubtful_pages(text: str) -> list[int]:
 
 
 _PAGE_MARK = re.compile(r"^\[page (\d+)\]\s*$", re.M)
+# Written after a PDF's last page read (documents.py): kept after that page, never part of it.
+_TAIL = re.compile(r"\n*(\[CloseDesk read the first \d+ of \d+ pages\.\])\s*$")
 _MARK = re.compile(r"^\[(?:page \d+|sheet \"[^\"\n]*\"[^\]\n]*|slide \d+|part \d+)\]\s*$", re.M)
 
 
@@ -183,7 +191,7 @@ def page_bodies(text: str) -> list[tuple[int, str]]:
         if not page:
             continue
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
-        out.append((int(page.group(1)), text[mark.end():end].strip()))
+        out.append((int(page.group(1)), _TAIL.sub("", text[mark.end():end]).strip()))
     return out
 
 
@@ -198,19 +206,20 @@ def render(data: bytes, filename: str, page: int) -> bytes:
     if suffix == ".pdf":
         import pypdfium2 as pdfium
 
-        pdf = pdfium.PdfDocument(data)
-        try:
-            if not 1 <= page <= len(pdf):
-                raise ValueError(f"the PDF has no page {page}")
-            sheet = pdf[page - 1]
+        with _PDFIUM:
+            pdf = pdfium.PdfDocument(data)
             try:
-                width, height = sheet.get_size()
-                scale = min(DPI / 72, MAX_SIDE / max(width, height, 1))
-                image = sheet.render(scale=scale).to_pil()
+                if not 1 <= page <= len(pdf):
+                    raise ValueError(f"the PDF has no page {page}")
+                sheet = pdf[page - 1]
+                try:
+                    width, height = sheet.get_size()
+                    scale = min(DPI / 72, MAX_SIDE / max(width, height, 1))
+                    image = sheet.render(scale=scale).to_pil().copy()
+                finally:
+                    sheet.close()
             finally:
-                sheet.close()
-        finally:
-            pdf.close()
+                pdf.close()
     else:
         image = Image.open(io.BytesIO(data))
         if getattr(image, "n_frames", 1) > 1:
@@ -224,7 +233,7 @@ def render(data: bytes, filename: str, page: int) -> bytes:
 
 def transcribe(settings: Settings, png: bytes, *, on_piece: Callable[[int], None] | None = None) -> str:
     """The model's reading of the page: its text, with tables in markdown. Raises ``EmptyReply`` when it wrote
-    nothing and ``httpx.HTTPError`` when the server failed."""
+    nothing, ``CutOff`` when it stopped at its length limit, and ``httpx.HTTPError`` when the server failed."""
     messages = [
         {
             "role": "user",
@@ -235,14 +244,81 @@ def transcribe(settings: Settings, png: bytes, *, on_piece: Callable[[int], None
         }
     ]
     written = []
-    for piece in stream_text(settings, messages, max_tokens=MAX_TOKENS, wait=WAIT_SECONDS, temperature=0.0):
-        written.append(piece)
-        if on_piece:
-            on_piece(sum(len(p) for p in written))
-    text = strip_thinking("".join(written)).strip()
+    finished: dict = {}
+    looped = False
+    pieces = stream_text(settings, messages, max_tokens=MAX_TOKENS, wait=WAIT_SECONDS, temperature=0.0, finished=finished)
+    try:
+        for piece in pieces:
+            written.append(piece)
+            if on_piece:
+                on_piece(sum(len(p) for p in written))
+            if "\n" in piece and _looping("".join(written)):
+                looped = True  # stop it here: the rest would be the same line until the token limit
+                break
+    finally:
+        pieces.close()
+    text, _trimmed = trim_loop(strip_thinking("".join(written)))
+    text = text.strip()
     if not text:
         raise EmptyReply("the model wrote nothing for the page")
+    if finished.get("reason") == "length" and not looped:
+        # Half a page would hide the rest of it: the reading is not kept.
+        raise CutOff(f"the reading stopped at the {MAX_TOKENS:,}-token limit before the end of the page")
     return text
+
+
+# A model reading a page greedily can fall into writing one line over and over (an empty table row) until its token
+# limit. A run this long of one line is that; a line with nothing but table pipes is that sooner.
+LOOP_LINES = 12
+LOOP_BLANK_ROWS = 6
+
+
+def _repeated_tail(lines: list[str]) -> int:
+    """How many of the last lines are the same line."""
+    if not lines:
+        return 0
+    last = lines[-1].strip()
+    count = 0
+    for line in reversed(lines):
+        if line.strip() != last:
+            break
+        count += 1
+    return count
+
+
+def _blank_row(line: str) -> bool:
+    return bool(_TABLE_ROW.match(line)) and not re.sub(r"[|\s:-]", "", line)
+
+
+def _looping(text: str) -> bool:
+    lines = [line for line in text.split("\n")[:-1] if line.strip()]  # complete lines only
+    run = _repeated_tail(lines)
+    return run >= LOOP_LINES or (run >= LOOP_BLANK_ROWS and _blank_row(lines[-1]))
+
+
+def trim_loop(text: str) -> tuple[str, bool]:
+    """The reading without a line the model repeated at its end (kept once when it says something)."""
+    lines = text.rstrip().split("\n")
+    if len(lines) > 1 and lines[-1].strip() != lines[-2].strip() and lines[-2].strip().startswith(lines[-1].strip()):
+        lines = lines[:-1]  # the repeated line, cut off part way when the reply stopped
+    run = _repeated_tail(lines)
+    if not lines or not (run >= LOOP_LINES or (run >= LOOP_BLANK_ROWS and _blank_row(lines[-1]))):
+        return text, False
+    keep = 0 if _blank_row(lines[-1]) or not lines[-1].strip() else 1
+    return "\n".join(lines[: len(lines) - run + keep]), True
+
+
+class CutOff(Exception):
+    """The model's reply ended at its length limit, part way down the page."""
+
+
+_reading = 0
+_reading_lock = threading.Lock()
+
+
+def busy() -> bool:
+    """A page is being read with the vision model now (the background job, or a question's quick read)."""
+    return _reading > 0
 
 
 # The model's markdown as a page CloseDesk reads ------------------------------------------------
@@ -375,12 +451,13 @@ class Comparison:
     model_totals: tuple[int, int] = (0, 0)
     first_totals: tuple[int, int] = (0, 0)
     choice: str = "first"
+    first_figures: int = 0
 
     def to_dict(self) -> dict:
         return {
             "figures": self.figures, "confirmed": self.confirmed, "differ": self.differ, "only_model": self.only_model,
             "only_first": self.only_first, "model_totals": list(self.model_totals), "first_totals": list(self.first_totals),
-            "choice": self.choice,
+            "choice": self.choice, "first_figures": self.first_figures,
         }
 
     @classmethod
@@ -390,18 +467,21 @@ class Comparison:
             differ=[tuple(pair) for pair in data.get("differ", [])], only_model=list(data.get("only_model", [])),
             only_first=list(data.get("only_first", [])), model_totals=tuple(data.get("model_totals", (0, 0))),
             first_totals=tuple(data.get("first_totals", (0, 0))), choice=str(data.get("choice", "first")),
+            first_figures=int(data.get("first_figures", 0)),
         )
 
 
 def compare(first: str, model_page: str) -> Comparison:
     """Figure by figure, and by each reading's printed totals: which reading the page is shown as."""
-    mine, theirs = figures(model_page), figures(first)
+    mine, theirs = figures(_ungrouped(model_page)), figures(_ungrouped(first))
     model_count = Counter({value: len(shown) for value, shown in mine.items()})
     first_count = Counter({value: len(shown) for value, shown in theirs.items()})
     both = model_count & first_count
     only_model = model_count - first_count
     only_first = first_count - model_count
-    comparison = Comparison(figures=sum(model_count.values()), confirmed=sum(both.values()))
+    comparison = Comparison(
+        figures=sum(model_count.values()), confirmed=sum(both.values()), first_figures=sum(first_count.values())
+    )
     pairs, left_model, left_first = _pairs(only_model, only_first)
     comparison.differ = [(mine[a][0], theirs[b][0]) for a, b in pairs]
     comparison.only_model = [mine[value][0] for value in left_model]
@@ -410,6 +490,24 @@ def compare(first: str, model_page: str) -> Comparison:
     comparison.first_totals = _totals(first)
     comparison.choice = _choose(comparison) if said_something(first) else ("model" if model_page.strip() else "first")
     return comparison
+
+
+def _ungrouped(page: str) -> str:
+    """The page without its section names written on each row ("Group: 6100 Office Supplies", then "6100 Office
+    Supplies | Line: …" on every row under it), so a figure in a section's name counts once, as printed."""
+    out = []
+    group = ""
+    for line in (page or "").splitlines():
+        if line.startswith("Group: "):
+            group = line[len("Group: "):].rstrip(": ").strip()
+            out.append(group)
+            continue
+        if line.startswith("["):
+            group = ""
+        if group and line.startswith(group + " | "):
+            line = line[len(group) + 3:]
+        out.append(line)
+    return "\n".join(out)
 
 
 def said_something(first: str) -> bool:
@@ -431,13 +529,15 @@ def _totals(text: str) -> tuple[int, int]:
 
 
 def _choose(comparison: Comparison) -> str:
-    """The model's reading when its totals hold up at least as well as the first reading's and most of its figures
-    are the first reading's too (a reading that shares few figures is of something else, or made up)."""
+    """The model's reading when its totals hold up at least as well as the first reading's, most of its figures
+    are the first reading's too (a reading that shares few figures is of something else, or made up), and it has
+    most of the first reading's figures (one that stopped early would hide the rest of the page)."""
     def score(totals: tuple[int, int]) -> int:
         return totals[0] - 2 * totals[1]
 
     share = comparison.confirmed / comparison.figures if comparison.figures else 0.0
-    if share >= 0.5 and score(comparison.model_totals) >= score(comparison.first_totals):
+    covered = comparison.confirmed / comparison.first_figures if comparison.first_figures else 1.0
+    if share >= 0.5 and covered >= 0.5 and score(comparison.model_totals) >= score(comparison.first_totals):
         return "model"
     return "first"
 
@@ -447,23 +547,25 @@ def _pairs(only_model: Counter, only_first: Counter) -> tuple[list[tuple[Decimal
     digit or two apart are one figure read two ways ("1,240.00" / "1,246.00")."""
     model_left = [value for value, count in only_model.items() for _ in range(count)]
     first_left = [value for value, count in only_first.items() for _ in range(count)]
-    pairs = []
-    for value in list(model_left):
+    candidates = []
+    for i, value in enumerate(model_left):
         mine = _digits(value)
-        best = None
-        for other in first_left:
+        for j, other in enumerate(first_left):
             theirs = _digits(other)
-            if len(theirs) == len(mine) and sum(a != b for a, b in zip(mine, theirs)) <= 2:
-                best = other
-                break
             if abs(other) == abs(value):  # the sign is all that differs
-                best = other
-                break
-        if best is not None:
-            pairs.append((value, best))
-            model_left.remove(value)
-            first_left.remove(best)
-    return pairs, model_left, first_left
+                candidates.append((0, Decimal(0), i, j))
+            elif len(theirs) == len(mine) and (apart := sum(a != b for a, b in zip(mine, theirs))) <= 2:
+                candidates.append((apart, abs(abs(value) - abs(other)), i, j))
+    # Fewest digits apart first, then the nearest in value: each figure is paired with the one it was most likely.
+    pairs, used_model, used_first = [], set(), set()
+    for _apart, _gap, i, j in sorted(candidates):
+        if i not in used_model and j not in used_first:
+            pairs.append((model_left[i], first_left[j]))
+            used_model.add(i)
+            used_first.add(j)
+    rest_model = [value for i, value in enumerate(model_left) if i not in used_model]
+    rest_first = [value for j, value in enumerate(first_left) if j not in used_first]
+    return pairs, rest_model, rest_first
 
 
 def _digits(value: Decimal) -> str:
@@ -500,11 +602,14 @@ def merged_page(first: str, model_markdown: str, comparison: Comparison, *, firs
             lines.append(f"[Where the two readings differ ({first_name} / {MODEL_NAME}): {listed}]")
     if comparison.choice == "model" and comparison.only_model:
         lines.append(f"[Read only by {MODEL_NAME}: {'; '.join(comparison.only_model[:LISTED])}]")
+    if comparison.choice == "model" and comparison.only_first:
+        lines.append(f"[Read only by {first_name}: {'; '.join(comparison.only_first[:LISTED])}]")
     return "\n".join(line for line in lines if line)
 
 
 _ONLY_MODEL = re.compile(r"^\[Read only by the vision model: (.+)\]$", re.M)
 _DIFFER = re.compile(r"^\[Where the two readings differ \(the vision model / ([^)]+)\): (.+)\]$", re.M)
+_DIFFER_FIRST = re.compile(r"^\[Where the two readings differ \(([^)]+) / the vision model\): (.+)\]$", re.M)
 
 
 def unconfirmed(text: str) -> dict[Decimal, str]:
@@ -525,6 +630,12 @@ def unconfirmed(text: str) -> dict[Decimal, str]:
             mine, _, theirs = pair.partition(" / ")
             for value in figures(mine):
                 out.setdefault(value, f"{match.group(1)} read {theirs.strip()}")
+    # The first reading shown: the model's side of each difference is only in the note.
+    for match in _DIFFER_FIRST.finditer(text or ""):
+        for pair in match.group(2).split("; "):
+            theirs, _, mine = pair.partition(" / ")
+            for value in figures(mine):
+                out.setdefault(value, f"{match.group(1)} read {theirs.strip()}")
     return out
 
 
@@ -540,12 +651,20 @@ def shown_text(text: str, rows: dict[int, dict]) -> str:
         return text
     text = text or ""
     marks = list(_MARK.finditer(text))
+    unmarked = {page: row for page, row in rows.items() if _saved(row).get("kind") == "unmarked"}
     if not marks:
-        row = rows.get(1)
-        if not row:
-            return text
         body = text.strip()
-        return _page_for(row["first"] if body.startswith(NOTE) else body, row)
+        if not unmarked:
+            row = rows.get(1)
+            if not row:
+                return text
+            # A picture: its whole text is page 1.
+            return _page_for(row["first"] if body.startswith(NOTE) else body, row)
+        # A PDF CloseDesk couldn't read page by page (its text is only a note): each page read follows the note.
+        pages = [f"[page {page}]\n{_page_for('', row)}" for page, row in sorted(unmarked.items())]
+        return "\n\n".join(part for part in [body, *pages] if part)
+    seen = {int(found.group(1)) for found in _PAGE_MARK.finditer(text)}
+    extra = [f"[page {page}]\n{_page_for('', row)}" for page, row in sorted(unmarked.items()) if page not in seen]
     pieces = [text[: marks[0].start()]]
     for i, mark in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
@@ -554,20 +673,30 @@ def shown_text(text: str, rows: dict[int, dict]) -> str:
         if row is None:
             pieces.append(text[mark.start():end])
             continue
-        body = text[mark.end():end].strip()
+        body = text[mark.end():end]
+        tail = _TAIL.search(body)
+        body = (body[: tail.start()] if tail else body).strip()
         first = row["first"] if body.startswith(NOTE) else body
-        tail = "\n\n" if i + 1 < len(marks) else ""
-        pieces.append(f"{mark.group(0).strip()}\n{_page_for(first, row)}{tail}")
-    return "".join(pieces)
+        after = f"\n\n{tail.group(1)}" if tail else ""
+        gap = "\n\n" if i + 1 < len(marks) else ""
+        pieces.append(f"{mark.group(0).strip()}\n{_page_for(first, row)}{after}{gap}")
+    return "".join(pieces) + "".join(f"\n\n{page}" for page in extra)
+
+
+def _saved(row: dict) -> dict:
+    """The comparison stored with a reading, or {} when it can't be read."""
+    try:
+        saved = json.loads(row.get("comparison") or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
 
 
 def _page_for(first: str, row: dict) -> str:
-    try:
-        saved = json.loads(row.get("comparison") or "{}")
-    except ValueError:
-        saved = {}
-    comparison = Comparison.from_dict(saved) if row.get("first") == first and saved else compare(first, page_text(row["model_text"]))
-    return merged_page(first, row["model_text"], comparison, first_name=saved.get("first_name") or "OCR", model=row.get("model") or "")
+    saved = _saved(row)
+    model_text = row.get("model_text") or ""
+    comparison = Comparison.from_dict(saved) if row.get("first") == first and saved else compare(first, page_text(model_text))
+    return merged_page(first, model_text, comparison, first_name=saved.get("first_name") or "OCR", model=row.get("model") or "")
 
 
 # Reading pages and keeping them ---------------------------------------------------------------
@@ -579,6 +708,7 @@ class Result:
     seconds: float = 0.0
     shown_model: int = 0
     failed: list[str] = field(default_factory=list)
+    stopped: bool = False
 
 
 def first_name(text: str, page: int, scanned: set[int], filename: str) -> str:
@@ -597,35 +727,64 @@ def read_pages(
     pages: list[int],
     *,
     on_progress: Callable[[int, int, str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> Result:
     """Read ``pages`` of the attachment with the vision model, compare each with its first reading and keep both.
-    The attachment's text shows each page as the reading that holds up best from then on (``shown_text``)."""
-    model = check_model(settings).model or settings.llm_model
-    scanned = set(scanned_pages(data)) if Path(att.filename).suffix.lower() == ".pdf" else set()
+    The attachment's text shows each page as the reading that holds up best from then on (``shown_text``). A page
+    read again is compared with the first reading as stored now (a reader update may have changed it)."""
+    global _reading
+    with _reading_lock:
+        _reading += 1
+    try:
+        return _read_pages(store, settings, email, att, data, pages, on_progress=on_progress, should_stop=should_stop)
+    finally:
+        with _reading_lock:
+            _reading -= 1
+
+
+def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, should_stop=None) -> Result:
+    from controller_inbox.extract import redact_financial_secrets
+
     result = Result()
-    bodies = dict(page_bodies(att.extracted_text or ""))
+    if not same_file(att, data):
+        result.failed.append("the file kept under this name isn't this attachment")
+        return result
+    model = check_model(settings).model or settings.llm_model
+    suffix = Path(att.filename).suffix.lower()
+    scanned = set(scanned_pages(data)) if suffix == ".pdf" else set()
+    stored_text = store.stored_text(att.id)
+    raw = (att.extracted_text or "") if stored_text is None else stored_text
+    kind = "picture" if suffix in IMAGE_SUFFIXES else ("pdf" if _PAGE_MARK.search(raw) else "unmarked")
+    bodies = dict(page_bodies(raw)) if kind != "unmarked" else {}
     stored = store.page_readings(att.id, att.sha256)
     todo = pages[:MAX_PAGES]
     for index, page in enumerate(todo, start=1):
-        current = bodies.get(page, "")
-        first = stored[page]["first"] if page in stored and current.startswith(NOTE) else current
-        if first.startswith(NOTE):
-            continue
+        if should_stop and should_stop():
+            result.stopped = True
+            break
+        first = bodies.get(page, "")
+        if first.startswith(NOTE):  # the page as shown, saved back: its first reading is the one kept with it
+            if page not in stored:
+                continue
+            first = stored[page]["first"]
         if on_progress:
             on_progress(index - 1, len(todo), f"{att.filename}, page {page}")
         started = time.monotonic()
         try:
             png = render(data, att.filename, page)
-            markdown = transcribe(settings, png)
+            markdown = redact_financial_secrets(transcribe(settings, png))
+        except EmptyReply:
+            markdown = ""  # a blank page (the back of a sheet): nothing on it to read
         except Exception as exc:  # one page failing doesn't lose the others
             log.warning("Vision reading of %s page %s failed: %s", att.filename, page, exc)
+            store.note_page_failure(att.id, page, sha256=att.sha256, error=str(exc))
             result.failed.append(f"page {page}: {str(exc)[:160]}")
             continue
         seconds = time.monotonic() - started
         comparison = compare(first, page_text(markdown))
         store.save_page_reading(
             att.id, page, first=first, model_text=markdown, model=model, seconds=seconds, sha256=att.sha256,
-            comparison=json.dumps({**comparison.to_dict(), "first_name": first_name(first, page, scanned, att.filename)}),
+            comparison=json.dumps({**comparison.to_dict(), "first_name": first_name(first, page, scanned, att.filename), "kind": kind}),
         )
         result.pages += 1
         result.seconds += seconds
@@ -635,10 +794,34 @@ def read_pages(
     return result
 
 
-def unread_pages(store: Store, att: AttachmentRecord, data: bytes, *, doubtful: bool = True) -> list[int]:
+def same_file(att: AttachmentRecord, data: bytes) -> bool:
+    """The bytes kept are this attachment's (a file inside a zip can share its name with another one)."""
+    return not att.sha256 or hashlib.sha256(data).hexdigest() == att.sha256
+
+
+def original_bytes(settings: Settings, email: EmailRecord, att: AttachmentRecord) -> bytes | None:
+    """The attachment as it arrived, when CloseDesk kept it and it is this attachment."""
+    from controller_inbox import agent
+
+    path = agent.original_file(settings, email, att)
+    if path is None:
+        return None
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return data if same_file(att, data) else None
+
+
+def unread_pages(
+    store: Store, att: AttachmentRecord, data: bytes, *, doubtful: bool = True, retry_failed: bool = False
+) -> list[int]:
     """The pages worth a second reading that haven't had one. ``doubtful``: also text pages whose totals don't add
-    up (finding them reads every table, so the overnight run looks at scans and pictures only)."""
+    up (finding them reads every table, so the overnight run looks at scans and pictures only). A page the model
+    failed on ``TRIES`` times is left out unless ``retry_failed`` (the user asked)."""
     done = set(store.page_readings(att.id, att.sha256))
+    if not retry_failed:
+        done |= {page for page, tries in store.page_failures(att.id, att.sha256).items() if tries >= TRIES}
     if doubtful:
         wanted = wanted_pages(data, att.filename, att.extracted_text or "")
     elif Path(att.filename or "").suffix.lower() in IMAGE_SUFFIXES:
@@ -658,7 +841,7 @@ def files_to_read(
 ) -> list[tuple[int, AttachmentRecord, bytes, list[int]]]:
     """(position on the email from 1, attachment, its bytes, pages to read) for each file with pages waiting. Files
     of an email flagged as payment fraud are never sent to the model, and only files CloseDesk kept can be read."""
-    from controller_inbox import agent, fraud
+    from controller_inbox import fraud
 
     if fraud.attachments_locked(email):
         return []
@@ -666,12 +849,8 @@ def files_to_read(
     for position, att in enumerate(email.attachments, start=1):
         if not readable_file(att.filename) or (not doubtful and not looks_scanned(att)):
             continue
-        path = agent.original_file(settings, email, att)
-        if path is None:
-            continue
-        try:
-            data = path.read_bytes()
-        except OSError:
+        data = original_bytes(settings, email, att)
+        if data is None:
             continue
         pages = unread_pages(store, att, data, doubtful=doubtful)
         if pages:
@@ -695,16 +874,19 @@ def read_waiting(
     if settings.vision_mode != "auto" or not can_render() or not available(settings):
         return total
     budget = 60.0 * (settings.vision_minutes_per_run if minutes is None else minutes)
+
+    def expected() -> float:
+        per_page = seconds_per_page(store, settings)
+        return UNKNOWN_SECONDS if per_page is None else per_page
+
+    if expected() > budget:
+        return total  # not even one page fits: no need to look through the mail
     started = time.monotonic()
-    failures_in_a_row = 0
+    files_failed_in_a_row = 0
     for email in store.list_emails(limit=400):
         for _position, att, data, pages in files_to_read(store, settings, email, doubtful=False):
             for page in pages:
-                per_page = seconds_per_page(store, settings)
-                expected = UNKNOWN_SECONDS if per_page is None else per_page
-                if time.monotonic() - started + expected > budget:
-                    return total
-                if total.pages + len(total.failed) >= RUN_PAGES or failures_in_a_row >= 2:
+                if time.monotonic() - started + expected() > budget or total.pages + len(total.failed) >= RUN_PAGES:
                     return total
                 if on_progress:
                     on_progress(total.pages, 0, f"{att.filename}, page {page}")
@@ -713,7 +895,14 @@ def read_waiting(
                 total.seconds += one.seconds
                 total.shown_model += one.shown_model
                 total.failed += one.failed
-                failures_in_a_row = failures_in_a_row + 1 if one.failed else 0
+                if one.failed:
+                    break  # the rest of this file waits for another night (a page failing twice is left out)
+            else:
+                files_failed_in_a_row = 0
+                continue
+            files_failed_in_a_row += 1
+            if files_failed_in_a_row >= 2:
+                return total  # the model server is likely down or out of memory
     return total
 
 
@@ -753,12 +942,16 @@ def offer_text(pages: int, seconds: float | None) -> str:
 
 def result_text(result: Result) -> str:
     """What a finished read says."""
+    if result.stopped and not result.pages:
+        return "Stopped before any page was read."
     if not result.pages:
         return "No page could be read: " + "; ".join(result.failed[:3]) if result.failed else "No page needed reading."
     each = f" ({duration(result.seconds / result.pages)} a page)" if result.pages else ""
     text = f"Read {result.pages} page{'s' if result.pages != 1 else ''} with the vision model{each}."
     if result.failed:
         text += f" {len(result.failed)} couldn't be read: {'; '.join(result.failed[:2])}."
+    if result.stopped:
+        text += " Stopped as asked; the rest can be read later."
     return text + " Ask again to use what it read."
 
 
@@ -771,10 +964,7 @@ def side_by_side(rows: dict[int, dict]) -> list[dict]:
 
     out = []
     for page, row in sorted(rows.items()):
-        try:
-            saved = json.loads(row.get("comparison") or "{}")
-        except ValueError:
-            saved = {}
+        saved = _saved(row)
         comparison = Comparison.from_dict(saved)
         mine = {a for a, _b in comparison.differ} | set(comparison.only_model)
         theirs = {b for _a, b in comparison.differ} | set(comparison.only_first)
@@ -791,14 +981,15 @@ def side_by_side(rows: dict[int, dict]) -> list[dict]:
 
 
 def _marked(html: str, shown: set[str]) -> str:
-    """Escaped text with each of ``shown`` (as written in it) marked."""
+    """Escaped text with each of ``shown`` (as written in it) marked, in one pass, longest first, never part of a
+    longer figure ("100" in "100.25")."""
     from markupsafe import escape
 
-    for item in sorted(shown, key=len, reverse=True):
-        safe = str(escape(item))
-        if safe:
-            html = re.sub(rf"(?<![\w.,]){re.escape(safe)}(?![\w])", f"<mark>{safe}</mark>", html)
-    return html
+    items = sorted({str(escape(item)) for item in shown if item}, key=len, reverse=True)
+    if not items:
+        return html
+    pattern = re.compile(r"(?<![\w.,])(" + "|".join(map(re.escape, items)) + r")(?![\w]|[.,]\d)")
+    return pattern.sub(r"<mark>\1</mark>", html)
 
 
 def _markdown_html(markdown: str, shown: set[str]) -> str:
@@ -822,29 +1013,34 @@ def _markdown_html(markdown: str, shown: set[str]) -> str:
 # What the pages offer, and starting a read -----------------------------------------------------
 
 
+LOCKED = "This email may be payment fraud, so its files aren't given to the model."
+
+
 def offer(store: Store, settings: Settings, email: EmailRecord, att: AttachmentRecord) -> dict:
     """What the file's page and the chat show about reading the file with the vision model as well: the pages that
     would be read and how long that takes on this computer, or why it can't be done."""
-    from controller_inbox import agent, fraud
+    from controller_inbox import fraud
 
     reason = ""
     pages: list[int] = []
     if not readable_file(att.filename):
         reason = "Only PDFs and pictures can be read with the vision model."
     elif fraud.attachments_locked(email):
-        reason = "This email may be payment fraud, so its files aren't given to the model."
+        reason = LOCKED
     elif settings.vision_mode == "off":
         reason = "Reading scans with the vision model is turned off in Setup."
     elif not can_render():
         reason = "The page renderer isn't installed. Double-click CloseDesk once (or run pip install -e .) to add it."
+    elif not check_model(settings).active:
+        reason = "No model is answering in LM Studio. Load one that can look at pictures (Qwen3.5, Gemma 3) to read scans both ways."
     elif not available(settings):
         reason = "The model loaded in LM Studio can't look at pictures. Load one that can (Qwen3.5, Gemma 3) to read scans both ways."
     else:
-        path = agent.original_file(settings, email, att)
-        if path is None:
+        data = original_bytes(settings, email, att)
+        if data is None:
             reason = "The original file wasn't kept, so its pages can't be looked at."
         else:
-            pages = unread_pages(store, att, path.read_bytes())
+            pages = unread_pages(store, att, data, retry_failed=True)
     seconds = estimate(store, settings, len(pages)) if pages else None
     return {
         "available": not reason,
@@ -860,13 +1056,10 @@ def offer(store: Store, settings: Settings, email: EmailRecord, att: AttachmentR
 def start(store: Store, settings: Settings, job, email: EmailRecord, att: AttachmentRecord, n: int, *, again: bool = False) -> tuple[dict, int]:
     """Start reading the file's pages that need it (``again``: every one, a second time) as the background job.
     Returns the reply for the page and its HTTP status."""
-    from controller_inbox import agent
-
     told = offer(store, settings, email, att)
     if told["reason"]:
-        return {"ok": False, "started": False, "message": told["reason"]}, 409
-    path = agent.original_file(settings, email, att)
-    data = path.read_bytes() if path else b""
+        return {"ok": False, "started": False, "message": told["reason"]}, 403 if told["reason"] == LOCKED else 409
+    data = original_bytes(settings, email, att) or b""
     pages = told["pages"]
     if again:
         pages = sorted(set(wanted_pages(data, att.filename, att.extracted_text or "")) | set(told["read"]))
@@ -878,13 +1071,16 @@ def start(store: Store, settings: Settings, job, email: EmailRecord, att: Attach
     def run(progress):
         progress("vision", 0, len(pages), att.filename)
         # Read again, a page's new reading replaces the old one; its first reading is the one kept with it.
-        result = read_pages(store, settings, email, att, data, pages, on_progress=lambda i, k, note: progress("vision", i, k, note))
+        result = read_pages(
+            store, settings, email, att, data, pages,
+            on_progress=lambda i, k, note: progress("vision", i, k, note), should_stop=lambda: job.stopping,
+        )
         return {
             "kind": "vision", "email_id": email.id, "n": n, "file": att.filename, "pages": result.pages, "failed": result.failed,
             "seconds": round(result.seconds), "href": href, "message": result_text(result),
         }
 
-    if not job.start(run):
+    if not job.start(run, about={"kind": "vision", "email_id": email.id, "n": n, "file": att.filename}):
         return {"ok": False, "started": False, "message": "CloseDesk is busy with another job. Try again when it finishes."}, 409
     seconds = estimate(store, settings, len(pages))
     return {"ok": True, "started": True, "pages": pages, "estimate": round(seconds) if seconds is not None else None, "message": offer_text(len(pages), seconds)}, 200
@@ -894,10 +1090,7 @@ def readings_json(rows: dict[int, dict]) -> list[dict]:
     """For the workspace: each read page's two readings as data (no HTML), with the figures to mark in each."""
     out = []
     for page, row in sorted(rows.items()):
-        try:
-            saved = json.loads(row.get("comparison") or "{}")
-        except ValueError:
-            saved = {}
+        saved = _saved(row)
         comparison = Comparison.from_dict(saved)
         out.append({
             "page": page,

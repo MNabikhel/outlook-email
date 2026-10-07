@@ -665,13 +665,19 @@ def complete_text(
 
 
 def stream_text(
-    settings: Settings, messages: list[dict], *, max_tokens: int = 500, wait: float | None = None, temperature: float | None = None
+    settings: Settings,
+    messages: list[dict],
+    *,
+    max_tokens: int = 500,
+    wait: float | None = None,
+    temperature: float | None = None,
+    finished: dict | None = None,
 ):
     """Yield the answer as it is written. Servers that ignore ``stream`` send it in one piece.
 
     Raises ``EmptyReply`` when the model wrote nothing, so callers never show a blank answer. ``wait``: how long
     the model may go quiet (looking at a picture first can take minutes on a laptop); ``temperature``: other than
-    the usual 0.2.
+    the usual 0.2; ``finished``: given a dict, its "reason" is set to why the reply ended ("length": cut off).
     """
     model, effort, budget = _chat_plan(settings, max_tokens)
     for _attempt in range(2):
@@ -679,6 +685,8 @@ def stream_text(
         for piece in _stream_once(settings, messages, budget, effort, reply, wait=wait, temperature=temperature):
             reply.content += piece
             yield piece
+        if finished is not None:
+            finished["reason"] = reply.finish
         if reply.content:
             return
         plan = _retry_plan(model, effort if model not in _effort_rejected else None, budget, reply)

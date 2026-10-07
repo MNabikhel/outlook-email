@@ -144,6 +144,8 @@ Looking at a page is slow on a laptop without a graphics card (minutes a page; a
 - **Only when I ask**: nothing is read until you click **Read with the vision model** on the file or under an answer.
 - **Off**.
 
+A read runs in the background, one page at a time; **Stop** in the bar at the top ends it after the page being read. A reading the model cut off at its length limit is not used (the page stays OCR's), and one where the model starts repeating a line is stopped there and kept without the repeats. A page the model fails on twice is only read again when you ask.
+
 ### Fraud check
 
 Each email gets a score. A bank-detail change or a request to buy gift cards **in the sender's own words** blocks it unless you trust the sender or their domain. That holds even when the request sits in a "this email is confidential" paragraph or follows "please be aware". A real anti-fraud notice ("we will never change our bank details by email", "if you receive such an email, call us") doesn't count, and neither does the model's opinion alone. Bank-change wording below a quote marker (`From:`, `>`), which is what a forged thread looks like, gets a *double-check before paying* note unless the sender's own words say it was fake. Weaker signals — a reply-to on another domain, a lookalike of a known domain, a borrowed display name, pressure, a first email from an address — add up to that same note, which doesn't block anything. Trusted domains and senders count against the score: from them a bank-change request gets a caution rather than a block. Replies are filed by what the sender wrote, so a colleague's "it wasn't them, I blocked the sender" above a quoted scam is neither flagged nor filed as an invoice.

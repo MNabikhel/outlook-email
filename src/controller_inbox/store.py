@@ -221,6 +221,18 @@ CREATE TABLE IF NOT EXISTS page_readings (
     created_at TEXT NOT NULL,
     PRIMARY KEY (attachment_id, page)
 );
+
+-- A page the vision model couldn't read (the server failed or timed out): after a second failure on the same
+-- file it is left for the user to ask for, so one bad page doesn't stop every overnight run.
+CREATE TABLE IF NOT EXISTS page_failures (
+    attachment_id TEXT NOT NULL,
+    page INTEGER NOT NULL,
+    sha256 TEXT NOT NULL DEFAULT '',
+    tries INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (attachment_id, page)
+);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(category);
@@ -295,6 +307,7 @@ class Store:
             removed = conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]
             conn.execute(f"DELETE FROM file_summaries WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
             conn.execute(f"DELETE FROM page_readings WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
+            conn.execute(f"DELETE FROM page_failures WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
             conn.execute(f"DELETE FROM embeddings WHERE email_id IN ({mail})")
             conn.execute(f"DELETE FROM fraud_log WHERE email_id IN ({mail})")
             conn.execute(f"DELETE FROM findings WHERE email_id IN ({mail})")
@@ -905,6 +918,7 @@ class Store:
             conn.execute(f"DELETE FROM embeddings WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM fraud_log WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM page_readings WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({sample}))")
+            conn.execute(f"DELETE FROM page_failures WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({sample}))")
             conn.execute(f"DELETE FROM attachments WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM action_items WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM corrections WHERE email_id IN ({sample})")
@@ -961,6 +975,39 @@ class Store:
                 """,
                 (attachment_id, page, _text(first), _text(model_text), model, float(seconds), comparison, sha256 or "", _now()),
             )
+            conn.execute("DELETE FROM page_failures WHERE attachment_id = ? AND page = ?", (attachment_id, page))
+
+    def note_page_failure(self, attachment_id: str, page: int, *, sha256: str, error: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO page_failures (attachment_id, page, sha256, tries, error, updated_at) VALUES (?, ?, ?, 1, ?, ?)
+                ON CONFLICT(attachment_id, page) DO UPDATE SET
+                    tries = CASE WHEN page_failures.sha256 = excluded.sha256 THEN page_failures.tries + 1 ELSE 1 END,
+                    sha256 = excluded.sha256, error = excluded.error, updated_at = excluded.updated_at
+                """,
+                (attachment_id, page, sha256 or "", error[:300], _now()),
+            )
+
+    def page_failures(self, attachment_id: str, sha256: str = "") -> dict[int, int]:
+        """Page -> how many times in a row the vision model failed to read it (this file's, when sha256 is given)."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT page, sha256, tries FROM page_failures WHERE attachment_id = ?", (attachment_id,)).fetchall()
+        return {int(row["page"]): int(row["tries"]) for row in rows if not sha256 or row["sha256"] in {"", sha256}}
+
+    def stored_text(self, attachment_id: str) -> str | None:
+        """The attachment's text as stored (an email's file, or a file added to a conversation: "chat-<id>:<name>"),
+        before any vision reading is shown in it."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT extracted_text FROM attachments WHERE id = ?", (attachment_id,)).fetchone()
+            if row is not None:
+                return row["extracted_text"] or ""
+            if attachment_id.startswith("chat-") and ":" in attachment_id:
+                chat_id, _, filename = attachment_id.removeprefix("chat-").partition(":")
+                row = conn.execute("SELECT text FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, filename)).fetchone()
+                if row is not None:
+                    return row["text"] or ""
+        return None
 
     def page_readings(self, attachment_id: str, sha256: str = "") -> dict[int, dict]:
         """Page -> the stored reading (first, model_text, model, seconds, comparison, sha256, created_at), of the
@@ -979,10 +1026,6 @@ class Store:
         for row in rows:
             out.setdefault(row["attachment_id"], {})[int(row["page"])] = {key: row[key] for key in row.keys()}
         return out
-
-    def delete_page_readings(self, attachment_id: str) -> None:
-        with self.connect() as conn:
-            conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (attachment_id,))
 
     def vision_seconds(self, model: str, *, limit: int = 12) -> list[float]:
         """How long the latest pages took this model to read, newest first."""
@@ -1178,6 +1221,7 @@ class Store:
             conn.execute("DELETE FROM chat_turns WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM chat_files WHERE chat_id = ?", (chat_id,))
             conn.execute(f"DELETE FROM page_readings WHERE attachment_id {_LIKE}", (_like_escape(f"chat-{chat_id}:") + "%",))
+            conn.execute(f"DELETE FROM page_failures WHERE attachment_id {_LIKE}", (_like_escape(f"chat-{chat_id}:") + "%",))
             conn.execute("DELETE FROM findings WHERE email_id = ?", (f"chat-{chat_id}",))
             conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
 
@@ -1186,6 +1230,7 @@ class Store:
         with self.connect() as conn:
             conn.execute("DELETE FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, row["filename"]))
             conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (f"chat-{chat_id}:{row['filename']}",))
+            conn.execute("DELETE FROM page_failures WHERE attachment_id = ?", (f"chat-{chat_id}:{row['filename']}",))
             conn.execute(
                 "INSERT INTO chat_files(chat_id, filename, content_type, size_bytes, sha256, text, added_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (chat_id, row["filename"], row.get("content_type", ""), row.get("size_bytes", 0), row.get("sha256", ""), row.get("text", ""), _now()),
@@ -1201,6 +1246,7 @@ class Store:
         with self.connect() as conn:
             conn.execute("DELETE FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, filename))
             conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (f"chat-{chat_id}:{filename}",))
+            conn.execute("DELETE FROM page_failures WHERE attachment_id = ?", (f"chat-{chat_id}:{filename}",))
 
     # File summaries written by the overnight run ------------------------------------------------
 
@@ -1232,11 +1278,12 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(
                 f"""
-                SELECT a.email_id, a.id FROM attachments a
+                SELECT a.email_id, a.id, e.importance_score, e.received_at FROM attachments a
                 JOIN emails e ON e.id = a.email_id
                 LEFT JOIN file_summaries f ON f.attachment_id = a.id
                 WHERE length(a.extracted_text) >= ?
                   AND (e.flags {_LIKE} OR (e.flags NOT {_LIKE} AND e.category != 'payment_instruction_change'))
+                  AND NOT EXISTS (SELECT 1 FROM page_readings p WHERE p.attachment_id = a.id)
                   AND (f.attachment_id IS NULL OR f.text_key != a.sha256 || ':' || length(a.extracted_text)
                        OR (f.summary = '' AND COALESCE(f.model, '') != ?))
                 ORDER BY e.importance_score DESC, e.received_at DESC
@@ -1244,7 +1291,28 @@ class Store:
                 """,
                 (min_chars, _json_contains("fraud_cleared"), _json_contains("fraud_risk"), model, limit),
             ).fetchall()
-        return [(row["email_id"], row["id"]) for row in rows]
+            # A file with pages the vision model read is summarized from its text as shown (agent.summary_key), so
+            # its key is worked out here rather than from the stored text's length.
+            seen = conn.execute(
+                f"""
+                SELECT a.email_id, a.id, a.sha256, a.extracted_text, f.text_key, f.summary, f.model, e.importance_score, e.received_at
+                FROM attachments a
+                JOIN emails e ON e.id = a.email_id
+                LEFT JOIN file_summaries f ON f.attachment_id = a.id
+                WHERE EXISTS (SELECT 1 FROM page_readings p WHERE p.attachment_id = a.id)
+                  AND (e.flags {_LIKE} OR (e.flags NOT {_LIKE} AND e.category != 'payment_instruction_change'))
+                """,
+                (_json_contains("fraud_cleared"), _json_contains("fraud_risk")),
+            ).fetchall()
+            readings = _readings_for(conn, [row["id"] for row in seen])
+        found = [(row["importance_score"], row["received_at"] or "", row["email_id"], row["id"]) for row in rows]
+        for row in seen:
+            text = shown_text(row["extracted_text"] or "", readings.get(row["id"]), row["sha256"] or "")
+            key = f"{row['sha256']}:{len(text)}"
+            if len(text) >= min_chars and (row["text_key"] is None or row["text_key"] != key or (row["summary"] == "" and (row["model"] or "") != model)):
+                found.append((row["importance_score"], row["received_at"] or "", row["email_id"], row["id"]))
+        found.sort(key=lambda item: (item[0] or 0, item[1]), reverse=True)
+        return [(email_id, attachment_id) for _score, _when, email_id, attachment_id in found[:limit]]
 
     # Vectors for search by meaning ---------------------------------------------------------------
 

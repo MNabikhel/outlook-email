@@ -79,6 +79,8 @@ NOTICES = {
     "sample-busy": "The sample mailbox was not loaded: mail is being processed right now. Try again when it finishes.",
     "processing": "Processing started. This page updates as it goes.",
     "busy": "Already processing. This page updates as it goes.",
+    "busy-vision": "The vision model is reading pages of a scan. Stop it from the bar at the top, or try again when it's done.",
+    "stopping": "Stopping after the page being read now.",
     "profile": "Saved. The digest and Today page now use this profile; new mail is sorted with it.",
     "timezone": "Saved. Times and “today” now use this time zone.",
     "context": "Saved. If the model in LM Studio is loaded with less, the next question reloads it with this context.",
@@ -273,6 +275,21 @@ class ProcessJob:
         self.result: dict | None = None
         self.error = ""
         self.finished_at = ""
+        # What a job other than Process new mail is about (a vision read: its email and file), for the pages.
+        self.about: dict | None = None
+        self._stop = threading.Event()
+
+    @property
+    def stopping(self) -> bool:
+        """Asked to stop: a vision read stops before its next page (Process new mail runs to the end)."""
+        return self._stop.is_set()
+
+    def request_stop(self) -> bool:
+        with self._lock:
+            if self.state != "running":
+                return False
+        self._stop.set()
+        return True
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -285,14 +302,17 @@ class ProcessJob:
                 "result": self.result,
                 "error": self.error,
                 "finished_at": self.finished_at,
+                "about": self.about,
+                "stopping": self._stop.is_set(),
             }
 
-    def start(self, target) -> bool:
+    def start(self, target, *, about: dict | None = None) -> bool:
         with self._lock:
             if self.state == "running":
                 return False
             self.state, self.stage, self.done, self.total = "running", "starting", 0, 0
-            self.note, self.result, self.error = "", None, ""
+            self.note, self.result, self.error, self.about = "", None, "", about
+            self._stop.clear()
         threading.Thread(target=self._run, args=(target,), daemon=True).start()
         return True
 
@@ -979,11 +999,17 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         started = job.start(
             lambda progress: run_overnight(store, settings, sync_graph=False, on_progress=progress, vision_minutes=vision.QUICK_SECONDS / 60)
         )
-        return RedirectResponse(f"/?notice={'processing' if started else 'busy'}", status_code=303)
+        busy = "busy-vision" if job.snapshot()["stage"] == "vision" else "busy"
+        return RedirectResponse(f"/?notice={'processing' if started else busy}", status_code=303)
 
     @app.get("/process/status")
     def process_status():
         return JSONResponse(job.snapshot())
+
+    @app.post("/process/stop")
+    def process_stop():
+        job.request_stop()
+        return RedirectResponse("/?notice=stopping", status_code=303)
 
     @app.post("/folder/ingest")
     def folder_ingest():
