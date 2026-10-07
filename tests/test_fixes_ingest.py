@@ -1022,3 +1022,25 @@ def test_vip_senders_copied_from_outlook_count_by_their_addresses(store: Store, 
         raw.id, raw.sender_email = f"v{n}", sender
         vip[sender] = "VIP / elevated sender" in process_message(raw, store, settings, now=NOW).importance_reasons
     assert vip == {"maya@taz.com": True, "colleen@randomvendor.com": False, "noreply@bobcat-rentals.com": False}
+
+
+# 31. A manual sync of a shorter window leaves the cursor and the message it waits for alone ------
+
+
+def test_a_shorter_manual_sync_keeps_the_message_the_cursor_waits_for(store: Store, settings: Settings):
+    from datetime import timedelta
+
+    t0 = datetime(2026, 10, 6, 9, 0, tzinfo=timezone.utc)
+    mailbox = _FlakyMailbox([_graph_raw("throttled", t0)], {"throttled": 1})
+    ingest_mailbox(mailbox, store, settings, received_after=t0 - timedelta(hours=72), now=t0 + timedelta(minutes=5))
+    held = store.get_state("last_sync_at")
+    assert held == t0.isoformat()
+
+    # "closedesk sync --hours 1" three hours later: it doesn't reach back to the message that failed.
+    later = t0 + timedelta(hours=3)
+    ingest_mailbox(mailbox, store, settings, received_after=later - timedelta(hours=1), now=later)
+    assert store.get_state("last_sync_at") == held, "the cursor doesn't jump past mail this sync didn't read"
+
+    ingest_mailbox(mailbox, store, settings, received_after=datetime.fromisoformat(held), now=later + timedelta(hours=1))
+    assert store.get_email("throttled") is not None
+    assert store.get_state("last_sync_at") == (later + timedelta(hours=1)).isoformat()

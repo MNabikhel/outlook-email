@@ -314,7 +314,8 @@ def ingest_mailbox(
     the earliest message that failed, so the next sync tries it again (up to ``MAX_SYNC_TRIES`` times).
 
     The cursor is the time the sync started, so mail that arrives while it runs is read next time.
-    ``cursor=None`` leaves it alone (the sample mailbox is not a sync).
+    ``cursor=None`` leaves it alone (the sample mailbox is not a sync), and so does a sync of a window that
+    starts after the cursor.
     """
     started = now or datetime.now(timezone.utc)
     report = report if report is not None else {}
@@ -340,7 +341,11 @@ def ingest_mailbox(
             failed[raw.id] = tries.get(raw.id, 0) + 1
             if failed[raw.id] < MAX_SYNC_TRIES:
                 held.append(received)
-    if cursor:
+    # A sync of a shorter window (``sync --hours 1``) didn't read all the mail since the cursor, or the message
+    # it waits for: the cursor and the messages to try again stay as they are.
+    previous = store.get_state(cursor) if cursor else None
+    covered = received_after is None or not previous or _utc(received_after) <= datetime.fromisoformat(previous)
+    if cursor and covered:
         started = started.astimezone(timezone.utc)
         mark = min([started, *held]).isoformat()
         store.set_state(cursor, mark)
