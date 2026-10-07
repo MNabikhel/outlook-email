@@ -4,29 +4,34 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import json
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from datetime import date, datetime
 from email.message import EmailMessage
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from controller_inbox import cli
+from controller_inbox import assistant, cli
 from controller_inbox.cli import DIGEST_SENT_KEY, load_sample, watch_tick
 from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, digest_window
 from controller_inbox.overnight import RunBusy, run_lock, run_overnight
 from controller_inbox.store import Store
 from controller_inbox.web import allowed_hosts, create_app
+from liveserver import serving
 
 ROOT = Path(__file__).resolve().parent.parent
 NY = ZoneInfo("America/New_York")
 SAME = {"origin": "http://testserver"}
+PAGE = {"X-CloseDesk": "1"}
 
 
 def _eml(path: Path, *, subject: str, body: str) -> None:
@@ -305,3 +310,42 @@ def test_clear_sample_removes_every_trace_of_sample_mail(loaded: Store):
         assert conn.execute("SELECT email_id FROM embeddings").fetchall()[0][0] == "chat-c1"
         assert conn.execute("SELECT COUNT(*) FROM file_summaries").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM fraud_log WHERE email_id = ?", (email.id,)).fetchone()[0] == 0
+
+
+# 10. A browser that goes away mid-answer: the answer so far is saved, and the model stops writing it.
+
+
+def test_an_answer_the_browser_left_is_saved_and_the_model_stops(settings: Settings, loaded: Store, monkeypatch):
+    stopped = threading.Event()
+    written: list[int] = []
+
+    def slow_model(*_args, **_kwargs):
+        try:
+            for i in range(300):
+                written.append(i)
+                yield f"part{i} "
+                time.sleep(0.02)
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
+    monkeypatch.setattr(assistant, "stream_text", slow_model)
+    with serving(create_app(settings, loaded)) as base, httpx.Client(trust_env=False, timeout=20) as client:
+        with client.stream("POST", f"{base}/chat", headers=PAGE, json={"message": "What needs a reply?"}) as response:
+            lines = response.iter_lines()
+            chat_id = json.loads(next(lines))["id"]
+            deltas = 0
+            while deltas < 3:
+                deltas += json.loads(next(lines))["type"] == "delta"
+        # Leaving the block drops the connection, as closing the tab does.
+        assert stopped.wait(10), "the model stops when the browser goes away"
+        deadline = time.monotonic() + 10
+        while len(loaded.chat_turns(chat_id)) < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+    assert len(written) < 300
+    asked, answer = loaded.chat_turns(chat_id)
+    assert asked["text"] == "What needs a reply?" and answer["role"] == "assistant"
+    assert answer["text"].startswith("part0 part1 part2 ")
+    assert answer["text"].endswith("(Stopped: the page closed before the answer finished.)")
+    assert answer["failed"], "an answer cut short isn't learned from"
