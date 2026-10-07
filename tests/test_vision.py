@@ -982,6 +982,23 @@ def test_html_tables_with_merged_cells_are_read_like_markdown_ones():
     assert vision.page_text("<table><tr><td>Cash</td><td>1,200.00</td></tr></table>").count("1,200.00") == 1
 
 
+def test_a_heading_ocr_writes_on_every_row_counts_once_when_choosing_the_reading():
+    """OCR's text of a ledger names the account in every cell, so its number is there three times a row; the model
+    has it once, as printed. The model's reading has every other figure OCR has, so it is shown."""
+    amounts = [(f"{1000 + 37 * n:,}.00", f"{5000 + 91 * n:,}.00") for n in range(10)]
+    first = "\n".join(
+        f"10/{n + 1:02d}/2026 Payroll | Num 6100 Salaries: not listed | Debit 6100 Salaries: {debit} | Balance 6100 Salaries: {balance}"
+        for n, (debit, balance) in enumerate(amounts)
+    )
+    model = "| Date | Debit | Balance |\n|---|---|---|\n| 6100 Salaries | | |\n" + "\n".join(
+        f"| 10/{n + 1:02d}/2026 | {debit} | {balance} |" for n, (debit, balance) in enumerate(amounts)
+    )
+    comparison = vision.compare(first, vision.page_text(model))
+    assert comparison.first_figures == 50 and comparison.confirmed == 21, "6100 thirty times in OCR's text, once in the model's"
+    assert (comparison.first_kinds, comparison.confirmed_kinds) == (21, 21) and comparison.choice == "model"
+    assert vision.Comparison.from_dict(comparison.to_dict()) == comparison
+
+
 def test_titles_written_into_an_html_table_come_out_above_it_and_sections_stay_out_of_the_headings():
     """As OvisOCR2 writes a report: the titles across the table, a blank row, headings in plain cells (dates among
     them), then sections."""

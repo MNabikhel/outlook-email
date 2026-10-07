@@ -781,12 +781,15 @@ class Comparison:
     first_totals: tuple[int, int] = (0, 0)
     choice: str = "first"
     first_figures: int = 0
+    first_kinds: int = 0  # different figures in the first reading
+    confirmed_kinds: int = 0  # different figures both readings have
 
     def to_dict(self) -> dict:
         return {
             "figures": self.figures, "confirmed": self.confirmed, "differ": self.differ, "only_model": self.only_model,
             "only_first": self.only_first, "model_totals": list(self.model_totals), "first_totals": list(self.first_totals),
-            "choice": self.choice, "first_figures": self.first_figures,
+            "choice": self.choice, "first_figures": self.first_figures, "first_kinds": self.first_kinds,
+            "confirmed_kinds": self.confirmed_kinds,
         }
 
     @classmethod
@@ -796,7 +799,8 @@ class Comparison:
             differ=[tuple(pair) for pair in data.get("differ", [])], only_model=list(data.get("only_model", [])),
             only_first=list(data.get("only_first", [])), model_totals=tuple(data.get("model_totals", (0, 0))),
             first_totals=tuple(data.get("first_totals", (0, 0))), choice=str(data.get("choice", "first")),
-            first_figures=int(data.get("first_figures", 0)),
+            first_figures=int(data.get("first_figures", 0)), first_kinds=int(data.get("first_kinds", 0)),
+            confirmed_kinds=int(data.get("confirmed_kinds", 0)),
         )
 
 
@@ -810,7 +814,8 @@ def compare(first: str, model_page: str, *, ocr: bool = True) -> Comparison:
     only_model = model_count - first_count
     only_first = first_count - model_count
     comparison = Comparison(
-        figures=sum(model_count.values()), confirmed=sum(both.values()), first_figures=sum(first_count.values())
+        figures=sum(model_count.values()), confirmed=sum(both.values()), first_figures=sum(first_count.values()),
+        first_kinds=len(first_count), confirmed_kinds=len(both),
     )
     pairs, left_model, left_first = _pairs(only_model, only_first)
     comparison.differ = [(mine[a][0], theirs[b][0]) for a, b in pairs]
@@ -863,7 +868,9 @@ def _choose(comparison: Comparison, *, ocr: bool = True) -> str:
 
     The model's when its totals hold up at least as well as the first reading's, most of its figures are the first
     reading's too (a reading that shares few figures is of something else, or made up), and it has most of the
-    first reading's figures (one that stopped early would hide the rest of the page).
+    first reading's figures (one that stopped early would hide the rest of the page). That is counted over the
+    different figures: OCR's text writes a column's heading into every cell under it ("October 1-31, 2026 Debit
+    6100 Salaries and Wages: 61,240.00"), so a figure in a heading is in it once per row, though printed once.
 
     Against OCR, also the model's when it has nearly all of OCR's figures (85%), whatever its totals: it read the
     same page, and its table puts each figure in its row and column where OCR's text runs them together. OCR's
@@ -874,7 +881,7 @@ def _choose(comparison: Comparison, *, ocr: bool = True) -> str:
         return totals[0] - 2 * totals[1]
 
     share = comparison.confirmed / comparison.figures if comparison.figures else 0.0
-    covered = comparison.confirmed / comparison.first_figures if comparison.first_figures else 1.0
+    covered = comparison.confirmed_kinds / comparison.first_kinds if comparison.first_kinds else 1.0
     if ocr and covered >= 0.85 and share >= 0.3:
         return "model"
     if share >= 0.5 and covered >= 0.5 and score(comparison.model_totals) >= score(comparison.first_totals):
