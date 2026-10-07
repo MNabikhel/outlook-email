@@ -275,6 +275,15 @@ def test_lookalikes_of_a_short_trusted_domain_are_caught():
         assert "lookalike_domain" not in _keys(check), domain
 
 
+def test_a_trusted_name_inside_another_domain_is_still_caught():
+    # The trusted name and the sender's domain are compared as they read, so letters such as "cl"
+    # (read like "d") or "5" (read like "s") in the trusted name do not hide it.
+    ctx = TrustContext(domains={"clarkco.com", "harbor5.com", "taz.com"})
+    for domain in ("clarkco-payments.net", "harbor5-billing.com", "taz-payments.net"):
+        check = assess(ctx, subject="Wire", body="Please wire the funds.", sender_name="AP", sender_email=f"ap@{domain}")
+        assert "lookalike_domain" in _keys(check), domain
+
+
 def test_a_short_name_you_only_hear_from_often_is_not_a_lookalike_target():
     # Mail from your bank (pnc.com) does not make your auditor (pwc.com) a look-alike.
     ctx = TrustContext(known={"pnc.com": 30, "pwc.com": 3})

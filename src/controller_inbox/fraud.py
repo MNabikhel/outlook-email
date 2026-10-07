@@ -640,7 +640,8 @@ def _lookalike(domain: str, ctx: TrustContext) -> str:
         limit = 2 if len(other) >= 10 else 1
         if len(label) >= (3 if trusted else 4) and _distance(shown, theirs, limit) <= limit:
             return other
-        if trusted and len(label) >= 3 and label in tokens:
+        # A trusted name inside another domain ("taz-payments.net"), both read the same way.
+        if trusted and len(label) >= 3 and theirs.split(".")[0] in tokens:
             return other
     return ""
 
