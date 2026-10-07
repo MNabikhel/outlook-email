@@ -856,6 +856,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 problems.append(str(exc))
             except Exception as exc:  # a damaged file is reported, the others still go in
                 problems.append(f"{upload.filename}: couldn't be read ({type(exc).__name__}).")
+        for upload in files[chats.MAX_FILES :]:
+            problems.append(f"{upload.filename or 'file'} wasn't added: up to {chats.MAX_FILES} files can be added at once.")
         return JSONResponse({"files": chats.file_cards(store, chat_id), "problems": problems})
 
     @app.post("/chats/{chat_id}/files/{n}/delete")
