@@ -12,11 +12,12 @@ pytest.importorskip("playwright")
 
 from playwright.sync_api import sync_playwright  # noqa: E402
 
-from controller_inbox import web  # noqa: E402
+from controller_inbox import assistant, chats, web  # noqa: E402
 from controller_inbox.web import create_app  # noqa: E402
 from liveserver import chromium_path, serving  # noqa: E402
 
 CHROMIUM = chromium_path()
+ROSTER = b"Employee,Department,Manager\nJonathan Reyes,,Priya Raman\nLi Wei,Finance,Dana Cole\n"
 pytestmark = pytest.mark.skipif(CHROMIUM is None, reason="no Chromium for Playwright on this machine")
 
 # The chat log once the last answer has finished streaming.
@@ -56,6 +57,31 @@ def page(context):
     return context.new_page()
 
 
+def _saved_answer(store, text: str, sources: list[dict], chat_id: str = "") -> str:
+    """A conversation whose answer is already written, as the model would have streamed it."""
+    chat_id = chat_id or chats.new_id()
+    store.create_chat(chat_id, "A saved answer")
+    store.add_chat_turn(chat_id, "user", "A question")
+    store.add_chat_turn(chat_id, "assistant", text, {"sources": sources, "mode": "model"})
+    return chat_id
+
+
+def _open_saved(page, url: str, chat_id: str):
+    """The page with the chat panel open on the saved conversation; gives the answer's bubble."""
+    page.goto(url)
+    page.evaluate("id => localStorage.setItem('closedesk-chat-id', id)", chat_id)
+    page.goto(url)
+    if page.is_visible("#chat-toggle"):
+        page.click("#chat-toggle")
+    page.wait_for_function(ANSWERED, arg=2)
+    return page.query_selector_all("#chat .msg.assistant")[-1]
+
+
+def _links(bubble) -> list[tuple[str, str]]:
+    """The links in the answer itself (not the list of sources under it)."""
+    return [(a.inner_text(), a.get_attribute("href")) for a in bubble.query_selector_all(":scope > div a")]
+
+
 def _chat_messages(page) -> list[str]:
     return page.eval_on_selector_all("#chat .chat-log .msg", "els => els.map(e => e.className + ' | ' + e.innerText)")
 
@@ -84,4 +110,27 @@ def test_asking_from_an_email_page_shows_the_answer_and_keeps_the_conversation(s
     assert page.evaluate("localStorage.getItem('closedesk-chat-id')") == chat_id
     assert [turn["role"] for turn in store.chat_turns(chat_id)] == ["user", "assistant"] * 2
     assert not page.is_disabled("#chat button[type=submit]")
+    assert context.errors == []
+
+
+# 4. A citation of a CSV file opens it at the cited cell (a CSV's sheet is named after the file).
+
+
+def test_a_csv_citation_opens_the_cited_cell(site, page, context, store, settings):
+    chat_id = chats.new_id()
+    store.create_chat(chat_id)
+    chats.add_file(store, settings, chat_id, "staff list.csv", "text/csv", ROSTER)
+    sources = assistant.source_cards([chats.chat_mail(store, chat_id)], settings)
+    text = (
+        'Li Wei is in Finance (staff list.csv, sheet "staff list.csv", cell B3) [1].\n'
+        "Jonathan Reyes has no department ('staff list.csv'!B2) [1]."
+    )
+    bubble = _open_saved(page, f"{site}/", _saved_answer(store, text, sources, chat_id))
+    base = f"/inbox/chat-{chat_id}/files/1"
+    links = _links(bubble)
+    assert [name for name, _href in links] == ["staff list.csv", "staff list.csv", "[1]", "staff list.csv", "[1]"]
+    assert [href for _name, href in links] == [f"{base}?at=B3"] * 3 + [f"{base}?at=B2"] * 2
+    cited = context.new_page()
+    cited.goto(site + base + "?at=B3")
+    assert "B3 (Department): Finance" in cited.inner_text(".file-part.target mark.cited")
     assert context.errors == []
