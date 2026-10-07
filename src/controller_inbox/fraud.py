@@ -845,7 +845,8 @@ class _Evidence:
     """
 
     def __init__(self, subject: str, body: str):
-        self.text = f"{subject or ''}\n{body or ''}"
+        # Subject and body read as one text, joined the way the rules join them ("Subject. Body").
+        self.text = f"{subject}. {body or ''}" if subject else body or ""
         self._read: tuple[str, list[int], list[int]] | None = None
 
     def _span(self, found: str) -> tuple[int, int] | None:
