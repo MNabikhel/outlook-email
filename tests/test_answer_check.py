@@ -49,6 +49,7 @@ def test_right_answers_are_left_alone():
         "Q3 was 191,600 and Q4 is 230,100, a total increase of 38,500.",
         "1. Marketing: 115,500\n10. Sales: 114,600",
         "FINDING 4 is on page 17 of FY26 Audit.pdf; it is due 30 November 2026 [1].",
+        "The bank rec is due 2026-09-28, a week after the Q4 budget review.",
     ):
         result = _review(answer)
         assert (result.text, result.checks) == (answer, []), answer
@@ -58,6 +59,23 @@ def test_figures_that_are_nowhere_in_what_was_read_are_flagged():
     result = _review("The Q4 budget is 230,100. Travel will cost $97,250.")
     assert result.text == "The Q4 budget is 230,100. Travel will cost $97,250."
     assert result.checks == ["$97,250 isn't in the emails or files I read; check it before relying on it."]
+
+
+def test_a_total_under_a_list_is_the_sum_of_the_amounts_listed():
+    material = ["Invoice INV-10482 amount due $12,850.00", "Amount due $1,980.00", "the outstanding $48,500.00 wire"]
+    listed = (
+        "Due this week:\n\n* **INV-10482:** $12,850.00 due 2026-10-05 [2]\n* **Harbor Packaging:** $1,980.00 [6]\n"
+        "* **Apex Vendor (wire):** $48,500.00 [1]\n\n**Total Due:** {total}\n\nVerify the wire by phone first."
+    )
+    wrong = review(listed.format(total="$73,330.00"), material=material, files=[])
+    assert wrong.text == listed.format(total="$63,330.00")
+    assert wrong.checks == ["Corrected $73,330.00 to $63,330.00 (the sum of the 3 amounts listed above it)."]
+    # The right sum is not flagged for being nowhere in the mail, and neither is the sum of some of the items.
+    for total in ("$63,330.00", "$14,830.00"):
+        assert review(listed.format(total=total), material=material, files=[]).checks == []
+    # Without a list above it, a total stays a figure to check.
+    alone = review("Total due: $73,330.00", material=material, files=[])
+    assert alone.text == "Total due: $73,330.00" and alone.checks[0].startswith("$73,330.00 isn't in")
 
 
 def test_a_cited_page_that_is_not_in_the_file_is_corrected():

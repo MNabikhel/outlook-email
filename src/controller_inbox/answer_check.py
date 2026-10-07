@@ -38,6 +38,7 @@ _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
 _MONTH_AFTER = re.compile(r"^(?:st|nd|rd|th)?\s+(?:of\s+)?" + _MONTH + r"\b", re.I)
 _MONTH_BEFORE = re.compile(r"\b" + _MONTH + r"\s+$", re.I)
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z-]{5,}")
+_ISO_DATE = re.compile(r"(?<!\d)\d{4}-\d{1,2}-\d{1,2}(?!\d)")
 _RELATIVE = 0.15
 
 
@@ -108,6 +109,8 @@ def _is_claim(text: str, number: Number) -> bool:
     """Figures worth checking: money, percentages, decimals, and whole numbers from 10 up that aren't years or references."""
     if _REFERENCE_BEFORE.search(text[max(0, number.start - 12): number.start]):
         return False
+    if any(m.start() <= number.start and number.end <= m.end() for m in _ISO_DATE.finditer(text, max(0, number.start - 8), number.end + 6)):
+        return False  # a piece of a date such as 2026-10-05, not a figure
     if number.value <= 31 and not (number.money or number.percent) and (
         _MONTH_AFTER.search(text[number.end: number.end + 16]) or _MONTH_BEFORE.search(text[max(0, number.start - 12): number.start])
     ):
@@ -172,6 +175,10 @@ def check_numbers(answer: str, grounding: Grounding) -> Review:
             # Only a figure the sentence says was worked out ("an increase of", "rose", "total") is recomputed.
             worked_out = bool(_WORKED_OUT_BEFORE.search(chunk[max(0, number.start - 30): number.start]))
             fix = _worked_out(number, [n for n in grounded if n is not number]) if worked_out else None
+            if fix is None:
+                fix = _list_total(answer, start + number.start, number, grounding)
+                if fix == "matches":
+                    continue
             if fix is not None:
                 value, how = fix
                 right = _format_like(value, number)
@@ -183,6 +190,40 @@ def check_numbers(answer: str, grounding: Grounding) -> Review:
             if number not in grounded and not any(_derivable(number, grounded)):
                 checks.insert(0, f"{number.shown} isn't in the emails or files I read; check it before relying on it.")
     return Review(text=text, checks=checks)
+
+
+_TOTAL_LINE = re.compile(r"^[\s*_#>|-]*(?:grand\s+)?total\b[^\n]*$", re.I)
+_ITEM_LINE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+")
+_MAX_ITEMS = 8
+
+
+def _list_total(answer: str, at: int, target: Number, grounding: Grounding):
+    """A "Total" line under a list of amounts: its total is the sum of the amounts listed above it.
+
+    Returns "matches" when the figure is the sum of some of them (the model may have meant only those),
+    the sum of all of them with how it was worked out when it is none of those sums, and None when there is
+    no such list, or one of its amounts wasn't in what was read."""
+    line_start = answer.rfind("\n", 0, at) + 1
+    if not _TOTAL_LINE.match(answer[line_start:at]):
+        return None
+    lines = answer[:line_start].split("\n")[:-1]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    amounts: list[Number] = []
+    while lines and _ITEM_LINE.match(lines[-1]):
+        line = lines.pop()
+        body = line[_ITEM_LINE.match(line).end():]
+        figures = [n for n in numbers_in(body) if (n.money if target.money else ("," in n.shown or "." in n.shown))]
+        if not figures or not grounding.has(figures[0]):
+            return None
+        amounts.insert(0, figures[0])
+    if not 2 <= len(amounts) <= _MAX_ITEMS:
+        return None
+    values = [n.value for n in amounts]
+    for mask in range(1, 2 ** len(values)):
+        if abs(sum(v for i, v in enumerate(values) if mask >> i & 1) - target.value) <= target.tolerance + 1e-9:
+            return "matches"
+    return sum(values), f"the sum of the {len(values)} amounts listed above it"
 
 
 def _derivable(target: Number, operands: list[Number]):
