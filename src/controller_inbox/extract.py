@@ -251,10 +251,16 @@ def parse_due_date(raw: str, *, as_of: date) -> str | None:
     except (ValueError, OverflowError, TypeError):
         return None
     has_year = len(re.findall(r"\d+", token)) >= 2
+    shift = 0
     if not has_year and (as_of - parsed).days > 90:
         # "January 5" written in late December is next January, not eleven months ago.
+        shift = 1
+    elif not has_year and (parsed - as_of).days > 270:
+        # "December 28" written on January 3 is last December, not eleven months ahead.
+        shift = -1
+    if shift:
         try:
-            parsed = parsed.replace(year=parsed.year + 1)
+            parsed = parsed.replace(year=parsed.year + shift)
         except ValueError:
             return None
     return parsed.isoformat()

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from controller_inbox.classify import classify_document, normalize_text
-from controller_inbox.extract import html_to_text
+from controller_inbox.extract import extract_fields, html_to_text, parse_due_date
 from controller_inbox.fraud import TrustContext, assess, attachments_locked, strip_notices
 from controller_inbox.models import DocumentType, RawAttachment, RawMessage
 from controller_inbox.pipeline import process_message
@@ -279,3 +279,14 @@ def test_a_short_name_you_only_hear_from_often_is_not_a_lookalike_target():
     ctx = TrustContext(known={"pnc.com": 30, "pwc.com": 3})
     check = assess(ctx, subject="PBC list", body="Please pay invoice 5521.", sender_name="Audit", sender_email="audit@pwc.com")
     assert "lookalike_domain" not in _keys(check)
+
+
+# 11. A month and day with no year, read just after New Year, is last December.
+def test_december_date_read_in_january_is_last_year():
+    assert parse_due_date("December 28", as_of=date(2027, 1, 3)) == "2026-12-28"
+    fields = extract_fields("Reminder: invoice INV-3301 for $4,200.00 was due December 28. Please remit.", as_of=date(2027, 1, 3))
+    assert fields.primary_due == "2026-12-28"
+    # The other way round, and dates near today, as before.
+    assert parse_due_date("January 5", as_of=date(2026, 12, 20)) == "2027-01-05"
+    assert parse_due_date("September 30", as_of=date(2026, 10, 7)) == "2026-09-30"
+    assert parse_due_date("June 30", as_of=date(2026, 1, 10)) == "2026-06-30"
