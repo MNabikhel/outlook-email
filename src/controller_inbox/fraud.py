@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from controller_inbox.classify import AUTOMATED_SENDERS, PAYMENT_CHANGE_RE, own_words
+from controller_inbox.classify import AUTOMATED_SENDERS, PAYMENT_CHANGE_RE, normalize_text, own_words
 
 if TYPE_CHECKING:
     from controller_inbox.config import Settings
@@ -280,6 +280,8 @@ def assess(
     sender = (sender_email or "").strip().lower()
     domain = domain_of(sender)
     signals: list[Signal] = []
+    # A zero-width space, an empty <span> or a Cyrillic "a" inside "bank" still reads as "bank".
+    subject, body, sender_name = normalize_text(subject), normalize_text(body), normalize_text(sender_name)
 
     def add(key: str, detail: str = "") -> None:
         points = POINTS[key]
@@ -308,7 +310,7 @@ def assess(
         if quoted:
             add("bank_change_quoted", _quote(everything, quoted))
         for filename, text in attachments or []:
-            hit = PAYMENT_CHANGE_RE.search(strip_notices((text or "")[:60_000]))
+            hit = PAYMENT_CHANGE_RE.search(strip_notices(normalize_text((text or "")[:60_000])))
             if hit:
                 add("bank_change_attachment", filename)
                 break

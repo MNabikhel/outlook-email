@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import html
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -46,6 +48,52 @@ DISCLAIMER_RE = re.compile(
     r"do\s+not\s+click\s+links\s+or\s+open\s+attachments)",
     re.I,
 )
+
+
+# Characters that show nothing but split a word for a pattern ("ba\u200bnk"): the soft hyphen, zero-width
+# spaces and joiners, direction marks, the word joiner and the byte-order mark. Then the accents and other
+# marks that sit on a letter once it is taken apart ("\u00e9" is "e" and a mark).
+_HIDDEN_RE = re.compile(
+    "[\u00ad\u034f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff"
+    "\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]"
+)
+# Formatting tags left in plain text split a word without showing a space ("b<span></span>ank").
+_INLINE_TAG_RE = re.compile(
+    r"<!--.*?-->|</?(?:a|abbr|b|big|code|del|em|font|i|ins|mark|o:p|s|small|span|strike|strong|sub|sup|u|wbr)(?:\s[^<>]{0,300})?/?>",
+    re.I | re.S,
+)
+# Cyrillic and Greek letters drawn like Latin ones ("b\u0430nk" with a Cyrillic a), curly quotes and dashes.
+_LOOKALIKES = str.maketrans(
+    {
+        **dict(zip("\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u043a\u043c\u043d\u0442\u0455\u0456\u0458\u0501\u051b\u051d\u04bb\u04cf", "aeopcyxkmhtsijdqwhl")),  # Cyrillic
+        **dict(zip("\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425\u0423\u0405\u0406\u0408\u051a\u051c\u04ba\u04c0", "ABEKMHOPCTXYSIJQWHI")),  # Cyrillic capitals
+        **dict(zip("\u03b1\u03b5\u03b9\u03ba\u03bd\u03bf\u03c1\u03c4\u03c5\u03c7\u03c9\u03f2\u03f3", "aeikvoptuxwcj")),  # Greek
+        **dict(zip("\u0391\u0392\u0395\u0396\u0397\u0399\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7\u03f9", "ABEZHIKMNOPTYXC")),  # Greek capitals
+        **dict(zip("\u0131\u0237\u0251\u0261\u0585\u057d", "ijagou")),  # dotless i and j, Latin alpha and script g, Armenian o and u
+        **dict.fromkeys("\u2018\u2019\u201a\u201b\u2032", "'"),  # curly quotes
+        **dict.fromkeys("\u201c\u201d\u201e\u201f\u2033", '"'),  # curly double quotes
+        **dict.fromkeys("\u2010\u2012\u2013\u2014\u2015\u2212", "-"),  # hyphens, dashes and the minus sign
+    }
+)
+
+
+def normalize_text(text: str) -> str:
+    """The text as the rules read it, so a disguised word still matches.
+
+    HTML entities and inline tags are resolved, full-width and other compatibility
+    forms become plain letters, invisible characters and accents are dropped, and
+    Cyrillic or Greek look-alike letters are read as Latin ones. Only for matching:
+    what is stored and shown is left as it was.
+    """
+    if not text:
+        return ""
+    if "&" in text:
+        text = html.unescape(text)
+    if "<" in text:
+        text = _INLINE_TAG_RE.sub("", text)
+    if text.isascii():
+        return text
+    return _HIDDEN_RE.sub("", unicodedata.normalize("NFKD", text)).translate(_LOOKALIKES)
 
 
 def own_words(body: str, *, keep_disclaimers: bool = False) -> str:
@@ -388,6 +436,8 @@ def score_rules(
     extracted_text: str = "",
     payment_rule: bool = True,
 ) -> dict[DocumentType, tuple[int, list[str], list[str]]]:
+    subject, body = normalize_text(subject), normalize_text(body)
+    filename, extracted_text = normalize_text(filename), normalize_text(extracted_text)
     own_blob = f"{subject or ''}\n{own_words(body)}".lower()
     # A reply with words of its own is about those words; the thread it quotes doesn't pick its category.
     replied = bool(QUOTE_START_RE.search(body or "")) and own_blob.strip() != (subject or "").strip().lower()

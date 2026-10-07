@@ -4,6 +4,7 @@ import hashlib
 import io
 import re
 from datetime import date, datetime
+from html import unescape
 from typing import Iterable
 
 from dateutil import parser as date_parser
@@ -79,18 +80,22 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# Tags inside a line of text. A browser shows no space for them, so "b<span></span>ank" reads "bank".
+_INLINE_TAG_RE = re.compile(
+    r"(?is)<!--.*?-->|</?(?:a|abbr|b|bdi|bdo|big|cite|code|del|dfn|em|font|i|ins|kbd|mark|nobr|o:p|q|s|samp|small|"
+    r"span|strike|strong|sub|sup|time|tt|u|var|wbr)(?:\s[^>]*)?/?>"
+)
+
+
 def html_to_text(html: str) -> str:
     text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"(?i)</p>", "\n", text)
     text = re.sub(r"(?i)</div>", "\n", text)
+    text = _INLINE_TAG_RE.sub("", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
-    text = re.sub(r"&nbsp;", " ", text)
-    text = re.sub(r"&amp;", "&", text)
-    text = re.sub(r"&lt;", "<", text)
-    text = re.sub(r"&gt;", ">", text)
-    text = re.sub(r"&#39;", "'", text)
-    text = re.sub(r"&quot;", '"', text)
+    # Every entity, named or numbered: "&#8203;" is a zero-width space, not five characters of text.
+    text = unescape(text)
     return collapse_ws(text)
 
 

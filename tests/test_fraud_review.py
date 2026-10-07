@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from controller_inbox.classify import classify_document, normalize_text
+from controller_inbox.extract import html_to_text
 from controller_inbox.fraud import TrustContext, assess, attachments_locked, strip_notices
 from controller_inbox.models import DocumentType, RawAttachment, RawMessage
 from controller_inbox.pipeline import process_message
@@ -66,3 +68,50 @@ def test_warnings_about_a_change_are_still_dropped():
     assert strip_notices("If you receive an email saying our bank details have changed, call us on the number on file.") == ""
     assert strip_notices("Beware of phishing emails claiming our bank details have changed, and call us.") == ""
     assert strip_notices("We will never ask you to buy gift cards or send codes by email.") == ""
+
+
+# 2. Invisible characters, HTML leftovers and look-alike letters do not hide a word.
+DISGUISED_BANK = [
+    "Our ba\u200bnk details have changed.",  # zero-width space
+    "Our ba&#8203;nk details have changed.",  # the same, as an HTML entity
+    "Our b<span></span>ank details have changed.",  # an empty inline tag
+    "Our ba\u00adnk det\u2060ails have changed.",  # soft hyphen and word joiner
+    "Our b\u0430nk details have changed.",  # Cyrillic a (U+0430)
+    "Our \uff42\uff41\uff4e\uff4b details have changed.",  # full-width letters
+]
+
+
+def test_disguised_bank_change_wording_is_still_caught():
+    for body in DISGUISED_BANK:
+        check = _check(body, history=3)
+        assert "bank_change" in _keys(check) and check.level == "high", body
+        assert classify_document(subject="Hello", body=body).document_type == DocumentType.PAYMENT_INSTRUCTION_CHANGE, body
+
+
+def test_disguised_subject_attachment_and_gift_card_ask_are_caught():
+    assert "bank_change" in _keys(_check("See attached.", subject="Our b\u0430nk details h\u200bave changed"))
+    files = [("letter.txt", "Please note our bank det&#8203;ails have changed.")]
+    assert "bank_change_attachment" in _keys(_check("Invoice attached.", attachments=files))
+    gift = _check("I need you to buy 5 Apple gift c\u200bards and send me the c\u043edes.", subject="Quick favor")
+    assert "gift_cards" in _keys(gift)
+
+
+def test_display_name_with_a_cyrillic_letter_is_still_a_borrowed_name():
+    ctx = TrustContext(domains={"taz.com"}, names={"dana cho": "dana@taz.com"})
+    check = assess(ctx, subject="Wire", body="Please wire the funds today.", sender_name="D\u0430na Cho", sender_email="dana.cho@gmail.com")
+    assert "display_name_spoof" in _keys(check)
+
+
+def test_html_to_text_keeps_words_whole_at_inline_tags():
+    assert html_to_text("<p>Our b<span></span>ank <b>details</b> have changed.</p>") == "Our bank details have changed."
+    assert html_to_text("<p>Our ba<!-- x -->nk de<a href='x'>tails</a></p>") == "Our bank details"
+    assert html_to_text("<p>Our ba&#8203;nk &amp; co</p>") == "Our ba\u200bnk & co"
+    # Block tags still break the text.
+    assert html_to_text("<p>One</p><p>Two</p>Three<br>Four<td>a</td><td>b</td>") == "One\n Two\nThree\nFour a b"
+    check = _check(html_to_text("<p>Our ba&#8203;nk details have changed. Remit to account 4410029981.</p>"), history=3)
+    assert check.level == "high"
+
+
+def test_plain_mail_reads_the_same_after_normalizing():
+    assert normalize_text("Invoice 7781 attached, AT&T R&D \u2014 see <a.smith@x.com>.") == "Invoice 7781 attached, AT&T R&D - see <a.smith@x.com>."
+    assert normalize_text("Caf\u00e9 don\u2019t") == "Cafe don't"
