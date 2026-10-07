@@ -951,3 +951,54 @@ def test_new_files_on_a_read_email_keep_what_the_user_did_meanwhile(settings: Se
         assert kept.model_status == "corrected" and kept.category.value == "newsletter"
     else:
         assert {"fraud_risk", "fraud_confirmed"} <= set(kept.flags)
+
+
+# 29. A copy of an email with no Subject or no Date, saved again under another name, is still one email --
+
+
+def _scan(settings: Settings, name: str, *, subject: str | None, date_header: str | None, age: float, data: bytes | None = None) -> bytes:
+    """A copier's scan; ``data`` saves the very bytes of an earlier one again under ``name``."""
+    if data is None:
+        msg = EmailMessage()
+        msg["From"] = "Scanner <scan@copier.local>"
+        msg["Message-ID"] = "<scan@copier.local>"
+        if subject is not None:
+            msg["Subject"] = subject
+        if date_header is not None:
+            msg["Date"] = date_header
+        msg.set_content("Scanned document attached.")
+        msg.add_attachment(f"Scanned page {name}".encode(), maintype="text", subtype="plain", filename="scan.txt")
+        data = bytes(msg)
+    path = settings.inbox_incoming / name
+    path.write_bytes(data)
+    old = time.time() - age
+    os.utime(path, (old, old))
+    return data
+
+
+@pytest.mark.parametrize("missing", ["subject", "date"])
+def test_a_copy_saved_again_is_one_email_when_the_message_has_no_subject_or_date(settings: Settings, store: Store, missing):
+    settings.ensure_data_dir()
+    subject = None if missing == "subject" else "Scan"
+    date_header = None if missing == "date" else "Mon, 05 Oct 2026 10:00:00 -0400"
+    # Its subject would be the file's name, or its date the file's date: both differ for the copy saved later.
+    first = _scan(settings, "Scan from copier.eml", subject=subject, date_header=date_header, age=3600)
+    ingest_folder(store, settings)
+    _scan(settings, "Scan from copier (copy).eml", subject=subject, date_header=date_header, age=60, data=first)
+    report: dict = {}
+    ingest_folder(store, settings, report=report)
+    assert (report["read"], report["already_read"]) == (0, 1) and store.counts()["emails"] == 1
+
+
+def test_scans_without_a_subject_that_share_a_message_id_are_still_kept_apart(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    _scan(settings, "a.eml", subject=None, date_header="Mon, 05 Oct 2026 10:00:00 -0400", age=60)
+    _scan(settings, "b.eml", subject=None, date_header="Mon, 05 Oct 2026 11:00:00 -0400", age=60)
+    second = (settings.inbox_incoming / "b.eml").read_bytes()
+    report: dict = {}
+    ingest_folder(store, settings, report=report)
+    assert report["read"] == 2 and store.counts()["emails"] == 2
+    _scan(settings, "b again.eml", subject=None, date_header=None, age=30, data=second)  # the second, saved again
+    report = {}
+    ingest_folder(store, settings, report=report)
+    assert report["already_read"] == 1 and store.counts()["emails"] == 2

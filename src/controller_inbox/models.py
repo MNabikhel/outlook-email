@@ -266,3 +266,6 @@ class RawMessage:
     source: str = "graph"
     reply_to: str = ""
     attachments: list[RawAttachment] = field(default_factory=list)
+    # What a dropped .eml or .msg doesn't say itself and was taken from its file: "subject" (the file's name)
+    # or "sent" (the file's date).
+    from_file: tuple[str, ...] = ()
