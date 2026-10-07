@@ -99,3 +99,16 @@ def test_a_small_print_header_above_a_table_is_not_a_row_of_it():
         items += _row(705 - 15 * r, [(40, "left", row[0]), (260, "right", row[1]), (340, "right", row[2]), (420, "right", row[3])])
     lines = _page(*items)
     assert "Customer: Brightline Transit | Balance: 68,260.73 | Current: 42,785.33 | Over 90: 9,875.40" in lines
+
+
+def test_a_column_edge_is_not_moved_into_the_space_inside_a_heading_phrase():
+    # "Month of October" centred over four figure columns: the edge after the 2026 "% of Sales" figures falls
+    # just inside "October", a space after "of". Moved off "October" it would land between "of" and
+    # "October" and cut the heading in two ("Month of" over two columns, "October" over the next).
+    from controller_inbox.pdf_layout import Line, Word, _edge_at
+
+    lines = [Line(700 - 15 * r, 10, words=[Word("62.4%", 431.6, 460.8, False), Word("942,118.75", 500.5, 549.0, False)]) for r in range(5)]
+    heads = [Word("Month", 413.3, 445.6, True), Word("of", 448.7, 458.8, True), Word("October", 461.9, 502.4, True),
+             Word("Sales", 433.4, 460.5, True), Word("Amount", 491.2, 530.9, True)]
+    cut = _edge_at(lines, list(range(5)), 460.8, 499.4, 475.2, heads, 4.0)
+    assert not 458.8 < cut < 461.9

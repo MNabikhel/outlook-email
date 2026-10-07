@@ -859,12 +859,15 @@ def _edge_at(lines: list[Line], rows: list[int], lo: float, hi: float, at: float
     space = 0.5 * statistics.median(lines[index].size for index in rows) if rows else 0.0
     covered: list[list[float]] = []
     for word in sorted(heads + across, key=lambda w: w.x0):
-        if word.x1 <= lo or word.x0 >= hi:
+        # A word a space outside the strip still joins the phrase it starts or ends ("Month of | October"
+        # over four columns, with the strip's edge just after "of"): the space after it is no room either.
+        if word.x1 <= lo - space or word.x0 >= hi + space:
             continue
         if covered and word.x0 <= covered[-1][1] + space:
             covered[-1][1] = max(covered[-1][1], word.x1)
         else:
             covered.append([word.x0, word.x1])
+    covered = [[max(a, lo), min(b, hi)] for a, b in covered if b > lo and a < hi]
     if not any(a < cut < b for a, b in covered):
         return cut
     bounds = [lo, *(x for span in covered for x in span), hi]
