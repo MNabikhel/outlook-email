@@ -334,6 +334,38 @@ def test_big_sheets_are_cut_into_row_ranges():
     assert read_part(text, "Ledger").label == labels[1]
 
 
+def _rewritten(data: bytes, member: str, change) -> bytes:
+    """An Office file (a zip) with one part's XML changed."""
+    import zipfile
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(out, "w") as target:
+        for item in source.infolist():
+            body = source.read(item)
+            target.writestr(item, change(body) if item.filename == member else body)
+    return out.getvalue()
+
+
+def test_a_sheet_that_understates_its_size_is_read_to_its_last_row():
+    import re
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "AP"
+    sheet.append(["Vendor", "Invoice", "Amount"])
+    for n in range(5):
+        sheet.append([f"Vendor {n}", f"INV-{100 + n}", 1000.5 + n])
+    out = io.BytesIO()
+    book.save(out)
+    # Writers other than Excel often store <dimension ref="A1"/> whatever the sheet holds.
+    data = _rewritten(out.getvalue(), "xl/worksheets/sheet1.xml", lambda xml: re.sub(rb'<dimension ref="[^"]*"/>', b'<dimension ref="A1"/>', xml))
+    text = extract_text_from_bytes("ap.xlsx", "", data)
+    assert '[sheet "AP" A1:C6]\n(6 rows with data)' in text
+    assert "A6 (Vendor): Vendor 4 | B6 (Invoice): INV-104 | C6 (Amount): 1,004.5" in text
+    unsized = _rewritten(out.getvalue(), "xl/worksheets/sheet1.xml", lambda xml: re.sub(rb'<dimension ref="[^"]*"/>', b"", xml))
+    assert '[sheet "AP" A1:C6]' in extract_text_from_bytes("ap.xlsx", "", unsized)
+
+
 def _scanned_pdf(lines: list[str]) -> bytes:
     from PIL import Image, ImageDraw, ImageFont
 

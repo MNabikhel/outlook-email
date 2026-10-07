@@ -374,12 +374,20 @@ def _sheet_header(rows: list[SheetRow], *, first_names_columns: bool = False) ->
 
 
 def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
-    from openpyxl.utils import get_column_letter
+    from openpyxl.utils import get_column_letter, range_boundaries
 
+    try:
+        declared = formula_sheet.calculate_dimension()
+    except Exception:
+        declared = ""
+    # Writers other than Excel often store too small a size (<dimension ref="A1"/>), and read-only mode
+    # stops there; forget it, so every row in the file is read.
+    formula_sheet.reset_dimensions()
+    value_sheet.reset_dimensions()
     rows: list[SheetRow] = []
     more = 0
     formula_count = 0
-    last_col = 0
+    first_col = first_row = last_col = last_row = 0
     for index, (frow, vrow) in enumerate(
         zip(
             formula_sheet.iter_rows(max_col=MAX_COLUMNS),
@@ -393,7 +401,8 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
             value = vrow[column] if column < len(vrow) else None
             if raw is None and value is None:
                 continue
-            last_col = max(last_col, column + 1)
+            first_col, last_col = min(first_col or column + 1, column + 1), max(last_col, column + 1)
+            first_row, last_row = (first_row or index + 1), index + 1
             if isinstance(raw, str) and raw.startswith("="):
                 formula_count += 1
                 shown = f"{_fmt(value)} ({raw})" if value is not None else raw
@@ -410,11 +419,14 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
         number = next((cell.row for cell in frow if getattr(cell, "row", None)), index + 1)
         rows.append(SheetRow(number, cells, bold))
     rows_text = sheet_row_lines(rows)
-    extent = ""
     try:
-        extent = formula_sheet.calculate_dimension()
-    except Exception:
-        extent = f"A1:{get_column_letter(max(last_col, 1))}{len(rows)}"
+        min_col, min_row, max_col, max_row = range_boundaries(declared)
+        fits = min_col <= first_col and min_row <= first_row and last_col <= max_col and last_row <= max_row
+    except (ValueError, TypeError):
+        fits = False
+    extent = declared or "A1:A1"
+    if last_row and not fits:
+        extent = f"{get_column_letter(first_col)}{first_row}:{get_column_letter(last_col)}{last_row}"
     hidden = " hidden" if formula_sheet.sheet_state != "visible" else ""
     head = f'[sheet "{formula_sheet.title}" {extent}{hidden}]'
     note = f"({len(rows) + more} row{'s' if len(rows) + more != 1 else ''} with data" + (
