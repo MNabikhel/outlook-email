@@ -192,3 +192,29 @@ def test_open_buttons_say_why_when_the_server_refuses(site, page, context, mail,
     page.click("[data-action='open-codes']")
     toast_says("Files open on the computer running CloseDesk only.")
     assert context.errors == []
+
+
+# 9. A citation clicked in the pop-out chat opens beside it, and the pop-out keeps the conversation.
+
+
+def test_a_citation_in_the_pop_out_opens_in_the_window_it_came_from(site, page, context, store, mail):
+    budget = mail["Q4 budget draft"]
+    chat_id = _saved_answer(store, "Maya Chen sent the Q4 budget draft [1].", assistant.source_cards([budget]))
+    _open_saved(page, f"{site}/inbox", chat_id)
+    with context.expect_page() as popped:
+        page.click("[data-action='popout-chat']")
+    popout = popped.value
+    popout.wait_for_function(ANSWERED, arg=2)
+    cite = "#chat .msg.assistant > div a.cite"
+    assert popout.get_attribute(cite, "href") == f"/inbox/{budget.id}"
+
+    popout.click(cite)
+    page.wait_for_url(f"{site}/inbox/{budget.id}")
+    assert popout.url == f"{site}/chat/window"
+
+    page.close()  # the window it came from is gone: a new tab
+    with context.expect_page() as opened:
+        popout.click(cite)
+    opened.value.wait_for_url(f"{site}/inbox/{budget.id}")
+    assert popout.url == f"{site}/chat/window" and len(popout.query_selector_all("#chat .msg")) == 2
+    assert context.errors == []

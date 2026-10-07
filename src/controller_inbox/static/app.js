@@ -794,6 +794,22 @@
     saveSize(chat.classList.contains("large") ? null : { large: true });
   }
 
+  /* The pop-out keeps the conversation on screen: an email or page it links to opens in the window it
+     came from, or in a new tab when that window is closed or has gone to another site. */
+  function openBeside(href) {
+    try {
+      const opener = window.opener;
+      if (opener && !opener.closed && opener.location.origin === location.origin) {
+        opener.location.href = href;
+        opener.focus();
+        return;
+      }
+    } catch (error) {
+      /* another site's window: its address can't be read, so it isn't used */
+    }
+    window.open(href, "_blank", "noopener");
+  }
+
   function popOut() {
     const popup = window.open("/chat/window", "closedesk-chat", "popup,width=560,height=820");
     if (!popup) return toast("Your browser blocked the window. Allow pop-ups for CloseDesk and try again.");
@@ -926,6 +942,10 @@
 
     const link = target.closest("a[href]");
     if (link) {
+      if (chatWindow && !link.target && !link.hasAttribute("download") && link.origin === location.origin) {
+        event.preventDefault();
+        return openBeside(link.href);
+      }
       const id = mailIdFromLink(link);
       if (id) {
         event.preventDefault();
