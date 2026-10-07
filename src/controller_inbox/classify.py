@@ -869,6 +869,11 @@ def month_end(as_of: date) -> date:
     return _month_end(as_of)
 
 
+def score_importance(**kwargs) -> tuple[Importance, int, list[str]]:
+    """How important an email of a given category is, scored the way ``classify_email`` scores it."""
+    return _importance(**kwargs)
+
+
 def outlook_categories(classification: Classification) -> list[str]:
     labels = ["CloseDesk", DOCUMENT_OUTLOOK.get(classification.document_type, classification.document_type.value)]
     if classification.importance in {Importance.CRITICAL, Importance.HIGH}:

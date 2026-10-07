@@ -313,3 +313,23 @@ def test_a_done_payment_change_warning_stays_until_its_phone_check(loaded, setti
     loaded.set_done("demo-bec-wire", True)
     focus = build_digest(loaded, as_of=date(2026, 9, 22), generated_at=as_of_now, tz=settings.tz, save=False)["focus"]
     assert focus[0]["email_id"] == "demo-bec-wire" and focus[0]["kind"] == "fraud"
+
+
+# 13. Correcting a fraud email's category scores it again instead of leaving it Critical for fraud.
+def test_correcting_a_fraud_email_recomputes_importance(loaded, settings):
+    from controller_inbox.learn import record_correction
+
+    record_correction(loaded, settings, email_id="demo-bec-wire", corrected_category="wire_ach_request", reason="Called CFO, real wire")
+    after = loaded.get_email("demo-bec-wire")
+    assert after.category == DocumentType.WIRE_ACH_REQUEST and "fraud_risk" not in after.flags
+    assert after.importance_score < 100
+    assert not any("BEC fraud" in reason for reason in after.importance_reasons)
+    assert "Outgoing payment request" in after.importance_reasons
+
+
+def test_correcting_to_newsletter_is_still_low(loaded, settings):
+    from controller_inbox.learn import record_correction
+
+    record_correction(loaded, settings, email_id="demo-question", corrected_category="newsletter", reason="Bulk mail")
+    after = loaded.get_email("demo-question")
+    assert after.importance.value == "low" and after.importance_score <= 15

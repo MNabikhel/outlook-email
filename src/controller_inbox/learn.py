@@ -12,9 +12,10 @@ import uuid
 from datetime import datetime, timezone
 
 from controller_inbox.actions import extract_actions, local_today, received_day
-from controller_inbox.classify import Classification
+from controller_inbox.classify import Classification, score_importance
 from controller_inbox.config import Settings
 from controller_inbox.models import DOCUMENT_LABELS, DocumentType, Importance
+from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
 
 
@@ -137,13 +138,32 @@ def record_correction(
     # Text dates are read from the day it arrived; priorities are measured from today.
     today = local_today(settings.tz)
     received_on = received_day(email.received_at, settings.tz, fallback=today)
+    if corrected != DocumentType.PAYMENT_INSTRUCTION_CHANGE:
+        # Score it again as the corrected category, as a refiled email is (pipeline.rescore_stored):
+        # a fraud email corrected to a wire request must not stay Critical for the fraud reason.
+        importance, score, reasons = score_importance(
+            category=corrected,
+            flags=learned.flags,
+            fields=email.extracted,
+            outlook_importance=email.outlook_importance,
+            sender=email.sender_email,
+            as_of=today,
+            high_amount=settings.high_amount,
+            vip_senders=settings.vip_list,
+            subject=email.subject,
+            body=email.body_text,
+            finance=is_finance(settings, store),
+        )
+        if corrected == DocumentType.NEWSLETTER:
+            importance, score = Importance.LOW, min(score, 15)
+        learned.importance, learned.importance_score, learned.importance_reasons = importance, score, reasons
     email.category = learned.document_type
     email.category_confidence = learned.confidence
     email.flags = list(dict.fromkeys(learned.flags))
     email.importance = learned.importance
     email.importance_score = learned.importance_score
     email.importance_reasons = [f"You corrected this to {DOCUMENT_LABELS[corrected]}: {reason}"] + [
-        item for item in email.importance_reasons if not item.startswith("You corrected")
+        item for item in learned.importance_reasons if not item.startswith("You corrected")
     ]
     email.actions = extract_actions(
         email_id=email.id,
