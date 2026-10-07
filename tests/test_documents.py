@@ -224,6 +224,25 @@ def test_a_csv_quote_that_never_closes_does_not_swallow_the_file():
         assert lines[-1] == ("A5 (Item): Desk | B5 (Qty): 1 | C5 (Price): 120.00" if repeat == 2 else "[11003 more rows not shown.]")
     closed = csv_text(b'Item,Note,Price\nDesk,"two\nlines",120.00\nLamp,"one, with a comma",30.00\n', "order.csv")
     assert "B2 (Note): two lines" in closed and "B3 (Note): one, with a comma" in closed
+    # The stray quote closes further on at a quote that ends a cell ('TV 55"'): still a stray quote.
+    late = 'Item,Qty,Price\n"Monitor 27,1,249.99\n' + "Cable,5,9.99\n" * 8 + 'TV 55",1,499.00\nDesk,1,120.00\n'
+    assert "A12 (Item): Desk | B12 (Qty): 1 | C12 (Price): 120.00" in csv_text(late.encode(), "order.csv")
+
+
+def test_a_csv_address_on_several_lines_in_its_quotes_is_one_cell():
+    # A vendor list's remit-to addresses: each line of an address has a comma, as many as the file's rows do.
+    from controller_inbox.documents import csv_text
+
+    data = (
+        b'Vendor,Remit To\nHarbor Steel LLC,"PO Box 1200\nSuite 4, Building B\nSpringfield, IL 62701"\n'
+        b'Acme Supply,"18 Main St\nFloor 2, Unit 9\nDayton, OH 45402"\n'
+    )
+    assert csv_text(data, "vendors.csv").splitlines() == [
+        '[sheet "vendors.csv" A1:B3]',
+        "A1: Vendor | B1: Remit To",
+        "A2 (Vendor): Harbor Steel LLC | B2 (Remit To): PO Box 1200 Suite 4, Building B Springfield, IL 62701",
+        "A3 (Vendor): Acme Supply | B3 (Remit To): 18 Main St Floor 2, Unit 9 Dayton, OH 45402",
+    ]
 
 
 def test_a_csv_of_names_only_still_names_its_columns():

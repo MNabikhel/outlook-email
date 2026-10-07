@@ -18,7 +18,7 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, EmailRecord, RawMessage
-from controller_inbox.fraud import assess, reassess_email, save_check, trust_context
+from controller_inbox.fraud import assess, domain_of, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
 
@@ -110,6 +110,7 @@ def process_message(
         attachments=[(att.filename, att.extracted_text) for att in att_records],
         history=store.sender_history(raw.sender_email, exclude=raw.id),
         flags=verdicts,
+        domain_history=store.domain_history(domain_of(raw.sender_email), exclude=raw.id),
     )
     classified_email = _classify(
         store,
@@ -253,11 +254,18 @@ def _add_files(
     store: Store, settings: Settings, email: EmailRecord, raw: RawMessage, attachments_raw: list, anchor, *, now: datetime
 ) -> EmailRecord:
     """Another copy of a message the model read or the user corrected: the reading stays, the files this copy
-    adds are stored with it, and the fraud check runs again with them, so a bank letter among them still counts."""
+    adds are stored with it, and the fraud check runs again with them, so a bank letter among them still counts.
+
+    Reading the files takes a while (a scan is read with OCR), and meanwhile the user may correct the email or
+    give a fraud verdict on it. So the files are read first and then added to the email as it is by then."""
     if not attachments_raw:
         return email
-    for raw_att in attachments_raw:
-        record, _classified = _file_record(raw, raw_att, anchor)
+    records = [_file_record(raw, raw_att, anchor)[0] for raw_att in attachments_raw]
+    email = store.get_email(email.id) or email
+    held = {att.id for att in email.attachments}
+    for record in records:
+        if record.id in held:
+            continue
         email.attachments.append(record)
         email.extracted = email.extracted.merged_with(record.extracted_fields)
     email.has_attachments = True
@@ -307,7 +315,8 @@ def ingest_mailbox(
     the earliest message that failed, so the next sync tries it again (up to ``MAX_SYNC_TRIES`` times).
 
     The cursor is the time the sync started, so mail that arrives while it runs is read next time.
-    ``cursor=None`` leaves it alone (the sample mailbox is not a sync).
+    ``cursor=None`` leaves it alone (the sample mailbox is not a sync), and so does a sync of a window that
+    starts after the cursor.
     """
     started = now or datetime.now(timezone.utc)
     report = report if report is not None else {}
@@ -333,7 +342,11 @@ def ingest_mailbox(
             failed[raw.id] = tries.get(raw.id, 0) + 1
             if failed[raw.id] < MAX_SYNC_TRIES:
                 held.append(received)
-    if cursor:
+    # A sync of a shorter window (``sync --hours 1``) didn't read all the mail since the cursor, or the message
+    # it waits for: the cursor and the messages to try again stay as they are.
+    previous = store.get_state(cursor) if cursor else None
+    covered = received_after is None or not previous or _utc(received_after) <= datetime.fromisoformat(previous)
+    if cursor and covered:
         started = started.astimezone(timezone.utc)
         mark = min([started, *held]).isoformat()
         store.set_state(cursor, mark)

@@ -9,6 +9,7 @@ from typing import Iterable
 
 from dateutil import parser as date_parser
 
+from controller_inbox.classify import strip_html_comments
 from controller_inbox.documents import decode_text, extract_document
 from controller_inbox.models import ExtractedFields
 from controller_inbox.ocr import image_text
@@ -82,18 +83,46 @@ def sha256_bytes(data: bytes) -> str:
 
 # Tags inside a line of text. A browser shows no space for them, so "b<span></span>ank" reads "bank".
 _INLINE_TAG_RE = re.compile(
-    r"(?is)<!--.*?-->|</?(?:a|abbr|b|bdi|bdo|big|cite|code|del|dfn|em|font|i|ins|kbd|mark|nobr|o:p|q|s|samp|small|"
-    r"span|strike|strong|sub|sup|time|tt|u|var|wbr)(?:\s[^>]*)?/?>"
+    r"(?i)</?(?:a|abbr|b|bdi|bdo|big|cite|code|del|dfn|em|font|i|ins|kbd|mark|nobr|o:p|q|s|samp|small|"
+    r"span|strike|strong|sub|sup|time|tt|u|var|wbr)(?:\s[^<>]*)?/?>"
 )
 
 
+def _drop_scripts(html: str) -> str:
+    """Replace each <script>…</script> and <style>…</style> block with a space, in one pass over the text.
+
+    Once no closing tag of a kind follows, no later block of that kind can close either, so the search
+    stops instead of reading to the end of the text again from every "<script".
+    """
+    low = html.lower()
+    out: list[str] = []
+    pos = 0
+    kinds = ["script", "style"]
+    while kinds:
+        opener = re.compile("<(" + "|".join(kinds) + ")").search(low, pos)
+        if opener is None:
+            break
+        end_of_tag = low.find(">", opener.end())
+        if end_of_tag < 0:
+            break
+        close = low.find(f"</{opener.group(1)}>", end_of_tag + 1)
+        if close < 0:
+            kinds.remove(opener.group(1))
+            continue
+        out.append(html[pos : opener.start()] + " ")
+        pos = close + len(opener.group(1)) + 3
+    out.append(html[pos:])
+    return "".join(out)
+
+
 def html_to_text(html: str) -> str:
-    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
+    text = _drop_scripts(html)
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"(?i)</p>", "\n", text)
     text = re.sub(r"(?i)</div>", "\n", text)
-    text = _INLINE_TAG_RE.sub("", text)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = _INLINE_TAG_RE.sub("", strip_html_comments(text))
+    # "[^<>]": a stray "<" ends the tag it is in, so a long run of them is read once, not once per "<".
+    text = re.sub(r"<[^<>]+>", " ", text)
     # Every entity, named or numbered: "&#8203;" is a zero-width space, not five characters of text.
     text = unescape(text)
     return collapse_ws(text)

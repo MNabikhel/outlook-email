@@ -377,6 +377,7 @@ def page_text(glyphs: list[Glyph], previous: list[Table] | None = None, rules: l
         return PageText("", [], unreadable=True)
     lines = _lines([g for g in glyphs if not _CID.fullmatch(g.text)])
     for line in lines:
+        line.glyphs = _without_leaders(line.glyphs)
         line.words, line.piece_gap = _words(line)
     lines = [line for line in lines if line.words]
     cuts = _column_cuts(lines, rules or [])
@@ -463,6 +464,31 @@ def _dedupe(glyphs: list[Glyph]) -> list[Glyph]:
         if any(other.text == glyph.text and abs(other.x0 - glyph.x0) < near for other in out[-3:]):
             continue
         out.append(glyph)
+    return out
+
+
+_LEADER_DOTS = {".": 1, "·": 1, "․": 1, "‥": 2, "…": 3}
+
+
+def _without_leaders(glyphs: list[Glyph]) -> list[Glyph]:
+    """Dot leaders ("Cash and cash equivalents . . . . . $290,291") lead the eye from a label to its figures
+    across the gap between two cells: they are that gap, not text. Up to three dots are an ellipsis."""
+    out: list[Glyph] = []
+    run: list[Glyph] = []
+
+    def settle() -> None:
+        if sum(_LEADER_DOTS.get(glyph.text.strip(), 0) for glyph in run) < 4:
+            out.extend(run)
+        run.clear()
+
+    for glyph in glyphs:
+        text = glyph.text.strip()
+        if text in _LEADER_DOTS or (run and not text):
+            run.append(glyph)
+            continue
+        settle()
+        out.append(glyph)
+    settle()
     return out
 
 
@@ -566,64 +592,124 @@ def _column_cuts(lines: list[Line], rules: list[Rule]) -> dict[int, list[float]]
     column on each side of it (so "Mon 09/28" under "Date" stays one cell).
     """
     cuts: dict[int, list[float]] = {}
-    for region in (part for whole in _regions(lines) for part in _same_columns(lines, whole)):
-        rows = _table_rows(lines, region)
-        if len(rows) < 3:
-            continue
-        em = statistics.median(lines[index].size for index in rows)
-        top = max(lines[index].mid for index in region) + em
-        bottom = min(lines[index].mid for index in region) - em
-        drawn = [rule.x for rule in rules if rule.y1 >= bottom and rule.y0 <= top]
-        # Headings are often merged across columns, so the gaps come from the rows from the first figure
-        # down. The heading lines above only veto a narrow gap one of their words is written across.
-        first = _first_figure_row(lines, rows)
-        # Fewer than three rows of figures is too little to find columns from (each line's own gaps do);
-        # a table with no figures at all (a task list) is read from all its rows.
-        body = rows if first is None else rows[first:] if len(rows) - first >= 3 else []
-        heads = [word for index in rows if index not in body for word in lines[index].words]
-        tolerance = 0 if len(body) < 6 else max(1, round(0.08 * len(body)))
-        edges: list[float] = []
-        narrow: list[float] = []
-        for lo, hi, strict, at in _strips(lines, body, tolerance):
-            border = [x for x in drawn if lo - 0.5 <= x <= hi + 0.5]
-            if border:
-                edges.append(border[0])
-            elif hi - lo >= 0.9 * em:
-                edges.append(_edge_at(lines, body, lo, hi, at, heads, 0.4 * em))
-            elif strict and _lined_up(lines, body, lo, hi):
-                cut = _edge_at(lines, body, lo, hi, at, heads, 0.6)
-                if not any(word.x0 < cut < word.x1 for word in heads):
-                    edges.append(cut)
-                    narrow.append(cut)
-        # A drawn border is a column edge even where a long label runs across it into an empty cell
-        # ("Total Machinery & Equipment"), as long as most rows stay on their side of it.
-        for x in drawn:
-            crossing = sum(1 for index in rows if any(w.x0 < x - 0.5 and w.x1 > x + 0.5 for w in lines[index].words))
-            if crossing <= 0.3 * len(rows):
-                edges.append(x)
-        edges = _distinct(edges)
-        lo = min(lines[index].words[0].x0 for index in rows)
-        hi = max(lines[index].words[-1].x1 for index in rows)
-        # Words that line up row after row with only a space between them ("Mon" against "09/28", an entity
-        # code against its name) are one cell unless the headings name a column on each side.
-        for cut in narrow:
-            if heads and cut in edges and not _headed_both_sides(cut, edges, heads, lo, hi):
-                edges.remove(cut)
-        if not edges:
-            continue
-        grid = (lo, *sorted(edge for edge in set(edges) if lo < edge < hi), hi)
-        # A short line between the rows, or right after the last at the rows' spacing, is a row with blank
-        # cells ("10/10 Sat"); a title above them is not.
-        pitch = statistics.median(lines[a].mid - lines[b].mid for a, b in zip(rows, rows[1:]))
-        last = rows[-1]
-        while last + 1 in region and lines[last].mid - lines[last + 1].mid <= 1.5 * pitch and len(lines[last + 1].words) <= 4:
-            last += 1
-        for index in region:
-            line = lines[index]
-            if index in rows or (rows[0] < index <= last and len(line.words) <= 4):
-                cuts[index] = edges
-                line.grid = grid
+    for whole in _regions(lines):
+        parts = _same_columns(lines, whole)
+        found = [_region_edges(lines, rules, part) for part in parts]
+        if len(parts) > 1:
+            together = _region_edges(lines, rules, whole)
+            # When no part finds a column edge the whole region doesn't, it is one table whose sections leave
+            # different columns empty (a trial balance's debits, then its credits), and it reads as one grid.
+            if together is not None and not any(_new_edges(edges, together) for edges in found):
+                parts, found = [whole], [together]
+        for region, edges in zip(parts, found):
+            if edges is None:
+                continue
+            rows = _table_rows(lines, region)
+            lo = min(lines[index].words[0].x0 for index in rows)
+            hi = max(lines[index].words[-1].x1 for index in rows)
+            grid = (lo, *sorted(edge for edge in set(edges) if lo < edge < hi), hi)
+            # A short line between the rows, or right after the last at the rows' spacing, is a row with blank
+            # cells ("10/10 Sat"); a title above them is not.
+            pitch = statistics.median(lines[a].mid - lines[b].mid for a, b in zip(rows, rows[1:]))
+            last = rows[-1]
+            while last + 1 in region and lines[last].mid - lines[last + 1].mid <= 1.5 * pitch and len(lines[last + 1].words) <= 4:
+                last += 1
+            for index in region:
+                line = lines[index]
+                if index in rows or (rows[0] < index <= last and len(line.words) <= 4):
+                    cuts[index] = edges
+                    line.grid = grid
     return cuts
+
+
+def _new_edges(edges: list[float] | None, known: list[float]) -> bool:
+    """Whether ``edges`` has one that ``known`` does not (more than a point and a half from each)."""
+    return any(all(abs(edge - other) > 1.5 for other in known) for edge in edges or [])
+
+
+def _region_edges(lines: list[Line], rules: list[Rule], region: list[int]) -> list[float] | None:
+    """The column edges of one region's rows (see ``_column_cuts``), or None when it has none."""
+    rows = _table_rows(lines, region)
+    if len(rows) < 3:
+        return None
+    em = statistics.median(lines[index].size for index in rows)
+    top = max(lines[index].mid for index in region) + em
+    bottom = min(lines[index].mid for index in region) - em
+    drawn = [rule.x for rule in rules if rule.y1 >= bottom and rule.y0 <= top]
+    # Headings are often merged across columns, so the gaps come from the rows from the first figure
+    # down. The heading lines above only veto a narrow gap one of their words is written across.
+    first = _first_figure_row(lines, rows)
+    # Fewer than three rows of figures is too little to find columns from (each line's own gaps do);
+    # a table with no figures at all (a task list) is read from all its rows.
+    body = rows if first is None else rows[first:] if len(rows) - first >= 3 else []
+    heads = [word for index in rows if index not in body for word in lines[index].words]
+    named = _headings_over(rows, body)
+    tolerance = 0 if len(body) < 6 else max(1, round(0.08 * len(body)))
+    edges: list[float] = []
+    narrow: list[float] = []
+    for lo, hi, strict, at in _strips(lines, body, tolerance):
+        border = [x for x in drawn if lo - 0.5 <= x <= hi + 0.5]
+        if border:
+            edges.append(border[0])
+        elif hi - lo >= 0.9 * em:
+            cut = _edge_at(lines, body, lo, hi, at, heads, 0.4 * em)
+            edges.append(cut)
+            edges += _empty_columns(lo, hi, cut, [word for index in named for word in lines[index].words], 0.5 * em)
+        elif strict and _lined_up(lines, body, lo, hi):
+            cut = _edge_at(lines, body, lo, hi, at, heads, 0.6)
+            if not any(word.x0 < cut < word.x1 for word in heads):
+                edges.append(cut)
+                narrow.append(cut)
+    # A drawn border is a column edge even where a long label runs across it into an empty cell
+    # ("Total Machinery & Equipment"), as long as most rows stay on their side of it.
+    for x in drawn:
+        crossing = sum(1 for index in rows if any(w.x0 < x - 0.5 and w.x1 > x + 0.5 for w in lines[index].words))
+        if crossing <= 0.3 * len(rows):
+            edges.append(x)
+    edges = _distinct(edges)
+    lo = min(lines[index].words[0].x0 for index in rows)
+    hi = max(lines[index].words[-1].x1 for index in rows)
+    # Words that line up row after row with only a space between them ("Mon" against "09/28", an entity
+    # code against its name) are one cell unless the headings name a column on each side.
+    for cut in narrow:
+        if heads and cut in edges and not _headed_both_sides(cut, edges, heads, lo, hi):
+            edges.remove(cut)
+    return edges or None
+
+
+def _headings_over(rows: list[int], body: list[int]) -> list[int]:
+    """The heading rows right above the rows of figures, with no other line between them (a report's title
+    further up, its name and run date between, names no column)."""
+    joined = body[:1]
+    for index in reversed([index for index in rows if index not in body]):
+        if not joined or index != joined[-1] - 1:
+            break
+        joined.append(index)
+    return joined[1:]
+
+
+def _empty_columns(lo: float, hi: float, cut: float, heads: list[Word], space: float) -> list[float]:
+    """Edges for a column no row fills ("Discount Available", blank on every invoice), in a strip between two
+    filled columns that already has its edge at ``cut``: its heading sits inside the strip, clear of both sides.
+    An edge goes in each space between that heading and another one (a heading inside the strip too, or that of
+    the column beside it reaching into the strip) on the far side from ``cut``. A heading with no other heading
+    beside it, such as one set left over figures set right, is the next column's."""
+    # The headings that reach into the strip, a phrase at a time ("Check #" is one, though "#" is inside it).
+    spans: list[list[float]] = []
+    for word in sorted((w for w in heads if w.x1 > lo + 1 and w.x0 < hi - 1), key=lambda w: w.x0):
+        if spans and word.x0 <= spans[-1][1] + space:
+            spans[-1][1] = max(spans[-1][1], word.x1)
+        else:
+            spans.append([word.x0, word.x1])
+    inside = [span for span in spans if span[0] > lo + 1 and span[1] < hi - 1]
+    if not inside or any(a < cut < b for a, b in spans):
+        return []
+    # Each space between two headings (one of them inside the strip) that doesn't hold the edge already found.
+    return [
+        (one[1] + two[0]) / 2
+        for one, two in zip(spans, spans[1:])
+        if (one in inside or two in inside) and two[0] - one[1] >= 2 and not one[1] <= cut <= two[0]
+    ]
 
 
 def _first_figure_row(lines: list[Line], rows: list[int]) -> int | None:
@@ -833,12 +919,15 @@ def _edge_at(lines: list[Line], rows: list[int], lo: float, hi: float, at: float
     space = 0.5 * statistics.median(lines[index].size for index in rows) if rows else 0.0
     covered: list[list[float]] = []
     for word in sorted(heads + across, key=lambda w: w.x0):
-        if word.x1 <= lo or word.x0 >= hi:
+        # A word a space outside the strip still joins the phrase it starts or ends ("Month of | October"
+        # over four columns, with the strip's edge just after "of"): the space after it is no room either.
+        if word.x1 <= lo - space or word.x0 >= hi + space:
             continue
         if covered and word.x0 <= covered[-1][1] + space:
             covered[-1][1] = max(covered[-1][1], word.x1)
         else:
             covered.append([word.x0, word.x1])
+    covered = [[max(a, lo), min(b, hi)] for a, b in covered if b > lo and a < hi]
     if not any(a < cut < b for a, b in covered):
         return cut
     bounds = [lo, *(x for span in covered for x in span), hi]
@@ -877,6 +966,8 @@ def _table_blocks(lines: list[Line]) -> list[tuple[int, int]]:
             end += 1
         if _is_table(lines[i:end]) and len(_columns(lines[i:end])) >= 2:
             start = i - 1 if i > 0 and _labels_above(lines[i - 1], lines[i:end]) else i
+            if start == i and _section_under_names(lines, i, end):
+                start = i - 2
             blocks.append((start, end))
             i = end
         else:
@@ -934,6 +1025,12 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
     # A label may run a little into the empty cell beside it ("Operating Expenses" past a narrow column);
     # a title written across the table covers whole columns.
     under = [c for c in columns if x0 < c[1] and x1 > c[0] and (c[0] <= x0 or min(x1, c[1]) - c[0] >= 0.3 * (c[1] - c[0]))]
+    if not under and columns and _outdented(line, columns):
+        # A section's name, unless a table of its own starts under it (a title over its column names).
+        nxt = lines[index + 1] if index + 1 < len(lines) else None
+        if nxt is None or _new_header(nxt):
+            return False
+        under = columns[:1]
     if len(under) != 1:
         return False
     if gap <= 1.6 * usual + 1:
@@ -948,6 +1045,33 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
         and _fits_columns(nxt, columns)
         and any(_amount_cell(word.text) for segment in nxt.segments for word in segment)
     )
+
+
+def _outdented(line: Line, columns: list[tuple[float, float]]) -> bool:
+    """A statement's section name ("Current liabilities:") is one label set out to the left of the line items
+    under it, ending inside their column."""
+    if len(line.segments) != 1:
+        return False
+    x0, x1 = line.segments[0][0].x0, line.segments[0][-1].x1
+    return x0 < columns[0][0] and columns[0][0] < x1 <= columns[0][1]
+
+
+def _section_under_names(lines: list[Line], start: int, end: int) -> bool:
+    """Column names, then the first section's name ("Current assets:") over the table's first row."""
+    if start < 2:
+        return False
+    section, block = lines[start - 1], lines[start:end]
+    columns = _columns(block)
+    # A table with its own column names under a title is a new table, not the section of one above.
+    if len(section.segments) != 1 or len(columns) < 2 or _new_header(block[0]):
+        return False
+    x0, x1 = section.segments[0][0].x0, section.segments[0][-1].x1
+    pitch = block[0].mid - block[1].mid if len(block) > 1 else 1.5 * section.size
+    if not 0 < section.mid - block[0].mid <= 1.6 * pitch + 1:
+        return False
+    if not (_outdented(section, columns) or columns[0][0] <= x0 < x1 <= columns[0][1]):
+        return False
+    return _labels_above(lines[start - 2], lines[start - 1 : end])
 
 
 def _new_header(line: Line) -> bool:
@@ -973,7 +1097,8 @@ def _labels_above(line: Line, block: list[Line]) -> bool:
     if len(line.segments) == 1:
         return _merged_heading_above(line, block, columns)
     words = [word.text for segment in line.segments for word in segment]
-    if not words or sum(map(tables.is_value, words)) >= 0.5 * len(words):
+    # Years and dates name a statement's columns ("2009 | 2008"); amounts make a row of figures.
+    if not words or sum(map(_amount_cell, words)) >= 0.5 * len(words):
         return False
     if line.segments[0][-1].text.endswith(":"):
         # "Pay Group:  Hourly & Salaried": a fact about the sheet above it, not its column names.
@@ -1829,24 +1954,23 @@ def _grouped_lines(
         if label:
             while groups and x <= groups[-1][0] + 1:
                 groups.pop()
-            groups.append((x, label, "group"))
+            # "Current assets:" names the rows under it; its colon would read as a cell's ("Current assets: > Cash").
+            groups.append((x, label.rstrip(": ") or label, "group"))
             lines.append(f"Group: {label}")
             continue
         stub = _stub_x(row, cell_x[index] if index < len(cell_x) else [])
-        if stub is None:
-            while groups and groups[-1][2] == "data":
-                groups.pop()
-            prefix = " > ".join(group for _at, group, _kind in groups)
-            line = render(row)
-            lines.append(f"{prefix} | {line}" if prefix else line)
-            continue
-        while groups and groups[-1][2] == "data" and stub <= groups[-1][0] + 1:
+        # A statement indents its totals past the line items ("Total current assets" under "Other current
+        # assets"): a total is never one item's detail.
+        total = _total_row(row)
+        while groups and groups[-1][2] == "data" and (stub is None or total or stub <= groups[-1][0] + 1):
             groups.pop()
-        while groups and groups[-1][2] == "group" and stub < groups[-1][0] - 1:
+        while stub is not None and groups and groups[-1][2] == "group" and stub < groups[-1][0] - 1:
             groups.pop()
         prefix = " > ".join(group for _at, group, _kind in groups)
         line = render(row)
         lines.append(f"{prefix} | {line}" if prefix else line)
+        if stub is None or total:
+            continue
         name, _name_x = _detail(row, cell_x[index] if index < len(cell_x) else [], grouped, stub)
         if name:
             groups.append((stub, name, "data"))

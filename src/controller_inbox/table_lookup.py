@@ -317,21 +317,41 @@ def verify(table: Table) -> Verdict:
                 continue
             if value is None or "%" in raw or not running.started():
                 continue
+            above = running.group_sum()
             if running.close(value):
                 verdict.matched += 1
             else:
-                verdict.mismatched.append(f"{row.name} ({label}): printed {raw}, the rows above add to {_plain(running.group_sum())}")
+                verdict.mismatched.append(f"{row.name} ({label}): printed {raw}, the rows above add to {_plain(above)}")
     return verdict
+
+
+class _Sum:
+    """A running sum and how many figures are in it."""
+
+    __slots__ = ("total", "parts")
+
+    def __init__(self) -> None:
+        self.total = Decimal(0)
+        self.parts = 0
+
+    def add(self, value: Decimal) -> None:
+        self.total += value
+        self.parts += 1
 
 
 class _Running:
     """For one figure column, read down the table: the sums a total row may print there. A subtotal is the sum
-    of the rows since the last total; a grand total the sum of every row, or of the subtotals."""
+    of the rows since the last total; a grand total the sum of every row, or of the subtotals. The sums are kept
+    as the rows go by, so a long table is read in one pass."""
 
     def __init__(self) -> None:
         self.group: list[Decimal] = []
-        self.body: list[Decimal] = []
-        self.subtotals: list[Decimal] = []
+        self.group_total = _Sum()
+        self.body = _Sum()
+        self.subtotals = _Sum()
+        # The last total of a whole section ("Total liabilities"), which a statement's last line adds to the
+        # sections after it ("Total liabilities and stockholders' equity").
+        self.section: Decimal | None = None
         self.places = 0
 
     def add(self, value: Decimal | None, raw: str) -> None:
@@ -340,33 +360,55 @@ class _Running:
         if "." in raw:
             self.places = max(self.places, len(raw.split(".")[-1].rstrip(")% ")))
         self.group.append(value)
-        self.body.append(value)
+        self.group_total.add(value)
+        self.body.add(value)
 
     def started(self) -> bool:
-        return bool(self.group or self.subtotals)
+        return bool(self.group or self.subtotals.parts)
 
     def group_sum(self) -> Decimal:
-        return sum(self.group or self.body, Decimal(0))
+        return self.group_total.total if self.group else self.body.total
 
-    def holds(self, value: Decimal) -> str:
+    def _near(self, total: Decimal, parts: int, value: Decimal) -> bool:
+        # Each part was rounded when it was printed, and so was the total: half a unit of the last place each.
+        return parts > 0 and abs(total - value) <= Decimal(1).scaleb(-self.places) * Decimal("0.5") * (parts + 1)
+
+    def holds(self, value: Decimal, *, tail: bool = True) -> str:
         """"group" when ``value`` is the sum of the rows since the last total, "all" when it is the sum of every
-        row or of the subtotals, else "". Each part was rounded when it was printed, so a total can be off by
-        half a unit of the last place per part."""
-        slack = Decimal(1).scaleb(-self.places) * (Decimal("0.5") * (len(self.body) + 1))
-        if self.group and abs(sum(self.group) - value) <= slack:
+        row or of the subtotals, else "". With ``tail``, a sum of the group's last rows holds too: a section's
+        total under a worked-out line ("Net Operating Cash Flow", then "Total Financing" of the two rows after
+        it), or a running balance's total, which is its last row."""
+        group = self.group_total
+        if self._near(group.total, group.parts, value):
             return "group"
-        if any(parts and abs(sum(parts) - value) <= slack for parts in (self.body, self.subtotals, self.subtotals + self.group)):
+        subtotals, body = self.subtotals, self.body
+        candidates = [
+            (body.total, body.parts),
+            (subtotals.total, subtotals.parts),
+            (subtotals.total + group.total, subtotals.parts + group.parts),
+        ]
+        if self.section is not None:
+            candidates.append((self.section + subtotals.total + group.total, 1 + subtotals.parts + group.parts))
+        if any(self._near(total, parts, value) for total, parts in candidates):
             return "all"
+        if tail:
+            total = Decimal(0)
+            for parts, part in enumerate(reversed(self.group[1:]), start=1):
+                total += part
+                if self._near(total, parts, value):
+                    return "group"
         return ""
 
     def close(self, value: Decimal) -> bool:
         """A total row printing ``value``: whether it holds; the next group starts after it either way."""
         held = self.holds(value)
         if held == "group":
-            self.subtotals.append(value)
+            self.subtotals.add(value)
         elif held == "all":
-            self.subtotals = []
+            self.subtotals = _Sum()
+            self.section = value
         self.group = []
+        self.group_total = _Sum()
         return bool(held)
 
 
@@ -374,28 +416,59 @@ class _Running:
 _TOTAL_WORD = re.compile(r"^(?:grand\s+|sub-?\s?)?totals?:?$|^%", re.I)
 
 
+def _figures_of(row: Row, figures: list[str]) -> dict[str, Decimal]:
+    return {
+        label: value for label in figures if (value := _number(row.value(label))) is not None and "%" not in row.value(label)
+    }
+
+
+def _held_totals(rows: list[Row], figures: list[str], as_rows: set[int]) -> dict[int, int]:
+    """Read down the table with the rows in ``as_rows`` counted as ordinary rows: for each total row, how many
+    of its figures add up."""
+    running = {label: _Running() for label in figures}
+    held: dict[int, int] = {}
+    for index, row in enumerate(rows):
+        total = row.total and index not in as_rows
+        if total:
+            held[index] = 0
+        for label in figures:
+            raw = row.value(label)
+            if not total:
+                running[label].add(_number(raw), raw)
+                continue
+            value = _number(raw)
+            if value is not None and "%" not in raw and running[label].started():
+                held[index] += running[label].close(value)
+    return held
+
+
 def _settle_totals(table: Table) -> bool:
-    """Decide which rows are totals by their figures as well as their words. A row named "Total Quality
-    Logistics" whose figures don't add up the rows above it is a vendor, not a total; a row with no name at all
-    whose every figure adds up the rows above it is a total (a sheet often leaves its total row unlabeled).
-    Returns whether any row changed."""
+    """Decide which rows are totals by their figures as well as their words. Returns whether any row changed.
+
+    A row of figures alone (no name, date or code) whose every figure adds up the rows above it is a total: a
+    sheet often leaves its total row unlabeled. A row named "Total ..." stays a total even when its figures
+    don't add up, since a misread figure above it is what the totals check is there to catch; it is an ordinary
+    row only when the totals below it add up with it counted as one ("Total Quality Logistics" is a vendor)."""
     figures = [label for label, kind in table.kinds.items() if kind == "figure"]
     if not figures:
         return False
+    rows = table.rows
     running = {label: _Running() for label in figures}
     changed = False
     seen = 0
-    for row in table.rows:
-        filled = {
-            label: value
-            for label in figures
-            if (value := _number(row.value(label))) is not None and "%" not in row.value(label)
-        }
-        held = {label for label, value in filled.items() if running[label].started() and running[label].holds(value)}
-        named = [value for _label, value in row.cells if value and value != tables.BLANK and not tables.is_value(value)]
-        if row.total and seen and filled and not held and not _TOTAL_WORD.match(row.name.strip()):
-            row.total, changed = False, True
-        elif not row.total and seen >= 2 and not named and len(filled) >= min(2, len(figures)) and held == set(filled) and any(filled.values()):
+    for index, row in enumerate(rows):
+        filled = _figures_of(row, figures)
+        bare = all(not value or value == tables.BLANK for label, value in row.cells if label not in figures)
+        if (
+            not row.total
+            and bare
+            and seen >= 2
+            and any(filled.values())
+            # One figure adding up the rows above can be a coincidence (5,000 after 2,500 and 2,500) unless it is the
+            # table's last row.
+            and (len(filled) >= 2 or index == len(rows) - 1)
+            and all(running[label].started() and running[label].holds(value, tail=False) for label, value in filled.items())
+        ):
             row.total, changed = True, True
             row.name = row.name if row.name and row.name != tables.BLANK else "Total"
         for label in figures:
@@ -407,6 +480,19 @@ def _settle_totals(table: Table) -> bool:
             else:
                 running[label].add(_number(raw), raw)
         seen += not row.total
+    as_rows: set[int] = set()
+    held = _held_totals(rows, figures, as_rows)
+    for index, row in enumerate(rows):
+        if index not in held or held[index] or _TOTAL_WORD.match(row.name.strip()):
+            continue
+        if not _figures_of(row, figures) or not any(not other.total for other in rows[:index]):
+            continue
+        trial = _held_totals(rows, figures, as_rows | {index})
+        if sum(trial.values()) > sum(count for at, count in held.items() if at != index):
+            as_rows.add(index)
+            held = trial
+    for index in as_rows:
+        rows[index].total, changed = False, True
     return changed
 
 
@@ -445,10 +531,13 @@ def _with_row_labels(table: Table) -> None:
         return
     table.labels = (ROW_LABEL, *table.labels)
     for row in table.rows:
-        row.cells.insert(0, (ROW_LABEL, row.group))
+        # Indented under a section ("Current assets > Cash and cash equivalents"), the row label is the last
+        # name and the section stays the row's group.
+        section, _sep, label = row.group.rpartition(" > ")
+        row.cells.insert(0, (ROW_LABEL, label))
         if row.refs:
             row.refs.insert(0, "")
-        row.group = ""
+        row.group = section
 
 
 def _joined_across_pages(found: list[Table]) -> list[Table]:
@@ -491,7 +580,9 @@ def _row(line: str, page: str) -> Row | None:
     for part in parts:
         label, sep, value = part.partition(": ")
         label = label.strip()
-        if sep and 0 < len(label) <= 60 and not tables.is_value(label):
+        # Columns headed by a year or a date ("2009: $5,920", "Dec 31, 2025: 4,210") are a comparative
+        # statement's figure columns.
+        if sep and 0 < len(label) <= 60:
             ref = ""
             if workbook and (cell := _CELL_REF.match(label)):
                 if not cell.group(2):

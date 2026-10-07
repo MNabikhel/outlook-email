@@ -200,6 +200,7 @@ def check_numbers(answer: str, grounding: Grounding) -> Review:
 _TOTAL_LINE = re.compile(r"^[\s*_#>|-]*(?:grand\s+)?total\b[^\n]*$", re.I)
 _ITEM_LINE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+")
 _MAX_ITEMS = 8
+_CREDIT_SIGN = re.compile(r"[-−(][$€£]?$")
 
 
 def _list_total(answer: str, at: int, target: Number, grounding: Grounding):
@@ -222,9 +223,9 @@ def _list_total(answer: str, at: int, target: Number, grounding: Grounding):
         figures = [n for n in numbers_in(body) if (n.money if target.money else ("," in n.shown or "." in n.shown))]
         if not figures or not grounding.has(figures[0]):
             return None
-        # A credit is listed as "-$300.00" or "($300.00)": it takes away from the total.
-        before = body[: figures[0].start].rstrip("$€£ ")
-        sign = -1 if before.endswith(("-", "−", "(")) else 1
+        # A credit is listed as "-$300.00" or "($300.00)": it takes away from the total. A dash with a space after
+        # it separates the name from the amount ("Harbor Steel LLC - $48,500.00").
+        sign = -1 if _CREDIT_SIGN.search(body[: figures[0].start]) else 1
         amounts.insert(0, Number(figures[0].shown, sign * figures[0].value, figures[0].tolerance, 0, 0, money=figures[0].money))
     if not 2 <= len(amounts) <= _MAX_ITEMS:
         return None

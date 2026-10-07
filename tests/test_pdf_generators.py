@@ -99,3 +99,60 @@ def test_a_small_print_header_above_a_table_is_not_a_row_of_it():
         items += _row(705 - 15 * r, [(40, "left", row[0]), (260, "right", row[1]), (340, "right", row[2]), (420, "right", row[3])])
     lines = _page(*items)
     assert "Customer: Brightline Transit | Balance: 68,260.73 | Current: 42,785.33 | Over 90: 9,875.40" in lines
+
+
+def test_a_column_edge_is_not_moved_into_the_space_inside_a_heading_phrase():
+    # "Month of October" centred over four figure columns: the edge after the 2026 "% of Sales" figures falls
+    # just inside "October", a space after "of". Moved off "October" it would land between "of" and
+    # "October" and cut the heading in two ("Month of" over two columns, "October" over the next).
+    from controller_inbox.pdf_layout import Line, Word, _edge_at
+
+    lines = [Line(700 - 15 * r, 10, words=[Word("62.4%", 431.6, 460.8, False), Word("942,118.75", 500.5, 549.0, False)]) for r in range(5)]
+    heads = [Word("Month", 413.3, 445.6, True), Word("of", 448.7, 458.8, True), Word("October", 461.9, 502.4, True),
+             Word("Sales", 433.4, 460.5, True), Word("Amount", 491.2, 530.9, True)]
+    cut = _edge_at(lines, list(range(5)), 460.8, 499.4, 475.2, heads, 4.0)
+    assert not 458.8 < cut < 461.9
+
+
+def test_a_trial_balance_whose_sections_leave_different_columns_empty_is_one_grid():
+    # Balance sheet accounts fill the credit column and expense accounts the adjusting debits, so the rows above
+    # a wrapped account name and the rows under it each write where the other leaves a gap. Read apart, the
+    # expense rows' columns would end at their last figure and no longer match the rows above.
+    from controller_inbox.pdf_layout import Line, Rule, Word, _column_cuts
+
+    def figure(text: str, right: float) -> Word:
+        return Word(text, right - 5.5 * len(text), right, False)
+
+    rows = []
+    for n in range(8):
+        words = [Word(f"2{n}00", 40, 60, False), Word("Liability", 80, 120, False)]
+        words += [figure("618,942.37", 316)] if n % 4 else [figure("412,806.55", 246)]
+        rows.append(words + ([figure("4,200.00", 436)] if n == 3 else []))
+    for n in range(6):
+        rows.append([Word(f"6{n}00", 40, 60, False), Word("Expense", 80, 118, False), figure("121,006.40", 246), figure("4,779.72", 376)])
+    lines, y = [], 700.0
+    for index, words in enumerate(rows):
+        if index == 8:  # "Inventory Shrink and / Obsolescence": a name on two lines
+            lines.append(Line(y, 10, words=[Word("Inventory", 80, 118, False), Word("Shrink", 121, 150, False)]))
+            y -= 13
+        lines.append(Line(y, 10, words=words))
+        y -= 13
+    _column_cuts(lines, [Rule(x, y - 10, 712) for x in (36, 76, 180, 250, 320, 380, 440)])
+    assert len({line.grid for line in lines if len(line.words) > 2}) == 1
+
+
+def test_a_column_no_row_fills_keeps_its_own_heading():
+    # An invoice register's "Discount Available" is blank on every invoice: only its heading, set between the
+    # "Invoice Amount" and "Net Payable" figures, shows the column. Without an edge after it, "Discount
+    # Available" and "Net Payable" ran together ("Net Available Payable").
+    from controller_inbox.pdf_layout import Word, _empty_columns
+
+    heads = [Word("Invoice", 553.8, 586.3, True), Word("Amount", 552.4, 587.7, True), Word("Discount", 604.3, 644.3, True),
+             Word("Available", 603.8, 644.8, True), Word("Net", 670.4, 686.5, True), Word("Payable", 661.1, 695.8, True)]
+    [edge] = _empty_columns(595.1, 662.8, 597.6, heads, 5.0)
+    assert 644.8 < edge < 661.1
+    # "Check #" reaching into the gap after the check numbers is that column's heading, not one of its own.
+    check = [Word("Check", 300.0, 330.0, True), Word("#", 332.8, 338.4, True), Word("Issue", 395.0, 420.6, True)]
+    assert _empty_columns(327.8, 395.0, 340.9, check, 5.0) == []
+    # A heading set left over figures set right, with no other heading beside it, names the figures.
+    assert _empty_columns(250.0, 370.0, 260.0, [Word("Amount", 300.0, 336.0, True)], 5.0) == []

@@ -699,6 +699,7 @@ def _budget(settings: Settings, *, tools: bool) -> int:
 
 def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[dict[str, Any]]:
     before = len(state["text"])
+    wrote = state["wrote"]
     for piece in without_echo(stream_text(settings, messages, max_tokens=settings.chat_max_tokens)):
         state["wrote"] = True
         state["text"] += piece
@@ -709,6 +710,10 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
     if "</think>" in written and "<think>" not in written.split("</think>", 1)[0]:
         state["text"] = state["text"][:before] + written.split("</think>")[-1].lstrip()
         yield {"type": "revise", "text": state["text"]}
+        if len(state["text"]) == before:
+            # Only reasoning came back: no answer was written (the draft or the lookup answer takes its place).
+            state["wrote"] = wrote
+            raise EmptyReply("the model wrote only its reasoning")
 
 
 def _keep_stated_figures(checked: str, draft: str, file_text: str) -> str:
