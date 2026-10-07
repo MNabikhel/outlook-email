@@ -62,3 +62,14 @@ def test_reasoning_before_a_lone_closing_think_tag_is_not_the_answer(store, sett
     events = list(assistant.answer_stream(store, settings, "Where is the offsite in this memo?", email_id=budget.id))
     final = [e["text"] for e in events if e["type"] == "revise"][-1]
     assert final == "The offsite is in Lisbon [1]."
+
+
+def test_a_reply_that_is_only_reasoning_falls_back_instead_of_an_empty_answer(store, settings, mail, monkeypatch):
+    reply = "Okay, the user asks about the offsite. Let me think about where it is.\n</think>\n"
+    budget = mail["Q4 budget draft"]
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "SQL: NONE")
+    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: iter([reply]))
+    events = list(assistant.answer_stream(store, settings, "Where is the offsite in this memo?", email_id=budget.id))
+    assert any(e["type"] == "mode" and e["mode"] == "lookup" for e in events), "the lookup answer takes its place"
+    assert "".join(e["text"] for e in events if e["type"] == "delta").strip()
