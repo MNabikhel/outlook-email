@@ -893,3 +893,21 @@ def test_an_inline_calendar_is_kept_as_the_invite(settings: Settings, store: Sto
     assert [att.filename for att in inline.attachments] == ["invite.ics"]
     assert "Q3 close review" in inline.attachments[0].extracted_text
     assert [att.filename for att in records["<both@x>"].attachments] == ["invite.ics"], "not kept twice"
+
+
+# 27. The overnight reading is saved for an email whose files didn't arrive in name order --------
+
+
+def test_a_reading_is_saved_for_an_email_whose_files_are_not_in_name_order(settings: Settings, store: Store):
+    from controller_inbox.overnight import read_queue
+    from test_bionic import AgreeingReader
+
+    settings.ensure_data_dir()
+    # "Statement" comes before "Invoice" in the email; the reading was checked against a copy in name order.
+    _eml(settings, "September statement", message_id="<st9@vendor.com>",
+         attach=[("Statement.txt", b"Statement of account Sept 2026"), ("Invoice INV-9.txt", b"Invoice INV-9 $310.00")])
+    [record] = ingest_folder(store, settings)
+    result = read_queue(store, settings, now=NOW, reader=AgreeingReader())
+    assert result["read_ids"] == [record.id]
+    assert store.get_email(record.id).model_status == "bionic"
+    assert store.counts()["waiting_on_bionic"] == 0
