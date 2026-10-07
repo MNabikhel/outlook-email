@@ -455,6 +455,32 @@ def test_compare_columns_ranks_each_row_and_keeps_totals_apart():
     assert "saved without values" in compare_columns(_budget(), "Budget", "Change", "D")
 
 
+def test_percentages_and_months_read_as_the_sheet_shows_them():
+    from datetime import datetime
+
+    from openpyxl.styles import Font
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Fees"
+    sheet.append(["Line", datetime(2026, 3, 1), datetime(2026, 4, 1), "Rate", "Paid"])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    sheet["B1"].number_format, sheet["C1"].number_format = "mmm-yy", '[$-409]mmm\\-yy;@'
+    sheet.append(["Rent", 3000, 3100, 0.15, datetime(2026, 3, 15)])
+    sheet.append(["Fees", 400, 410, 0.0525, datetime(2026, 4, 2)])
+    sheet.append(["Period", datetime(2026, 9, 1)])
+    sheet["D2"].number_format, sheet["D3"].number_format, sheet["E2"].number_format = "0%", '0.00%;[Red]-0.00%', "d-mmm-yy"
+    sheet["B4"].number_format = 'mmmm" "yyyy'
+    out = io.BytesIO()
+    book.save(out)
+    lines = extract_text_from_bytes("fees.xlsx", "", out.getvalue()).splitlines()
+    assert "A1: Line | B1: Mar-26 | C1: Apr-26 | D1: Rate | E1: Paid" in lines
+    assert "A2 (Line): Rent | B2 (Mar-26): 3,000 | C2 (Apr-26): 3,100 | D2 (Rate): 15% | E2 (Paid): 2026-03-15" in lines
+    assert "A3 (Line): Fees | B3 (Mar-26): 400 | C3 (Apr-26): 410 | D3 (Rate): 5.25% | E3 (Paid): 2026-04-02" in lines
+    assert "A4 (Line): Period | B4 (Mar-26): September 2026" in lines
+
+
 def test_big_sheets_are_cut_into_row_ranges():
     book = Workbook()
     sheet = book.active

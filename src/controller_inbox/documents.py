@@ -440,9 +440,9 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
             first_row, last_row = (first_row or index + 1), index + 1
             if isinstance(raw, str) and raw.startswith("="):
                 formula_count += 1
-                shown = f"{_fmt(value)} ({raw})" if value is not None else raw
+                shown = f"{_formatted(value, cell)} ({raw})" if value is not None else raw
             else:
-                shown = _fmt(value if value is not None else raw)
+                shown = _formatted(value if value is not None else raw, cell)
             if shown:
                 cells[column + 1] = shown
                 bold = bold and bool(getattr(getattr(cell, "font", None), "b", False))
@@ -673,6 +673,35 @@ def decode_text(data: bytes) -> str:
             continue
     return data.decode("utf-8", errors="replace")
 
+
+_MONTHS = ("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December")
+_DATE_PART = re.compile(r'(?i)"([^"]*)"|\\(.)|mmmm|mmm|mm|m|yyyy|yy|[^a-z]')
+
+
+def _formatted(value, cell) -> str:
+    """A workbook value as the sheet shows it where that reads differently from the value itself: a
+    percentage (0.15 formatted 0.0% is 15.0%) and a month (a date formatted mmm-yy is Mar-26, not the
+    first of the month). Other numbers, and dates with a day, keep the plain form ``_fmt`` gives them."""
+    number_format = getattr(cell, "number_format", None)
+    if not isinstance(number_format, str) or number_format == "General":
+        return _fmt(value)
+    # The format for positive values, without its colour or locale, padding and fill; then without its literal text.
+    section = re.sub(r"\[[^\]]*\]|[_*].", "", number_format.split(";")[0])
+    bare = re.sub(r'"[^"]*"|\\.', "", section)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and "%" in bare and math.isfinite(value):
+        decimals = re.search(r"\.([0#?]+)", bare)
+        return f"{value * 100:,.{len(decimals.group(1)) if decimals else 0}f}%"
+    if isinstance(value, (datetime, date)) and "m" in bare.lower() and "y" in bare.lower():
+        parts = list(_DATE_PART.finditer(section))
+        if "".join(part.group(0) for part in parts) == section:
+            month, year = _MONTHS[value.month - 1], value.year
+            words = {"mmmm": month, "mmm": month[:3], "mm": f"{value.month:02d}", "m": str(value.month), "yyyy": f"{year:04d}", "yy": f"{year % 100:02d}"}
+            shown = []
+            for part in parts:
+                literal = part.group(1) if part.group(1) is not None else part.group(2)
+                shown.append(literal if literal is not None else words.get(part.group(0).lower(), part.group(0)))
+            return "".join(shown).strip()
+    return _fmt(value)
 
 
 def _fmt(value) -> str:
