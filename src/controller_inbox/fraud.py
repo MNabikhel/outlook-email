@@ -123,8 +123,13 @@ GIFT_RE = re.compile(
 )
 # "Our gift card program", "the gift card policy", "your gift card balance": not an ask by themselves.
 GIFT_PROGRAM_RE = re.compile(r"[^.\n]{0,40}\b(?:program|policy|balance)\b", re.I)
-# ...unless the sentence also says to buy the cards or send their codes.
-GIFT_BUY_RE = re.compile(r"\b(?:buy|purchase|pick\s+up|grab)\b|\bsend\b[^.\n]{0,40}\b(?:codes?|card\s+numbers|pins?)\b", re.I)
+# ...unless it is asked to buy those cards: the buying word comes just before the mention, in the same part of
+# the sentence, and is not "do not purchase" or a "purchase order" ("buy 10 Amazon gift cards for our program")...
+GIFT_BUY_BEFORE_RE = re.compile(
+    r"(?<!not )(?<!n't )(?<!never )\b(?:buy|purchase(?!\s+orders?\b)|pick\s+up|grab)\b[^.?!;:\n]{0,40}$", re.I
+)
+# ...or the sentence asks for their codes.
+GIFT_SEND_CODES_RE = re.compile(r"(?<!not )(?<!n't )(?<!never )\bsend\b[^.\n]{0,40}\b(?:codes?|card\s+numbers|pins?)\b", re.I)
 # Gift cards only count when someone is asked to get them or hand over their codes.
 GIFT_ASK_RE = re.compile(
     r"\b(?:buy|purchase|pick\s+up|get\s+(?:me|us|some|them|a\s+few)|grab|send\s+(?:me|us)|need|scratch|codes?|card\s+numbers|pins?)\b",
@@ -341,11 +346,14 @@ def _gift_asks(text: str) -> list[re.Match[str]]:
         span = (stops[before - 1] + 1 if before else 0, stops[after] if after < len(stops) else len(text))
         if span not in read:
             sentence = text[span[0] : span[1]]
-            read[span] = (bool(GIFT_ASK_RE.search(sentence)), bool(GIFT_BUY_RE.search(sentence)))
-        asks, buys = read[span]
-        # "Buy 10 gift cards for our staff rewards program and send me the codes" is still an ask.
-        if GIFT_PROGRAM_RE.match(text, match.end()) and not buys:
-            continue
+            read[span] = (bool(GIFT_ASK_RE.search(sentence)), bool(GIFT_SEND_CODES_RE.search(sentence)))
+        asks, sends = read[span]
+        # "Buy 10 gift cards for our staff rewards program and send me the codes" is still an ask; "thank you for
+        # your gift card program purchase" and "our gift card policy: do not purchase them" are not.
+        if GIFT_PROGRAM_RE.match(text, match.end()) and not sends:
+            lead = text[max(span[0], match.start() - 60) : match.start()]
+            if not GIFT_BUY_BEFORE_RE.search(lead):
+                continue
         if asks:
             found.append(match)
     return found

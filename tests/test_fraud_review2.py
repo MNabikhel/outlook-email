@@ -130,3 +130,26 @@ def test_real_changes_in_five_languages_still_block():
         assert "bank_change" in _keys(check) and check.level == "high", body
     assert _cpu_seconds(lambda: _check("pay account " + "1 " * 100_000)) < 2.5
     assert _cpu_seconds(lambda: _check(("use acct " + "x" * 200 + " ") * 950)) < 2.5
+
+
+# 3. Gift-card program, policy and balance mail counts as an ask only when it asks to buy those cards or send codes.
+def test_gift_card_program_mail_with_a_buying_word_elsewhere_is_not_an_ask():
+    for body in (
+        "Thank you for your gift card program purchase, invoice INV-2201 is attached.",
+        "Want to buy for your whole team? Our corporate gift card program makes year-end rewards easy.",
+        "Please check the gift card balance before you buy anything else on the account.",
+        "Reminder of our gift card policy: do not purchase them with the corporate card.",
+        "Purchase order 4410 for the gift card program is attached.",
+    ):
+        check = _check(body, sender="orders@giftvendor.example")
+        assert "gift_cards" not in _keys(check) and check.level == "none", body
+
+
+def test_gift_card_requests_for_a_program_still_block():
+    for body in (
+        "I need you to buy 10 Amazon gift cards for our staff rewards program today and send me the codes.",
+        "Please purchase five gift cards for the client program and scratch off the backs.",
+        "Our gift card program needs 10 more cards, send me the codes by noon.",
+    ):
+        check = _check(body, subject="Quick favor", sender="ceo.office@gmail.com", history=0)
+        assert "gift_cards" in _keys(check) and check.level == "high", body
