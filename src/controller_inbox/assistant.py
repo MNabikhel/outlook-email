@@ -45,6 +45,9 @@ MAX_SOURCES = 6
 MAX_QUESTION = 1000
 TOOL_ROOM = 6000  # characters the first file-reading prompt leaves free for tool results
 MIN_FILE_ROOM = 800
+# File text beside a query that worked the answer out (prompt characters, about 4,000 tokens): enough for its
+# wording and citations; the model reads a prompt this size several times faster than a full context.
+WORKED_FILE_ROOM = 12_000
 
 _STOP = set(
     """
@@ -820,7 +823,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         # it goes, without tools to read more and without a second pass (the answer check still runs).
         plain = _budget(settings, tools=False) // shrink
         overhead = prompt_chars(build_messages(question, ws.sources, budget=plain, bodies=False, **base))
-        files = agent.file_context(ws, question, max(MIN_FILE_ROOM, int((plain - overhead) * 0.85)))
+        files = agent.file_context(ws, question, max(MIN_FILE_ROOM, min(WORKED_FILE_ROOM, int((plain - overhead) * 0.85))))
         for read in ws.reads:
             yield {"type": "step", "text": read}
         ws.reads.clear()
