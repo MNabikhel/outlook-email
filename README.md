@@ -127,6 +127,23 @@ Search by meaning: load an embedding model in LM Studio next to the chat model (
 
 Files on an email flagged as possible payment fraud are never given to the model and don't download. You can still read their text on the page.
 
+### Scanned pages read two ways
+
+OCR reads a scanned page's words but loses its table: the title runs into the column names and a row's figures land on the wrong line. When the model loaded in LM Studio can look at pictures (**Qwen3.5** 4B or 9B, Gemma 3; LM Studio shows an eye icon beside it), CloseDesk also shows it the page itself, at about 100 DPI, and asks for an exact transcription with every table as a table. The two readings are kept side by side and compared figure by figure:
+
+- A figure both readings have is confirmed. Where they differ, both are kept, and each reading's printed totals are checked against the rows above them.
+- The page the chat and the table lookup read is the model's reading when its totals hold up at least as well and most of its figures agree with OCR's; otherwise OCR's. Either way a note at the top of the page says which, and the figures the two read differently are listed under it.
+- A figure in an answer that only the vision model read (or read differently) gets a check under the answer: *check it against the file*.
+- The file's page (and the workspace's file view) shows both readings side by side, the figures they differ on marked.
+
+Pages read this way: a scanned PDF's pages, a picture, and a PDF page whose table doesn't add up as read. The original is never changed: the first reading stays stored, the model's beside it, and a reading is only used while the file is the same one it was made from.
+
+Looking at a page is slow on a laptop without a graphics card (minutes a page; a graphics card or Apple silicon is many times faster), so CloseDesk times each page on this computer and says how long a read will take before it starts one. **Setup → Read scans with the vision model** chooses:
+
+- **Automatically** (default): the overnight run reads waiting scans for up to 30 minutes (`CONTROLLER_INBOX_VISION_MINUTES_PER_RUN`). **Process new mail** only reads pages this computer reads in under a minute, and starting CloseDesk reads none. When you ask about a scan, pages that take under a minute in all are read before the answer; a longer read is offered under the answer with its time (*Read 2 pages with the vision model as well: about 18 minutes on this computer*), runs in the background, and **Ask again** answers from both readings.
+- **Only when I ask**: nothing is read until you click **Read with the vision model** on the file or under an answer.
+- **Off**.
+
 ### Fraud check
 
 Each email gets a score. A bank-detail change or a request to buy gift cards **in the sender's own words** blocks it unless you trust the sender or their domain. That holds even when the request sits in a "this email is confidential" paragraph or follows "please be aware". A real anti-fraud notice ("we will never change our bank details by email", "if you receive such an email, call us") doesn't count, and neither does the model's opinion alone. Bank-change wording below a quote marker (`From:`, `>`), which is what a forged thread looks like, gets a *double-check before paying* note unless the sender's own words say it was fake. Weaker signals — a reply-to on another domain, a lookalike of a known domain, a borrowed display name, pressure, a first email from an address — add up to that same note, which doesn't block anything. Trusted domains and senders count against the score: from them a bank-change request gets a caution rather than a block. Replies are filed by what the sender wrote, so a colleague's "it wasn't them, I blocked the sender" above a quoted scam is neither flagged nor filed as an invoice.
@@ -306,6 +323,7 @@ src/controller_inbox/
   file_summaries.py Overnight summaries of long attachments, checked against the file
   semantic.py    Search by meaning with a local embedding model
   ocr.py         Scanned pages and pictures to text (RapidOCR, else Tesseract)
+  vision.py      Scanned pages read again by a model that can see, compared with OCR figure by figure
   local_llm.py   LM Studio / Ollama client built for small models
   overnight.py   One pass: drop folder → model → digest (run, overnight, watch, dashboard)
   learn.py       Corrections that teach the classifier

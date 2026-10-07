@@ -12,6 +12,7 @@ from pathlib import Path
 
 from controller_inbox.actions import local_today
 from controller_inbox.clock import apply_saved_timezone
+from controller_inbox.vision import apply_saved_mode
 from controller_inbox.config import Settings, load_settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.fraud import _cell
@@ -112,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_settings()
     store = Store(settings.db_path)
     apply_saved_timezone(settings, store)
+    apply_saved_mode(settings, store)
 
     if args.cmd == "run":
         return _run(settings, store, args)
@@ -349,7 +351,8 @@ def _run(settings: Settings, store: Store, args) -> int:
         print(f"  {label}{suffix}: {note[:70]}", flush=True)
 
     try:
-        result = run_overnight(store, settings, limit=args.limit, on_progress=progress)
+        # Nobody should wait on minutes-long page reads for the dashboard to open.
+        result = run_overnight(store, settings, limit=args.limit, on_progress=progress, vision_minutes=0)
     except RunBusy as exc:
         print(exc)
     else:

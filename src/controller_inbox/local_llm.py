@@ -65,6 +65,8 @@ class ModelStatus:
     # LM Studio's model key for the loaded instance and the longest context it supports, for reloading it.
     key: str = ""
     max_context: int = 0
+    # The loaded model can look at pictures (a page of a scanned PDF), not only read text.
+    vision: bool = False
 
     @property
     def active(self) -> bool:
@@ -91,6 +93,7 @@ class ModelStatus:
             "base_url": self.base_url,
             "error": self.error,
             "context_length": self.context_length,
+            "vision": self.vision,
             "message": self.describe(),
         }
 
@@ -114,12 +117,13 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         ids = [str(item.get("id")) for item in listed if isinstance(item, dict) and item.get("id")]
         status.reachable = True
         status.models = ids
-        loaded, reasoning, contexts, reloadable = _lm_studio_models(settings, base, timeout)
+        loaded, reasoning, contexts, reloadable, seeing = _lm_studio_models(settings, base, timeout)
         status.loaded = loaded
         status.model = _pick_model(settings.llm_model, ids, loaded)
         status.reasoning = reasoning.get(status.model, [])
         status.context_length = contexts.get(status.model, 0)
         status.key, status.max_context = reloadable.get(status.model, ("", 0))
+        status.vision = status.model in seeing
         # llama.cpp reports the loaded context on the model itself (meta.n_ctx). LM Studio uses its own route.
         if not status.context_length:
             for item in listed:
@@ -127,6 +131,8 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
                     meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
                     status.context_length = _int(meta.get("n_ctx"))
                     break
+        if not loaded and status.model:
+            status.vision = _llama_cpp_sees(settings, base, timeout)
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         status.error = _short_error(exc)
     _status_cache[key] = (time.monotonic(), status)
@@ -135,8 +141,9 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
 
 def _lm_studio_models(
     settings: Settings, base: str, timeout: float
-) -> tuple[list[str], dict[str, list[str]], dict[str, int], dict[str, tuple[str, int]]]:
-    """Loaded models, their reasoning options, the context length each was loaded with, and each one's model key and longest context.
+) -> tuple[list[str], dict[str, list[str]], dict[str, int], dict[str, tuple[str, int]], set[str]]:
+    """Loaded models, their reasoning options, the context length each was loaded with, each one's model key
+    and longest context, and the loaded models that can look at pictures.
 
     With just-in-time loading on, ``/v1/models`` lists every downloaded model, so
     picking from it can make LM Studio load a second, bigger model. Other servers
@@ -155,6 +162,7 @@ def _lm_studio_models(
         reasoning: dict[str, list[str]] = {}
         contexts: dict[str, int] = {}
         reloadable: dict[str, tuple[str, int]] = {}
+        seeing: set[str] = set()
         if isinstance(data.get("models"), list):
             for item in data["models"]:
                 if not isinstance(item, dict) or item.get("type") not in {"llm", "vlm"}:
@@ -162,6 +170,7 @@ def _lm_studio_models(
                 caps = item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {}
                 allowed = caps.get("reasoning", {}).get("allowed_options") if isinstance(caps.get("reasoning"), dict) else None
                 options = [str(option) for option in allowed] if isinstance(allowed, list) else []
+                sees = caps.get("vision") is True or item.get("type") == "vlm"
                 if item.get("key"):
                     reasoning[str(item["key"])] = options
                 for instance in item.get("loaded_instances") or []:
@@ -171,14 +180,30 @@ def _lm_studio_models(
                         config = instance.get("config") if isinstance(instance.get("config"), dict) else {}
                         contexts[str(instance["id"])] = _int(config.get("context_length"))
                         reloadable[str(instance["id"])] = (str(item.get("key") or instance["id"]), _int(item.get("max_context_length")))
-            return loaded, reasoning, contexts, reloadable
+                        if sees:
+                            seeing.add(str(instance["id"]))
+            return loaded, reasoning, contexts, reloadable, seeing
         if isinstance(data.get("data"), list):
             for item in data["data"]:
                 if isinstance(item, dict) and item.get("id") and item.get("state") == "loaded" and item.get("type") in {"llm", "vlm"}:
                     loaded.append(str(item["id"]))
                     contexts[str(item["id"])] = _int(item.get("loaded_context_length") or item.get("max_context_length"))
-            return loaded, reasoning, contexts, reloadable
-    return [], {}, {}, {}
+                    if item.get("type") == "vlm":
+                        seeing.add(str(item["id"]))
+            return loaded, reasoning, contexts, reloadable, seeing
+    return [], {}, {}, {}, set()
+
+
+def _llama_cpp_sees(settings: Settings, base: str, timeout: float) -> bool:
+    """llama.cpp's server says on ``/props`` whether it was started with a vision projector (``--mmproj``)."""
+    root = base[: -len("/v1")] if base.endswith("/v1") else base
+    try:
+        response = httpx.get(root + "/props", headers=_headers(settings), timeout=timeout)
+        data = response.json() if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        return False
+    modalities = data.get("modalities") if isinstance(data, dict) else None
+    return isinstance(modalities, dict) and modalities.get("vision") is True
 
 
 def _int(value) -> int:
@@ -639,15 +664,19 @@ def complete_text(
     raise EmptyReply(reply.why_unusable())
 
 
-def stream_text(settings: Settings, messages: list[dict], *, max_tokens: int = 500):
+def stream_text(
+    settings: Settings, messages: list[dict], *, max_tokens: int = 500, wait: float | None = None, temperature: float | None = None
+):
     """Yield the answer as it is written. Servers that ignore ``stream`` send it in one piece.
 
-    Raises ``EmptyReply`` when the model wrote nothing, so callers never show a blank answer.
+    Raises ``EmptyReply`` when the model wrote nothing, so callers never show a blank answer. ``wait``: how long
+    the model may go quiet (looking at a picture first can take minutes on a laptop); ``temperature``: other than
+    the usual 0.2.
     """
     model, effort, budget = _chat_plan(settings, max_tokens)
     for _attempt in range(2):
         reply = Reply(content="")
-        for piece in _stream_once(settings, messages, budget, effort, reply):
+        for piece in _stream_once(settings, messages, budget, effort, reply, wait=wait, temperature=temperature):
             reply.content += piece
             yield piece
         if reply.content:
@@ -660,14 +689,24 @@ def stream_text(settings: Settings, messages: list[dict], *, max_tokens: int = 5
 
 
 def _stream_once(
-    settings: Settings, messages: list[dict], budget: int, effort: str | None, reply: Reply, *, rejected_effort: str = ""
+    settings: Settings,
+    messages: list[dict],
+    budget: int,
+    effort: str | None,
+    reply: Reply,
+    *,
+    rejected_effort: str = "",
+    wait: float | None = None,
+    temperature: float | None = None,
 ):
     """``rejected_effort`` names the model whose ``reasoning_effort`` the last try sent; it is
     remembered as refusing it only if this try, without it, is accepted."""
     url, payload = _chat_request(settings, messages, budget, stream=True)
     if effort:
         payload["reasoning_effort"] = effort
-    timeout = httpx.Timeout(settings.llm_timeout, connect=5.0)
+    if temperature is not None:
+        payload["temperature"] = temperature
+    timeout = httpx.Timeout(max(settings.llm_timeout, wait or 0.0), connect=5.0)
     with httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
         if effort and response.status_code in _RETRYABLE:
             rejected = True
@@ -682,7 +721,10 @@ def _stream_once(
             yield from _stream_pieces(response, reply)
     if rejected:
         # Only a refusal is remembered; a busy server (500) is just tried again without the effort.
-        yield from _stream_once(settings, messages, budget, None, reply, rejected_effort=str(payload.get("model")) if refused else "")
+        yield from _stream_once(
+            settings, messages, budget, None, reply,
+            rejected_effort=str(payload.get("model")) if refused else "", wait=wait, temperature=temperature,
+        )
 
 
 def _stream_pieces(response: httpx.Response, reply: Reply):

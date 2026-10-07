@@ -503,9 +503,9 @@ def _plain(number: Decimal) -> str:
 def _with_colon_labels(rows: list[Row]) -> None:
     """A bare row label with a colon in it ("Add: Deposits in transit | Operating: 86,412.50") reads as a
     cell named "Add". When the rows around it have bare labels and the same columns as the rest of it,
-    it is a row label too."""
+    it is a row label too, under the section it is in ("Current Assets > Less: Allowance for Doubtful Accounts")."""
     for index, row in enumerate(rows):
-        if row.group or row.refs and any(row.refs) or len(row.cells) < 3:
+        if row.refs and any(row.refs) or len(row.cells) < 3:
             continue
         label, value = row.cells[0]
         if len(label) > 25 or not value or tables.is_value(value):
@@ -513,7 +513,7 @@ def _with_colon_labels(rows: list[Row]) -> None:
         rest = [name for name, _value in row.cells[1:]]
         near = rows[max(0, index - 8) : index] + rows[index + 1 : index + 9]
         if any(other.group and other.page == row.page and [name for name, _value in other.cells] == rest for other in near):
-            row.group = f"{label}: {value}"
+            row.group = f"{row.group} > {label}: {value}" if row.group else f"{label}: {value}"
             row.cells = row.cells[1:]
             row.refs = row.refs[1:]
 

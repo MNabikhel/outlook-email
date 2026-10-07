@@ -403,4 +403,25 @@ def review(answer: str, *, material: list[str], files: list[tuple[str, str]]) ->
     """The answer with clear corrections made, and notes on figures that couldn't be found."""
     numbers = check_numbers(answer, Grounding(material + [body for _name, body in files]))
     cited = check_citations(numbers.text, files)
-    return Review(text=cited.text, checks=numbers.checks + cited.checks)
+    return Review(text=cited.text, checks=numbers.checks + cited.checks + _seen_once(cited.text, files))
+
+
+def _seen_once(answer: str, files: list[tuple[str, str]]) -> list[str]:
+    """A figure in the answer that, on a page read two ways, only the vision model read: it is right as often as
+    not, so the answer says to check it against the page."""
+    if not any("[Read two ways" in body for _name, body in files):
+        return []
+    from controller_inbox.vision import unconfirmed
+
+    doubtful = {}
+    for _name, body in files:
+        doubtful.update(unconfirmed(body))
+    checks, said = [], set()
+    for number in numbers_in(answer):
+        for value, other in doubtful.items():
+            if abs(abs(float(value)) - number.value) <= number.tolerance + 1e-9 and value not in said:
+                said.add(value)
+                where = f" ({other})" if other else ""
+                checks.append(f"{number.shown} was read from the page by the vision model only{where}: check it against the file.")
+                break
+    return checks

@@ -16,6 +16,9 @@ dependencies = [
   "pydantic-settings>=2.3,<3",
   "pypdf>=4.0,<7",
   "pdfminer.six>=20231228",
+  # Draws a PDF page as a picture for a model that can see (vision.py).
+  "pypdfium2>=4.30,<6",
+  "Pillow>=10,<13",
   "openpyxl>=3.1,<4",
   "python-docx>=1.1,<2",
   "python-pptx>=1.0,<2",

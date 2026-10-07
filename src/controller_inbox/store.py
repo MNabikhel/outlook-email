@@ -205,6 +205,22 @@ CREATE TABLE IF NOT EXISTS cost_codings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_cost_codings_status ON cost_codings(status);
+
+-- A page the vision model read, beside the reading CloseDesk had of it (OCR's, or the PDF's own text): both are
+-- kept, and the page is shown as whichever holds up best (see vision.py).
+CREATE TABLE IF NOT EXISTS page_readings (
+    attachment_id TEXT NOT NULL,
+    page INTEGER NOT NULL,
+    first TEXT NOT NULL,
+    model_text TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    seconds REAL NOT NULL DEFAULT 0,
+    comparison TEXT NOT NULL DEFAULT '{}',
+    -- The file the page was read from: a reading never shows on another file that took the same name.
+    sha256 TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (attachment_id, page)
+);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(category);
@@ -215,7 +231,7 @@ CREATE INDEX IF NOT EXISTS idx_att_hash ON attachments(sha256);
 
 
 # Setup choices kept in sync_state. Loading the sample mailbox keeps these; everything else there is mail bookkeeping.
-SETTING_KEYS = frozenset({"timezone", "profile", "min_context_tokens"})
+SETTING_KEYS = frozenset({"timezone", "profile", "min_context_tokens", "vision_mode"})
 
 BUSY_TIMEOUT_SECONDS = 30.0
 
@@ -278,6 +294,7 @@ class Store:
         with self.connect() as conn:
             removed = conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]
             conn.execute(f"DELETE FROM file_summaries WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
+            conn.execute(f"DELETE FROM page_readings WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
             conn.execute(f"DELETE FROM embeddings WHERE email_id IN ({mail})")
             conn.execute(f"DELETE FROM fraud_log WHERE email_id IN ({mail})")
             conn.execute(f"DELETE FROM findings WHERE email_id IN ({mail})")
@@ -432,7 +449,8 @@ class Store:
                 "SELECT * FROM action_items WHERE email_id = ? ORDER BY due_date IS NULL, due_date, priority",
                 (email_id,),
             ).fetchall()
-        return _email_from_rows(row, attachments, actions)
+            readings = _readings_for(conn, [item["id"] for item in attachments])
+        return _email_from_rows(row, attachments, actions, readings)
 
     def list_emails(
         self,
@@ -509,7 +527,8 @@ class Store:
                     "SELECT * FROM action_items WHERE email_id = ?",
                     (row["id"],),
                 ).fetchall()
-                email = _email_from_rows(row, attachments, actions)
+                readings = _readings_for(conn, [item["id"] for item in attachments]) if attachments else {}
+                email = _email_from_rows(row, attachments, actions, readings)
                 if flag and flag not in email.flags:
                     continue
                 out.append(email)
@@ -885,6 +904,7 @@ class Store:
             )
             conn.execute(f"DELETE FROM embeddings WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM fraud_log WHERE email_id IN ({sample})")
+            conn.execute(f"DELETE FROM page_readings WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({sample}))")
             conn.execute(f"DELETE FROM attachments WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM action_items WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM corrections WHERE email_id IN ({sample})")
@@ -915,6 +935,67 @@ class Store:
     def set_attachment_text(self, attachment_id: str, text: str) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE attachments SET extracted_text = ? WHERE id = ?", (_text(text), attachment_id))
+
+    # Pages the vision model read (vision.py) ------------------------------------------------------
+
+    def save_page_reading(
+        self,
+        attachment_id: str,
+        page: int,
+        *,
+        first: str,
+        model_text: str,
+        model: str,
+        seconds: float,
+        comparison: str,
+        sha256: str = "",
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO page_readings (attachment_id, page, first, model_text, model, seconds, comparison, sha256, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attachment_id, page) DO UPDATE SET
+                    first=excluded.first, model_text=excluded.model_text, model=excluded.model, seconds=excluded.seconds,
+                    comparison=excluded.comparison, sha256=excluded.sha256, created_at=excluded.created_at
+                """,
+                (attachment_id, page, _text(first), _text(model_text), model, float(seconds), comparison, sha256 or "", _now()),
+            )
+
+    def page_readings(self, attachment_id: str, sha256: str = "") -> dict[int, dict]:
+        """Page -> the stored reading (first, model_text, model, seconds, comparison, sha256, created_at), of the
+        file with this SHA-256 when one is given."""
+        with self.connect() as conn:
+            rows = _readings_for(conn, [attachment_id]).get(attachment_id, {})
+        return _same_file(rows, sha256)
+
+    def chat_readings(self, chat_id: str) -> dict[str, dict[int, dict]]:
+        """Attachment id -> page -> reading, for a conversation's files."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM page_readings WHERE attachment_id {_LIKE} ORDER BY page", (_like_escape(f"chat-{chat_id}:") + "%",)
+            ).fetchall()
+        out: dict[str, dict[int, dict]] = {}
+        for row in rows:
+            out.setdefault(row["attachment_id"], {})[int(row["page"])] = {key: row[key] for key in row.keys()}
+        return out
+
+    def delete_page_readings(self, attachment_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (attachment_id,))
+
+    def vision_seconds(self, model: str, *, limit: int = 12) -> list[float]:
+        """How long the latest pages took this model to read, newest first."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT seconds FROM page_readings WHERE model = ? AND seconds > 0 ORDER BY created_at DESC LIMIT ?",
+                (model, limit),
+            ).fetchall()
+        return [float(row["seconds"]) for row in rows]
+
+    def vision_pages_read(self) -> int:
+        with self.connect() as conn:
+            return conn.execute("SELECT COUNT(*) AS n FROM page_readings").fetchone()["n"]
 
     def get_state(self, key: str) -> str | None:
         with self.connect() as conn:
@@ -1096,6 +1177,7 @@ class Store:
         with self.connect() as conn:
             conn.execute("DELETE FROM chat_turns WHERE chat_id = ?", (chat_id,))
             conn.execute("DELETE FROM chat_files WHERE chat_id = ?", (chat_id,))
+            conn.execute(f"DELETE FROM page_readings WHERE attachment_id {_LIKE}", (_like_escape(f"chat-{chat_id}:") + "%",))
             conn.execute("DELETE FROM findings WHERE email_id = ?", (f"chat-{chat_id}",))
             conn.execute("DELETE FROM chats WHERE id = ?", (chat_id,))
 
@@ -1103,6 +1185,7 @@ class Store:
         """Adds a file to the conversation, replacing one with the same name."""
         with self.connect() as conn:
             conn.execute("DELETE FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, row["filename"]))
+            conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (f"chat-{chat_id}:{row['filename']}",))
             conn.execute(
                 "INSERT INTO chat_files(chat_id, filename, content_type, size_bytes, sha256, text, added_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (chat_id, row["filename"], row.get("content_type", ""), row.get("size_bytes", 0), row.get("sha256", ""), row.get("text", ""), _now()),
@@ -1117,6 +1200,7 @@ class Store:
     def remove_chat_file(self, chat_id: str, filename: str) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, filename))
+            conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (f"chat-{chat_id}:{filename}",))
 
     # File summaries written by the overnight run ------------------------------------------------
 
@@ -1384,11 +1468,42 @@ def _action_from_row(row: sqlite3.Row) -> ActionItem:
     )
 
 
+def _readings_for(conn: sqlite3.Connection, attachment_ids: list[str]) -> dict[str, dict[int, dict]]:
+    """Attachment id -> page -> its stored vision reading."""
+    if not attachment_ids:
+        return {}
+    marks = ", ".join("?" for _ in attachment_ids)
+    rows = conn.execute(f"SELECT * FROM page_readings WHERE attachment_id IN ({marks}) ORDER BY page", attachment_ids).fetchall()
+    out: dict[str, dict[int, dict]] = {}
+    for row in rows:
+        out.setdefault(row["attachment_id"], {})[int(row["page"])] = {key: row[key] for key in row.keys()}
+    return out
+
+
+def _same_file(readings: dict[int, dict], sha256: str) -> dict[int, dict]:
+    """The readings of the file with this SHA-256 (all of them when it isn't known)."""
+    if not sha256:
+        return readings
+    return {page: row for page, row in readings.items() if not row.get("sha256") or row["sha256"] == sha256}
+
+
+def shown_text(text: str, readings: dict[int, dict] | None, sha256: str = "") -> str:
+    """The attachment's text with the pages the vision model read shown as vision.py writes them."""
+    readings = _same_file(readings or {}, sha256)
+    if not readings:
+        return text
+    from controller_inbox import vision
+
+    return vision.shown_text(text, readings)
+
+
 def _email_from_rows(
     row: sqlite3.Row,
     attachment_rows: list[sqlite3.Row],
     action_rows: list[sqlite3.Row],
+    readings: dict[str, dict[int, dict]] | None = None,
 ) -> EmailRecord:
+    readings = readings or {}
     attachments = [
         AttachmentRecord(
             id=item["id"],
@@ -1397,7 +1512,7 @@ def _email_from_rows(
             content_type=item["content_type"],
             size_bytes=item["size_bytes"] or 0,
             sha256=item["sha256"],
-            extracted_text=item["extracted_text"] or "",
+            extracted_text=shown_text(item["extracted_text"] or "", readings.get(item["id"]), item["sha256"] or ""),
             document_type=DocumentType(item["document_type"]),
             document_confidence=item["document_confidence"] or 0,
             extracted_fields=ExtractedFields.from_dict(_loads(item["extracted_fields"], {})),

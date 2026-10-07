@@ -14,13 +14,14 @@ running, the same emails and the matching file passages come back as a list.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from controller_inbox import agent, answer_check, semantic, table_lookup
+from controller_inbox import agent, answer_check, chats, semantic, table_lookup, vision
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
@@ -40,6 +41,8 @@ from controller_inbox.local_llm import (
 from controller_inbox.models import DOCUMENT_LABELS, ActionStatus, DocumentType, EmailRecord
 from controller_inbox.reading import _ungrounded_amounts
 from controller_inbox.store import Store
+
+log = logging.getLogger(__name__)
 
 MAX_SOURCES = 6
 MAX_QUESTION = 1000
@@ -601,6 +604,9 @@ def answer_stream(
         return
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id, past=past)
     state = {"wrote": False, "text": ""}
+    offer = None
+    if current is not None and _should_read_files(ws, question, focus if about_today else None):
+        offer = yield from _vision_first(store, settings, ws, current, question)
     if (ready := agent.summary_request(ws, question)) is not None:
         att, summary = ready
         yield {"type": "step", "text": f"Used the summary of {att.filename} written during the overnight reading"}
@@ -637,7 +643,44 @@ def answer_stream(
     advice = agent.context_advice(context_length(settings), ws.left_out)
     if advice:
         yield {"type": "context", "text": advice}
+    if offer:
+        yield offer
     yield {"type": "done"}
+
+
+def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current: EmailRecord, question: str):
+    """Pages of the email's scans, pictures and doubtful tables the vision model hasn't read. In "auto", with this
+    computer's speed known and the pages quick to read, they are read before answering; otherwise the answer comes
+    from what was read before, and the event returned offers the read with the time it would take."""
+    if not vision.can_render() or not vision.available(settings):
+        return None
+    try:
+        files = vision.files_to_read(store, settings, current)
+    except Exception:  # a file that can't be opened leaves the answer as it was
+        log.warning("Couldn't check %s for pages to read with the vision model", current.id, exc_info=True)
+        return None
+    named = [item for item in files if item[1].filename.lower() in question.lower()]
+    files = named or files
+    if not files:
+        return None
+    pages = sum(len(todo) for *_rest, todo in files)
+    seconds = vision.estimate(store, settings, pages)
+    if settings.vision_mode == "auto" and seconds is not None and seconds <= vision.QUICK_SECONDS:
+        for _position, att, data, todo in files:
+            yield {"type": "step", "text": f"Reading {att.filename} with the vision model ({vision.duration(vision.estimate(store, settings, len(todo)) or 0)})"}
+            vision.read_pages(store, settings, current, att, data, todo)
+        fresh = chats.chat_mail(store, chats.chat_id_of(current.id)) if chats.chat_id_of(current.id) else store.get_email(current.id)
+        if fresh is not None:
+            ws.sources[:] = [fresh if email.id == current.id else email for email in ws.sources]
+        return None
+    position, att, _data, todo = files[0]
+    single = vision.estimate(store, settings, len(todo))
+    return {
+        "type": "vision", "email_id": current.id, "n": position, "file": att.filename, "pages": len(todo),
+        "estimate": round(single) if single is not None else None, "question": question,
+        "text": f"{att.filename} has {len(todo)} page{'s' if len(todo) != 1 else ''} the vision model could read too, "
+        f"beside {'OCR' if vision.looks_scanned(att) else 'the PDF text'}. {vision.offer_text(len(todo), single)}",
+    }
 
 
 def _should_read_files(ws: agent.Workspace, question: str, focus) -> bool:
