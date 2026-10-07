@@ -32,7 +32,7 @@ logging.getLogger("pypdf").setLevel(logging.ERROR)
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 # Raise when attachments read differently, so text stored by an older reader is read again.
-READER_VERSION = "17"
+READER_VERSION = "18"
 MAX_TEXT = 400_000
 MAX_PDF_PAGES = 300
 MAX_SHEETS = 40
@@ -81,28 +81,49 @@ def _cap(text: str) -> str:
 def pdf_text(data: bytes) -> str:
     from pypdf import PdfReader
 
-    reader = PdfReader(io.BytesIO(data))
-    if reader.is_encrypted:
+    failure: Exception | None = None
+    try:
+        reader = PdfReader(io.BytesIO(data))
+    except Exception as exc:
+        # pypdf gives up on small defects (no "%%EOF" at the end) that pdfminer reads past.
+        reader, failure = None, exc
+    if reader is not None and reader.is_encrypted:
         try:
             if not reader.decrypt(""):
                 return "[This PDF is password-protected, so CloseDesk can't read it.]"
         except Exception:
             return "[This PDF is password-protected, so CloseDesk can't read it.]"
+    miner = _Miner.open(data)
+    listed = None
+    if reader is not None:
+        try:
+            total = len(reader.pages)
+            listed = reader.pages[:MAX_PDF_PAGES]
+        except Exception as exc:
+            failure = exc
+    if listed is None:
+        # pypdf can't read the file: pdfminer's pages alone, when it can.
+        if miner is None or not miner.pages:
+            raise failure or ValueError("not a readable PDF")
+        total = len(miner.pages)
+        pairs = [(None, mined) for mined in miner.pages]
+    else:
+        pairs = [(page, miner.page_for(page, index) if miner else None) for index, page in enumerate(listed)]
+    if not total:
+        return "[This PDF has no pages.]"
     pages = []
     words = 0
     scanned = []
-    total = len(reader.pages)
-    layouts = _layouts(data)
     previous: list[pdf_layout.Table] = []
-    for number, page in enumerate(reader.pages[:MAX_PDF_PAGES], start=1):
-        layout = next(layouts, None)
+    for number, (page, mined) in enumerate(pairs, start=1):
+        layout = miner.layout(mined) if miner is not None and mined is not None else None
         text = ""
         if layout is not None:
             laid_out = pdf_layout.page_text(pdf_layout.glyphs_of(layout), previous, pdf_layout.rules_of(layout))
             text, previous = laid_out.text, laid_out.tables
-        if not text.strip():
+        if not text.strip() and page is not None:
             text = _pdf_page(page)
-        if not text.strip() and len(scanned) < MAX_OCR_PAGES:
+        if not text.strip() and page is not None and len(scanned) < MAX_OCR_PAGES:
             scanned.append(number)
             text = _ocr_page_images(page)
         words += len(text.split())
@@ -128,14 +149,84 @@ _OCR_HINT = ' [To read scanned pages, install the OCR add-on: pip install -e ".[
 MAX_OCR_PAGES = 40
 
 
-def _layouts(data: bytes):
-    """pdfminer's pages, with every character's position; nothing once pdfminer can't go on."""
-    try:
-        from pdfminer.high_level import extract_pages
+class _Miner:
+    """pdfminer's pages of a PDF, each read on request into its characters' positions.
 
-        yield from extract_pages(io.BytesIO(data), laparams=None, maxpages=MAX_PDF_PAGES)
-    except Exception:
-        return
+    pdfminer is asked for the characters only: its layout analysis (grouping them into text
+    boxes) takes many times longer, and ``pdf_layout`` does that work itself.
+
+    Pages are matched to pypdf's by object number, not by position. pdfminer's walk of the page
+    tree passes over a page whose dictionary lacks ``/Type /Page`` and visits a page listed twice
+    only once; matched by position, every page after it would get the wrong page's text.
+    """
+
+    def __init__(self, document, pages: list) -> None:
+        from pdfminer.converter import PDFPageAggregator
+        from pdfminer.pdfinterp import PDFPageInterpreter, PDFResourceManager
+
+        self.document = document
+        self.pages = pages
+        self.by_id = {page.pageid: page for page in pages}
+        manager = PDFResourceManager()
+        self.device = PDFPageAggregator(manager, laparams=None)
+        self.interpreter = PDFPageInterpreter(manager, self.device)
+
+    @classmethod
+    def open(cls, data: bytes) -> _Miner | None:
+        """None when pdfminer can't open the file at all."""
+        try:
+            from pdfminer.pdfdocument import PDFDocument
+            from pdfminer.pdfpage import PDFPage
+            from pdfminer.pdfparser import PDFParser
+
+            document = PDFDocument(PDFParser(io.BytesIO(data)))
+        except Exception:
+            return None
+        pages: list = []
+        try:
+            for page in PDFPage.create_pages(document):
+                pages.append(page)
+                if len(pages) >= MAX_PDF_PAGES:
+                    break
+        except Exception:
+            pass
+        return cls(document, pages)
+
+    def page_for(self, page, index: int):
+        """pdfminer's page for one of pypdf's (the same object), built from the page's own dictionary
+        when pdfminer's walk passed it over; by position when pypdf has no object number for it."""
+        objid = getattr(getattr(page, "indirect_reference", None), "idnum", None)
+        if objid is None:
+            return self.pages[index] if index < len(self.pages) else None
+        if objid not in self.by_id:
+            self.by_id[objid] = self._build(objid)
+        return self.by_id[objid]
+
+    def _build(self, objid: int):
+        from pdfminer.pdfpage import PDFPage
+        from pdfminer.pdftypes import dict_value, resolve1
+
+        try:
+            attrs = dict(dict_value(self.document.getobj(objid)))
+            parent, steps = attrs.get("Parent"), 0
+            # The fonts and the page size can be set on the page tree above the page.
+            while parent is not None and steps < 32:
+                node = dict_value(resolve1(parent))
+                for key in PDFPage.INHERITABLE_ATTRS:
+                    if key not in attrs and key in node:
+                        attrs[key] = node[key]
+                parent, steps = node.get("Parent"), steps + 1
+            return PDFPage(self.document, objid, attrs)
+        except Exception:
+            return None
+
+    def layout(self, page):
+        """The page's characters and drawn lines (pdfminer's ``LTPage``), or None when it can't be read."""
+        try:
+            self.interpreter.process_page(page)
+            return self.device.get_result()
+        except Exception:
+            return None
 
 
 def _pdf_page(page) -> str:

@@ -112,11 +112,15 @@ def glyphs_of(layout) -> list[Glyph]:
     A name turned on its side (a schedule's column headings) is not upright. Those letters
     are gathered into the word and set down at the foot of the column, on one line with the
     other names, so the row is readable instead of dropped.
+
+    A page whose text mostly runs up (or down) the page is a sheet printed sideways without the
+    page saying so: it is read turned upright (see ``_page_turn``).
     """
     from pdfminer.layout import LTChar
 
     out: list[Glyph] = []
     turned: list[_Turned] = []
+    turn = _page_turn(layout)
 
     def walk(item) -> None:
         if isinstance(item, LTChar):
@@ -124,11 +128,16 @@ def glyphs_of(layout) -> list[Glyph]:
             if text and item.x1 > item.x0 and item.y1 > item.y0:
                 font = (item.fontname or "").lower()
                 bold = any(mark in font for mark in ("bold", "black", "heavy", "semibold", "demi"))
-                if item.upright:
-                    out.append(Glyph(text, item.x0, item.x1, (item.y0 + item.y1) / 2, max(item.size, 1.0), bold))
+                if not turn:
+                    x0, x1, y0, y1, upright, upward, size = item.x0, item.x1, item.y0, item.y1, item.upright, item.matrix[1] > 0, item.size
                 else:
-                    upward = item.matrix[1] > 0
-                    turned.append(_Turned(text, item.x0, item.x1, item.y0, item.y1, max(item.size, 1.0), bold, upward))
+                    x0, y0, x1, y1 = _turn_box(layout, turn, item.x0, item.y0, item.x1, item.y1)
+                    a, b, c, d = _turn_matrix(turn, *item.matrix[:4])
+                    upright, upward, size = a * d > 0 and b * c <= 0, b > 0, y1 - y0 if a * d > 0 and b * c <= 0 else x1 - x0
+                if upright:
+                    out.append(Glyph(text, x0, x1, (y0 + y1) / 2, max(size, 1.0), bold))
+                else:
+                    turned.append(_Turned(text, x0, x1, y0, y1, max(size, 1.0), bold, upward))
             return
         try:
             children = list(item)
@@ -140,6 +149,52 @@ def glyphs_of(layout) -> list[Glyph]:
     walk(layout)
     out.extend(_turned_words(turned))
     return out
+
+
+def _page_turn(layout) -> int:
+    """Which way a page printed sideways must be turned to read it: 0 for a page that reads upright, 90 when most
+    of its letters run up the page (it is turned a quarter clockwise), -90 when they run down it.
+
+    Many report writers print a wide sheet sideways on a portrait page instead of marking the page as turned,
+    and read as drawn, its columns would come out as rows.
+    """
+    from pdfminer.layout import LTChar
+
+    counts = {0: 0, 90: 0, -90: 0}
+
+    def walk(item) -> None:
+        if isinstance(item, LTChar):
+            if item.get_text().strip():
+                a, b, c, d = item.matrix[:4]
+                counts[0 if a * d > 0 and b * c <= 0 else 90 if b > 0 else -90] += 1
+            return
+        try:
+            children = list(item)
+        except TypeError:
+            return
+        for child in children:
+            walk(child)
+
+    walk(layout)
+    total = sum(counts.values())
+    turn = max((90, -90), key=lambda way: counts[way])
+    return turn if total and counts[turn] > 0.6 * total else 0
+
+
+def _turn_box(layout, turn: int, x0: float, y0: float, x1: float, y1: float) -> tuple[float, float, float, float]:
+    """A box on the page as it reads once the page is turned upright: (x0, y0, x1, y1)."""
+    left, bottom, right, top = layout.bbox
+    if turn == 90:
+        # Text running up the page: its lines are stacked from left (first) to right.
+        return y0 - bottom, right - x1, y1 - bottom, right - x0
+    return top - y1, x0 - left, top - y0, x1 - left
+
+
+def _turn_matrix(turn: int, a: float, b: float, c: float, d: float) -> tuple[float, float, float, float]:
+    """A character's text matrix once the page is turned upright."""
+    if turn == 90:
+        return b, -a, d, -c
+    return -b, a, -d, c
 
 
 @dataclass
@@ -288,16 +343,19 @@ class Rule:
 
 
 def rules_of(layout) -> list[Rule]:
-    """The vertical borders drawn on a pdfminer page: thin lines and rectangles running down it."""
+    """The vertical borders drawn on a pdfminer page: thin lines and rectangles running down it
+    (down the page as it reads, for a page printed sideways; see ``_page_turn``)."""
     from pdfminer.layout import LTCurve
 
     found: list[Rule] = []
+    turn = _page_turn(layout)
 
     def walk(item) -> None:
         if isinstance(item, LTCurve):
-            width, height = item.x1 - item.x0, item.y1 - item.y0
+            x0, y0, x1, y1 = _turn_box(layout, turn, item.x0, item.y0, item.x1, item.y1) if turn else item.bbox
+            width, height = x1 - x0, y1 - y0
             if width <= 2.0 and height >= 4.0:
-                found.append(Rule((item.x0 + item.x1) / 2, item.y0, item.y1))
+                found.append(Rule((x0 + x1) / 2, y0, y1))
             return
         try:
             children = list(item)
@@ -399,7 +457,10 @@ def _dedupe(glyphs: list[Glyph]) -> list[Glyph]:
     """Drop the second copy of text drawn twice a hair apart (a common way to fake bold)."""
     out: list[Glyph] = []
     for glyph in glyphs:
-        if any(other.text == glyph.text and abs(other.x0 - glyph.x0) < 0.2 * glyph.size for other in out[-3:]):
+        # The copy sits over most of the first one. The same letter twice in a word ("ll" in a condensed
+        # font) starts a whole letter further on, which can be less than a fifth of the type size.
+        near = min(0.2 * glyph.size, 0.5 * (glyph.x1 - glyph.x0))
+        if any(other.text == glyph.text and abs(other.x0 - glyph.x0) < near for other in out[-3:]):
             continue
         out.append(glyph)
     return out
@@ -1489,7 +1550,7 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
 
     body_lines = _grouped_lines(grid, row_x, bolds, render, group_cols, cell_x, sizes) if labels else [render(row) for row in grid]
     first_label = (labels[0] if labels else "") or ""
-    carried = _carried_over(mids, header_mid if labels else None, previous or [], first_label)
+    carried = None if _names_own_rows(grid) else _carried_over(mids, header_mid if labels else None, previous or [], first_label)
     if carried and labels:
         prior, names = carried
         lines = [f"[These columns continue the table on the page before; each row starts with its {prior.row_label}.]"]
@@ -1883,6 +1944,13 @@ def _join_wrapped(
             del sequence[k]
         k = max(first, k - 1)
     return rows, row_mids
+
+
+def _names_own_rows(grid: list[list[str]]) -> bool:
+    """The first column names every row, each differently, in words: the table has its own row names, so it
+    is not the other columns of the table on the page before (a second table printed in the same place)."""
+    names = [row[0].strip() for row in grid if row and any(cell.strip() for cell in row)]
+    return len(names) >= 2 and all(names) and len(set(names)) == len(names) and not any(map(tables.is_value, names))
 
 
 def _carried_over(
