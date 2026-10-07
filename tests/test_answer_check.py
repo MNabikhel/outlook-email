@@ -137,3 +137,10 @@ def test_a_page_range_is_not_corrected_to_one_page():
     )
     answer = "The schedule runs from payment 23 to payment 24 on pages 1-2 of Loan.pdf, ending at 1,571,781.00."
     assert review(answer, material=[], files=[("Loan.pdf", loan)]).text == answer
+
+
+def test_a_dash_between_a_name_and_its_amount_is_not_a_minus_sign():
+    answer = "Open invoices:\n- Harbor Steel LLC - $48,500.00\n- Acme Industrial Supply - $24,310.50\n- Orion Software - $18,600.00\n\nTotal: $91,410.50"
+    material = ["Harbor Steel LLC $48,500.00", "Acme Industrial Supply $24,310.50", "Orion Software $18,600.00"]
+    result = review(answer, material=material, files=[])
+    assert (result.text, result.checks) == (answer, [])

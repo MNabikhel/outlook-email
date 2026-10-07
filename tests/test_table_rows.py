@@ -121,3 +121,87 @@ def test_a_balance_sheet_reads_as_one_table_whose_totals_add_up():
     ]
     verdict = verify(table)
     assert verdict.mismatched == [] and verdict.matched == 10, "liabilities and equity add up as total liabilities plus equity"
+
+
+def _table(lines: list[str]):
+    [table] = tables_in("[page 1]\n[table]\n" + "\n".join(lines) + "\n")
+    return table
+
+
+def test_a_misread_figure_is_caught_by_its_total_instead_of_hiding_it():
+    from controller_inbox.table_lookup import verify
+
+    checks = [
+        "Payee: Tidewater Metals | Check #: 20418 | Amount: 32,300.00",  # 52,300.00 misread
+        "Payee: Summit Ridge Electric | Check #: 20425 | Amount: 18,744.65",
+        "Payee: Total outstanding checks | Check #: not listed | Amount: 71,044.65",
+    ]
+    table = _table(["Payee | Check # | Amount", *checks])
+    assert [row.total for row in table.rows] == [False, False, True], "the total stays a total"
+    assert verify(table).mismatched == ["Total outstanding checks (Amount): printed 71,044.65, the rows above add to 51,044.65"]
+    # One subtotal off doesn't turn the right ones after it into rows.
+    assets = [
+        "Category: Buildings | Asset: B-100 Warehouse | Cost: 2,450,000.00",
+        "Category: Buildings | Asset: B-101 Roof | Cost: 186,000.00",
+        "Category: Buildings | Asset: Total Buildings | Cost: 2,636,500.00",
+        "Category: Vehicles | Asset: V-301 Van | Cost: 52,400.00",
+        "Category: Vehicles | Asset: V-302 Pickup | Cost: 48,950.00",
+        "Category: Vehicles | Asset: Total Vehicles | Cost: 101,350.00",
+    ]
+    table = _table(["Category | Asset | Cost", *assets])
+    assert [row.name for row in table.rows if row.total] == ["Total Buildings", "Total Vehicles"]
+    assert Tables([("FA.pdf", "[page 1]\n[table]\nCategory | Asset | Cost\n" + "\n".join(assets))]).run("SELECT SUM(cost) FROM t1")[1] == [(2737350.0,)]
+
+
+def test_a_row_with_a_date_is_never_taken_for_a_total():
+    deposits = [f"Date: 10/{day}/2026 | Amount: {amount}" for day, amount in (("01", "2,500.00"), ("08", "2,500.00"), ("15", "5,000.00"), ("22", "1,200.00"))]
+    table = _table(["Date | Amount", *deposits])
+    assert not any(row.total for row in table.rows), "5,000 after 2,500 and 2,500 is a deposit"
+
+
+def test_a_section_total_under_a_worked_out_line_and_a_running_balance_add_up():
+    from controller_inbox.table_lookup import verify
+
+    cash = _table([
+        "Item | Wk 1 | Wk 2",
+        "Item: Customer collections | Wk 1: 377,897 | Wk 2: 386,220",
+        "Item: Total Operating Receipts | Wk 1: 377,897 | Wk 2: 386,220",
+        "Item: Payroll and benefits | Wk 1: (274,275) | Wk 2: (264,495)",
+        "Item: Total Operating Disbursements | Wk 1: (274,275) | Wk 2: (264,495)",
+        "Item: Net Operating Cash Flow | Wk 1: 103,622 | Wk 2: 121,725",
+        "Item: Revolver draw (repayment) | Wk 1: - | Wk 2: 150,000",
+        "Item: Interest paid | Wk 1: (9,842) | Wk 2: -",
+        "Item: Total Financing | Wk 1: (9,842) | Wk 2: 150,000",
+    ])
+    assert [row.name for row in cash.rows if row.total][-1] == "Total Financing"
+    assert verify(cash).mismatched == []
+    ledger = _table([
+        "Date | Name | Debit | Credit | Balance",
+        "Date: 10/07/2026 | Name: Old Dominion | Debit: 4,567.06 | Credit: not listed | Balance: 4,567.06",
+        "Date: 10/14/2026 | Name: Estes Express | Debit: 1,555.89 | Credit: not listed | Balance: 6,122.95",
+        "Date: 10/31/2026 | Name: FedEx Freight | Debit: not listed | Credit: 122.95 | Balance: 6,000.00",
+        "Date: Total 6600 Freight Out | Name: not listed | Debit: 6,122.95 | Credit: 122.95 | Balance: 6,000.00",
+    ])
+    assert verify(ledger).mismatched == [], "a balance column's total is its last balance"
+
+
+def test_a_small_misread_in_a_long_table_still_shows():
+    from controller_inbox.table_lookup import verify
+
+    lines = ["Department | Account | Budget"]
+    for group, name in enumerate(("Finance", "Sales", "IT")):
+        values = [1000 + 37 * i + 101 * group for i in range(20)]
+        lines += [f"Department: {name} | Account: {name[:3]}-{6000 + i} | Budget: {value:,}" for i, value in enumerate(values)]
+        lines.append(f"Department: {name} | Account: Total {name} | Budget: {sum(values):,}")
+    assert verify(_table(lines)).mismatched == []
+    misread = [line.replace("Budget: 1,202", "Budget: 1,242") if "IT-6000" in line else line for line in lines]
+    assert verify(_table(misread)).mismatched == ["Total IT (Budget): printed 31,070, the rows above add to 31,110"]
+
+
+def test_a_long_table_reads_quickly():
+    import time
+
+    rows = [f"Date: 10/{i % 28 + 1:02d}/2026 | Name: Vendor {i} | Debit: {(i * 37) % 9000 + 100:,}.00 | Balance: {i * 31 % 99999:,}.00" for i in range(3000)]
+    started = time.monotonic()
+    tables_in("[page 1]\n[table]\nDate | Name | Debit | Balance\n" + "\n".join(rows))
+    assert time.monotonic() - started < 2.0
