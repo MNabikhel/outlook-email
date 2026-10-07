@@ -333,3 +333,24 @@ def test_correcting_to_newsletter_is_still_low(loaded, settings):
     record_correction(loaded, settings, email_id="demo-question", corrected_category="newsletter", reason="Bulk mail")
     after = loaded.get_email("demo-question")
     assert after.importance.value == "low" and after.importance_score <= 15
+
+
+# 14. A code kept as a number in the workbook is found on the invoice, not also reported as unlisted.
+def test_loose_code_found_on_invoice_is_not_also_unlisted(settings):
+    from openpyxl import Workbook
+
+    from controller_inbox import cost_codes
+    from test_cost_codes import _invoice
+
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["Description", "Cost Code"])
+    sheet.append(["Freight and delivery", "1100.6420"])
+    sheet.append(["Rent", 1100.611])  # typed into a number cell: Excel kept 1100.611
+    path = cost_codes.workbook_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    book.save(path)
+    codebook = cost_codes.load(settings)
+    email = _invoice("rent", text="October rent\nCoding 1100.6110\nOld code 1100.6990")
+    assert [found["code"] for found in cost_codes.codes_on(email, codebook)] == ["1100.611"]
+    assert cost_codes.unlisted_codes(email, codebook) == ["1100.6990"]
