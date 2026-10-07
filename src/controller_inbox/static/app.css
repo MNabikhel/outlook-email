@@ -196,6 +196,8 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .job span { color: var(--muted); }
 .job.running { border-color: var(--navy); }
 .job.running progress { width: 220px; }
+.job-stop { margin: 0; }
+.job-stop button { white-space: nowrap; }
 .job.done { border-left: 4px solid var(--green); display: block; }
 .job.error { border-left: 4px solid var(--danger); display: block; }
 .model-line { padding: 8px 10px; border-left: 3px solid var(--line); background: #f8f5ee; }

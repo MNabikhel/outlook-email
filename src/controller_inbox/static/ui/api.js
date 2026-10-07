@@ -17,7 +17,9 @@ async function handle(response) {
     data = null;
   }
   if (!response.ok) {
-    const detail = data && typeof data.detail === "string" ? data.detail : `the server said ${response.status}`;
+    // FastAPI's errors carry "detail"; CloseDesk's own refusals (a vision read while busy) carry "message".
+    const said = data && (typeof data.detail === "string" ? data.detail : typeof data.message === "string" ? data.message : "");
+    const detail = said || `the server said ${response.status}`;
     throw new ApiError(detail, response.status);
   }
   return data;

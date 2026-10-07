@@ -31,6 +31,7 @@ const S = {
   listToken: 0,
   emailToken: 0,
   poll: 0,
+  jobSeq: 0, // bumped when this page starts a job, so a status fetched before that doesn't undo it
 };
 
 /* ---------- Addresses ---------- */
@@ -169,10 +170,24 @@ function renderTop() {
           { class: "job" },
           h("span", { class: "spin", "aria-hidden": "true" }),
           h("span", null, h("b", null, job.stage_label || "Working"), job.total > 1 ? ` · ${job.done} of ${job.total}` : "", job.note ? h("span", { class: "muted" }, ` · ${job.note}`) : null),
-          h("span", { class: "job-bar" }, h("span", { style: { width: job.total ? `${Math.round((100 * job.done) / job.total)}%` : "30%" }, class: job.total ? "" : "indeterminate" }))
+          h("span", { class: "job-bar" }, h("span", { style: { width: job.total ? `${Math.round((100 * job.done) / job.total)}%` : "30%" }, class: job.total ? "" : "indeterminate" })),
+          job.stage === "vision" && job.about && !job.stopping
+            ? h("button", { type: "button", class: "btn btn-sm btn-quiet", title: "Stop reading pages with the vision model after the page being read now", onclick: stopJob }, "Stop")
+            : null
         )
       : null
   );
+}
+
+async function stopJob(event) {
+  event.currentTarget.disabled = true;
+  try {
+    await postJSON("/api/process/stop");
+    toast("Stopping after the page being read now.");
+    if (S.meta) S.meta.job = { ...S.meta.job, stopping: true };
+  } catch (error) {
+    toast(error.message, { tone: "error" });
+  }
 }
 
 /* ---------- Theme ---------- */
@@ -518,6 +533,7 @@ const ctx = {
   reload: () => reloadEmail(),
   categories: () => (S.meta ? S.meta.categories : []),
   visionRead,
+  visionReading,
 };
 
 /* Reading a file's pages with the vision model: started from the file view or from an answer's offer, it runs as
@@ -527,8 +543,13 @@ async function visionRead(emailId, n, again = false) {
     const result = await postJSON(`/api/mail/${enc(emailId)}/files/${Number(n)}/vision${again ? "?again=1" : ""}`);
     if (result.started) {
       toast(result.message, { ms: 8000 });
+      S.jobSeq += 1;
       if (S.meta) {
-        S.meta.job = { state: "running", stage: "vision", stage_label: "Reading pages with the vision model", done: 0, total: result.pages.length, note: "" };
+        S.meta.job = {
+          ...S.meta.job,
+          state: "running", stage: "vision", stage_label: "Reading scans with the vision model", done: 0, total: result.pages.length, note: "",
+          about: { kind: "vision", email_id: emailId, n: Number(n) }, stopping: false,
+        };
         renderTop();
       }
       clearTimeout(S.poll);
@@ -539,6 +560,12 @@ async function visionRead(emailId, n, again = false) {
     toast(error.message, { tone: "error", ms: 9000 });
     return null;
   }
+}
+
+/* Whether the vision model is reading this file now (the file view's button waits for it). */
+function visionReading(emailId, n) {
+  const job = S.meta && S.meta.job;
+  return Boolean(job && job.state === "running" && job.about && job.about.email_id === emailId && Number(job.about.n) === Number(n));
 }
 
 function visionDone(result) {
@@ -552,11 +579,12 @@ function visionDone(result) {
   window.dispatchEvent(new CustomEvent("closedesk:vision", { detail: result }));
   // A file added to a conversation has no page here: it opens on its classic page.
   const fromChat = String(result.email_id).startsWith("chat-");
+  const show = result.pages && !here;
   toast(result.message, {
     tone: result.pages ? "ok" : "error",
     ms: 10000,
-    action: here ? "" : "See the file",
-    onAction: here ? null : () => (fromChat ? window.open(result.href, "_blank", "noopener") : navigate(fileUrl(result.email_id, result.n, "text"))),
+    action: show ? "See the file" : "",
+    onAction: show ? () => (fromChat ? window.open(result.href, "_blank", "noopener") : navigate(fileUrl(result.email_id, result.n, "text"))) : null,
   });
 }
 
@@ -857,15 +885,17 @@ function doneSelected() {
 
 async function poll() {
   clearTimeout(S.poll);
+  const seq = S.jobSeq;
   try {
     const meta = await getJSON("/api/state");
+    if (seq !== S.jobSeq) throw new Error("a job started while this was on its way: ask again");
     const before = S.meta;
     S.meta = meta;
     renderTop();
     updateRail(navId());
     chat.setModel(meta.model);
     $("#chat-btn").classList.toggle("live", meta.model.active);
-    if (before && before.job.state === "running" && meta.job.state !== "running") finished(meta.job);
+    if (before && meta.job.state !== "running" && meta.job.finished_at && meta.job.finished_at !== before.job.finished_at) finished(meta.job);
     if (before && before.version !== meta.version) refreshData();
   } catch (error) {
     /* offline for a moment: try again later */
@@ -881,6 +911,9 @@ function refreshData() {
 }
 
 function finished(job) {
+  if (job.state === "error" && job.about && job.about.kind === "vision") {
+    return visionDone({ ...job.about, pages: 0, message: `The read stopped: ${job.error}` });
+  }
   if (job.state === "error") return toast(`Processing stopped: ${job.error}`, { tone: "error", ms: 9000 });
   const result = job.result || {};
   if (result.kind === "index") return toast(`Indexed for search: ${result.indexed} emails and file sections.`, { tone: "ok" });
@@ -892,8 +925,16 @@ function finished(job) {
 async function processMail() {
   try {
     const result = await postJSON("/api/process");
-    toast(result.started ? "Processing new mail. The lists update as it goes." : "Already processing.");
-    if (S.meta) {
+    const reading = !result.started && result.job && result.job.stage === "vision";
+    toast(
+      result.started
+        ? "Processing new mail. The lists update as it goes."
+        : reading
+          ? "The vision model is reading pages of a scan. Stop it from the bar at the top, or try again when it's done."
+          : "Already processing."
+    );
+    if (S.meta && result.started) {
+      S.jobSeq += 1;
       S.meta.job = { ...result.job, stage_label: "Starting" };
       renderTop();
     }

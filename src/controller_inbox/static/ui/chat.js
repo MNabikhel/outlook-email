@@ -115,11 +115,13 @@ export function createChat({ root, onToggle, visionRead }) {
     const vision = turn.vision;
     if (!vision || turn.pending) return null;
     if (vision.state === "done") {
+      // A file added to the conversation is read with the conversation; an email's file, about that email.
+      const about = String(vision.email_id || "").startsWith("chat-") ? undefined : vision.email_id;
       return h(
         "div",
         { class: "msg-vision" },
         h("p", null, vision.message),
-        h("button", { type: "button", class: "btn btn-sm", onclick: () => ask(vision.question, vision.email_id) }, icon("refresh", 14), h("span", null, "Ask again"))
+        h("button", { type: "button", class: "btn btn-sm", onclick: () => ask(vision.question, about) }, icon("refresh", 14), h("span", null, "Ask again"))
       );
     }
     if (vision.state === "reading") return h("div", { class: "msg-vision" }, h("p", { class: "muted" }, vision.message));
@@ -129,10 +131,10 @@ export function createChat({ root, onToggle, visionRead }) {
       if (result && result.started) {
         vision.state = "reading";
         vision.message = `Reading ${plural(result.pages.length, "page")} of ${vision.file} with the vision model. Ask again when it's done.`;
-      } else if (result) {
-        vision.message = result.message;
+      } else {
+        vision.message = result ? result.message : "It didn't start. Try again in a moment.";
       }
-      renderLog();
+      repaint(turn);
     };
     return h(
       "div",
@@ -143,19 +145,26 @@ export function createChat({ root, onToggle, visionRead }) {
     );
   }
 
+  // A read finished (or stopped, or failed): the offers for that file say so. Nothing read: offer it again.
   window.addEventListener("closedesk:vision", (event) => {
     const done = event.detail || {};
-    let changed = false;
     for (const turn of turns) {
       const vision = turn.vision;
-      if (vision && vision.state !== "done" && vision.email_id === done.email_id && vision.n === done.n) {
-        vision.state = "done";
+      if (vision && vision.state !== "done" && vision.email_id === done.email_id && Number(vision.n) === Number(done.n)) {
+        vision.state = done.pages ? "done" : "offered";
         vision.message = done.message;
-        changed = true;
+        repaint(turn);
       }
     }
-    if (changed) renderLog();
   });
+
+  // Each turn's element, so one turn can be redrawn without rebuilding the log under an answer still streaming.
+  const elements = new WeakMap();
+
+  function repaint(turn) {
+    const el = elements.get(turn);
+    if (el && el.isConnected) turnEl(turn, el);
+  }
 
   function turnEl(turn, el) {
     el = el || h("div");
@@ -221,7 +230,14 @@ export function createChat({ root, onToggle, visionRead }) {
       );
       return;
     }
-    replace(log, turns.map((turn) => turnEl(turn)));
+    replace(
+      log,
+      turns.map((turn) => {
+        const el = turnEl(turn);
+        elements.set(turn, el);
+        return el;
+      })
+    );
     log.scrollTop = log.scrollHeight;
   }
 
@@ -332,6 +348,7 @@ export function createChat({ root, onToggle, visionRead }) {
     turns.push(answer);
     renderLog();
     const bubble = log.lastElementChild;
+    elements.set(answer, bubble);
     let frame = 0;
     const paint = () => {
       if (frame) return;

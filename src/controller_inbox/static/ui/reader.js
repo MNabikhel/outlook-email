@@ -559,7 +559,7 @@ function highlight(text, words) {
 function marked(text, marks) {
   const wanted = [...new Set(marks || [])].filter(Boolean).sort((a, b) => b.length - a.length);
   if (!wanted.length) return [text];
-  const pattern = new RegExp(`(?<![\\w.,])(${wanted.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\w])`, "g");
+  const pattern = new RegExp(`(?<![\\w.,])(${wanted.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\w]|[.,]\\d)`, "g");
   return text.split(pattern).map((piece, i) => (i % 2 ? h("mark", null, piece) : piece));
 }
 
@@ -596,7 +596,9 @@ function visionBox(data, ctx) {
     if (!result || !result.started) button.disabled = false;
   };
   let body;
-  if (offer.available && offer.pages.length) {
+  if (ctx.visionReading(email.id, file.n)) {
+    body = [h("p", null, "The vision model is reading this file now. Its reading shows here when it's done; the bar at the top can stop it.")];
+  } else if (offer.available && offer.pages.length) {
     const which = `${offer.pages.length === 1 ? "page" : "pages"} ${offer.pages.join(", ")}`;
     body = [
       h("p", null, `${offer.text} The model looks at ${which} itself, and its reading is compared with the first one figure by figure.`),

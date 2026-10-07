@@ -603,7 +603,7 @@
     const href = `/inbox/${encodeURIComponent(offer.email_id)}/files/${Number(offer.n)}/vision`;
     return (
       `<div class="vision-offer"><p>${escapeHtml(offer.text || "")}</p>` +
-      `<button type="button" class="ghost" data-action="vision-read" data-href="${escapeHtml(href)}" data-question="${escapeHtml(offer.question || "")}">Read with the vision model</button>` +
+      `<button type="button" class="ghost" data-action="vision-read" data-href="${escapeHtml(href)}" data-question="${escapeHtml(offer.question || "")}" data-email="${escapeHtml(offer.email_id || "")}">Read with the vision model</button>` +
       `<span class="vision-status" data-vision-status aria-live="polite"></span></div>`
     );
   }
@@ -638,13 +638,21 @@
           button.disabled = false;
           return;
         }
-        if (box.hasAttribute("data-reload")) return location.reload();
+        const read = job.result && job.result.kind === "vision" ? job.result.pages : 0;
         say((job.result && job.result.message) || "Done.");
+        if (!read) {
+          // Nothing was read (every page failed, or it was stopped first): say why and offer the read again.
+          button.disabled = false;
+          return;
+        }
+        if (box.hasAttribute("data-reload")) return location.reload();
         if (button.dataset.question) {
           const again = document.createElement("button");
           again.type = "button";
           again.className = "ghost";
           again.dataset.ask = button.dataset.question;
+          // A file added to the conversation is read with the conversation; an email's file, about that email.
+          if (button.dataset.email && !button.dataset.email.startsWith("chat-")) again.dataset.askEmail = button.dataset.email;
           again.textContent = "Ask again";
           box.append(again);
         }
@@ -1005,7 +1013,7 @@
     }
 
     const suggestion = target.closest("[data-ask]");
-    if (suggestion) return ask(suggestion.dataset.ask);
+    if (suggestion) return ask(suggestion.dataset.ask, suggestion.dataset.askEmail);
 
     if (target === backdrop) return closePreview();
 
