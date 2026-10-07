@@ -894,11 +894,16 @@ class Store:
         with self.connect() as conn:
             conn.execute("UPDATE emails SET source_path = ? WHERE id = ?", (path, email_id))
 
-    def attachment_files(self) -> list[tuple[str, str, str, str]]:
-        """Every attachment's id, email id, file name and stored text."""
+    def attachment_files(self) -> list[tuple[str, str, str, str, str]]:
+        """Every attachment's id, email id, file name, SHA-256 and stored text, one email's files together."""
         with self.connect() as conn:
-            rows = conn.execute("SELECT id, email_id, filename, extracted_text FROM attachments").fetchall()
-        return [(row["id"], row["email_id"], row["filename"] or "", row["extracted_text"] or "") for row in rows]
+            rows = conn.execute(
+                "SELECT id, email_id, filename, sha256, extracted_text FROM attachments ORDER BY email_id"
+            ).fetchall()
+        return [
+            (row["id"], row["email_id"], row["filename"] or "", row["sha256"] or "", row["extracted_text"] or "")
+            for row in rows
+        ]
 
     def set_attachment_text(self, attachment_id: str, text: str) -> None:
         with self.connect() as conn:

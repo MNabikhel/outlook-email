@@ -632,26 +632,55 @@ def reread_attachments(store: Store, settings: Settings, *, on_progress: Callabl
     if store.get_state(READER_KEY) == READER_VERSION:
         return 0
     todo = []
-    for attachment_id, email_id, filename, text in store.attachment_files():
+    for attachment_id, email_id, filename, sha, text in store.attachment_files():
         if Path(filename).suffix.lower() not in _REREAD or "read with OCR" in text[:400] or text.startswith("[This PDF looks scanned"):
             continue
-        path = settings.inbox_extracted / email_id / safe_filename(filename)
-        if path.is_file() and path.stat().st_size <= _MAX_REREAD_BYTES:
-            todo.append((attachment_id, filename, path, text))
+        if sha and (settings.inbox_extracted / email_id).is_dir():
+            todo.append((attachment_id, settings.inbox_extracted / email_id, filename, sha, text))
     changed = 0
-    for index, (attachment_id, filename, path, old) in enumerate(todo, start=1):
+    zipped: tuple[Path | None, dict[str, bytes]] = (None, {})
+    for index, (attachment_id, folder, filename, sha, old) in enumerate(todo, start=1):
         if on_progress:
             on_progress(index, len(todo), filename)
         try:
-            new = attachment_text(filename, "", path.read_bytes())
+            # Only the attachment's own bytes: a file that came in a zip is read from the zip, never from
+            # another attachment that has its name ("invoice.pdf" beside "older.zip" holding an "invoice.pdf").
+            data = _kept_file(folder / safe_filename(filename), sha)
+            if data is None:
+                if zipped[0] != folder:
+                    zipped = (folder, _zipped_files(folder))
+                data = zipped[1].get(sha)
+            if data is None:
+                continue
+            new = attachment_text(filename, "", data)
         except Exception:
-            log.warning("Couldn't read %s again", path, exc_info=True)
+            log.warning("Couldn't read %s again", folder / filename, exc_info=True)
             continue
         if new.strip() and new != old:
             store.set_attachment_text(attachment_id, new)
             changed += 1
     store.set_state(READER_KEY, READER_VERSION)
     return changed
+
+
+def _kept_file(path: Path, sha: str) -> bytes | None:
+    """The file kept under inbox/extracted, when it holds these bytes."""
+    if not path.is_file() or path.stat().st_size > _MAX_REREAD_BYTES:
+        return None
+    data = path.read_bytes()
+    return data if sha256_bytes(data) == sha else None
+
+
+def _zipped_files(folder: Path) -> dict[str, bytes]:
+    """The files inside the zips kept for one email, by SHA-256, as the email's attachments were stored."""
+    found: dict[str, bytes] = {}
+    for path in sorted(folder.iterdir()):
+        if path.suffix.lower() != ".zip" or not path.is_file() or path.stat().st_size > _MAX_REREAD_BYTES:
+            continue
+        for part in explode_archives([_attachment(path.name, "application/zip", path.read_bytes())]):
+            if part.content:
+                found.setdefault(sha256_bytes(part.content), part.content)
+    return found
 
 
 def safe_filename(name: str) -> str:

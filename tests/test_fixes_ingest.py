@@ -687,3 +687,39 @@ def test_watch_reads_the_drop_folder_while_outlook_is_down(settings: Settings, s
     assert not list(settings.inbox_incoming.iterdir())
     assert cli._watch(settings, store, once=True) == 0
     assert "Outlook could not be read (Graph 503" in capsys.readouterr().out
+
+
+# 20. Reading attachments again never gives a zipped file another file's text --------------------
+
+
+def test_reading_again_reads_a_zipped_file_from_its_zip(settings: Settings, store: Store):
+    from controller_inbox.demo import make_pdf
+
+    settings.ensure_data_dir()
+    outer = make_pdf([["Invoice INV-1001 from Alpha Freight", ["Item", "Amount"], ["Freight", "$1,000.00"]]])
+    inner = make_pdf([["Invoice INV-2002 from Beta Paper", ["Item", "Amount"], ["Paper", "$2,000.00"]]])
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("invoice.pdf", inner)
+    msg = EmailMessage()
+    msg["From"] = "AP <ap@vendor.com>"
+    msg["Subject"] = "Two invoices"
+    msg["Message-ID"] = "<two@x>"
+    msg["Date"] = "Mon, 05 Oct 2026 10:00:00 -0400"
+    msg.set_content("See attached.")
+    # An "invoice.pdf" beside a zip that holds another "invoice.pdf".
+    msg.add_attachment(outer, maintype="application", subtype="pdf", filename="invoice.pdf")
+    msg.add_attachment(buffer.getvalue(), maintype="application", subtype="zip", filename="older.zip")
+    path = settings.inbox_incoming / "two.eml"
+    path.write_bytes(bytes(msg))
+    _age(path)
+    [record] = ingest_folder(store, settings)
+    zipped = next(att for att in record.attachments if att.id.endswith("older.zip:invoice.pdf"))
+    assert "INV-2002" in zipped.extracted_text
+
+    store.set_attachment_text(zipped.id, "[page 1]\nas an older reader left it")
+    store.set_state(folder_mail.READER_KEY, "old")
+    assert reread_attachments(store, settings) == 1
+    texts = {att.id: att.extracted_text for att in store.get_email(record.id).attachments}
+    assert "INV-2002" in texts[zipped.id] and "INV-1001" not in texts[zipped.id]
+    assert "INV-1001" in texts[f"{record.id}:invoice.pdf"]
