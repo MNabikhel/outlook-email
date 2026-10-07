@@ -173,14 +173,26 @@ def test_a_new_lookalike_of_a_trusted_domain_is_still_caught():
 
 
 def test_history_is_read_from_the_store(store, settings):
+    from controller_inbox.fraud import record_fraud_verdict
     from test_fraud_review import _mail
+
+    def lookalike(email):
+        return "lookalike_domain" in {s["key"] for s in store.fraud_check(email.id)["signals"]}
 
     settings.trusted_domains = "pnc.com"
     body = "Attached is the PBC list for the September audit."
     first = _mail(store, settings, "pwc1", subject="PBC list", sender="audit@pwc.com", body=body)
     second = _mail(store, settings, "pwc2", subject="PBC list", sender="lead@pwc.com", body=body)
-    assert "lookalike_domain" in {s["key"] for s in store.fraud_check(first.id)["signals"]}
-    assert "lookalike_domain" not in {s["key"] for s in store.fraud_check(second.id)["signals"]}
+    assert lookalike(first) and lookalike(second), "a look-alike's flagged first email doesn't vouch for its second"
+    record_fraud_verdict(store, settings, first.id, verdict="safe")
+    third = _mail(store, settings, "pwc3", subject="PBC list", sender="audit@pwc.com", body=body)
+    assert not lookalike(third), "once the user says the domain's mail isn't fraud, it is one they hear from"
+    # Mail that came in before the trusted domain was added was never flagged: it counts too.
+    settings.trusted_domains = ""
+    _mail(store, settings, "adt1", subject="Statement", sender="billing@adt.com", body="Your September statement.")
+    settings.trusted_domains = "adp.com"
+    later = _mail(store, settings, "adt2", subject="Statement", sender="billing@adt.com", body="Your October statement.")
+    assert not lookalike(later)
 
 
 def test_a_trusted_domain_in_unicode_or_punycode_is_the_same_domain():

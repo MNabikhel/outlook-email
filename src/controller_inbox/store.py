@@ -1297,14 +1297,21 @@ class Store:
             ).fetchone()["n"]
 
     def domain_history(self, domain: str, *, exclude: str = "") -> int:
-        """Emails from addresses at exactly this domain, other than ``exclude``."""
+        """Emails from addresses at exactly this domain, other than ``exclude``, that the fraud check let
+        through or the user said weren't fraud. A look-alike domain's own first email was flagged, so it
+        doesn't make the domain one the user already hears from."""
         if not domain:
             return 0
         with self.connect() as conn:
             return conn.execute(
-                "SELECT COUNT(*) AS n FROM emails WHERE instr(sender_email, '@') > 0 "
-                "AND lower(substr(sender_email, instr(sender_email, '@') + 1)) = ? AND id != ?",
-                (domain.lower(), exclude),
+                f"""SELECT COUNT(*) AS n FROM emails WHERE instr(sender_email, '@') > 0
+                AND lower(substr(sender_email, instr(sender_email, '@') + 1)) = ? AND id != ?
+                AND (COALESCE(flags, '') {_LIKE} OR (COALESCE(flags, '') NOT {_LIKE} AND COALESCE(flags, '') NOT {_LIKE}
+                     AND COALESCE(flags, '') NOT {_LIKE}))""",
+                (
+                    domain.lower(), exclude, _json_contains("fraud_cleared"), _json_contains("fraud_risk"),
+                    _json_contains("payment_caution"), _json_contains("fraud_confirmed"),
+                ),
             ).fetchone()["n"]
 
     def email_ids_from(self, *, sender: str = "", domain: str = "") -> list[str]:
