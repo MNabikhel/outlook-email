@@ -180,9 +180,8 @@ def test_the_pages_show_what_is_indexed_and_index_on_request(store, settings, ma
 
     started = client.post("/settings/index", follow_redirects=False)
     assert started.headers["location"] == "/settings?notice=indexing#search"
-    for _ in range(100):
-        if app.state.job.snapshot()["state"] != "running":
-            break
+    deadline = time.monotonic() + 60  # the job runs in the background; a slow machine needs more than a few seconds
+    while app.state.job.snapshot()["state"] == "running" and time.monotonic() < deadline:
         time.sleep(0.05)
     assert app.state.job.snapshot()["result"]["kind"] == "index"
     setup = client.get("/settings").text
