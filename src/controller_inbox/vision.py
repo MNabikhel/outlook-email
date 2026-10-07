@@ -247,14 +247,18 @@ def transcribe(settings: Settings, png: bytes, *, on_piece: Callable[[int], None
     finished: dict = {}
     looped = False
     pieces = stream_text(settings, messages, max_tokens=MAX_TOKENS, wait=WAIT_SECONDS, temperature=0.0, finished=finished)
+    checked = 0
     try:
         for piece in pieces:
             written.append(piece)
+            size = sum(len(p) for p in written)
             if on_piece:
-                on_piece(sum(len(p) for p in written))
-            if "\n" in piece and _looping("".join(written)):
-                looped = True  # stop it here: the rest would be the same line until the token limit
+                on_piece(size)
+            if ("\n" in piece or size - checked >= 400) and _looping("".join(written)):
+                looped = True  # stop it here: the rest would be the same until the token limit
                 break
+            if "\n" in piece or size - checked >= 400:
+                checked = size
     except EmptyReply:
         if finished.get("reason") == "stop" and not finished.get("thought"):
             raise Blank("the page has nothing on it to read") from None
@@ -270,6 +274,8 @@ def transcribe(settings: Settings, png: bytes, *, on_piece: Callable[[int], None
     if finished.get("reason") == "length" and not looped:
         # Half a page would hide the rest of it: the reading is not kept.
         raise CutOff(f"the reading stopped at the {MAX_TOKENS:,}-token limit before the end of the page")
+    if looped and len(text) < 200:
+        raise CutOff("the model got stuck repeating itself near the top of the page")
     return text
 
 
@@ -317,15 +323,29 @@ def _blank_row(line: str) -> bool:
     return bool(_TABLE_ROW.match(line)) and not re.sub(r"[|\s:-]", "", line)
 
 
+# The same few characters over and over at the end of the reading: empty cells written across one line without
+# end ("|  |  |  …"). Sixty in a row is more columns than any printed table has.
+_RUN = re.compile(r"(.{1,12}?)\1{59,}$", re.S)
+
+
 def _looping(text: str) -> bool:
     lines = [line for line in text.split("\n")[:-1] if line.strip()]  # complete lines only
     run = _repeated_tail(lines)
-    return run >= LOOP_LINES or (run >= LOOP_BLANK_ROWS and _blank_row(lines[-1]))
+    if run >= LOOP_LINES or (run >= LOOP_BLANK_ROWS and _blank_row(lines[-1])):
+        return True
+    return bool(_RUN.search(text[-1500:].rstrip()))
 
 
 def trim_loop(text: str) -> tuple[str, bool]:
-    """The reading without a line the model repeated at its end (kept once when it says something). Blank lines
-    between the repeats are passed over, as ``_looping`` does."""
+    """The reading without a line the model repeated at its end (kept once when it says something), or without
+    the characters it repeated across its last line. Blank lines between repeated lines are passed over, as
+    ``_looping`` does."""
+    tail = _RUN.search(text[-1500:].rstrip())
+    if tail:
+        cut = len(text[-1500:].rstrip()) - len(tail.group(0))
+        start = text.rstrip()[: len(text.rstrip()) - len(text[-1500:].rstrip()) + cut].rstrip(" |")
+        last = start.rsplit("\n", 1)[-1]
+        return start + (" |" if last.lstrip().startswith("|") else ""), True  # the table row closed where it stopped
     lines = text.rstrip().split("\n")
     filled = [index for index, line in enumerate(lines) if line.strip()]
     if len(filled) > 1:

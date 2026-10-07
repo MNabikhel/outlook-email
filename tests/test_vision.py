@@ -884,3 +884,15 @@ def test_a_reading_of_a_page_with_no_mark_in_the_text_is_still_shown():
     }
     shown = vision.shown_text(f"[page 1]\n{OCR_TEXT}", rows)
     assert "\n\n[page 21]\n" in shown and vision.shown_text(shown, rows) == shown
+
+
+def test_a_reading_that_loops_across_one_line_is_stopped_too(settings, monkeypatch):
+    """Seen on a scanned income statement: a table row begun, then empty cells for 6,000 tokens (30 minutes)."""
+    settings.llm = None
+    _serve(monkeypatch, FakeVisionServer(page="| Larkspur Outdoor Supply Co. |" + "  |" * 3000))
+    seen = []
+    with pytest.raises(vision.CutOff, match="stuck repeating itself"):  # nothing usable: a failure, tried again later
+        vision.transcribe(settings, b"png", on_piece=seen.append)
+    assert seen[-1] < 2500, "stopped within a few hundred tokens, not at the limit"
+    assert vision.trim_loop("Total sales | 41,400\n| Region |" + " |" * 80) == ("Total sales | 41,400\n| Region |", True)
+    assert not vision._looping("| a | b |\n|---|---|\n| x |" + "  |" * 30), "a wide row of blank cells is a row"
