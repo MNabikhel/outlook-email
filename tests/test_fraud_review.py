@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 from controller_inbox.classify import classify_document, normalize_text
+from controller_inbox.digest import build_digest
 from controller_inbox.extract import extract_fields, html_to_text, parse_due_date
 from controller_inbox.fraud import TrustContext, assess, attachments_locked, strip_notices
 from controller_inbox.models import DocumentType, RawAttachment, RawMessage
@@ -290,3 +291,25 @@ def test_december_date_read_in_january_is_last_year():
     assert parse_due_date("January 5", as_of=date(2026, 12, 20)) == "2027-01-05"
     assert parse_due_date("September 30", as_of=date(2026, 10, 7)) == "2026-09-30"
     assert parse_due_date("June 30", as_of=date(2026, 1, 10)) == "2026-06-30"
+
+
+# 12. Mail marked done leaves the digest's focus list and the "need you" count.
+def test_done_email_leaves_focus_and_the_need_you_count(loaded, settings, as_of_now):
+    def digest():
+        return build_digest(loaded, as_of=date(2026, 9, 22), generated_at=as_of_now, tz=settings.tz, save=False)
+
+    before = digest()
+    target = next(row for row in before["focus"] if row["kind"] != "fraud")
+    important = next(row["id"] for row in before["new_mail"]["important"] if row["id"] != target["email_id"])
+    loaded.set_done(target["email_id"], True)
+    loaded.set_done(important, True)
+    after = digest()
+    assert target["email_id"] not in [row["email_id"] for row in after["focus"]]
+    assert after["kpis"]["need_you"] == before["kpis"]["need_you"] - 2 + (target["folder"] != "important")
+    assert after["headline"].startswith(f"{after['kpis']['need_you']} of 18 emails")
+
+
+def test_a_done_payment_change_warning_stays_until_its_phone_check(loaded, settings, as_of_now):
+    loaded.set_done("demo-bec-wire", True)
+    focus = build_digest(loaded, as_of=date(2026, 9, 22), generated_at=as_of_now, tz=settings.tz, save=False)["focus"]
+    assert focus[0]["email_id"] == "demo-bec-wire" and focus[0]["kind"] == "fraud"
