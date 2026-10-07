@@ -144,7 +144,17 @@ Looking at a page is slow on a laptop without a graphics card (minutes a page; a
 - **Only when I ask**: nothing is read until you click **Read with the vision model** on the file or under an answer.
 - **Off**.
 
-A read runs in the background, one page at a time; **Stop** in the bar at the top ends it after the page being read. A reading the model cut off at its length limit is not used (the page stays OCR's), and one where the model starts repeating a line is stopped there and kept without the repeats. A page the model fails on twice is only read again when you ask.
+A read runs in the background, one page at a time; **Stop** in the bar at the top ends it after the page being read. The model reads greedily (the most faithful copy of each figure); when it falls into repeating a line or a cell, the reading is stopped there and the page is read once more with the sampling Qwen recommends, which breaks the loop. A reading cut off at the length limit is not used (the page stays OCR's), and a page the model fails on twice is only read again when you ask.
+
+Measured on 15 scanned pages of 12 finance reports the model had never seen (balance sheet, trial balance, AP register, GL detail, 13-week cash forecast and others, as image-only scans with tilt, noise and JPEG compression), with Qwen3.5 9B (Q4_K_M) and every cell checked against the original workbook:
+
+| | OCR alone | Vision model alone | Both, as CloseDesk shows them |
+|---|---:|---:|---:|
+| Table cells read exactly (right row and column) | 0.7% | 48% | 46% |
+| The reports' figures found on the page | 78% | 95% | 90% |
+| Figures read that are nowhere on the page | 2.2% | 9.4% | 2.2% |
+
+The model's table was shown on 11 of the 15 pages; on the 4 densest pages (an AP register and a GL detail in small print) it misread digits and swapped rows, the readings disagreed, and OCR's reading was kept. A page took about 12 minutes on a 4-core server without a graphics card (dense pages up to 45 with a second reading); a graphics card or Apple silicon is many times faster, and CloseDesk measures it on each computer. The choice rule and the two-line heading handling were tuned on these same pages.
 
 ### Fraud check
 
