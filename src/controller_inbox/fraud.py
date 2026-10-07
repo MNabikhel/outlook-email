@@ -20,7 +20,14 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
-from controller_inbox.classify import AUTOMATED_SENDERS, PAYMENT_CHANGE_RE, QUOTE_START_RE, normalize_text, own_words
+from controller_inbox.classify import (
+    AUTOMATED_SENDERS,
+    PAYMENT_CHANGE_RE,
+    QUOTE_START_RE,
+    normalize_text,
+    normalize_with_spans,
+    own_words,
+)
 
 if TYPE_CHECKING:
     from controller_inbox.config import Settings
@@ -413,7 +420,10 @@ def assess(
     sender = (sender_email or "").strip().lower()
     domain = domain_of(sender)
     signals: list[Signal] = []
-    # A zero-width space, an empty <span> or a Cyrillic "a" inside "bank" still reads as "bank".
+    # A zero-width space, an empty <span> or a Cyrillic "a" inside "bank" still reads as "bank". What the
+    # user is shown as evidence is quoted from the email as written.
+    evidence = _Evidence(subject, body)
+    shown_name = sender_name
     subject, body, sender_name = normalize_text(subject), normalize_text(body), normalize_text(sender_name)
 
     def add(key: str, detail: str = "") -> None:
@@ -439,11 +449,11 @@ def assess(
         text = own_full
         match = PAYMENT_CHANGE_RE.search(own_full)
     if match:
-        add("bank_change", _quote(text, match))
+        add("bank_change", evidence.quote(text, match))
     else:
         quoted = PAYMENT_CHANGE_RE.search(everything)
         if quoted:
-            add("bank_change_quoted", _quote(everything, quoted))
+            add("bank_change_quoted", evidence.quote(everything, quoted))
         for filename, text in attachments or []:
             hit = PAYMENT_CHANGE_RE.search(strip_notices(normalize_text((text or "")[:60_000])))
             if hit:
@@ -451,16 +461,16 @@ def assess(
                 break
     gift = _gift_ask(own) or _gift_ask(own_full)
     if gift:
-        add("gift_cards", _quote(gift.string, gift))
+        add("gift_cards", evidence.quote(gift.string, gift))
     account = ACCOUNT_RE.search(own)
     if account:
-        add("account_numbers", _quote(own, account))
+        add("account_numbers", evidence.quote(own, account))
     ask = PAYMENT_ASK_RE.search(own)
     if ask:
-        add("payment_request", _quote(own, ask))
+        add("payment_request", evidence.quote(own, ask))
     pressure = PRESSURE_RE.search(own)
     if pressure:
-        add("pressure", pressure.group(0))
+        add("pressure", evidence.words(pressure.group(0)))
     if "model_said_bank_change" in flags:
         add("model_said_bank_change")
 
@@ -485,7 +495,7 @@ def assess(
         look = _lookalike(domain, ctx, established=domain_history > 0)
         if look:
             add("lookalike_domain", f"{domain} looks like {look}")
-    spoof = _display_name_spoof(sender_name, sender, domain, trusted_domain, ctx)
+    spoof = _display_name_spoof(sender_name, sender, domain, trusted_domain, ctx, shown=shown_name)
     if spoof:
         add("display_name_spoof", spoof)
 
@@ -776,16 +786,20 @@ def _lookalike(domain: str, ctx: TrustContext, *, established: bool = False) -> 
     return ""
 
 
-def _display_name_spoof(name: str, sender: str, domain: str, trusted_domain: str, ctx: TrustContext) -> str:
+def _display_name_spoof(name: str, sender: str, domain: str, trusted_domain: str, ctx: TrustContext, *,
+                        shown: str = "") -> str:
+    """``name`` is the display name as the rules read it, ``shown`` as written (for the message)."""
     name = (name or "").strip()
+    shown = (shown or name).strip()
     embedded = EMBEDDED_ADDRESS_RE.search(name)
     if embedded and embedded.group(0).lower() != sender:
-        return f"name shows {embedded.group(0).lower()}"
+        written = EMBEDDED_ADDRESS_RE.search(shown)
+        return f"name shows {(written or embedded).group(0).lower()}"
     if trusted_domain or not domain:
         return ""
     seen = ctx.names.get(name_key(name))
     if seen and not same_or_under(domain_of(seen), domain) and len(name) >= 5:
-        return f"“{name}” usually writes from {seen}"
+        return f"“{shown}” usually writes from {seen}"
     return ""
 
 
@@ -813,9 +827,49 @@ def _distance(a: str, b: str, limit: int) -> int:
 
 
 def _quote(text: str, match: re.Match[str]) -> str:
-    start = max(0, match.start() - 40)
-    snippet = " ".join(text[start : match.end() + 40].split())
-    return ("…" if start else "") + snippet[:160]
+    return _snippet(text, match.start(), match.end())
+
+
+def _snippet(text: str, start: int, end: int) -> str:
+    begin = max(0, start - 40)
+    snippet = " ".join(text[begin : end + 40].split())
+    return ("…" if begin else "") + snippet[:160]
+
+
+class _Evidence:
+    """Quotes for the fraud panel, taken from the subject and body as written.
+
+    The rules read a normalized copy (accents dropped, look-alike letters read as Latin, "¹" as "1"), which
+    must not change the figures, names or disguised letters the user is shown. A phrase found in that copy
+    is looked up again in the normalized whole and mapped back to the characters it came from.
+    """
+
+    def __init__(self, subject: str, body: str):
+        self.text = f"{subject or ''}\n{body or ''}"
+        self._read: tuple[str, list[int], list[int]] | None = None
+
+    def _span(self, found: str) -> tuple[int, int] | None:
+        # The quote shows at most 160 characters, so the start of a long match is enough to place it.
+        words = found[:200].split()
+        if len(found) > 200 and len(words) > 1:
+            words.pop()
+        if not words:
+            return None
+        if self._read is None:
+            self._read = normalize_with_spans(self.text)
+        normalized, starts, ends = self._read
+        hit = re.search(r"\s+".join(map(re.escape, words)), normalized)
+        if hit is None:
+            return None
+        return starts[hit.start()], ends[hit.end() - 1]
+
+    def quote(self, text: str, match: re.Match[str]) -> str:
+        span = self._span(match.group(0))
+        return _snippet(self.text, *span) if span else _quote(text, match)
+
+    def words(self, found: str) -> str:
+        span = self._span(found)
+        return self.text[span[0] : span[1]] if span else found
 
 
 def _stamp(now: datetime | None) -> str:

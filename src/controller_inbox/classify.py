@@ -74,6 +74,16 @@ def strip_html_comments(text: str) -> str:
         return text
     out: list[str] = []
     pos = 0
+    for start, end in _comment_spans(text):
+        out.append(text[pos:start])
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _comment_spans(text: str) -> list[tuple[int, int]]:
+    spans = []
+    pos = 0
     while True:
         start = text.find("<!--", pos)
         if start < 0:
@@ -81,10 +91,9 @@ def strip_html_comments(text: str) -> str:
         end = text.find("-->", start + 4)
         if end < 0:
             break
-        out.append(text[pos:start])
+        spans.append((start, end + 3))
         pos = end + 3
-    out.append(text[pos:])
-    return "".join(out)
+    return spans
 # An HTML entity left in text: numbered ("&#8203;", "&#x200b;") or named with its closing ";" ("&amp;").
 # A bare "&not" or "&copy" in plain text ("Smith&notary", "Print&copy") is written that way, not an entity.
 _ENTITY_RE = re.compile(r"&(?:#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[A-Za-z][A-Za-z0-9]{1,31};)")
@@ -120,6 +129,66 @@ def normalize_text(text: str) -> str:
     if text.isascii():
         return text
     return _HIDDEN_RE.sub("", unicodedata.normalize("NFKD", text)).translate(_LOOKALIKES)
+
+
+def normalize_with_spans(text: str) -> tuple[str, list[int], list[int]]:
+    """``normalize_text``, and for each character it returns, where in ``text`` it came from (start, end).
+
+    So a phrase the rules found in the normalized text can be shown as it was written.
+    """
+    if not text:
+        return "", [], []
+    starts = list(range(len(text)))
+    ends = list(range(1, len(text) + 1))
+    if "&" in text:
+        pieces: list[str] = []
+        new_starts: list[int] = []
+        new_ends: list[int] = []
+        pos = 0
+        for entity in _ENTITY_RE.finditer(text):
+            pieces.append(text[pos : entity.start()])
+            new_starts += starts[pos : entity.start()]
+            new_ends += ends[pos : entity.start()]
+            decoded = html.unescape(entity.group(0))
+            pieces.append(decoded)
+            new_starts += [starts[entity.start()]] * len(decoded)
+            new_ends += [ends[entity.end() - 1]] * len(decoded)
+            pos = entity.end()
+        pieces.append(text[pos:])
+        text, starts, ends = "".join(pieces), new_starts + starts[pos:], new_ends + ends[pos:]
+    if "<" in text:
+        text, starts, ends = _drop_spans(text, starts, ends, _comment_spans(text))
+        text, starts, ends = _drop_spans(text, starts, ends, [tag.span() for tag in _INLINE_TAG_RE.finditer(text)])
+    if text.isascii():
+        return text, starts, ends
+    pieces, new_starts, new_ends = [], [], []
+    for run in re.finditer(r"[\x00-\x7f]+|[^\x00-\x7f]", text):
+        piece = run.group(0)
+        if not piece.isascii():
+            piece = _HIDDEN_RE.sub("", unicodedata.normalize("NFKD", piece)).translate(_LOOKALIKES)
+            new_starts += [starts[run.start()]] * len(piece)
+            new_ends += [ends[run.start()]] * len(piece)
+        else:
+            new_starts += starts[run.start() : run.end()]
+            new_ends += ends[run.start() : run.end()]
+        pieces.append(piece)
+    return "".join(pieces), new_starts, new_ends
+
+
+def _drop_spans(text: str, starts: list[int], ends: list[int], spans: list[tuple[int, int]]):
+    if not spans:
+        return text, starts, ends
+    pieces: list[str] = []
+    new_starts: list[int] = []
+    new_ends: list[int] = []
+    pos = 0
+    for start, end in spans:
+        pieces.append(text[pos:start])
+        new_starts += starts[pos:start]
+        new_ends += ends[pos:start]
+        pos = end
+    pieces.append(text[pos:])
+    return "".join(pieces), new_starts + starts[pos:], new_ends + ends[pos:]
 
 
 def own_words(body: str, *, keep_disclaimers: bool = False) -> str:

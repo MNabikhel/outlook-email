@@ -218,3 +218,23 @@ def test_borrowed_accented_display_names_are_caught(store, settings):
 def test_bare_named_entities_in_plain_text_are_left_as_written():
     assert normalize_text("Smith&notary, Print&copy 2026, R&D") == "Smith&notary, Print&copy 2026, R&D"
     assert normalize_text("ba&#8203;nk ba&#8203nk ba&#x200b;nk AT&amp;T") == "bank bank bank AT&T"
+
+
+# 7. Evidence in the fraud panel is quoted as the email wrote it, not as the rules read it.
+def test_evidence_is_quoted_as_written():
+    body = ("Bitte überweisen Sie die Rechnung von Müller GmbH auf unser neues Konto IBAN DE89 3704 0044 0532 0130 00¹ "
+            "sofort. Don’t call, I am in a meeting.")
+    details = {s.key: s.detail for s in _check(body, subject="Zahlung").signals}
+    assert "Müller GmbH" in details["bank_change"] and "0130 00¹" in details["bank_change"], details
+    assert details["pressure"] == "Don’t call"
+    disguised = {s.key: s.detail for s in _check("Our bаnk details have changed.").signals}
+    assert "bаnk details have changed" in disguised["bank_change"]
+    wire = {s.key: s.detail for s in _check("Please wire $48,500 today to acct ９９８８７７６６.").signals}
+    assert "９９８８７７６６" in wire["account_numbers"]
+
+
+def test_borrowed_name_is_shown_as_written():
+    ctx = TrustContext(domains={"ourco.example"}, names={"José García": "jose@ourco.example"})
+    check = assess(ctx, subject="Wire", body="Please wire the funds today.", sender_name="José García",
+                   sender_email="jose.garcia.ceo@gmail.com")
+    assert {s.key: s.detail for s in check.signals}["display_name_spoof"] == "“José García” usually writes from jose@ourco.example"
