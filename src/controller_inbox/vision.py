@@ -255,11 +255,17 @@ def transcribe(settings: Settings, png: bytes, *, on_piece: Callable[[int], None
             if "\n" in piece and _looping("".join(written)):
                 looped = True  # stop it here: the rest would be the same line until the token limit
                 break
+    except EmptyReply:
+        if finished.get("reason") == "stop" and not finished.get("thought"):
+            raise Blank("the page has nothing on it to read") from None
+        raise  # it thought until its budget ran out, or sent nothing: a failure, tried again later
     finally:
         pieces.close()
     text, _trimmed = trim_loop(strip_thinking("".join(written)))
     text = text.strip()
     if not text:
+        if finished.get("reason") == "stop" and not finished.get("thought"):
+            raise Blank("the page has nothing on it to read")
         raise EmptyReply("the model wrote nothing for the page")
     if finished.get("reason") == "length" and not looped:
         # Half a page would hide the rest of it: the reading is not kept.
@@ -267,10 +273,31 @@ def transcribe(settings: Settings, png: bytes, *, on_piece: Callable[[int], None
     return text
 
 
+# An account or routing number beside its label in the model's markdown ("| Account Number | 123456789012 |",
+# "**Routing:** 021000021"): only the number is masked, so the table keeps its cells.
+_SECRET = re.compile(
+    r"(\b(?:routing(?:\s+(?:number|no\.?))?|aba|sort\s+code|iban|account(?:\s+(?:number|no\.?|#))?|"
+    r"acct\.?(?:\s+(?:number|no\.?))?|a/c)\b[\s#:*_|.]*)([A-Z]{2}\d{2}[A-Z0-9]{10,30}|(?=(?:[A-Z]*\d){6})[A-Z0-9][A-Z0-9 -]{4,32}[A-Z0-9])\b",
+    re.IGNORECASE,
+)
+
+
+def mask_secrets(markdown: str) -> str:
+    """The model's reading with bank account, routing and IBAN numbers masked to their last four digits, as
+    CloseDesk masks every file's text."""
+    from controller_inbox.extract import redact_financial_secrets
+
+    def mask(match: re.Match[str]) -> str:
+        digits = re.sub(r"\D", "", match.group(2))
+        return f"{match.group(1)}****{digits[-4:]}"
+
+    return redact_financial_secrets(_SECRET.sub(mask, markdown or ""))
+
+
 # A model reading a page greedily can fall into writing one line over and over (an empty table row) until its token
 # limit. A run this long of one line is that; a line with nothing but table pipes is that sooner.
-LOOP_LINES = 12
-LOOP_BLANK_ROWS = 6
+LOOP_LINES = 20
+LOOP_BLANK_ROWS = 30  # an invoice can print a dozen empty line-item rows; thirty in a row is the model looping
 
 
 def _repeated_tail(lines: list[str]) -> int:
@@ -297,19 +324,29 @@ def _looping(text: str) -> bool:
 
 
 def trim_loop(text: str) -> tuple[str, bool]:
-    """The reading without a line the model repeated at its end (kept once when it says something)."""
+    """The reading without a line the model repeated at its end (kept once when it says something). Blank lines
+    between the repeats are passed over, as ``_looping`` does."""
     lines = text.rstrip().split("\n")
-    if len(lines) > 1 and lines[-1].strip() != lines[-2].strip() and lines[-2].strip().startswith(lines[-1].strip()):
-        lines = lines[:-1]  # the repeated line, cut off part way when the reply stopped
-    run = _repeated_tail(lines)
-    if not lines or not (run >= LOOP_LINES or (run >= LOOP_BLANK_ROWS and _blank_row(lines[-1]))):
+    filled = [index for index, line in enumerate(lines) if line.strip()]
+    if len(filled) > 1:
+        last, before = lines[filled[-1]].strip(), lines[filled[-2]].strip()
+        if last != before and before.startswith(last):
+            filled = filled[:-1]  # the repeated line, cut off part way when the reply stopped
+    kept = [lines[index] for index in filled]
+    run = _repeated_tail(kept)
+    if not kept or not (run >= LOOP_LINES or (run >= LOOP_BLANK_ROWS and _blank_row(kept[-1]))):
         return text, False
-    keep = 0 if _blank_row(lines[-1]) or not lines[-1].strip() else 1
-    return "\n".join(lines[: len(lines) - run + keep]), True
+    first_dropped = len(kept) - run + (0 if _blank_row(kept[-1]) else 1)
+    end = filled[first_dropped] if first_dropped < len(filled) else len(lines)
+    return "\n".join(lines[:end]).rstrip(), True
 
 
 class CutOff(Exception):
     """The model's reply ended at its length limit, part way down the page."""
+
+
+class Blank(Exception):
+    """The model finished without writing anything: the page is blank (the back of a sheet)."""
 
 
 _reading = 0
@@ -326,7 +363,8 @@ def busy() -> bool:
 
 _TABLE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _RULE_ROW = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$")
-_FORMATTING = re.compile(r"\*\*|__|`")
+# Bold and code marks; a run of four asterisks is a masked number ("****9012"), not formatting.
+_FORMATTING = re.compile(r"(?<!\*)\*\*(?!\*)|__|`")
 
 
 def page_text(markdown: str) -> str:
@@ -664,7 +702,7 @@ def shown_text(text: str, rows: dict[int, dict]) -> str:
         pages = [f"[page {page}]\n{_page_for('', row)}" for page, row in sorted(unmarked.items())]
         return "\n\n".join(part for part in [body, *pages] if part)
     seen = {int(found.group(1)) for found in _PAGE_MARK.finditer(text)}
-    extra = [f"[page {page}]\n{_page_for('', row)}" for page, row in sorted(unmarked.items()) if page not in seen]
+    extra = [f"[page {page}]\n{_page_for('', row)}" for page, row in sorted(rows.items()) if page not in seen]
     pieces = [text[: marks[0].start()]]
     for i, mark in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
@@ -743,8 +781,6 @@ def read_pages(
 
 
 def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, should_stop=None) -> Result:
-    from controller_inbox.extract import redact_financial_secrets
-
     result = Result()
     if not same_file(att, data):
         result.failed.append("the file kept under this name isn't this attachment")
@@ -772,8 +808,8 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
         started = time.monotonic()
         try:
             png = render(data, att.filename, page)
-            markdown = redact_financial_secrets(transcribe(settings, png))
-        except EmptyReply:
+            markdown = mask_secrets(transcribe(settings, png))
+        except Blank:
             markdown = ""  # a blank page (the back of a sheet): nothing on it to read
         except Exception as exc:  # one page failing doesn't lose the others
             log.warning("Vision reading of %s page %s failed: %s", att.filename, page, exc)

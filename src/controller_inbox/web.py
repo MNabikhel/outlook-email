@@ -322,15 +322,12 @@ class ProcessJob:
 
     def _run(self, target) -> None:
         try:
-            result = target(self.progress)
-            with self._lock:
-                self.state, self.result = "done", result
+            result, state, error = target(self.progress), "done", ""
         except Exception as exc:  # the page shows the error instead of a dead spinner
-            with self._lock:
-                self.state, self.error = "error", str(exc)
-        finally:
-            with self._lock:
-                self.finished_at = datetime.now(timezone.utc).isoformat()
+            result, state, error = None, "error", str(exc)
+        with self._lock:  # all at once: a page that sees the job done also sees when it finished
+            self.state, self.result, self.error = state, result, error
+            self.finished_at = datetime.now(timezone.utc).isoformat()
 
 
 def _nearest_step(tokens: int) -> int:
@@ -999,7 +996,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         started = job.start(
             lambda progress: run_overnight(store, settings, sync_graph=False, on_progress=progress, vision_minutes=vision.QUICK_SECONDS / 60)
         )
-        busy = "busy-vision" if job.snapshot()["stage"] == "vision" else "busy"
+        busy = "busy-vision" if (job.snapshot()["about"] or {}).get("kind") == "vision" else "busy"
         return RedirectResponse(f"/?notice={'processing' if started else busy}", status_code=303)
 
     @app.get("/process/status")

@@ -32,6 +32,7 @@ const S = {
   emailToken: 0,
   poll: 0,
   jobSeq: 0, // bumped when this page starts a job, so a status fetched before that doesn't undo it
+  topJob: "", // what the job bar shows
 };
 
 /* ---------- Addresses ---------- */
@@ -162,6 +163,10 @@ function renderTop() {
   const button = $("#process-btn");
   button.disabled = running;
   button.textContent = running ? "Processing…" : "Process new mail";
+  // Redrawn only when it changes, so a click on Stop isn't lost to a redraw between press and release.
+  const shown = JSON.stringify(running ? [job.stage_label, job.done, job.total, job.note, Boolean(job.about), job.stopping] : null);
+  if (shown === S.topJob) return;
+  S.topJob = shown;
   replace(
     $("#top-job"),
     running
@@ -181,10 +186,14 @@ function renderTop() {
 
 async function stopJob(event) {
   event.currentTarget.disabled = true;
+  S.jobSeq += 1; // a status fetched before the click mustn't bring the button back
   try {
     await postJSON("/api/process/stop");
     toast("Stopping after the page being read now.");
-    if (S.meta) S.meta.job = { ...S.meta.job, stopping: true };
+    if (S.meta) {
+      S.meta.job = { ...S.meta.job, stopping: true };
+      renderTop();
+    }
   } catch (error) {
     toast(error.message, { tone: "error" });
   }
@@ -925,7 +934,7 @@ function finished(job) {
 async function processMail() {
   try {
     const result = await postJSON("/api/process");
-    const reading = !result.started && result.job && result.job.stage === "vision";
+    const reading = !result.started && result.job && result.job.about && result.job.about.kind === "vision";
     toast(
       result.started
         ? "Processing new mail. The lists update as it goes."

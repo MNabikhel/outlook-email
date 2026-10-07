@@ -677,7 +677,8 @@ def stream_text(
 
     Raises ``EmptyReply`` when the model wrote nothing, so callers never show a blank answer. ``wait``: how long
     the model may go quiet (looking at a picture first can take minutes on a laptop); ``temperature``: other than
-    the usual 0.2; ``finished``: given a dict, its "reason" is set to why the reply ended ("length": cut off).
+    the usual 0.2; ``finished``: given a dict, its "reason" is set to why the reply ended ("length": cut off) and
+    "thought" to whether the model reasoned first.
     """
     model, effort, budget = _chat_plan(settings, max_tokens)
     for _attempt in range(2):
@@ -686,7 +687,7 @@ def stream_text(
             reply.content += piece
             yield piece
         if finished is not None:
-            finished["reason"] = reply.finish
+            finished["reason"], finished["thought"] = reply.finish, bool(reply.reasoning)
         if reply.content:
             return
         plan = _retry_plan(model, effort if model not in _effort_rejected else None, budget, reply)

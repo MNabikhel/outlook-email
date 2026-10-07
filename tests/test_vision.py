@@ -601,7 +601,7 @@ def test_a_reading_cut_off_at_the_length_limit_is_not_kept(scan, store, settings
 
 
 def test_a_blank_page_is_read_as_blank_not_failed(scan, store, settings, monkeypatch):
-    monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: (_ for _ in ()).throw(vision.EmptyReply("nothing")))
+    monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: (_ for _ in ()).throw(vision.Blank("nothing")))
     assert _read(store, settings, scan.id).pages == 1
     shown = store.get_email(scan.id).attachments[0].extracted_text
     assert "no figures to compare. Shown: OCR's reading" in shown and "30,256" in shown
@@ -810,3 +810,77 @@ def test_a_reading_that_loops_on_one_line_is_stopped_and_kept_without_the_loop(s
     assert seen[-1] < len(looping) / 2, "the reading stopped soon after the loop began"
     assert vision.trim_loop("| a | 1 |\n" + "| x | 9 |\n" * 20 + "| x |") == ("| a | 1 |\n| x | 9 |", True)
     assert vision.trim_loop("| a | 1 |\n| | |\n| | |\n| b | 2 |")[1] is False, "a few blank rows are the page's"
+
+
+# What the second look at the fixes found ----------------------------------------------------------------------
+
+
+def test_account_numbers_in_the_models_tables_are_masked_and_the_table_keeps_its_cells():
+    markdown = (
+        "| Field | Value |\n|---|---|\n| Account Number | 123456789012 |\n| Routing | 021000021 |\n"
+        "**Account No.** 987654321098\n| GL Account | 1200 |\n"
+    )
+    masked = vision.mask_secrets(markdown)
+    assert "123456789012" not in masked and "021000021" not in masked and "987654321098" not in masked
+    assert "| Account Number | ****9012 |" in masked and "| Routing | ****0021 |" in masked
+    assert "| GL Account | 1200 |" in masked, "a four-digit GL account is not a bank account"
+    page = vision.page_text(masked)
+    assert "Field: Account Number | Value: ****9012" in page and "Account No. ****1098" in page
+
+
+def test_an_invoice_with_empty_line_rows_is_read_to_the_end():
+    invoice = (
+        "| Item | Qty | Amount |\n|---|---|---|\n| Paper | 10 | 45.00 |\n| Toner | 2 | 160.00 |\n" + "| | | |\n" * 12
+        + "| Subtotal | | 205.00 |\n| Tax | | 16.40 |\n| Total | | 221.40 |\n"
+    )
+    assert not vision._looping(invoice) and vision.trim_loop(invoice) == (invoice, False)
+    assert vision._looping("| a | 1 |\n" + "| | | |\n" * 31 + "|")
+
+
+def test_a_loop_with_blank_lines_between_its_repeats_is_trimmed():
+    text = "| a | 1 |\n" + "| x | 9 |\n\n" * 25
+    assert vision._looping(text)
+    assert vision.trim_loop(text) == ("| a | 1 |\n| x | 9 |", True)
+
+
+def test_a_model_that_thought_until_its_budget_ran_out_failed_the_page_and_a_blank_reply_is_a_blank_page(scan, store, settings, monkeypatch):
+    settings.llm = None
+
+    class Replies(FakeVisionServer):
+        def __init__(self, delta, finish):
+            super().__init__()
+            self.delta, self.finish = delta, finish
+
+        def __call__(self, request):
+            if not request.url.path.endswith("/chat/completions"):
+                return super().__call__(request)
+            self.calls.append(json.loads(request.content))
+            events = [{"choices": [{"delta": self.delta}]}, {"choices": [{"delta": {}, "finish_reason": self.finish}]}]
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    _serve(monkeypatch, Replies({"reasoning_content": "Let me look at every row. " * 50}, "length"))
+    result = _read(store, settings, scan.id)
+    att = store.get_email(scan.id).attachments[0]
+    assert result.pages == 0 and result.failed and store.page_failures(att.id, att.sha256) == {1: 1}
+    local_llm._status_cache.clear()
+    _serve(monkeypatch, Replies({"content": "  "}, "stop"))
+    assert _read(store, settings, scan.id).pages == 1
+    assert store.page_readings(att.id, att.sha256)[1]["model_text"] == ""
+
+
+def test_questions_about_a_files_contents_are_told_apart_from_others():
+    about = ["What does this say?", "What's in the picture?", "What does the receipt show?", "What date is on the bill?",
+             "Total for October?", "How much is owed to Acme?", "Is 4,750.00 the deposit?"]
+    other = ["Draft a reply saying I'll call at 3pm", "Who is Maya Chen and how do I reach her?", "Is this urgent?"]
+    assert all(assistant._ABOUT_FILES.search(question) for question in about)
+    assert not any(assistant._ABOUT_FILES.search(question) for question in other)
+
+
+def test_a_reading_of_a_page_with_no_mark_in_the_text_is_still_shown():
+    rows = {
+        1: {"first": OCR_TEXT, "model_text": BALANCE, "model": MODEL, "comparison": json.dumps({"kind": "pdf"})},
+        21: {"first": "", "model_text": BALANCE, "model": MODEL, "comparison": json.dumps({"kind": "pdf"})},
+    }
+    shown = vision.shown_text(f"[page 1]\n{OCR_TEXT}", rows)
+    assert "\n\n[page 21]\n" in shown and vision.shown_text(shown, rows) == shown

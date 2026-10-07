@@ -653,8 +653,10 @@ def answer_stream(
 # A question about a scan's contents (as opposed to its sender, or a reply to write).
 _ABOUT_FILES = re.compile(
     r"\b(attach\w*|files?|pdfs?|scan\w*|pages?|tables?|rows?|columns?|lines?|totals?|subtotals?|amounts?|balances?|"
-    r"figures?|numbers?|sum|summar\w*|reports?|statements?|invoices?|schedules?|forecasts?|ledgers?|registers?|"
-    r"costs?|fees?|paid|owe\w*|due|how much|how many|what does it say|read)\b|[$€£%]|\d",
+    r"figures?|numbers?|sum|summar\w*|reports?|statements?|invoices?|receipts?|bills?|checks?|cheques?|schedules?|"
+    r"forecasts?|ledgers?|registers?|images?|pictures?|photos?|screenshots?|documents?|forms?|letters?|dates?|"
+    r"vendors?|payees?|accounts?|items?|costs?|fees?|prices?|paid|owe\w*|due|says?|shows?|contains?|listed|"
+    r"how much|how many|what'?s in|read)\b|[$€£%]|\d[\d,]*\.\d\d|\d{4,}",
     re.I,
 )
 
