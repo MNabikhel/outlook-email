@@ -40,3 +40,18 @@ def test_pdf_text_roundtrip():
     text = extract_text_from_bytes("INV-777.pdf", "application/pdf", data)
     assert "INV-777" in text
     assert "500.00" in text
+
+
+def test_rtf_text_keeps_coded_characters_and_leaves_out_hidden_groups():
+    rtf = (
+        r"{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fnil\fcharset0 Calibri;}{\f1\fswiss Arial;}}"
+        r"{\colortbl ;\red0\green0\blue255;}{\*\generator Riched20 10.0.19041}\viewkind4\uc1" "\r\n"
+        r"\pard\sa200\sl276\slmult1\f0\fs22 Invoice INV-7781\par" "\r\n"
+        r"Amount due: \'a34,250.00 \endash\~net 30\par" "\r\n"
+        r"{\pict\pngblip\picw10\pich10 89504e470d0a1a0a0000000d4948445200000010}"
+        r"Caf\'e9 Rouge Ltd, \{ref\} \u8364\'80 12\par" "\r\n"
+        r"\trowd\intbl Item\cell Amount\cell\row}"
+    )
+    text = extract_text_from_bytes("remittance.rtf", "application/rtf", rtf.encode("latin-1"))
+    assert text == "Invoice INV-7781\nAmount due: £4,250.00 – net 30\nCafé Rouge Ltd, {ref} € 12\nItem | Amount"
+    assert extract_fields(text, as_of=date(2026, 10, 1)).invoice_numbers == ["INV-7781"]
