@@ -503,7 +503,10 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         if len(parts) > 1:
             labels = [p.label for p in parts[:12]] + ([f"… {len(parts) - 12} more"] if len(parts) > 12 else [])
             block.append("Sections: " + " / ".join(labels))
-        budget = per_file - prompt_size(head) - 200
+        counted = _row_counts(text)
+        if counted:
+            block.append(counted)
+        budget = per_file - prompt_size(head) - prompt_size(counted) - 200
         size = prompt_size(text)
         # The table rows the question names, and anything worked out from them, so a small model starts from the
         # right cell. A file that fits whole comes first; one too long to show gets this index whatever it costs,
@@ -551,6 +554,17 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         used += prompt_size(piece)
     lines += [f"── File: {att.filename} ({file_kind(att)}; not asked about, read it with read_file)" for att in skipped]
     return "\n".join(lines)
+
+
+def _row_counts(text: str) -> str:
+    """How many rows each table of the file has, counted: a small model summing up a file miscounts them
+    ("10 vendors" for 12)."""
+    counts = []
+    for table in table_lookup.tables_in(text):
+        totals = len(table.rows) - len(table.body)
+        if len(table.body) >= 3:
+            counts.append(f'"{table.labels[0]}" {len(table.body)} rows' + (f" and {totals} total row{'s' if totals != 1 else ''}" if totals else ""))
+    return "Tables (rows counted): " + "; ".join(counts) if counts else ""
 
 
 def _worked_block(block: str, room: int) -> str:

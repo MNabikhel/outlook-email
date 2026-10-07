@@ -165,6 +165,16 @@ def test_the_model_starts_from_the_rows_the_question_names(store, settings):
     assert any("picked out the table rows" in read for read in ws.reads)
 
 
+def test_the_model_is_told_how_many_rows_each_table_has(store, settings):
+    from controller_inbox import agent
+
+    email = _schedule_email(store, settings, "Fixed Asset Schedule 9-30-26.pdf")
+    ws = agent.Workspace(store, settings, [email], question="summarize this file", current_id=email.id)
+    block = agent.file_context(ws, ws.question, 12_000)[email.id]
+    # Eleven assets; the five category subtotals and the grand total are not assets.
+    assert 'Tables (rows counted): "Category" 11 rows and 6 total rows' in block
+
+
 def test_without_a_model_the_lookup_answer_shows_the_row(store, settings):
     from controller_inbox.assistant import answer_stream
 
