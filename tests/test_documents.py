@@ -63,6 +63,36 @@ def test_a_formula_can_be_traced_back_to_its_inputs_across_sheets():
     assert "    Budget!D2 ← =C2-B2" in trace
 
 
+def test_a_trace_skips_other_workbooks_function_names_and_text_and_reads_only_cells_in_use(monkeypatch):
+    from openpyxl.styles import Font
+    from openpyxl.worksheet.worksheet import Worksheet
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Sheet1"
+    sheet["B2"] = 999  # shares its address with the cell in the other workbook
+    sheet["A1"] = "=[1]Sheet1!B2*2"
+    sheet["A2"] = '=IF(C1>0,"Q1 plan","Q2 plan")'
+    sheet["A3"] = "=LOG10(C1)+ATAN2(C1,C2)"
+    sheet["A4"] = "=VLOOKUP(5,Data!$A$1:$Z$65536,2,FALSE)"
+    sheet["C1"], sheet["C2"] = 5, 7
+    data = book.create_sheet("Data")
+    for row in range(1, 50):
+        data.append([row, row * 10])
+    data.cell(1048576, 1).font = Font(bold=True)  # formatted to the bottom of the sheet
+    out = io.BytesIO()
+    book.save(out)
+    made = []
+    real = Worksheet.cell
+    monkeypatch.setattr(Worksheet, "cell", lambda self, *args, **kwargs: made.append(1) or real(self, *args, **kwargs))
+    assert trace_cell(out.getvalue(), "Sheet1", "A1").splitlines() == ["Sheet1!A1 ← =[1]Sheet1!B2*2", "  [1]Sheet1!B2: in another workbook, not in this file"]
+    assert trace_cell(out.getvalue(), "Sheet1", "A2").splitlines()[1:] == ["  Sheet1!C1 = 5"]
+    assert trace_cell(out.getvalue(), "Sheet1", "A3").splitlines()[1:] == ["  Sheet1!C1 = 5", "  Sheet1!C2 = 7"]
+    assert trace_cell(out.getvalue(), "Sheet1", "A4").splitlines()[1] == "  Data!A1:Z65536: 98 filled cells, 98 numbers adding to 13,475"
+    assert read_cells(out.getvalue(), "Data", "A48:B1048576").splitlines()[1:] == ["A48: 48 | B48: 480", "A49: 49 | B49: 490"]
+    assert len(made) < 1000, "a cell was made for every empty address in the range"
+
+
 def test_reading_a_range_shows_values_and_formulas():
     cells = read_cells(_budget(), "Budget", "A3:D4")
     assert cells.splitlines() == [

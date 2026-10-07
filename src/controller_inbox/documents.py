@@ -950,9 +950,13 @@ def read_part(text: str, label: str) -> Part | None:
 
 # Exact cells from the original workbook ------------------------------------------------------
 
+# Not part of a longer name (LOG10, ATAN2, 1.5E10) or of a link to another workbook ([1]Sheet1!B2),
+# and not a function's name (LOG10( ).
 _FORMULA_REF = re.compile(
-    r"(?:'((?:[^']|'')+)'!|([A-Za-z0-9_.]+)!)?\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?"
+    r"(?<![\w.\]!$'])(?:'((?:[^']|'')+)'!|([A-Za-z0-9_.]+)!)?\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?(?![\w(!])"
 )
+_FORMULA_TEXT = re.compile(r'"(?:[^"]|"")*"')
+_FORMULA_LINK = re.compile(r"'?\[[^\[\]]+\][^\[\]!(),;+\-*/^&=<>]*!\$?[A-Za-z_]*\$?\d*(?::\$?[A-Z]{1,3}\$?\d+)?")
 
 
 def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200) -> str:
@@ -976,11 +980,13 @@ def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200) -> str:
         max_row = min(max_row or ws.max_row, ws.max_row)
         lines = [f'Sheet "{ws.title}" {get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}']
         shown = 0
-        for r in range(min_row, max_row + 1):
+        held = _held(ws, min_col, min_row, max_col, max_row)
+        held_values = _held(vs, min_col, min_row, max_col, max_row)
+        for r in sorted({r for r, _c in held} | {r for r, _c in held_values}):
             row = []
             for c in range(min_col, max_col + 1):
-                raw = ws.cell(r, c).value
-                value = vs.cell(r, c).value
+                raw = getattr(held.get((r, c)), "value", None)
+                value = getattr(held_values.get((r, c)), "value", None)
                 if raw is None and value is None:
                     continue
                 ref = f"{get_column_letter(c)}{r}"
@@ -1000,6 +1006,16 @@ def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200) -> str:
     finally:
         values.close()
         formulas.close()
+
+
+def _held(ws, min_col: int, min_row: int, max_col: int, max_row: int) -> dict:
+    """The cells of a range the sheet holds, by (row, column) in order, without making a cell for every
+    empty address in it as ``ws.cell`` does: a sheet formatted down to row 1,048,576 would take minutes."""
+    return {
+        key: cell
+        for key, cell in sorted(ws._cells.items())
+        if min_row <= key[0] <= max_row and min_col <= key[1] <= max_col
+    }
 
 
 def trace_cell(data: bytes, sheet: str, cell: str, *, depth: int = 2) -> str:
@@ -1126,7 +1142,10 @@ def _trace(formulas, values, sheet: str, ref: str, depth: int, level: int, lines
         lines.append(f"{indent}{where}{shown} ← {raw}")
         if level >= depth:
             return
-        for match in _FORMULA_REF.finditer(raw[1:]):
+        formula = _FORMULA_TEXT.sub('""', raw[1:])
+        for link in dict.fromkeys(_FORMULA_LINK.findall(formula)):
+            lines.append(f"{indent}  {link}: in another workbook, not in this file")
+        for match in _FORMULA_REF.finditer(formula):
             target = (match.group(1) or match.group(2) or sheet).replace("''", "'")
             if target not in formulas.sheetnames:
                 continue
@@ -1134,21 +1153,21 @@ def _trace(formulas, values, sheet: str, ref: str, depth: int, level: int, lines
             if match.group(5):
                 end = f"{match.group(5)}{match.group(6)}"
                 min_col, min_row, max_col, max_row = range_boundaries(f"{start}:{end}")
-                cells = [
-                    f"{get_column_letter(c)}{r}"
-                    for r in range(min_row, max_row + 1)
-                    for c in range(min_col, max_col + 1)
-                ]
-                if len(cells) > 12:
-                    total = [values[target][c].value for c in cells]
-                    numbers = [v for v in total if isinstance(v, (int, float))]
+                # Only the part the sheet uses: an old lookup's A1:Z65536 is a few hundred cells, not 1.7 million.
+                used = values[target]
+                max_col, max_row = min(max_col, used.max_column), min(max_row, used.max_row)
+                count = max(0, max_col - min_col + 1) * max(0, max_row - min_row + 1)
+                if count > 12:
+                    filled = [c.value for c in _held(used, min_col, min_row, max_col, max_row).values() if c.value is not None]
+                    numbers = [v for v in filled if isinstance(v, (int, float)) and not isinstance(v, bool)]
                     lines.append(
-                        f"{indent}  {target}!{start}:{end}: {len(cells)} cells"
+                        f"{indent}  {target}!{start}:{end}: {len(filled)} filled cells"
                         + (f", {len(numbers)} numbers adding to {_fmt(sum(numbers))}" if numbers else "")
                     )
                     continue
-                for c in cells:
-                    _trace(formulas, values, target, c, depth, level + 1, lines, seen)
+                for r in range(min_row, max_row + 1):
+                    for c in range(min_col, max_col + 1):
+                        _trace(formulas, values, target, f"{get_column_letter(c)}{r}", depth, level + 1, lines, seen)
             else:
                 _trace(formulas, values, target, start, depth, level + 1, lines, seen)
     else:
