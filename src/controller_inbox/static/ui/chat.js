@@ -31,9 +31,11 @@ export function createChat({ root, onToggle }) {
   let chatId = store.get(CHAT_KEY);
   let turns = [];
   let loaded = false;
+  let loading = null; // the load of the conversation on its way, if any
+  let loadRound = 0; // a later load wins over an earlier one
   let busy = false;
   let controller = null;
-  let round = 0;
+  let round = 0; // the answer showing in the panel; an older one stops updating it
   let scope = null; // { id, subject }
   let scopeOff = false;
   let model = { active: false, name: "" };
@@ -218,28 +220,43 @@ export function createChat({ root, onToggle }) {
     store.set(CHAT_KEY, id || null);
   }
 
-  async function load(id) {
-    const mine = ++round;
-    if (!id) {
-      turns = [];
-      title.textContent = "Ask CloseDesk";
+  /** Show conversation ``id``. ``switching``: another conversation was picked, so an answer still streaming
+   * belongs to the old one and stops updating the panel. Opening the panel only fills it in. */
+  function load(id, switching = true) {
+    const mine = ++loadRound;
+    if (switching) ++round;
+    loaded = false;
+    const done = (async () => {
+      if (!id) {
+        turns = [];
+        title.textContent = "Ask CloseDesk";
+      } else {
+        try {
+          const saved = await getJSON(`/chats/${encodeURIComponent(id)}`);
+          if (mine !== loadRound) return;
+          remember(saved.id);
+          turns = (saved.turns || []).map((turn) => ({ ...turn, pending: false }));
+          title.textContent = saved.title || "Ask CloseDesk";
+        } catch (error) {
+          if (mine !== loadRound) return;
+          remember(null);
+          turns = [];
+          title.textContent = "Ask CloseDesk";
+        }
+      }
       loaded = true;
-      return renderLog();
-    }
-    try {
-      const saved = await getJSON(`/chats/${encodeURIComponent(id)}`);
-      if (mine !== round) return;
-      remember(saved.id);
-      turns = (saved.turns || []).map((turn) => ({ ...turn, pending: false }));
-      title.textContent = saved.title || "Ask CloseDesk";
-    } catch (error) {
-      if (mine !== round) return;
-      remember(null);
-      turns = [];
-      title.textContent = "Ask CloseDesk";
-    }
-    loaded = true;
-    renderLog();
+      renderLog();
+    })();
+    loading = done;
+    done.finally(() => {
+      if (loading === done) loading = null;
+    });
+    return done;
+  }
+
+  /** Wait for the conversation to be on screen: a question asked while it loads goes after its earlier turns. */
+  async function ready() {
+    while (!loaded) await (loading || load(chatId, false));
   }
 
   function newChat() {
@@ -257,6 +274,8 @@ export function createChat({ root, onToggle }) {
     if (!question || busy) return;
     open(false);
     closeHistory();
+    setBusy(true);
+    await ready();
     const mine = ++round;
     const about = emailId || (scope && !scopeOff ? scope.id : null);
     turns.push({ role: "user", text: question });
@@ -275,7 +294,6 @@ export function createChat({ root, onToggle }) {
       });
     };
     controller = new AbortController();
-    setBusy(true);
     try {
       await postStream(
         "/chat",
@@ -411,7 +429,7 @@ export function createChat({ root, onToggle }) {
   }
 
   function open(focus = true) {
-    if (!loaded) load(chatId);
+    if (!loaded && !loading) load(chatId, false);
     if (root.hidden) {
       root.hidden = false;
       document.documentElement.dataset.chat = "open";
@@ -474,7 +492,7 @@ export function createChat({ root, onToggle }) {
   renderStatus();
   if (document.documentElement.dataset.chat === "open") {
     root.hidden = false;
-    load(chatId);
+    load(chatId, false);
   }
 
   return {

@@ -218,3 +218,53 @@ def test_a_citation_in_the_pop_out_opens_in_the_window_it_came_from(site, page, 
     opened.value.wait_for_url(f"{site}/inbox/{budget.id}")
     assert popout.url == f"{site}/chat/window" and len(popout.query_selector_all("#chat .msg")) == 2
     assert context.errors == []
+
+
+# The workspace (/app): a question asked while its conversation is still loading, and the chat closed and
+# opened again meanwhile, shows after the earlier turns and streams to the end.
+
+WORKSPACE_ANSWERED = """n => {
+  const msgs = document.querySelectorAll('#chat .chat-log .msg');
+  const last = msgs[msgs.length - 1];
+  return msgs.length >= n && last.matches('.bot:not(.pending)');
+}"""
+
+
+def test_the_workspace_chat_keeps_its_conversation_and_answer_while_it_loads(site, page, context, store, mail, monkeypatch):
+    import time
+
+    def slow_model(*_args, **_kwargs):
+        for i in range(12):
+            yield f"part{i} "
+            time.sleep(0.12)  # still answering when a second load of the conversation would land
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
+    monkeypatch.setattr(assistant, "stream_text", slow_model)
+    budget = mail["Q4 budget draft"]
+    chat_id = _saved_answer(store, "An earlier answer.", [])
+    page.add_init_script(
+        """(() => {
+          const real = window.fetch;
+          window.fetch = (url, options) => /\\/chats\\/[0-9a-f]+$/.test(String(url))
+            ? new Promise((done) => setTimeout(done, 500)).then(() => real(url, options))
+            : real(url, options);
+        })()"""
+    )
+    page.goto(f"{site}/app/mail/{budget.id}")
+    page.evaluate("id => localStorage.setItem('closedesk-chat-id', id)", chat_id)
+    page.goto(f"{site}/app/mail/{budget.id}")
+    page.wait_for_selector("button[title='Ask CloseDesk about this email']")
+    page.evaluate(
+        """() => {
+          document.querySelector("button[title='Ask CloseDesk about this email']").click();
+          setTimeout(() => document.querySelector("#chat-btn").click(), 150);
+          setTimeout(() => document.querySelector("#chat-btn").click(), 300);
+        }"""
+    )
+    page.wait_for_function(WORKSPACE_ANSWERED, arg=4, timeout=20000)
+    texts = page.eval_on_selector_all("#chat .chat-log .msg", "els => els.map(e => e.innerText)")
+    assert "A question" in texts[0] and "An earlier answer." in texts[1], "the earlier turns come first"
+    assert "What does this email need from me?" in texts[2] and "part11" in texts[3]
+    assert [turn["role"] for turn in store.chat_turns(chat_id)] == ["user", "assistant"] * 2
+    assert context.errors == []
