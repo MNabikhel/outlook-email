@@ -272,6 +272,63 @@ def tables_in(text: str) -> list[Table]:
     return found
 
 
+@dataclass
+class Verdict:
+    """How a table's printed totals check out against the rows they add up."""
+
+    matched: int = 0
+    mismatched: list[str] = field(default_factory=list)
+
+    @property
+    def checked(self) -> int:
+        return self.matched + len(self.mismatched)
+
+
+def verify(table: Table) -> Verdict:
+    """Check each printed total and subtotal of each figure column against the rows above it.
+
+    A schedule carries its own checksums: a subtotal is the sum of the rows since the last one, a grand total
+    the sum of every row or of the subtotals. A reading that put a figure in the wrong column or row, or lost
+    a row, breaks them; a right reading keeps them. A percent row ("% of Total") is not a sum and is skipped."""
+    verdict = Verdict()
+    for label, kind in table.kinds.items():
+        if kind != "figure":
+            continue
+        group: list[Decimal] = []
+        body: list[Decimal] = []
+        subtotals: list[Decimal] = []
+        places = 0
+        for row in table.rows:
+            raw = row.value(label)
+            value = _number(raw)
+            if value is not None and "." in raw:
+                places = max(places, len(raw.split(".")[-1].rstrip(")% ")))
+            if not row.total:
+                if value is not None:
+                    group.append(value)
+                    body.append(value)
+                continue
+            if value is None or "%" in raw or not (group or subtotals):
+                continue
+            # Each part was rounded when it was printed, so a total can be off by half a unit of the last place per part.
+            slack = Decimal(1).scaleb(-places) * (Decimal("0.5") * (len(body) + 1))
+            if group and abs(sum(group) - value) <= slack:
+                subtotals.append(value)
+            elif any(parts and abs(sum(parts) - value) <= slack for parts in (body, subtotals, subtotals + group)):
+                subtotals = []
+            else:
+                verdict.mismatched.append(f"{row.name} ({label}): printed {raw}, the rows above add to {_plain(sum(group or body))}")
+                group = []
+                continue
+            verdict.matched += 1
+            group = []
+    return verdict
+
+
+def _plain(number: Decimal) -> str:
+    return f"{number:,.2f}" if number != number.to_integral_value() else f"{number:,.0f}"
+
+
 def _with_colon_labels(rows: list[Row]) -> None:
     """A bare row label with a colon in it ("Add: Deposits in transit | Operating: 86,412.50") reads as a
     cell named "Add". When the rows around it have bare labels and the same columns as the rest of it,

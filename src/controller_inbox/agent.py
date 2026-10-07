@@ -503,7 +503,7 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         if len(parts) > 1:
             labels = [p.label for p in parts[:12]] + ([f"… {len(parts) - 12} more"] if len(parts) > 12 else [])
             block.append("Sections: " + " / ".join(labels))
-        counted = _row_counts(text)
+        counted, checked = _tables_note(text)
         if counted:
             block.append(counted)
         budget = per_file - prompt_size(head) - prompt_size(counted) - 200
@@ -548,7 +548,8 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             ws.reads.append(f"Left out {att.filename}: no room (the assistant can still open it)")
             lines.append(f"── File: {att.filename} (not shown; read it with read_file)")
             continue
-        ws.reads.append(f"{read}; picked out the table rows the question names" if rows else read)
+        read = f"{read}; picked out the table rows the question names" if rows else read
+        ws.reads.append(f"{read}; {checked}" if checked else read)
         lines.append(piece)
         files_shown += 1
         used += prompt_size(piece)
@@ -556,12 +557,20 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
     return "\n".join(lines)
 
 
-def _row_counts(text: str) -> str:
-    """How many rows each table of the file has, counted, and how many of them fall under each name of a first
-    column that groups them ("Category" 11 rows: Buildings 2, Vehicles 3, ...): a small model summing up a
-    file miscounts its rows ("10 vendors" for 12). Total and subtotal rows are left out of the count."""
-    counts = []
+def _tables_note(text: str) -> tuple[str, str]:
+    """For the prompt: how many rows each table has, and whether its printed totals add up as it was read; and
+    for the chat's reading steps, a few words on that check.
+
+    Rows are counted, with how many fall under each name of a first column that groups them ("Category" 11 rows:
+    Buildings 2, ...), because a small model summing up a file miscounts them ("10 vendors" for 12). A total that
+    doesn't match the rows above it means the reading put a figure in the wrong row or column or lost a row: the
+    model is told, so it doesn't pass such figures on as certain."""
+    counts: list[str] = []
+    matched, mismatched = 0, []
     for table in table_lookup.tables_in(text):
+        verdict = table_lookup.verify(table)
+        matched += verdict.matched
+        mismatched += verdict.mismatched
         if len(table.body) < 3:
             continue
         label = table.labels[0]
@@ -573,7 +582,18 @@ def _row_counts(text: str) -> str:
         if 1 < len(groups) <= 8 and len(groups) < len(table.body):
             piece += " (" + ", ".join(f"{name}: {n}" for name, n in groups.items()) + ")"
         counts.append(piece)
-    return "Tables (rows counted, totals and subtotals left out): " + "; ".join(counts) if counts else ""
+    lines = ["Tables (rows counted, totals and subtotals left out): " + "; ".join(counts)] if counts else []
+    checked = len(mismatched) + matched
+    if mismatched:
+        lines.append(
+            f"Caution: {len(mismatched)} of the {checked} printed totals don't match the rows above them as read "
+            f"({'; '.join(mismatched[:2])}). Figures from this table may be misread: say so when you use them."
+        )
+        return "\n".join(lines), f"{len(mismatched)} of its {checked} printed totals don't add up as read, so its figures may be misread"
+    if matched:
+        lines.append(f"Totals check: all {matched} printed totals match the rows above them.")
+        return "\n".join(lines), f"its {matched} printed total{'s' if matched != 1 else ''} add up"
+    return "\n".join(lines), ""
 
 
 def _worked_block(block: str, room: int) -> str:

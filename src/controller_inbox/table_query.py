@@ -176,6 +176,7 @@ class Sheet:
     rows: int
     of: str = ""  # a _cells table: the table it lays out one value per row
     across: str = ""  # its columns that were laid out (the first ... the last)
+    caution: str = ""  # its printed totals that don't match its rows as read
 
 
 @dataclass
@@ -274,7 +275,9 @@ class Tables:
         sheet = table.where if table.where.startswith("sheet") else ""
         headings = _headings_above(lines, table.rows[0].at)
         title = " / ".join(part for part in (source, sheet, " / ".join(headings[:3])) if part)
-        self._register(Sheet(name, title, _notes(lines), columns, len(values)))
+        verdict = table_lookup.verify(table)
+        caution = f"{len(verdict.mismatched)} of its {verdict.checked} printed totals don't match its rows as read" if verdict.mismatched else ""
+        self._register(Sheet(name, title, _notes(lines), columns, len(values), caution=caution))
         family = _family(columns)
         if family:
             self._load_cells(self.sheets[-1], family, values, _over(headings, columns, family))
@@ -356,7 +359,9 @@ class Tables:
         for index, column in enumerate(sheet.columns):
             comma = "," if index < len(sheet.columns) - 1 else ""
             lines.append(f"  {column.name} {_sql_type(column.kind)}{comma}  -- {_describe(column, names)}")
-        lines.append(");" + (f"  -- note: {sheet.note}" if sheet.note else ""))
+        notes = [f"caution: {sheet.caution}, so its figures may be misread"] if sheet.caution else []
+        notes += [f"note: {sheet.note}"] if sheet.note else []
+        lines.append(");" + (f"  -- {'; '.join(notes)}" if notes else ""))
         return "\n".join(lines)
 
     def run(self, sql: str) -> tuple[list[str], list[tuple], bool]:
@@ -394,6 +399,10 @@ class Tables:
         if not found.rows:
             lines.append("It returned no rows.")
             return "\n".join(lines)
+        used = set(re.findall(r"\b(t\d+)(?:_cells)?\b", _LITERAL.sub("''", found.sql)))
+        for sheet in self.sheets:
+            if sheet.name in used and sheet.caution:
+                lines.append(f"Caution: {sheet.caution} ({sheet.title}); its figures may be misread, so say so if you use them.")
         lines.append(f"Result ({len(found.rows)} row{'s' if len(found.rows) != 1 else ''}{', more not shown' if found.more else ''}):")
         for row in found.rows:
             cells = [f"{self._heading(name)}: {self._shown(name, value)}" for name, value in zip(found.names, row)]

@@ -215,3 +215,51 @@ def test_several_matching_rows_are_counted(texts):
     found = lookup(texts["Sept Close Calendar.pdf"], "Which of Priya Raman's tasks are not started?")
     assert "2 of the table's 12 rows match, where the row names priya, raman, not, started:" in found
     assert "Intercompany reconciliation" not in found
+
+
+def _misread(text: str, vendor: str) -> str:
+    """The text with one figure of ``vendor``'s row read into the column beside it, as a bad reading would."""
+    lines = text.splitlines()
+    at = next(index for index, line in enumerate(lines) if line.startswith(f"Vendor: {vendor}"))
+    cells = [cell.split(": ", 1) for cell in lines[at].split(" | ")]
+    first = next(index for index, (label, _value) in enumerate(cells) if label.startswith("31"))
+    cells[first][1], cells[first + 1][1] = cells[first + 1][1], cells[first][1]
+    lines[at] = " | ".join(": ".join(cell) for cell in cells)
+    return "\n".join(lines)
+
+
+def test_a_table_checks_its_reading_against_its_printed_totals(texts):
+    from controller_inbox.table_lookup import tables_in, verify
+
+    good = verify(tables_in(texts["AP Aging 9-30-26.pdf"])[0])
+    assert good.matched == 6 and good.mismatched == []
+    bad = verify(tables_in(_misread(texts["AP Aging 9-30-26.pdf"], "Harbor Steel"))[0])
+    assert bad.mismatched == [
+        "Total (31 - 60 Days): printed $41,895.50, the rows above add to 19,745.50",
+        "Total (61 - 90 Days): printed $13,990.00, the rows above add to 36,140",
+    ]
+    # Subtotals, and a grand total that adds up the subtotals, all check out on a right reading.
+    assets = verify(tables_in(texts["Fixed Asset Schedule 9-30-26.pdf"])[0])
+    assert assets.matched == 30 and assets.mismatched == []
+
+
+def test_the_model_and_the_chat_are_told_when_totals_do_not_add_up(store, settings, texts):
+    from controller_inbox import agent, table_query
+
+    email = _schedule_email(store, settings, "AP Aging 9-30-26.pdf")
+    ws = agent.Workspace(store, settings, [email], question="summarize this file", current_id=email.id)
+    block = agent.file_context(ws, ws.question, 12_000)[email.id]
+    assert "Totals check: all 6 printed totals match the rows above them." in block
+    assert ws.reads[-1].endswith("; its 6 printed totals add up")
+
+    email.attachments[0].extracted_text = _misread(email.attachments[0].extracted_text, "Harbor Steel")
+    ws = agent.Workspace(store, settings, [email], question="summarize this file", current_id=email.id)
+    block = agent.file_context(ws, ws.question, 12_000)[email.id]
+    assert "Caution: 2 of the 6 printed totals don't match the rows above them as read" in block
+    assert ws.reads[-1].endswith("; 2 of its 6 printed totals don't add up as read, so its figures may be misread")
+
+    tables = table_query.Tables([("AP Aging 9-30-26.pdf", email.attachments[0].extracted_text)])
+    assert "caution: 2 of its 6 printed totals don't match its rows as read" in tables.schema()
+    names, rows, more = tables.run("SELECT SUM(c_31_60_days) FROM t1")
+    found = table_query.Result("", "SELECT SUM(c_31_60_days) FROM t1", names, rows, more)
+    assert "Caution: 2 of its 6 printed totals don't match its rows as read" in tables.render(found)
