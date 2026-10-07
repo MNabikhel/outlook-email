@@ -241,9 +241,24 @@ def test_a_reading_of_something_else_is_not_shown():
 def test_a_reading_whose_totals_dont_add_up_loses_to_one_whose_do():
     wrong = BALANCE.replace("| Cash | 12,400 |", "| Cash | 12,900 |")
     first = vision.page_text(BALANCE)  # the PDF's own text, already a table that adds up
-    comparison = vision.compare(first, vision.page_text(wrong))
+    comparison = vision.compare(first, vision.page_text(wrong), ocr=False)
     assert comparison.model_totals == (1, 1) and comparison.first_totals == (2, 0)
     assert comparison.choice == "first"
+
+
+def test_against_ocr_a_table_with_nearly_all_its_figures_is_shown_though_a_total_is_off():
+    """OCR's text can't be totalled: a model table that agrees with nearly all of it puts each figure in its row and
+    column, and the figure it read differently is flagged. A PDF's own text, which is exact, still wins."""
+    rows = "".join(f"| Account {n} | {1000 + n * 37:,}.00 |\n" for n in range(1, 21))
+    ocr_text = "\n".join(f"Account {n} {1000 + n * 37:,}.00" for n in range(1, 21)) + "\nTotal 26,770.00"
+    model = "| Account | Balance |\n|---|---|\n" + rows.replace("1,037.00", "1,087.00") + "| Total | 26,770.00 |\n"
+    comparison = vision.compare(ocr_text, vision.page_text(model))
+    assert comparison.model_totals == (0, 1) and comparison.differ == [("1,087.00", "1,037.00")]
+    assert comparison.choice == "model"
+    page = vision.merged_page(ocr_text, model, comparison, first_name="OCR", model=MODEL)
+    assert "its printed totals add up 0 of 1 times" in page
+    assert vision.unconfirmed(page) == {vision.Decimal("1087.00"): "OCR read 1,037.00"}
+    assert vision.compare(ocr_text, vision.page_text(model), ocr=False).choice == "first"
 
 
 def test_without_ocr_the_models_reading_is_the_page_and_every_figure_is_unconfirmed():
@@ -714,7 +729,7 @@ def test_a_stored_comparison_that_cant_be_read_doesnt_break_loading_mail():
 def test_when_ocrs_reading_is_shown_the_models_differing_figure_is_still_flagged():
     first = vision.page_text(BALANCE)
     wrong = BALANCE.replace("| Cash | 12,400 |", "| Cash | 12,900 |")
-    comparison = vision.compare(first, vision.page_text(wrong))
+    comparison = vision.compare(first, vision.page_text(wrong), ocr=False)
     page = vision.merged_page(first, wrong, comparison, first_name="the PDF's text", model=MODEL)
     assert comparison.choice == "first" and "(the PDF's text / the vision model): 12,400 / 12,900" in page
     assert vision.unconfirmed(page) == {vision.Decimal("12900"): "the PDF's text read 12,400"}
@@ -896,3 +911,20 @@ def test_a_reading_that_loops_across_one_line_is_stopped_too(settings, monkeypat
     assert seen[-1] < 2500, "stopped within a few hundred tokens, not at the limit"
     assert vision.trim_loop("Total sales | 41,400\n| Region |" + " |" * 80) == ("Total sales | 41,400\n| Region |", True)
     assert not vision._looping("| a | b |\n|---|---|\n| x |" + "  |" * 30), "a wide row of blank cells is a row"
+
+
+def test_a_tables_second_heading_line_names_the_columns_under_a_spanning_heading():
+    """A markdown table has one heading line: the model writes "Revenue Recognized" over an empty cell and puts
+    Oct-26, Nov-26 on the first row. Joined, each figure is named by its month (100% of the cells of a scanned
+    depreciation schedule read right, from 46%)."""
+    markdown = (
+        "| Customer | Service Term | | Revenue Recognized | | |\n|---|---|---|---|---|---|\n"
+        "| | Start | End | Oct-26 | Nov-26 | Dec-26 |\n| Alpine Ridge | 10/01/25 | 09/30/27 | 400.00 | 400.00 | 400.00 |\n"
+    )
+    page = vision.page_text(markdown)
+    assert "Customer | Service Term Start | Service Term End | Revenue Recognized Oct-26 | Revenue Recognized Nov-26" in page
+    assert "Customer: Alpine Ridge | Service Term Start: 10/01/25" in page and "Revenue Recognized Dec-26: 400.00" in page
+    years = "| | Month of October | | Year to Date | |\n|---|---|---|---|---|\n| | 2026 | 2025 | 2026 | 2025 |\n| Net sales | 9,100 | 8,700 | 88,000 | 81,500 |\n"
+    assert "Line: Net sales | Month of October 2026: 9,100 | Month of October 2025: 8,700 | Year to Date 2026: 88,000" in vision.page_text(years)
+    second_table = "| Voucher | Vendor | Amount |\n|---|---|---|\n| GL Acct | Account Name | Vouchers |\n| 6200 | Utilities | 12 |\n"
+    assert "Voucher | Vendor | Amount" in vision.page_text(second_table), "another table's headings fill no gap: left as a row"

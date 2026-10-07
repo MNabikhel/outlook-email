@@ -69,8 +69,9 @@ NOTE = "[Read two ways"
 MODEL_NAME = "the vision model"
 # A page the first reading found nothing on (a scan without OCR): the model's reading is the only one.
 ALONE = "found no text on this page"
-# How many differing or model-only figures a page's note lists; the answer check flags each one listed.
-LISTED = 40
+# How many differing or model-only figures a page's note lists; the answer check flags each one listed. Enough for
+# a dense page whose OCR text was cut short (a trial balance: 114 figures only the model read).
+LISTED = 150
 # After this many failures in a row on the same file, a page is only read when the user asks.
 TRIES = 2
 
@@ -436,9 +437,38 @@ def _cells(line: str) -> list[str]:
     return [_FORMATTING.sub("", cell).strip() for cell in re.split(r"(?<!\\)\|", inner)]
 
 
+_YEAR_LABEL = re.compile(r"^(19|20)\d\d$")
+
+
+def _second_heading(header: list[str], row: list[str]) -> bool:
+    """The table's first row is the second line of its column headings: labels only (a year counts as one), and at
+    least one sits under a heading spanning several columns ("Revenue Recognized" over Oct-26, Nov-26 …), which a
+    markdown table can only write as an empty heading cell. A second table's own headings fill no such gap."""
+    filled = [cell for cell in row if cell]
+    if len(filled) < 2 or any(tables.is_value(cell) and not _YEAR_LABEL.match(cell) for cell in filled):
+        return False
+    padded = [*header, *[""] * (len(row) - len(header))]
+    return any(cell and not padded[index] for index, cell in enumerate(row) if index > 0)
+
+
+def _joined_headings(header: list[str], row: list[str]) -> list[str]:
+    """Two heading lines as one: a spanning heading is carried over the columns under it ("Revenue Recognized
+    Oct-26"), and a column with one line keeps it."""
+    width = max(len(header), len(row))
+    top = [*header, *[""] * (width - len(header))]
+    sub = [*row, *[""] * (width - len(row))]
+    out, carried = [], ""
+    for above, below in zip(top, sub):
+        carried = above or carried
+        out.append(f"{above or carried} {below}".strip() if below else above)
+    return out
+
+
 def _table_lines(header: list[str], rows: list[list[str]]) -> list[str]:
     from controller_inbox.table_lookup import ROW_LABEL
 
+    if rows and _second_heading(header, rows[0]):
+        header, rows = _joined_headings(header, rows[0]), rows[1:]
     width = max([len(header), *(len(row) for row in rows)]) if rows else len(header)
     labels = [*header, *[""] * (width - len(header))]
     # Every column is named, the row names too ("Line: Less: Allowance for Doubtful Accounts" stays one cell).
@@ -529,8 +559,9 @@ class Comparison:
         )
 
 
-def compare(first: str, model_page: str) -> Comparison:
-    """Figure by figure, and by each reading's printed totals: which reading the page is shown as."""
+def compare(first: str, model_page: str, *, ocr: bool = True) -> Comparison:
+    """Figure by figure, and by each reading's printed totals: which reading the page is shown as. ``ocr``: the
+    first reading is OCR's (a scan or a picture), not a PDF's own text."""
     mine, theirs = figures(_ungrouped(model_page)), figures(_ungrouped(first))
     model_count = Counter({value: len(shown) for value, shown in mine.items()})
     first_count = Counter({value: len(shown) for value, shown in theirs.items()})
@@ -546,7 +577,7 @@ def compare(first: str, model_page: str) -> Comparison:
     comparison.only_first = [theirs[value][0] for value in left_first]
     comparison.model_totals = _totals(model_page)
     comparison.first_totals = _totals(first)
-    comparison.choice = _choose(comparison) if said_something(first) else ("model" if model_page.strip() else "first")
+    comparison.choice = _choose(comparison, ocr=ocr) if said_something(first) else ("model" if model_page.strip() else "first")
     return comparison
 
 
@@ -586,15 +617,25 @@ def _totals(text: str) -> tuple[int, int]:
     return matched, mismatched
 
 
-def _choose(comparison: Comparison) -> str:
-    """The model's reading when its totals hold up at least as well as the first reading's, most of its figures
-    are the first reading's too (a reading that shares few figures is of something else, or made up), and it has
-    most of the first reading's figures (one that stopped early would hide the rest of the page)."""
+def _choose(comparison: Comparison, *, ocr: bool = True) -> str:
+    """Which reading the page is shown as.
+
+    The model's when its totals hold up at least as well as the first reading's, most of its figures are the first
+    reading's too (a reading that shares few figures is of something else, or made up), and it has most of the
+    first reading's figures (one that stopped early would hide the rest of the page).
+
+    Against OCR, also the model's when it has nearly all of OCR's figures (85%), whatever its totals: it read the
+    same page, and its table puts each figure in its row and column where OCR's text runs them together. OCR's
+    text can't be totalled at all, so a model table whose totals don't all add up isn't worse than it; what OCR
+    lacked (cut short on a dense page) or read differently is listed under the page and flagged in answers. Measured
+    on 15 unseen scanned pages, this kept OCR's reading on the dense pages where the model misread small print."""
     def score(totals: tuple[int, int]) -> int:
         return totals[0] - 2 * totals[1]
 
     share = comparison.confirmed / comparison.figures if comparison.figures else 0.0
     covered = comparison.confirmed / comparison.first_figures if comparison.first_figures else 1.0
+    if ocr and covered >= 0.85 and share >= 0.3:
+        return "model"
     if share >= 0.5 and covered >= 0.5 and score(comparison.model_totals) >= score(comparison.first_totals):
         return "model"
     return "first"
@@ -753,7 +794,8 @@ def _saved(row: dict) -> dict:
 def _page_for(first: str, row: dict) -> str:
     saved = _saved(row)
     model_text = row.get("model_text") or ""
-    comparison = Comparison.from_dict(saved) if row.get("first") == first and saved else compare(first, page_text(model_text))
+    ocr = (saved.get("first_name") or "OCR") == "OCR"
+    comparison = Comparison.from_dict(saved) if row.get("first") == first and saved else compare(first, page_text(model_text), ocr=ocr)
     return merged_page(first, model_text, comparison, first_name=saved.get("first_name") or "OCR", model=row.get("model") or "")
 
 
@@ -837,10 +879,11 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
             result.failed.append(f"page {page}: {str(exc)[:160]}")
             continue
         seconds = time.monotonic() - started
-        comparison = compare(first, page_text(markdown))
+        named = first_name(first, page, scanned, att.filename)
+        comparison = compare(first, page_text(markdown), ocr=named == "OCR")
         store.save_page_reading(
             att.id, page, first=first, model_text=markdown, model=model, seconds=seconds, sha256=att.sha256,
-            comparison=json.dumps({**comparison.to_dict(), "first_name": first_name(first, page, scanned, att.filename), "kind": kind}),
+            comparison=json.dumps({**comparison.to_dict(), "first_name": named, "kind": kind}),
         )
         result.pages += 1
         result.seconds += seconds
