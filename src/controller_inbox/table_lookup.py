@@ -1234,7 +1234,8 @@ def _year(text: str | None) -> int | None:
     if not text:
         return None
     year = int(text)
-    return year + 2000 if year < 100 else year
+    # Two digits: 00-69 are this century and 70-99 the last ("6/1/98" is 1998), as Python's %y reads them.
+    return year + (2000 if year < 70 else 1900) if year < 100 else year
 
 
 def _span(text: str) -> tuple[When, When] | None:

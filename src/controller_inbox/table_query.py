@@ -131,8 +131,15 @@ _KEYWORDS = frozenset(
     with without""".split()
 )
 _ALLOWED = {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION, getattr(sqlite3, "SQLITE_RECURSIVE", 33)}
-# Functions that build large values from nothing, or reach outside the database.
-_REFUSED = frozenset({"load_extension", "zeroblob", "randomblob"})
+# The functions a question over a schedule needs: sums and counts, rounding, text and dates. Any other (one that
+# reaches outside the database, builds large values, or exposes the engine's internals) is refused.
+_FUNCTIONS = frozenset(
+    """abs avg ceil ceiling coalesce count date datetime dense_rank first_value floor glob group_concat ifnull iif
+    instr julianday lag last_value lead length like lower ltrim max min nullif printf format rank replace round
+    row_number rtrim sign strftime substr substring sum time total trim trunc typeof upper""".split()
+)
+# The longest text kept in one cell: anything longer is not a cell a question is about.
+MAX_CELL_CHARS = 10_000
 _RESULT_WORDS = re.compile(r"\b(?:total|net|ending|end|closing|variance|change|difference|balance)\b", re.I)
 _CANNOT = re.compile(
     r"\bnot\s+(?:in|on|shown\s+in|listed\s+in|available\s+in|part\s+of)\s+the\s+(?:tables?|sheets?|schema|data)\b|"
@@ -144,8 +151,8 @@ _CANNOT = re.compile(
 # "Totals are not in the table, so SUM them" is about the left-out total rows, not the question.
 _TOTAL_ROWS = re.compile(r"\b(?:sub)?total(?:s|\s+rows?)\b", re.I)
 _LITERAL = re.compile(r"'((?:[^']|'')*)'")
-_CROSS = re.compile(r"(?i)\bFROM\s+t\d+(?:\s+(?:AS\s+)?\w+)?\s*,")
-_JOIN = re.compile(r"(?i)\bJOIN\s+t\d+((?:\s+\w+){0,3})")
+_CROSS = re.compile(r"(?i)\bFROM\s+(?:\([^()]*\)|\w+)(?:\s+(?:AS\s+)?\w+)?\s*,")
+_JOIN = re.compile(r"(?i)\bJOIN\s+(?:\([^()]*\)|\w+)((?:\s+\w+){0,4})")
 _QUOTED = re.compile(r'"([^"]+)"')
 _ALIAS = re.compile(r'(?i)\bAS\s+"([^"]+)"')
 _SQL_LINE = re.compile(r"(?is)\bSQL:\s*(.*)")
@@ -164,6 +171,7 @@ class Column:
     parts: list[tuple[int, int]] = field(default_factory=list)  # (column index, sign) of the formula's terms
     written: dict[str, str] = field(default_factory=dict)  # a value as stored -> as the sheet writes it
     under: str = ""  # the heading merged over this column and its neighbours ("Due From (payable entity)")
+    most: bool = False  # its formula holds on most rows, not every one (a footer row or two works otherwise)
     same_as: str = ""  # in a _cells table: the table whose column this repeats
 
 
@@ -200,8 +208,10 @@ class Tables:
         self._db = sqlite3.connect(":memory:", check_same_thread=False)
         self._db.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES)
         # SQLite's LIKE ignores case for A-Z only: "Müller" would not match '%müller%'.
-        self._db.create_function("like", 2, _like, deterministic=True)
-        self._db.create_function("like", 3, _like, deterministic=True)
+        # LIKE runs in Python, where SQLite's progress handler can't stop it: it watches the query's deadline itself.
+        self._deadline = 0.0
+        self._db.create_function("like", 2, lambda pattern, value: _like(pattern, value, deadline=self._deadline), deterministic=True)
+        self._db.create_function("like", 3, lambda pattern, value, escape: _like(pattern, value, escape, deadline=self._deadline), deterministic=True)
         self.facts: list[tuple[str, str, str]] = []
         count = 0
         for source, text in files:
@@ -377,10 +387,16 @@ class Tables:
         for quoted in _QUOTED.findall(bare):
             if quoted.lower() not in self._names | aliases:
                 raise ValueError(f'no such column: "{quoted}"')
-        if _CROSS.search(bare) or any(not re.match(r"(?i)\s*(?:\w+\s+)?(?:ON|USING)\b", rest) for rest in _JOIN.findall(bare)):
+        joins = _JOIN.findall(bare)
+        if (
+            _CROSS.search(bare)
+            or any(not re.match(r"(?i)\s*(?:(?:AS\s+)?\w+\s+)?(?:ON|USING)\b", rest) for rest in joins)
+            or (joins and re.search(r"(?i)\bON\s+(?:1|TRUE)\b", bare))
+        ):
             # Every row of one table against every row of another: its sums are many times too large.
             raise ValueError("the tables are separate lists: query one at a time, or JOIN them ON a column they share")
         started = time.monotonic()
+        self._deadline = started + QUERY_SECONDS
         self._db.set_progress_handler(lambda: int(time.monotonic() - started > QUERY_SECONDS), 10_000)
         try:
             cursor = self._db.execute(sql)
@@ -556,8 +572,8 @@ def parse(reply: str) -> tuple[str, str]:
 
 
 def _authorize(action: int, _table, function, _db, _trigger) -> int:
-    """Reading and the built-in functions only; for a function call SQLite passes its name third."""
-    if action in _ALLOWED and not (action == sqlite3.SQLITE_FUNCTION and str(function).lower() in _REFUSED):
+    """Reading and the functions in ``_FUNCTIONS`` only; for a function call SQLite passes its name third."""
+    if action in _ALLOWED and (action != sqlite3.SQLITE_FUNCTION or str(function).lower() in _FUNCTIONS):
         return sqlite3.SQLITE_OK
     return sqlite3.SQLITE_DENY
 
@@ -566,8 +582,9 @@ _ANY = object()
 _STAR = object()
 
 
-def _like(pattern, value, escape=None):
-    """SQL's LIKE with case folded for every letter: % any run of characters, _ any one."""
+def _like(pattern, value, escape=None, *, deadline: float = 0.0):
+    """SQL's LIKE with case folded for every letter: % any run of characters, _ any one. Past ``deadline`` (a
+    time.monotonic() value; 0 for none) it gives up with an error, as SQLite does for a query that runs too long."""
     if pattern is None or value is None:
         return None
     tokens: list = []
@@ -585,14 +602,18 @@ def _like(pattern, value, escape=None):
         else:
             tokens.append(_ANY if char == "_" else char)
         index += 1
-    return _wildcard(tokens, str(value).casefold())
+    return _wildcard(tokens, str(value).casefold(), deadline)
 
 
-def _wildcard(tokens: list, text: str) -> bool:
+def _wildcard(tokens: list, text: str, deadline: float = 0.0) -> bool:
     """Whether ``tokens`` match all of ``text``, going back only to the last % (no runaway backtracking)."""
     at = position = 0
     star, mark = -1, 0
+    steps = 0
     while position < len(text):
+        steps += 1
+        if deadline and not steps % 4096 and time.monotonic() > deadline:
+            raise sqlite3.OperationalError("interrupted")
         if at < len(tokens) and tokens[at] is not _STAR and (tokens[at] is _ANY or tokens[at] == text[position]):
             at += 1
             position += 1
@@ -629,6 +650,7 @@ def _sql_type(kind: str) -> str:
 
 
 def _stored(raw: str, kind: str):
+    raw = raw[:MAX_CELL_CHARS]
     if kind == "figure":
         # A "-" is the accounting format's zero; a blank cell is no figure at all (MIN and AVG skip it).
         number = table_lookup._number(raw)
@@ -659,7 +681,7 @@ def _describe(column: Column, names: int = MAX_NAMES) -> str:
         note = f'"{column.label}" figure' + (f', under "{column.under}"' if column.under else "")
         if column.samples and all("%" in sample for sample in column.samples):
             note += ", a percent (6.3 means 6.3%)"
-        return f"{note} = {column.formula} on every row" if column.formula else note
+        return f"{note} = {column.formula} on {'most rows' if column.most else 'every row'}" if column.formula else note
     if column.kind == "date":
         stored = next((_stored(s, "date") for s in column.samples if table_lookup._when(s)), "")
         shape = "YYYY-MM-DD" if len(stored or "") == 10 else "MM-DD"
@@ -689,11 +711,17 @@ def _formulas(columns: list[Column], values: list[list]) -> None:
             # Every other column: "Total HC = Chicago HC + Austin HC + Remote HC" beside their Salary columns.
             if width >= 3 and position - 2 * width >= 0:
                 runs.append((figures[position - 2 * width : position : 2], True))
-        for run, interleaved in runs:
-            signs = [(1,) * len(run)] if len(run) > 5 or interleaved else [(1, *rest) for rest in itertools.product((1, -1), repeat=len(run) - 1)]
-            terms = next((list(zip(run, pattern)) for pattern in signs if _holds(values, target, list(zip(run, pattern)))), None)
-            if terms:
-                found[target] = terms
+        # A formula that holds on every row comes first: "total = current + 1-30" holds on most rows of an aging
+        # (the later buckets are mostly empty) but only the one over every bucket holds on all of them.
+        for share in (1.0, 0.9):
+            for run, interleaved in runs:
+                signs = [(1,) * len(run)] if len(run) > 5 or interleaved else [(1, *rest) for rest in itertools.product((1, -1), repeat=len(run) - 1)]
+                terms = next((list(zip(run, pattern)) for pattern in signs if _holds(values, target, list(zip(run, pattern)), share)), None)
+                if terms:
+                    found[target] = terms
+                    columns[target].most = share < 1
+                    break
+            if target in found:
                 break
     def kept(index: int) -> tuple[bool, int]:
         return bool(_RESULT_WORDS.search(columns[index].label)), index
@@ -707,13 +735,16 @@ def _formulas(columns: list[Column], values: list[list]) -> None:
         columns[target].formula = " ".join(("+ " if sign > 0 else "- ") + columns[index].name for index, sign in terms).removeprefix("+ ")
 
 
-def _holds(values: list[list], target: int, terms: list[tuple[int, int]]) -> bool:
+def _holds(values: list[list], target: int, terms: list[tuple[int, int]], share: float = 1.0) -> bool:
+    """Whether ``target`` is the signed sum of ``terms`` on at least ``share`` of the rows that have it."""
     used = good = 0
     copies = [0] * len(terms)
     for row in values:
         # A blank part adds nothing, as in the sheet's SUM.
         parts = [row[index] or 0.0 for index, _sign in terms]
-        if row[target] is None:
+        # A row with none of the parts ("Balance per trial balance, GL" under a rollforward) isn't worked out
+        # from them at all.
+        if row[target] is None or all(row[index] is None for index, _sign in terms):
             continue
         used += 1
         good += abs(sum(sign * part for (_index, sign), part in zip(terms, parts)) - row[target]) <= 0.015 * len(terms)
@@ -721,7 +752,7 @@ def _holds(values: list[list], target: int, terms: list[tuple[int, int]]) -> boo
             copies[position] += abs(part - row[target]) < 0.005
     nonzero = sum(1 for row in values if row[target])
     # Equal months ("Oct = Jul - Aug + Sep" when every month is the same) only look like a formula.
-    return used >= 3 and nonzero >= 2 and good >= 0.9 * used and max(copies) < 0.8 * used
+    return used >= 3 and nonzero >= 2 and good >= share * used and max(copies) < 0.8 * used
 
 
 def _headings_above(lines: list[str], at: int) -> list[str]:

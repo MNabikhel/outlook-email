@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -270,3 +271,45 @@ def test_a_date_is_shown_as_the_sheet_writes_it():
     calendar = _tables(FIRST / "Sept Close Calendar.pdf")
     names, rows, more = calendar.run("SELECT task, date FROM t1 WHERE date > '10-06' ORDER BY date DESC LIMIT 1")
     assert calendar.render(table_query.Result("", "q", names, rows, more)).endswith("Task: Close package to CFO | Date: Thu 10/08")
+
+
+def test_only_the_functions_a_schedule_question_needs_are_allowed():
+    tables = Tables([("book.xlsx", "Customer: Acme | Balance: 1,000\nCustomer: Bolt | Balance: 2,150\nCustomer: Cato | Balance: 3,000\n")])
+    assert tables.run("SELECT ROUND(SUM(balance) / COUNT(*), 2), MAX(balance) FROM t1")[1] == [(2050.0, 3000.0)]
+    assert tables.run("SELECT UPPER(customer) FROM t1 WHERE customer LIKE 'ac%'")[1] == [("ACME",)]
+    for sql in ("SELECT fts3_tokenizer('simple')", "SELECT hex(customer) FROM t1", "SELECT sqlite_source_id()"):
+        with pytest.raises(sqlite3.Error):
+            tables.run(sql)
+
+
+def test_tables_listed_side_by_side_are_refused_and_joins_on_a_column_run():
+    tables = Tables([("book.xlsx", "Customer: Acme | Balance: 1,000\nCustomer: Bolt | Balance: 2,150\nCustomer: Cato | Balance: 3,000\n")])
+    for sql in ("SELECT SUM(balance) FROM t1, t1 AS b", "SELECT SUM(balance) FROM (SELECT * FROM t1) x, t1", "SELECT COUNT(*) FROM t1 JOIN t1 AS b ON 1"):
+        with pytest.raises(ValueError, match="separate lists"):
+            tables.run(sql)
+    assert tables.run("SELECT COUNT(*) FROM t1 AS a JOIN t1 AS b ON a.customer = b.customer")[1] == [(3,)]
+
+
+def test_a_like_that_runs_too_long_is_stopped():
+    # LIKE runs in Python, where SQLite's own time limit can't reach: it keeps to the limit itself.
+    tables = Tables([("book.xlsx", "Customer: Acme | Balance: 1,000\nCustomer: Bolt | Balance: 2,150\nCustomer: Cato | Balance: 3,000\n")])
+    started = time.monotonic()
+    with pytest.raises(sqlite3.Error):
+        tables.run("SELECT customer FROM t1 WHERE printf('%12000s', '') LIKE '%' || printf('%6000s', '') || 'x%'")
+    assert time.monotonic() - started < table_query.QUERY_SECONDS + 1.5
+
+
+def test_a_formula_is_said_to_hold_on_every_row_only_when_it_does():
+    def aged(name, *buckets):
+        cells = [f"{label}: {value:,.2f}" if value else f"{label}: -" for label, value in zip(("Current", "1 - 30", "31 - 60", "61 - 90", "Over 90"), buckets)]
+        return " | ".join([f"Customer: {name}", f"Total Balance: {sum(buckets):,.2f}", *cells])
+
+    text = "\n".join(aged(f"Customer {n}", 1000.0 * n, 100.0 * n, 0, 0, 0) for n in range(1, 10))
+    text += "\n" + aged("Dunmore Precision", 8100.0, 2400.0, 4418.9, 2960.15, 11304.62)
+    schema = Tables([("AR.pdf", text)]).schema()
+    assert '"Total Balance" figure = current_col + c_1_30 + c_31_60 + c_61_90 + over_90 on every row' in schema
+
+
+def test_a_very_long_cell_does_not_stop_the_table_loading():
+    text = "Name: " + "x" * 120_000 + " | Amount: 1\nName: B | Amount: 2\nName: C | Amount: 3\n"
+    assert Tables([("f.pdf", text)]).run("SELECT SUM(amount) FROM t1")[1] == [(6.0,)]
