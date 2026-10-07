@@ -300,6 +300,38 @@ def test_word_table_with_a_header_row_merged_cells_and_blanks():
     assert lines[-1] == "After the table."
 
 
+def test_a_word_row_that_starts_further_right_keeps_its_figures_in_their_columns(monkeypatch):
+    from controller_inbox import tables
+
+    document = Document()
+    table = document.add_table(rows=0, cols=4)
+    for values in (["Description", "Q1", "Q2", "Q3"], ["Rent", "3,000", "3,100", "3,200"], ["Total", "3,450", "3,570", "3,720"], ["Notes", "", "", ""]):
+        for cell, value in zip(table.add_row().cells, values):
+            cell.text = value
+    total = table.rows[2]._tr
+    total.remove(total.tc_lst[0])
+    skipped = OxmlElement("w:gridBefore")
+    skipped.set(qn("w:val"), "1")
+    total.get_or_add_trPr().append(skipped)
+    # A span with no width is one column; one wider than Word allows is cut to Word's 63.
+    table.rows[1]._tr.tc_lst[0].get_or_add_tcPr().append(OxmlElement("w:gridSpan"))
+    notes = table.rows[3]._tr
+    for cell in notes.tc_lst[1:]:
+        notes.remove(cell)
+    wide = OxmlElement("w:gridSpan")
+    wide.set(qn("w:val"), "99999")
+    notes.tc_lst[0].get_or_add_tcPr().append(wide)
+    widths = []
+    real = tables.table_lines
+    monkeypatch.setattr(tables, "table_lines", lambda grid, **kw: widths.append(max(map(len, grid))) or real(grid, **kw))
+    out = io.BytesIO()
+    document.save(out)
+    lines = extract_text_from_bytes("budget.docx", "", out.getvalue()).splitlines()
+    assert "Description: Rent | Q1: 3,000 | Q2: 3,100 | Q3: 3,200" in lines
+    assert "Description: not listed | Q1: 3,450 | Q2: 3,570 | Q3: 3,720" in lines
+    assert "Notes" in lines and widths == [63]
+
+
 def test_powerpoint_table_rows_name_their_columns():
     from pptx import Presentation
     from pptx.util import Inches

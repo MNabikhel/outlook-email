@@ -257,7 +257,8 @@ def _docx_table(element) -> list[str]:
     for number, row in enumerate(element.findall(f"{_W}tr")):
         if number == 0:
             marked = row.find(f"{_W}trPr/{_W}tblHeader") is not None
-        cells: list[str | None] = []
+        # A row that starts further right (Word's "grid before") has no cells for the columns it skips.
+        cells: list[str | None] = [""] * _docx_count(row.find(f"{_W}trPr/{_W}gridBefore"), 0)
         for cell in _docx_cells(row):
             text = " ".join(filter(None, (_docx_paragraph(p) for p in cell.iter(f"{_W}p") if _docx_own(p, cell)))).strip()
             properties = cell.find(f"{_W}tcPr")
@@ -267,14 +268,20 @@ def _docx_table(element) -> list[str]:
                 above = grid[-1] if grid else []
                 text = next((c for c in reversed(above[: len(cells) + 1]) if c is not None), "") if len(cells) < len(above) else ""
             cells.append(text)
-            if span is not None and (span.get(f"{_W}val") or "1").isdigit():
-                cells.extend([None] * (int(span.get(f"{_W}val")) - 1))
+            cells.extend([None] * (_docx_count(span, 1) - 1))
         grid.append(cells)
         if number == 0:
             runs = [r for r in row.iter(f"{_W}r") if "".join(t.text or "" for t in r.iter(f"{_W}t")).strip()]
             bold.append(bool(runs) and all(_docx_bold(r) for r in runs))
     header = tables.has_header(grid, marked=marked, bold_first=bool(bold and bold[0]))
     return tables.table_lines(grid, header=header)
+
+
+def _docx_count(element, default: int) -> int:
+    """A column count such as ``w:gridSpan``: the default when it is missing or unreadable, and no more
+    columns than a Word table can have."""
+    value = (element.get(f"{_W}val") or "") if element is not None else ""
+    return min(int(value), 63) if value.isdigit() else default
 
 
 def _docx_own(paragraph, cell) -> bool:
