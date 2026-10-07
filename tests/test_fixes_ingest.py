@@ -462,3 +462,32 @@ def test_an_address_in_the_display_name_is_not_the_sender(store: Store, settings
     # Headers the strict parser gives up on still give the address in the brackets.
     assert folder_mail._split_address("Chen, Maya <maya@x.com>") == ("Chen, Maya", "maya@x.com")
     assert folder_mail._split_address("Maya Chen") == ("Maya Chen", "")
+
+
+# 15. The overnight reading never overwrites what the user did while the model was reading -------
+
+
+def test_a_reading_is_not_saved_over_a_correction_or_verdict_made_meanwhile(store: Store, settings: Settings):
+    from controller_inbox.fraud import record_fraud_verdict
+    from controller_inbox.learn import record_correction
+    from controller_inbox.overnight import read_queue
+    from test_bionic import AgreeingReader
+
+    ingest_demo(store, settings, now=NOW)
+    first, corrected, flagged = (e.id for e in store.list_emails(model_status="script_draft", order="queue", limit=3))
+
+    class SlowReader(AgreeingReader):
+        def read(self, packet):
+            if packet["email_id"] == first:
+                # While the model reads the first email, the user corrects the second and calls the third fraud.
+                record_correction(store, settings, email_id=corrected, corrected_category="newsletter", reason="it is a newsletter")
+                record_fraud_verdict(store, settings, flagged, verdict="fraud", note="phoned the vendor; it is fake")
+            return super().read(packet)
+
+    result = read_queue(store, settings, limit=3, now=NOW, reader=SlowReader())
+    assert result["read_ids"] == [first]
+    kept = store.get_email(corrected)
+    assert kept.category.value == "newsletter" and kept.model_status == "corrected"
+    verdict = store.get_email(flagged)
+    assert {"fraud_risk", "fraud_confirmed"} <= set(verdict.flags)
+    assert verdict.model_status == "script_draft", "read again on the next run, as it is now"
