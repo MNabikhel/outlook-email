@@ -212,3 +212,9 @@ def test_borrowed_accented_display_names_are_caught(store, settings):
         email = mail(f"stranger{n}", borrowed, f"person{n}.ceo@gmail.com", "Wire today",
                      "Please wire $48,500 today for invoice 5521.")
         assert "display_name_spoof" in {s["key"] for s in store.fraud_check(email.id)["signals"]}, borrowed
+
+
+# Plain text: only real entities are decoded, not a bare "&not" or "&copy" that is part of what was written.
+def test_bare_named_entities_in_plain_text_are_left_as_written():
+    assert normalize_text("Smith&notary, Print&copy 2026, R&D") == "Smith&notary, Print&copy 2026, R&D"
+    assert normalize_text("ba&#8203;nk ba&#8203nk ba&#x200b;nk AT&amp;T") == "bank bank bank AT&T"

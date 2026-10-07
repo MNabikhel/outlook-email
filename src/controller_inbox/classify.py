@@ -85,6 +85,9 @@ def strip_html_comments(text: str) -> str:
         pos = end + 3
     out.append(text[pos:])
     return "".join(out)
+# An HTML entity left in text: numbered ("&#8203;", "&#x200b;") or named with its closing ";" ("&amp;").
+# A bare "&not" or "&copy" in plain text ("Smith&notary", "Print&copy") is written that way, not an entity.
+_ENTITY_RE = re.compile(r"&(?:#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[A-Za-z][A-Za-z0-9]{1,31};)")
 # Cyrillic and Greek letters drawn like Latin ones ("b\u0430nk" with a Cyrillic a), curly quotes and dashes.
 _LOOKALIKES = str.maketrans(
     {
@@ -111,7 +114,7 @@ def normalize_text(text: str) -> str:
     if not text:
         return ""
     if "&" in text:
-        text = html.unescape(text)
+        text = _ENTITY_RE.sub(lambda entity: html.unescape(entity.group(0)), text)
     if "<" in text:
         text = _INLINE_TAG_RE.sub("", strip_html_comments(text))
     if text.isascii():
