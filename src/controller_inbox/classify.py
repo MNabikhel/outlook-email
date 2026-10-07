@@ -59,9 +59,32 @@ _HIDDEN_RE = re.compile(
 )
 # Formatting tags left in plain text split a word without showing a space ("b<span></span>ank").
 _INLINE_TAG_RE = re.compile(
-    r"<!--.*?-->|</?(?:a|abbr|b|big|code|del|em|font|i|ins|mark|o:p|s|small|span|strike|strong|sub|sup|u|wbr)(?:\s[^<>]{0,300})?/?>",
-    re.I | re.S,
+    r"</?(?:a|abbr|b|big|code|del|em|font|i|ins|mark|o:p|s|small|span|strike|strong|sub|sup|u|wbr)(?:\s[^<>]{0,300})?/?>",
+    re.I,
 )
+
+
+def strip_html_comments(text: str) -> str:
+    """Drop every "<!-- … -->" in one pass over the text. An "<!--" that is never closed stays as text.
+
+    A pattern such as ``<!--.*?-->`` reads to the end of the text from every unclosed "<!--", so a long
+    run of them took minutes.
+    """
+    if "<!--" not in text:
+        return text
+    out: list[str] = []
+    pos = 0
+    while True:
+        start = text.find("<!--", pos)
+        if start < 0:
+            break
+        end = text.find("-->", start + 4)
+        if end < 0:
+            break
+        out.append(text[pos:start])
+        pos = end + 3
+    out.append(text[pos:])
+    return "".join(out)
 # Cyrillic and Greek letters drawn like Latin ones ("b\u0430nk" with a Cyrillic a), curly quotes and dashes.
 _LOOKALIKES = str.maketrans(
     {
@@ -90,7 +113,7 @@ def normalize_text(text: str) -> str:
     if "&" in text:
         text = html.unescape(text)
     if "<" in text:
-        text = _INLINE_TAG_RE.sub("", text)
+        text = _INLINE_TAG_RE.sub("", strip_html_comments(text))
     if text.isascii():
         return text
     return _HIDDEN_RE.sub("", unicodedata.normalize("NFKD", text)).translate(_LOOKALIKES)
@@ -123,8 +146,10 @@ _BANK_DETAILS = (
 )
 _CHANGED = r"(?:changed|changing|updated|amended|modified|replaced|moved|switched)"
 
+# Every phrasing starts a word, so the leading "\b(?=[a-z])" lets the many alternatives be tried only there:
+# three times quicker on a long email than trying each of them at every character.
 PAYMENT_CHANGE_RE = re.compile(
-    r"(\bnew\s+(?:bank(?:ing)?|routing|account|wire)\s+instruct|"
+    r"\b(?=[a-z])(\bnew\s+(?:bank(?:ing)?|routing|account|wire)\s+instruct|"
     r"\bupdated\s+(?:bank(?:ing)?|wire|account|payment)\s+instruct|"
     # "Change of bank details", "changes to our banking information", "notice of change of bank."
     r"(?<!not a )(?<!not )\bchange[ds]?\s+(?:in|of|to)\s+(?:(?:our|the|your|my)\s+)?"

@@ -13,6 +13,7 @@ from __future__ import annotations
 import csv
 import io
 import re
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -227,7 +228,7 @@ def _asks(text: str) -> bool:
 def _requests(text: str) -> list[int]:
     """Where in the text a bank change or gift cards are asked for."""
     starts = [match.start() for match in PAYMENT_CHANGE_RE.finditer(text)]
-    return starts + [match.start() for match in GIFT_RE.finditer(text) if _gift_sentence_asks(text, match)]
+    return starts + [match.start() for match in _gift_asks(text)]
 
 
 def _is_notice(sentence: str) -> bool:
@@ -237,13 +238,34 @@ def _is_notice(sentence: str) -> bool:
         # A change asked for anywhere else is a request, whatever the sentence says after it:
         # "our bank details have changed, pay the new account, and if you receive other instructions call us",
         # "we will never ask for gift cards, but our bank details have changed".
+        requests = _requests(sentence)
+        if not requests:
+            return True
+        # Where each part of the sentence ends, found once for every warning in it.
+        cuts = [cut.start() for cut in CLAUSE_RE.finditer(sentence)]
         scopes = []
         for marker in STRONG_NOTICE_RE.finditer(sentence):
-            end = next((cut.start() for cut in CLAUSE_RE.finditer(sentence, marker.end())), len(sentence))
-            scopes.append((marker.start(), end))
-        return all(any(start <= at < end for start, end in scopes) for at in _requests(sentence))
+            after = bisect_left(cuts, marker.end())
+            scopes.append((marker.start(), cuts[after] if after < len(cuts) else len(sentence)))
+        return _all_inside(requests, scopes)
     # "Beware of scams" is a notice; "please be aware our bank details have changed" is not.
     return bool(WEAK_NOTICE_RE.search(sentence)) and not _asks(sentence)
+
+
+def _all_inside(points: list[int], spans: list[tuple[int, int]]) -> bool:
+    """Every point falls inside one of the spans (start included, end not)."""
+    merged: list[list[int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    starts = [start for start, _end in merged]
+    for at in points:
+        index = bisect_right(starts, at) - 1
+        if index < 0 or at >= merged[index][1]:
+            return False
+    return True
 
 
 def strip_notices(text: str) -> str:
@@ -258,20 +280,35 @@ def strip_notices(text: str) -> str:
 
 def _gift_ask(text: str) -> re.Match[str] | None:
     """A gift-card mention in a sentence that asks someone to buy them or send their codes."""
-    for match in GIFT_RE.finditer(text or ""):
-        if _gift_sentence_asks(text, match):
-            return match
-    return None
+    found = _gift_asks(text)
+    return found[0] if found else None
 
 
-def _gift_sentence_asks(text: str, match: re.Match[str]) -> bool:
-    start = max(text.rfind(".", 0, match.start()), text.rfind("\n", 0, match.start())) + 1
-    ends = [i for i in (text.find(".", match.end()), text.find("\n", match.end())) if i >= 0]
-    sentence = text[start : min(ends) if ends else len(text)]
-    # "Buy 10 gift cards for our staff rewards program and send me the codes" is still an ask.
-    if GIFT_PROGRAM_RE.match(text, match.end()) and not GIFT_BUY_RE.search(sentence):
-        return False
-    return bool(GIFT_ASK_RE.search(sentence))
+def _gift_asks(text: str) -> list[re.Match[str]]:
+    """Every gift-card mention in a sentence that asks someone to buy them or send their codes.
+
+    Each sentence is read once, however many mentions it has, so a long run of them stays quick.
+    """
+    mentions = list(GIFT_RE.finditer(text or ""))
+    if not mentions:
+        return []
+    stops = [stop.start() for stop in re.finditer(r"[.\n]", text)]
+    read: dict[tuple[int, int], tuple[bool, bool]] = {}
+    found = []
+    for match in mentions:
+        before = bisect_left(stops, match.start())
+        after = bisect_left(stops, match.end())
+        span = (stops[before - 1] + 1 if before else 0, stops[after] if after < len(stops) else len(text))
+        if span not in read:
+            sentence = text[span[0] : span[1]]
+            read[span] = (bool(GIFT_ASK_RE.search(sentence)), bool(GIFT_BUY_RE.search(sentence)))
+        asks, buys = read[span]
+        # "Buy 10 gift cards for our staff rewards program and send me the codes" is still an ask.
+        if GIFT_PROGRAM_RE.match(text, match.end()) and not buys:
+            continue
+        if asks:
+            found.append(match)
+    return found
 
 
 def assess(
