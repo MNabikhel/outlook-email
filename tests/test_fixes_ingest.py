@@ -571,3 +571,33 @@ def test_a_copy_of_a_read_message_adds_its_new_files_and_keeps_the_reading(setti
     report: dict = {}
     assert ingest_folder(store, settings, report=report) == [] and report["already_read"] == 1
     assert len(store.get_email(record.id).attachments) == 2
+
+
+# 17. Different emails that share a Message-ID stay apart ------------------------------------
+
+
+def test_different_emails_with_one_message_id_are_kept_apart(settings: Settings, store: Store):
+    # A scan-to-email copier gives every scan the same Message-ID.
+    settings.ensure_data_dir()
+    scan = "<scan@copier.local>"
+    _eml(settings, "Scan 0001", "Scanned: vendor invoice", message_id=scan, attach=[("Scan 0001.txt", b"Invoice INV-7001 total $4,200.00")])
+    second = _eml(settings, "Scan 0002", "Scanned: signed contract", message_id=scan, attach=[("Scan 0002.txt", b"Contract signed")],
+                  date_header="Mon, 05 Oct 2026 11:00:00 -0400").read_bytes()
+    report: dict = {}
+    ingest_folder(store, settings, report=report)
+    assert (report["read"], report["already_read"]) == (2, 0)
+
+    # The next day another scan, while the first two are still script drafts.
+    _eml(settings, "Scan 0003", "Scanned: bank statement", message_id=scan, attach=[("Scan 0003.txt", b"Statement Sept 2026")],
+         date_header="Tue, 06 Oct 2026 09:00:00 -0400")
+    ingest_folder(store, settings)
+    stored = {email.subject: [att.filename for att in email.attachments] for email in store.list_emails()}
+    assert stored == {"Scan 0001": ["Scan 0001.txt"], "Scan 0002": ["Scan 0002.txt"], "Scan 0003": ["Scan 0003.txt"]}
+
+    # The second scan dropped again is still one email.
+    path = settings.inbox_incoming / "Scan 0002 again.eml"
+    path.write_bytes(second)
+    _age(path)
+    report = {}
+    ingest_folder(store, settings, report=report)
+    assert report["already_read"] == 1 and store.counts()["emails"] == 3

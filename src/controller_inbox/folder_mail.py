@@ -9,7 +9,7 @@ import re
 import shutil
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
 from email.utils import parseaddr, parsedate_to_datetime
@@ -65,6 +65,13 @@ def ingest_folder(
         try:
             raw = _read_batch(path, sidecars)
             existing = store.get_email(raw.id)
+            if existing is not None and raw.internet_message_id and _another_message(existing, raw):
+                # Some scanners and mail tools give every message the same Message-ID. A stored email with
+                # another subject, sender or date is a different message, so this one gets an id from those
+                # too, which a copy of it saved again later shares.
+                sent = raw.received_at.astimezone(timezone.utc).isoformat()
+                raw.id = _stable_id("\n".join([raw.internet_message_id, raw.subject, raw.sender_email, sent]))
+                existing = store.get_email(raw.id)
             if existing is not None:
                 # Another copy of a stored message: only files it doesn't hold yet are read and added.
                 raw.attachments = _new_files(settings, raw, existing)
@@ -508,6 +515,25 @@ def _stable_id(message_id: str) -> str:
     """Same Outlook message, same id — whether it was saved as .msg or .eml, today or next week."""
     normalized = message_id.strip().strip("<>").strip().lower()
     return "mail-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
+
+
+# A .msg and an .eml of one message can disagree on the sent time by a few seconds.
+SAME_MESSAGE_SLACK = timedelta(minutes=2)
+
+
+def _another_message(stored, raw: RawMessage) -> bool:
+    """Whether a stored email that has this message's Message-ID is a different message after all."""
+    if _tidy(stored.subject).casefold() != _tidy(raw.subject).casefold():
+        return True
+    if (stored.sender_email or "").strip().lower() != (raw.sender_email or "").strip().lower():
+        return True
+    try:
+        sent = datetime.fromisoformat(str(stored.received_at))
+    except ValueError:
+        return False
+    if sent.tzinfo is None:
+        sent = sent.replace(tzinfo=timezone.utc)
+    return abs(sent - raw.received_at) > SAME_MESSAGE_SLACK
 
 
 def _files(folder: Path) -> list[Path]:
