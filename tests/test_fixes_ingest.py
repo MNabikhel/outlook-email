@@ -723,3 +723,34 @@ def test_reading_again_reads_a_zipped_file_from_its_zip(settings: Settings, stor
     texts = {att.id: att.extracted_text for att in store.get_email(record.id).attachments}
     assert "INV-2002" in texts[zipped.id] and "INV-1001" not in texts[zipped.id]
     assert "INV-1001" in texts[f"{record.id}:invoice.pdf"]
+
+
+# 21. A long non-Latin attachment name is cut to fit, and files are saved before the email --------
+
+
+def test_a_long_non_latin_file_name_is_cut_to_fit_and_keeps_its_extension(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    name = "請求書" * 30 + ".txt"  # 94 characters but 274 bytes in UTF-8, more than a file name can hold
+    _eml(settings, "請求書", message_id="<jp1@x>", attach=[(name, b"first copy"), (name, b"second copy")])
+    report: dict = {}
+    [record] = ingest_folder(store, settings, report=report)
+    assert report["failed"] == [] and not list(settings.inbox_failed.iterdir())
+    assert record.source_path.endswith(".eml")
+    saved = {path.name: path.read_bytes() for path in (settings.inbox_extracted / record.id).iterdir()}
+    assert sorted(saved.values()) == [b"first copy", b"second copy"]
+    assert all(len(name.encode("utf-8")) <= 255 and name.endswith(".txt") for name in saved)
+    assert any(name.endswith(" (2).txt") for name in saved), "the number of the second copy is not cut off"
+
+
+def test_an_email_is_not_stored_when_its_files_cannot_be_saved(settings: Settings, store: Store, monkeypatch):
+    settings.ensure_data_dir()
+    _eml(settings, "Disk full", message_id="<full@x>", attach=[("a.txt", b"data")])
+
+    def full(*_args):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(folder_mail, "_write_extracted", full)
+    report: dict = {}
+    assert ingest_folder(store, settings, report=report) == []
+    assert len(report["failed"]) == 1 and store.counts()["emails"] == 0
+    assert (settings.inbox_failed / "Disk full.eml").exists()

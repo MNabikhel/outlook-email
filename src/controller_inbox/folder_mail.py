@@ -90,8 +90,9 @@ def ingest_folder(
                 if not store.real_mail_count():
                     cleared = store.clear_sample()
                     report["sample_cleared"] = cleared
-            record = process_message(raw, store, settings, now=now)
+            # The files are saved first: an email is only stored once everything that came with it is.
             _write_extracted(settings, raw)
+            record = process_message(raw, store, settings, now=now)
             archived = _archive(settings, owned)
             if archived and archived[0]:
                 store.set_source_path(record.id, str(archived[0]))
@@ -683,11 +684,36 @@ def _zipped_files(folder: Path) -> dict[str, bytes]:
     return found
 
 
+MAX_NAME_CHARS = 150
+# Most file systems take 255 bytes in a file name; a Japanese or Cyrillic name reaches that well before 150 characters.
+MAX_NAME_BYTES = 255
+
+
 def safe_filename(name: str) -> str:
-    """Windows refuses : * ? " < > | in file names; forwarded-mail subjects often have them."""
+    """Windows refuses : * ? " < > | in file names; forwarded-mail subjects often have them.
+
+    Names are cut to 150 characters, and a name still over 255 bytes in UTF-8 is cut to fit, keeping its extension.
+    """
     base = re.split(r"[\\/]", name or "")[-1]
     cleaned = re.sub(r'[<>:"|?*\x00-\x1f]', "_", base).strip(" .")
-    return cleaned[:150] or "attachment"
+    short = cleaned[:MAX_NAME_CHARS]
+    if len(short.encode("utf-8")) > MAX_NAME_BYTES:
+        stem, suffix = _split_suffix(cleaned)
+        short = _shorten(stem, MAX_NAME_CHARS - len(suffix), MAX_NAME_BYTES - len(suffix.encode("utf-8"))).rstrip(" .") + suffix
+    return short or "attachment"
+
+
+def _split_suffix(name: str) -> tuple[str, str]:
+    """("invoice", ".pdf") from "invoice.pdf"; a name without a short extension has none."""
+    dot = name.rfind(".")
+    if 0 < dot and len(name) - dot <= 10 and " " not in name[dot:]:
+        return name[:dot], name[dot:]
+    return name, ""
+
+
+def _shorten(text: str, chars: int, size: int) -> str:
+    """``text`` cut to ``chars`` characters and ``size`` bytes of UTF-8, never inside a character."""
+    return text[: max(0, chars)].encode("utf-8")[: max(0, size)].decode("utf-8", errors="ignore")
 
 
 def unique_attachments(attachments: list[RawAttachment], *, taken: set[str] = frozenset()) -> list[RawAttachment]:
@@ -702,13 +728,12 @@ def unique_attachments(attachments: list[RawAttachment], *, taken: set[str] = fr
     for att in attachments:
         key = safe_filename(att.filename).casefold()
         if key in taken:
-            name = att.filename
-            dot = name.rfind(".")
-            base, suffix = (name[:dot], name[dot:]) if 0 < dot and len(name) - dot <= 10 and " " not in name[dot:] else (name, "")
+            base, suffix = _split_suffix(att.filename)
             number = 2
             while True:
                 tail = f" ({number}){suffix}"
-                candidate = base[: max(1, 150 - len(tail))] + tail
+                # Cut to fit as ``safe_filename`` would, so the number is never cut off.
+                candidate = _shorten(base, MAX_NAME_CHARS - len(tail), MAX_NAME_BYTES - len(tail.encode("utf-8"))) + tail
                 if safe_filename(candidate).casefold() not in taken:
                     break
                 number += 1
