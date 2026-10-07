@@ -260,7 +260,9 @@ def test_the_lock_holds_across_processes(settings: Settings):
     )
     child = subprocess.Popen([sys.executable, "-c", script])
     try:
-        for _ in range(200):
+        # Starting a second Python can take several seconds on a slow machine (CI's Windows).
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
             if ready.exists() and ready.read_text():
                 break
             time.sleep(0.05)
