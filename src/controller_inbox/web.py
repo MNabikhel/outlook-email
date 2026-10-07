@@ -743,13 +743,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         instructions = str(data.get("instructions") or "")[:300]
         return JSONResponse(await run_in_threadpool(draft_reply, settings, email, instructions=instructions))
 
-    @app.post("/chat")
-    async def chat(request: Request):
-        _require_page(request)
-        data = await _json_body(request)
-        question = str(data.get("message") or "").strip()
-        if not question:
-            raise HTTPException(status_code=400, detail="Ask a question first.")
+    def answer_lines(data: dict, question: str):
+        """Saves the question and gathers what its answer needs, then gives the answer's lines to stream."""
         chat_id = str(data.get("chat_id") or "")
         if not chats.valid_id(chat_id):
             chat_id = chats.new_id()
@@ -812,7 +807,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             if not finished:
                 yield json.dumps({"type": "done"}) + "\n"
 
-        return StreamingResponse(_closing(lines()), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
+        return lines()
+
+    @app.post("/chat")
+    async def chat(request: Request):
+        _require_page(request)
+        data = await _json_body(request)
+        question = str(data.get("message") or "").strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="Ask a question first.")
+        # The database and today's list take a moment: in a worker thread, so other pages aren't held up.
+        lines = await run_in_threadpool(answer_lines, data, question)
+        return StreamingResponse(_closing(lines), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
 
     @app.get("/chats")
     def chat_list(q: str = ""):

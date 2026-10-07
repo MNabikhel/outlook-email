@@ -21,7 +21,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from controller_inbox import assistant, cli
+from controller_inbox import assistant, cli, web
 from controller_inbox.cli import DIGEST_SENT_KEY, load_sample, watch_tick
 from controller_inbox.config import Settings
 from controller_inbox.demo import make_pdf
@@ -377,3 +377,34 @@ def test_actions_export_writes_formulas_as_text(settings: Settings, store: Store
     assert {row["subject"] for row in rows} == {"'" + subject}
     assert {row["sender"] for row in rows} == {"'+cmd@vendor.example"}
     assert all(row["title"][:1] not in {"=", "+", "-", "@"} for row in rows)
+
+
+# 12. A chat answer gets ready in a worker thread, so other pages answer meanwhile.
+
+
+def test_other_pages_answer_while_a_chat_answer_gets_ready(settings: Settings, loaded: Store, monkeypatch):
+    started = threading.Event()
+    real_digest = web.build_digest
+
+    def slow_digest(*args, **kwargs):
+        started.set()
+        time.sleep(3)
+        return real_digest(*args, **kwargs)
+
+    monkeypatch.setattr(web, "build_digest", slow_digest)
+    answered: dict = {}
+
+    def ask(base: str) -> None:
+        with httpx.Client(trust_env=False, timeout=30) as client:
+            answered["chat"] = client.post(f"{base}/chat", headers=PAGE, json={"message": "What's urgent today?"})
+
+    with serving(create_app(settings, loaded)) as base, httpx.Client(trust_env=False, timeout=30) as client:
+        asking = threading.Thread(target=ask, args=(base,))
+        asking.start()
+        assert started.wait(10)
+        began = time.monotonic()
+        assert client.get(f"{base}/health").status_code == 200
+        waited = time.monotonic() - began
+        asking.join(30)
+    assert waited < 2, "other pages don't wait for a chat's setup"
+    assert answered["chat"].status_code == 200 and '"type": "done"' in answered["chat"].text
