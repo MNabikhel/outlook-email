@@ -853,3 +853,11 @@ def test_text_stored_with_a_nul_before_is_cleaned_once(store: Store, settings: S
         conn.execute("UPDATE attachments SET extracted_text = ?", ("a\x00b",))
         conn.execute("DELETE FROM sync_state WHERE key = 'attachment_text_without_nul'")
     assert Store(settings.db_path).get_email("raw-1").attachments[0].extracted_text == "ab"
+
+
+# 25. VIP senders can be separated by semicolons, like trusted domains -----------------------------
+
+
+def test_vip_senders_split_on_semicolons_too():
+    settings = Settings(vip_senders="cfo@taz.com; ceo@taz.com,board@taz.com", _env_file=None)
+    assert settings.vip_list == ["cfo@taz.com", "ceo@taz.com", "board@taz.com"]
