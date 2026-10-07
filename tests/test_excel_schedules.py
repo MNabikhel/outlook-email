@@ -171,8 +171,11 @@ def test_the_model_is_told_how_many_rows_each_table_has(store, settings):
     email = _schedule_email(store, settings, "Fixed Asset Schedule 9-30-26.pdf")
     ws = agent.Workspace(store, settings, [email], question="summarize this file", current_id=email.id)
     block = agent.file_context(ws, ws.question, 12_000)[email.id]
-    # Eleven assets; the five category subtotals and the grand total are not assets.
-    assert 'Tables (rows counted): "Category" 11 rows and 6 total rows' in block
+    # Eleven assets in five categories; the category subtotals and the grand total are not assets.
+    assert (
+        'Tables (rows counted, totals and subtotals left out): "Category" 11 rows (Buildings: 2, '
+        "Machinery & Equipment: 3, Vehicles: 3, Computer Equipment: 2, Furniture & Fixtures: 1)"
+    ) in block
 
 
 def test_without_a_model_the_lookup_answer_shows_the_row(store, settings):

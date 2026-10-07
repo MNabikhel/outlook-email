@@ -557,14 +557,23 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
 
 
 def _row_counts(text: str) -> str:
-    """How many rows each table of the file has, counted: a small model summing up a file miscounts them
-    ("10 vendors" for 12)."""
+    """How many rows each table of the file has, counted, and how many of them fall under each name of a first
+    column that groups them ("Category" 11 rows: Buildings 2, Vehicles 3, ...): a small model summing up a
+    file miscounts its rows ("10 vendors" for 12). Total and subtotal rows are left out of the count."""
     counts = []
     for table in table_lookup.tables_in(text):
-        totals = len(table.rows) - len(table.body)
-        if len(table.body) >= 3:
-            counts.append(f'"{table.labels[0]}" {len(table.body)} rows' + (f" and {totals} total row{'s' if totals != 1 else ''}" if totals else ""))
-    return "Tables (rows counted): " + "; ".join(counts) if counts else ""
+        if len(table.body) < 3:
+            continue
+        label = table.labels[0]
+        groups: dict[str, int] = {}
+        for row in table.body:
+            if value := row.value(label):
+                groups[value] = groups.get(value, 0) + 1
+        piece = f'"{label}" {len(table.body)} rows'
+        if 1 < len(groups) <= 8 and len(groups) < len(table.body):
+            piece += " (" + ", ".join(f"{name}: {n}" for name, n in groups.items()) + ")"
+        counts.append(piece)
+    return "Tables (rows counted, totals and subtotals left out): " + "; ".join(counts) if counts else ""
 
 
 def _worked_block(block: str, room: int) -> str:
