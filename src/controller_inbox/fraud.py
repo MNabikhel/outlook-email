@@ -89,10 +89,8 @@ STRONG_NOTICE_RE = re.compile(
 )
 # A warning word that can just as well introduce a real request ("please be aware our bank details have changed").
 WEAK_NOTICE_RE = re.compile(r"(\bbeware\b|\bbe\s+(?:aware|alert|vigilant)\b|\balways\s+(?:call|verify|confirm)\b)", re.I)
-# What a real warning tells the reader to do.
-PROTECTIVE_RE = re.compile(
-    r"\b(?:call|phone|telephone|verify|verbally|contact\s+(?:us|your)|known\s+number|on\s+file|report|ignore|delete)\b", re.I
-)
+# Where one part of a sentence ends and the next begins ("…, but our bank details have changed").
+CLAUSE_RE = re.compile(r"[,;:]|\s[-–—]+\s|\s(?=(?:but|however|although|though|yet|whereas)\b)", re.I)
 # A colleague saying the quoted request was fake.
 DISAVOW_RE = re.compile(
     r"\b(?:(?:was|is|it'?s)\s+not\s+(?:them|legit\w*|genuine|real)|(?:wasn'?t|isn'?t)\s+(?:them|legit\w*|genuine|real)|"
@@ -221,12 +219,24 @@ def _asks(text: str) -> bool:
     return bool(PAYMENT_CHANGE_RE.search(text) or _gift_ask(text))
 
 
+def _requests(text: str) -> list[int]:
+    """Where in the text a bank change or gift cards are asked for."""
+    starts = [match.start() for match in PAYMENT_CHANGE_RE.finditer(text)]
+    return starts + [match.start() for match in GIFT_RE.finditer(text) if _gift_sentence_asks(text, match)]
+
+
 def _is_notice(sentence: str) -> bool:
-    strong = STRONG_NOTICE_RE.search(sentence)
-    if strong:
-        # "If you receive an email saying our bank details have changed, call us" is a warning;
-        # "we will never ask for gift cards, but our bank details have changed" is a request.
-        return not _asks(sentence) or bool(PROTECTIVE_RE.search(STRONG_NOTICE_RE.sub(" ", sentence)))
+    if STRONG_NOTICE_RE.search(sentence):
+        # A warning covers the words after it, to the end of that part of the sentence:
+        # "if you receive an email saying our bank details have changed, call us" is a warning.
+        # A change asked for anywhere else is a request, whatever the sentence says after it:
+        # "our bank details have changed, pay the new account, and if you receive other instructions call us",
+        # "we will never ask for gift cards, but our bank details have changed".
+        scopes = []
+        for marker in STRONG_NOTICE_RE.finditer(sentence):
+            end = next((cut.start() for cut in CLAUSE_RE.finditer(sentence, marker.end())), len(sentence))
+            scopes.append((marker.start(), end))
+        return all(any(start <= at < end for start, end in scopes) for at in _requests(sentence))
     # "Beware of scams" is a notice; "please be aware our bank details have changed" is not.
     return bool(WEAK_NOTICE_RE.search(sentence)) and not _asks(sentence)
 
@@ -235,7 +245,7 @@ def strip_notices(text: str) -> str:
     """Drop anti-fraud notices ("we will never change our bank details by email") before looking for a request.
 
     Only warnings are dropped: a sentence that asserts a change ("please be aware our banking
-    details have changed") stays, whatever warning word it starts with.
+    details have changed") stays, whatever warning words it starts or ends with.
     """
     parts = re.split(r"(?<=[.!?])\s+|\n+", text or "")
     return " ".join(part for part in parts if not _is_notice(part))
@@ -244,11 +254,15 @@ def strip_notices(text: str) -> str:
 def _gift_ask(text: str) -> re.Match[str] | None:
     """A gift-card mention in a sentence that asks someone to buy them or send their codes."""
     for match in GIFT_RE.finditer(text or ""):
-        start = max(text.rfind(".", 0, match.start()), text.rfind("\n", 0, match.start())) + 1
-        ends = [i for i in (text.find(".", match.end()), text.find("\n", match.end())) if i >= 0]
-        if GIFT_ASK_RE.search(text[start : min(ends) if ends else len(text)]):
+        if _gift_sentence_asks(text, match):
             return match
     return None
+
+
+def _gift_sentence_asks(text: str, match: re.Match[str]) -> bool:
+    start = max(text.rfind(".", 0, match.start()), text.rfind("\n", 0, match.start())) + 1
+    ends = [i for i in (text.find(".", match.end()), text.find("\n", match.end())) if i >= 0]
+    return bool(GIFT_ASK_RE.search(text[start : min(ends) if ends else len(text)]))
 
 
 def assess(
