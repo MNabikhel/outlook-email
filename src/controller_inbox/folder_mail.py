@@ -259,6 +259,8 @@ def _eml_content(message, prefix: str = "", depth: int = 0) -> tuple[str, list[R
     body_parts: list[str] = []
     attachments: list[RawAttachment] = []
     html_fallback = ""
+    calendar = b""
+    ics_attached = False
     for part in _eml_leaves(message):
         filename = part.get_filename()
         ctype = part.get_content_type()
@@ -279,11 +281,17 @@ def _eml_content(message, prefix: str = "", depth: int = 0) -> tuple[str, list[R
                     content=payload,
                 )
             )
+            ics_attached = ics_attached or (filename or "").lower().endswith(".ics")
             continue
         if ctype == "text/plain":
             body_parts.append(_decode_text_part(part, payload))
         elif ctype == "text/html" and not html_fallback:
             html_fallback = html_to_text(_decode_text_part(part, payload))
+        elif ctype == "text/calendar" and not calendar:
+            calendar = payload
+    if calendar and not ics_attached:
+        # An invitation can carry its calendar inline, with no file name; it is kept as the invite file it is.
+        attachments.append(_attachment(f"{prefix}invite.ics", "text/calendar", calendar))
     body = "\n".join(p for p in body_parts if p).strip() or html_fallback
     return body, attachments
 

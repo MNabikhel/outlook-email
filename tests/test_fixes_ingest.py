@@ -861,3 +861,35 @@ def test_text_stored_with_a_nul_before_is_cleaned_once(store: Store, settings: S
 def test_vip_senders_split_on_semicolons_too():
     settings = Settings(vip_senders="cfo@taz.com; ceo@taz.com,board@taz.com", _env_file=None)
     assert settings.vip_list == ["cfo@taz.com", "ceo@taz.com", "board@taz.com"]
+
+
+# 26. An invitation's calendar sent inline, with no file name, is kept ----------------------------
+
+
+INVITE = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nSUMMARY:Q3 close review\r\nDTSTART:20261008T150000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+
+
+def _invite(settings: Settings, name: str, *, attached: bool) -> None:
+    msg = EmailMessage()
+    msg["From"] = "Controller <cfo@taz.com>"
+    msg["Subject"] = "Q3 close review"
+    msg["Message-ID"] = f"<{name}@x>"
+    msg["Date"] = "Mon, 05 Oct 2026 10:00:00 -0400"
+    msg.set_content("You have been invited.")
+    msg.add_alternative(INVITE, subtype="calendar", params={"method": "REQUEST"})
+    if attached:
+        msg.add_attachment(INVITE.encode(), maintype="text", subtype="calendar", filename="invite.ics")
+    path = settings.inbox_incoming / f"{name}.eml"
+    path.write_bytes(bytes(msg))
+    _age(path)
+
+
+def test_an_inline_calendar_is_kept_as_the_invite(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    _invite(settings, "inline", attached=False)
+    _invite(settings, "both", attached=True)
+    records = {record.internet_message_id: record for record in ingest_folder(store, settings)}
+    inline = records["<inline@x>"]
+    assert [att.filename for att in inline.attachments] == ["invite.ics"]
+    assert "Q3 close review" in inline.attachments[0].extracted_text
+    assert [att.filename for att in records["<both@x>"].attachments] == ["invite.ics"], "not kept twice"
