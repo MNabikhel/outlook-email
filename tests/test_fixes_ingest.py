@@ -499,3 +499,75 @@ def test_a_limit_of_zero_reads_nothing(loaded: Store, settings: Settings):
 
     assert read_queue(loaded, settings, limit=0, reader=AgreeingReader())["read_ids"] == []
     assert loaded.counts()["waiting_on_bionic"] == 19
+
+
+# 16. Another copy of a stored message keeps the files that came with the first ---------------
+
+
+def _sidecar(settings: Settings, name: str, data: bytes) -> Path:
+    path = settings.inbox_incoming / name
+    path.write_bytes(data)
+    _age(path)
+    return path
+
+
+def test_a_copy_without_the_files_keeps_the_ones_dropped_with_the_first(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    _eml(settings, "Invoice 4410", "Invoice attached, due Oct 30.", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Invoice INV-4410 Freight $1,250.00")
+    [record] = ingest_folder(store, settings)
+    assert [att.filename for att in record.attachments] == ["Invoice 4410.txt"]
+
+    # Exported again later (a bulk "save as" of the folder), this time with no file beside it.
+    _eml(settings, "Invoice 4410", "Invoice attached, due Oct 30.", message_id="<inv4410@vendor.com>")
+    report: dict = {}
+    ingest_folder(store, settings, report=report)
+    assert report["already_read"] == 1 and report["failed"] == []
+    again = store.get_email(record.id)
+    assert [att.filename for att in again.attachments] == ["Invoice 4410.txt"]
+    assert 1250.0 in again.extracted.amounts and again.has_attachments
+    assert "missing_attachment" not in again.flags
+
+
+def test_a_second_copy_in_one_drop_still_brings_its_files(settings: Settings, store: Store):
+    # "Invoice 4410 (2).eml" sorts first and has no file beside it; the copy that does must not be skipped.
+    settings.ensure_data_dir()
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>").rename(settings.inbox_incoming / "Invoice 4410 (2).eml")
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Invoice INV-4410 Freight $1,250.00")
+    report: dict = {}
+    records = ingest_folder(store, settings, report=report)
+    assert (report["read"], report["already_read"]) == (1, 1)
+    assert len(records) == 1 and [att.filename for att in records[0].attachments] == ["Invoice 4410.txt"]
+    assert "INV-4410" in records[0].attachments[0].extracted_text
+    assert not list(settings.inbox_incoming.iterdir())
+
+
+def test_a_copy_of_a_read_message_adds_its_new_files_and_keeps_the_reading(settings: Settings, store: Store):
+    from controller_inbox.reading import apply_bionic_reading
+
+    settings.ensure_data_dir()
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Invoice INV-4410 Freight $1,250.00")
+    [record] = ingest_folder(store, settings)
+    reading = {"category": "ap_invoice", "folder": "important", "importance": "high", "summary": "Freight invoice.", "actions": [], "why": "x"}
+    apply_bionic_reading(store, record.id, reading)
+
+    # The same message again, with a different file under the same name: both files are kept.
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Revised invoice INV-4410 Freight $1,300.00")
+    ingest_folder(store, settings)
+    kept = store.get_email(record.id)
+    assert kept.model_status == "bionic" and kept.summary == "Freight invoice."
+    assert sorted(att.filename for att in kept.attachments) == ["Invoice 4410 (2).txt", "Invoice 4410.txt"]
+    folder = settings.inbox_extracted / record.id
+    assert b"$1,250.00" in (folder / "Invoice 4410.txt").read_bytes()
+    assert b"$1,300.00" in (folder / "Invoice 4410 (2).txt").read_bytes()
+
+    # A third copy with a file already stored adds nothing.
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Revised invoice INV-4410 Freight $1,300.00")
+    report: dict = {}
+    assert ingest_folder(store, settings, report=report) == [] and report["already_read"] == 1
+    assert len(store.get_email(record.id).attachments) == 2

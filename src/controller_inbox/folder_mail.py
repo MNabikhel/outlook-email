@@ -16,7 +16,7 @@ from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 
 from controller_inbox.config import Settings
-from controller_inbox.extract import html_to_text, sha256_bytes
+from controller_inbox.extract import explode_archives, html_to_text, sha256_bytes
 from controller_inbox.models import RawAttachment, RawMessage
 from controller_inbox.pipeline import KEEP_READINGS, attachment_text, process_message
 from controller_inbox.store import Store
@@ -65,12 +65,17 @@ def ingest_folder(
         try:
             raw = _read_batch(path, sidecars)
             existing = store.get_email(raw.id)
-            if raw.id in seen or (existing is not None and existing.model_status in KEEP_READINGS):
+            if existing is not None:
+                # Another copy of a stored message: only files it doesn't hold yet are read and added.
+                raw.attachments = _new_files(settings, raw, existing)
+            if not raw.attachments and (raw.id in seen or (existing is not None and existing.model_status in KEEP_READINGS)):
                 report["already_read"] += 1
                 archived = _archive(settings, owned)
                 if existing is not None and not existing.source_path and archived and archived[0]:
                     store.set_source_path(raw.id, str(archived[0]))
                 continue
+            if raw.id in seen:
+                records = [item for item in records if item.id != raw.id]
             seen.add(raw.id)
             if not sample_checked:
                 # Only once a real message has parsed, so a bad file cannot empty the board.
@@ -559,6 +564,25 @@ def _decode_text_part(part, payload: bytes) -> str:
         return payload.decode("utf-8", errors="replace")
 
 
+def _new_files(settings: Settings, raw: RawMessage, existing) -> list[RawAttachment]:
+    """The files in this copy of a stored message that aren't stored with it yet (the same bytes under any
+    name are), renamed when a kept file under inbox/extracted already has the name, so none replaces it."""
+    hashes = {att.sha256 for att in existing.attachments if att.sha256}
+    names = {att.filename for att in existing.attachments}
+    fresh = []
+    for att in raw.attachments:
+        parts = explode_archives([att])
+        if all(sha256_bytes(part.content) in hashes if part.content else part.filename in names for part in parts):
+            continue
+        att.id = att.filename
+        fresh.append(att)
+    taken = {safe_filename(name).casefold() for name in names}
+    folder = settings.inbox_extracted / raw.id
+    if folder.is_dir():
+        taken |= {path.name.casefold() for path in folder.iterdir()}
+    return unique_attachments(fresh, taken=taken)
+
+
 def _write_extracted(settings: Settings, raw: RawMessage) -> None:
     if not raw.attachments:
         return
@@ -611,14 +635,15 @@ def safe_filename(name: str) -> str:
     return cleaned[:150] or "attachment"
 
 
-def unique_attachments(attachments: list[RawAttachment]) -> list[RawAttachment]:
+def unique_attachments(attachments: list[RawAttachment], *, taken: set[str] = frozenset()) -> list[RawAttachment]:
     """Give a repeated file name a number ("invoice.pdf", "invoice (2).pdf"), in order.
 
     Two attachments with one name would share an attachment id and a file under inbox/extracted.
     Names are compared as saved on disk (``safe_filename``, any case), and a name that is not
-    repeated keeps its name and id, so files already stored still match.
+    repeated keeps its name and id, so files already stored still match. ``taken`` are names
+    (as saved on disk, casefolded) that are already used.
     """
-    taken: set[str] = set()
+    taken = set(taken)
     for att in attachments:
         key = safe_filename(att.filename).casefold()
         if key in taken:

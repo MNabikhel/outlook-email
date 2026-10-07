@@ -17,7 +17,7 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, EmailRecord, RawMessage
-from controller_inbox.fraud import assess, save_check, trust_context
+from controller_inbox.fraud import assess, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
 
@@ -55,7 +55,7 @@ def process_message(
 ) -> EmailRecord:
     now = now or datetime.now(timezone.utc)
     existing = store.get_email(raw.id)
-    if existing is not None and existing.model_status in KEEP_READINGS:
+    if existing is not None and existing.model_status in KEEP_READINGS and not raw.attachments:
         return existing
     # Two dates. "By Friday" and "October 15" in the text are read against the day the mail was
     # sent (``anchor``); how urgent or overdue it is now is judged against today (``as_of``).
@@ -71,7 +71,14 @@ def process_message(
     attachments_raw = explode_archives(list(raw.attachments))
     if mailbox is not None and not attachments_raw and raw.has_attachments:
         attachments_raw = list(mailbox.get_attachments(raw.id))
-    attachments_raw = _unique_ids(attachments_raw)
+    # Another copy of a stored message: the files stored from earlier copies are kept, and this copy adds
+    # only files they don't hold. A re-saved .eml often comes without the files dropped beside the first.
+    kept = existing.attachments if existing is not None else []
+    attachments_raw = _unique_ids(
+        _unstored(attachments_raw, kept), taken={att.id.removeprefix(f"{raw.id}:") for att in kept}
+    )
+    if existing is not None and existing.model_status in KEEP_READINGS:
+        return _add_files(store, settings, existing, raw, attachments_raw, anchor, now=now)
 
     att_records: list[AttachmentRecord] = []
     att_classifications: list[Classification] = []
@@ -80,37 +87,15 @@ def process_message(
         as_of=anchor,
         extra_vendor=raw.sender_name,
     )
-
+    for att in kept:
+        att_records.append(att)
+        att_classifications.append(_classify_file(raw, att.filename, att.content_type, att.extracted_text))
+        merged_fields = merged_fields.merged_with(att.extracted_fields)
     for raw_att in attachments_raw:
-        text = attachment_text(raw_att.filename, raw_att.content_type, raw_att.content)
-        fields = extract_fields(f"{raw_att.filename}\n{text}", as_of=anchor, extra_vendor=raw.sender_name)
-        merged_fields = merged_fields.merged_with(fields)
-        classified = classify_document(
-            subject=raw.subject,
-            body=raw.body_text,
-            filename=raw_att.filename,
-            sender=raw.sender_email,
-            extracted_text=text,
-            content_type=raw_att.content_type,
-            has_text=bool(text.strip()),
-            payment_rule=False,
-        )
+        record, classified = _file_record(raw, raw_att, anchor)
+        att_records.append(record)
         att_classifications.append(classified)
-        att_records.append(
-            AttachmentRecord(
-                id=f"{raw.id}:{raw_att.id}",
-                email_id=raw.id,
-                filename=raw_att.filename,
-                content_type=raw_att.content_type,
-                size_bytes=raw_att.size_bytes or len(raw_att.content),
-                sha256=sha256_bytes(raw_att.content) if raw_att.content else "",
-                extracted_text=text,
-                document_type=classified.document_type,
-                document_confidence=classified.confidence,
-                extracted_fields=fields,
-                classification_reasons=classified.reasons,
-            )
-        )
+        merged_fields = merged_fields.merged_with(record.extracted_fields)
 
     body_text = clean.body_text
     verdicts = [flag for flag in (existing.flags if existing else []) if flag in VERDICT_FLAGS]
@@ -136,7 +121,7 @@ def process_message(
         attachments=att_classifications,
         fields=merged_fields,
         as_of=as_of,
-        has_attachments=bool(attachments_raw) or raw.has_attachments,
+        has_attachments=bool(att_records) or raw.has_attachments,
         fraud=check.level,
     )
     classified_email.flags.extend(verdicts)
@@ -220,9 +205,74 @@ def sent_date(received_at, settings: Settings, *, fallback):
         return fallback
 
 
-def _unique_ids(attachments: list) -> list:
-    """Attachment ids must be unique within a message (they key the stored record); a repeat gets a number."""
-    seen: set[str] = set()
+def _file_record(raw: RawMessage, raw_att, anchor) -> tuple[AttachmentRecord, Classification]:
+    """One attachment read, classified and its fields pulled, as stored."""
+    text = attachment_text(raw_att.filename, raw_att.content_type, raw_att.content)
+    fields = extract_fields(f"{raw_att.filename}\n{text}", as_of=anchor, extra_vendor=raw.sender_name)
+    classified = _classify_file(raw, raw_att.filename, raw_att.content_type, text)
+    record = AttachmentRecord(
+        id=f"{raw.id}:{raw_att.id}",
+        email_id=raw.id,
+        filename=raw_att.filename,
+        content_type=raw_att.content_type,
+        size_bytes=raw_att.size_bytes or len(raw_att.content),
+        sha256=sha256_bytes(raw_att.content) if raw_att.content else "",
+        extracted_text=text,
+        document_type=classified.document_type,
+        document_confidence=classified.confidence,
+        extracted_fields=fields,
+        classification_reasons=classified.reasons,
+    )
+    return record, classified
+
+
+def _classify_file(raw: RawMessage, filename: str, content_type: str, text: str) -> Classification:
+    return classify_document(
+        subject=raw.subject,
+        body=raw.body_text,
+        filename=filename,
+        sender=raw.sender_email,
+        extracted_text=text,
+        content_type=content_type,
+        has_text=bool(text.strip()),
+        payment_rule=False,
+    )
+
+
+def _unstored(attachments: list, kept: list[AttachmentRecord]) -> list:
+    """The files not stored with the message yet. The same bytes under any name count as stored."""
+    if not kept:
+        return attachments
+    hashes = {att.sha256 for att in kept if att.sha256}
+    names = {att.filename for att in kept}
+    return [att for att in attachments if (sha256_bytes(att.content) not in hashes if att.content else att.filename not in names)]
+
+
+def _add_files(
+    store: Store, settings: Settings, email: EmailRecord, raw: RawMessage, attachments_raw: list, anchor, *, now: datetime
+) -> EmailRecord:
+    """Another copy of a message the model read or the user corrected: the reading stays, the files this copy
+    adds are stored with it, and the fraud check runs again with them, so a bank letter among them still counts."""
+    if not attachments_raw:
+        return email
+    for raw_att in attachments_raw:
+        record, _classified = _file_record(raw, raw_att, anchor)
+        email.attachments.append(record)
+        email.extracted = email.extracted.merged_with(record.extracted_fields)
+    email.has_attachments = True
+    email.flags = [flag for flag in email.flags if flag != "missing_attachment"]
+    store.upsert_email(email)
+    reassess_email(store, settings, email, now=now)
+    from controller_inbox import cost_codes
+
+    cost_codes.refresh(store, settings, email_ids=[email.id])
+    return store.get_email(email.id) or email
+
+
+def _unique_ids(attachments: list, taken: set[str] = frozenset()) -> list:
+    """Attachment ids must be unique within a message (they key the stored record); a repeat gets a number.
+    ``taken`` are ids already stored with the message."""
+    seen: set[str] = set(taken)
     out = []
     for att in attachments:
         att_id = str(att.id)
