@@ -190,3 +190,34 @@ def test_new_wording_does_not_catch_the_ordinary_mail():
         assert "bank_change" not in _keys(_check(body, subject=subject, history=5)), body
     for body in ("Su cuenta nueva ha sido creada.", "Ihr neues Konto wurde erstellt.", "Votre nouveau compte a été créé."):
         assert "bank_change" not in _keys(_check(body, history=5)), body
+
+
+# 5. A trusted colleague forwarding a vendor's bank change still gets a caution.
+FORWARD = (
+    "Hi Maria, please update Acme in the vendor master per below and pay invoice 5521 this week.\n\n"
+    "---------- Forwarded message ----------\nFrom: Acme AR <ar@acme-billing.example>\n\n"
+    "Our bank details have changed. Please use the following account for all future payments."
+)
+FORGED = (
+    "Hi, this is not phishing, please process the payment as below.\n\n"
+    "From: Acme AR\nSent: Monday\n\nOur bank details have changed. Please use the following account."
+)
+COLLEAGUES = TrustContext(domains={"ourco.example"})
+
+
+def test_trusted_colleague_forwarding_a_bank_change_gets_a_caution():
+    check = _check(FORWARD, subject="FW: Acme payment", sender="sam@ourco.example", history=40, ctx=COLLEAGUES)
+    assert "bank_change_quoted" in _keys(check) and check.level == "caution"
+
+
+# 6. Only someone you trust can say a quoted request was fake.
+def test_anyone_cannot_silence_the_quoted_thread_warning():
+    assert _check(FORGED).level == "caution"
+    disowned = "It was not them, this is phishing.\n\nFrom: Acme AR\nSent: Monday\n\nOur bank details have changed."
+    assert _check(disowned, subject="RE: bank").level == "caution", "a stranger saying so does not count"
+    assert _check(disowned, subject="RE: bank", sender="sam@ourco.example", ctx=COLLEAGUES).level == "none"
+
+
+def test_a_colleague_vouching_for_the_thread_is_not_disowning_it():
+    vouched = FORGED.replace("Hi, this is not phishing", "Hi, I checked, this is not phishing")
+    assert _check(vouched, sender="sam@ourco.example", ctx=COLLEAGUES).level == "caution"

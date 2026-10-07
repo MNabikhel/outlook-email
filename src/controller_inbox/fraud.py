@@ -91,10 +91,11 @@ STRONG_NOTICE_RE = re.compile(
 WEAK_NOTICE_RE = re.compile(r"(\bbeware\b|\bbe\s+(?:aware|alert|vigilant)\b|\balways\s+(?:call|verify|confirm)\b)", re.I)
 # Where one part of a sentence ends and the next begins ("…, but our bank details have changed").
 CLAUSE_RE = re.compile(r"[,;:]|\s[-–—]+\s|\s(?=(?:but|however|although|though|yet|whereas)\b)", re.I)
-# A colleague saying the quoted request was fake.
+# A colleague saying the quoted request was fake (not "this is not phishing", which vouches for it).
 DISAVOW_RE = re.compile(
     r"\b(?:(?:was|is|it'?s)\s+not\s+(?:them|legit\w*|genuine|real)|(?:wasn'?t|isn'?t)\s+(?:them|legit\w*|genuine|real)|"
-    r"(?:is|was|looks\s+like|seems\s+like)\s+(?:a\s+)?(?:scam|phish\w*|fake|spoof\w*)|phishing|"
+    r"(?:is|was|looks\s+like|seems\s+like)\s+(?:a\s+)?(?:scam|phish\w*|fake|spoof\w*)|"
+    r"(?<!not )(?<!n't )(?<!not a )(?<!no )phishing|"
     r"blocked\s+(?:the|this)\s+sender|reported\s+(?:it|this|the\s+sender))\b",
     re.I,
 )
@@ -384,9 +385,11 @@ def assess(
         level = "high"
     elif score >= CAUTION_AT and keys & CONTEXT:
         level = "caution"
-    elif "bank_change_quoted" in keys and not trust and not DISAVOW_RE.search(mine):
-        # Bank-change wording below a quote marker ("From:", ">") can be a forged thread.
-        # Only a colleague saying it was fake ("it was not them") keeps it quiet.
+    elif "bank_change_quoted" in keys and not (trust and DISAVOW_RE.search(mine)):
+        # Bank-change wording below a quote marker ("From:", ">") can be a forged thread, and a
+        # colleague forwarding a vendor's change still needs a phone call before anyone pays.
+        # Only someone you trust saying it was fake ("it was not them") keeps it quiet: anyone
+        # can write "this is not phishing" above a forged thread.
         level = "caution"
     else:
         level = "none"
