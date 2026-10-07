@@ -809,26 +809,30 @@ def without_echo(pieces: Iterator[str]) -> Iterator[str]:
 def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history, today, shrink: int) -> Iterator[dict[str, Any]]:
     """Read the files: passages up front, tools for the rest, then an answer checked against what was read."""
     settings = ws.settings
-    budget = _budget(settings, tools=True) // shrink
     primary = ws.primary()
     notes = agent.earlier_findings(ws, primary) if primary is not None else ""
     notes = "\n\n".join(part for part in (notes, ws.past) if part)
     base = dict(history=history, today=today, current_id=ws.current_id, notes=notes)
-    # The first prompt leaves room for what the tools return; the file text gets most of the rest.
-    target = budget - min(budget // 3, TOOL_ROOM)
-    overhead = prompt_chars(build_messages(question, ws.sources, budget=target, tools=True, bodies=False, **base))
     yield from agent.query_tables(ws, question, complete_text)
+    plain = _budget(settings, tools=False) // shrink
+    room = int((plain - prompt_chars(build_messages(question, ws.sources, budget=plain, bodies=False, **base))) * 0.85)
     if primary is not None and ws.worked.get(primary.id):
-        # The query worked the answer out from the tables: the model writes it from that and the file text as
-        # it goes, without tools to read more and without a second pass (the answer check still runs).
-        plain = _budget(settings, tools=False) // shrink
-        overhead = prompt_chars(build_messages(question, ws.sources, budget=plain, bodies=False, **base))
-        files = agent.file_context(ws, question, max(MIN_FILE_ROOM, min(WORKED_FILE_ROOM, int((plain - overhead) * 0.85))))
+        # The query worked the answer out from the tables: the model writes it from that and the file text.
+        files = agent.file_context(ws, question, max(MIN_FILE_ROOM, min(WORKED_FILE_ROOM, room)))
+    else:
+        files = _whole_files(ws, question, room) if _one_pass(question) else None
+    if files is not None:
+        # The model writes the answer as it goes, without tools to read more and without a second pass (the
+        # answer check still runs on it).
         for read in ws.reads:
             yield {"type": "step", "text": read}
         ws.reads.clear()
         yield from _stream(settings, build_messages(question, ws.sources, budget=plain, files=files, **base), state)
         return
+    budget = _budget(settings, tools=True) // shrink
+    # The first prompt leaves room for what the tools return; the file text gets most of the rest.
+    target = budget - min(budget // 3, TOOL_ROOM)
+    overhead = prompt_chars(build_messages(question, ws.sources, budget=target, tools=True, bodies=False, **base))
     files = agent.file_context(ws, question, max(MIN_FILE_ROOM, int((target - overhead) * 0.75)))
     for read in ws.reads:
         yield {"type": "step", "text": read}
@@ -884,6 +888,37 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     if kept != state["text"][before:]:
         state["text"] = state["text"][:before] + kept
         yield {"type": "revise", "text": state["text"]}
+
+
+def _one_pass(question: str) -> bool:
+    """Whether the files alone answer the question. One that asks for something worked out (a sum, a change, the
+    days between two dates, how a total is built) or about other mail keeps the tools: calculate, trace_cell and
+    search_mail do that work exactly."""
+    return not (_WORK_OUT.search(question) or _ELSEWHERE.search(question))
+
+
+_WORK_OUT = re.compile(
+    r"\b(?:calculat\w*|comput\w*|worked? out|formulas?|derived?|add(?:s|ed)? up|sum(?:s|med)?|totals? of|combined|"
+    r"altogether|differen\w*|chang\w*|increas\w*|decreas\w*|went (?:up|down)|go(?:es)? (?:up|down)|grow\w*|grew|drop\w*|"
+    r"percent\w*|ratio|average|median|minus|subtract\w*|divid\w*|multipl\w*|"
+    r"how (?:many|long) (?:days|weeks|months|years)|days? (?:until|till|left|late|overdue|past|between|before|after|from)|"
+    r"compar\w*|versus|vs)\b|%",
+    re.I,
+)
+
+
+def _whole_files(ws: agent.Workspace, question: str, room: int) -> dict[str, str] | None:
+    """The files the question is about, when every one of them fits whole in ``room``. Otherwise None, with
+    nothing recorded as read: the tools read what doesn't fit."""
+    if room < MIN_FILE_ROOM:
+        return None
+    left, reads = len(ws.left_out), len(ws.reads)
+    files = agent.file_context(ws, question, room)
+    if len(ws.left_out) == left and any(files.values()):
+        return files
+    del ws.left_out[left:]
+    del ws.reads[reads:]
+    return None
 
 
 def _tool_loop(ws: agent.Workspace, messages: list[dict], budget: int):

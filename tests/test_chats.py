@@ -8,7 +8,6 @@ import pytest
 from fastapi.testclient import TestClient
 
 from controller_inbox import assistant, chats
-from controller_inbox.local_llm import ToolReply
 from controller_inbox.web import create_app
 
 PAGE = {"X-CloseDesk": "1"}
@@ -102,16 +101,12 @@ def test_the_model_reads_added_files_and_what_earlier_conversations_found(settin
 
     asked = []
 
-    def fake_tools(_settings, messages, tools, *, max_tokens):
-        asked.append(messages[-1]["content"])
-        return ToolReply("Jonathan Reyes has no department listed; his manager is Priya Raman [1].")
-
     def fake_stream(_settings, messages, *, max_tokens):
+        asked.append(messages[-1]["content"])
         yield "Jonathan Reyes has no department listed; his manager is Priya Raman (staff list.csv) [1]."
 
     monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
     monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
-    monkeypatch.setattr(assistant, "chat_with_tools", fake_tools)
     monkeypatch.setattr(assistant, "stream_text", fake_stream)
     past = chats.past_context(loaded, "Who manages Jonathan Reyes?", exclude=current)
     assert "leaves Jonathan Reyes's department blank" in past and "[1]" not in past
