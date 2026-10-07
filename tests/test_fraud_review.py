@@ -260,3 +260,22 @@ def test_gift_card_program_news_is_not_an_ask():
         "Your gift card balance is $25; use the codes at checkout.",
     ):
         assert "gift_cards" not in _keys(_check(body)), body
+
+
+# 10. Look-alikes of a short trusted name, in Unicode or punycode.
+def test_lookalikes_of_a_short_trusted_domain_are_caught():
+    ctx = TrustContext(domains={"taz.com"})
+    for domain in ("tax.com", "tazz.com", "t4z.com", "tаz.com", "xn--tz-7kc.com"):
+        check = assess(ctx, subject="Wire today", body="Please wire $48,500 today for invoice 5521.",
+                       sender_name="Treasury", sender_email=f"treasury@{domain}")
+        assert "lookalike_domain" in _keys(check) and check.level == "caution", domain
+    for domain in ("mail.taz.com", "acme.com", "tazmaniafoods.com"):
+        check = assess(ctx, subject="Hi", body="Please pay invoice 5521.", sender_name="AP", sender_email=f"ap@{domain}")
+        assert "lookalike_domain" not in _keys(check), domain
+
+
+def test_a_short_name_you_only_hear_from_often_is_not_a_lookalike_target():
+    # Mail from your bank (pnc.com) does not make your auditor (pwc.com) a look-alike.
+    ctx = TrustContext(known={"pnc.com": 30, "pwc.com": 3})
+    check = assess(ctx, subject="PBC list", body="Please pay invoice 5521.", sender_name="Audit", sender_email="audit@pwc.com")
+    assert "lookalike_domain" not in _keys(check)

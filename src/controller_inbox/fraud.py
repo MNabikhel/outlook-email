@@ -626,16 +626,20 @@ def _lookalike(domain: str, ctx: TrustContext) -> str:
     candidates = [(item, True) for item in ctx.domains] + [
         (item, False) for item, count in ctx.known.items() if count > max(mine, 1)
     ]
+    shown = _skeleton(domain)
+    tokens = re.split(r"[.-]", shown.rsplit(".", 1)[0])
     for other, trusted in candidates:
         if other == domain or domain.endswith("." + other) or other.endswith("." + domain):
             continue
-        if _skeleton(domain) == _skeleton(other):
+        theirs = _skeleton(other)
+        if shown == theirs:
             return other
-        limit = 2 if len(other) >= 10 else 1
-        if len(other.split(".")[0]) >= 4 and _distance(domain, other, limit) <= limit:
-            return other
+        # One letter off a name you trust ("tax.com", "tazz.com", "t4z.com" for "taz.com"). A domain you
+        # merely hear from a lot needs a longer name, so "pwc.com" is not taken for "pnc.com".
         label = other.split(".")[0]
-        tokens = re.split(r"[.-]", domain.rsplit(".", 1)[0])
+        limit = 2 if len(other) >= 10 else 1
+        if len(label) >= (3 if trusted else 4) and _distance(shown, theirs, limit) <= limit:
+            return other
         if trusted and len(label) >= 3 and label in tokens:
             return other
     return ""
@@ -655,7 +659,17 @@ def _display_name_spoof(name: str, sender: str, domain: str, trusted_domain: str
 
 
 def _skeleton(domain: str) -> str:
-    text = domain.lower()
+    """How a domain reads on screen: punycode labels ("xn--tz-7kc") decoded, Cyrillic, Greek and full-width
+    look-alike letters read as Latin, and pairs that pass for one another ("rn" and "m", "0" and "o") made the same."""
+    labels = []
+    for label in domain.lower().split("."):
+        if label.startswith("xn--"):
+            try:
+                label = label.encode("ascii").decode("idna")
+            except UnicodeError:
+                pass
+        labels.append(label)
+    text = normalize_text(".".join(labels)).lower()
     for old, new in _HOMOGLYPHS:
         text = text.replace(old, new)
     return text
