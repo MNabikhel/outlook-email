@@ -122,6 +122,26 @@ def test_zip_and_office_files_are_read():
     assert b"INV-42" in exploded[0].content
 
 
+def test_a_zip_bomb_is_not_unpacked(monkeypatch):
+    import os
+
+    from controller_inbox import extract
+
+    def explode(entries: dict[str, bytes]) -> list[str]:
+        zipped = io.BytesIO()
+        with zipfile.ZipFile(zipped, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, payload in entries.items():
+                archive.writestr(name, payload)
+        item = RawAttachment(id="z", filename="ledgers.zip", content_type="application/zip", size_bytes=1, content=zipped.getvalue())
+        return [part.filename for part in explode_archives([item])]
+
+    # Zeros shrink a thousandfold: each entry is under the 30 MB limit, but no real document packs like that.
+    assert explode({"ledger_1.csv": b"0" * 20_000_000, "notes.txt": b"Invoice INV-42", "ledger_2.csv": b"0" * 20_000_000}) == ["notes.txt"]
+    # And what all the entries unpack to together is capped.
+    monkeypatch.setattr(extract, "MAX_UNZIPPED", 2_500)
+    assert explode({f"scan_{n}.bin": os.urandom(1_000) for n in range(4)}) == ["scan_0.bin", "scan_1.bin"]
+
+
 def test_attachments_read_by_an_older_reader_are_read_again_once(store, settings, mail):
     from controller_inbox.documents import READER_VERSION
     from controller_inbox.folder_mail import READER_KEY, reread_attachments

@@ -175,6 +175,12 @@ def explode_archives(items: list, *, limit: int = 40) -> list:
     return exploded
 
 
+# A zip bomb is a small file that unpacks to gigabytes: zipped zeros shrink a thousandfold, documents
+# a few times. Unpack at most this much in all, and skip a large entry packed tighter than this.
+MAX_UNZIPPED = 100_000_000
+MAX_ZIP_RATIO = 100
+
+
 def _unzip(item, *, limit: int) -> list:
     import zipfile
 
@@ -187,10 +193,16 @@ def _unzip(item, *, limit: int) -> list:
     except zipfile.BadZipFile:
         return []
     out = []
+    total = 0
     for info in archive.infolist():
         if info.is_dir() or len(out) >= limit:
             continue
         if info.file_size > 30_000_000 or info.filename.startswith("__MACOSX"):
+            continue
+        # zipfile stops reading an entry at its stated size, so the stated sizes bound what is unpacked.
+        if total + info.file_size > MAX_UNZIPPED:
+            continue
+        if info.file_size > 1_000_000 and info.file_size > MAX_ZIP_RATIO * info.compress_size:
             continue
         filename = _basename(info.filename)
         if not filename or filename.startswith("."):
@@ -199,6 +211,7 @@ def _unzip(item, *, limit: int) -> list:
             payload = archive.read(info)
         except Exception:
             continue
+        total += len(payload)
         out.append(
             RawAttachment(
                 id=f"{item.id}:{filename}",
