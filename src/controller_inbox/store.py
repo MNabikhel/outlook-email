@@ -1125,20 +1125,27 @@ class Store:
                 (attachment_id, text_key, summary, model, at),
             )
 
-    def files_to_summarize(self, *, min_chars: int, limit: int) -> list[tuple[str, str]]:
-        """(email id, attachment id) of long files with no summary for their current text, most important mail first."""
+    def files_to_summarize(self, *, min_chars: int, limit: int, model: str = "") -> list[tuple[str, str]]:
+        """(email id, attachment id) of long files with no summary for their current text, most important mail first.
+
+        Files on mail suspected of fraud (as ``fraud.attachments_locked`` decides) are left out here, so they
+        never use up the night's quota. A file the model gave no usable summary for is tried again only when
+        another model is loaded.
+        """
         with self.connect() as conn:
             rows = conn.execute(
-                """
+                f"""
                 SELECT a.email_id, a.id FROM attachments a
                 JOIN emails e ON e.id = a.email_id
                 LEFT JOIN file_summaries f ON f.attachment_id = a.id
                 WHERE length(a.extracted_text) >= ?
-                  AND (f.attachment_id IS NULL OR f.text_key != a.sha256 || ':' || length(a.extracted_text))
+                  AND (e.flags {_LIKE} OR (e.flags NOT {_LIKE} AND e.category != 'payment_instruction_change'))
+                  AND (f.attachment_id IS NULL OR f.text_key != a.sha256 || ':' || length(a.extracted_text)
+                       OR (f.summary = '' AND COALESCE(f.model, '') != ?))
                 ORDER BY e.importance_score DESC, e.received_at DESC
                 LIMIT ?
                 """,
-                (min_chars, limit),
+                (min_chars, _json_contains("fraud_cleared"), _json_contains("fraud_risk"), model, limit),
             ).fetchall()
         return [(row["email_id"], row["id"]) for row in rows]
 

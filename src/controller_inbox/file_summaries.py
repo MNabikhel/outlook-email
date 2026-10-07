@@ -73,9 +73,13 @@ def summarize_files(
     model: str = "",
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> int:
-    """Summarize long attachments that have no summary yet, most important mail first. Returns how many were written."""
+    """Summarize long attachments that have no summary yet, most important mail first. Returns how many were written.
+
+    When the model gives nothing usable for a file, that is remembered (as an empty summary), so the file isn't
+    tried again every night; it is tried again when its text changes or another model is loaded.
+    """
     written = 0
-    queue = store.files_to_summarize(min_chars=SUMMARY_MIN_CHARS, limit=limit)
+    queue = store.files_to_summarize(min_chars=SUMMARY_MIN_CHARS, limit=limit, model=model)
     for index, (email_id, attachment_id) in enumerate(queue, start=1):
         email = store.get_email(email_id)
         att = next((a for a in email.attachments if a.id == attachment_id), None) if email else None
@@ -85,11 +89,12 @@ def summarize_files(
             on_progress(index, len(queue), att.filename)
         try:
             summary = summarize_file(settings, att)
-        except (ContextOverflow, EmptyReply):
+        except ContextOverflow:
             continue
+        except EmptyReply:
+            summary = ""
         except httpx.HTTPError:
             break
-        if summary:
-            store.save_file_summary(att.id, summary_key(att), summary, model=model, at=datetime.now(timezone.utc).isoformat())
-            written += 1
+        store.save_file_summary(att.id, summary_key(att), summary, model=model, at=datetime.now(timezone.utc).isoformat())
+        written += bool(summary)
     return written

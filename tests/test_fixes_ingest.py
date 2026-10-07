@@ -779,3 +779,46 @@ def test_graph_sync_reads_reply_to_for_the_fraud_check(store: Store, settings: S
     assert "replyTo" in client.params[0]["$select"].split(",")
     assert record.reply_to == "acme.billing@protonmail.com"
     assert "reply_to_mismatch" in {signal["key"] for signal in store.fraud_check(record.id)["signals"]}
+
+
+# 23. Overnight file summaries: flagged mail doesn't use up the night, empty ones aren't retried -----
+
+
+LONG_FILE = ("Line item freight services rendered in September per contract. " * 60).encode()
+
+
+def _mail_with_long_file(store: Store, settings: Settings, n: int, *, scam: bool):
+    raw = _raw(
+        "Our bank details have changed. Please use the new account for all payments from today."
+        if scam else "Please find the monthly report attached.",
+        received=NOW,
+        attachments=[RawAttachment(id="f.txt", filename=f"file{n}.txt", content_type="text/plain", size_bytes=len(LONG_FILE), content=LONG_FILE)],
+    )
+    raw.id, raw.subject = f"m{n}", "Updated remittance details" if scam else f"Monthly report {n}"
+    raw.sender_email = f"billing@acme-pay{n}.net" if scam else "maya@taz.com"
+    return process_message(raw, store, settings, now=NOW)
+
+
+def test_files_on_flagged_mail_do_not_use_up_the_nights_summaries(store: Store, settings: Settings, monkeypatch):
+    from controller_inbox import file_summaries
+
+    # Flagged mail scores highest, so it would fill a night's quota of 3 and nothing else would ever be summarized.
+    assert all("fraud_risk" in _mail_with_long_file(store, settings, n, scam=True).flags for n in range(3))
+    _mail_with_long_file(store, settings, 9, scam=False)
+    calls: list[str] = []
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.filename) or "- Freight for September")
+    assert file_summaries.summarize_files(store, settings, limit=3, model="m") == 1
+    assert calls == ["file9.txt"]
+
+
+def test_a_file_the_model_cannot_summarize_is_not_tried_every_night(store: Store, settings: Settings, monkeypatch):
+    from controller_inbox import file_summaries
+
+    _mail_with_long_file(store, settings, 1, scam=False)
+    calls: list[str] = []
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.id) or "")
+    for _night in range(3):
+        assert file_summaries.summarize_files(store, settings, limit=5, model="small") == 0
+    assert calls == ["m1:f.txt"]
+    file_summaries.summarize_files(store, settings, limit=5, model="bigger")
+    assert len(calls) == 2, "another model gets a try"
