@@ -460,13 +460,13 @@ def query_tables(ws: Workspace, question: str, complete) -> Iterator[dict]:
         tables = table_query.Tables([(att.filename, att.extracted_text or "") for att in readable])
         if not tables or not tables.about(question):
             return
-        yield {"type": "step", "text": "Writing queries over the tables for the question"}
+        yield {"type": "step", "text": "Writing a query over the tables for the question"}
         found = table_query.ask(ws.settings, tables, question, complete=complete, think=ws.settings.table_query_thinking)
         if found is None:
             return
         ws.worked[email.id] = tables.render(found)
         count = len(found.rows)
-        yield {"type": "step", "text": f"Worked out from the tables: two queries agree ({count} row{'s' if count != 1 else ''})"}
+        yield {"type": "step", "text": f"Worked out from the tables with a query ({count} row{'s' if count != 1 else ''})"}
     except Exception:
         return
     finally:

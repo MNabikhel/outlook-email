@@ -89,31 +89,16 @@ def _replies(*replies: str):
 
 def test_a_failed_query_is_tried_once_more_with_the_error(aging):
     right = "Table: t1.\nRows: Juniper.\nValue: over_90.\nSQL: SELECT customer, over_90 FROM t1 WHERE customer LIKE '%juniper%'"
-    complete = _replies("Table: t1.\nRows: the row.\nValue: x.\nSQL: SELECT name FROM t1", right, right)
-    found = table_query.ask(None, aging, "what's juniper's over 90 balance", complete=complete)
-    assert found is not None and found.rows == [("Juniper Ridge Apartments", 7615.29)] and found.checks == 2
+    complete = _replies("Table: t1.\nRows: the row.\nValue: x.\nSQL: SELECT name FROM t1", right)
+    found = table_query.ask(None, aging, "what's juniper's over 90 balance", complete=complete, think=True)
+    assert found is not None and found.rows == [("Juniper Ridge Apartments", 7615.29)]
     assert "no such column: name" in complete.calls[1][0][-1]["content"]
-    # The second try is written apart, more freely.
-    assert complete.calls[0][1]["temperature"] is None and complete.calls[2][1]["temperature"] == 0.7
+    assert all(options["think"] for _messages, options in complete.calls), "each go may think"
 
 
-def test_tries_that_disagree_give_no_answer(aging):
-    one = "Table: t1.\nRows: all.\nValue: total.\nSQL: SELECT SUM(total_balance) FROM t1"
-    other = "Table: t1.\nRows: all.\nValue: current.\nSQL: SELECT SUM(current_col) FROM t1"
-    third = "Table: t1.\nRows: all.\nValue: over 90.\nSQL: SELECT SUM(over_90) FROM t1"
-    assert table_query.ask(None, aging, "total AR", complete=_replies(one, other, third)) is None
-    # A third try settles a disagreement, and the answer showing more columns is kept.
-    fuller = "Table: t1.\nRows: all.\nValue: total.\nSQL: SELECT SUM(total_balance) AS total, COUNT(*) AS customers FROM t1"
-    found = table_query.ask(None, aging, "total AR", complete=_replies(one, other, fuller))
-    assert found is not None and found.names == ["total", "customers"] and found.rows == [(323110.0, 15)]
-
-
-def test_tries_that_agree_the_sheet_lacks_it_give_no_answer(aging):
-    none = "Table: none: no column holds credit limits.\nRows: none.\nValue: none.\nSQL: NONE"
-    some = "Table: t1.\nRows: Dunmore.\nValue: total.\nSQL: SELECT total_balance FROM t1 WHERE customer LIKE '%dunmore%'"
-    complete = _replies(none, some, none)
-    assert table_query.ask(None, aging, "what's Dunmore's credit limit", complete=complete) is None
-    assert len(complete.calls) == 3
+def test_a_query_that_never_runs_is_no_answer(aging):
+    wrong = "Table: t1.\nRows: the row.\nValue: x.\nSQL: SELECT name FROM t1"
+    assert table_query.ask(None, aging, "what's juniper's over 90 balance", complete=_replies(wrong, wrong)) is None
 
 
 def test_none_is_no_answer(aging):

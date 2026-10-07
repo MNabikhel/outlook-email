@@ -19,7 +19,6 @@ import re
 import sqlite3
 import time
 import unicodedata
-from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
@@ -37,8 +36,7 @@ QUERY_SECONDS = 2.0
 MAX_VALUE_BYTES = 100_000
 # Rows checked for the columns a row works out from others.
 FORMULA_ROWS = 200
-# Tries at a query, each with one more go when its query fails or finds nothing.
-CANDIDATES = 3
+# Goes at a query: one more when the first fails or finds nothing.
 ATTEMPTS = 2
 WORKED_HEAD = "Worked out with a query over the table (check it is what was asked; the whole file follows):"
 
@@ -119,21 +117,6 @@ Rows: none.
 Value: none.
 SQL: NONE"""
 
-# The same rules and examples with a one-line plan in place of the Table, Rows and Value lines.
-PLAN_SYSTEM = re.sub(
-    r"Table: (.+)\nRows: (.+)\nValue: (.+)\n",
-    lambda m: f"Plan: {m.group(1)} {m.group(2)} {m.group(3)}\n",
-    SYSTEM.replace(
-        "Write four lines:\nTable: which table holds the answer, and why (one named in the schema).\n"
-        "Rows: which rows the question picks (all, or the ones it names), and the column that names them.\n"
-        "Value: which column or expression gives the answer, and what its heading means.\n",
-        "Write two lines:\nPlan: which table, which rows (all, or the ones the question names), what value each row "
-        "gives, and how they combine (list, sum, count, average, largest...).\n",
-    ),
-)
-
-PROMPT = SYSTEM
-
 # SQLite's words, which a column can't be called without quotes the model would leave off.
 _KEYWORDS = frozenset(
     """abort action add after all alter always analyze and as asc attach autoincrement before begin between by
@@ -202,7 +185,6 @@ class Result:
     names: list[str]
     rows: list[tuple]
     more: bool = False
-    checks: int = 1  # how many tries written apart gave it
 
 
 class Tables:
@@ -412,8 +394,7 @@ class Tables:
         if not found.rows:
             lines.append("It returned no rows.")
             return "\n".join(lines)
-        agreed = ", the same from two queries written apart" if found.checks > 1 else ""
-        lines.append(f"Result ({len(found.rows)} row{'s' if len(found.rows) != 1 else ''}{', more not shown' if found.more else ''}{agreed}):")
+        lines.append(f"Result ({len(found.rows)} row{'s' if len(found.rows) != 1 else ''}{', more not shown' if found.more else ''}):")
         for row in found.rows:
             cells = [f"{self._heading(name)}: {self._shown(name, value)}" for name, value in zip(found.names, row)]
             lines.append(" | ".join(cells))
@@ -489,49 +470,31 @@ class Tables:
 
 
 def ask(settings, tables: Tables, question: str, *, complete=None, think: bool = False) -> Result | None:
-    """A query for the question that two of the model's tries agree on, run on ``tables``; None when they
-    agree the tables can't answer it, or don't agree at all.
-
-    A small model's query is right most of the time, and a wrong one returns a wrong figure that looks as
-    good as a right one. Two tries written apart (the second worded more freely) seldom go wrong the same
-    way, so a result both give is used, and a third try settles a disagreement. ``complete``: the model call
-    (``local_llm.complete_text``); ``think``: let a model that can think do so before each query.
-    """
+    """The model's query for the question, run on ``tables``; None when it says the tables can't answer it
+    or no query it writes runs and finds something. ``complete``: the model call (``local_llm.complete_text``);
+    ``think``: let a model that can think do so first. Thinking is what most helps a small model read which
+    column and row a question means (on held-out questions a 4B model got twice as many of the hard ones),
+    at some 600 tokens a question; a second, independent query that had to agree did not help, as its
+    mistakes are the same ones."""
     if complete is None:
         from controller_inbox.local_llm import complete_text as complete
 
-    if CANDIDATES == 1:
-        outcome = _candidate(settings, tables, question, complete, temperature=None, think=think)
-        return None if outcome is _NO_QUERY else outcome
-    seen: list[Result | None] = []
-    for index in range(CANDIDATES):
-        outcome = _candidate(settings, tables, question, complete, temperature=None if index == 0 else 0.7, think=think)
-        if outcome is _NO_QUERY:
-            continue
-        for earlier in seen:
-            if _agree(earlier, outcome):
-                if outcome is None or earlier is None:
-                    return None
-                found = max((earlier, outcome), key=lambda result: len(result.names))
-                found.checks = 2
-                return found
-        seen.append(outcome)
-    return None
+    outcome = _candidate(settings, tables, question, complete, think=think)
+    return None if outcome is _NO_QUERY else outcome
 
 
 _NO_QUERY = object()
 
 
-def _candidate(settings, tables: Tables, question: str, complete, *, temperature: float | None, think: bool):
-    """One try: a Result, None when the model says the tables can't answer it, or ``_NO_QUERY`` when none of
-    its queries ran and found something. A query that fails or finds nothing is tried again with what was
-    wrong."""
+def _candidate(settings, tables: Tables, question: str, complete, *, think: bool):
+    """A Result, None when the model says the tables can't answer it, or ``_NO_QUERY`` when none of its queries
+    ran and found something. A query that fails or finds nothing is tried again with what was wrong."""
     messages = [
-        {"role": "system", "content": PROMPT},
+        {"role": "system", "content": SYSTEM},
         {"role": "user", "content": f"Schema:\n{tables.schema()}\n\nQuestion: {question}"},
     ]
     for attempt in range(ATTEMPTS):
-        reply = complete(settings, messages, max_tokens=500, temperature=temperature, think=think)
+        reply = complete(settings, messages, max_tokens=500, think=think)
         plan, sql = parse(reply)
         if not sql or _cannot(plan):
             # "Sum q3 actual (since Q2 is not in the table)" answers another question under this one's name.
@@ -555,21 +518,6 @@ def _candidate(settings, tables: Tables, question: str, complete, *, temperature
             {"role": "user", "content": f"{problem} {hints} Write the Table, Rows, Value and SQL lines again.".replace("  ", " ")},
         ]
     return _NO_QUERY
-
-
-def _agree(first: Result | None, second: Result | None) -> bool:
-    """Two tries give the same answer: both say the tables can't answer, or they return as many rows with
-    the same figures (one may show more columns: a name beside the amount, a date) or, with no figures, the
-    same names."""
-    if first is None or second is None:
-        return first is None and second is None
-    if len(first.rows) != len(second.rows):
-        return False
-    figures = [Counter(round(float(v), 2) for row in r.rows for v in row if isinstance(v, (int, float))) for r in (first, second)]
-    if figures[0] and figures[1]:
-        return figures[0] <= figures[1] or figures[1] <= figures[0]
-    names = [{str(v).strip().casefold() for row in r.rows for v in row if isinstance(v, str) and v.strip()} for r in (first, second)]
-    return bool(names[0] and names[1]) and (names[0] <= names[1] or names[1] <= names[0])
 
 
 def _cannot(plan: str) -> bool:
