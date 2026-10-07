@@ -253,11 +253,18 @@ def _add_files(
     store: Store, settings: Settings, email: EmailRecord, raw: RawMessage, attachments_raw: list, anchor, *, now: datetime
 ) -> EmailRecord:
     """Another copy of a message the model read or the user corrected: the reading stays, the files this copy
-    adds are stored with it, and the fraud check runs again with them, so a bank letter among them still counts."""
+    adds are stored with it, and the fraud check runs again with them, so a bank letter among them still counts.
+
+    Reading the files takes a while (a scan is read with OCR), and meanwhile the user may correct the email or
+    give a fraud verdict on it. So the files are read first and then added to the email as it is by then."""
     if not attachments_raw:
         return email
-    for raw_att in attachments_raw:
-        record, _classified = _file_record(raw, raw_att, anchor)
+    records = [_file_record(raw, raw_att, anchor)[0] for raw_att in attachments_raw]
+    email = store.get_email(email.id) or email
+    held = {att.id for att in email.attachments}
+    for record in records:
+        if record.id in held:
+            continue
         email.attachments.append(record)
         email.extracted = email.extracted.merged_with(record.extracted_fields)
     email.has_attachments = True

@@ -911,3 +911,43 @@ def test_a_reading_is_saved_for_an_email_whose_files_are_not_in_name_order(setti
     assert result["read_ids"] == [record.id]
     assert store.get_email(record.id).model_status == "bionic"
     assert store.counts()["waiting_on_bionic"] == 0
+
+
+# 28. A copy of a read email with new files doesn't undo what the user did while its files were read --
+
+
+@pytest.mark.parametrize("meanwhile", ["correction", "verdict"])
+def test_new_files_on_a_read_email_keep_what_the_user_did_meanwhile(settings: Settings, store: Store, monkeypatch, meanwhile):
+    from controller_inbox import pipeline
+    from controller_inbox.fraud import record_fraud_verdict
+    from controller_inbox.learn import record_correction
+    from controller_inbox.reading import apply_bionic_reading
+
+    settings.ensure_data_dir()
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Invoice INV-4410 Freight $1,250.00")
+    [record] = ingest_folder(store, settings)
+    reading = {"category": "ap_invoice", "folder": "important", "importance": "high", "summary": "Freight invoice.", "actions": [], "why": "x"}
+    apply_bionic_reading(store, record.id, reading)
+
+    real = pipeline.attachment_text
+
+    def slow_read(filename, content_type, data):
+        # A scan read with OCR takes a while; the user works on the email in the dashboard meanwhile.
+        if meanwhile == "correction":
+            record_correction(store, settings, email_id=record.id, corrected_category="newsletter", reason="it is a newsletter")
+        else:
+            record_fraud_verdict(store, settings, record.id, verdict="fraud", note="phoned the vendor; it is fake")
+        return real(filename, content_type, data)
+
+    monkeypatch.setattr(pipeline, "attachment_text", slow_read)
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Revised invoice INV-4410 Freight $1,300.00")
+    ingest_folder(store, settings)
+
+    kept = store.get_email(record.id)
+    assert sorted(att.filename for att in kept.attachments) == ["Invoice 4410 (2).txt", "Invoice 4410.txt"]
+    if meanwhile == "correction":
+        assert kept.model_status == "corrected" and kept.category.value == "newsletter"
+    else:
+        assert {"fraud_risk", "fraud_confirmed"} <= set(kept.flags)
