@@ -82,3 +82,51 @@ def test_a_request_next_to_warning_words_is_still_a_request():
         assert "bank_change" in _keys(check) and check.level == "high", body
     gift = _check("I will never ask this normally, but I am asking you to buy 5 Apple gift cards and send me the codes.")
     assert "gift_cards" in _keys(gift) and gift.level == "high"
+
+
+# 2. A change the sender says is not happening, a question, an audit request or a ledger account is not a request.
+NOT_A_CHANGE = [
+    "Invoice 7781 for $4,200.00 attached. Please note there is no change to our bank details.",
+    "We have not made any changes to our bank details; only our address has moved.",
+    "There have been no recent changes to our banking information.",
+    "Adjuntamos la factura 7781. Nuestros datos bancarios no han cambiado.",
+    "No hay cambio de cuenta bancaria.",
+    "Il n'y a pas de changement de RIB. Aucun changement de coordonnées bancaires.",
+    "Es gibt keine Änderung unserer Bankverbindung.",
+    "Não há alteração de dados bancários. Sem alteração de dados bancários.",
+    "Have your bank details changed? Please let us know before the next run.",
+    "Please send the vendor master file and the log of bank account changes for the year by Friday.",
+    "Please confirm whether any vendor bank details changed during FY2026.",
+    "Please use account 6150 for all software payments going forward.",
+    "Use GL account 5200 for these fuel purchases going forward.",
+    "Important changes to your bank account fees from November.",
+]
+
+# The same kinds of sentence when they do ask for a change, in each of the five languages.
+REAL_CHANGES = [
+    "Please note our bank details have changed; pay invoice 7781 to the new account below.",
+    "Our payment details changed last week, please update your records.",
+    "Please use acct 99887766 for all payments going forward.",
+    "Not only has our address changed, our bank details have changed too.",
+    "Nuestros datos bancarios han cambiado. Por favor pague a la nueva cuenta bancaria.",
+    "Nos coordonnées bancaires ont été modifiées, merci de noter notre nouveau RIB.",
+    "Unsere Bankverbindung hat sich geändert. Bitte überweisen Sie auf das neue Konto.",
+    "Nossos dados bancários foram alterados, segue a nova conta bancária.",
+]
+
+
+def test_a_change_that_is_not_happening_is_not_a_request(store, settings):
+    from test_fraud_review import _mail
+
+    for n, body in enumerate(NOT_A_CHANGE):
+        assert "bank_change" not in _keys(_check(body)), body
+        email = _mail(store, settings, f"nochange{n}", subject="Invoice 7781", sender="ar@vendor.example", body=body)
+        assert email.category.value != "payment_instruction_change", body
+
+
+def test_real_changes_in_five_languages_still_block():
+    for body in REAL_CHANGES:
+        check = _check(body)
+        assert "bank_change" in _keys(check) and check.level == "high", body
+    assert _cpu_seconds(lambda: _check("pay account " + "1 " * 100_000)) < 2.5
+    assert _cpu_seconds(lambda: _check(("use acct " + "x" * 200 + " ") * 950)) < 2.5
