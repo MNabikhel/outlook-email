@@ -202,26 +202,3 @@ def test_several_matching_rows_are_counted(texts):
     found = lookup(texts["Sept Close Calendar.pdf"], "Which of Priya Raman's tasks are not started?")
     assert "2 of the table's 12 rows match, where the row names priya, raman, not, started:" in found
     assert "Intercompany reconciliation" not in found
-
-
-def test_ask_table_answers_from_the_file_whose_table_fits_best(store, settings):
-    from email.message import EmailMessage
-
-    from controller_inbox import agent
-    from controller_inbox.folder_mail import ingest_folder
-
-    settings.ensure_data_dir()
-    msg = EmailMessage()
-    msg["From"] = "Maya Chen <maya@taz.com>"
-    msg["Subject"] = "Month-end schedules"
-    msg["Message-ID"] = "<schedules-2@taz.com>"
-    msg.set_content("Both schedules attached.")
-    for name in ("AP Aging 9-30-26.pdf", "Fixed Asset Schedule 9-30-26.pdf"):
-        msg.add_attachment((FIXTURES / name).read_bytes(), maintype="application", subtype="pdf", filename=name)
-    (settings.inbox_incoming / "both.eml").write_bytes(bytes(msg))
-    email = ingest_folder(store, settings)[0]
-    ws = agent.Workspace(store, settings, [email], question="", current_id=email.id)
-    found = agent.run_tool(ws, "ask_table", {"email": "1", "question": "total Cost of the vehicles"}, limit=4000)
-    assert found.startswith("From Fixed Asset Schedule 9-30-26.pdf:")
-    assert "$172,650.00" in found
-    assert agent.step_label("ask_table", {"email": "1", "question": "total Cost"}, ws).startswith("Asking the table in")

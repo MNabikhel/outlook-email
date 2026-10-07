@@ -879,14 +879,6 @@ def _tool_reply(data) -> ToolReply:
     return ToolReply(content=content, calls=calls, reasoning=base.reasoning, finish=base.finish)
 
 
-def read_packet(settings: Settings, packet: dict) -> dict | None:
-    """One-off read. Runs that read many messages should share a LocalReader."""
-    if not llm_active(settings):
-        return None
-    with LocalReader(settings, model=check_model(settings).model or None) as reader:
-        return reader.read(packet)
-
-
 def build_prompt(packet: dict, *, budget: int = 6000) -> str:
     """A short, plain-text packet. Fixed parts first, then body and attachments share what is left."""
     corrections = packet.get("saved_corrections_for_sender") or []

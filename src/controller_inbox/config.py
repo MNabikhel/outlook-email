@@ -222,10 +222,6 @@ class Settings(BaseSettings):
     def graph_configured(self) -> bool:
         return bool(self.azure_client_id)
 
-    @property
-    def daemon_mode(self) -> bool:
-        return bool(self.azure_client_id and self.azure_client_secret and self.mailbox)
-
     def ensure_data_dir(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.digest_dir.mkdir(parents=True, exist_ok=True)

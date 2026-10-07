@@ -116,23 +116,6 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "ask_table",
-            "description": "Answer from a table in an email's files exactly: matching rows, a total, average, count, largest, "
-            "first or last, filtered by names, amounts or dates. Plain words, e.g. \"total Interest for payments in 2027\".",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "email": {"type": "string", "description": "The email's number, like 1"},
-                    "question": {"type": "string", "description": "The question about the table, in plain words"},
-                    "file": {"type": "string", "description": "File name or number; leave empty for all its files"},
-                },
-                "required": ["email", "question"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "read_cells",
             "description": "Exact values and formulas from a spreadsheet range such as B2:F20.",
             "parameters": {
@@ -761,8 +744,6 @@ def step_label(name: str, args, ws: Workspace) -> str:
         return f"Reading {fname}" + (f" · {args['part']}" if args.get("part") else "")
     if name == "find_in_file":
         return f"Looking for “{args.get('query', '')}” in {fname}"
-    if name == "ask_table":
-        return f"Asking the table in {fname}: “{str(args.get('question', ''))[:80]}”"
     if name == "read_cells":
         return f"Reading cells {_sheet_ref(args)}{args.get('cells', '')} in {fname}"
     if name == "trace_cell":
@@ -809,8 +790,6 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
         return LOCKED
     if name == "find_in_file":
         return _find_in_file(ws, email, str(args.get("query") or ""), args.get("file"))
-    if name == "ask_table":
-        return _ask_table(ws, email, str(args.get("question") or ""), args.get("file"))
     att = ws.file(email, args.get("file"))
     if att is None:
         return f"No file like {args.get('file')!r} on [{ws.number(email)}]. " + (files_line(email) or "It has no files.")
@@ -832,29 +811,6 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
             return documents.compare_columns(data, str(args.get("sheet") or ""), str(args.get("from") or ""), str(args.get("to") or ""))
         return documents.trace_cell(data, str(args.get("sheet") or ""), str(args.get("cell") or ""))
     return f"There is no tool called {name}."
-
-
-def _ask_table(ws: Workspace, email: EmailRecord, question: str, file) -> str:
-    """The table rows, and anything worked out from them, that answer ``question`` in one file or each of them."""
-    if not question.strip():
-        return "Say what to ask the table, like \"total Cost for Vehicles\"."
-    if file:
-        att = ws.file(email, file)
-        if att is None:
-            return f"No file like {file!r} on [{ws.number(email)}]. " + (files_line(email) or "It has no files.")
-        candidates = [att]
-    else:
-        candidates = [att for att in email.attachments if (att.extracted_text or "").strip()]
-    ws.read_files = True
-    # The file whose table answers best, not just the first with any match.
-    found = [(answer, att) for att in candidates if (answer := table_lookup.answer(att.extracted_text or "", question))]
-    if found:
-        best, att = max(found, key=lambda item: item[0].weight)
-        return f"From {att.filename}:\n{table_lookup.render(best, 2500)}"
-    return (
-        f"No table rows in {', '.join(att.filename for att in candidates) or 'its files'} answer {question!r}. "
-        "Ask with the words of the table's columns and rows, or use find_in_file."
-    )
 
 
 def _search_mail(ws: Workspace, query: str) -> str:

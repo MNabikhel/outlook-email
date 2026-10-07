@@ -309,7 +309,3 @@ def _unique(items: Iterable) -> list:
         seen.add(key)
         out.append(item)
     return out
-
-
-def build_search_blob(*parts: str) -> str:
-    return collapse_ws("\n".join(p for p in parts if p))

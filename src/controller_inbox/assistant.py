@@ -139,7 +139,6 @@ TOOLS_GUIDE = (
     "every sum, difference, percentage and date with calculate, never in your head: for \"payment due 45 days after "
     "an invoice dated 15 March 2026\", call calculate with \"2026-03-15 + 45 days\". "
     "If the file already states the figure, answer from that line and do not call calculate. "
-    "For a total, count or filter over a table's rows, call ask_table. "
     "A heading such as three months or nine months beside a row of amounts is a column, not a date to work out. "
     "When the file text is already in the prompt, that is the whole document: answer from it. "
     "Do not call read_cells, trace_cell, or compare_columns on a picture or a PDF page. "

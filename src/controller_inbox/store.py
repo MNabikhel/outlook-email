@@ -263,13 +263,6 @@ class Store:
         finally:
             conn.close()
 
-    def reset(self) -> None:
-        """Delete the database file (and its write-ahead log) and start empty."""
-        for path in (self.path, self.path.with_name(self.path.name + "-wal"), self.path.with_name(self.path.name + "-shm")):
-            if path.exists():
-                path.unlink()
-        self._init()
-
     def clear_mail(self) -> int:
         """Remove every email and what was worked out from it, for loading the sample mailbox.
 
@@ -807,13 +800,6 @@ class Store:
                 (sender_email.lower(), exclude),
             ).fetchone()
         return _loads(row["codes"], []) if row else []
-
-    def category_counts(self) -> dict[str, int]:
-        with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT category, COUNT(*) AS n FROM emails GROUP BY category ORDER BY n DESC"
-            ).fetchall()
-        return {row["category"]: row["n"] for row in rows}
 
     def attachment_type_counts(self) -> dict[str, int]:
         with self.connect() as conn:

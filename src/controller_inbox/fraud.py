@@ -24,8 +24,6 @@ if TYPE_CHECKING:
     from controller_inbox.models import EmailRecord
     from controller_inbox.store import Store
 
-LEVELS = ("none", "caution", "high")
-
 POINTS = {
     "bank_change": 50,
     "bank_change_quoted": 10,
@@ -91,7 +89,6 @@ STRONG_NOTICE_RE = re.compile(
 )
 # A warning word that can just as well introduce a real request ("please be aware our bank details have changed").
 WEAK_NOTICE_RE = re.compile(r"(\bbeware\b|\bbe\s+(?:aware|alert|vigilant)\b|\balways\s+(?:call|verify|confirm)\b)", re.I)
-NOTICE_RE = re.compile(f"{STRONG_NOTICE_RE.pattern}|{WEAK_NOTICE_RE.pattern}", re.I)
 # What a real warning tells the reader to do.
 PROTECTIVE_RE = re.compile(
     r"\b(?:call|phone|telephone|verify|verbally|contact\s+(?:us|your)|known\s+number|on\s+file|report|ignore|delete)\b", re.I

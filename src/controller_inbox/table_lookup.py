@@ -15,8 +15,7 @@ was asked about, and adds a column up wrong. So the question is read against the
 
 The rows used, and anything worked out from them (exactly, with the subtotal rows left out and the
 table's own total beside it), go at the top of the file text with how the question was read, so the
-model can check that reading before it answers. The model still gets the whole file, and can ask the
-table more questions itself (Ask CloseDesk's ``ask_table`` tool).
+model can check that reading before it answers. The model still gets the whole file.
 """
 
 from __future__ import annotations
