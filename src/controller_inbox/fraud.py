@@ -358,7 +358,12 @@ def assess(
     if spoof:
         add("display_name_spoof", spoof)
 
-    if any(needle in sender for needle in AUTOMATED_SENDERS):
+    # Machine mail ("no-reply@") rarely asks for anything, but anyone can pick that address on a domain of
+    # their own. So it counts only from a sender you have mail from or a domain you trust, and never
+    # against bank-change wording.
+    keys = {item.key for item in signals}
+    familiar = history > 0 or bool(trusted_domain)
+    if any(needle in sender for needle in AUTOMATED_SENDERS) and familiar and not keys & ({"bank_change"} | SOFT_BANK):
         add("automated_sender")
     verdict_for_sender = ctx.senders.get(sender, "")
     reported = verdict_for_sender == "fraud" or (domain and domain_matches(domain, ctx.fraud_domains))

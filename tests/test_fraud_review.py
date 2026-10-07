@@ -231,3 +231,16 @@ def test_reply_prefix_without_a_quote_does_not_hide_the_subject():
     # With the thread quoted below, the subject belongs to the thread, as before.
     quoted = "Thanks, I will call them first.\n\nFrom: Acme AR\nSent: Monday\n\nPlease see below."
     assert "bank_change" not in _keys(_check(quoted, subject="RE: Our bank details have changed"))
+
+
+# 8. A no-reply address does not discount a bank change or a sender you have never heard from.
+def test_no_reply_sender_does_not_remove_the_warning():
+    letter = [("remittance-update.pdf", "Please note our bank details have changed. New account ****9981 routing ****0021.")]
+    for sender in ("no-reply@acme-billing.example", "notifications@acme-billing.example"):
+        check = _check("Please see the attached invoice and remittance update.", sender=sender, history=5, attachments=letter)
+        assert "automated_sender" not in _keys(check) and check.level == "caution", sender
+    payment = "Please remit invoice 5521 today to account 4410029981."
+    assert _check(payment, sender="no-reply@acme-billing.example").level == "caution", "a stranger's no-reply address"
+    # A no-reply address you have mail from still counts as machine mail.
+    familiar = _check(payment, sender="no-reply@acme-billing.example", history=5)
+    assert "automated_sender" in _keys(familiar) and familiar.level == "none"
