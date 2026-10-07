@@ -69,8 +69,10 @@ def ingest_folder(
                 # Some scanners and mail tools give every message the same Message-ID. A stored email with
                 # another subject, sender or date is a different message, so this one gets an id from those
                 # too, which a copy of it saved again later shares.
-                sent = raw.received_at.astimezone(timezone.utc).isoformat()
-                raw.id = _stable_id("\n".join([raw.internet_message_id, raw.subject, raw.sender_email, sent]))
+                # What the message doesn't say itself (a subject or date taken from its file) is left out of it.
+                subject = "" if "subject" in raw.from_file else raw.subject
+                sent = "" if "sent" in raw.from_file else raw.received_at.astimezone(timezone.utc).isoformat()
+                raw.id = _stable_id("\n".join([raw.internet_message_id, subject, raw.sender_email, sent]))
                 existing = store.get_email(raw.id)
             if existing is not None:
                 # Another copy of a stored message: only files it doesn't hold yet are read and added.
@@ -243,9 +245,9 @@ def _parse_message(path: Path) -> RawMessage:
 def _parse_eml(path: Path) -> RawMessage:
     data = path.read_bytes()
     parsed = BytesParser(policy=policy.default).parsebytes(data)
-    subject = str(parsed.get("subject") or path.stem)
+    subject = str(parsed.get("subject") or "")
     sender_name, sender_email = _split_address(str(parsed.get("from") or ""))
-    received = _email_date(parsed.get("date"), path)
+    received = _email_date(parsed.get("date"))
     body, attachments = _eml_content(parsed)
     message_id = str(parsed.get("message-id") or "").strip()
     raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
@@ -351,7 +353,7 @@ def _parse_msg(path: Path) -> RawMessage:
 
     message = extract_msg.Message(str(path))
     try:
-        subject = message.subject or path.stem
+        subject = message.subject or ""
         sender_name, sender_email = _split_address(message.sender or "")
         if "@" not in sender_email:
             sender_email = _msg_smtp_address(message) or ""
@@ -362,7 +364,7 @@ def _parse_msg(path: Path) -> RawMessage:
             if isinstance(html_body, bytes):
                 html_body = html_body.decode("utf-8", errors="replace")
             body = html_to_text(html_body)
-        received = _coerce_date(getattr(message, "date", None), path)
+        received = _coerce_date(getattr(message, "date", None))
         attachments = _msg_attachments(message)
         header = getattr(message, "header", None)
         reply_to = _reply_address(str(header.get("Reply-To") or "")) if header is not None else ""
@@ -481,7 +483,12 @@ def _standalone(path: Path) -> RawMessage:
 def _raw_message(
     path, data, subject, sender_name, sender_email, received, body, attachments, message_id: str = ""
 ) -> RawMessage:
+    """A message without a subject is named after its file, and one without a sent time (``received`` None) is
+    dated by its file; ``from_file`` says which, as two saved copies of one message differ in those."""
+    from_file = tuple(part for part, missing in (("subject", not _tidy(subject)), ("sent", received is None)) if missing)
     subject = _tidy(subject) or _tidy(path.stem)
+    if received is None:
+        received = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     sender_name, sender_email = _tidy(sender_name), _tidy(sender_email)
     body = (body or "").replace("\x00", "").strip()
     message_id = _tidy(message_id)
@@ -497,6 +504,7 @@ def _raw_message(
         has_attachments=bool(attachments),
         source="folder",
         attachments=attachments,
+        from_file=from_file,
     )
 
 
@@ -531,11 +539,16 @@ SAME_MESSAGE_SLACK = timedelta(minutes=2)
 
 
 def _another_message(stored, raw: RawMessage) -> bool:
-    """Whether a stored email that has this message's Message-ID is a different message after all."""
-    if _tidy(stored.subject).casefold() != _tidy(raw.subject).casefold():
+    """Whether a stored email that has this message's Message-ID is a different message after all.
+
+    Only what the message itself says counts: a message without a subject is named after its file and one
+    without a date is dated by its file, and those differ between two copies of it saved at different times."""
+    if "subject" not in raw.from_file and _tidy(stored.subject).casefold() != _tidy(raw.subject).casefold():
         return True
     if (stored.sender_email or "").strip().lower() != (raw.sender_email or "").strip().lower():
         return True
+    if "sent" in raw.from_file:
+        return False
     try:
         sent = datetime.fromisoformat(str(stored.received_at))
     except ValueError:
@@ -571,7 +584,8 @@ def _split_address(raw: str) -> tuple[str, str]:
     return name.strip() or email, email
 
 
-def _email_date(value, path: Path) -> datetime:
+def _email_date(value) -> datetime | None:
+    """A Date header's time, or None when there is none that can be read."""
     if value:
         try:
             parsed = parsedate_to_datetime(str(value))
@@ -580,15 +594,15 @@ def _email_date(value, path: Path) -> datetime:
             return parsed
         except (TypeError, ValueError, IndexError):
             pass
-    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    return None
 
 
-def _coerce_date(value, path: Path) -> datetime:
+def _coerce_date(value) -> datetime | None:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value
-    return _email_date(value, path)
+    return _email_date(value)
 
 
 def _decode_text_part(part, payload: bytes) -> str:

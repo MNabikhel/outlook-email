@@ -893,3 +893,154 @@ def test_an_inline_calendar_is_kept_as_the_invite(settings: Settings, store: Sto
     assert [att.filename for att in inline.attachments] == ["invite.ics"]
     assert "Q3 close review" in inline.attachments[0].extracted_text
     assert [att.filename for att in records["<both@x>"].attachments] == ["invite.ics"], "not kept twice"
+
+
+# 27. The overnight reading is saved for an email whose files didn't arrive in name order --------
+
+
+def test_a_reading_is_saved_for_an_email_whose_files_are_not_in_name_order(settings: Settings, store: Store):
+    from controller_inbox.overnight import read_queue
+    from test_bionic import AgreeingReader
+
+    settings.ensure_data_dir()
+    # "Statement" comes before "Invoice" in the email; the reading was checked against a copy in name order.
+    _eml(settings, "September statement", message_id="<st9@vendor.com>",
+         attach=[("Statement.txt", b"Statement of account Sept 2026"), ("Invoice INV-9.txt", b"Invoice INV-9 $310.00")])
+    [record] = ingest_folder(store, settings)
+    result = read_queue(store, settings, now=NOW, reader=AgreeingReader())
+    assert result["read_ids"] == [record.id]
+    assert store.get_email(record.id).model_status == "bionic"
+    assert store.counts()["waiting_on_bionic"] == 0
+
+
+# 28. A copy of a read email with new files doesn't undo what the user did while its files were read --
+
+
+@pytest.mark.parametrize("meanwhile", ["correction", "verdict"])
+def test_new_files_on_a_read_email_keep_what_the_user_did_meanwhile(settings: Settings, store: Store, monkeypatch, meanwhile):
+    from controller_inbox import pipeline
+    from controller_inbox.fraud import record_fraud_verdict
+    from controller_inbox.learn import record_correction
+    from controller_inbox.reading import apply_bionic_reading
+
+    settings.ensure_data_dir()
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Invoice INV-4410 Freight $1,250.00")
+    [record] = ingest_folder(store, settings)
+    reading = {"category": "ap_invoice", "folder": "important", "importance": "high", "summary": "Freight invoice.", "actions": [], "why": "x"}
+    apply_bionic_reading(store, record.id, reading)
+
+    real = pipeline.attachment_text
+
+    def slow_read(filename, content_type, data):
+        # A scan read with OCR takes a while; the user works on the email in the dashboard meanwhile.
+        if meanwhile == "correction":
+            record_correction(store, settings, email_id=record.id, corrected_category="newsletter", reason="it is a newsletter")
+        else:
+            record_fraud_verdict(store, settings, record.id, verdict="fraud", note="phoned the vendor; it is fake")
+        return real(filename, content_type, data)
+
+    monkeypatch.setattr(pipeline, "attachment_text", slow_read)
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Revised invoice INV-4410 Freight $1,300.00")
+    ingest_folder(store, settings)
+
+    kept = store.get_email(record.id)
+    assert sorted(att.filename for att in kept.attachments) == ["Invoice 4410 (2).txt", "Invoice 4410.txt"]
+    if meanwhile == "correction":
+        assert kept.model_status == "corrected" and kept.category.value == "newsletter"
+    else:
+        assert {"fraud_risk", "fraud_confirmed"} <= set(kept.flags)
+
+
+# 29. A copy of an email with no Subject or no Date, saved again under another name, is still one email --
+
+
+def _scan(settings: Settings, name: str, *, subject: str | None, date_header: str | None, age: float, data: bytes | None = None) -> bytes:
+    """A copier's scan; ``data`` saves the very bytes of an earlier one again under ``name``."""
+    if data is None:
+        msg = EmailMessage()
+        msg["From"] = "Scanner <scan@copier.local>"
+        msg["Message-ID"] = "<scan@copier.local>"
+        if subject is not None:
+            msg["Subject"] = subject
+        if date_header is not None:
+            msg["Date"] = date_header
+        msg.set_content("Scanned document attached.")
+        msg.add_attachment(f"Scanned page {name}".encode(), maintype="text", subtype="plain", filename="scan.txt")
+        data = bytes(msg)
+    path = settings.inbox_incoming / name
+    path.write_bytes(data)
+    old = time.time() - age
+    os.utime(path, (old, old))
+    return data
+
+
+@pytest.mark.parametrize("missing", ["subject", "date"])
+def test_a_copy_saved_again_is_one_email_when_the_message_has_no_subject_or_date(settings: Settings, store: Store, missing):
+    settings.ensure_data_dir()
+    subject = None if missing == "subject" else "Scan"
+    date_header = None if missing == "date" else "Mon, 05 Oct 2026 10:00:00 -0400"
+    # Its subject would be the file's name, or its date the file's date: both differ for the copy saved later.
+    first = _scan(settings, "Scan from copier.eml", subject=subject, date_header=date_header, age=3600)
+    ingest_folder(store, settings)
+    _scan(settings, "Scan from copier (copy).eml", subject=subject, date_header=date_header, age=60, data=first)
+    report: dict = {}
+    ingest_folder(store, settings, report=report)
+    assert (report["read"], report["already_read"]) == (0, 1) and store.counts()["emails"] == 1
+
+
+def test_scans_without_a_subject_that_share_a_message_id_are_still_kept_apart(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    _scan(settings, "a.eml", subject=None, date_header="Mon, 05 Oct 2026 10:00:00 -0400", age=60)
+    _scan(settings, "b.eml", subject=None, date_header="Mon, 05 Oct 2026 11:00:00 -0400", age=60)
+    second = (settings.inbox_incoming / "b.eml").read_bytes()
+    report: dict = {}
+    ingest_folder(store, settings, report=report)
+    assert report["read"] == 2 and store.counts()["emails"] == 2
+    _scan(settings, "b again.eml", subject=None, date_header=None, age=30, data=second)  # the second, saved again
+    report = {}
+    ingest_folder(store, settings, report=report)
+    assert report["already_read"] == 1 and store.counts()["emails"] == 2
+
+
+# 30. VIP senders copied from Outlook count by their addresses, not the words of their names ------
+
+
+def test_vip_senders_copied_from_outlook_count_by_their_addresses(store: Store, settings: Settings):
+    pasted = Settings(vip_senders="Chen, Maya <maya@taz.com>; Bob Lee <Bob@taz.com>", _env_file=None)
+    assert pasted.vip_list == ["maya@taz.com", "bob@taz.com"]
+    assert Settings(vip_senders="cfo@taz.com ceo@taz.com; irs.gov, Maya Chen", _env_file=None).vip_list == [
+        "cfo@taz.com", "ceo@taz.com", "irs.gov"
+    ]
+    assert Settings(vip_senders="treasurer", _env_file=None).vip_list == ["treasurer"]
+
+    settings.vip_senders = pasted.vip_senders
+    vip = {}
+    for n, sender in enumerate(["maya@taz.com", "colleen@randomvendor.com", "noreply@bobcat-rentals.com"]):
+        raw = _raw("Just checking in.", received=NOW)
+        raw.id, raw.sender_email = f"v{n}", sender
+        vip[sender] = "VIP / elevated sender" in process_message(raw, store, settings, now=NOW).importance_reasons
+    assert vip == {"maya@taz.com": True, "colleen@randomvendor.com": False, "noreply@bobcat-rentals.com": False}
+
+
+# 31. A manual sync of a shorter window leaves the cursor and the message it waits for alone ------
+
+
+def test_a_shorter_manual_sync_keeps_the_message_the_cursor_waits_for(store: Store, settings: Settings):
+    from datetime import timedelta
+
+    t0 = datetime(2026, 10, 6, 9, 0, tzinfo=timezone.utc)
+    mailbox = _FlakyMailbox([_graph_raw("throttled", t0)], {"throttled": 1})
+    ingest_mailbox(mailbox, store, settings, received_after=t0 - timedelta(hours=72), now=t0 + timedelta(minutes=5))
+    held = store.get_state("last_sync_at")
+    assert held == t0.isoformat()
+
+    # "closedesk sync --hours 1" three hours later: it doesn't reach back to the message that failed.
+    later = t0 + timedelta(hours=3)
+    ingest_mailbox(mailbox, store, settings, received_after=later - timedelta(hours=1), now=later)
+    assert store.get_state("last_sync_at") == held, "the cursor doesn't jump past mail this sync didn't read"
+
+    ingest_mailbox(mailbox, store, settings, received_after=datetime.fromisoformat(held), now=later + timedelta(hours=1))
+    assert store.get_email("throttled") is not None
+    assert store.get_state("last_sync_at") == (later + timedelta(hours=1)).isoformat()

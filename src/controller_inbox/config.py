@@ -208,8 +208,17 @@ class Settings(BaseSettings):
 
     @property
     def vip_list(self) -> list[str]:
-        """Addresses or domains, separated by commas, semicolons (as Outlook copies a list) or spaces."""
-        return [part.strip().lower() for part in re.split(r"[,;\s]+", self.vip_senders) if part.strip()]
+        """Addresses or domains, separated by commas, semicolons (as Outlook copies a list) or spaces.
+
+        Each is looked for anywhere in a sender's address, so a list copied from Outlook ("Chen, Maya <maya@taz.com>;
+        Bob Lee <bob@taz.com>") counts by its addresses alone: the words of a name would match strangers ("lee" in
+        colleen@…). A single word on its own ("treasurer") still counts, as it always has."""
+        pasted = "<" in self.vip_senders  # names beside addresses, as Outlook copies them
+        found: list[str] = []
+        for entry in re.split(r"[,;]+", self.vip_senders):
+            words = [word.strip("<>'\"") for word in entry.split()]
+            found += [word for word in words if "@" in word or "." in word or (len(words) == 1 and not pasted)]
+        return [word.lower() for word in found if word]
 
     @property
     def trusted_domain_list(self) -> list[str]:

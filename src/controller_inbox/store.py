@@ -499,8 +499,10 @@ class Store:
             rows = conn.execute(sql, params).fetchall()
             out: list[EmailRecord] = []
             for row in rows:
+                # In the order get_email gives them: the overnight run compares an email listed here with the
+                # same email read again by get_email, and files in another order would never match.
                 attachments = conn.execute(
-                    "SELECT * FROM attachments WHERE email_id = ?",
+                    "SELECT * FROM attachments WHERE email_id = ? ORDER BY filename",
                     (row["id"],),
                 ).fetchall()
                 actions = conn.execute(

@@ -470,6 +470,12 @@
     renderChat();
   }
 
+  /* Until the saved conversation is loaded. A load started meanwhile (the chat button clicked while it loads)
+     makes the one being waited for return without loading it, so load again until one finishes. */
+  async function chatLoaded() {
+    while (chat && !loaded) await loadChat(chatId);
+  }
+
   function newChat() {
     rememberChat(null);
     closeHistory();
@@ -507,7 +513,7 @@
     busy = true;
     closeHistory();
     // Load the saved conversation first: loading it afterwards would start a new round and drop this answer.
-    if (chat && !loaded) await loadChat(chatId);
+    await chatLoaded();
     const round = ++chatRound;
     openChat(false);
     if (!turns.length) chatLog.innerHTML = "";
@@ -708,7 +714,7 @@
     const files = Array.from(list || []);
     if (!files.length) return;
     // As in ask(): a conversation still loading would replace the list of files this upload returns.
-    if (chat && !loaded) await loadChat(chatId);
+    await chatLoaded();
     openChat(false);
     renderFiles(files.map((file) => file.name));
     try {
