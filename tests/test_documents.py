@@ -672,6 +672,21 @@ def test_scanned_invoice_lines_and_statement_dashes_keep_their_columns():
     assert "CRN-4 | Debit: N/A | Credit: 50.00" in text
 
 
+def test_scanned_negatives_keep_their_column_and_rates_keep_their_decimals():
+    from controller_inbox.ocr import _polish, _rows
+
+    hits = [(100, 60, 140, "Line item"), (100, 400, 440, "2024"), (100, 600, 640, "2023")]
+    for top, (label, this_year, last_year) in zip(
+        (130, 160, 190, 220),
+        [("Revenue", "12,500", "11,900"), ("Cost of sales", "7,100", "6,800"), ("Other income", "-1,234", "450"), ("Net income", "4,166", "5,550")],
+    ):
+        hits += [(top, 60, 200, label), (top, 385, 440, this_year), (top, 590, 640, last_year)]
+    assert "Other income | 2024: -1,234 | 2023: 450" in _rows(hits)
+    assert _polish("Interest rate 5.125%") == "Interest rate 5.125%"
+    assert _polish("Mileage rate $0.655 per mile") == "Mileage rate $0.655 per mile"
+    assert _polish("FX rate 0.125, fee 1.250") == "FX rate 0.125, fee 1,250"
+
+
 def test_ocr_puts_back_dropped_spaces_without_splitting_codes_or_times():
     from controller_inbox.ocr import _spaced
 
