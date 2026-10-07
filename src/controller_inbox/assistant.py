@@ -721,11 +721,31 @@ def _figures(text: str) -> set[str]:
 
 
 def _checked(ws: agent.Workspace, answer: str, *, history, today: str, focus: list[dict] | None = None) -> Iterator[dict[str, Any]]:
-    """Correct clear arithmetic and citation slips in the finished answer, and flag figures that weren't in what was read.
+    """Correct clear arithmetic and citation slips in the finished answer, and flag figures that weren't in what was read."""
+    result = answer_check.review(answer, **_read_material(ws, history=history, today=today, focus=focus))
+    if result.changed(answer):
+        yield {"type": "revise", "text": result.text}
+    if result.checks:
+        yield {"type": "check", "items": result.checks}
 
-    The material is everything the model was shown: the question, the focus list, each email's header,
-    summary, tasks and text, notes from earlier reading, earlier conversations, and what the tools returned."""
-    material = [ws.question, today, ws.past, *ws.evidence, *ws.notes]
+
+def _grounded(ws: agent.Workspace, draft: str, *, history, today: str) -> bool:
+    """A draft that cites its source and whose every figure and citation checks out against what was read
+    needs no second pass by the model: the same check runs on it as on any answer."""
+    if not _CITED.search(draft):
+        return False
+    result = answer_check.review(draft, **_read_material(ws, history=history, today=today))
+    return not result.checks and not result.changed(draft)
+
+
+_CITED = re.compile(r"\[\d+\]")
+
+
+def _read_material(ws: agent.Workspace, *, history, today: str, focus: list[dict] | None = None) -> dict[str, Any]:
+    """Everything the model was shown, for checking an answer against: the question, the focus list, each
+    email's header, summary, tasks and text, notes from earlier reading, earlier conversations, what the
+    tools returned, the queries worked out over the tables, and the files."""
+    material = [ws.question, today, ws.past, *ws.evidence, *ws.notes, *ws.worked.values()]
     material += [str(turn.get("text") or "") for turn in history or []]
     material += [" · ".join(str(value) for value in row.values() if isinstance(value, (str, int, float))) for row in focus or []]
     primary = ws.primary()
@@ -737,11 +757,7 @@ def _checked(ws: agent.Workspace, answer: str, *, history, today: str, focus: li
         material.append(_source_block(0, email, len(email.body_text or "") + 1, on_screen=False))
         if not agent.attachments_locked(email):
             files += [(att.filename, att.extracted_text) for att in email.attachments if att.extracted_text]
-    result = answer_check.review(answer, material=material, files=files)
-    if result.changed(answer):
-        yield {"type": "revise", "text": result.text}
-    if result.checks:
-        yield {"type": "check", "items": result.checks}
+    return {"material": material, "files": files}
 
 
 # Small models sometimes carry on past their answer by copying the instructions they were given.
@@ -799,6 +815,17 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     target = budget - min(budget // 3, TOOL_ROOM)
     overhead = prompt_chars(build_messages(question, ws.sources, budget=target, tools=True, bodies=False, **base))
     yield from agent.query_tables(ws, question, complete_text)
+    if primary is not None and ws.worked.get(primary.id):
+        # The query worked the answer out from the tables: the model writes it from that and the file text as
+        # it goes, without tools to read more and without a second pass (the answer check still runs).
+        plain = _budget(settings, tools=False) // shrink
+        overhead = prompt_chars(build_messages(question, ws.sources, budget=plain, bodies=False, **base))
+        files = agent.file_context(ws, question, max(MIN_FILE_ROOM, int((plain - overhead) * 0.85)))
+        for read in ws.reads:
+            yield {"type": "step", "text": read}
+        ws.reads.clear()
+        yield from _stream(settings, build_messages(question, ws.sources, budget=plain, files=files, **base), state)
+        return
     files = agent.file_context(ws, question, max(MIN_FILE_ROOM, int((target - overhead) * 0.75)))
     for read in ws.reads:
         yield {"type": "step", "text": read}
@@ -821,6 +848,13 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
             yield {"type": "delta", "text": draft}
             return
         yield from _stream(settings, build_messages(question, ws.sources, budget=budget, **base), state)
+        return
+    if draft and not ws.notes and _grounded(ws, draft, history=history, today=today):
+        # Every figure in it is in what was read: a second pass over the whole prompt would only cost time.
+        yield {"type": "step", "text": "Checked the answer's figures against what was read"}
+        state["wrote"] = True
+        state["text"] += draft
+        yield {"type": "delta", "text": draft}
         return
 
     check_budget = _budget(settings, tools=False) // shrink

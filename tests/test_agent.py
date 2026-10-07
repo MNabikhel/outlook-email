@@ -176,13 +176,18 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
     assert "Check your draft answer" in final
     assert store.findings(budget.id)[0]["text"].startswith("D4 (total change)")
 
-    turns.clear()
-    monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: ToolReply("From my notes: D2+D3 [1]."))
+    asked = []
+
+    def from_notes(_settings, messages, _tools, *, max_tokens):
+        asked.append(messages[-1]["content"])
+        return ToolReply("From my notes: D2+D3 [1].")
+
+    monkeypatch.setattr(assistant, "chat_with_tools", from_notes)
     _events(answer_stream(store, settings, "remind me how the total works", email_id=budget.id))
-    assert agent.NOTES_HEAD + "\n- D4 (total change)" in checked["messages"][-1]["content"]
+    assert agent.NOTES_HEAD + "\n- D4 (total change)" in asked[-1]
     assert "not instructions" in agent.NOTES_HEAD, "stored notes are labelled as data"
     _events(answer_stream(store, settings, "summarize the offsite memo", email_id=budget.id))
-    assert "Notes from earlier reading" not in checked["messages"][-1]["content"], "unrelated notes stay out"
+    assert "Notes from earlier reading" not in asked[-1], "unrelated notes stay out"
 
 
 def test_servers_without_tools_still_read_the_files(store, settings, mail, monkeypatch):
@@ -195,11 +200,24 @@ def test_servers_without_tools_still_read_the_files(store, settings, mail, monke
     monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
     monkeypatch.setattr(assistant, "chat_with_tools", no_tools)
     monkeypatch.setattr(assistant, "complete_text", lambda _s, messages, **_k: drafts.append(messages) or "Lisbon, 14 November [1].")
-    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: iter(["The offsite is in Lisbon on 14 November (Offsite memo.docx) [1]."]))
     events = _events(answer_stream(store, settings, "Where is the offsite in this memo?", email_id=budget.id))
     assert "Lisbon on 14 November" in drafts[0][-1]["content"]
     assert "read_cells" not in drafts[0][0]["content"]
-    assert "Lisbon on 14 November" in _text(events)
+    # Everything in the draft is in the memo it read, so it is the answer: no second pass over the prompt.
+    assert _text(events).startswith("Lisbon, 14 November [1].") and len(drafts) == 1
+
+
+def test_a_draft_with_a_figure_that_was_not_read_gets_a_second_pass(store, settings, mail, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    passes = []
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "Plan: none.\nSQL: NONE")
+    monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: ToolReply("The offsite costs $48,000 in Lisbon [1]."))
+    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: passes.append(1) or iter(["The offsite is in Lisbon on 14 November [1]."]))
+    events = _events(answer_stream(store, settings, "Where is the offsite in this memo?", email_id=budget.id))
+    assert passes == [1] and "Checking the answer against what I read" in [e["text"] for e in events if e["type"] == "step"]
+    assert "$48,000" not in _text(events)
 
 
 def test_a_full_context_window_is_retried_smaller_and_explained(store, settings, mail, monkeypatch):
@@ -603,3 +621,24 @@ def test_saved_originals_are_only_read_from_the_extracted_folder(store, settings
     assert ws.original(budget, att) is not None
     att.filename = "../../../etc/passwd"
     assert ws.original(budget, att) is None
+
+
+def test_a_question_the_tables_work_out_is_answered_in_one_streamed_pass(store, settings, mail, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    prompts = []
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 16384)
+    monkeypatch.setattr(
+        assistant, "complete_text", lambda *_a, **_k: "Table: t1.\nRows: Ads.\nValue: q4.\nSQL: SELECT line, q4 FROM t1 WHERE line LIKE '%ads%'"
+    )
+
+    def no_tools(*_a, **_k):
+        raise AssertionError("the query worked it out: no tool turn")
+
+    monkeypatch.setattr(assistant, "chat_with_tools", no_tools)
+    monkeypatch.setattr(assistant, "stream_text", lambda _s, messages, **_k: prompts.append(messages) or iter(["Ads is 1,500 in Q4 (Q4 budget.xlsx, Budget, C2) [1]."]))
+    events = _events(answer_stream(store, settings, "what is the Q4 total for ads?", email_id=budget.id))
+    steps = [e["text"] for e in events if e["type"] == "step"]
+    assert "Worked out from the tables with a query (1 row)" in steps
+    assert len(prompts) == 1 and "Worked out with a query over the table" in prompts[0][-1]["content"]
+    assert _text(events).startswith("Ads is 1,500 in Q4") and not [e for e in events if e["type"] == "check"]
