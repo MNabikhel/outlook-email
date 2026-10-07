@@ -191,3 +191,24 @@ def test_a_trusted_domain_in_unicode_or_punycode_is_the_same_domain():
     check = assess(TrustContext(domains={"müller.de"}), subject="Rechnung", body="Rechnung 5521 anbei.",
                    sender_name="AP", sender_email="ap@muller.de")
     assert "lookalike_domain" in _keys(check)
+
+
+# 5. A colleague's display name with accents or a curly apostrophe is still recognised when a stranger borrows it.
+def test_borrowed_accented_display_names_are_caught(store, settings):
+    from controller_inbox.models import RawMessage
+    from controller_inbox.pipeline import process_message
+    from test_fraud_review import NOW
+
+    settings.trusted_domains = "ourco.example"
+
+    def mail(msg_id, name, sender, subject, body):
+        raw = RawMessage(id=msg_id, subject=subject, sender_name=name, sender_email=sender, received_at=NOW,
+                         body_text=body, body_preview=body[:200], has_attachments=False, source="folder")
+        return process_message(raw, store, settings, now=NOW)
+
+    for n, (name, borrowed) in enumerate((("José García", "José García"), ("Dana O’Brien", "Dana O'Brien"),
+                                          ("Zoë Kim", "Zoë Kim"), ("Dana Cho", "Dаna Cho"))):
+        mail(f"colleague{n}", name, f"person{n}@ourco.example", "Staff meeting", "See you at 10.")
+        email = mail(f"stranger{n}", borrowed, f"person{n}.ceo@gmail.com", "Wire today",
+                     "Please wire $48,500 today for invoice 5521.")
+        assert "display_name_spoof" in {s["key"] for s in store.fraud_check(email.id)["signals"]}, borrowed

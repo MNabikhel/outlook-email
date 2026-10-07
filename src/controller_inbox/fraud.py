@@ -198,6 +198,20 @@ class TrustContext:
     names: dict[str, str] = field(default_factory=dict)
     weights: dict[str, float] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.names = name_index(self.names)
+
+
+def name_key(name: str) -> str:
+    """A display name as the fraud check reads it: "José García" and "Jose Garcia", or "O’Brien" and
+    "O'Brien", are the same name."""
+    return " ".join(normalize_text(name or "").lower().split())
+
+
+def name_index(names: dict[str, str]) -> dict[str, str]:
+    """Display names seen from trusted domains, keyed the way the fraud check reads a sender's name."""
+    return {name_key(name): address for name, address in names.items() if name_key(name)}
+
 
 def domain_of(address: str) -> str:
     address = (address or "").strip().lower()
@@ -242,7 +256,7 @@ def trust_context(store: "Store", settings: "Settings") -> TrustContext:
             ctx.senders[row["value"]] = row["verdict"]
     ctx.fraud_domains -= ctx.domains
     ctx.known = dict(store.sender_domains(limit=200))
-    ctx.names = store.names_at_domains(ctx.domains)
+    ctx.names = name_index(store.names_at_domains(ctx.domains))
     ctx.weights = learned_weights(store)
     return ctx
 
@@ -769,7 +783,7 @@ def _display_name_spoof(name: str, sender: str, domain: str, trusted_domain: str
         return f"name shows {embedded.group(0).lower()}"
     if trusted_domain or not domain:
         return ""
-    seen = ctx.names.get(name.lower())
+    seen = ctx.names.get(name_key(name))
     if seen and not same_or_under(domain_of(seen), domain) and len(name) >= 5:
         return f"“{name}” usually writes from {seen}"
     return ""
