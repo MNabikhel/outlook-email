@@ -244,3 +244,19 @@ def test_no_reply_sender_does_not_remove_the_warning():
     # A no-reply address you have mail from still counts as machine mail.
     familiar = _check(payment, sender="no-reply@acme-billing.example", history=5)
     assert "automated_sender" in _keys(familiar) and familiar.level == "none"
+
+
+# 9. "Program" does not hide a gift-card request that says to buy cards or send codes.
+def test_gift_card_request_for_a_program_is_still_an_ask():
+    ctx = TrustContext(domains={"ourco.example"}, names={"dana cho": "dana@ourco.example"})
+    body = "I need you to buy 10 Amazon gift cards for our staff rewards program today and send me the codes."
+    check = assess(ctx, subject="Quick favor", body=body, sender_name="Dana Cho", sender_email="dana.cho.ceo@gmail.com")
+    assert "gift_cards" in _keys(check) and check.level == "high"
+
+
+def test_gift_card_program_news_is_not_an_ask():
+    for body in (
+        "Our gift card program is open to all staff this year; we need sign-ups by Friday.",
+        "Your gift card balance is $25; use the codes at checkout.",
+    ):
+        assert "gift_cards" not in _keys(_check(body)), body

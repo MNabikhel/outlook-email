@@ -101,9 +101,13 @@ DISAVOW_RE = re.compile(
 )
 GIFT_RE = re.compile(
     r"(?:\b(?:(?:itunes|apple|google\s+play|steam|amazon|visa|target|walmart|ebay|best\s*buy)\s+)?gift\s*-?\s*cards?\b|"
-    r"\b(?:itunes|google\s+play|steam)\s+cards?\b)(?![^.\n]{0,40}\b(?:program|policy|balance)\b)",
+    r"\b(?:itunes|google\s+play|steam)\s+cards?\b)",
     re.I,
 )
+# "Our gift card program", "the gift card policy", "your gift card balance": not an ask by themselves.
+GIFT_PROGRAM_RE = re.compile(r"[^.\n]{0,40}\b(?:program|policy|balance)\b", re.I)
+# ...unless the sentence also says to buy the cards or send their codes.
+GIFT_BUY_RE = re.compile(r"\b(?:buy|purchase|pick\s+up|grab)\b|\bsend\b[^.\n]{0,40}\b(?:codes?|card\s+numbers|pins?)\b", re.I)
 # Gift cards only count when someone is asked to get them or hand over their codes.
 GIFT_ASK_RE = re.compile(
     r"\b(?:buy|purchase|pick\s+up|get\s+(?:me|us|some|them|a\s+few)|grab|send\s+(?:me|us)|need|scratch|codes?|card\s+numbers|pins?)\b",
@@ -263,7 +267,11 @@ def _gift_ask(text: str) -> re.Match[str] | None:
 def _gift_sentence_asks(text: str, match: re.Match[str]) -> bool:
     start = max(text.rfind(".", 0, match.start()), text.rfind("\n", 0, match.start())) + 1
     ends = [i for i in (text.find(".", match.end()), text.find("\n", match.end())) if i >= 0]
-    return bool(GIFT_ASK_RE.search(text[start : min(ends) if ends else len(text)]))
+    sentence = text[start : min(ends) if ends else len(text)]
+    # "Buy 10 gift cards for our staff rewards program and send me the codes" is still an ask.
+    if GIFT_PROGRAM_RE.match(text, match.end()) and not GIFT_BUY_RE.search(sentence):
+        return False
+    return bool(GIFT_ASK_RE.search(sentence))
 
 
 def assess(
