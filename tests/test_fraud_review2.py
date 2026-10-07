@@ -238,3 +238,24 @@ def test_borrowed_name_is_shown_as_written():
     check = assess(ctx, subject="Wire", body="Please wire the funds today.", sender_name="José García",
                    sender_email="jose.garcia.ceo@gmail.com")
     assert {s.key: s.detail for s in check.signals}["display_name_spoof"] == "“José García” usually writes from jose@ourco.example"
+
+
+# 8. A payment-change warning marked done, but not yet verified by phone, still counts as needing you.
+def test_need_you_count_keeps_an_unverified_payment_warning(loaded, settings, as_of_now):
+    from datetime import date
+
+    from controller_inbox.digest import build_digest
+
+    def digest():
+        return build_digest(loaded, as_of=date(2026, 9, 22), generated_at=as_of_now, tz=settings.tz, save=False)
+
+    before = digest()
+    loaded.set_done("demo-bec-wire", True)
+    marked = digest()
+    assert marked["focus"][0]["email_id"] == "demo-bec-wire"
+    assert marked["kpis"]["need_you"] == before["kpis"]["need_you"]
+    for action in loaded.get_email("demo-bec-wire").actions:
+        loaded.set_action_status(action.id, "done")
+    verified = digest()
+    assert "demo-bec-wire" not in [row["email_id"] for row in verified["focus"]]
+    assert verified["kpis"]["need_you"] == before["kpis"]["need_you"] - 1

@@ -114,11 +114,12 @@ def build_digest(
         )
     ]
 
-    # Mail marked done is handled: it leaves the focus list and the count of what needs you.
+    # Mail marked done is handled: it leaves the focus list and the count of what needs you, except a
+    # payment-change warning whose phone check is still open, which stays in both.
     done = store.done_ids()
     focus = _focus(as_of, window_emails, open_actions, full, done)
     by_folder = {name: [e for e in window_emails if (e.folder or "informational") == name] for name in FOLDER_LABELS}
-    need_you = sum(1 for e in by_folder["important"] if e.id not in done)
+    need_you = sum(1 for e in by_folder["important"] if _needs_you(e, done))
     newsletters = sum(1 for e in by_folder["informational"] if e.category == DocumentType.NEWSLETTER)
 
     close_day = month_end(as_of)
@@ -268,6 +269,14 @@ def _headline(kpis: dict[str, int], since: str) -> str:
             f"{kpis['fraud_alerts']} payment-change warning{'s' if kpis['fraud_alerts'] != 1 else ''}"
         )
     return ". ".join(parts) + "."
+
+
+def _needs_you(email: EmailRecord, done: set[str] | frozenset[str]) -> bool:
+    """Not marked done, or a payment-change warning not yet verified by phone (marking it done does not verify it)."""
+    if email.id not in done:
+        return True
+    verified = bool(email.actions) and all(action.status != ActionStatus.OPEN for action in email.actions)
+    return _is_fraud(email) and not verified
 
 
 def _is_fraud(email: EmailRecord) -> bool:
