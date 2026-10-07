@@ -46,14 +46,14 @@ def test_the_classic_pages_link_to_the_workspace_and_back(client):
 def test_scripts_never_put_server_text_into_html_unescaped():
     folder = UI
     for path in folder.glob("*.js"):
-        text = path.read_text()
+        text = path.read_text(encoding="utf-8")
         uses = text.count(".innerHTML")
         if path.name == "chat.js":
             # The one use: an answer, escaped first by formatAnswer (see format.js).
             assert uses == 1 and "innerHTML = formatAnswer(" in text
         else:
             assert uses == 0, path.name
-    assert "escapeHtml(sentence)" in (folder / "format.js").read_text()
+    assert "escapeHtml(sentence)" in (folder / "format.js").read_text(encoding="utf-8")
 
 
 def test_a_file_name_with_a_bracketed_number_stays_one_link(tmp_path):
