@@ -13,9 +13,11 @@ from __future__ import annotations
 import csv
 import io
 import re
+import unicodedata
 from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from controller_inbox.classify import AUTOMATED_SENDERS, PAYMENT_CHANGE_RE, QUOTE_START_RE, normalize_text, own_words
@@ -202,10 +204,31 @@ def domain_of(address: str) -> str:
     return address.rsplit("@", 1)[1].strip(">. ") if "@" in address else ""
 
 
+@lru_cache(maxsize=4096)
+def canonical_domain(domain: str) -> str:
+    """One spelling of a domain, so "müller.de" and its punycode form "xn--mller-kva.de" are the same domain:
+    lower case, with each punycode label read as the letters it stands for."""
+    labels = []
+    for label in (domain or "").strip().lower().split("."):
+        if label.startswith("xn--"):
+            try:
+                label = label.encode("ascii").decode("idna")
+            except UnicodeError:
+                pass
+        labels.append(unicodedata.normalize("NFC", label))
+    return ".".join(labels)
+
+
+def same_or_under(domain: str, other: str) -> bool:
+    """``domain`` is ``other`` or one of its subdomains, however either is spelled (Unicode or punycode)."""
+    domain, other = canonical_domain(domain), canonical_domain(other)
+    return domain == other or domain.endswith("." + other)
+
+
 def domain_matches(domain: str, trusted: set[str] | list[str]) -> str:
     """The trusted entry covering ``domain`` (itself or a parent domain), or ""."""
     for item in trusted:
-        if domain == item or domain.endswith("." + item):
+        if same_or_under(domain, item):
             return item
     return ""
 
@@ -370,7 +393,9 @@ def assess(
     attachments: list[tuple[str, str]] | None = None,
     history: int = 0,
     flags: list[str] | tuple[str, ...] = (),
+    domain_history: int = 0,
 ) -> FraudCheck:
+    """``history`` counts earlier mail from this address, ``domain_history`` earlier mail from its domain."""
     sender = (sender_email or "").strip().lower()
     domain = domain_of(sender)
     signals: list[Signal] = []
@@ -435,16 +460,15 @@ def assess(
     if (
         reply_domain
         and domain
-        and reply_domain != domain
-        and not reply_domain.endswith("." + domain)
-        and not domain.endswith("." + reply_domain)
+        and not same_or_under(reply_domain, domain)
+        and not same_or_under(domain, reply_domain)
         and not domain_matches(reply_domain, ctx.domains)
     ):
         add("reply_to_mismatch", reply_to.lower())
 
     trusted_domain = domain_matches(domain, ctx.domains) if domain else ""
     if domain and not trusted_domain:
-        look = _lookalike(domain, ctx)
+        look = _lookalike(domain, ctx, established=domain_history > 0)
         if look:
             add("lookalike_domain", f"{domain} looks like {look}")
     spoof = _display_name_spoof(sender_name, sender, domain, trusted_domain, ctx)
@@ -507,6 +531,7 @@ def assess_email(store: "Store", ctx: TrustContext, email: "EmailRecord") -> Fra
         attachments=[(att.filename, att.extracted_text) for att in email.attachments],
         history=store.sender_history(email.sender_email, exclude=email.id),
         flags=email.flags,
+        domain_history=store.domain_history(domain_of(email.sender_email), exclude=email.id),
     )
 
 
@@ -706,7 +731,13 @@ def _cell(value) -> str:
     return "'" + text if text[:1] in {"=", "+", "-", "@", "\t", "\r"} else text
 
 
-def _lookalike(domain: str, ctx: TrustContext) -> str:
+def _lookalike(domain: str, ctx: TrustContext, *, established: bool = False) -> str:
+    """The trusted or frequent domain this one passes for, or "".
+
+    ``established``: you already have mail from this domain. Then being one letter off another name is not
+    a sign by itself: with "pnc.com" trusted, your auditor at "pwc.com", or "usps.com" next to "ups.com", is
+    a real company of its own. Domains that read the same ("tаz.com" with a Cyrillic "а") still count.
+    """
     mine = ctx.known.get(domain, 0)
     candidates = [(item, True) for item in ctx.domains] + [
         (item, False) for item, count in ctx.known.items() if count > max(mine, 1)
@@ -714,7 +745,7 @@ def _lookalike(domain: str, ctx: TrustContext) -> str:
     shown = _skeleton(domain)
     tokens = re.split(r"[.-]", shown.rsplit(".", 1)[0])
     for other, trusted in candidates:
-        if other == domain or domain.endswith("." + other) or other.endswith("." + domain):
+        if same_or_under(domain, other) or same_or_under(other, domain):
             continue
         theirs = _skeleton(other)
         if shown == theirs:
@@ -723,7 +754,7 @@ def _lookalike(domain: str, ctx: TrustContext) -> str:
         # merely hear from a lot needs a longer name, so "pwc.com" is not taken for "pnc.com".
         label = other.split(".")[0]
         limit = 2 if len(other) >= 10 else 1
-        if len(label) >= (3 if trusted else 4) and _distance(shown, theirs, limit) <= limit:
+        if not established and len(label) >= (3 if trusted else 4) and _distance(shown, theirs, limit) <= limit:
             return other
         # A trusted name inside another domain ("taz-payments.net"), both read the same way.
         if trusted and len(label) >= 3 and theirs.split(".")[0] in tokens:
@@ -739,7 +770,7 @@ def _display_name_spoof(name: str, sender: str, domain: str, trusted_domain: str
     if trusted_domain or not domain:
         return ""
     seen = ctx.names.get(name.lower())
-    if seen and domain_of(seen) != domain and len(name) >= 5:
+    if seen and not same_or_under(domain_of(seen), domain) and len(name) >= 5:
         return f"“{name}” usually writes from {seen}"
     return ""
 
@@ -747,15 +778,7 @@ def _display_name_spoof(name: str, sender: str, domain: str, trusted_domain: str
 def _skeleton(domain: str) -> str:
     """How a domain reads on screen: punycode labels ("xn--tz-7kc") decoded, Cyrillic, Greek and full-width
     look-alike letters read as Latin, and pairs that pass for one another ("rn" and "m", "0" and "o") made the same."""
-    labels = []
-    for label in domain.lower().split("."):
-        if label.startswith("xn--"):
-            try:
-                label = label.encode("ascii").decode("idna")
-            except UnicodeError:
-                pass
-        labels.append(label)
-    text = normalize_text(".".join(labels)).lower()
+    text = normalize_text(canonical_domain(domain)).lower()
     for old, new in _HOMOGLYPHS:
         text = text.replace(old, new)
     return text

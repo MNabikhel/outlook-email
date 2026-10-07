@@ -153,3 +153,41 @@ def test_gift_card_requests_for_a_program_still_block():
     ):
         check = _check(body, subject="Quick favor", sender="ceo.office@gmail.com", history=0)
         assert "gift_cards" in _keys(check) and check.level == "high", body
+
+
+# 4. Look-alikes: a domain you already have mail from is not a look-alike for being one letter off;
+#    a trusted domain written in Unicode or punycode is the same domain.
+def test_an_established_domain_one_letter_off_a_trusted_one_is_not_a_lookalike():
+    for sender, trusted in (("audit@pwc.com", "pnc.com"), ("auto@usps.com", "ups.com"), ("billing@adt.com", "adp.com")):
+        check = assess(TrustContext(domains={trusted}), subject="Statement", body="Attached is our September statement.",
+                       sender_name="AR", sender_email=sender, history=4, domain_history=4)
+        assert "lookalike_domain" not in _keys(check) and check.level == "none", sender
+
+
+def test_a_new_lookalike_of_a_trusted_domain_is_still_caught():
+    ctx = TrustContext(domains={"taz.com"})
+    for domain, history in (("tax.com", 0), ("tazz.com", 0), ("t4z.com", 0), ("tаz.com", 3), ("xn--tz-7kc.com", 3)):
+        check = assess(ctx, subject="Wire today", body="Please wire $48,500 today for invoice 5521.", sender_name="Treasury",
+                       sender_email=f"treasury@{domain}", domain_history=history)
+        assert "lookalike_domain" in _keys(check) and check.level == "caution", domain
+
+
+def test_history_is_read_from_the_store(store, settings):
+    from test_fraud_review import _mail
+
+    settings.trusted_domains = "pnc.com"
+    body = "Attached is the PBC list for the September audit."
+    first = _mail(store, settings, "pwc1", subject="PBC list", sender="audit@pwc.com", body=body)
+    second = _mail(store, settings, "pwc2", subject="PBC list", sender="lead@pwc.com", body=body)
+    assert "lookalike_domain" in {s["key"] for s in store.fraud_check(first.id)["signals"]}
+    assert "lookalike_domain" not in {s["key"] for s in store.fraud_check(second.id)["signals"]}
+
+
+def test_a_trusted_domain_in_unicode_or_punycode_is_the_same_domain():
+    for trusted, sender in (("müller.de", "ap@xn--mller-kva.de"), ("xn--mller-kva.de", "ap@müller.de")):
+        check = assess(TrustContext(domains={trusted}), subject="Rechnung", body="Rechnung 5521 anbei.",
+                       sender_name="AP", sender_email=sender)
+        assert "lookalike_domain" not in _keys(check) and check.trust == "domain", sender
+    check = assess(TrustContext(domains={"müller.de"}), subject="Rechnung", body="Rechnung 5521 anbei.",
+                   sender_name="AP", sender_email="ap@muller.de")
+    assert "lookalike_domain" in _keys(check)

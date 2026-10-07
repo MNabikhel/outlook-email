@@ -1296,6 +1296,17 @@ class Store:
                 ((sender_email or "").lower(), exclude),
             ).fetchone()["n"]
 
+    def domain_history(self, domain: str, *, exclude: str = "") -> int:
+        """Emails from addresses at exactly this domain, other than ``exclude``."""
+        if not domain:
+            return 0
+        with self.connect() as conn:
+            return conn.execute(
+                "SELECT COUNT(*) AS n FROM emails WHERE instr(sender_email, '@') > 0 "
+                "AND lower(substr(sender_email, instr(sender_email, '@') + 1)) = ? AND id != ?",
+                (domain.lower(), exclude),
+            ).fetchone()["n"]
+
     def email_ids_from(self, *, sender: str = "", domain: str = "") -> list[str]:
         """Emails from one address, or from a domain and its subdomains."""
         with self.connect() as conn:
