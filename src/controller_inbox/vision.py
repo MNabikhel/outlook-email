@@ -76,32 +76,94 @@ LISTED = 150
 TRIES = 2
 
 
+@dataclass(frozen=True)
+class Reader:
+    """How a model is asked to read a page. Empty fields: a general model's settings above."""
+
+    label: str
+    prompt: str = ""
+    dpi: int = 0
+    max_side: int = 0
+    max_tokens: int = 0
+
+
+# OvisOCR2 (0.85B, Apache-2.0, a Qwen3.5-0.8B trained to read document pages) with its own prompt, which asks for
+# tables in HTML (merged headings and all). Measured on scanned finance reports it never saw, it read the figures
+# more accurately than Qwen3.5-9B, several times faster: see README. 200 DPI with the long side at 2,048 pixels (LM
+# Studio shrinks larger pictures to that anyway) gives it about 3,000 image tokens of a letter page.
+OVIS_PROMPT = (
+    "\nExtract all readable content from the image in natural human reading order and output the result as a single "
+    "Markdown document. For charts or images, represent them using an HTML image tag: <img src=\"images/bbox_{left}_"
+    "{top}_{right}_{bottom}.jpg\" />, where left, top, right, bottom are bounding box coordinates scaled to [0, 1000). "
+    "Format formulas as LaTeX. Format tables as HTML: <table>...</table>. Transcribe all other text as standard "
+    "Markdown. Preserve the original text without translation or paraphrasing."
+)
+GENERAL = Reader("a general model that can see")
+# Models made for reading document pages, by a word in their name: preferred over a general one when downloaded.
+READERS = {"ovisocr": Reader("OvisOCR2, a document reader", OVIS_PROMPT, 200, 2048, 12288)}
+
+
+def _plain(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def reader_for(model: str) -> Reader:
+    """How this model reads pages: a known document reader's own way, else a general model's."""
+    plain = _plain(model)
+    return next((reader for key, reader in READERS.items() if key in plain), GENERAL)
+
+
+def reading_model(settings: Settings) -> str:
+    """The model that reads pages: the one chosen in Setup; else a document reader the server has (LM Studio loads a
+    downloaded one when it is first asked); else the chat model when it can see. "" when there is none."""
+    if settings.vision_mode == "off":
+        return ""
+    status = check_model(settings)
+    if not status.reachable:
+        return ""
+    chosen = (settings.vision_model or "").strip()
+    if chosen and chosen != "auto":
+        return chosen if chosen in status.vision_models or chosen in status.models else ""
+    for model in status.vision_models:
+        if reader_for(model) is not GENERAL:
+            return model
+    return status.model if status.active and status.vision else ""
+
+
 # Whether it can be used ------------------------------------------------------------------------
 
 
 MODE_KEY = "vision_mode"
 
 
+MODEL_KEY = "vision_model"
+
+
 def apply_saved_mode(settings: Settings, store: Store) -> None:
-    """The choice made in Setup, kept across restarts."""
+    """The choices made in Setup (how and with which model), kept across restarts."""
     saved = store.get_state(MODE_KEY)
     if saved in MODES:
         settings.vision_mode = saved
+    model = store.get_state(MODEL_KEY)
+    if model is not None:
+        settings.vision_model = model
 
 
-def save_mode(settings: Settings, store: Store, mode: str) -> None:
+def save_mode(settings: Settings, store: Store, mode: str, model: str | None = None) -> None:
+    """``model``: the model that reads pages ("" or "auto": chosen as ``reading_model`` says)."""
     if mode not in MODES:
         raise ValueError(f"Vision reading is one of {', '.join(MODES)}.")
     store.set_state(MODE_KEY, mode)
     settings.vision_mode = mode
+    if model is not None:
+        model = "" if model.strip() == "auto" else model.strip()[:200]
+        store.set_state(MODEL_KEY, model)
+        settings.vision_model = model
 
 
 def available(settings: Settings) -> bool:
-    """A model that can see is loaded and vision reading isn't turned off."""
-    if settings.vision_mode == "off":
-        return False
-    status = check_model(settings)
-    return status.active and status.vision
+    """A model that can read pages is there and vision reading isn't turned off."""
+    return bool(reading_model(settings))
 
 
 def can_render() -> bool:
@@ -199,10 +261,12 @@ def page_bodies(text: str) -> list[tuple[int, str]]:
 # Looking at a page ---------------------------------------------------------------------------
 
 
-def render(data: bytes, filename: str, page: int) -> bytes:
-    """The page as a PNG at about 100 DPI, its long side at most ``MAX_SIDE`` pixels."""
+def render(data: bytes, filename: str, page: int, *, reader: Reader = GENERAL) -> bytes:
+    """The page as a PNG at the reader's resolution (a general model: about 100 DPI, its long side at most
+    ``MAX_SIDE`` pixels)."""
     from PIL import Image, ImageOps
 
+    dpi, max_side = reader.dpi or DPI, reader.max_side or MAX_SIDE
     suffix = Path(filename or "").suffix.lower()
     if suffix == ".pdf":
         import pypdfium2 as pdfium
@@ -215,7 +279,7 @@ def render(data: bytes, filename: str, page: int) -> bytes:
                 sheet = pdf[page - 1]
                 try:
                     width, height = sheet.get_size()
-                    scale = min(DPI / 72, MAX_SIDE / max(width, height, 1))
+                    scale = min(dpi / 72, max_side / max(width, height, 1))
                     image = sheet.render(scale=scale).to_pil().copy()
                 finally:
                     sheet.close()
@@ -226,7 +290,7 @@ def render(data: bytes, filename: str, page: int) -> bytes:
         if getattr(image, "n_frames", 1) > 1:
             image.seek(0)
         image = ImageOps.exif_transpose(image)
-        image.thumbnail((MAX_SIDE, MAX_SIDE))
+        image.thumbnail((max_side, max_side))
     out = io.BytesIO()
     image.convert("RGB").save(out, "PNG", optimize=True)
     return out.getvalue()
@@ -239,25 +303,31 @@ def render(data: bytes, filename: str, page: int) -> bytes:
 RETRY_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}
 
 
-def transcribe(settings: Settings, png: bytes, *, on_piece: Callable[[int], None] | None = None) -> str:
-    """The model's reading of the page: its text, with tables in markdown. Raises ``Blank`` for a page with nothing
-    on it, ``EmptyReply`` when it wrote nothing, ``CutOff`` when it stopped at its length limit or got stuck repeating
-    itself (twice), and ``httpx.HTTPError`` when the server failed."""
+def transcribe(
+    settings: Settings, png: bytes, *, on_piece: Callable[[int], None] | None = None, model: str | None = None
+) -> str:
+    """The model's reading of the page: its text, with tables in markdown (or HTML). ``model``: the one that reads
+    pages (``reading_model``), asked its own way (``reader_for``). Raises ``Blank`` for a page with nothing on it,
+    ``EmptyReply`` when it wrote nothing, ``CutOff`` when it stopped at its length limit or got stuck repeating itself
+    (twice), and ``httpx.HTTPError`` when the server failed."""
+    model = model or reading_model(settings) or None
+    reader = reader_for(model or "")
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64," + base64.b64encode(png).decode("ascii")}},
-                {"type": "text", "text": PROMPT},
+                {"type": "text", "text": reader.prompt or PROMPT},
             ],
         }
     ]
-    text, looped = _transcribe_once(settings, messages, on_piece, {"temperature": 0.0})
+    limit = reader.max_tokens or MAX_TOKENS
+    text, looped = _transcribe_once(settings, messages, on_piece, {"temperature": 0.0}, model=model, limit=limit)
     if not looped:
         return text
     log.info("The vision model looped on a page; reading it once more with sampling")
     try:
-        again, looped_again = _transcribe_once(settings, messages, on_piece, RETRY_SAMPLING)
+        again, looped_again = _transcribe_once(settings, messages, on_piece, RETRY_SAMPLING, model=model, limit=limit)
     except (CutOff, EmptyReply, Blank):
         again, looped_again = "", True
     best = again if not looped_again else max(text, again, key=len)
@@ -266,15 +336,17 @@ def transcribe(settings: Settings, png: bytes, *, on_piece: Callable[[int], None
     return best
 
 
-def _transcribe_once(settings: Settings, messages: list[dict], on_piece, sampling: dict) -> tuple[str, bool]:
+def _transcribe_once(
+    settings: Settings, messages: list[dict], on_piece, sampling: dict, *, model: str | None = None, limit: int = 0
+) -> tuple[str, bool]:
     """One reading of the page, stopped early if it loops: (text without the loop, whether it looped)."""
     written = []
     finished: dict = {}
     looped = False
     settings_ = {key: value for key, value in sampling.items() if key != "temperature"}
     pieces = stream_text(
-        settings, messages, max_tokens=MAX_TOKENS, wait=WAIT_SECONDS, temperature=sampling.get("temperature"),
-        finished=finished, sampling=settings_ or None,
+        settings, messages, max_tokens=limit or MAX_TOKENS, wait=WAIT_SECONDS, temperature=sampling.get("temperature"),
+        finished=finished, sampling=settings_ or None, model=model,
     )
     checked = 0
     try:
@@ -302,7 +374,7 @@ def _transcribe_once(settings: Settings, messages: list[dict], on_piece, samplin
         raise EmptyReply("the model wrote nothing for the page")
     if finished.get("reason") == "length" and not looped:
         # Half a page would hide the rest of it: the reading is not kept.
-        raise CutOff(f"the reading stopped at the {MAX_TOKENS:,}-token limit before the end of the page")
+        raise CutOff(f"the reading stopped at the {limit or MAX_TOKENS:,}-token limit before the end of the page")
     return text, looped
 
 
@@ -414,11 +486,139 @@ _RULE_ROW = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _FORMATTING = re.compile(r"(?<!\*)\*\*(?!\*)|__|`")
 
 
+_HTML_TABLE = re.compile(r"<table\b.*?</table>", re.S | re.I)
+_HTML_ROW = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.S | re.I)
+_HTML_CELL = re.compile(r"<t([dh])\b([^>]*)>(.*?)</t[dh]>", re.S | re.I)
+_SPAN = re.compile(r"""\b(colspan|rowspan)\s*=\s*["']?(\d+)""", re.I)
+_PICTURE = re.compile(r"^\s*<img\b[^>]*>\s*$", re.M | re.I)  # a region the model saw as a picture (OvisOCR2)
+
+
+def _html_cell_text(markup: str) -> str:
+    import html
+
+    text = re.sub(r"<br\s*/?>", " ", markup, flags=re.I)
+    text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    return " ".join(text.split()).replace("|", "/")
+
+
+def _html_grid(table: str) -> tuple[list[str], list[list[str]], int]:
+    """The table's title lines, its cells on a grid, and how many rows at the top of the grid are column headings.
+
+    Document models write a report's title into the table (one text across the row: the company, the report, its
+    period) and mark no cell as a heading, so the titles come out as lines above the table, and a heading row is one
+    with labels over the figure columns and no figures (a date or a year there is a label: "October 31", "10/09/26").
+    A row with one label across it (ASSETS, "Operating Receipts") starts a section, so it ends the headings. A merged
+    heading is written over every column and row it covers (it names each of them); a merged cell in the body only in
+    its first column, so a label or figure isn't repeated across the row, though a label merged down the rows (a
+    category) is kept on each of them."""
+    grid: list[list[str]] = []
+    marked: list[bool] = []  # every cell of the row a <th>
+    copies: set[tuple[int, int]] = set()  # cells holding a merged cell's text again
+    pending: dict[tuple[int, int], str] = {}  # (row, column) -> text of a cell merged down into it
+    for r, row_markup in enumerate(_HTML_ROW.findall(table)):
+        row: list[str] = []
+        cells = _HTML_CELL.findall(row_markup)
+
+        def take_pending() -> None:
+            while (r, len(row)) in pending:
+                text = pending.pop((r, len(row)))
+                if grid_is_data(text):
+                    copies.add((r, len(row)))
+                row.append(text)
+
+        for _kind, attrs, markup in cells:
+            take_pending()
+            spans = {name.lower(): int(value) for name, value in _SPAN.findall(attrs)}
+            text = _html_cell_text(markup)
+            for offset in range(max(1, min(spans.get("colspan", 1), 50))):
+                if offset:
+                    copies.add((r, len(row)))
+                for down in range(1, max(1, min(spans.get("rowspan", 1), 200))):
+                    pending[(r + down, len(row))] = text
+                row.append(text)
+        take_pending()
+        grid.append(row)
+        marked.append(bool(cells) and all(kind.lower() == "h" for kind, _attrs, _text in cells))
+
+    def title(row: list[str]) -> bool:
+        """Blank, or one text from the first column on (a text over the figure columns only is their heading)."""
+        return all(not cell or cell == row[0] for cell in row)
+
+    def heading(r: int) -> bool:
+        row = grid[r]
+        if marked[r]:
+            return True
+        labels = [cell for cell in row[1:] if cell and cell != row[0]]
+        return bool(labels) and not any(_heading_figure(cell) for cell in row if cell)
+
+    # Titles: the rows of one text (or none) above the first heading row, when there is one.
+    top = 0
+    while top < min(len(grid), 8) and title(grid[top]) and not marked[top]:
+        top += 1
+    if not (top < len(grid) and heading(top)):
+        top = 0
+    titles = [next(cell for cell in row if cell) for row in grid[:top] if any(row)]
+    grid, marked = grid[top:], marked[top:]
+    copies = {(r - top, column) for r, column in copies if r >= top}
+    heading_rows = 0
+    while heading_rows < min(3, len(grid) - 1) and heading(heading_rows):
+        heading_rows += 1
+    for r, column in copies:
+        if r >= heading_rows and column < len(grid[r]):
+            grid[r][column] = ""
+    return titles, grid, heading_rows
+
+
+_MONTH_DAY = re.compile(
+    r"^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?(\s+\d{2,4})?$", re.I
+)
+
+
+def _heading_figure(text: str) -> bool:
+    """A figure in a row that may be headings: a date there is a column's label."""
+    return grid_is_data(text) and not _DATE.fullmatch(text) and not _MONTH_DAY.match(text)
+
+
+def grid_is_data(text: str) -> bool:
+    """A figure (a year in a heading is a label)."""
+    return tables.is_value(text) and not _YEAR_LABEL.match(text)
+
+
+def _html_tables_as_markdown(text: str) -> str:
+    """Each HTML table (OvisOCR2 and other document models write them, merged cells and all) as a markdown table with
+    one heading line: the heading rows joined per column ("Revenue Recognized" over "Oct-26": "Revenue Recognized
+    Oct-26"), so the rest of this module reads it like any other."""
+
+    def one(match: re.Match[str]) -> str:
+        titles, grid, heading_rows = _html_grid(match.group(0))
+        if not grid:
+            return "\n\n" + "\n\n".join(titles) + "\n\n" if titles else ""
+        width = max(len(row) for row in grid)
+        grid = [[*row, *[""] * (width - len(row))] for row in grid]
+        if heading_rows:
+            header = []
+            for column in range(width):
+                parts: list[str] = []
+                for row in grid[:heading_rows]:
+                    if row[column] and (not parts or parts[-1] != row[column]):
+                        parts.append(row[column])
+                header.append(" ".join(parts))
+            body = grid[heading_rows:]
+        else:
+            header, body = [""] * width, grid
+        lines = ["| " + " | ".join(header) + " |", "|" + "---|" * width]
+        lines += ["| " + " | ".join(row) + " |" for row in body]
+        return "\n\n" + "".join(title + "\n\n" for title in titles) + "\n".join(lines) + "\n\n"
+
+    text = _PICTURE.sub("", text or "")
+    return _HTML_TABLE.sub(one, text) if "<table" in text.lower() else text
+
+
 def page_text(markdown: str) -> str:
     """The model's markdown written the way CloseDesk writes a page it read: each table row by row with every cell
     named by its column (``Label: value``) and section rows as ``Group:``, the rest as notes, so the table lookup,
-    the totals check and the chat read it like any other page."""
-    lines = strip_thinking(markdown or "").splitlines()
+    the totals check and the chat read it like any other page. HTML tables are read too."""
+    lines = _html_tables_as_markdown(strip_thinking(markdown or "")).splitlines()
     out: list[str] = []
     notes: list[str] = []
 
@@ -888,7 +1088,8 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
     if not same_file(att, data):
         result.failed.append("the file kept under this name isn't this attachment")
         return result
-    model = check_model(settings).model or settings.llm_model
+    model = reading_model(settings) or settings.llm_model
+    reader = reader_for(model)
     suffix = Path(att.filename).suffix.lower()
     scanned = set(scanned_pages(data)) if suffix == ".pdf" else set()
     stored_text = store.stored_text(att.id)
@@ -910,8 +1111,8 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
             on_progress(index - 1, len(todo), f"{att.filename}, page {page}")
         started = time.monotonic()
         try:
-            png = render(data, att.filename, page)
-            markdown = mask_secrets(transcribe(settings, png))
+            png = render(data, att.filename, page, reader=reader)
+            markdown = mask_secrets(transcribe(settings, png, model=model))
         except Blank:
             markdown = ""  # a blank page (the back of a sheet): nothing on it to read
         except Exception as exc:  # one page failing doesn't lose the others
@@ -1050,8 +1251,8 @@ def read_waiting(
 
 
 def seconds_per_page(store: Store, settings: Settings) -> float | None:
-    """The typical time this computer's model has taken to read a page, or None before the first one."""
-    model = check_model(settings).model or settings.llm_model
+    """The typical time the model that reads pages has taken on this computer, or None before its first page."""
+    model = reading_model(settings) or settings.llm_model
     recent = store.vision_seconds(model, limit=12)
     return statistics.median(recent) if recent else None
 
@@ -1171,10 +1372,13 @@ def offer(store: Store, settings: Settings, email: EmailRecord, att: AttachmentR
         reason = "Reading scans with the vision model is turned off in Setup."
     elif not can_render():
         reason = "The page renderer isn't installed. Double-click CloseDesk once (or run pip install -e .) to add it."
-    elif not check_model(settings).active:
-        reason = "No model is answering in LM Studio. Load one that can look at pictures (Qwen3.5, Gemma 3) to read scans both ways."
+    elif not check_model(settings).reachable:
+        reason = "No model server is answering. Start LM Studio's server to read scans both ways."
     elif not available(settings):
-        reason = "The model loaded in LM Studio can't look at pictures. Load one that can (Qwen3.5, Gemma 3) to read scans both ways."
+        reason = (
+            "No model in LM Studio can look at pictures. Download OvisOCR2 (a small model made for reading document "
+            "pages) in LM Studio, or load one that can see (Qwen3.5, Gemma 3), to read scans both ways."
+        )
     else:
         data = original_bytes(settings, email, att)
         if data is None:
@@ -1248,7 +1452,7 @@ def readings_json(rows: dict[int, dict]) -> list[dict]:
 
 def markdown_blocks(markdown: str) -> list[dict]:
     """The model's markdown as blocks: {"kind": "table", "header", "rows"} and {"kind": "text", "text"}."""
-    lines = strip_thinking(markdown).splitlines()
+    lines = _html_tables_as_markdown(strip_thinking(markdown)).splitlines()
     out: list[dict] = []
     index = 0
     while index < len(lines):

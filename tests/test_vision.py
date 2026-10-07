@@ -388,7 +388,8 @@ def test_the_offer_says_why_it_cant_read(scan, store, settings, monkeypatch):
     att = email.attachments[0]
     settings.llm = None
     _serve(monkeypatch, FakeVisionServer(vision=False))
-    assert "can't look at pictures" in vision.offer(store, settings, email, att)["reason"]
+    reason = vision.offer(store, settings, email, att)["reason"]
+    assert "No model in LM Studio can look at pictures" in reason and "Download OvisOCR2" in reason
     settings.vision_mode = "off"
     assert "turned off in Setup" in vision.offer(store, settings, email, att)["reason"]
 
@@ -957,3 +958,143 @@ def test_headings_with_an_extra_blank_at_the_left_are_lined_up_with_the_figures(
     )
     page = vision.page_text(markdown)
     assert "Line: 4010 Wholesale | Month of October 2026: 1,084,215.40 | Month of October % of Sales: 62.4% | Month of October 2025: 942,118.75" in page
+
+
+def test_html_tables_with_merged_cells_are_read_like_markdown_ones():
+    """Document models (OvisOCR2) write tables as HTML, merged headings and all; markdown can't hold them."""
+    html = (
+        '<table><tr><th rowspan="2">Customer</th><th colspan="2">Service Term</th><th colspan="2">Revenue Recognized</th></tr>'
+        "<tr><th>Start</th><th>End</th><th>Oct-26</th><th>Nov-26</th></tr>"
+        '<tr><td rowspan="2">West</td><td>10/01/25</td><td>09/30/27</td><td>400.00</td><td>400.00</td></tr>'
+        "<tr><td>11/01/25</td><td>10/31/27</td><td>250.00</td><td>250.00</td></tr>"
+        '<tr><td colspan="3">Total</td><td>650.00</td><td>650.00</td></tr></table>\n'
+        '<img src="images/bbox_10_20_300_400.jpg" />'
+    )
+    page = vision.page_text("# Deferred revenue\n" + html)
+    assert "Customer | Service Term Start | Service Term End | Revenue Recognized Oct-26 | Revenue Recognized Nov-26" in page
+    assert page.count("Customer: West |") == 2, "a label merged down the rows names each of them"
+    assert "Customer: Total | Service Term Start: not listed" in page, "a merged body cell isn't repeated across"
+    assert "bbox" not in page
+    [table] = table_lookup.tables_in("[page 1]\n" + page)
+    assert table_lookup.verify(table).matched == 2 and not table_lookup.verify(table).mismatched
+    [block] = vision.markdown_blocks(html)
+    assert block["header"][3] == "Revenue Recognized Oct-26" and block["rows"][-1][:2] == ["Total", ""]
+    assert vision.page_text("<table><tr><td>Cash</td><td>1,200.00</td></tr></table>").count("1,200.00") == 1
+
+
+def test_titles_written_into_an_html_table_come_out_above_it_and_sections_stay_out_of_the_headings():
+    """As OvisOCR2 writes a report: the titles across the table, a blank row, headings in plain cells (dates among
+    them), then sections."""
+    html = (
+        '<table border=1><tr><td colspan="4">Larkspur Outdoor Supply Co.</td></tr>'
+        '<tr><td colspan="4">13-Week Cash Flow Forecast</td></tr><tr><td></td><td></td><td></td><td></td></tr>'
+        '<tr><td rowspan="2">Cash Flow Item</td><td>Wk 1</td><td>Wk 2</td><td>13-Week</td></tr>'
+        "<tr><td>10/09/26</td><td>10/16/26</td><td>Total</td></tr>"
+        '<tr><td colspan="4">Operating Receipts</td></tr>'
+        "<tr><td>Customer collections</td><td>377,897</td><td>386,220</td><td>764,117</td></tr>"
+        '<tr><td>ASSETS</td><td></td><td></td><td></td></tr>'
+        "<tr><td>Cash</td><td>1,000</td><td>2,000</td><td>3,000</td></tr></table>"
+    )
+    page = vision.page_text(html)
+    assert page.startswith("[notes]\nLarkspur Outdoor Supply Co.\n13-Week Cash Flow Forecast\n\n[table]\n")
+    assert "\nCash Flow Item | Wk 1 10/09/26 | Wk 2 10/16/26 | 13-Week Total\nGroup: Operating Receipts\n" in page
+    assert "Cash Flow Item: Customer collections | Wk 1 10/09/26: 377,897" in page
+    assert "Group: ASSETS" in page and "Cash Flow Item: Cash | Wk 1 10/09/26: 1,000" in page
+    # Without a heading row under them, rows of one label are the table's own (sections), not titles.
+    plain = vision.page_text('<table><tr><td colspan="2">Revenue</td></tr><tr><td>Sales</td><td>1,200.00</td></tr></table>')
+    assert "[notes]" not in plain and "Revenue" in plain.split("[table]", 1)[1]
+
+
+# A model made for reading pages --------------------------------------------------------------------------------
+
+OVIS = "ath-maas_ovisocr2"
+# OvisOCR2 writes tables in HTML, merged cells and all.
+OVIS_PAGE = """# BALANCE SHEET
+
+<table><tr><td rowspan="2"></td><td colspan="2">October 31</td></tr><tr><td>2026</td><td>2025</td></tr>
+<tr><td>Cash</td><td>12,400</td><td>9,800</td></tr>
+<tr><td>Accounts Receivable</td><td>30,250</td><td>28,000</td></tr>
+<tr><td>Less: Allowance for Doubtful Accounts</td><td>(1,250)</td><td>(1,000)</td></tr>
+<tr><td>Total Current Assets</td><td>41,400</td><td>36,800</td></tr></table>"""
+
+
+class ReaderServer(FakeVisionServer):
+    """LM Studio with a chat model loaded that can't see, and OvisOCR2 downloaded (loaded when a request names it)."""
+
+    def __init__(self, **kw):
+        super().__init__(OVIS_PAGE, **kw)
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/models":
+            chat = {"type": "llm", "key": MODEL, "loaded_instances": [{"id": MODEL, "config": {"context_length": 16384}}],
+                    "capabilities": {"vision": False, "reasoning": {"allowed_options": ["off", "on"], "default": "on"}}}
+            reader = {"type": "llm", "key": OVIS, "loaded_instances": [], "capabilities": {"vision": True}}
+            return httpx.Response(200, json={"models": [chat, reader]})
+        return super().__call__(request)
+
+
+@pytest.fixture
+def reader_server(settings, monkeypatch) -> ReaderServer:
+    server = ReaderServer()
+    settings.llm = None
+    _serve(monkeypatch, server)
+    return server
+
+
+def test_a_document_reader_in_lm_studio_reads_pages_its_own_way(settings, reader_server):
+    status = check_model(settings)
+    assert status.model == MODEL and not status.vision and status.vision_models == [OVIS]
+    assert vision.reading_model(settings) == OVIS and vision.available(settings)
+    reader = vision.reader_for(OVIS)
+    assert reader.label.startswith("OvisOCR2") and vision.reader_for(MODEL) is vision.GENERAL
+    text = vision.transcribe(settings, b"png")
+    [call] = reader_server.calls
+    assert call["model"] == OVIS, "the reader is named, so LM Studio loads it"
+    assert call["messages"][-1]["content"][1]["text"] == vision.OVIS_PROMPT and call["max_tokens"] == reader.max_tokens
+    assert "reasoning_effort" not in call, "the chat model's thinking options aren't sent to the reader"
+    # Its tables are in HTML with no cell marked a heading: the title comes out above the table, and the merged
+    # heading names each column it covers.
+    page_text = vision.page_text(text)
+    assert page_text.startswith("[heading]\nBALANCE SHEET\n\n[table]\nLine | October 31 2026 | October 31 2025\n")
+    assert "Line: Accounts Receivable | October 31 2026: 30,250 | October 31 2025: 28,000" in page_text
+    # It is shown the page in finer detail than a general model.
+    page = _scan_pdf()
+    general = Image.open(io.BytesIO(vision.render(page, "scan.pdf", 1)))
+    finer = Image.open(io.BytesIO(vision.render(page, "scan.pdf", 1, reader=reader)))
+    assert finer.width > general.width and max(finer.size) <= reader.max_side
+
+
+def test_a_scan_is_read_by_the_document_reader_and_kept_under_its_name(scan, store, settings, reader_server):
+    result = _read(store, settings, scan.id)
+    assert (result.pages, result.shown_model, result.failed) == (1, 1, [])
+    assert reader_server.calls[0]["model"] == OVIS
+    shown = store.get_email(scan.id).attachments[0].extracted_text
+    assert f"by OCR and by the vision model ({OVIS})" in shown and "Line: Accounts Receivable | October 31 2026: 30,250" in shown
+    assert store.vision_seconds(OVIS), "its speed is timed under its own name"
+
+
+def test_setup_shows_and_saves_the_model_that_reads_pages(store, settings, reader_server):
+    client = TestClient(web.create_app(settings, store))
+    page = client.get("/settings").text
+    assert f"Pages are read by <b>{OVIS}</b>" in page and f'<option value="{OVIS}"' in page
+    origin = {"Origin": "http://testserver"}
+    client.post("/settings/vision", data={"mode": "auto", "model": OVIS}, headers=origin, follow_redirects=False)
+    assert settings.vision_model == OVIS and store.get_state("vision_model") == OVIS
+    fresh = type(settings)(data_dir=settings.data_dir, inbox_dir=settings.inbox_dir, _env_file=None)
+    vision.apply_saved_mode(fresh, store)
+    assert fresh.vision_model == OVIS
+    client.post("/settings/vision", data={"mode": "auto", "model": "auto"}, headers=origin, follow_redirects=False)
+    assert settings.vision_model == "" and vision.reading_model(settings) == OVIS
+    # A model chosen in Setup that is gone from LM Studio reads nothing, rather than some other model.
+    settings.vision_model = "gemma-3-12b"
+    assert vision.reading_model(settings) == "" and not vision.available(settings)
+    # Saving only the mode (the classic form without a model choice) keeps the model chosen.
+    vision.save_mode(settings, store, "ask")
+    assert settings.vision_model == "gemma-3-12b"
+
+
+def test_with_vision_off_setup_still_says_which_model_would_read(store, settings, reader_server):
+    vision.save_mode(settings, store, "off")
+    assert vision.reading_model(settings) == ""
+    page = TestClient(web.create_app(settings, store)).get("/settings").text
+    assert f"Pages are read by <b>{OVIS}</b>" in page

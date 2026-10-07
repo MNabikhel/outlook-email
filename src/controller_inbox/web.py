@@ -1144,9 +1144,16 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return RedirectResponse("/settings?notice=timezone#timezone", status_code=303)
 
     def vision_setup(model) -> dict:
-        per_page = vision.seconds_per_page(store, settings) if model.active else None
+        # When it is off, still say which model would read pages, so the choice can be made before turning it on.
+        on = settings if settings.vision_mode != "off" else settings.model_copy(update={"vision_mode": "auto"})
+        reader = vision.reading_model(on)
+        per_page = vision.seconds_per_page(store, on) if reader else None
         return {
-            "sees": model.active and model.vision,
+            "sees": bool(reader),
+            "reader": reader,
+            "reader_label": vision.reader_for(reader).label if reader else "",
+            "chosen": settings.vision_model or "auto",
+            "choices": model.vision_models,
             "renderer": vision.can_render(),
             "mode": settings.vision_mode,
             "pages_read": store.vision_pages_read(),
@@ -1154,9 +1161,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         }
 
     @app.post("/settings/vision")
-    def save_vision(mode: str = Form(...)):
+    def save_vision(mode: str = Form(...), model: str | None = Form(None)):
         try:
-            vision.save_mode(settings, store, mode)
+            vision.save_mode(settings, store, mode, model)
         except ValueError:
             return RedirectResponse("/settings#vision", status_code=303)
         return RedirectResponse("/settings?notice=vision-saved#vision", status_code=303)

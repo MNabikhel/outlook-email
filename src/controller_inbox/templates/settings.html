@@ -129,15 +129,25 @@
     <div class="search-box" id="vision">
       <h4>Reading scans with the model's vision</h4>
       {% if vision_setup.sees %}
-      <p class="muted small"><b>{{ model.model }}</b> can look at pages. Scanned PDFs and pictures are read by OCR and by the model side by side: figures both read the same way are confirmed, and the file's page shows where they differ. {{ vision_setup.speed or 'The first page read shows how long one takes on this computer; a laptop without a graphics card can take a few minutes.' }}</p>
+      <p class="muted small">Pages are read by <b>{{ vision_setup.reader }}</b> ({{ vision_setup.reader_label }}). Scanned PDFs and pictures are read by OCR and by the model side by side: figures both read the same way are confirmed, and the file's page shows where they differ. {{ vision_setup.speed or 'The first page read shows how long one takes on this computer; a laptop without a graphics card can take a few minutes.' }}</p>
       {% else %}
-      <p class="muted small">The loaded model can't look at pictures, so scans are read with OCR only. Load one that can in LM Studio (Qwen3.5 9B, Gemma 3) to read them both ways.</p>
+      <p class="muted small">No model in LM Studio can look at pictures, so scans are read with OCR only. Download <b>OvisOCR2</b> in LM Studio (a small model made for reading document pages: the most accurate and fastest we measured), or load one that can see (Qwen3.5 9B, Gemma 3), to read them both ways.</p>
       {% endif %}
       {% if not vision_setup.renderer %}<p class="warn-box small">The page renderer isn't installed. Double-click CloseDesk once (or run <code>pip install -e .</code>) to add it.</p>{% endif %}
       <form method="post" action="/settings/vision" class="vision-form">
         <label><input type="radio" name="mode" value="auto" {{ 'checked' if vision_setup.mode == 'auto' }}/> <b>Automatic</b>: the overnight run reads waiting scans ({{ settings.vision_minutes_per_run | round | int }} minutes at most). Process new mail and a question only read pages this computer reads in under a minute; a longer read is offered with its time.</label>
         <label><input type="radio" name="mode" value="ask" {{ 'checked' if vision_setup.mode == 'ask' }}/> <b>Only when I ask</b>: nothing is read until you click Read with the vision model, after seeing how long it will take.</label>
         <label><input type="radio" name="mode" value="off" {{ 'checked' if vision_setup.mode == 'off' }}/> <b>Off</b>: OCR only.</label>
+        {% if vision_setup.choices %}
+        <label class="vision-model">Model that reads pages
+          <select name="model">
+            <option value="auto" {{ 'selected' if vision_setup.chosen == 'auto' }}>Automatic: a document reader when there is one{% if vision_setup.chosen == 'auto' and vision_setup.reader %} (now {{ vision_setup.reader }}){% endif %}</option>
+            {% for choice in vision_setup.choices %}
+            <option value="{{ choice }}" {{ 'selected' if vision_setup.chosen == choice }}>{{ choice }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        {% endif %}
         <button type="submit">Save</button>
         {% if vision_setup.pages_read %}<span class="muted small">{{ vision_setup.pages_read }} page{{ '' if vision_setup.pages_read == 1 else 's' }} read both ways so far.</span>{% endif %}
       </form>

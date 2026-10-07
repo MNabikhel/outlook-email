@@ -129,7 +129,14 @@ Files on an email flagged as possible payment fraud are never given to the model
 
 ### Scanned pages read two ways
 
-OCR reads a scanned page's words but loses its table: the title runs into the column names and a row's figures land on the wrong line. When the model loaded in LM Studio can look at pictures (**Qwen3.5** 4B or 9B, Gemma 3; LM Studio shows an eye icon beside it), CloseDesk also shows it the page itself, at about 100 DPI, and asks for an exact transcription with every table as a table. The two readings are kept side by side and compared figure by figure:
+OCR reads a scanned page's words but loses its table: the title runs into the column names and a row's figures land on the wrong line. When LM Studio has a model that can look at pictures, CloseDesk also shows it the page itself and asks for an exact transcription with every table as a table. The two readings are kept side by side and compared figure by figure.
+
+The model that reads pages:
+
+- **OvisOCR2** (recommended): a small model (0.85B, Apache-2.0) made for reading document pages. Download it in LM Studio (search *OvisOCR2*, the `ATH-MaaS_OvisOCR2-GGUF` build at Q8_0, about 1 GB); it doesn't need to be loaded. CloseDesk names it when it reads a page and LM Studio loads it then (*Just-in-Time model loading* in LM Studio's Developer tab, on by default in new installs). A chat model you loaded yourself stays loaded beside it. It is shown the page at 200 DPI and asked its own way (tables in HTML, merged headings kept). It was the most accurate reader we measured and the fastest, see below.
+- Otherwise the chat model, when it can see (**Qwen3.5** 4B or 9B, Gemma 3; LM Studio shows an eye icon beside it), at about 100 DPI.
+
+**Setup → Read scans with the vision model** says which model reads pages, and the list there picks another one. **Automatic** uses a document reader when LM Studio has one, then the chat model. The comparison:
 
 - A figure both readings have is confirmed. Where they differ, both are kept, and each reading's printed totals are checked against the rows above them.
 - The page the chat and the table lookup read is the model's reading when its totals hold up at least as well and most of its figures agree with OCR's; otherwise OCR's. Either way a note at the top of the page says which, and the figures the two read differently are listed under it.

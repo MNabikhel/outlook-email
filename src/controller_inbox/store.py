@@ -243,7 +243,7 @@ CREATE INDEX IF NOT EXISTS idx_att_hash ON attachments(sha256);
 
 
 # Setup choices kept in sync_state. Loading the sample mailbox keeps these; everything else there is mail bookkeeping.
-SETTING_KEYS = frozenset({"timezone", "profile", "min_context_tokens", "vision_mode"})
+SETTING_KEYS = frozenset({"timezone", "profile", "min_context_tokens", "vision_mode", "vision_model"})
 
 BUSY_TIMEOUT_SECONDS = 30.0
 

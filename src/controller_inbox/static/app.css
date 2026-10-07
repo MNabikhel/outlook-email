@@ -499,4 +499,5 @@ details.correct summary { cursor: pointer; font-family: var(--serif); font-size:
 .vision-form { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
 .vision-form label { font-size: 13px; }
 .vision-form button { align-self: flex-start; }
+.vision-form .vision-model select { display: block; margin-top: 3px; max-width: 100%; }
 @media (max-width: 860px) { .vision-columns { grid-template-columns: 1fr; } }

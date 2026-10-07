@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     # "auto": overnight, and while a question waits when that's quick; "ask": only when asked, with the time it'd
     # take; "off": never.
     vision_mode: str = "auto"
+    # The model that reads pages ("" = automatic: a document reader such as OvisOCR2 when LM Studio has it, else the
+    # chat model when it can see). Setup saves the choice.
+    vision_model: str = ""
     # How long the overnight run may spend reading scanned pages with the vision model. Process new mail reads only
     # what takes this computer under a minute, and starting CloseDesk reads none, so nobody waits on it.
     vision_minutes_per_run: float = 30.0
