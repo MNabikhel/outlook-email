@@ -291,3 +291,60 @@ def test_thinking_requests_get_a_longer_timeout(auto, monkeypatch):
     reader._structured = False
     assert reader.read({"subject": "one", "body": "x"})
     assert seen == [auto.llm_timeout, local_llm.THINKING_TIMEOUT]
+
+
+def test_a_query_call_may_think_and_the_rest_stay_quick(auto, monkeypatch):
+    server = FakeLMStudio()
+    _serve(monkeypatch, server)
+    assert complete_text(auto, [{"role": "user", "content": "hi"}], max_tokens=300) == "Start with [1]; it needs you today."
+    assert server.calls[-1]["reasoning_effort"] == "none", "an ordinary call turns thinking off"
+    complete_text(auto, [{"role": "user", "content": "hi"}], max_tokens=300, think=True, temperature=0.7)
+    asked = server.calls[-1]
+    assert asked["reasoning_effort"] == "low" and asked["max_tokens"] >= local_llm.THINKING_ROOM and asked["temperature"] == 0.7
+
+
+def test_thinking_asked_of_a_server_that_reports_no_options_is_left_to_the_model(auto, monkeypatch):
+    server = FakeLMStudio(options=())
+    _serve(monkeypatch, server)
+    assert complete_text(auto, [{"role": "user", "content": "hi"}], max_tokens=300, think=True) == "Start with [1]; it needs you today."
+    assert "reasoning_effort" not in server.calls[0], "nothing to ask for"
+    # This one thinks anyway and ran out of room: the retry turns thinking down, as for any call.
+    assert server.calls[-1]["reasoning_effort"] == "none" and server.calls[-1]["max_tokens"] >= local_llm.THINKING_ROOM
+
+
+def _reply(status, body):
+    url = "http://127.0.0.1:9/v1/chat/completions"
+    return httpx.Response(status, json=body, request=httpx.Request("POST", url))
+
+
+def test_one_badly_written_tool_call_does_not_turn_tools_off(settings, monkeypatch):
+    from controller_inbox import agent
+    from controller_inbox.local_llm import ToolsUnsupported
+
+    monkeypatch.setattr(local_llm, "check_model", lambda *_a, **_k: local_llm.ModelStatus(mode="auto", reachable=True, model="qwen3-4b"))
+    replies = iter([
+        # llama.cpp and Ollama fail the request when the model writes a tool call that isn't JSON.
+        _reply(500, {"error": {"message": "error parsing tool call: raw='{\"name\":\"read_file\",}'", "type": "api_error"}}),
+        _reply(200, {"choices": [{"message": {"content": "", "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "read_file", "arguments": "{\"email\": \"1\"}"}}]}}]}),
+    ])
+    monkeypatch.setattr(local_llm.httpx, "post", lambda *_a, **_k: next(replies))
+    messages = [{"role": "user", "content": "hi"}]
+    with pytest.raises(ToolsUnsupported):
+        local_llm.chat_with_tools(settings, messages, agent.TOOLS)
+    assert local_llm.chat_with_tools(settings, messages, agent.TOOLS).calls[0]["name"] == "read_file"
+
+
+def test_a_busy_server_does_not_stop_thinking_being_turned_off(settings, monkeypatch):
+    status = local_llm.ModelStatus(mode="auto", reachable=True, model="qwen3-4b", reasoning=["off", "on"])
+    monkeypatch.setattr(local_llm, "check_model", lambda *_a, **_k: status)
+    sent = []
+    replies = iter([
+        _reply(500, {"error": "Model is busy, try again"}),
+        _reply(200, {"choices": [{"message": {"content": "ok"}}]}),
+        _reply(200, {"choices": [{"message": {"content": "ok"}}]}),
+    ])
+    monkeypatch.setattr(local_llm.httpx, "post", lambda url, json=None, **_k: sent.append(dict(json)) or next(replies))
+    local_llm.complete_text(settings, [{"role": "user", "content": "hi"}])
+    local_llm.complete_text(settings, [{"role": "user", "content": "hi"}])
+    assert [payload.get("reasoning_effort") for payload in sent] == ["none", None, "none"]

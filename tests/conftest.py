@@ -53,7 +53,10 @@ def as_of_now() -> datetime:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
-    return Settings(data_dir=tmp_path, inbox_dir=tmp_path / "inbox", timezone="America/New_York", _env_file=None)
+    # A model server nobody listens on: a test that forgets to fake a model call fails fast, here and in CI.
+    return Settings(
+        data_dir=tmp_path, inbox_dir=tmp_path / "inbox", timezone="America/New_York", llm_base_url="http://127.0.0.1:9/v1", _env_file=None
+    )
 
 
 @pytest.fixture

@@ -19,14 +19,16 @@ from __future__ import annotations
 import ast
 import calendar
 import json
+import math
 import operator
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from itertools import zip_longest
 from pathlib import Path
 
-from controller_inbox import documents, semantic
+from controller_inbox import documents, semantic, table_lookup, table_query
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
@@ -36,7 +38,6 @@ MAX_STEPS = 6
 CHARS_PER_TOKEN = 3
 DEFAULT_CONTEXT = 4096
 RECOMMENDED_CONTEXT = 16384
-TOOL_SCHEMA_TOKENS = 1000
 MAX_FILE_BYTES = 40_000_000
 
 LOCKED = (
@@ -195,8 +196,51 @@ TOOLS = [
 ]
 
 
+_LETTERS = re.compile(r"[^\W\d_]+")
+
+
+def prompt_size(text: str) -> int:
+    """How many characters ``text`` is for a prompt budget, which allows three characters a token.
+
+    Its length alone is far off either way: a model's tokenizer takes an English word as one token but most
+    numbers a digit at a time, and table punctuation ("| Label: $1,234.00") a token a mark. So the tokens are
+    estimated from the words, digits and marks (fitted to Qwen's tokenizer on mail, guides and schedules, with
+    a tenth to spare) and written as three characters each.
+    """
+    text = text or ""
+    words = _LETTERS.findall(text)
+    digits = sum(ch.isdigit() for ch in text)
+    marks = sum(1 for ch in text if not ch.isalnum() and not ch.isspace())
+    # A run of letters far longer than a word is split into many tokens.
+    long = sum(max(0, len(word) - 15) for word in words) / 3
+    tokens = 0.8 * len(words) + 0.07 * sum(map(len, words)) + long + 1.3 * digits + 1.2 * marks
+    return int(tokens * CHARS_PER_TOKEN) + 1
+
+
+# What the tool definitions take of the context: their JSON runs about 3.4 characters a token (measured on
+# Qwen's tokenizer), and the chat template wraps it in a few dozen more.
+TOOL_SCHEMA_TOKENS = int(len(json.dumps(TOOLS)) / 3.3) + 80
+
+
+def clip(text: str, room: int, *, mark: str = "\n…") -> str:
+    """``text`` cut at a line so it and ``mark`` fit ``room`` (as ``prompt_size`` counts them)."""
+    if prompt_size(text) <= room:
+        return text
+    room -= prompt_size(mark)
+    keep = len(text)
+    while keep > 0:
+        # Figures cost more than words, so a cut at the average rate can still be too long: cut again. Each try
+        # keeps less than the last, or a line too long to fit could have it go back and forth for ever.
+        keep = max(0, min(keep - 1, int(keep * room / max(1, prompt_size(text[:keep])))))
+        cut = text[:keep].rsplit("\n", 1)[0] if "\n" in text[:keep] else text[:keep]
+        if prompt_size(cut) <= room:
+            return cut + mark
+        keep = len(cut)
+    return mark.lstrip("\n")
+
+
 def prompt_budget(context_tokens: int, reply_tokens: int, *, tools: bool) -> int:
-    """Characters of prompt that fit the model's context next to its reply."""
+    """Characters of prompt (as ``prompt_size`` counts them) that fit the model's context next to its reply."""
     overhead = TOOL_SCHEMA_TOKENS if tools else 250
     tokens = (context_tokens or DEFAULT_CONTEXT) - reply_tokens - overhead
     return max(2500, tokens * CHARS_PER_TOKEN)
@@ -273,6 +317,8 @@ class Workspace:
     read_files: bool = False
     last_email: str = ""
     opened: set[str] = field(default_factory=set)
+    # The query worked out over each email's tables for the question, by email id ("" when none fits).
+    worked: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # The emails in the prompt, plus those the model opens with a tool: the only ones it may write notes on.
@@ -381,6 +427,38 @@ def files_line(email: EmailRecord) -> str:
     return "Files: " + "; ".join(names) + locked
 
 
+def query_tables(ws: Workspace, question: str, complete) -> Iterator[dict]:
+    """Have the model write a query over the tables in the files the question is about, and run it, once
+    per question. Yields chat ``step`` events; the result is kept in ``ws.worked`` for ``file_context``.
+    ``complete``: the model call. Anything going wrong leaves the answer to the file text: a model that is
+    down fails again on the answer, and says so there."""
+    email = ws.primary()
+    if not ws.settings.table_queries or email is None or email.id in ws.worked or not email.attachments:
+        return
+    if attachments_locked(email) or SUMMARY_RE.search(question):
+        return
+    ws.worked[email.id] = ""
+    readable = [att for att in email.attachments if (att.extracted_text or "").strip()]
+    readable = named_files(readable, question) or readable
+    tables = None
+    try:
+        tables = table_query.Tables([(att.filename, att.extracted_text or "") for att in readable])
+        if not tables or not tables.about(question):
+            return
+        yield {"type": "step", "text": "Writing a query over the tables for the question"}
+        found = table_query.ask(ws.settings, tables, question, complete=complete, think=ws.settings.table_query_thinking)
+        if found is None:
+            return
+        ws.worked[email.id] = tables.render(found)
+        count = len(found.rows)
+        yield {"type": "step", "text": f"Worked out from the tables with a query ({count} row{'s' if count != 1 else ''})"}
+    except Exception:
+        return
+    finally:
+        if tables is not None:
+            tables.close()
+
+
 def file_context(ws: Workspace, question: str, room: int) -> dict[str, str]:
     """Outline and the passages that matter, for the email(s) the question is about, within ``room`` characters."""
     blocks: dict[str, str] = {}
@@ -407,8 +485,14 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
     skipped = [att for att in readable if att not in named] if named else []
     readable = named or readable
     lines: list[str] = []
+    files_shown = 0
     used = 0
-    per_file = max(600, room // len(readable))
+    # The query worked out over the tables answers the question as asked; it leads, ahead of the files.
+    worked = "" if whole else _worked_block(ws.worked.get(email.id, ""), room // 3)
+    if worked:
+        lines.append(worked)
+        used += prompt_size(worked)
+    per_file = max(600, (room - used) // len(readable))
     for att in readable:
         text = att.extracted_text
         parts = documents.split_parts(text)
@@ -421,18 +505,35 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         if len(parts) > 1:
             labels = [p.label for p in parts[:12]] + ([f"… {len(parts) - 12} more"] if len(parts) > 12 else [])
             block.append("Sections: " + " / ".join(labels))
-        budget = per_file - len(head) - 200
-        summary = overnight_summary(ws.store, att) if len(text) > budget else ""
+        counted, checked = _tables_note(text)
+        if counted:
+            block.append(counted)
+        budget = per_file - prompt_size(head) - prompt_size(counted) - 200
+        size = prompt_size(text)
+        # The table rows the question names, and anything worked out from them, so a small model starts from the
+        # right cell. A file that fits whole comes first; one too long to show gets this index whatever it costs,
+        # since it points into the parts that are left out.
+        rows = "" if whole else table_lookup.lookup(text, question, limit=table_lookup.MAX_CHARS)
+        if worked and rows.startswith(table_lookup.WORKED_HEAD):
+            # Two workings of one question would leave the model to pick a figure; the query read it as asked.
+            rows = ""
+        spare = budget - size - 2 * len(parts) * 12
+        space = spare if spare >= 0 else budget // 3
+        rows = clip(rows, space) if rows and space >= 200 else ""
+        if rows:
+            block.append(rows)
+            budget -= prompt_size(rows) + 1
+        summary = overnight_summary(ws.store, att) if size > budget else ""
         if summary:
             block.append("Summary written overnight (checked against the file):\n" + summary[:900])
-            budget -= min(len(summary), 900) + 60
-        if whole and len(parts) > 2 and len(text) > budget:
+            budget -= prompt_size(summary[:900]) + 60
+        if whole and len(parts) > 2 and size > budget:
             block.append(_skimmed(att, parts, budget))
             ws.left_out.append(att.filename)
             read = f"Skimmed {att.filename}: too long to read whole ({len(parts)} sections)"
         else:
             how = "picked by words" if matches else "from the start: no words matched"
-            if not whole and len(text) > budget:
+            if not whole and size > budget:
                 by_meaning = semantic.rank_sections(ws.store, ws.settings, att, question)
                 if by_meaning:
                     how = "picked by words and meaning" if matches else "picked by meaning"
@@ -444,25 +545,76 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             else:
                 read = f"Read {shown} of {len(parts)} sections of {att.filename}{', one cut short' if cut else ''} ({how})"
         piece = "\n".join(block)
-        if used + len(piece) > room and lines:
+        if used + prompt_size(piece) > room and files_shown:
             ws.left_out.append(att.filename)
             ws.reads.append(f"Left out {att.filename}: no room (the assistant can still open it)")
             lines.append(f"── File: {att.filename} (not shown; read it with read_file)")
             continue
-        ws.reads.append(read)
+        read = f"{read}; picked out the table rows the question names" if rows else read
+        ws.reads.append(f"{read}; {checked}" if checked else read)
         lines.append(piece)
-        used += len(piece)
+        files_shown += 1
+        used += prompt_size(piece)
     lines += [f"── File: {att.filename} ({file_kind(att)}; not asked about, read it with read_file)" for att in skipped]
     return "\n".join(lines)
 
 
+def _tables_note(text: str) -> tuple[str, str]:
+    """For the prompt: how many rows each table has, and whether its printed totals add up as it was read; and
+    for the chat's reading steps, a few words on that check.
+
+    Rows are counted, with how many fall under each name of a first column that groups them ("Category" 11 rows:
+    Buildings 2, ...), because a small model summing up a file miscounts them ("10 vendors" for 12). A total that
+    doesn't match the rows above it means the reading put a figure in the wrong row or column or lost a row: the
+    model is told, so it doesn't pass such figures on as certain."""
+    counts: list[str] = []
+    matched, mismatched = 0, []
+    for table in table_lookup.tables_in(text):
+        verdict = table_lookup.verify(table)
+        matched += verdict.matched
+        mismatched += verdict.mismatched
+        if len(table.body) < 3:
+            continue
+        label = table.labels[0]
+        groups: dict[str, int] = {}
+        for row in table.body:
+            if value := row.value(label):
+                groups[value] = groups.get(value, 0) + 1
+        piece = f'"{label}" {len(table.body)} rows'
+        if 1 < len(groups) <= 8 and len(groups) < len(table.body):
+            piece += " (" + ", ".join(f"{name}: {n}" for name, n in groups.items()) + ")"
+        counts.append(piece)
+    lines = ["Tables (rows counted, totals and subtotals left out): " + "; ".join(counts)] if counts else []
+    checked = len(mismatched) + matched
+    if mismatched:
+        lines.append(
+            f"Caution: {len(mismatched)} of the {checked} printed totals don't match the rows above them as read "
+            f"({'; '.join(mismatched[:2])}). Figures from this table may be misread: say so when you use them."
+        )
+        return "\n".join(lines), f"{len(mismatched)} of its {checked} printed totals don't add up as read, so its figures may be misread"
+    if matched:
+        lines.append(f"Totals check: all {matched} printed totals match the rows above them.")
+        return "\n".join(lines), f"its {matched} printed total{'s' if matched != 1 else ''} add up"
+    return "\n".join(lines), ""
+
+
+def _worked_block(block: str, room: int) -> str:
+    """The query's block cut to ``room`` at a line, or "" when not even its first result row fits."""
+    if not block:
+        return ""
+    cut = clip(block, room)
+    lines = cut.splitlines()
+    result = next((index for index, line in enumerate(lines) if line.startswith("Result (")), None)
+    return cut if result is not None and len(lines) > result + 1 and not lines[result + 1].startswith("…") else ""
+
+
 def _skimmed(att: AttachmentRecord, parts: list[documents.Part], budget: int) -> str:
     """For a summary of a file too long to show: its opening, then the lines that stand out from every other section."""
-    first = parts[0].text
-    if len(first) > budget // 3:
-        first = first[: budget // 3].rsplit("\n", 1)[0] + "\n…"
+    first = clip(parts[0].text, budget // 3)
     opening = f"[{att.filename} · {parts[0].label}]\n{first}"
-    rest = documents.skim(parts[1:], budget - len(opening) - 250, tag=f"{att.filename} · ")
+    text = "\n".join(part.text for part in parts[1:])
+    room = budget - prompt_size(opening) - 250
+    rest = documents.skim(parts[1:], int(room * len(text) / max(1, prompt_size(text))), tag=f"{att.filename} · ")
     return (
         f"{opening}\n(Too long to show whole. Below are the lines that stand out from the other {len(parts) - 1} "
         "sections; lines repeated from section to section are left out. This summary comes from a skim. "
@@ -492,10 +644,10 @@ def _passages(
         if budget <= 200:
             break
         body = part.text
-        if len(body) > budget:
-            body, cut = body[:budget].rsplit("\n", 1)[0] + "\n…", True
+        if prompt_size(body) > budget:
+            body, cut = clip(body, budget), True
         picked[part.label] = body
-        budget -= len(body) + len(part.label) + 4
+        budget -= prompt_size(body) + len(part.label) + 4
     block = [f"[{att.filename} · {part.label}]\n{picked[part.label]}" for part in parts if part.label in picked]
     if cut or len(picked) < len(parts):
         ws.left_out.append(att.filename)
@@ -659,8 +811,7 @@ def run_tool(ws: Workspace, name: str, args: dict, *, limit: int) -> str:
         text = _dispatch(ws, name, args)
     except Exception as exc:  # a broken file or odd argument is reported back to the model, not raised
         text = f"That didn't work ({type(exc).__name__}: {str(exc)[:120]})."
-    if len(text) > limit:
-        text = text[:limit].rsplit("\n", 1)[0] + "\n[Cut here to fit. Ask for a narrower part to see more.]"
+    text = clip(text, limit, mark="\n[Cut here to fit. Ask for a narrower part to see more.]")
     if name not in {"note", "search_mail"}:
         ws.evidence.append(f"{step_label(name, args, ws)}:\n{text}")
     return text
@@ -858,7 +1009,9 @@ def _evaluate(node):
         return node.value
     if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
         left, right = _evaluate(node.left), _evaluate(node.right)
-        if isinstance(node.op, ast.Pow) and abs(right) > 12:
+        # A power is worked out only when its result stays a figure a schedule could hold: (9**12)**12 nested a
+        # few times would keep the computer busy for minutes.
+        if isinstance(node.op, ast.Pow) and (abs(right) > 12 or (abs(left) > 1 and abs(right) * math.log10(abs(left)) > 15)):
             raise ValueError("exponent too large")
         return _OPS[type(node.op)](left, right)
     if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
@@ -877,11 +1030,11 @@ def evidence_text(ws: Workspace, room: int) -> str:
     kept: list[str] = []
     used = 0
     for item in reversed(ws.evidence):
-        piece = item if len(item) <= 1800 else item[:1800].rsplit("\n", 1)[0] + "\n…"
-        if used + len(piece) > room:
+        piece = clip(item, 1800)
+        if used + prompt_size(piece) > room:
             break
         kept.append(piece)
-        used += len(piece)
+        used += prompt_size(piece)
     return "\n\n".join(reversed(kept))
 
 

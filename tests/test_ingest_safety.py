@@ -147,9 +147,11 @@ def test_process_button_runs_in_the_background(store, settings):
     client = TestClient(create_app(settings, store))
     started = client.post("/process", follow_redirects=False)
     assert started.status_code == 303
-    for _ in range(100):
+    # The request returns at once; the run itself can take several seconds on a slow machine (CI's Windows).
+    deadline = time.monotonic() + 60
+    while True:
         status = client.get("/process/status").json()
-        if status["state"] != "running":
+        if status["state"] != "running" or time.monotonic() > deadline:
             break
         time.sleep(0.05)
     assert status["state"] == "done", status

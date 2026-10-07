@@ -69,6 +69,8 @@ def test_anti_fraud_footer_and_quoted_thread_do_not_flag(store, settings):
         ),
     )
     assert "fraud_risk" not in footer.flags and "payment_caution" not in footer.flags
+    # Sam is a colleague: only someone you trust can say the quoted request was fake.
+    settings.mailbox = "me@ourco.example"
     reply = _mail(
         store,
         settings,
@@ -82,7 +84,7 @@ def test_anti_fraud_footer_and_quoted_thread_do_not_flag(store, settings):
     )
     assert reply.category != DocumentType.PAYMENT_INSTRUCTION_CHANGE
     assert _level(store, "f2") == "none"
-    assert {s["key"] for s in store.fraud_check("f2")["signals"]} == {"bank_change_quoted"}
+    assert {s["key"] for s in store.fraud_check("f2")["signals"]} == {"bank_change_quoted", "trusted_domain"}
 
 
 def test_trusted_domain_gets_a_caution_note_not_a_block(store, settings):

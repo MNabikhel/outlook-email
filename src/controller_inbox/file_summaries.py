@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import httpx
 
 from controller_inbox import answer_check, documents
-from controller_inbox.agent import SUMMARY_MIN_CHARS, prompt_budget, summary_key
+from controller_inbox.agent import SUMMARY_MIN_CHARS, clip, prompt_budget, prompt_size, summary_key
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import ContextOverflow, EmptyReply, complete_text, context_length
@@ -39,11 +39,14 @@ def summarize_file(settings: Settings, att: AttachmentRecord) -> str:
     text = att.extracted_text or ""
     room = prompt_budget(context_length(settings), MAX_TOKENS, tools=False) - len(PROMPT) - 300
     parts = documents.split_parts(text)
-    if len(text) <= room or len(parts) < 3:
-        shown = text[:room]
+    # Room is counted the way prompt_size counts it (figures cost more than words), not in characters.
+    if prompt_size(text) <= room or len(parts) < 3:
+        shown = clip(text, room)
     else:
-        first = parts[0].text[: room // 3]
-        shown = f"[{parts[0].label}]\n{first}\n" + documents.skim(parts[1:], room - len(first) - 50)
+        first = clip(parts[0].text, room // 3)
+        rest = "\n".join(part.text for part in parts[1:])
+        left = room - prompt_size(first) - 50
+        shown = f"[{parts[0].label}]\n{first}\n" + documents.skim(parts[1:], int(left * len(rest) / max(1, prompt_size(rest))))
     messages = [
         {"role": "system", "content": PROMPT},
         {"role": "user", "content": f"File: {att.filename}\n\n{shown}"},
@@ -73,9 +76,13 @@ def summarize_files(
     model: str = "",
     on_progress: Callable[[int, int, str], None] | None = None,
 ) -> int:
-    """Summarize long attachments that have no summary yet, most important mail first. Returns how many were written."""
+    """Summarize long attachments that have no summary yet, most important mail first. Returns how many were written.
+
+    When the model gives nothing usable for a file, that is remembered (as an empty summary), so the file isn't
+    tried again every night; it is tried again when its text changes or another model is loaded.
+    """
     written = 0
-    queue = store.files_to_summarize(min_chars=SUMMARY_MIN_CHARS, limit=limit)
+    queue = store.files_to_summarize(min_chars=SUMMARY_MIN_CHARS, limit=limit, model=model)
     for index, (email_id, attachment_id) in enumerate(queue, start=1):
         email = store.get_email(email_id)
         att = next((a for a in email.attachments if a.id == attachment_id), None) if email else None
@@ -85,11 +92,12 @@ def summarize_files(
             on_progress(index, len(queue), att.filename)
         try:
             summary = summarize_file(settings, att)
-        except (ContextOverflow, EmptyReply):
+        except ContextOverflow:
             continue
+        except EmptyReply:
+            summary = ""
         except httpx.HTTPError:
             break
-        if summary:
-            store.save_file_summary(att.id, summary_key(att), summary, model=model, at=datetime.now(timezone.utc).isoformat())
-            written += 1
+        store.save_file_summary(att.id, summary_key(att), summary, model=model, at=datetime.now(timezone.utc).isoformat())
+        written += bool(summary)
     return written

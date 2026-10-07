@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import html
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -48,6 +50,147 @@ DISCLAIMER_RE = re.compile(
 )
 
 
+# Characters that show nothing but split a word for a pattern ("ba\u200bnk"): the soft hyphen, zero-width
+# spaces and joiners, direction marks, the word joiner and the byte-order mark. Then the accents and other
+# marks that sit on a letter once it is taken apart ("\u00e9" is "e" and a mark).
+_HIDDEN_RE = re.compile(
+    "[\u00ad\u034f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff"
+    "\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]"
+)
+# Formatting tags left in plain text split a word without showing a space ("b<span></span>ank").
+_INLINE_TAG_RE = re.compile(
+    r"</?(?:a|abbr|b|big|code|del|em|font|i|ins|mark|o:p|s|small|span|strike|strong|sub|sup|u|wbr)(?:\s[^<>]{0,300})?/?>",
+    re.I,
+)
+
+
+def strip_html_comments(text: str) -> str:
+    """Drop every "<!-- … -->" in one pass over the text. An "<!--" that is never closed stays as text.
+
+    A pattern such as ``<!--.*?-->`` reads to the end of the text from every unclosed "<!--", so a long
+    run of them took minutes.
+    """
+    if "<!--" not in text:
+        return text
+    out: list[str] = []
+    pos = 0
+    for start, end in _comment_spans(text):
+        out.append(text[pos:start])
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _comment_spans(text: str) -> list[tuple[int, int]]:
+    spans = []
+    pos = 0
+    while True:
+        start = text.find("<!--", pos)
+        if start < 0:
+            break
+        end = text.find("-->", start + 4)
+        if end < 0:
+            break
+        spans.append((start, end + 3))
+        pos = end + 3
+    return spans
+# An HTML entity left in text: numbered ("&#8203;", "&#x200b;") or named with its closing ";" ("&amp;").
+# A bare "&not" or "&copy" in plain text ("Smith&notary", "Print&copy") is written that way, not an entity.
+_ENTITY_RE = re.compile(r"&(?:#[0-9]+;?|#[xX][0-9a-fA-F]+;?|[A-Za-z][A-Za-z0-9]{1,31};)")
+# Cyrillic and Greek letters drawn like Latin ones ("b\u0430nk" with a Cyrillic a), curly quotes and dashes.
+_LOOKALIKES = str.maketrans(
+    {
+        **dict(zip("\u0430\u0435\u043e\u0440\u0441\u0443\u0445\u043a\u043c\u043d\u0442\u0455\u0456\u0458\u0501\u051b\u051d\u04bb\u04cf", "aeopcyxkmhtsijdqwhl")),  # Cyrillic
+        **dict(zip("\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425\u0423\u0405\u0406\u0408\u051a\u051c\u04ba\u04c0", "ABEKMHOPCTXYSIJQWHI")),  # Cyrillic capitals
+        **dict(zip("\u03b1\u03b5\u03b9\u03ba\u03bd\u03bf\u03c1\u03c4\u03c5\u03c7\u03c9\u03f2\u03f3", "aeikvoptuxwcj")),  # Greek
+        **dict(zip("\u0391\u0392\u0395\u0396\u0397\u0399\u039a\u039c\u039d\u039f\u03a1\u03a4\u03a5\u03a7\u03f9", "ABEZHIKMNOPTYXC")),  # Greek capitals
+        **dict(zip("\u0131\u0237\u0251\u0261\u0585\u057d", "ijagou")),  # dotless i and j, Latin alpha and script g, Armenian o and u
+        **dict.fromkeys("\u2018\u2019\u201a\u201b\u2032", "'"),  # curly quotes
+        **dict.fromkeys("\u201c\u201d\u201e\u201f\u2033", '"'),  # curly double quotes
+        **dict.fromkeys("\u2010\u2012\u2013\u2014\u2015\u2212", "-"),  # hyphens, dashes and the minus sign
+    }
+)
+
+
+def normalize_text(text: str) -> str:
+    """The text as the rules read it, so a disguised word still matches.
+
+    HTML entities and inline tags are resolved, full-width and other compatibility
+    forms become plain letters, invisible characters and accents are dropped, and
+    Cyrillic or Greek look-alike letters are read as Latin ones. Only for matching:
+    what is stored and shown is left as it was.
+    """
+    if not text:
+        return ""
+    if "&" in text:
+        text = _ENTITY_RE.sub(lambda entity: html.unescape(entity.group(0)), text)
+    if "<" in text:
+        text = _INLINE_TAG_RE.sub("", strip_html_comments(text))
+    if text.isascii():
+        return text
+    return _HIDDEN_RE.sub("", unicodedata.normalize("NFKD", text)).translate(_LOOKALIKES)
+
+
+def normalize_with_spans(text: str) -> tuple[str, list[int], list[int]]:
+    """``normalize_text``, and for each character it returns, where in ``text`` it came from (start, end).
+
+    So a phrase the rules found in the normalized text can be shown as it was written.
+    """
+    if not text:
+        return "", [], []
+    starts = list(range(len(text)))
+    ends = list(range(1, len(text) + 1))
+    if "&" in text:
+        pieces: list[str] = []
+        new_starts: list[int] = []
+        new_ends: list[int] = []
+        pos = 0
+        for entity in _ENTITY_RE.finditer(text):
+            pieces.append(text[pos : entity.start()])
+            new_starts += starts[pos : entity.start()]
+            new_ends += ends[pos : entity.start()]
+            decoded = html.unescape(entity.group(0))
+            pieces.append(decoded)
+            new_starts += [starts[entity.start()]] * len(decoded)
+            new_ends += [ends[entity.end() - 1]] * len(decoded)
+            pos = entity.end()
+        pieces.append(text[pos:])
+        text, starts, ends = "".join(pieces), new_starts + starts[pos:], new_ends + ends[pos:]
+    if "<" in text:
+        text, starts, ends = _drop_spans(text, starts, ends, _comment_spans(text))
+        text, starts, ends = _drop_spans(text, starts, ends, [tag.span() for tag in _INLINE_TAG_RE.finditer(text)])
+    if text.isascii():
+        return text, starts, ends
+    pieces, new_starts, new_ends = [], [], []
+    for run in re.finditer(r"[\x00-\x7f]+|[^\x00-\x7f]", text):
+        piece = run.group(0)
+        if not piece.isascii():
+            piece = _HIDDEN_RE.sub("", unicodedata.normalize("NFKD", piece)).translate(_LOOKALIKES)
+            new_starts += [starts[run.start()]] * len(piece)
+            new_ends += [ends[run.start()]] * len(piece)
+        else:
+            new_starts += starts[run.start() : run.end()]
+            new_ends += ends[run.start() : run.end()]
+        pieces.append(piece)
+    return "".join(pieces), new_starts, new_ends
+
+
+def _drop_spans(text: str, starts: list[int], ends: list[int], spans: list[tuple[int, int]]):
+    if not spans:
+        return text, starts, ends
+    pieces: list[str] = []
+    new_starts: list[int] = []
+    new_ends: list[int] = []
+    pos = 0
+    for start, end in spans:
+        pieces.append(text[pos:start])
+        new_starts += starts[pos:start]
+        new_ends += ends[pos:start]
+        pos = end
+    pieces.append(text[pos:])
+    return "".join(pieces), new_starts + starts[pos:], new_ends + ends[pos:]
+
+
 def own_words(body: str, *, keep_disclaimers: bool = False) -> str:
     """The part of a message the sender actually wrote: no quoted thread, no legal footer or banner.
 
@@ -64,29 +207,124 @@ def own_words(body: str, *, keep_disclaimers: bool = False) -> str:
     return "\n\n".join(kept).strip()
 
 
+# Words that name where a payment goes. "Account" and "payment" on their own also name logins, account
+# managers, card details and payment terms, so they count only next to one of these.
+_BANK = r"(?:bank(?:ing|s)?|remit(?:tance)?|remit[- ]to|wire|wiring|ach|iban|swift|bic|sort\s+code)"
+# The details themselves: "bank details", "bank account number", "wire instructions", "our payment details".
+_BANK_DETAILS = (
+    r"(?:" + _BANK + r"\s+(?:account\s+)?(?:details|information|info|instructions|account|numbers?|data|coordinates)"
+    r"|routing\s+(?:and\s+account\s+)?numbers?|account\s+and\s+routing\s+numbers?"
+    r"|(?:payment|remittance)\s+instructions|our\s+payment\s+(?:details|information|info))"
+)
+_CHANGED = r"(?:changed|changing|updated|amended|modified|replaced|moved|switched)"
+# Up to 25 characters inside one sentence, but not across a "no", "not", "nicht", "pas"...: "datos bancarios no han
+# cambiado" says the details have NOT changed.
+_GAP = r"(?:(?!\b(?:no|not|nunca|jamas|pas|jamais|nicht|nie|kein\w*|nao|sin|sem)\b)[^.\n]){0,25}?"
+
+# Every phrasing starts a word, so the leading "\b(?=[a-z])" lets the many alternatives be tried only there:
+# three times quicker on a long email than trying each of them at every character.
 PAYMENT_CHANGE_RE = re.compile(
-    r"(new\s+(?:bank(?:ing)?|routing|account|wire)\s+instruct|"
-    r"updated\s+(?:bank(?:ing)?|wire|account|payment)\s+instruct|"
-    r"(?<!not a )(?<!not )change(?:d|s)?\s+(?:in|of|to)\s+(?:bank|account|wiring|payment)|"
-    r"please\s+use\s+(?:the\s+)?following\s+(?:account|routing|bank)|"
-    r"wire\s+instructions\s+have\s+changed|"
-    r"our\s+bank(?:ing)?\s+details\s+have\s+changed|"
-    r"do\s+not\s+use\s+(?:the\s+)?previous\s+account|"
-    r"(?<!not )(?:changed|switched|moved)\s+(?:our\s+bank(?:s|ing\s+partner)?|banks|to\s+a\s+new\s+bank)\b|"
-    r"update\s+(?:our|the|your\s+records\s+with\s+our)\s+(?:bank(?:ing)?|remittance|payment|wire|ach)\s+"
-    r"(?:details|information|info|instructions)|"
-    r"(?:updated|new)\s+(?:remittance|remit[- ]to|bank(?:ing)?|payment|wire|ach)\s+(?:account\s+)?(?:details|information|info)|"
-    r"(?:to|into)\s+(?:the|our)\s+new\s+(?:bank\s+)?account|"
-    # "Our bank account details have changed", "remittance information has been updated".
-    r"\b(?:bank(?:ing)?|account|payment|remittance|remit[- ]to|wire|wiring|ach)(?:\s+account)?\s+"
-    r"(?:details|information|info|instructions|number)\s+(?:have|has)\s+(?:recently\s+)?(?:been\s+)?(?:changed|updated)|"
-    # "We have a new bank account", "our new banking account".
-    r"\b(?:a|our)\s+new\s+bank(?:ing)?\s+account\b|"
+    r"\b(?=[a-z])(\bnew\s+(?:bank(?:ing)?|routing|account|wire)\s+instruct|"
+    r"\bupdated\s+(?:bank(?:ing)?|wire|account|payment)\s+instruct|"
+    # "Change of bank details", "changes to our banking information", "notice of change of bank."
+    # Not "changes to your bank account fees": a change to the reader's own account is not a payee's change.
+    r"(?<!not a )(?<!not )\bchange[ds]?\s+(?:in|of|to)\s+(?:(?:our|the|my|its|their)\s+)?"
+    r"(?:" + _BANK_DETAILS + r"|bank(?:ing|s)?(?=\s*(?:[.,;:!?)]|\n|$)))|"
+    # "Our bank account has changed", "bank details were updated", "our bank is changing".
+    r"\b(?:" + _BANK_DETAILS + r"|our\s+bank(?:ing|s)?)\s+(?:has|have|had|was|were|is|are)\s+"
+    r"(?:(?:now|just|recently|also|all|since)\s+)?(?:been\s+)?" + _CHANGED + r"\b|"
+    # "Our bank account change", "their bank details changed" (not "have your bank details changed?" or an
+    # auditor's "the log of bank account changes": the details must be the writer's or the payee's own).
+    r"\b(?:our|my|its|their)\s+(?:new\s+)?(?:" + _BANK_DETAILS + r"|(?:payment|remittance)\s+(?:details|information|info))"
+    r"\s+change[ds]?\b|"
+    # "New bank details", "updated ACH information", "new routing number".
+    r"\b(?:new|updated|revised|changed|different|amended)\s+(?:" + _BANK + r"\s+(?:account\s+)?"
+    r"(?:details|information|info|instructions|numbers?|data)|routing\s+numbers?|(?:payment|remittance)\s+instructions)|"
+    # "We have a new bank account", "our new account details".
+    r"\b(?:a|our)\s+new\s+bank(?:ing)?\s+account\b|\bour\s+new\s+(?:bank\s+)?account\s+(?:details|information|info|number)|"
+    # "Update the bank account on file", "update your records with our payment information".
+    r"\bupdate\s+(?:(?:your|the)\s+(?:records?|files?|vendor\s+(?:file|master|records?))\s+(?:with|to)\s+)?"
+    r"(?:(?:our|the|its|their)\s+)?(?:new\s+)?" + _BANK_DETAILS + r"|"
+    # "Please pay invoice 5521 to the new account", "send this payment to a different account" (not "send the W-9 to
+    # the new account manager").
+    r"\b(?:pay|paid|paying|payments?|remit\w*|wire[ds]?|wiring|transfer\w*|deposit\w*|funds)\b[^.\n]{0,60}?"
+    r"\b(?:to|into)\s+(?:the|our|this|a)\s+(?:new|different|updated)\s+(?:bank\s+)?account\b|"
+    # "Please use the new account for all future payments", "use account ****9981 for all payments going forward".
+    r"\b(?:use|pay|remit|wire|transfer|deposit)\b[^.\n]{0,30}?\b(?:new|different|other|following|bank)\s+account\s+"
+    r"for\s+(?:all|any|future|upcoming|further)\b[^.\n]{0,25}?\bpayments?\b|"
+    # The number must look like a bank account, masked ("****9981") or seven digits or more: "use account 6150
+    # for all software payments going forward" is a ledger account.
+    r"\b(?:use|pay|remit|wire|transfer|deposit)\b[^.\n]{0,30}?\b(?:account|acct\.?)\s*(?:number|no\.?|#)?\s*[:#]?\s*"
+    r"(?:[*xX•]{2,12}[\s-]?\d{2,6}|\d{7,17})\b[^.\n]{0,50}?\b(?:for\s+(?:all|any|future|upcoming|further)\b[^.\n]{0,25}?\bpayments?\b|"
+    r"going\s+forward|from\s+now\s+on|effective\s+immediately)|"
+    # "Please use the following account for the next payment" (but not "the following account for coding").
+    r"\bplease\s+use\s+(?:the\s+)?following\s+(?:bank(?:ing)?\b|routing\b|(?:account|details)\b"
+    r"(?=[^.\n]{0,60}\b(?:pay\w*|remit\w*|wir(?:e|ing)|ach|routing|bank\w*|transfer\w*|deposit\w*|iban|swift)\b))|"
+    r"\bdo\s+not\s+use\s+(?:the\s+)?previous\s+account|"
+    r"(?<!not )\b(?:changed|switched|moved)\s+(?:our\s+bank(?:s|ing\s+partner)?|banks|to\s+a\s+new\s+bank)\b|"
     # "Kindly remit to the account below".
     r"\b(?:remit|send|pay|wire|transfer|make)\w*\s+(?:all\s+|any\s+|future\s+|the\s+)*(?:payments?\s+|funds\s+)?"
-    r"(?:to|into)\s+(?:the|our)\s+(?:bank\s+)?account\s+(?:below|listed\s+below|shown\s+below|details\s+below|as\s+follows)\b)",
+    r"(?:to|into)\s+(?:the|our)\s+(?:bank\s+)?account\s+(?:below|listed\s+below|shown\s+below|details\s+below|as\s+follows)\b|"
+    # The same in Spanish, French, German and Portuguese (read without accents, see normalize_text).
+    r"\b(?:datos|cuenta|informacion|coordenadas)\s+bancari[oa]s?\b" + _GAP + r"\b(?:ha|han)\s+(?:sido\s+)?"
+    r"(?:cambiad|actualizad|modificad)[oa]s?\b|"
+    r"\bnuev[oa]s?\s+(?:datos|cuenta|informacion)\s+bancari[oa]s?\b|\bcambio\s+de\s+(?:(?:cuenta|datos)\s+bancari[oa]s?|banco)\b|"
+    r"\b(?:coordonnees|informations|donnees|references)\s+bancaires\b" + _GAP + r"\b(?:ont|a)\s+(?:ete\s+)?"
+    r"(?:change|modifie|mis\s+a\s+jour|mise\s+a\s+jour)e?s?\b|"
+    r"\bnouve(?:au|l|lle|lles|aux)\s+(?:rib|iban|compte\s+bancaire|coordonnees\s+bancaires)\b|"
+    r"\bchangement\s+de\s+(?:coordonnees\s+bancaires|rib|compte\s+bancaire|banque)\b|"
+    r"\b(?:rib|compte\s+bancaire|banque)\s+a\s+change\b|"
+    r"\b(?:bankverbindung|bankdaten|kontodaten|kontoverbindung|bankkonto)\b" + _GAP +
+    r"\b(?:(?:hat|haben)\s+sich\s+ge(?:a|ae)ndert|(?:wurde|wurden|ist|sind)\s+(?:ge(?:a|ae)ndert|aktualisiert))\b|"
+    r"\bneue[nrs]?\s+(?:bankverbindung|bankdaten|kontodaten|kontoverbindung|bankkonto|iban)\b|"
+    r"\b(?:a|ae)nderung\s+(?:der|unserer|ihrer)\s+(?:bankverbindung|bankdaten|kontodaten|kontoverbindung)\b|"
+    r"\b(?:uberweisen|uberweisung|zahlen|zahlung\w*)\b[^.\n]{0,40}\b(?:auf|an)\s+(?:das|unser)\s+neue[sn]?\s+konto\b|"
+    r"\b(?:dados|conta|informacoes)\s+bancari[oa]s?\s+(?:(?:foram|foi)\s+)?"
+    r"(?:alterad[oa]s?|atualizad[oa]s?|modificad[oa]s?|mudaram|mudou)\b|"
+    r"\bnov[oa]s?\s+(?:dados|conta|informacoes)\s+bancari[oa]s?\b|"
+    r"\b(?:alteracao|mudanca|troca)\s+(?:de|dos|nos|da)\s+(?:dados|conta)\s+bancari)",
     re.IGNORECASE,
 )
+
+# A change the sentence says is not happening: "there is no change to our bank details", "we have not made any
+# changes to our bank details", "keine Änderung unserer Bankverbindung", "aucun changement de RIB", "no hay cambio
+# de cuenta bancaria", "sem alteração de dados bancários". Read up to two filler words back, within the clause.
+_NEGATION_BEFORE_RE = re.compile(
+    r"(?:^|[^\w'])(?:no|not|never|without|nor|\w+n't|keine?[nrms]?|nicht|ohne|aucune?|sans|pas\s+de|ni|sin|"
+    r"ningun[oa]?|nunca|nao|sem|nenhum[oa]?)"
+    r"(?:\s+(?:any|recent|further|other|such|planned|the|a|an|been|made|have|had|has|be|is|are|was|were|there|"
+    r"hay|ha|habido|houve|es|gibt)){0,2}\s+$",
+    re.IGNORECASE,
+)
+
+
+def _negated(text: str, start: int) -> bool:
+    head = text[max(0, start - 60) : start]
+    stop = max(head.rfind(mark) for mark in ".,;:!?()\n")
+    return bool(_NEGATION_BEFORE_RE.search(head[stop + 1 :]))
+
+
+class _BankChangePattern:
+    """``PAYMENT_CHANGE_RE``: the bank-change wording, less a change the sentence says is not happening.
+
+    It is used like a compiled pattern (``search``, ``finditer``, ``pattern``).
+    """
+
+    def __init__(self, compiled: re.Pattern[str]):
+        self.compiled = compiled
+        self.pattern = compiled.pattern
+        self.flags = compiled.flags
+
+    def finditer(self, text: str):
+        for match in self.compiled.finditer(text):
+            if not _negated(text, match.start()):
+                yield match
+
+    def search(self, text: str) -> re.Match[str] | None:
+        return next(self.finditer(text), None)
+
+
+PAYMENT_CHANGE_RE = _BankChangePattern(PAYMENT_CHANGE_RE)
 
 NEWSLETTER_RE = re.compile(
     r"(unsubscribe|view\s+in\s+browser|you\s+are\s+receiving\s+this|"
@@ -388,6 +626,8 @@ def score_rules(
     extracted_text: str = "",
     payment_rule: bool = True,
 ) -> dict[DocumentType, tuple[int, list[str], list[str]]]:
+    subject, body = normalize_text(subject), normalize_text(body)
+    filename, extracted_text = normalize_text(filename), normalize_text(extracted_text)
     own_blob = f"{subject or ''}\n{own_words(body)}".lower()
     # A reply with words of its own is about those words; the thread it quotes doesn't pick its category.
     replied = bool(QUOTE_START_RE.search(body or "")) and own_blob.strip() != (subject or "").strip().lower()
@@ -772,6 +1012,11 @@ def _month_end(as_of: date) -> date:
 
 def month_end(as_of: date) -> date:
     return _month_end(as_of)
+
+
+def score_importance(**kwargs) -> tuple[Importance, int, list[str]]:
+    """How important an email of a given category is, scored the way ``classify_email`` scores it."""
+    return _importance(**kwargs)
 
 
 def outlook_categories(classification: Classification) -> list[str]:

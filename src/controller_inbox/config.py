@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     chat_context_tokens: int = 0
     # Enough for most attachments to be read whole. LM Studio models loaded with less are reloaded with this; 0 = leave as loaded.
     min_context_tokens: int = 16384
+    # A question about a file's tables is first turned into a query the model writes and CloseDesk runs exactly
+    # (one short extra call). table_query_thinking lets a model that can think do so first: right about twice
+    # as often on the hardest questions (which row and column a question means), but some 600 tokens slower
+    # per question, so it is off unless asked for.
+    table_queries: bool = True
+    table_query_thinking: bool = False
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"
@@ -202,7 +208,17 @@ class Settings(BaseSettings):
 
     @property
     def vip_list(self) -> list[str]:
-        return [part.strip().lower() for part in self.vip_senders.split(",") if part.strip()]
+        """Addresses or domains, separated by commas, semicolons (as Outlook copies a list) or spaces.
+
+        Each is looked for anywhere in a sender's address, so a list copied from Outlook ("Chen, Maya <maya@taz.com>;
+        Bob Lee <bob@taz.com>") counts by its addresses alone: the words of a name would match strangers ("lee" in
+        colleen@…). A single word on its own ("treasurer") still counts, as it always has."""
+        pasted = "<" in self.vip_senders  # names beside addresses, as Outlook copies them
+        found: list[str] = []
+        for entry in re.split(r"[,;]+", self.vip_senders):
+            words = [word.strip("<>'\"") for word in entry.split()]
+            found += [word for word in words if "@" in word or "." in word or (len(words) == 1 and not pasted)]
+        return [word.lower() for word in found if word]
 
     @property
     def trusted_domain_list(self) -> list[str]:
@@ -215,10 +231,6 @@ class Settings(BaseSettings):
     @property
     def graph_configured(self) -> bool:
         return bool(self.azure_client_id)
-
-    @property
-    def daemon_mode(self) -> bool:
-        return bool(self.azure_client_id and self.azure_client_secret and self.mailbox)
 
     def ensure_data_dir(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

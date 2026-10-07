@@ -187,7 +187,7 @@ def _row_has_amount(row: list[tuple[float, float, float, str]]) -> bool:
     return any(_is_amount(text) for _t, _l, _r, text in row)
 
 
-_AMOUNT = re.compile(r"^[$€£]?\(?\d[\d,.]*%?\)?$")
+_AMOUNT = re.compile(r"^[-−]?[$€£]?[-−]?\(?\d[\d,.]*%?\)?$")
 _YEAR = re.compile(r"^(?:19|20)\d{2}$")
 
 
@@ -480,7 +480,8 @@ def _divider(chars: list[str], index: int, gaps: list[float]) -> bool:
 def _thousands(line: str) -> str:
     """A comma read as a dot inside a thousands group is still a thousands separator.
 
-    28.412,414 and (1.097.978) are grouped in threes. 0.61 and 12,480.00 keep their decimals.
+    28.412,414 and (1.097.978) are grouped in threes. 0.61 and 12,480.00 keep their decimals, and so do
+    a rate (5.125%) and a figure under one (0.655), which can't be thousands.
     """
 
     def fix(match: re.Match) -> str:
@@ -488,14 +489,14 @@ def _thousands(line: str) -> str:
         wrapped = token.startswith("(") and token.endswith(")")
         core = token[1:-1] if wrapped else token
         parts = re.split(r"[.,]", core)
-        if len(parts) < 2 or not all(part.isdigit() for part in parts):
+        if len(parts) < 2 or not all(part.isdigit() for part in parts) or parts[0].startswith("0"):
             return token
         if any(len(part) != 3 for part in parts[1:]):
             return token
         grouped = parts[0] + "".join("," + part for part in parts[1:])
         return f"({grouped})" if wrapped else grouped
 
-    return re.sub(r"\(?\d{1,3}(?:[.,]\d{3})+\)?", fix, line)
+    return re.sub(r"(?<![\d.,])\(?\d{1,3}(?:[.,]\d{3})+\)?(?![\d%])", fix, line)
 
 
 def _polish(line: str) -> str:

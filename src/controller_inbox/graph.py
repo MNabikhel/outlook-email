@@ -126,7 +126,7 @@ class GraphMailbox:
             "$top": "50",
             "$orderby": "receivedDateTime desc",
             "$select": (
-                "id,subject,from,receivedDateTime,body,bodyPreview,hasAttachments,"
+                "id,subject,from,replyTo,receivedDateTime,body,bodyPreview,hasAttachments,"
                 "importance,isRead,conversationId,internetMessageId"
             ),
             "$filter": " and ".join(filters),
@@ -218,5 +218,15 @@ class GraphMailbox:
             conversation_id=item.get("conversationId") or "",
             internet_message_id=item.get("internetMessageId") or "",
             source="graph",
+            reply_to=_reply_to(item, sender.get("address") or ""),
             attachments=[],
         )
+
+
+def _reply_to(item: dict[str, Any], sender: str) -> str:
+    """Where replies go, for the fraud check: the first Reply-To address that isn't the sender's own."""
+    addresses = [
+        ((entry or {}).get("emailAddress") or {}).get("address") or "" for entry in item.get("replyTo") or []
+    ]
+    others = [address.strip().lower() for address in addresses if "@" in address and address.strip().lower() != sender.strip().lower()]
+    return others[0] if others else ""

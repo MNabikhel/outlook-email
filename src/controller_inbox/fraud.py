@@ -13,18 +13,26 @@ from __future__ import annotations
 import csv
 import io
 import re
+import unicodedata
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
-from controller_inbox.classify import AUTOMATED_SENDERS, PAYMENT_CHANGE_RE, own_words
+from controller_inbox.classify import (
+    AUTOMATED_SENDERS,
+    PAYMENT_CHANGE_RE,
+    QUOTE_START_RE,
+    normalize_text,
+    normalize_with_spans,
+    own_words,
+)
 
 if TYPE_CHECKING:
     from controller_inbox.config import Settings
     from controller_inbox.models import EmailRecord
     from controller_inbox.store import Store
-
-LEVELS = ("none", "caution", "high")
 
 POINTS = {
     "bank_change": 50,
@@ -82,32 +90,55 @@ FREEMAIL = {
     "yandex.com", "zoho.com", "zohomail.com", "fastmail.com", "tutanota.com",
 }
 
-# A warning that frames the sentence as hypothetical ("we will never…", "if you receive…").
+# A warning that frames the sentence as hypothetical ("we will never…", "if you receive…"), including
+# the usual footer "we will never notify you of a change to our bank details by email".
+_NEVER_DO = r"(?:change|ask|request|send|update|contact|email|notify|inform|tell|advise|alert)"
 STRONG_NOTICE_RE = re.compile(
-    r"(\bnever\s+(?:change|ask|request|send|update|contact|email)\b|\b(?:will\s+not|won'?t)\s+(?:change|ask|request)\b|"
+    r"(\bnever\s+" + _NEVER_DO + r"\b|\b(?:will\s+not|won'?t)\s+" + _NEVER_DO + r"\b|"
     r"\bif\s+you\s+(?:receive|get|are\s+contacted)\b|"
     r"\b(?:scam|phishing|fraudulent|spoofed)\s+(?:e-?mails?|messages?|requests?|calls?)\b)",
     re.I,
 )
 # A warning word that can just as well introduce a real request ("please be aware our bank details have changed").
 WEAK_NOTICE_RE = re.compile(r"(\bbeware\b|\bbe\s+(?:aware|alert|vigilant)\b|\balways\s+(?:call|verify|confirm)\b)", re.I)
-NOTICE_RE = re.compile(f"{STRONG_NOTICE_RE.pattern}|{WEAK_NOTICE_RE.pattern}", re.I)
-# What a real warning tells the reader to do.
-PROTECTIVE_RE = re.compile(
-    r"\b(?:call|phone|telephone|verify|verbally|contact\s+(?:us|your)|known\s+number|on\s+file|report|ignore|delete)\b", re.I
+# Where one part of a sentence ends and the next begins ("…, but our bank details have changed").
+CLAUSE_RE = re.compile(r"[,;:]|\s[-–—]+\s|\s(?=(?:but|however|although|though|yet|whereas)\b)", re.I)
+# Words that report what a hypothetical message says ("…, claiming to be us, saying our bank details have changed").
+REPORTING_RE = re.compile(
+    r"\b(?:say(?:s|ing)?|said|claim(?:s|ed|ing)?|stat(?:es|ed|ing)|advis(?:es|ed|ing)|notif(?:y|ies|ied|ying)|"
+    r"inform(?:s|ed|ing)?|tell(?:s|ing)?|told|ask(?:s|ed|ing)?|request(?:s|ed|ing)?|purport(?:s|ed|ing)?|"
+    r"suggest(?:s|ed|ing)?|indicat(?:es|ed|ing)|alert(?:s|ed|ing)?)\b",
+    re.I,
 )
-# A colleague saying the quoted request was fake.
+# A part of the sentence that turns away from the warning: what to do about it ("…, please call us") or a
+# contrast ("…, but our bank details have changed"). A warning's reach ends there.
+TURN_RE = re.compile(
+    r"\s*(?:(?:and|so|then)\s+)?(?:but|however|although|though|yet|whereas|(?:please\s+|kindly\s+)?(?:call|phone|telephone|"
+    r"ring|contact|verify|confirm|check|ignore|delete|report|forward|speak|talk|do\s+not|don'?t|let\s+us\s+know))\b",
+    re.I,
+)
+# A colleague saying the quoted request was fake (not "this is not phishing", which vouches for it).
 DISAVOW_RE = re.compile(
     r"\b(?:(?:was|is|it'?s)\s+not\s+(?:them|legit\w*|genuine|real)|(?:wasn'?t|isn'?t)\s+(?:them|legit\w*|genuine|real)|"
-    r"(?:is|was|looks\s+like|seems\s+like)\s+(?:a\s+)?(?:scam|phish\w*|fake|spoof\w*)|phishing|"
+    r"(?:is|was|looks\s+like|seems\s+like)\s+(?:a\s+)?(?:scam|phish\w*|fake|spoof\w*)|"
+    r"(?<!not )(?<!n't )(?<!not a )(?<!no )phishing|"
     r"blocked\s+(?:the|this)\s+sender|reported\s+(?:it|this|the\s+sender))\b",
     re.I,
 )
 GIFT_RE = re.compile(
     r"(?:\b(?:(?:itunes|apple|google\s+play|steam|amazon|visa|target|walmart|ebay|best\s*buy)\s+)?gift\s*-?\s*cards?\b|"
-    r"\b(?:itunes|google\s+play|steam)\s+cards?\b)(?![^.\n]{0,40}\b(?:program|policy|balance)\b)",
+    r"\b(?:itunes|google\s+play|steam)\s+cards?\b)",
     re.I,
 )
+# "Our gift card program", "the gift card policy", "your gift card balance": not an ask by themselves.
+GIFT_PROGRAM_RE = re.compile(r"[^.\n]{0,40}\b(?:program|policy|balance)\b", re.I)
+# ...unless it is asked to buy those cards: the buying word comes just before the mention, in the same part of
+# the sentence, and is not "do not purchase" or a "purchase order" ("buy 10 Amazon gift cards for our program")...
+GIFT_BUY_BEFORE_RE = re.compile(
+    r"(?<!not )(?<!n't )(?<!never )\b(?:buy|purchase(?!\s+orders?\b)|pick\s+up|grab)\b[^.?!;:\n]{0,40}$", re.I
+)
+# ...or the sentence asks for their codes.
+GIFT_SEND_CODES_RE = re.compile(r"(?<!not )(?<!n't )(?<!never )\bsend\b[^.\n]{0,40}\b(?:codes?|card\s+numbers|pins?)\b", re.I)
 # Gift cards only count when someone is asked to get them or hand over their codes.
 GIFT_ASK_RE = re.compile(
     r"\b(?:buy|purchase|pick\s+up|get\s+(?:me|us|some|them|a\s+few)|grab|send\s+(?:me|us)|need|scratch|codes?|card\s+numbers|pins?)\b",
@@ -174,16 +205,51 @@ class TrustContext:
     names: dict[str, str] = field(default_factory=dict)
     weights: dict[str, float] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        self.names = name_index(self.names)
+
+
+def name_key(name: str) -> str:
+    """A display name as the fraud check reads it: "José García" and "Jose Garcia", or "O’Brien" and
+    "O'Brien", are the same name."""
+    return " ".join(normalize_text(name or "").lower().split())
+
+
+def name_index(names: dict[str, str]) -> dict[str, str]:
+    """Display names seen from trusted domains, keyed the way the fraud check reads a sender's name."""
+    return {name_key(name): address for name, address in names.items() if name_key(name)}
+
 
 def domain_of(address: str) -> str:
     address = (address or "").strip().lower()
     return address.rsplit("@", 1)[1].strip(">. ") if "@" in address else ""
 
 
+@lru_cache(maxsize=4096)
+def canonical_domain(domain: str) -> str:
+    """One spelling of a domain, so "müller.de" and its punycode form "xn--mller-kva.de" are the same domain:
+    lower case, with each punycode label read as the letters it stands for."""
+    labels = []
+    for label in (domain or "").strip().lower().split("."):
+        if label.startswith("xn--"):
+            try:
+                label = label.encode("ascii").decode("idna")
+            except UnicodeError:
+                pass
+        labels.append(unicodedata.normalize("NFC", label))
+    return ".".join(labels)
+
+
+def same_or_under(domain: str, other: str) -> bool:
+    """``domain`` is ``other`` or one of its subdomains, however either is spelled (Unicode or punycode)."""
+    domain, other = canonical_domain(domain), canonical_domain(other)
+    return domain == other or domain.endswith("." + other)
+
+
 def domain_matches(domain: str, trusted: set[str] | list[str]) -> str:
     """The trusted entry covering ``domain`` (itself or a parent domain), or ""."""
     for item in trusted:
-        if domain == item or domain.endswith("." + item):
+        if same_or_under(domain, item):
             return item
     return ""
 
@@ -197,7 +263,7 @@ def trust_context(store: "Store", settings: "Settings") -> TrustContext:
             ctx.senders[row["value"]] = row["verdict"]
     ctx.fraud_domains -= ctx.domains
     ctx.known = dict(store.sender_domains(limit=200))
-    ctx.names = store.names_at_domains(ctx.domains)
+    ctx.names = name_index(store.names_at_domains(ctx.domains))
     ctx.weights = learned_weights(store)
     return ctx
 
@@ -224,21 +290,78 @@ def _asks(text: str) -> bool:
     return bool(PAYMENT_CHANGE_RE.search(text) or _gift_ask(text))
 
 
+def _requests(text: str) -> list[int]:
+    """Where in the text a bank change or gift cards are asked for."""
+    starts = [match.start() for match in PAYMENT_CHANGE_RE.finditer(text)]
+    return starts + [match.start() for match in _gift_asks(text)]
+
+
 def _is_notice(sentence: str) -> bool:
-    strong = STRONG_NOTICE_RE.search(sentence)
-    if strong:
-        # "If you receive an email saying our bank details have changed, call us" is a warning;
-        # "we will never ask for gift cards, but our bank details have changed" is a request.
-        return not _asks(sentence) or bool(PROTECTIVE_RE.search(STRONG_NOTICE_RE.sub(" ", sentence)))
+    if STRONG_NOTICE_RE.search(sentence):
+        # A warning covers the words after it, to the end of that part of the sentence:
+        # "if you receive an email saying our bank details have changed, call us" is a warning.
+        # A change asked for anywhere else is a request, whatever the sentence says after it:
+        # "our bank details have changed, pay the new account, and if you receive other instructions call us",
+        # "we will never ask for gift cards, but our bank details have changed".
+        requests = _requests(sentence)
+        if not requests:
+            return True
+        # Where each part of the sentence ends, found once for every warning in it.
+        cuts = list(CLAUSE_RE.finditer(sentence))
+        cut_starts = [cut.start() for cut in cuts]
+        markers = list(STRONG_NOTICE_RE.finditer(sentence))
+        scopes = []
+        for marker in markers:
+            after = bisect_left(cut_starts, marker.end())
+            scopes.append((marker.start(), cut_starts[after] if after < len(cuts) else len(sentence)))
+        inside = _spans_test(scopes)
+        # A later part of the sentence that reports what the hypothetical message says is still the warning:
+        # "if you receive an email from us, or anyone claiming to be us, saying our bank details have
+        # changed, please call us". Its reach ends where the sentence turns to what to do, or to a contrast.
+        turns = [cut.end() for cut in cuts if TURN_RE.match(sentence, cut.end())]
+        reports = list(REPORTING_RE.finditer(sentence))
+        report_starts = [report.start() for report in reports]
+        marker_ends = [marker.end() for marker in markers]
+
+        def reported(at: int) -> bool:
+            before = bisect_left(cut_starts, at)
+            part = cuts[before - 1].end() if before else 0
+            last = bisect_left(report_starts, at) - 1
+            if last < 0 or reports[last].start() < part or reports[last].end() > at:
+                return False
+            warning = bisect_right(marker_ends, part) - 1
+            if warning < 0:
+                return False
+            turn = bisect_left(turns, marker_ends[warning])
+            return not (turn < len(turns) and turns[turn] <= part)
+
+        return all(inside(at) or reported(at) for at in requests)
     # "Beware of scams" is a notice; "please be aware our bank details have changed" is not.
     return bool(WEAK_NOTICE_RE.search(sentence)) and not _asks(sentence)
+
+
+def _spans_test(spans: list[tuple[int, int]]):
+    """A test for whether a point falls inside one of the spans (start included, end not)."""
+    merged: list[list[int]] = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    starts = [start for start, _end in merged]
+
+    def inside(at: int) -> bool:
+        index = bisect_right(starts, at) - 1
+        return index >= 0 and at < merged[index][1]
+
+    return inside
 
 
 def strip_notices(text: str) -> str:
     """Drop anti-fraud notices ("we will never change our bank details by email") before looking for a request.
 
     Only warnings are dropped: a sentence that asserts a change ("please be aware our banking
-    details have changed") stays, whatever warning word it starts with.
+    details have changed") stays, whatever warning words it starts or ends with.
     """
     parts = re.split(r"(?<=[.!?])\s+|\n+", text or "")
     return " ".join(part for part in parts if not _is_notice(part))
@@ -246,12 +369,38 @@ def strip_notices(text: str) -> str:
 
 def _gift_ask(text: str) -> re.Match[str] | None:
     """A gift-card mention in a sentence that asks someone to buy them or send their codes."""
-    for match in GIFT_RE.finditer(text or ""):
-        start = max(text.rfind(".", 0, match.start()), text.rfind("\n", 0, match.start())) + 1
-        ends = [i for i in (text.find(".", match.end()), text.find("\n", match.end())) if i >= 0]
-        if GIFT_ASK_RE.search(text[start : min(ends) if ends else len(text)]):
-            return match
-    return None
+    found = _gift_asks(text)
+    return found[0] if found else None
+
+
+def _gift_asks(text: str) -> list[re.Match[str]]:
+    """Every gift-card mention in a sentence that asks someone to buy them or send their codes.
+
+    Each sentence is read once, however many mentions it has, so a long run of them stays quick.
+    """
+    mentions = list(GIFT_RE.finditer(text or ""))
+    if not mentions:
+        return []
+    stops = [stop.start() for stop in re.finditer(r"[.\n]", text)]
+    read: dict[tuple[int, int], tuple[bool, bool]] = {}
+    found = []
+    for match in mentions:
+        before = bisect_left(stops, match.start())
+        after = bisect_left(stops, match.end())
+        span = (stops[before - 1] + 1 if before else 0, stops[after] if after < len(stops) else len(text))
+        if span not in read:
+            sentence = text[span[0] : span[1]]
+            read[span] = (bool(GIFT_ASK_RE.search(sentence)), bool(GIFT_SEND_CODES_RE.search(sentence)))
+        asks, sends = read[span]
+        # "Buy 10 gift cards for our staff rewards program and send me the codes" is still an ask; "thank you for
+        # your gift card program purchase" and "our gift card policy: do not purchase them" are not.
+        if GIFT_PROGRAM_RE.match(text, match.end()) and not sends:
+            lead = text[max(span[0], match.start() - 60) : match.start()]
+            if not GIFT_BUY_BEFORE_RE.search(lead):
+                continue
+        if asks:
+            found.append(match)
+    return found
 
 
 def assess(
@@ -265,10 +414,17 @@ def assess(
     attachments: list[tuple[str, str]] | None = None,
     history: int = 0,
     flags: list[str] | tuple[str, ...] = (),
+    domain_history: int = 0,
 ) -> FraudCheck:
+    """``history`` counts earlier mail from this address, ``domain_history`` earlier mail from its domain."""
     sender = (sender_email or "").strip().lower()
     domain = domain_of(sender)
     signals: list[Signal] = []
+    # A zero-width space, an empty <span> or a Cyrillic "a" inside "bank" still reads as "bank". What the
+    # user is shown as evidence is quoted from the email as written.
+    evidence = _Evidence(subject, body)
+    shown_name = sender_name
+    subject, body, sender_name = normalize_text(subject), normalize_text(body), normalize_text(sender_name)
 
     def add(key: str, detail: str = "") -> None:
         points = POINTS[key]
@@ -276,7 +432,9 @@ def assess(
             points = round(points * ctx.weights.get(key, 1.0))
         signals.append(Signal(key, points, detail))
 
-    is_reply = bool(REPLY_PREFIX_RE.match(subject or ""))
+    # A reply's subject repeats the thread it answers, so it is left out of the sender's own words, but
+    # only when the body quotes that thread. "RE:" over a body with no quote is just a subject line.
+    is_reply = bool(REPLY_PREFIX_RE.match(subject or "")) and bool(QUOTE_START_RE.search(body or ""))
     mine = strip_notices(own_words(body))
     own = mine if is_reply else f"{subject or ''}. {mine}"
     everything = strip_notices(f"{subject or ''}\n{body or ''}")
@@ -291,28 +449,28 @@ def assess(
         text = own_full
         match = PAYMENT_CHANGE_RE.search(own_full)
     if match:
-        add("bank_change", _quote(text, match))
+        add("bank_change", evidence.quote(text, match))
     else:
         quoted = PAYMENT_CHANGE_RE.search(everything)
         if quoted:
-            add("bank_change_quoted", _quote(everything, quoted))
+            add("bank_change_quoted", evidence.quote(everything, quoted))
         for filename, text in attachments or []:
-            hit = PAYMENT_CHANGE_RE.search(strip_notices((text or "")[:60_000]))
+            hit = PAYMENT_CHANGE_RE.search(strip_notices(normalize_text((text or "")[:60_000])))
             if hit:
                 add("bank_change_attachment", filename)
                 break
     gift = _gift_ask(own) or _gift_ask(own_full)
     if gift:
-        add("gift_cards", _quote(gift.string, gift))
+        add("gift_cards", evidence.quote(gift.string, gift))
     account = ACCOUNT_RE.search(own)
     if account:
-        add("account_numbers", _quote(own, account))
+        add("account_numbers", evidence.quote(own, account))
     ask = PAYMENT_ASK_RE.search(own)
     if ask:
-        add("payment_request", _quote(own, ask))
+        add("payment_request", evidence.quote(own, ask))
     pressure = PRESSURE_RE.search(own)
     if pressure:
-        add("pressure", pressure.group(0))
+        add("pressure", evidence.words(pressure.group(0)))
     if "model_said_bank_change" in flags:
         add("model_said_bank_change")
 
@@ -326,23 +484,27 @@ def assess(
     if (
         reply_domain
         and domain
-        and reply_domain != domain
-        and not reply_domain.endswith("." + domain)
-        and not domain.endswith("." + reply_domain)
+        and not same_or_under(reply_domain, domain)
+        and not same_or_under(domain, reply_domain)
         and not domain_matches(reply_domain, ctx.domains)
     ):
         add("reply_to_mismatch", reply_to.lower())
 
     trusted_domain = domain_matches(domain, ctx.domains) if domain else ""
     if domain and not trusted_domain:
-        look = _lookalike(domain, ctx)
+        look = _lookalike(domain, ctx, established=domain_history > 0)
         if look:
             add("lookalike_domain", f"{domain} looks like {look}")
-    spoof = _display_name_spoof(sender_name, sender, domain, trusted_domain, ctx)
+    spoof = _display_name_spoof(sender_name, sender, domain, trusted_domain, ctx, shown=shown_name)
     if spoof:
         add("display_name_spoof", spoof)
 
-    if any(needle in sender for needle in AUTOMATED_SENDERS):
+    # Machine mail ("no-reply@") rarely asks for anything, but anyone can pick that address on a domain of
+    # their own. So it counts only from a sender you have mail from or a domain you trust, and never
+    # against bank-change wording.
+    keys = {item.key for item in signals}
+    familiar = history > 0 or bool(trusted_domain)
+    if any(needle in sender for needle in AUTOMATED_SENDERS) and familiar and not keys & ({"bank_change"} | SOFT_BANK):
         add("automated_sender")
     verdict_for_sender = ctx.senders.get(sender, "")
     reported = verdict_for_sender == "fraud" or (domain and domain_matches(domain, ctx.fraud_domains))
@@ -371,9 +533,11 @@ def assess(
         level = "high"
     elif score >= CAUTION_AT and keys & CONTEXT:
         level = "caution"
-    elif "bank_change_quoted" in keys and not trust and not DISAVOW_RE.search(mine):
-        # Bank-change wording below a quote marker ("From:", ">") can be a forged thread.
-        # Only a colleague saying it was fake ("it was not them") keeps it quiet.
+    elif "bank_change_quoted" in keys and not (trust and DISAVOW_RE.search(mine)):
+        # Bank-change wording below a quote marker ("From:", ">") can be a forged thread, and a
+        # colleague forwarding a vendor's change still needs a phone call before anyone pays.
+        # Only someone you trust saying it was fake ("it was not them") keeps it quiet: anyone
+        # can write "this is not phishing" above a forged thread.
         level = "caution"
     else:
         level = "none"
@@ -391,6 +555,7 @@ def assess_email(store: "Store", ctx: TrustContext, email: "EmailRecord") -> Fra
         attachments=[(att.filename, att.extracted_text) for att in email.attachments],
         history=store.sender_history(email.sender_email, exclude=email.id),
         flags=email.flags,
+        domain_history=store.domain_history(domain_of(email.sender_email), exclude=email.id),
     )
 
 
@@ -590,41 +755,58 @@ def _cell(value) -> str:
     return "'" + text if text[:1] in {"=", "+", "-", "@", "\t", "\r"} else text
 
 
-def _lookalike(domain: str, ctx: TrustContext) -> str:
+def _lookalike(domain: str, ctx: TrustContext, *, established: bool = False) -> str:
+    """The trusted or frequent domain this one passes for, or "".
+
+    ``established``: you already have mail from this domain. Then being one letter off another name is not
+    a sign by itself: with "pnc.com" trusted, your auditor at "pwc.com", or "usps.com" next to "ups.com", is
+    a real company of its own. Domains that read the same ("tаz.com" with a Cyrillic "а") still count.
+    """
     mine = ctx.known.get(domain, 0)
     candidates = [(item, True) for item in ctx.domains] + [
         (item, False) for item, count in ctx.known.items() if count > max(mine, 1)
     ]
+    shown = _skeleton(domain)
+    tokens = re.split(r"[.-]", shown.rsplit(".", 1)[0])
     for other, trusted in candidates:
-        if other == domain or domain.endswith("." + other) or other.endswith("." + domain):
+        if same_or_under(domain, other) or same_or_under(other, domain):
             continue
-        if _skeleton(domain) == _skeleton(other):
+        theirs = _skeleton(other)
+        if shown == theirs:
             return other
-        limit = 2 if len(other) >= 10 else 1
-        if len(other.split(".")[0]) >= 4 and _distance(domain, other, limit) <= limit:
-            return other
+        # One letter off a name you trust ("tax.com", "tazz.com", "t4z.com" for "taz.com"). A domain you
+        # merely hear from a lot needs a longer name, so "pwc.com" is not taken for "pnc.com".
         label = other.split(".")[0]
-        tokens = re.split(r"[.-]", domain.rsplit(".", 1)[0])
-        if trusted and len(label) >= 3 and label in tokens:
+        limit = 2 if len(other) >= 10 else 1
+        if not established and len(label) >= (3 if trusted else 4) and _distance(shown, theirs, limit) <= limit:
+            return other
+        # A trusted name inside another domain ("taz-payments.net"), both read the same way.
+        if trusted and len(label) >= 3 and theirs.split(".")[0] in tokens:
             return other
     return ""
 
 
-def _display_name_spoof(name: str, sender: str, domain: str, trusted_domain: str, ctx: TrustContext) -> str:
+def _display_name_spoof(name: str, sender: str, domain: str, trusted_domain: str, ctx: TrustContext, *,
+                        shown: str = "") -> str:
+    """``name`` is the display name as the rules read it, ``shown`` as written (for the message)."""
     name = (name or "").strip()
+    shown = (shown or name).strip()
     embedded = EMBEDDED_ADDRESS_RE.search(name)
     if embedded and embedded.group(0).lower() != sender:
-        return f"name shows {embedded.group(0).lower()}"
+        written = EMBEDDED_ADDRESS_RE.search(shown)
+        return f"name shows {(written or embedded).group(0).lower()}"
     if trusted_domain or not domain:
         return ""
-    seen = ctx.names.get(name.lower())
-    if seen and domain_of(seen) != domain and len(name) >= 5:
-        return f"“{name}” usually writes from {seen}"
+    seen = ctx.names.get(name_key(name))
+    if seen and not same_or_under(domain_of(seen), domain) and len(name) >= 5:
+        return f"“{shown}” usually writes from {seen}"
     return ""
 
 
 def _skeleton(domain: str) -> str:
-    text = domain.lower()
+    """How a domain reads on screen: punycode labels ("xn--tz-7kc") decoded, Cyrillic, Greek and full-width
+    look-alike letters read as Latin, and pairs that pass for one another ("rn" and "m", "0" and "o") made the same."""
+    text = normalize_text(canonical_domain(domain)).lower()
     for old, new in _HOMOGLYPHS:
         text = text.replace(old, new)
     return text
@@ -645,9 +827,50 @@ def _distance(a: str, b: str, limit: int) -> int:
 
 
 def _quote(text: str, match: re.Match[str]) -> str:
-    start = max(0, match.start() - 40)
-    snippet = " ".join(text[start : match.end() + 40].split())
-    return ("…" if start else "") + snippet[:160]
+    return _snippet(text, match.start(), match.end())
+
+
+def _snippet(text: str, start: int, end: int) -> str:
+    begin = max(0, start - 40)
+    snippet = " ".join(text[begin : end + 40].split())
+    return ("…" if begin else "") + snippet[:160]
+
+
+class _Evidence:
+    """Quotes for the fraud panel, taken from the subject and body as written.
+
+    The rules read a normalized copy (accents dropped, look-alike letters read as Latin, "¹" as "1"), which
+    must not change the figures, names or disguised letters the user is shown. A phrase found in that copy
+    is looked up again in the normalized whole and mapped back to the characters it came from.
+    """
+
+    def __init__(self, subject: str, body: str):
+        # Subject and body read as one text, joined the way the rules join them ("Subject. Body").
+        self.text = f"{subject}. {body or ''}" if subject else body or ""
+        self._read: tuple[str, list[int], list[int]] | None = None
+
+    def _span(self, found: str) -> tuple[int, int] | None:
+        # The quote shows at most 160 characters, so the start of a long match is enough to place it.
+        words = found[:200].split()
+        if len(found) > 200 and len(words) > 1:
+            words.pop()
+        if not words:
+            return None
+        if self._read is None:
+            self._read = normalize_with_spans(self.text)
+        normalized, starts, ends = self._read
+        hit = re.search(r"\s+".join(map(re.escape, words)), normalized)
+        if hit is None:
+            return None
+        return starts[hit.start()], ends[hit.end() - 1]
+
+    def quote(self, text: str, match: re.Match[str]) -> str:
+        span = self._span(match.group(0))
+        return _snippet(self.text, *span) if span else _quote(text, match)
+
+    def words(self, found: str) -> str:
+        span = self._span(found)
+        return self.text[span[0] : span[1]] if span else found
 
 
 def _stamp(now: datetime | None) -> str:

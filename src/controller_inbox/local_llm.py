@@ -227,6 +227,8 @@ class EmptyReply(RuntimeError):
 THINKING_ROOM = 2048
 THINKING_TIMEOUT = 300.0
 _RETRYABLE = {400, 404, 415, 422, 500, 501}
+# A server that refuses a parameter says so with one of these; a 500 or 404 can be a busy or reloading server.
+_REFUSES = {400, 415, 422, 501}
 _reasoning_seen: set[str] = set()
 _effort_rejected: set[str] = set()
 
@@ -289,6 +291,18 @@ def reasoning_effort(settings: Settings, model: str) -> str | None:
     return None
 
 
+def thinking_effort(settings: Settings, model: str) -> str | None:
+    """The lightest ``reasoning_effort`` that turns thinking on, for a short call worth thinking through, or
+    None to leave the model's own setting (a model that thinks by default goes on thinking)."""
+    if model in _effort_rejected:
+        return None
+    status = check_model(settings)
+    options = status.reasoning if status.model == model else []
+    if "low" in options or "on" in options:
+        return "low"
+    return next((level for level in ("medium", "high") if level in options), None)
+
+
 def _thinks(settings: Settings, model: str, effort: str | None) -> bool:
     """Whether replies need room for thinking. Models like DeepSeek-R1 only allow ``on``."""
     status = check_model(settings)
@@ -313,7 +327,9 @@ def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> 
         effort = payload.pop("reasoning_effort")
         retry = post(url, json=payload, headers=_headers(settings), **options)
         if retry.status_code < 400:
-            _effort_rejected.add(str(payload.get("model")))
+            # Remembered only when the server said no to the request itself, not when it was busy for a moment.
+            if response.status_code in _REFUSES:
+                _effort_rejected.add(str(payload.get("model")))
             return retry
         payload["reasoning_effort"] = effort
     return response
@@ -517,8 +533,13 @@ _THINK_RE = re.compile(r"<think>.*?(?:</think>|\Z)", re.S)
 
 
 def strip_thinking(text: str) -> str:
-    """Reasoning models (Qwen3, DeepSeek-R1) put their scratch work in <think> tags."""
-    return _THINK_RE.sub("", text or "").strip()
+    """Reasoning models (Qwen3, DeepSeek-R1) put their scratch work in <think> tags. A template that opens the
+    tag in the prompt leaves only its close in the reply: everything before a "</think>" with no "<think>"
+    before it is reasoning too."""
+    text = text or ""
+    if _THINK_CLOSE in text and _THINK_OPEN not in text.split(_THINK_CLOSE, 1)[0]:
+        text = text.split(_THINK_CLOSE, 1)[1]
+    return _THINK_RE.sub("", text).strip()
 
 
 class ThinkFilter:
@@ -565,10 +586,11 @@ class ThinkFilter:
         return text
 
 
-def _chat_plan(settings: Settings, max_tokens: int) -> tuple[str, str | None, int]:
-    """Model, reasoning effort, and token budget for a chat or draft request."""
+def _chat_plan(settings: Settings, max_tokens: int, *, think: bool = False) -> tuple[str, str | None, int]:
+    """Model, reasoning effort, and token budget for a chat or draft request. ``think``: let a model that can
+    think do so, with room for it, instead of turning thinking down."""
     model = check_model(settings).model or settings.llm_model
-    effort = reasoning_effort(settings, model)
+    effort = thinking_effort(settings, model) if think else reasoning_effort(settings, model)
     return model, effort, max(max_tokens, THINKING_ROOM) if _thinks(settings, model, effort) else max_tokens
 
 
@@ -589,11 +611,16 @@ def _retry_plan(model: str, effort: str | None, budget: int, reply: Reply) -> tu
     return new_effort, new_budget
 
 
-def complete_text(settings: Settings, messages: list[dict], *, max_tokens: int = 400) -> str:
-    """One plain-text answer. Raises ``httpx.HTTPError`` or ``EmptyReply`` when there is none."""
-    model, effort, budget = _chat_plan(settings, max_tokens)
+def complete_text(
+    settings: Settings, messages: list[dict], *, max_tokens: int = 400, temperature: float | None = None, think: bool = False
+) -> str:
+    """One plain-text answer. Raises ``httpx.HTTPError`` or ``EmptyReply`` when there is none. ``temperature``:
+    other than the usual 0.2, for a second, differently worded try; ``think``: see ``_chat_plan``."""
+    model, effort, budget = _chat_plan(settings, max_tokens, think=think)
     for _attempt in range(2):
         url, payload = _chat_request(settings, messages, budget, stream=False)
+        if temperature is not None:
+            payload["temperature"] = temperature
         if effort:
             payload["reasoning_effort"] = effort
         response = _post_chat(httpx.post, url, payload, settings, timeout=_timeout(settings, budget))
@@ -644,6 +671,7 @@ def _stream_once(
     with httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
         if effort and response.status_code in _RETRYABLE:
             rejected = True
+            refused = response.status_code in _REFUSES
         else:
             rejected = False
             if response.status_code >= 400:
@@ -653,7 +681,8 @@ def _stream_once(
                 _effort_rejected.add(rejected_effort)
             yield from _stream_pieces(response, reply)
     if rejected:
-        yield from _stream_once(settings, messages, budget, None, reply, rejected_effort=str(payload.get("model")))
+        # Only a refusal is remembered; a busy server (500) is just tried again without the effort.
+        yield from _stream_once(settings, messages, budget, None, reply, rejected_effort=str(payload.get("model")) if refused else "")
 
 
 def _stream_pieces(response: httpx.Response, reply: Reply):
@@ -812,10 +841,13 @@ def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict],
         if effort:
             payload["reasoning_effort"] = effort
         response = _post_chat(httpx.post, url, payload, settings, timeout=_timeout(settings, budget))
-        if response.status_code in {400, 404, 415, 422, 500, 501} and re.search(r"\btools?\b|function", response.text[:600], re.I):
-            if not _OVERFLOW_RE.search(response.text[:600]):
+        text = response.text[:600]
+        if response.status_code in _RETRYABLE and re.search(r"\btools?\b|function", text, re.I) and not _OVERFLOW_RE.search(text):
+            # This question goes on without tools. The model is only remembered as having none when the server
+            # refused them; a tool call the model wrote badly ("error parsing tool call") is a one-off.
+            if response.status_code in _REFUSES and not re.search(r"\bpars(?:e|ing)\b|invalid json|malformed", text, re.I):
                 _tools_rejected.add(model)
-                raise ToolsUnsupported(" ".join(response.text.split())[:200])
+            raise ToolsUnsupported(" ".join(text.split())[:200])
         _raise_for(response)
         try:
             data = response.json()
@@ -859,14 +891,6 @@ def _tool_reply(data) -> ToolReply:
                 calls.append({"id": f"call_{index}", "name": str(parsed["name"]), "arguments": arguments})
         content = _TEXT_CALL_RE.sub("", content).strip() if calls else content
     return ToolReply(content=content, calls=calls, reasoning=base.reasoning, finish=base.finish)
-
-
-def read_packet(settings: Settings, packet: dict) -> dict | None:
-    """One-off read. Runs that read many messages should share a LocalReader."""
-    if not llm_active(settings):
-        return None
-    with LocalReader(settings, model=check_model(settings).model or None) as reader:
-        return reader.read(packet)
 
 
 def build_prompt(packet: dict, *, budget: int = 6000) -> str:

@@ -63,6 +63,36 @@ def test_a_formula_can_be_traced_back_to_its_inputs_across_sheets():
     assert "    Budget!D2 ← =C2-B2" in trace
 
 
+def test_a_trace_skips_other_workbooks_function_names_and_text_and_reads_only_cells_in_use(monkeypatch):
+    from openpyxl.styles import Font
+    from openpyxl.worksheet.worksheet import Worksheet
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Sheet1"
+    sheet["B2"] = 999  # shares its address with the cell in the other workbook
+    sheet["A1"] = "=[1]Sheet1!B2*2"
+    sheet["A2"] = '=IF(C1>0,"Q1 plan","Q2 plan")'
+    sheet["A3"] = "=LOG10(C1)+ATAN2(C1,C2)"
+    sheet["A4"] = "=VLOOKUP(5,Data!$A$1:$Z$65536,2,FALSE)"
+    sheet["C1"], sheet["C2"] = 5, 7
+    data = book.create_sheet("Data")
+    for row in range(1, 50):
+        data.append([row, row * 10])
+    data.cell(1048576, 1).font = Font(bold=True)  # formatted to the bottom of the sheet
+    out = io.BytesIO()
+    book.save(out)
+    made = []
+    real = Worksheet.cell
+    monkeypatch.setattr(Worksheet, "cell", lambda self, *args, **kwargs: made.append(1) or real(self, *args, **kwargs))
+    assert trace_cell(out.getvalue(), "Sheet1", "A1").splitlines() == ["Sheet1!A1 ← =[1]Sheet1!B2*2", "  [1]Sheet1!B2: in another workbook, not in this file"]
+    assert trace_cell(out.getvalue(), "Sheet1", "A2").splitlines()[1:] == ["  Sheet1!C1 = 5"]
+    assert trace_cell(out.getvalue(), "Sheet1", "A3").splitlines()[1:] == ["  Sheet1!C1 = 5", "  Sheet1!C2 = 7"]
+    assert trace_cell(out.getvalue(), "Sheet1", "A4").splitlines()[1] == "  Data!A1:Z65536: 98 filled cells, 98 numbers adding to 13,475"
+    assert read_cells(out.getvalue(), "Data", "A48:B1048576").splitlines()[1:] == ["A48: 48 | B48: 480", "A49: 49 | B49: 490"]
+    assert len(made) < 1000, "a cell was made for every empty address in the range"
+
+
 def test_reading_a_range_shows_values_and_formulas():
     cells = read_cells(_budget(), "Budget", "A3:D4")
     assert cells.splitlines() == [
@@ -139,6 +169,82 @@ def test_csv_reads_like_a_sheet():
     assert pairs[1:] == ["A1: Amount due | B1: 12480.00", "A2: Paid | B2: 0"], "a list of values isn't a header"
 
 
+def test_a_file_called_a_workbook_is_read_as_what_it_is():
+    # Windows sends every .csv as application/vnd.ms-excel; only a real 97-2003 workbook goes to xlrd.
+    data = b'Vendor,Invoice,Amount\nAcme,INV-1001,"1,250.00"\nGlobex,INV-1002,980.00\n'
+    lines = extract_text_from_bytes("payments.csv", "application/vnd.ms-excel", data).splitlines()
+    assert lines[0] == '[sheet "payments.csv" A1:C3]'
+    assert lines[2] == "A2 (Vendor): Acme | B2 (Invoice): INV-1001 | C2 (Amount): 1,250.00"
+    page = (
+        b'<html xmlns:o="urn:schemas-microsoft-com:office:office"><head><style>td {color: red}</style></head><body>'
+        b"<table><tr><th>Vendor</th><th>Invoice</th><th>Amount</th></tr>"
+        b"<tr><td>Acme &amp; Sons</td><td>INV-1001</td><td>1,250.00</td></tr>"
+        b"<tr><td colspan=2>Total</td><td>1,250.00</td></tr></table></body></html>"
+    )
+    lines = extract_text_from_bytes("export.xls", "application/vnd.ms-excel", page).splitlines()
+    assert lines[2:] == [
+        "A2 (Vendor): Acme & Sons | B2 (Invoice): INV-1001 | C2 (Amount): 1,250.00",
+        "A3 (Vendor): Total | B3 (Invoice): not listed | C3 (Amount): 1,250.00",
+    ]
+    xml = (
+        b'<?xml version="1.0"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" '
+        b'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="AP"><Table>'
+        b'<Row><Cell><Data ss:Type="String">Vendor</Data></Cell><Cell><Data ss:Type="String">Invoice</Data></Cell>'
+        b'<Cell><Data ss:Type="String">Amount</Data></Cell></Row>'
+        b'<Row><Cell><Data ss:Type="String">Acme</Data></Cell><Cell ss:Index="3"><Data ss:Type="Number">1250</Data></Cell></Row>'
+        b"</Table></Worksheet></Workbook>"
+    )
+    assert "A2 (Vendor): Acme | B2 (Invoice): not listed | C2 (Amount): 1250" in extract_text_from_bytes("export.xls", "", xml)
+    renamed = extract_text_from_bytes("budget.xls", "application/vnd.ms-excel", _budget())
+    assert "A2 (Line): Ads | B2 (Q3): 1,000" in renamed
+
+
+def test_excel_97_errors_and_yes_no_cells_are_not_read_as_figures():
+    import xlrd
+    from xlrd.sheet import Cell
+
+    from controller_inbox.documents import _fmt, _xls_value
+
+    def shown(ctype: int, value) -> str:
+        return _fmt(_xls_value(Cell(ctype, value), 0))
+
+    assert shown(xlrd.XL_CELL_ERROR, 0x2A) == "#N/A" and shown(xlrd.XL_CELL_ERROR, 0x07) == "#DIV/0!"
+    assert shown(xlrd.XL_CELL_BOOLEAN, 1) == "TRUE" and shown(xlrd.XL_CELL_BOOLEAN, 0) == "FALSE"
+    assert shown(xlrd.XL_CELL_NUMBER, 42.0) == "42" and shown(xlrd.XL_CELL_DATE, 46295.0) == "2026-09-30"
+
+
+def test_a_csv_quote_that_never_closes_does_not_swallow_the_file():
+    from controller_inbox.documents import csv_text
+
+    for repeat in (2, 12_000):  # past 128 KB the csv module raises instead
+        data = 'Item,Qty,Price\n"Monitor 27,1,249.99\n' + "Cable,5,9.99\n" * repeat + 'Desk,"1",120.00\n'
+        lines = csv_text(data.encode(), "order.csv").splitlines()
+        assert lines[0] == f'[sheet "order.csv" A1:C{repeat + 3}]'
+        assert lines[2:4] == ['A2 (Item): "Monitor 27 | B2 (Qty): 1 | C2 (Price): 249.99', "A3 (Item): Cable | B3 (Qty): 5 | C3 (Price): 9.99"]
+        assert lines[-1] == ("A5 (Item): Desk | B5 (Qty): 1 | C5 (Price): 120.00" if repeat == 2 else "[11003 more rows not shown.]")
+    closed = csv_text(b'Item,Note,Price\nDesk,"two\nlines",120.00\nLamp,"one, with a comma",30.00\n', "order.csv")
+    assert "B2 (Note): two lines" in closed and "B3 (Note): one, with a comma" in closed
+    # The stray quote closes further on at a quote that ends a cell ('TV 55"'): still a stray quote.
+    late = 'Item,Qty,Price\n"Monitor 27,1,249.99\n' + "Cable,5,9.99\n" * 8 + 'TV 55",1,499.00\nDesk,1,120.00\n'
+    assert "A12 (Item): Desk | B12 (Qty): 1 | C12 (Price): 120.00" in csv_text(late.encode(), "order.csv")
+
+
+def test_a_csv_address_on_several_lines_in_its_quotes_is_one_cell():
+    # A vendor list's remit-to addresses: each line of an address has a comma, as many as the file's rows do.
+    from controller_inbox.documents import csv_text
+
+    data = (
+        b'Vendor,Remit To\nHarbor Steel LLC,"PO Box 1200\nSuite 4, Building B\nSpringfield, IL 62701"\n'
+        b'Acme Supply,"18 Main St\nFloor 2, Unit 9\nDayton, OH 45402"\n'
+    )
+    assert csv_text(data, "vendors.csv").splitlines() == [
+        '[sheet "vendors.csv" A1:B3]',
+        "A1: Vendor | B1: Remit To",
+        "A2 (Vendor): Harbor Steel LLC | B2 (Remit To): PO Box 1200 Suite 4, Building B Springfield, IL 62701",
+        "A3 (Vendor): Acme Supply | B3 (Remit To): 18 Main St Floor 2, Unit 9 Dayton, OH 45402",
+    ]
+
+
 def test_a_csv_of_names_only_still_names_its_columns():
     data = "Employee,Department,Manager\nJonathan Reyes,,Priya Raman\nLi Wei,Finance,Dana Cole\n"
     lines = extract_text_from_bytes("staff.csv", "text/csv", data.encode()).splitlines()
@@ -200,6 +306,40 @@ def test_a_citation_finds_its_section_and_cell():
     assert locate(pages, "page 4") is None and locate(pages, "") is None
 
 
+def _text_box(*lines: str):
+    """A run holding a text box the way Word 2010 and later save it: as a drawing, then again as VML for older Word."""
+    from docx.oxml import parse_xml
+
+    box = "".join(f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>" for line in lines)
+    return parse_xml(
+        '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
+        'xmlns:v="urn:schemas-microsoft-com:vml"><mc:AlternateContent>'
+        '<mc:Choice Requires="wps"><w:drawing><wp:anchor><a:graphic><a:graphicData><wps:wsp><wps:txbx>'
+        f"<w:txbxContent>{box}</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>"
+        f"<mc:Fallback><w:pict><v:shape><v:textbox><w:txbxContent>{box}</w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback>"
+        "</mc:AlternateContent></w:r>"
+    )
+
+
+def test_a_word_text_box_is_read_once_a_line_at_a_time():
+    document = Document()
+    document.add_paragraph("Invoice INV-2001")
+    document.add_paragraph("See box").runs[0]._r.addnext(_text_box("Bill To:", "Acme Corp", "Amount due: $4,500.00"))
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Remit to"
+    table.cell(0, 1).paragraphs[0]._p.append(_text_box("First Bank", "Account ending 4471"))
+    out = io.BytesIO()
+    document.save(out)
+    text = extract_text_from_bytes("invoice.docx", "", out.getvalue())
+    assert "See box\nBill To:\nAcme Corp\nAmount due: $4,500.00\n" in text
+    assert text.count("Acme Corp") == 1 and text.count("First Bank") == 1
+    assert "Remit to | First Bank Account ending 4471" in text
+
+
 def test_word_table_with_a_header_row_merged_cells_and_blanks():
     document = Document()
     table = document.add_table(rows=6, cols=4)
@@ -220,6 +360,53 @@ def test_word_table_with_a_header_row_merged_cells_and_blanks():
     assert "Employee: Sofia Rossi | Department: Operations | Manager: Priya Raman | Start date: not listed" in lines
     assert lines.index("Contractors") == lines.index("Employee: Omar Haddad | Department: Finance | Manager: not listed | Start date: 2026-01-05") - 1
     assert lines[-1] == "After the table."
+
+
+def test_a_word_row_that_starts_further_right_keeps_its_figures_in_their_columns(monkeypatch):
+    from controller_inbox import tables
+
+    document = Document()
+    table = document.add_table(rows=0, cols=4)
+    for values in (["Description", "Q1", "Q2", "Q3"], ["Rent", "3,000", "3,100", "3,200"], ["Total", "3,450", "3,570", "3,720"], ["Notes", "", "", ""]):
+        for cell, value in zip(table.add_row().cells, values):
+            cell.text = value
+    total = table.rows[2]._tr
+    total.remove(total.tc_lst[0])
+    skipped = OxmlElement("w:gridBefore")
+    skipped.set(qn("w:val"), "1")
+    total.get_or_add_trPr().append(skipped)
+    # A span with no width is one column; one wider than Word allows is cut to Word's 63.
+    table.rows[1]._tr.tc_lst[0].get_or_add_tcPr().append(OxmlElement("w:gridSpan"))
+    notes = table.rows[3]._tr
+    for cell in notes.tc_lst[1:]:
+        notes.remove(cell)
+    wide = OxmlElement("w:gridSpan")
+    wide.set(qn("w:val"), "99999")
+    notes.tc_lst[0].get_or_add_tcPr().append(wide)
+    widths = []
+    real = tables.table_lines
+    monkeypatch.setattr(tables, "table_lines", lambda grid, **kw: widths.append(max(map(len, grid))) or real(grid, **kw))
+    out = io.BytesIO()
+    document.save(out)
+    lines = extract_text_from_bytes("budget.docx", "", out.getvalue()).splitlines()
+    assert "Description: Rent | Q1: 3,000 | Q2: 3,100 | Q3: 3,200" in lines
+    assert "Description: not listed | Q1: 3,450 | Q2: 3,570 | Q3: 3,720" in lines
+    assert "Notes" in lines and widths == [63]
+
+
+def test_a_lone_figure_in_a_table_row_keeps_its_column():
+    from controller_inbox.tables import labelled_row
+
+    document = Document()
+    table = document.add_table(rows=0, cols=4)
+    for values in (["Description", "Q1", "Q2", "Q3"], ["Rent", "3,000", "3,000", "3,000"], ["Utilities", "450", "", "520"], ["", "", "", "12,970"]):
+        for cell, value in zip(table.add_row().cells, values):
+            cell.text = value
+    out = io.BytesIO()
+    document.save(out)
+    lines = extract_text_from_bytes("costs.docx", "", out.getvalue()).splitlines()
+    assert lines[-1] == "Description: not listed | Q1: not listed | Q2: not listed | Q3: 12,970"
+    assert labelled_row(["Employee", "Department", "Manager"], ["Contractors", "", ""]) == "Contractors"
 
 
 def test_powerpoint_table_rows_name_their_columns():
@@ -287,6 +474,32 @@ def test_compare_columns_ranks_each_row_and_keeps_totals_apart():
     assert "saved without values" in compare_columns(_budget(), "Budget", "Change", "D")
 
 
+def test_percentages_and_months_read_as_the_sheet_shows_them():
+    from datetime import datetime
+
+    from openpyxl.styles import Font
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Fees"
+    sheet.append(["Line", datetime(2026, 3, 1), datetime(2026, 4, 1), "Rate", "Paid"])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    sheet["B1"].number_format, sheet["C1"].number_format = "mmm-yy", '[$-409]mmm\\-yy;@'
+    sheet.append(["Rent", 3000, 3100, 0.15, datetime(2026, 3, 15)])
+    sheet.append(["Fees", 400, 410, 0.0525, datetime(2026, 4, 2)])
+    sheet.append(["Period", datetime(2026, 9, 1)])
+    sheet["D2"].number_format, sheet["D3"].number_format, sheet["E2"].number_format = "0%", '0.00%;[Red]-0.00%', "d-mmm-yy"
+    sheet["B4"].number_format = 'mmmm" "yyyy'
+    out = io.BytesIO()
+    book.save(out)
+    lines = extract_text_from_bytes("fees.xlsx", "", out.getvalue()).splitlines()
+    assert "A1: Line | B1: Mar-26 | C1: Apr-26 | D1: Rate | E1: Paid" in lines
+    assert "A2 (Line): Rent | B2 (Mar-26): 3,000 | C2 (Apr-26): 3,100 | D2 (Rate): 15% | E2 (Paid): 2026-03-15" in lines
+    assert "A3 (Line): Fees | B3 (Mar-26): 400 | C3 (Apr-26): 410 | D3 (Rate): 5.25% | E3 (Paid): 2026-04-02" in lines
+    assert "A4 (Line): Period | B4 (Mar-26): September 2026" in lines
+
+
 def test_big_sheets_are_cut_into_row_ranges():
     book = Workbook()
     sheet = book.active
@@ -302,6 +515,38 @@ def test_big_sheets_are_cut_into_row_ranges():
     last = split_parts(text)[-1]
     assert "A300: Line 300" in last.text
     assert read_part(text, "Ledger").label == labels[1]
+
+
+def _rewritten(data: bytes, member: str, change) -> bytes:
+    """An Office file (a zip) with one part's XML changed."""
+    import zipfile
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as source, zipfile.ZipFile(out, "w") as target:
+        for item in source.infolist():
+            body = source.read(item)
+            target.writestr(item, change(body) if item.filename == member else body)
+    return out.getvalue()
+
+
+def test_a_sheet_that_understates_its_size_is_read_to_its_last_row():
+    import re
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "AP"
+    sheet.append(["Vendor", "Invoice", "Amount"])
+    for n in range(5):
+        sheet.append([f"Vendor {n}", f"INV-{100 + n}", 1000.5 + n])
+    out = io.BytesIO()
+    book.save(out)
+    # Writers other than Excel often store <dimension ref="A1"/> whatever the sheet holds.
+    data = _rewritten(out.getvalue(), "xl/worksheets/sheet1.xml", lambda xml: re.sub(rb'<dimension ref="[^"]*"/>', b'<dimension ref="A1"/>', xml))
+    text = extract_text_from_bytes("ap.xlsx", "", data)
+    assert '[sheet "AP" A1:C6]\n(6 rows with data)' in text
+    assert "A6 (Vendor): Vendor 4 | B6 (Invoice): INV-104 | C6 (Amount): 1,004.5" in text
+    unsized = _rewritten(out.getvalue(), "xl/worksheets/sheet1.xml", lambda xml: re.sub(rb'<dimension ref="[^"]*"/>', b"", xml))
+    assert '[sheet "AP" A1:C6]' in extract_text_from_bytes("ap.xlsx", "", unsized)
 
 
 def _scanned_pdf(lines: list[str]) -> bytes:
@@ -513,6 +758,21 @@ def test_scanned_invoice_lines_and_statement_dashes_keep_their_columns():
     assert "01/03/2024 INV-1001 | Debit: 1,200.00 | Credit: -" in text
     assert "01/09/2024 PMT-77 | Debit: - | Credit: 800.00" in text
     assert "CRN-4 | Debit: N/A | Credit: 50.00" in text
+
+
+def test_scanned_negatives_keep_their_column_and_rates_keep_their_decimals():
+    from controller_inbox.ocr import _polish, _rows
+
+    hits = [(100, 60, 140, "Line item"), (100, 400, 440, "2024"), (100, 600, 640, "2023")]
+    for top, (label, this_year, last_year) in zip(
+        (130, 160, 190, 220),
+        [("Revenue", "12,500", "11,900"), ("Cost of sales", "7,100", "6,800"), ("Other income", "-1,234", "450"), ("Net income", "4,166", "5,550")],
+    ):
+        hits += [(top, 60, 200, label), (top, 385, 440, this_year), (top, 590, 640, last_year)]
+    assert "Other income | 2024: -1,234 | 2023: 450" in _rows(hits)
+    assert _polish("Interest rate 5.125%") == "Interest rate 5.125%"
+    assert _polish("Mileage rate $0.655 per mile") == "Mileage rate $0.655 per mile"
+    assert _polish("FX rate 0.125, fee 1.250") == "FX rate 0.125, fee 1,250"
 
 
 def test_ocr_puts_back_dropped_spaces_without_splitting_codes_or_times():

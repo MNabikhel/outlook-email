@@ -54,9 +54,20 @@ def files_dir(settings: Settings, chat_id: str) -> Path:
     return settings.inbox_extracted / f"{PREFIX}{chat_id}"
 
 
+def _kept_name(filename: str) -> str:
+    """The name an added file is kept under: safe on Windows and not too long. A long name is shortened
+    before its extension, which says what kind of file it is (cutting the end would lose it)."""
+    name = safe_filename(filename)
+    suffix = Path(re.split(r"[\\/]", filename or "")[-1]).suffix
+    if not suffix or len(suffix) > 10 or name.lower().endswith(suffix.lower()):
+        return name
+    stem = safe_filename(filename[: -len(suffix)])
+    return safe_filename(stem[: max(1, len(name) - len(suffix))] + suffix)
+
+
 def add_file(store: Store, settings: Settings, chat_id: str, filename: str, content_type: str, data: bytes) -> dict[str, Any]:
     """Reads a file into the conversation. Raises ValueError with a message for the person when it can't."""
-    name = safe_filename(filename)
+    name = _kept_name(filename)
     suffix = Path(name).suffix.lower()
     if suffix not in ACCEPTED:
         raise ValueError(f"{name}: this kind of file can't be added (PDF, Word, Excel, CSV, PowerPoint, text or pictures).")

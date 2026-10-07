@@ -4,10 +4,12 @@ import hashlib
 import io
 import re
 from datetime import date, datetime
+from html import unescape
 from typing import Iterable
 
 from dateutil import parser as date_parser
 
+from controller_inbox.classify import strip_html_comments
 from controller_inbox.documents import decode_text, extract_document
 from controller_inbox.models import ExtractedFields
 from controller_inbox.ocr import image_text
@@ -79,18 +81,50 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# Tags inside a line of text. A browser shows no space for them, so "b<span></span>ank" reads "bank".
+_INLINE_TAG_RE = re.compile(
+    r"(?i)</?(?:a|abbr|b|bdi|bdo|big|cite|code|del|dfn|em|font|i|ins|kbd|mark|nobr|o:p|q|s|samp|small|"
+    r"span|strike|strong|sub|sup|time|tt|u|var|wbr)(?:\s[^<>]*)?/?>"
+)
+
+
+def _drop_scripts(html: str) -> str:
+    """Replace each <script>…</script> and <style>…</style> block with a space, in one pass over the text.
+
+    Once no closing tag of a kind follows, no later block of that kind can close either, so the search
+    stops instead of reading to the end of the text again from every "<script".
+    """
+    low = html.lower()
+    out: list[str] = []
+    pos = 0
+    kinds = ["script", "style"]
+    while kinds:
+        opener = re.compile("<(" + "|".join(kinds) + ")").search(low, pos)
+        if opener is None:
+            break
+        end_of_tag = low.find(">", opener.end())
+        if end_of_tag < 0:
+            break
+        close = low.find(f"</{opener.group(1)}>", end_of_tag + 1)
+        if close < 0:
+            kinds.remove(opener.group(1))
+            continue
+        out.append(html[pos : opener.start()] + " ")
+        pos = close + len(opener.group(1)) + 3
+    out.append(html[pos:])
+    return "".join(out)
+
+
 def html_to_text(html: str) -> str:
-    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html)
+    text = _drop_scripts(html)
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"(?i)</p>", "\n", text)
     text = re.sub(r"(?i)</div>", "\n", text)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
-    text = re.sub(r"&nbsp;", " ", text)
-    text = re.sub(r"&amp;", "&", text)
-    text = re.sub(r"&lt;", "<", text)
-    text = re.sub(r"&gt;", ">", text)
-    text = re.sub(r"&#39;", "'", text)
-    text = re.sub(r"&quot;", '"', text)
+    text = _INLINE_TAG_RE.sub("", strip_html_comments(text))
+    # "[^<>]": a stray "<" ends the tag it is in, so a long run of them is read once, not once per "<".
+    text = re.sub(r"<[^<>]+>", " ", text)
+    # Every entity, named or numbered: "&#8203;" is a zero-width space, not five characters of text.
+    text = unescape(text)
     return collapse_ws(text)
 
 
@@ -151,13 +185,70 @@ def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> st
     return ""
 
 
+_RTF_TOKEN = re.compile(r"\\([a-zA-Z]+)(-?\d+)? ?|\\'([0-9a-fA-F]{2})|\\([^a-zA-Z'])|([{}])|([^\\{}\r\n]+)|[\r\n]+")
+# Groups that hold no document text: tables of fonts, colours and styles, document properties, pictures,
+# embedded objects and the instructions of a field (its result is the text shown).
+_RTF_HIDDEN = {
+    "fonttbl", "colortbl", "stylesheet", "info", "pict", "object", "fldinst", "themedata", "colorschememapping",
+    "datastore", "latentstyles", "listtable", "listoverridetable", "rsidtbl", "generator", "xmlnstbl", "filetbl",
+}
+_RTF_BREAKS = {"par": "\n", "line": "\n", "sect": "\n", "page": "\n", "row": "\n", "tab": "\t", "cell": " | "}
+_RTF_MARKS = {
+    "emdash": "—", "endash": "–", "bullet": "•", "lquote": "‘", "rquote": "’", "ldblquote": "“", "rdblquote": "”",
+    "emspace": " ", "enspace": " ", "qmspace": " ",
+}
+
+
 def _rtf_text(data: bytes) -> str:
-    raw = data.decode("latin-1", errors="replace")
-    raw = re.sub(r"\\'[0-9a-fA-F]{2}", " ", raw)
-    raw = re.sub(r"\\[a-zA-Z]+-?\d* ?", " ", raw)
-    raw = raw.replace("\\", " ")
-    raw = re.sub(r"[{}]", " ", raw)
-    return collapse_ws(raw)
+    """The text of an RTF document. Characters written as codes (\\'a3 for £, \\u8364 for €) are decoded in
+    the document's code page; font and colour tables, pictures and other hidden groups are left out."""
+    raw = data.decode("latin-1")
+    page = re.search(r"\\ansicpg(\d+)", raw[:4096])
+    encoding = f"cp{page.group(1)}" if page else "cp1252"
+    try:
+        b"".decode(encoding)
+    except LookupError:
+        encoding = "cp1252"
+    out: list[str] = []
+    coded = bytearray()  # \'hh bytes, decoded together so a two-byte character stays whole
+    groups: list[tuple[bool, int]] = []
+    hidden, fallback, drop = False, 1, 0  # after \uN, the next ``fallback`` characters repeat it for old readers
+    for match in _RTF_TOKEN.finditer(raw):
+        word, number, code, symbol, brace, text = match.groups()
+        if coded and code is None:
+            out.append(coded.decode(encoding, errors="replace"))
+            coded.clear()
+        if brace == "{":
+            groups.append((hidden, fallback))
+        elif brace == "}":
+            hidden, fallback = groups.pop() if groups else (hidden, fallback)
+            drop = 0
+        elif symbol == "*" or word in _RTF_HIDDEN:
+            hidden = True
+        elif hidden:
+            continue
+        elif code:
+            if drop:
+                drop -= 1
+            else:
+                coded.append(int(code, 16))
+        elif word == "uc":
+            fallback = int(number or 1)
+        elif word == "u" and number:
+            out.append(chr(int(number) % 65536))
+            drop = fallback
+        elif word:
+            out.append(_RTF_BREAKS.get(word) or _RTF_MARKS.get(word, ""))
+        elif symbol:
+            out.append({"~": " ", "_": "-", "\r": "\n", "\n": "\n"}.get(symbol, symbol if symbol in "\\{}" else ""))
+        elif text:
+            if drop:
+                text, drop = text[drop:], max(0, drop - len(text))
+            out.append(text)
+    if coded:
+        out.append(coded.decode(encoding, errors="replace"))
+    text = "".join(out).encode("utf-16", "surrogatepass").decode("utf-16", errors="replace")
+    return collapse_ws(re.sub(r"(?: \| )+(?=\n|$)", "", text))
 
 
 def explode_archives(items: list, *, limit: int = 40) -> list:
@@ -175,6 +266,12 @@ def explode_archives(items: list, *, limit: int = 40) -> list:
     return exploded
 
 
+# A zip bomb is a small file that unpacks to gigabytes: zipped zeros shrink a thousandfold, documents
+# a few times. Unpack at most this much in all, and skip a large entry packed tighter than this.
+MAX_UNZIPPED = 100_000_000
+MAX_ZIP_RATIO = 100
+
+
 def _unzip(item, *, limit: int) -> list:
     import zipfile
 
@@ -187,10 +284,16 @@ def _unzip(item, *, limit: int) -> list:
     except zipfile.BadZipFile:
         return []
     out = []
+    total = 0
     for info in archive.infolist():
         if info.is_dir() or len(out) >= limit:
             continue
         if info.file_size > 30_000_000 or info.filename.startswith("__MACOSX"):
+            continue
+        # zipfile stops reading an entry at its stated size, so the stated sizes bound what is unpacked.
+        if total + info.file_size > MAX_UNZIPPED:
+            continue
+        if info.file_size > 1_000_000 and info.file_size > MAX_ZIP_RATIO * info.compress_size:
             continue
         filename = _basename(info.filename)
         if not filename or filename.startswith("."):
@@ -199,6 +302,7 @@ def _unzip(item, *, limit: int) -> list:
             payload = archive.read(info)
         except Exception:
             continue
+        total += len(payload)
         out.append(
             RawAttachment(
                 id=f"{item.id}:{filename}",
@@ -246,10 +350,16 @@ def parse_due_date(raw: str, *, as_of: date) -> str | None:
     except (ValueError, OverflowError, TypeError):
         return None
     has_year = len(re.findall(r"\d+", token)) >= 2
+    shift = 0
     if not has_year and (as_of - parsed).days > 90:
         # "January 5" written in late December is next January, not eleven months ago.
+        shift = 1
+    elif not has_year and (parsed - as_of).days > 270:
+        # "December 28" written on January 3 is last December, not eleven months ahead.
+        shift = -1
+    if shift:
         try:
-            parsed = parsed.replace(year=parsed.year + 1)
+            parsed = parsed.replace(year=parsed.year + shift)
         except ValueError:
             return None
     return parsed.isoformat()
@@ -309,7 +419,3 @@ def _unique(items: Iterable) -> list:
         seen.add(key)
         out.append(item)
     return out
-
-
-def build_search_blob(*parts: str) -> str:
-    return collapse_ws("\n".join(p for p in parts if p))

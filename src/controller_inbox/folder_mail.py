@@ -9,14 +9,14 @@ import re
 import shutil
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
-from email.utils import parsedate_to_datetime
+from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 
 from controller_inbox.config import Settings
-from controller_inbox.extract import html_to_text, sha256_bytes
+from controller_inbox.extract import explode_archives, html_to_text, sha256_bytes
 from controller_inbox.models import RawAttachment, RawMessage
 from controller_inbox.pipeline import KEEP_READINGS, attachment_text, process_message
 from controller_inbox.store import Store
@@ -65,12 +65,26 @@ def ingest_folder(
         try:
             raw = _read_batch(path, sidecars)
             existing = store.get_email(raw.id)
-            if raw.id in seen or (existing is not None and existing.model_status in KEEP_READINGS):
+            if existing is not None and raw.internet_message_id and _another_message(existing, raw):
+                # Some scanners and mail tools give every message the same Message-ID. A stored email with
+                # another subject, sender or date is a different message, so this one gets an id from those
+                # too, which a copy of it saved again later shares.
+                # What the message doesn't say itself (a subject or date taken from its file) is left out of it.
+                subject = "" if "subject" in raw.from_file else raw.subject
+                sent = "" if "sent" in raw.from_file else raw.received_at.astimezone(timezone.utc).isoformat()
+                raw.id = _stable_id("\n".join([raw.internet_message_id, subject, raw.sender_email, sent]))
+                existing = store.get_email(raw.id)
+            if existing is not None:
+                # Another copy of a stored message: only files it doesn't hold yet are read and added.
+                raw.attachments = _new_files(settings, raw, existing)
+            if not raw.attachments and (raw.id in seen or (existing is not None and existing.model_status in KEEP_READINGS)):
                 report["already_read"] += 1
                 archived = _archive(settings, owned)
                 if existing is not None and not existing.source_path and archived and archived[0]:
                     store.set_source_path(raw.id, str(archived[0]))
                 continue
+            if raw.id in seen:
+                records = [item for item in records if item.id != raw.id]
             seen.add(raw.id)
             if not sample_checked:
                 # Only once a real message has parsed, so a bad file cannot empty the board.
@@ -78,8 +92,9 @@ def ingest_folder(
                 if not store.real_mail_count():
                     cleared = store.clear_sample()
                     report["sample_cleared"] = cleared
-            record = process_message(raw, store, settings, now=now)
+            # The files are saved first: an email is only stored once everything that came with it is.
             _write_extracted(settings, raw)
+            record = process_message(raw, store, settings, now=now)
             archived = _archive(settings, owned)
             if archived and archived[0]:
                 store.set_source_path(record.id, str(archived[0]))
@@ -230,9 +245,9 @@ def _parse_message(path: Path) -> RawMessage:
 def _parse_eml(path: Path) -> RawMessage:
     data = path.read_bytes()
     parsed = BytesParser(policy=policy.default).parsebytes(data)
-    subject = str(parsed.get("subject") or path.stem)
+    subject = str(parsed.get("subject") or "")
     sender_name, sender_email = _split_address(str(parsed.get("from") or ""))
-    received = _email_date(parsed.get("date"), path)
+    received = _email_date(parsed.get("date"))
     body, attachments = _eml_content(parsed)
     message_id = str(parsed.get("message-id") or "").strip()
     raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
@@ -246,6 +261,8 @@ def _eml_content(message, prefix: str = "", depth: int = 0) -> tuple[str, list[R
     body_parts: list[str] = []
     attachments: list[RawAttachment] = []
     html_fallback = ""
+    calendar = b""
+    ics_attached = False
     for part in _eml_leaves(message):
         filename = part.get_filename()
         ctype = part.get_content_type()
@@ -266,11 +283,17 @@ def _eml_content(message, prefix: str = "", depth: int = 0) -> tuple[str, list[R
                     content=payload,
                 )
             )
+            ics_attached = ics_attached or (filename or "").lower().endswith(".ics")
             continue
         if ctype == "text/plain":
             body_parts.append(_decode_text_part(part, payload))
         elif ctype == "text/html" and not html_fallback:
             html_fallback = html_to_text(_decode_text_part(part, payload))
+        elif ctype == "text/calendar" and not calendar:
+            calendar = payload
+    if calendar and not ics_attached:
+        # An invitation can carry its calendar inline, with no file name; it is kept as the invite file it is.
+        attachments.append(_attachment(f"{prefix}invite.ics", "text/calendar", calendar))
     body = "\n".join(p for p in body_parts if p).strip() or html_fallback
     return body, attachments
 
@@ -330,7 +353,7 @@ def _parse_msg(path: Path) -> RawMessage:
 
     message = extract_msg.Message(str(path))
     try:
-        subject = message.subject or path.stem
+        subject = message.subject or ""
         sender_name, sender_email = _split_address(message.sender or "")
         if "@" not in sender_email:
             sender_email = _msg_smtp_address(message) or ""
@@ -341,7 +364,7 @@ def _parse_msg(path: Path) -> RawMessage:
             if isinstance(html_body, bytes):
                 html_body = html_body.decode("utf-8", errors="replace")
             body = html_to_text(html_body)
-        received = _coerce_date(getattr(message, "date", None), path)
+        received = _coerce_date(getattr(message, "date", None))
         attachments = _msg_attachments(message)
         header = getattr(message, "header", None)
         reply_to = _reply_address(str(header.get("Reply-To") or "")) if header is not None else ""
@@ -460,7 +483,12 @@ def _standalone(path: Path) -> RawMessage:
 def _raw_message(
     path, data, subject, sender_name, sender_email, received, body, attachments, message_id: str = ""
 ) -> RawMessage:
+    """A message without a subject is named after its file, and one without a sent time (``received`` None) is
+    dated by its file; ``from_file`` says which, as two saved copies of one message differ in those."""
+    from_file = tuple(part for part, missing in (("subject", not _tidy(subject)), ("sent", received is None)) if missing)
     subject = _tidy(subject) or _tidy(path.stem)
+    if received is None:
+        received = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     sender_name, sender_email = _tidy(sender_name), _tidy(sender_email)
     body = (body or "").replace("\x00", "").strip()
     message_id = _tidy(message_id)
@@ -476,6 +504,7 @@ def _raw_message(
         has_attachments=bool(attachments),
         source="folder",
         attachments=attachments,
+        from_file=from_file,
     )
 
 
@@ -505,6 +534,30 @@ def _stable_id(message_id: str) -> str:
     return "mail-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
 
 
+# A .msg and an .eml of one message can disagree on the sent time by a few seconds.
+SAME_MESSAGE_SLACK = timedelta(minutes=2)
+
+
+def _another_message(stored, raw: RawMessage) -> bool:
+    """Whether a stored email that has this message's Message-ID is a different message after all.
+
+    Only what the message itself says counts: a message without a subject is named after its file and one
+    without a date is dated by its file, and those differ between two copies of it saved at different times."""
+    if "subject" not in raw.from_file and _tidy(stored.subject).casefold() != _tidy(raw.subject).casefold():
+        return True
+    if (stored.sender_email or "").strip().lower() != (raw.sender_email or "").strip().lower():
+        return True
+    if "sent" in raw.from_file:
+        return False
+    try:
+        sent = datetime.fromisoformat(str(stored.received_at))
+    except ValueError:
+        return False
+    if sent.tzinfo is None:
+        sent = sent.replace(tzinfo=timezone.utc)
+    return abs(sent - raw.received_at) > SAME_MESSAGE_SLACK
+
+
 def _files(folder: Path) -> list[Path]:
     if not folder.exists():
         return []
@@ -516,18 +569,23 @@ def _files(folder: Path) -> list[Path]:
 
 
 def _split_address(raw: str) -> tuple[str, str]:
+    """(name, address) from a From or Reply-To header. The address is the one after any quoted name, as mail
+    programs read it: a name can itself look like an address ("Acme Billing <billing@acme.com>" <x@acme-pay.net>),
+    and taking that one would pass a lookalike sender off as a trusted one."""
     raw = (raw or "").strip()
-    match = re.search(r"<([^>]+)>", raw)
-    if match:
-        email = match.group(1).strip()
-        name = raw[: match.start()].strip().strip('"')
-        return name or email, email
-    if "@" in raw:
-        return raw, raw
-    return raw, ""
+    name, email = parseaddr(raw)
+    if "@" not in email:
+        # A header the strict parser gives up on ("Chen, Maya <maya@x.com>"): the last <...> is the address.
+        brackets = list(re.finditer(r"<([^<>]+)>", raw))
+        if not brackets:
+            return (raw, raw) if "@" in raw else (raw, "")
+        email = brackets[-1].group(1).strip()
+        name = raw[: brackets[-1].start()].strip().strip('"')
+    return name.strip() or email, email
 
 
-def _email_date(value, path: Path) -> datetime:
+def _email_date(value) -> datetime | None:
+    """A Date header's time, or None when there is none that can be read."""
     if value:
         try:
             parsed = parsedate_to_datetime(str(value))
@@ -536,15 +594,15 @@ def _email_date(value, path: Path) -> datetime:
             return parsed
         except (TypeError, ValueError, IndexError):
             pass
-    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    return None
 
 
-def _coerce_date(value, path: Path) -> datetime:
+def _coerce_date(value) -> datetime | None:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value
-    return _email_date(value, path)
+    return _email_date(value)
 
 
 def _decode_text_part(part, payload: bytes) -> str:
@@ -553,6 +611,25 @@ def _decode_text_part(part, payload: bytes) -> str:
         return payload.decode(charset, errors="replace")
     except LookupError:
         return payload.decode("utf-8", errors="replace")
+
+
+def _new_files(settings: Settings, raw: RawMessage, existing) -> list[RawAttachment]:
+    """The files in this copy of a stored message that aren't stored with it yet (the same bytes under any
+    name are), renamed when a kept file under inbox/extracted already has the name, so none replaces it."""
+    hashes = {att.sha256 for att in existing.attachments if att.sha256}
+    names = {att.filename for att in existing.attachments}
+    fresh = []
+    for att in raw.attachments:
+        parts = explode_archives([att])
+        if all(sha256_bytes(part.content) in hashes if part.content else part.filename in names for part in parts):
+            continue
+        att.id = att.filename
+        fresh.append(att)
+    taken = {safe_filename(name).casefold() for name in names}
+    folder = settings.inbox_extracted / raw.id
+    if folder.is_dir():
+        taken |= {path.name.casefold() for path in folder.iterdir()}
+    return unique_attachments(fresh, taken=taken)
 
 
 def _write_extracted(settings: Settings, raw: RawMessage) -> None:
@@ -578,20 +655,29 @@ def reread_attachments(store: Store, settings: Settings, *, on_progress: Callabl
     if store.get_state(READER_KEY) == READER_VERSION:
         return 0
     todo = []
-    for attachment_id, email_id, filename, text in store.attachment_files():
+    for attachment_id, email_id, filename, sha, text in store.attachment_files():
         if Path(filename).suffix.lower() not in _REREAD or "read with OCR" in text[:400] or text.startswith("[This PDF looks scanned"):
             continue
-        path = settings.inbox_extracted / email_id / safe_filename(filename)
-        if path.is_file() and path.stat().st_size <= _MAX_REREAD_BYTES:
-            todo.append((attachment_id, filename, path, text))
+        if sha and (settings.inbox_extracted / email_id).is_dir():
+            todo.append((attachment_id, settings.inbox_extracted / email_id, filename, sha, text))
     changed = 0
-    for index, (attachment_id, filename, path, old) in enumerate(todo, start=1):
+    zipped: tuple[Path | None, dict[str, bytes]] = (None, {})
+    for index, (attachment_id, folder, filename, sha, old) in enumerate(todo, start=1):
         if on_progress:
             on_progress(index, len(todo), filename)
         try:
-            new = attachment_text(filename, "", path.read_bytes())
+            # Only the attachment's own bytes: a file that came in a zip is read from the zip, never from
+            # another attachment that has its name ("invoice.pdf" beside "older.zip" holding an "invoice.pdf").
+            data = _kept_file(folder / safe_filename(filename), sha)
+            if data is None:
+                if zipped[0] != folder:
+                    zipped = (folder, _zipped_files(folder))
+                data = zipped[1].get(sha)
+            if data is None:
+                continue
+            new = attachment_text(filename, "", data)
         except Exception:
-            log.warning("Couldn't read %s again", path, exc_info=True)
+            log.warning("Couldn't read %s again", folder / filename, exc_info=True)
             continue
         if new.strip() and new != old:
             store.set_attachment_text(attachment_id, new)
@@ -600,31 +686,76 @@ def reread_attachments(store: Store, settings: Settings, *, on_progress: Callabl
     return changed
 
 
+def _kept_file(path: Path, sha: str) -> bytes | None:
+    """The file kept under inbox/extracted, when it holds these bytes."""
+    if not path.is_file() or path.stat().st_size > _MAX_REREAD_BYTES:
+        return None
+    data = path.read_bytes()
+    return data if sha256_bytes(data) == sha else None
+
+
+def _zipped_files(folder: Path) -> dict[str, bytes]:
+    """The files inside the zips kept for one email, by SHA-256, as the email's attachments were stored."""
+    found: dict[str, bytes] = {}
+    for path in sorted(folder.iterdir()):
+        if path.suffix.lower() != ".zip" or not path.is_file() or path.stat().st_size > _MAX_REREAD_BYTES:
+            continue
+        for part in explode_archives([_attachment(path.name, "application/zip", path.read_bytes())]):
+            if part.content:
+                found.setdefault(sha256_bytes(part.content), part.content)
+    return found
+
+
+MAX_NAME_CHARS = 150
+# Most file systems take 255 bytes in a file name; a Japanese or Cyrillic name reaches that well before 150 characters.
+MAX_NAME_BYTES = 255
+
+
 def safe_filename(name: str) -> str:
-    """Windows refuses : * ? " < > | in file names; forwarded-mail subjects often have them."""
+    """Windows refuses : * ? " < > | in file names; forwarded-mail subjects often have them.
+
+    Names are cut to 150 characters, and a name still over 255 bytes in UTF-8 is cut to fit, keeping its extension.
+    """
     base = re.split(r"[\\/]", name or "")[-1]
     cleaned = re.sub(r'[<>:"|?*\x00-\x1f]', "_", base).strip(" .")
-    return cleaned[:150] or "attachment"
+    short = cleaned[:MAX_NAME_CHARS]
+    if len(short.encode("utf-8")) > MAX_NAME_BYTES:
+        stem, suffix = _split_suffix(cleaned)
+        short = _shorten(stem, MAX_NAME_CHARS - len(suffix), MAX_NAME_BYTES - len(suffix.encode("utf-8"))).rstrip(" .") + suffix
+    return short or "attachment"
 
 
-def unique_attachments(attachments: list[RawAttachment]) -> list[RawAttachment]:
+def _split_suffix(name: str) -> tuple[str, str]:
+    """("invoice", ".pdf") from "invoice.pdf"; a name without a short extension has none."""
+    dot = name.rfind(".")
+    if 0 < dot and len(name) - dot <= 10 and " " not in name[dot:]:
+        return name[:dot], name[dot:]
+    return name, ""
+
+
+def _shorten(text: str, chars: int, size: int) -> str:
+    """``text`` cut to ``chars`` characters and ``size`` bytes of UTF-8, never inside a character."""
+    return text[: max(0, chars)].encode("utf-8")[: max(0, size)].decode("utf-8", errors="ignore")
+
+
+def unique_attachments(attachments: list[RawAttachment], *, taken: set[str] = frozenset()) -> list[RawAttachment]:
     """Give a repeated file name a number ("invoice.pdf", "invoice (2).pdf"), in order.
 
     Two attachments with one name would share an attachment id and a file under inbox/extracted.
     Names are compared as saved on disk (``safe_filename``, any case), and a name that is not
-    repeated keeps its name and id, so files already stored still match.
+    repeated keeps its name and id, so files already stored still match. ``taken`` are names
+    (as saved on disk, casefolded) that are already used.
     """
-    taken: set[str] = set()
+    taken = set(taken)
     for att in attachments:
         key = safe_filename(att.filename).casefold()
         if key in taken:
-            name = att.filename
-            dot = name.rfind(".")
-            base, suffix = (name[:dot], name[dot:]) if 0 < dot and len(name) - dot <= 10 and " " not in name[dot:] else (name, "")
+            base, suffix = _split_suffix(att.filename)
             number = 2
             while True:
                 tail = f" ({number}){suffix}"
-                candidate = base[: max(1, 150 - len(tail))] + tail
+                # Cut to fit as ``safe_filename`` would, so the number is never cut off.
+                candidate = _shorten(base, MAX_NAME_CHARS - len(tail), MAX_NAME_BYTES - len(tail.encode("utf-8"))) + tail
                 if safe_filename(candidate).casefold() not in taken:
                     break
                 number += 1

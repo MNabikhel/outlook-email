@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -17,7 +18,7 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, EmailRecord, RawMessage
-from controller_inbox.fraud import assess, save_check, trust_context
+from controller_inbox.fraud import assess, domain_of, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
 
@@ -55,7 +56,7 @@ def process_message(
 ) -> EmailRecord:
     now = now or datetime.now(timezone.utc)
     existing = store.get_email(raw.id)
-    if existing is not None and existing.model_status in KEEP_READINGS:
+    if existing is not None and existing.model_status in KEEP_READINGS and not raw.attachments:
         return existing
     # Two dates. "By Friday" and "October 15" in the text are read against the day the mail was
     # sent (``anchor``); how urgent or overdue it is now is judged against today (``as_of``).
@@ -71,7 +72,14 @@ def process_message(
     attachments_raw = explode_archives(list(raw.attachments))
     if mailbox is not None and not attachments_raw and raw.has_attachments:
         attachments_raw = list(mailbox.get_attachments(raw.id))
-    attachments_raw = _unique_ids(attachments_raw)
+    # Another copy of a stored message: the files stored from earlier copies are kept, and this copy adds
+    # only files they don't hold. A re-saved .eml often comes without the files dropped beside the first.
+    kept = existing.attachments if existing is not None else []
+    attachments_raw = _unique_ids(
+        _unstored(attachments_raw, kept), taken={att.id.removeprefix(f"{raw.id}:") for att in kept}
+    )
+    if existing is not None and existing.model_status in KEEP_READINGS:
+        return _add_files(store, settings, existing, raw, attachments_raw, anchor, now=now)
 
     att_records: list[AttachmentRecord] = []
     att_classifications: list[Classification] = []
@@ -80,37 +88,15 @@ def process_message(
         as_of=anchor,
         extra_vendor=raw.sender_name,
     )
-
+    for att in kept:
+        att_records.append(att)
+        att_classifications.append(_classify_file(raw, att.filename, att.content_type, att.extracted_text))
+        merged_fields = merged_fields.merged_with(att.extracted_fields)
     for raw_att in attachments_raw:
-        text = attachment_text(raw_att.filename, raw_att.content_type, raw_att.content)
-        fields = extract_fields(f"{raw_att.filename}\n{text}", as_of=anchor, extra_vendor=raw.sender_name)
-        merged_fields = merged_fields.merged_with(fields)
-        classified = classify_document(
-            subject=raw.subject,
-            body=raw.body_text,
-            filename=raw_att.filename,
-            sender=raw.sender_email,
-            extracted_text=text,
-            content_type=raw_att.content_type,
-            has_text=bool(text.strip()),
-            payment_rule=False,
-        )
+        record, classified = _file_record(raw, raw_att, anchor)
+        att_records.append(record)
         att_classifications.append(classified)
-        att_records.append(
-            AttachmentRecord(
-                id=f"{raw.id}:{raw_att.id}",
-                email_id=raw.id,
-                filename=raw_att.filename,
-                content_type=raw_att.content_type,
-                size_bytes=raw_att.size_bytes or len(raw_att.content),
-                sha256=sha256_bytes(raw_att.content) if raw_att.content else "",
-                extracted_text=text,
-                document_type=classified.document_type,
-                document_confidence=classified.confidence,
-                extracted_fields=fields,
-                classification_reasons=classified.reasons,
-            )
-        )
+        merged_fields = merged_fields.merged_with(record.extracted_fields)
 
     body_text = clean.body_text
     verdicts = [flag for flag in (existing.flags if existing else []) if flag in VERDICT_FLAGS]
@@ -124,6 +110,7 @@ def process_message(
         attachments=[(att.filename, att.extracted_text) for att in att_records],
         history=store.sender_history(raw.sender_email, exclude=raw.id),
         flags=verdicts,
+        domain_history=store.domain_history(domain_of(raw.sender_email), exclude=raw.id),
     )
     classified_email = _classify(
         store,
@@ -136,7 +123,7 @@ def process_message(
         attachments=att_classifications,
         fields=merged_fields,
         as_of=as_of,
-        has_attachments=bool(attachments_raw) or raw.has_attachments,
+        has_attachments=bool(att_records) or raw.has_attachments,
         fraud=check.level,
     )
     classified_email.flags.extend(verdicts)
@@ -220,9 +207,81 @@ def sent_date(received_at, settings: Settings, *, fallback):
         return fallback
 
 
-def _unique_ids(attachments: list) -> list:
-    """Attachment ids must be unique within a message (they key the stored record); a repeat gets a number."""
-    seen: set[str] = set()
+def _file_record(raw: RawMessage, raw_att, anchor) -> tuple[AttachmentRecord, Classification]:
+    """One attachment read, classified and its fields pulled, as stored."""
+    text = attachment_text(raw_att.filename, raw_att.content_type, raw_att.content)
+    fields = extract_fields(f"{raw_att.filename}\n{text}", as_of=anchor, extra_vendor=raw.sender_name)
+    classified = _classify_file(raw, raw_att.filename, raw_att.content_type, text)
+    record = AttachmentRecord(
+        id=f"{raw.id}:{raw_att.id}",
+        email_id=raw.id,
+        filename=raw_att.filename,
+        content_type=raw_att.content_type,
+        size_bytes=raw_att.size_bytes or len(raw_att.content),
+        sha256=sha256_bytes(raw_att.content) if raw_att.content else "",
+        extracted_text=text,
+        document_type=classified.document_type,
+        document_confidence=classified.confidence,
+        extracted_fields=fields,
+        classification_reasons=classified.reasons,
+    )
+    return record, classified
+
+
+def _classify_file(raw: RawMessage, filename: str, content_type: str, text: str) -> Classification:
+    return classify_document(
+        subject=raw.subject,
+        body=raw.body_text,
+        filename=filename,
+        sender=raw.sender_email,
+        extracted_text=text,
+        content_type=content_type,
+        has_text=bool(text.strip()),
+        payment_rule=False,
+    )
+
+
+def _unstored(attachments: list, kept: list[AttachmentRecord]) -> list:
+    """The files not stored with the message yet. The same bytes under any name count as stored."""
+    if not kept:
+        return attachments
+    hashes = {att.sha256 for att in kept if att.sha256}
+    names = {att.filename for att in kept}
+    return [att for att in attachments if (sha256_bytes(att.content) not in hashes if att.content else att.filename not in names)]
+
+
+def _add_files(
+    store: Store, settings: Settings, email: EmailRecord, raw: RawMessage, attachments_raw: list, anchor, *, now: datetime
+) -> EmailRecord:
+    """Another copy of a message the model read or the user corrected: the reading stays, the files this copy
+    adds are stored with it, and the fraud check runs again with them, so a bank letter among them still counts.
+
+    Reading the files takes a while (a scan is read with OCR), and meanwhile the user may correct the email or
+    give a fraud verdict on it. So the files are read first and then added to the email as it is by then."""
+    if not attachments_raw:
+        return email
+    records = [_file_record(raw, raw_att, anchor)[0] for raw_att in attachments_raw]
+    email = store.get_email(email.id) or email
+    held = {att.id for att in email.attachments}
+    for record in records:
+        if record.id in held:
+            continue
+        email.attachments.append(record)
+        email.extracted = email.extracted.merged_with(record.extracted_fields)
+    email.has_attachments = True
+    email.flags = [flag for flag in email.flags if flag != "missing_attachment"]
+    store.upsert_email(email)
+    reassess_email(store, settings, email, now=now)
+    from controller_inbox import cost_codes
+
+    cost_codes.refresh(store, settings, email_ids=[email.id])
+    return store.get_email(email.id) or email
+
+
+def _unique_ids(attachments: list, taken: set[str] = frozenset()) -> list:
+    """Attachment ids must be unique within a message (they key the stored record); a repeat gets a number.
+    ``taken`` are ids already stored with the message."""
+    seen: set[str] = set(taken)
     out = []
     for att in attachments:
         att_id = str(att.id)
@@ -237,6 +296,8 @@ def _unique_ids(attachments: list) -> list:
 
 
 SYNC_CURSOR = "last_sync_at"
+# How many syncs in a row a message that fails (Outlook throttling, a dropped connection) holds the cursor back for.
+MAX_SYNC_TRIES = 10
 
 
 def ingest_mailbox(
@@ -250,24 +311,51 @@ def ingest_mailbox(
     cursor: str | None = SYNC_CURSOR,
 ) -> list[EmailRecord]:
     """Read every message since ``received_after``. One message that can't be read is logged in
-    ``report["failed"]`` and skipped; the rest are still read and the cursor still moves.
+    ``report["failed"]`` and skipped; the rest are still read and the cursor still moves, but not past
+    the earliest message that failed, so the next sync tries it again (up to ``MAX_SYNC_TRIES`` times).
 
     The cursor is the time the sync started, so mail that arrives while it runs is read next time.
-    ``cursor=None`` leaves it alone (the sample mailbox is not a sync).
+    ``cursor=None`` leaves it alone (the sample mailbox is not a sync), and so does a sync of a window that
+    starts after the cursor.
     """
     started = now or datetime.now(timezone.utc)
     report = report if report is not None else {}
     report.setdefault("failed", [])
     processed: list[EmailRecord] = []
+    retry_key = f"{cursor}_retry"
+    retry = json.loads(store.get_state(retry_key) or "{}") if cursor else {}
+    tries: dict[str, int] = retry.get("tries", {})
+    # Resuming from a cursor held back for a failed message: the mail around it was read by the last sync.
+    resumed = bool(retry) and received_after is not None and _utc(received_after) == datetime.fromisoformat(retry["cursor"])
+    read_before = datetime.fromisoformat(retry["until"]) if resumed else None
+    failed: dict[str, int] = {}
+    held: list[datetime] = []
     for raw in mailbox.list_messages(received_after=received_after):
+        received = _utc(raw.received_at)
+        if read_before and received < read_before and raw.id not in tries and store.get_email(raw.id) is not None:
+            continue  # listed again only because the cursor waited for a message that failed
         try:
             processed.append(process_message(raw, store, settings, mailbox, now=now))
         except Exception as exc:
             log.warning("Couldn't read message %s (%s)", raw.id, raw.subject, exc_info=True)
             report["failed"].append({"id": raw.id, "subject": raw.subject, "error": str(exc)[:300]})
-    if cursor:
-        store.set_state(cursor, started.astimezone(timezone.utc).isoformat())
+            failed[raw.id] = tries.get(raw.id, 0) + 1
+            if failed[raw.id] < MAX_SYNC_TRIES:
+                held.append(received)
+    # A sync of a shorter window (``sync --hours 1``) didn't read all the mail since the cursor, or the message
+    # it waits for: the cursor and the messages to try again stay as they are.
+    previous = store.get_state(cursor) if cursor else None
+    covered = received_after is None or not previous or _utc(received_after) <= datetime.fromisoformat(previous)
+    if cursor and covered:
+        started = started.astimezone(timezone.utc)
+        mark = min([started, *held]).isoformat()
+        store.set_state(cursor, mark)
+        store.set_state(retry_key, json.dumps({"cursor": mark, "until": started.isoformat(), "tries": failed}) if failed else "")
     return processed
+
+
+def _utc(when: datetime) -> datetime:
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
 def ingest_demo(store: Store, settings: Settings, *, now: datetime | None = None) -> list[EmailRecord]:

@@ -111,10 +111,15 @@
 
   /* ---------- Open original, draft a reply ---------- */
 
+  // A refused request says why in "detail" (for example, files open only on the computer running CloseDesk).
+  const refusal = (response, data) =>
+    typeof data.detail === "string" && data.detail ? data.detail : `That didn't work (the server said ${response.status}).`;
+
   async function openOriginal(id) {
     try {
       const response = await fetch(`/inbox/${encodeURIComponent(id)}/open`, { method: "POST", headers: JSON_HEADERS });
-      const data = await response.json();
+      const data = (await response.json().catch(() => null)) || {};
+      if (!response.ok) return toast(refusal(response, data), 6000);
       toast(data.message || "Opening…");
       if (!data.ok && data.download) location.href = data.download;
     } catch (error) {
@@ -125,8 +130,8 @@
   async function openCodes() {
     try {
       const response = await fetch("/coding/open", { method: "POST", headers: JSON_HEADERS });
-      const data = await response.json();
-      toast(data.message || "Opening the workbook…", 6000);
+      const data = (await response.json().catch(() => null)) || {};
+      toast(response.ok ? data.message || "Opening the workbook…" : refusal(response, data), 6000);
     } catch (error) {
       toast("Couldn't open the workbook from here. Its location is on the AP coding page.", 6000);
     }
@@ -266,15 +271,16 @@
     const page = context.match(PAGE_AT);
     if (file.view) return `${base}/view${/\.pdf$/i.test(file.name) && page ? `#page=${page[1]}` : ""}`;
     const slide = context.match(SLIDE_AT);
-    const sheet = context.match(SHEET_AT);
+    // A CSV's one sheet is named after the file, which was just blanked out: an empty name means "the sheet".
+    const sheet = ((context.match(SHEET_AT) || [])[1] || "").trim();
     const cell = SHEET_FILE.test(file.name) ? citedCell(context) : null;
     let at = "";
     if (page) at = `page ${page[1]}`;
     else if (slide) at = `slide ${slide[1]}`;
     else if (cell) {
-      const name = cell[1] || cell[2] || cell[3] || (sheet && sheet[1]);
+      const name = [cell[1], cell[2], cell[3], sheet].map((part) => (part || "").trim()).find(Boolean);
       at = name ? `${name}!${cell[4]}` : cell[4];
-    } else if (sheet) at = `sheet "${sheet[1]}"`;
+    } else if (sheet) at = `sheet "${sheet}"`;
     return at ? `${base}?at=${encodeURIComponent(at)}` : base;
   }
 
@@ -304,17 +310,18 @@
   }
 
   function formatSentence(sentence, context, sources, names, whole) {
-    let html = escapeHtml(sentence)
+    const html = escapeHtml(sentence)
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
       .replace(/(^|[\s(])\*(?!\s)([^*\n]+?)\*(?=[\s).,!?:;]|$)/g, "$1<em>$2</em>")
       .replace(/`([^`\n]+)`/g, "<code>$1</code>");
-    if (names.pattern) {
-      html = html.replace(names.pattern, (match) => {
-        const hit = names.byName.get(match.toLowerCase());
-        return hit ? fileLink(fileHref(hit.source, hit.file, context), hit.file.name, match, "cite-name") : match;
-      });
-    }
-    return html.replace(/\[(\d{1,2})\]/g, (match, n) => {
+    // File names and [n] citations in one pass, so a link is never looked through again: a file named
+    // report[1].csv stays one link instead of getting a citation inside its title. Tags pass unchanged.
+    return html.replace(names.pattern, (match, tag, name, n) => {
+      if (tag) return tag;
+      if (name) {
+        const hit = names.byName.get(name.toLowerCase());
+        return hit ? fileLink(fileHref(hit.source, hit.file, context), hit.file.name, name, "cite-name") : name;
+      }
       const source = sources.find((item) => String(item.n) === n);
       if (!source) return match;
       const target = citeTarget(source, context, whole);
@@ -337,11 +344,12 @@
     const unique = new Map(
       [...byName].filter(([key]) => counts.get(key) === 1 && key.length >= 5).map(([key, hit]) => [escapeHtml(key), hit])
     );
-    if (!unique.size) return { byName: unique, pattern: null };
     const escaped = [...unique.keys()]
       .sort((a, b) => b.length - a.length)
       .map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-    return { byName: unique, pattern: new RegExp(`(?<![\\w/])(?:${escaped.join("|")})(?![\\w])`, "gi") };
+    // A tag added for bold, italics or code; a file name (none: matches nothing); a citation.
+    const name = escaped.length ? `(?<![\\w/])(?:${escaped.join("|")})(?![\\w])` : "(?!)";
+    return { byName: unique, pattern: new RegExp(`(<[^>]*>)|(${name})|\\[(\\d{1,2})\\]`, "gi") };
   }
 
   function formatAnswer(text, sources) {
@@ -462,6 +470,12 @@
     renderChat();
   }
 
+  /* Until the saved conversation is loaded. A load started meanwhile (the chat button clicked while it loads)
+     makes the one being waited for return without loading it, so load again until one finishes. */
+  async function chatLoaded() {
+    while (chat && !loaded) await loadChat(chatId);
+  }
+
   function newChat() {
     rememberChat(null);
     closeHistory();
@@ -498,6 +512,8 @@
     if (!question || busy) return;
     busy = true;
     closeHistory();
+    // Load the saved conversation first: loading it afterwards would start a new round and drop this answer.
+    await chatLoaded();
     const round = ++chatRound;
     openChat(false);
     if (!turns.length) chatLog.innerHTML = "";
@@ -697,6 +713,8 @@
   async function addFiles(list) {
     const files = Array.from(list || []);
     if (!files.length) return;
+    // As in ask(): a conversation still loading would replace the list of files this upload returns.
+    await chatLoaded();
     openChat(false);
     renderFiles(files.map((file) => file.name));
     try {
@@ -780,6 +798,22 @@
 
   function toggleLarge() {
     saveSize(chat.classList.contains("large") ? null : { large: true });
+  }
+
+  /* The pop-out keeps the conversation on screen: an email or page it links to opens in the window it
+     came from, or in a new tab when that window is closed or has gone to another site. */
+  function openBeside(href) {
+    try {
+      const opener = window.opener;
+      if (opener && !opener.closed && opener.location.origin === location.origin) {
+        opener.location.href = href;
+        opener.focus();
+        return;
+      }
+    } catch (error) {
+      /* another site's window: its address can't be read, so it isn't used */
+    }
+    window.open(href, "_blank", "noopener");
   }
 
   function popOut() {
@@ -914,6 +948,10 @@
 
     const link = target.closest("a[href]");
     if (link) {
+      if (chatWindow && !link.target && !link.hasAttribute("download") && link.origin === location.origin) {
+        event.preventDefault();
+        return openBeside(link.href);
+      }
       const id = mailIdFromLink(link);
       if (id) {
         event.preventDefault();

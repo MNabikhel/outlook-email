@@ -70,7 +70,8 @@ def test_the_prompt_fits_a_4096_token_context_and_leaves_room_for_tools(store, s
         seen.append([dict(m) for m in messages])
         if len(seen) == 1:
             return ToolReply("", [{"id": "c1", "name": "read_file", "arguments": {"email": "1", "file": "Offsite memo.docx", "part": "page 3"}}])
-        return ToolReply("The memo covers venue, travel and catering [1].")
+        # A figure that isn't in the memo: the answer gets the second pass this test sizes.
+        return ToolReply("The memo covers venue, travel and catering, $12,000 in all [1].")
 
     final = {}
 

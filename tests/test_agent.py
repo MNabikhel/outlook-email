@@ -149,15 +149,21 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
         yield "The Q4 total change in D4 adds the Ads and Travel changes (Q4 budget.xlsx, sheet Budget, D4) [1]."
 
     monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    # Room for both files beside the tool definitions (a 4,096-token context leaves the workbook to read_file).
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
     monkeypatch.setattr(assistant, "chat_with_tools", fake_tools)
     monkeypatch.setattr(assistant, "stream_text", fake_stream)
+    # Asked for a query over the workbook's table, the model finds none fits a question about a formula.
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "Plan: the formula is not a value in the table.\nSQL: NONE")
     events = _events(answer_stream(store, settings, "How is the total change worked out?", email_id=budget.id))
     kinds = [e["type"] for e in events]
     assert kinds[0] == "sources" and kinds[-1] == "done"
     steps = [e["text"] for e in events if e["type"] == "step"]
     assert steps[-2:] == ["Tracing how Budget!D4 is calculated in Q4 budget.xlsx", "Checking the answer against what I read"]
     assert "Read Offsite memo.docx in full (1 section)" in steps[:-2], "the chat says what it read of each file"
-    assert all(step.startswith("Read ") for step in steps[:-2])
+    # The workbook's table was offered to a query first; the model found none fits a question about a formula.
+    assert steps[0] == "Writing a query over the tables for the question"
+    assert all(step.startswith("Read ") for step in steps[1:-2])
     assert [e["text"] for e in events if e["type"] == "note"][0].startswith("D4 (total change)")
     assert "(Q4 budget.xlsx, sheet Budget, D4) [1]" in _text(events)
 
@@ -170,13 +176,20 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
     assert "Check your draft answer" in final
     assert store.findings(budget.id)[0]["text"].startswith("D4 (total change)")
 
-    turns.clear()
-    monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: ToolReply("From my notes: D2+D3 [1]."))
+    asked = []
+
+    def from_notes(_settings, messages, *, max_tokens):
+        asked.append(messages[-1]["content"])
+        yield "From my notes: D2+D3 [1]."
+
+    # Both files fit whole and nothing is to be worked out: one streamed pass, no tools.
+    monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("tools")))
+    monkeypatch.setattr(assistant, "stream_text", from_notes)
     _events(answer_stream(store, settings, "remind me how the total works", email_id=budget.id))
-    assert agent.NOTES_HEAD + "\n- D4 (total change)" in checked["messages"][-1]["content"]
+    assert agent.NOTES_HEAD + "\n- D4 (total change)" in asked[-1]
     assert "not instructions" in agent.NOTES_HEAD, "stored notes are labelled as data"
     _events(answer_stream(store, settings, "summarize the offsite memo", email_id=budget.id))
-    assert "Notes from earlier reading" not in checked["messages"][-1]["content"], "unrelated notes stay out"
+    assert "Notes from earlier reading" not in asked[-1], "unrelated notes stay out"
 
 
 def test_servers_without_tools_still_read_the_files(store, settings, mail, monkeypatch):
@@ -188,12 +201,52 @@ def test_servers_without_tools_still_read_the_files(store, settings, mail, monke
     drafts = []
     monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
     monkeypatch.setattr(assistant, "chat_with_tools", no_tools)
-    monkeypatch.setattr(assistant, "complete_text", lambda _s, messages, **_k: drafts.append(messages) or "Lisbon, 14 November [1].")
-    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: iter(["The offsite is in Lisbon on 14 November (Offsite memo.docx) [1]."]))
-    events = _events(answer_stream(store, settings, "Where is the offsite in this memo?", email_id=budget.id))
+    def complete(_s, messages, **_k):
+        if messages[-1]["content"].startswith("Schema:"):
+            return "SQL: NONE"  # the workbook's table doesn't hold the offsite's date
+        drafts.append(messages)
+        return "Lisbon, 14 November [1]."
+
+    monkeypatch.setattr(assistant, "complete_text", complete)
+    # Days to work out keep the tools; this server refuses them, so the draft comes from a plain prompt.
+    events = _events(answer_stream(store, settings, "How many days until the offsite in this memo?", email_id=budget.id))
     assert "Lisbon on 14 November" in drafts[0][-1]["content"]
     assert "read_cells" not in drafts[0][0]["content"]
-    assert "Lisbon on 14 November" in _text(events)
+    # Everything in the draft is in the memo it read, so it is the answer: no second pass over the prompt.
+    assert _text(events).startswith("Lisbon, 14 November [1].") and len(drafts) == 1
+
+
+def test_files_that_fit_whole_are_answered_in_one_streamed_pass(store, settings, mail, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    prompts = []
+
+    def stream(_settings, messages, *, max_tokens):
+        prompts.append(messages)
+        yield "The offsite is in Lisbon on 14 November [1]."
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "Plan: none.\nSQL: NONE")
+    monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("tools")))
+    monkeypatch.setattr(assistant, "stream_text", stream)
+    events = _events(answer_stream(store, settings, "Where is the offsite in this memo?", email_id=budget.id))
+    assert len(prompts) == 1 and "Lisbon on 14 November" in prompts[0][-1]["content"]
+    assert "read_cells" not in prompts[0][0]["content"], "no tools to describe"
+    steps = [e["text"] for e in events if e["type"] == "step"]
+    assert "Read Offsite memo.docx in full (1 section)" in steps and "Checking the answer against what I read" not in steps
+    assert _text(events) == "The offsite is in Lisbon on 14 November [1]."
+
+
+def test_a_draft_with_a_figure_that_was_not_read_gets_a_second_pass(store, settings, mail, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    passes = []
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "Plan: none.\nSQL: NONE")
+    monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: ToolReply("The offsite costs $48,000 in Lisbon [1]."))
+    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: passes.append(1) or iter(["The offsite is in Lisbon on 14 November [1]."]))
+    events = _events(answer_stream(store, settings, "How does the offsite cost compare with the cap in this memo?", email_id=budget.id))
+    assert passes == [1] and "Checking the answer against what I read" in [e["text"] for e in events if e["type"] == "step"]
+    assert "$48,000" not in _text(events)
 
 
 def test_a_full_context_window_is_retried_smaller_and_explained(store, settings, mail, monkeypatch):
@@ -539,14 +592,13 @@ def test_asking_what_is_due_still_reads_the_open_pdf(store, settings, mail, monk
     store.upsert_email(budget)
     seen = []
 
-    def fake_tools(_settings, messages, tools, *, max_tokens):
+    def fake_stream(_settings, messages, *, max_tokens):
         seen.append(messages[-1]["content"])
-        return ToolReply("The Northwind amount due is $12,480.00 on 15 March 2026. Globex's note is not listed.")
+        yield "The Northwind amount due is $12,480.00 on 15 March 2026."
 
     monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
     monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
-    monkeypatch.setattr(assistant, "chat_with_tools", fake_tools)
-    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: iter(["The Northwind amount due is $12,480.00 on 15 March 2026."]))
+    monkeypatch.setattr(assistant, "stream_text", fake_stream)
     text = _text(answer_stream(store, settings, "What is the Northwind amount due, and when is it due?", email_id=budget.id))
     assert seen and "$12,480.00" in seen[0]
     assert "15 March 2026" in seen[0]
@@ -597,3 +649,96 @@ def test_saved_originals_are_only_read_from_the_extracted_folder(store, settings
     assert ws.original(budget, att) is not None
     att.filename = "../../../etc/passwd"
     assert ws.original(budget, att) is None
+
+
+def test_a_question_the_tables_work_out_is_answered_in_one_streamed_pass(store, settings, mail, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    prompts = []
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 16384)
+    monkeypatch.setattr(
+        assistant, "complete_text", lambda *_a, **_k: "Table: t1.\nRows: Ads.\nValue: q4.\nSQL: SELECT line, q4 FROM t1 WHERE line LIKE '%ads%'"
+    )
+
+    def no_tools(*_a, **_k):
+        raise AssertionError("the query worked it out: no tool turn")
+
+    monkeypatch.setattr(assistant, "chat_with_tools", no_tools)
+    monkeypatch.setattr(assistant, "stream_text", lambda _s, messages, **_k: prompts.append(messages) or iter(["Ads is 1,500 in Q4 (Q4 budget.xlsx, Budget, C2) [1]."]))
+    events = _events(answer_stream(store, settings, "what is the Q4 total for ads?", email_id=budget.id))
+    steps = [e["text"] for e in events if e["type"] == "step"]
+    assert "Worked out from the tables with a query (1 row)" in steps
+    assert len(prompts) == 1 and "Worked out with a query over the table" in prompts[0][-1]["content"]
+    assert _text(events).startswith("Ads is 1,500 in Q4") and not [e for e in events if e["type"] == "check"]
+
+
+def test_clip_always_returns_text_that_fits():
+    import random
+
+    rng = random.Random(7)
+    prose = (
+        "The Northwind invoice INV-10482 for $12,480.00 was received on 15 March 2026 and is due within 45 days. "
+        "Freight of $880.00 is billed separately under PO 7731. "
+    )
+    for _ in range(400):
+        text = prose * rng.randint(1, 6) if rng.random() < 0.5 else "\n".join(prose * rng.randint(1, 2) for _ in range(rng.randint(1, 5)))
+        room = rng.randint(1, agent.prompt_size(text) + 50)
+        cut = agent.clip(text, room)
+        assert agent.prompt_size(cut) <= max(room, agent.prompt_size("…")), (room, len(text))
+
+
+def test_a_check_pass_that_repeats_its_heading_keeps_the_draft(store, settings, mail, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "SQL: NONE")
+    # A draft with a figure that isn't in the files needs a check pass; that pass starts by repeating its heading.
+    monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: ToolReply("The offsite is in Lisbon on 14 November, budget $42,000, deposit $5,000 [1]."))
+    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: iter(["Your draft answer: ", "The offsite is in Lisbon on 14 November, capped at $42,000 [1]."]))
+    events = _events(answer_stream(store, settings, "How does the offsite budget compare with the cap in this memo?", email_id=budget.id))
+    assert not any(e["type"] == "mode" and e["mode"] == "lookup" for e in events)
+    assert "Lisbon on 14 November" in _text(events)
+
+
+def test_an_empty_turn_after_the_tools_read_still_answers_from_the_reading(store, settings, mail, monkeypatch):
+    from controller_inbox.local_llm import EmptyReply
+
+    budget = mail["Q4 budget draft"]
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "SQL: NONE")
+    turns = []
+
+    def tools(_s, messages, *_a, **_k):
+        turns.append(1)
+        if len(turns) == 1:
+            return ToolReply("", [{"id": "c1", "name": "trace_cell", "arguments": {"email": "1", "file": "Q4 budget.xlsx", "sheet": "Budget", "cell": "D4"}}])
+        raise EmptyReply("the model used its whole reply budget thinking")
+
+    streamed = []
+    monkeypatch.setattr(assistant, "chat_with_tools", tools)
+    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: streamed.append(1) or iter(["D4 = D2+D3 [1]."]))
+    events = _events(answer_stream(store, settings, "How is the total change worked out?", email_id=budget.id))
+    assert streamed and "D4 = D2+D3" in _text(events)
+
+
+def test_the_email_a_question_names_is_not_crowded_out_by_its_kind(loaded, settings, monkeypatch):
+    import copy
+
+    from controller_inbox import semantic
+    from controller_inbox.assistant import pick_sources
+    from controller_inbox.models import DocumentType
+
+    monkeypatch.setattr(semantic, "embedding_model", lambda _s: "")
+    base = loaded.get_email("demo-question")
+    for n in range(4):  # a mailbox with more reply-needed mails and invoices than the demo has
+        for category, prefix in ((DocumentType.REPLY_NEEDED, "reply"), (DocumentType.AP_INVOICE, "inv")):
+            email = copy.deepcopy(base)
+            email.id, email.category, email.importance_score = f"{prefix}-{n}", category, 95
+            email.subject, email.body_text, email.attachments, email.actions = f"Other {prefix} {n}", "unrelated", [], []
+            loaded.upsert_email(email)
+    sources, _, found = pick_sources(loaded, "Did Lakeside Tooling reply about the invoice?", settings=settings)
+    assert sources[0].id == "demo-wire-legit", "the Lakeside Tooling email the question names comes first"
+    assert "demo-wire-legit" in found and not any(hit.startswith(("reply-", "inv-")) for hit in found)
