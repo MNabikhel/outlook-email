@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="color-scheme" content="light dark"/>
+  <title>CloseDesk</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231b365d'/%3E%3Ctext x='16' y='21' font-family='Arial' font-weight='700' font-size='13' text-anchor='middle' fill='%23f3e3bd'%3ECD%3C/text%3E%3C/svg%3E"/>
+  <script src="/static/ui/theme.js?v={{ ui_version }}"></script>
+  <link rel="stylesheet" href="/static/ui/app.css?v={{ ui_version }}"/>
+  <script type="importmap">{{ import_map | tojson }}</script>
+  <script type="module" src="/static/ui/main.js?v={{ ui_version }}"></script>
+</head>
+<body data-tz="{{ tz }}">
+  <a class="skip" href="#list">Skip to the mail list</a>
+  <div class="ws" id="ws">
+    <aside class="rail" id="rail" aria-label="Folders and views">
+      <div class="rail-head">
+        <a class="brand" href="/app" data-nav title="CloseDesk">
+          <span class="brand-mark" aria-hidden="true">CD</span>
+          <span class="brand-name">CloseDesk</span>
+        </a>
+        <button type="button" class="icon-btn rail-toggle" data-cmd="toggle-rail" aria-label="Collapse the side bar" title="Collapse the side bar ( [ )"></button>
+      </div>
+      <nav class="rail-nav" id="rail-nav"></nav>
+      <div class="rail-foot" id="rail-foot"></div>
+    </aside>
+
+    <header class="top" id="top">
+      <button type="button" class="icon-btn top-back" data-cmd="back-to-list" aria-label="Back to the list" hidden></button>
+      <div class="top-date" id="top-date"><span class="sk sk-line" style="width: 180px"></span></div>
+      <div class="top-job" id="top-job" role="status" aria-live="polite"></div>
+      <button type="button" class="palette-btn" data-cmd="palette" aria-label="Search or jump (Ctrl K)">
+        <span class="palette-icon" aria-hidden="true"></span>
+        <span class="palette-text">Search mail, jump to a folder, or ask…</span>
+        <kbd class="palette-kbd">Ctrl K</kbd>
+      </button>
+      <div class="top-tools">
+        <button type="button" class="btn btn-quiet" data-cmd="process" id="process-btn">Process new mail</button>
+        <button type="button" class="icon-btn" data-cmd="theme" id="theme-btn" aria-label="Switch to dark theme" title="Theme"></button>
+        <button type="button" class="icon-btn" data-cmd="help" aria-label="Keyboard shortcuts" title="Keyboard shortcuts ( ? )"></button>
+        <button type="button" class="btn btn-chat" data-cmd="chat" id="chat-btn" aria-controls="chat" aria-expanded="false">
+          <span class="chat-icon" aria-hidden="true"></span><span class="chat-label">Ask CloseDesk</span><span class="dot" aria-hidden="true"></span>
+        </button>
+      </div>
+    </header>
+
+    <section class="list-pane" id="list" aria-label="Mail list" tabindex="-1"></section>
+    <main class="reader-pane" id="reader" aria-label="Reading pane" tabindex="-1"></main>
+
+    <aside class="chat" id="chat" aria-label="Ask CloseDesk" hidden></aside>
+  </div>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+  <div class="overlay" id="overlay" hidden></div>
+  <noscript><p class="noscript">The workspace needs JavaScript. <a href="/">Use the classic view</a>.</p></noscript>
+</body>
+</html>

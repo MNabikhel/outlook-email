@@ -1,6 +1,6 @@
-"""The JSON a workspace that renders in the browser is built from.
+"""The JSON the workspace at /app is built from, and the page that hosts it.
 
-The classic pages render on the server; a workspace can fetch these endpoints and render in the browser,
+The classic pages render on the server; the workspace fetches these endpoints and renders in the browser,
 so moving between folders and emails never reloads the page. Everything here reuses what the classic
 pages use (the store's queries, ``build_digest`` for the focus list, the fraud, coding and correction
 helpers), so both views always agree.
@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse
 
 from controller_inbox import agent, cost_codes, documents, fraud, semantic, table_lookup
 from controller_inbox.digest import build_digest
@@ -28,7 +29,13 @@ from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_L
 from controller_inbox.profile import active_profile, is_finance
 from controller_inbox.classify import month_end
 from controller_inbox.clock import format_when
-from controller_inbox.web import DOWNLOADABLE, _json_body, _require_page, _same_origin
+from controller_inbox.web import DOWNLOADABLE, _json_body, _require_page, _same_origin, templates
+
+UI_DIR = Path(__file__).parent / "static" / "ui"
+# Each script is fetched by a URL that changes with its contents, so an update never runs beside an old copy.
+UI_VERSION = hashlib.sha256(
+    b"".join(path.name.encode() + path.read_bytes() for path in sorted(UI_DIR.glob("*")) if path.is_file())
+).hexdigest()[:10]
 
 MAX_TABLES = 40
 MAX_TABLE_ROWS = 1500
@@ -89,6 +96,23 @@ def short_when(value: str, tz, today: date) -> str:
     if local.year == today.year:
         return f"{local.strftime('%b')} {local.day}"
     return f"{local.strftime('%b')} {local.day}, {local.year}"
+
+
+def due_label(due: str, today: date) -> str:
+    """``Due today``, ``Due tomorrow``, ``Due Fri Sep 25``, ``Overdue · Mon Sep 21``."""
+    if not due:
+        return ""
+    try:
+        when = date.fromisoformat(due)
+    except ValueError:
+        return f"Due {due}"
+    days = (when - today).days
+    if days == 0:
+        return "Due today"
+    if days == 1:
+        return "Due tomorrow"
+    label = f"{when.strftime('%a')} {when.strftime('%b')} {when.day}" + ("" if when.year == today.year else f", {when.year}")
+    return f"Overdue · {label}" if days < 0 else f"Due {label}"
 
 
 def _category(email_category) -> dict[str, str]:
@@ -171,7 +195,7 @@ def register_workspace(
     file_cards: Callable[[EmailRecord], list[dict]],
     original_path: Callable[[EmailRecord], Path | None],
 ) -> None:
-    """Add the workspace's JSON API (/api) to the dashboard."""
+    """Add the workspace page (/app) and its JSON API (/api) to the dashboard."""
     api = APIRouter(prefix="/api", dependencies=[Depends(page_only)])
 
     def known(email_id: str) -> EmailRecord:
@@ -347,6 +371,7 @@ def register_workspace(
                     "title": action.title,
                     "detail": action.detail,
                     "due": action.due_date or "",
+                    "due_label": due_label(action.due_date or "", today),
                     "overdue": bool(action.due_date and action.due_date < today.isoformat() and action.status == ActionStatus.OPEN),
                     "priority": action.priority.value,
                     "priority_label": IMPORTANCE_LABELS.get(action.priority, action.priority.value),
@@ -412,6 +437,7 @@ def register_workspace(
                     "title": action.title,
                     "detail": action.detail,
                     "due": action.due_date or "",
+                    "due_label": due_label(action.due_date or "", today),
                     "overdue": bool(action.due_date and action.due_date < today.isoformat() and action.status == ActionStatus.OPEN),
                     "priority": action.priority.value,
                     "priority_label": IMPORTANCE_LABELS.get(action.priority, action.priority.value),
@@ -605,3 +631,22 @@ def register_workspace(
         return {"ok": True, "started": started, "job": job.snapshot()}
 
     app.include_router(api)
+
+    def ui_scripts() -> dict[str, str]:
+        return {f"/static/ui/{path.name}": f"/static/ui/{path.name}?v={UI_VERSION}" for path in sorted(UI_DIR.glob("*.js"))}
+
+    def workspace(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request,
+            "app.html",
+            {"ui_version": UI_VERSION, "import_map": {"imports": ui_scripts()}, "tz": settings.tz.key},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/app", response_class=HTMLResponse)
+    def workspace_home(request: Request):
+        return workspace(request)
+
+    @app.get("/app/{rest:path}", response_class=HTMLResponse)
+    def workspace_page(request: Request, rest: str):
+        return workspace(request)
