@@ -643,6 +643,7 @@ def _region_edges(lines: list[Line], rules: list[Rule], region: list[int]) -> li
     # a table with no figures at all (a task list) is read from all its rows.
     body = rows if first is None else rows[first:] if len(rows) - first >= 3 else []
     heads = [word for index in rows if index not in body for word in lines[index].words]
+    named = _headings_over(rows, body)
     tolerance = 0 if len(body) < 6 else max(1, round(0.08 * len(body)))
     edges: list[float] = []
     narrow: list[float] = []
@@ -651,7 +652,9 @@ def _region_edges(lines: list[Line], rules: list[Rule], region: list[int]) -> li
         if border:
             edges.append(border[0])
         elif hi - lo >= 0.9 * em:
-            edges.append(_edge_at(lines, body, lo, hi, at, heads, 0.4 * em))
+            cut = _edge_at(lines, body, lo, hi, at, heads, 0.4 * em)
+            edges.append(cut)
+            edges += _empty_columns(lo, hi, cut, [word for index in named for word in lines[index].words], 0.5 * em)
         elif strict and _lined_up(lines, body, lo, hi):
             cut = _edge_at(lines, body, lo, hi, at, heads, 0.6)
             if not any(word.x0 < cut < word.x1 for word in heads):
@@ -672,6 +675,41 @@ def _region_edges(lines: list[Line], rules: list[Rule], region: list[int]) -> li
         if heads and cut in edges and not _headed_both_sides(cut, edges, heads, lo, hi):
             edges.remove(cut)
     return edges or None
+
+
+def _headings_over(rows: list[int], body: list[int]) -> list[int]:
+    """The heading rows right above the rows of figures, with no other line between them (a report's title
+    further up, its name and run date between, names no column)."""
+    joined = body[:1]
+    for index in reversed([index for index in rows if index not in body]):
+        if not joined or index != joined[-1] - 1:
+            break
+        joined.append(index)
+    return joined[1:]
+
+
+def _empty_columns(lo: float, hi: float, cut: float, heads: list[Word], space: float) -> list[float]:
+    """Edges for a column no row fills ("Discount Available", blank on every invoice), in a strip between two
+    filled columns that already has its edge at ``cut``: its heading sits inside the strip, clear of both sides.
+    An edge goes in each space between that heading and another one (a heading inside the strip too, or that of
+    the column beside it reaching into the strip) on the far side from ``cut``. A heading with no other heading
+    beside it, such as one set left over figures set right, is the next column's."""
+    # The headings that reach into the strip, a phrase at a time ("Check #" is one, though "#" is inside it).
+    spans: list[list[float]] = []
+    for word in sorted((w for w in heads if w.x1 > lo + 1 and w.x0 < hi - 1), key=lambda w: w.x0):
+        if spans and word.x0 <= spans[-1][1] + space:
+            spans[-1][1] = max(spans[-1][1], word.x1)
+        else:
+            spans.append([word.x0, word.x1])
+    inside = [span for span in spans if span[0] > lo + 1 and span[1] < hi - 1]
+    if not inside or any(a < cut < b for a, b in spans):
+        return []
+    # Each space between two headings (one of them inside the strip) that doesn't hold the edge already found.
+    return [
+        (one[1] + two[0]) / 2
+        for one, two in zip(spans, spans[1:])
+        if (one in inside or two in inside) and two[0] - one[1] >= 2 and not one[1] <= cut <= two[0]
+    ]
 
 
 def _first_figure_row(lines: list[Line], rows: list[int]) -> int | None:

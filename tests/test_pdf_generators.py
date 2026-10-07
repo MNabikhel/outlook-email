@@ -139,3 +139,20 @@ def test_a_trial_balance_whose_sections_leave_different_columns_empty_is_one_gri
         y -= 13
     _column_cuts(lines, [Rule(x, y - 10, 712) for x in (36, 76, 180, 250, 320, 380, 440)])
     assert len({line.grid for line in lines if len(line.words) > 2}) == 1
+
+
+def test_a_column_no_row_fills_keeps_its_own_heading():
+    # An invoice register's "Discount Available" is blank on every invoice: only its heading, set between the
+    # "Invoice Amount" and "Net Payable" figures, shows the column. Without an edge after it, "Discount
+    # Available" and "Net Payable" ran together ("Net Available Payable").
+    from controller_inbox.pdf_layout import Word, _empty_columns
+
+    heads = [Word("Invoice", 553.8, 586.3, True), Word("Amount", 552.4, 587.7, True), Word("Discount", 604.3, 644.3, True),
+             Word("Available", 603.8, 644.8, True), Word("Net", 670.4, 686.5, True), Word("Payable", 661.1, 695.8, True)]
+    [edge] = _empty_columns(595.1, 662.8, 597.6, heads, 5.0)
+    assert 644.8 < edge < 661.1
+    # "Check #" reaching into the gap after the check numbers is that column's heading, not one of its own.
+    check = [Word("Check", 300.0, 330.0, True), Word("#", 332.8, 338.4, True), Word("Issue", 395.0, 420.6, True)]
+    assert _empty_columns(327.8, 395.0, 340.9, check, 5.0) == []
+    # A heading set left over figures set right, with no other heading beside it, names the figures.
+    assert _empty_columns(250.0, 370.0, 260.0, [Word("Amount", 300.0, 336.0, True)], 5.0) == []
