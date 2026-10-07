@@ -672,18 +672,20 @@ def stream_text(
     wait: float | None = None,
     temperature: float | None = None,
     finished: dict | None = None,
+    sampling: dict | None = None,
 ):
     """Yield the answer as it is written. Servers that ignore ``stream`` send it in one piece.
 
     Raises ``EmptyReply`` when the model wrote nothing, so callers never show a blank answer. ``wait``: how long
     the model may go quiet (looking at a picture first can take minutes on a laptop); ``temperature``: other than
     the usual 0.2; ``finished``: given a dict, its "reason" is set to why the reply ended ("length": cut off) and
-    "thought" to whether the model reasoned first.
+    "thought" to whether the model reasoned first; ``sampling``: more settings sent as they are (top_p, top_k,
+    presence_penalty).
     """
     model, effort, budget = _chat_plan(settings, max_tokens)
     for _attempt in range(2):
         reply = Reply(content="")
-        for piece in _stream_once(settings, messages, budget, effort, reply, wait=wait, temperature=temperature):
+        for piece in _stream_once(settings, messages, budget, effort, reply, wait=wait, temperature=temperature, sampling=sampling):
             reply.content += piece
             yield piece
         if finished is not None:
@@ -707,6 +709,7 @@ def _stream_once(
     rejected_effort: str = "",
     wait: float | None = None,
     temperature: float | None = None,
+    sampling: dict | None = None,
 ):
     """``rejected_effort`` names the model whose ``reasoning_effort`` the last try sent; it is
     remembered as refusing it only if this try, without it, is accepted."""
@@ -715,6 +718,8 @@ def _stream_once(
         payload["reasoning_effort"] = effort
     if temperature is not None:
         payload["temperature"] = temperature
+    if sampling:
+        payload.update(sampling)
     timeout = httpx.Timeout(max(settings.llm_timeout, wait or 0.0), connect=5.0)
     with httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
         if effort and response.status_code in _RETRYABLE:
@@ -732,7 +737,7 @@ def _stream_once(
         # Only a refusal is remembered; a busy server (500) is just tried again without the effort.
         yield from _stream_once(
             settings, messages, budget, None, reply,
-            rejected_effort=str(payload.get("model")) if refused else "", wait=wait, temperature=temperature,
+            rejected_effort=str(payload.get("model")) if refused else "", wait=wait, temperature=temperature, sampling=sampling,
         )
 
 

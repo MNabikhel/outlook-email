@@ -232,9 +232,17 @@ def render(data: bytes, filename: str, page: int) -> bytes:
     return out.getvalue()
 
 
+# Greedy decoding copies a page most faithfully, but now and then falls into writing one line or cell over and over.
+# A page it loops on is read once more with the sampling Qwen recommends for its instruct models, which breaks such
+# loops: on a scanned commission report that looped from its first line, the second reading had all 162 figures
+# right.
+RETRY_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penalty": 1.5}
+
+
 def transcribe(settings: Settings, png: bytes, *, on_piece: Callable[[int], None] | None = None) -> str:
-    """The model's reading of the page: its text, with tables in markdown. Raises ``EmptyReply`` when it wrote
-    nothing, ``CutOff`` when it stopped at its length limit, and ``httpx.HTTPError`` when the server failed."""
+    """The model's reading of the page: its text, with tables in markdown. Raises ``Blank`` for a page with nothing
+    on it, ``EmptyReply`` when it wrote nothing, ``CutOff`` when it stopped at its length limit or got stuck repeating
+    itself (twice), and ``httpx.HTTPError`` when the server failed."""
     messages = [
         {
             "role": "user",
@@ -244,10 +252,30 @@ def transcribe(settings: Settings, png: bytes, *, on_piece: Callable[[int], None
             ],
         }
     ]
+    text, looped = _transcribe_once(settings, messages, on_piece, {"temperature": 0.0})
+    if not looped:
+        return text
+    log.info("The vision model looped on a page; reading it once more with sampling")
+    try:
+        again, looped_again = _transcribe_once(settings, messages, on_piece, RETRY_SAMPLING)
+    except (CutOff, EmptyReply, Blank):
+        again, looped_again = "", True
+    best = again if not looped_again else max(text, again, key=len)
+    if len(best) < 200:
+        raise CutOff("the model got stuck repeating itself near the top of the page")
+    return best
+
+
+def _transcribe_once(settings: Settings, messages: list[dict], on_piece, sampling: dict) -> tuple[str, bool]:
+    """One reading of the page, stopped early if it loops: (text without the loop, whether it looped)."""
     written = []
     finished: dict = {}
     looped = False
-    pieces = stream_text(settings, messages, max_tokens=MAX_TOKENS, wait=WAIT_SECONDS, temperature=0.0, finished=finished)
+    settings_ = {key: value for key, value in sampling.items() if key != "temperature"}
+    pieces = stream_text(
+        settings, messages, max_tokens=MAX_TOKENS, wait=WAIT_SECONDS, temperature=sampling.get("temperature"),
+        finished=finished, sampling=settings_ or None,
+    )
     checked = 0
     try:
         for piece in pieces:
@@ -268,16 +296,14 @@ def transcribe(settings: Settings, png: bytes, *, on_piece: Callable[[int], None
         pieces.close()
     text, _trimmed = trim_loop(strip_thinking("".join(written)))
     text = text.strip()
-    if not text:
+    if not text and not looped:
         if finished.get("reason") == "stop" and not finished.get("thought"):
             raise Blank("the page has nothing on it to read")
         raise EmptyReply("the model wrote nothing for the page")
     if finished.get("reason") == "length" and not looped:
         # Half a page would hide the rest of it: the reading is not kept.
         raise CutOff(f"the reading stopped at the {MAX_TOKENS:,}-token limit before the end of the page")
-    if looped and len(text) < 200:
-        raise CutOff("the model got stuck repeating itself near the top of the page")
-    return text
+    return text, looped
 
 
 # An account or routing number beside its label in the model's markdown ("| Account Number | 123456789012 |",

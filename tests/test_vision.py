@@ -928,3 +928,21 @@ def test_a_tables_second_heading_line_names_the_columns_under_a_spanning_heading
     assert "Line: Net sales | Month of October 2026: 9,100 | Month of October 2025: 8,700 | Year to Date 2026: 88,000" in vision.page_text(years)
     second_table = "| Voucher | Vendor | Amount |\n|---|---|---|\n| GL Acct | Account Name | Vouchers |\n| 6200 | Utilities | 12 |\n"
     assert "Voucher | Vendor | Amount" in vision.page_text(second_table), "another table's headings fill no gap: left as a row"
+
+
+def test_a_page_the_model_loops_on_is_read_once_more_with_sampling(settings, monkeypatch):
+    """Greedy first (it copies figures most faithfully); a loop is read again the way Qwen recommends sampling."""
+    settings.llm = None
+
+    class LoopsWhenGreedy(FakeVisionServer):
+        def __call__(self, request):
+            if request.url.path.endswith("/chat/completions"):
+                self.page = BALANCE if json.loads(request.content).get("presence_penalty") else "| Larkspur |" + "  |" * 3000
+            return super().__call__(request)
+
+    server = LoopsWhenGreedy()
+    _serve(monkeypatch, server)
+    assert vision.transcribe(settings, b"png") == BALANCE.strip()
+    greedy, sampled = server.calls
+    assert greedy["temperature"] == 0.0 and "presence_penalty" not in greedy
+    assert {key: sampled[key] for key in vision.RETRY_SAMPLING} == vision.RETRY_SAMPLING
