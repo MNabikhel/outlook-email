@@ -227,21 +227,22 @@ def pick_sources(
         if on_screen_question(question) or (not about_today and not _ELSEWHERE.search(question) and answered_here(current, question)):
             return [current], False, set()
     stripped = _TODAY.sub(" ", question) if about_today else question
-    found = []
+    by_kind: list[EmailRecord] = []
     for pattern, categories in _INTENTS:
         if pattern.search(question):
             stripped = pattern.sub(" ", stripped)
             for category in categories:
-                found += store.list_emails(category=category.value, order="score", limit=4)
+                by_kind += store.list_emails(category=category.value, order="score", limit=4)
     # "How do I set up LM Studio?" is a help question, but "the payroll export" is a search.
     terms = keywords(_HELP.sub(" ", stripped))
     if terms:
         terms = keywords(stripped)
     by_search, by_meaning, how = semantic.find_mail(store, settings, stripped, terms, limit=MAX_SOURCES)
-    found += by_search
     if terms and report is not None:
         report.update(how=how, meaning_hits=len(by_meaning))
-    found = list({email.id: email for email in found}.values())[:MAX_SOURCES]
+    # The emails the question's own words find come first; the top emails of the kind it names ("invoice",
+    # "reply") fill what room is left. They are the matches only when the words found none.
+    found = list({email.id: email for email in [*by_search, *by_kind]}.values())[:MAX_SOURCES]
     for email in found:
         picked.setdefault(email.id, email)
     if about_today or not terms:
@@ -251,7 +252,8 @@ def pick_sources(
                 if email is not None:
                     picked[email.id] = email
     cap = MAX_SOURCES + (1 if email_id in picked else 0)
-    return list(picked.values())[:cap], about_today, {email.id for email in found}
+    hits = by_search if by_search else found
+    return list(picked.values())[:cap], about_today, {email.id for email in hits}
 
 
 _FILE_WORDS = re.compile(
@@ -386,7 +388,7 @@ def build_messages(
     for email in sources:
         limit = per * 3 if lead(email) else per
         # The body's share is in budget characters; a body full of figures gets fewer of its own.
-        body = email.body_text or ""
+        body = re.sub(r"\s+", " ", email.body_text or "").strip()  # as _source_block shows it
         limit = int(limit * len(body) / max(1, size(body))) if body else limit
         block = _source_block(numbers[email.id], email, limit, on_screen=email.id == current_id, brief=brief[email.id])
         lines.append(block + fenced.get(email.id, ""))
@@ -696,10 +698,17 @@ def _budget(settings: Settings, *, tools: bool) -> int:
 
 
 def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[dict[str, Any]]:
+    before = len(state["text"])
     for piece in without_echo(stream_text(settings, messages, max_tokens=settings.chat_max_tokens)):
         state["wrote"] = True
         state["text"] += piece
         yield {"type": "delta", "text": piece}
+    # A model whose chat template opens <think> in the prompt, on a server that doesn't separate reasoning,
+    # writes its reasoning and then "</think>": what came before that tag is not the answer.
+    written = state["text"][before:]
+    if "</think>" in written and "<think>" not in written.split("</think>", 1)[0]:
+        state["text"] = state["text"][:before] + written.split("</think>")[-1].lstrip()
+        yield {"type": "revise", "text": state["text"]}
 
 
 def _keep_stated_figures(checked: str, draft: str, file_text: str) -> str:
@@ -844,6 +853,11 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     except ToolsUnsupported:
         messages = build_messages(question, ws.sources, budget=budget, files=files, **base)
         draft = complete_text(settings, messages, max_tokens=settings.chat_max_tokens)
+    except EmptyReply:
+        # A turn with no answer (a thinking model out of room) after the tools have read something: answer
+        # from what was read below, rather than drop it all for the lookup answer.
+        if not (ws.evidence or ws.read_files):
+            raise
     if len(ws.sources) > known:
         yield {"type": "sources", "sources": source_cards(ws.sources, settings), "mode": "model"}
     draft = _ECHO_RE.split(draft, maxsplit=1)[0].rstrip()
@@ -881,7 +895,16 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     messages = build_messages(question, ws.sources, budget=check_budget, files=files, tail="\n\n".join(parts), **base)
     yield {"type": "step", "text": "Checking the answer against what I read"}
     before = len(state["text"])
-    yield from _stream(settings, messages, state)
+    try:
+        yield from _stream(settings, messages, state)
+    except EmptyReply:
+        # The check pass sent nothing usable (or only its instructions back): the draft is the answer.
+        if not draft or state["text"][before:]:
+            raise
+        state["wrote"] = True
+        state["text"] += draft
+        yield {"type": "delta", "text": draft}
+        return
     file_text = "\n".join(att.extracted_text or "" for email in ws.sources for att in email.attachments)
     kept = _keep_stated_figures(state["text"][before:], draft, file_text)
     if kept != state["text"][before:]:

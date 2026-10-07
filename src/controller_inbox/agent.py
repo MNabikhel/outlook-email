@@ -19,6 +19,7 @@ from __future__ import annotations
 import ast
 import calendar
 import json
+import math
 import operator
 import re
 from collections.abc import Iterator
@@ -228,12 +229,13 @@ def clip(text: str, room: int, *, mark: str = "\n…") -> str:
     room -= prompt_size(mark)
     keep = len(text)
     while keep > 0:
-        # Figures cost more than words, so a cut at the average rate can still be too long: cut again.
-        keep = max(0, int(keep * room / max(1, prompt_size(text[:keep]))))
+        # Figures cost more than words, so a cut at the average rate can still be too long: cut again. Each try
+        # keeps less than the last, or a line too long to fit could have it go back and forth for ever.
+        keep = max(0, min(keep - 1, int(keep * room / max(1, prompt_size(text[:keep])))))
         cut = text[:keep].rsplit("\n", 1)[0] if "\n" in text[:keep] else text[:keep]
         if prompt_size(cut) <= room:
             return cut + mark
-        keep = len(cut) - 1
+        keep = len(cut)
     return mark.lstrip("\n")
 
 
@@ -1007,7 +1009,9 @@ def _evaluate(node):
         return node.value
     if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
         left, right = _evaluate(node.left), _evaluate(node.right)
-        if isinstance(node.op, ast.Pow) and abs(right) > 12:
+        # A power is worked out only when its result stays a figure a schedule could hold: (9**12)**12 nested a
+        # few times would keep the computer busy for minutes.
+        if isinstance(node.op, ast.Pow) and (abs(right) > 12 or (abs(left) > 1 and abs(right) * math.log10(abs(left)) > 15)):
             raise ValueError("exponent too large")
         return _OPS[type(node.op)](left, right)
     if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
