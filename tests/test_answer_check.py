@@ -109,3 +109,31 @@ def test_a_figure_cited_to_the_wrong_file_is_pointed_out():
     assert result.text == answer
     assert result.checks == ["115,500 is in Q4 budget.xlsx, not FY26 Audit.pdf: check where that figure comes from."]
     assert _review("[1] · page 17: 3 vendor bank-detail changes were approved.").checks == []
+
+
+def test_right_answers_from_the_review_are_left_alone():
+    def checked(answer, material):
+        return review(answer, material=material, files=[])
+
+    # A fall written as a positive percentage is the change over the earlier figure.
+    fall = checked("Services revenue fell 10% from $200,000 to $180,000.", ["Services revenue: Q2 $200,000; Q3 $180,000"])
+    assert (fall.text, fall.checks) == ("Services revenue fell 10% from $200,000 to $180,000.", [])
+    # A total of three figures is not "corrected" to the sum of two of them.
+    three = checked("The three open invoices total $5,800 ($500 + $2,500 + $2,800).", ["INV-1 $500.00", "INV-2 $2,500.00", "INV-3 $2,800.00"])
+    assert (three.text, three.checks) == ("The three open invoices total $5,800 ($500 + $2,500 + $2,800).", [])
+    # A credit in a list takes away from its total.
+    credit = "Open items:\n- INV-1001: $1,000.00\n- INV-1002: $2,000.00\n- CM-2291 (credit): -$300.00\n\nTotal: $2,700.00"
+    assert checked(credit, ["INV-1001 1,000.00", "INV-1002 2,000.00", "CM-2291 (300.00)"]).text == credit
+    # Only the first figure on a "Total" line is the list's total.
+    listed = "Due:\n* INV-10482: $12,850.00\n* Harbor: $1,980.00\n* Apex: $48,500.00\n\nTotal: $63,330.00, leaving $36,670.00 of the $100,000.00 budget."
+    left = checked(listed, ["$12,850.00", "$1,980.00", "$48,500.00", "budget $100,000.00"])
+    assert left.text == listed and not any(check.startswith("Corrected") for check in left.checks)
+
+
+def test_a_page_range_is_not_corrected_to_one_page():
+    loan = (
+        "[page 1]\nPmt #: 23 | Ending Balance: 1,612,004.10\n\n[page 2]\nPmt #: 24 | Ending Balance: 1,571,781.00\n\n"
+        "[page 3]\nPmt #: 37 | Ending Balance: 1,051,370.72\n"
+    )
+    answer = "The schedule runs from payment 23 to payment 24 on pages 1-2 of Loan.pdf, ending at 1,571,781.00."
+    assert review(answer, material=[], files=[("Loan.pdf", loan)]).text == answer
