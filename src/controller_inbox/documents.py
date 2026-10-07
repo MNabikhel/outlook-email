@@ -697,7 +697,7 @@ def csv_text(data: bytes, filename: str) -> str:
     quote = getattr(dialect, "quotechar", None) or '"'
     try:
         rows = list(csv.reader(io.StringIO(text), dialect))
-        broken = _swallowed(rows, text, dialect.delimiter, quote)
+        broken = _swallowed(rows, text, dialect)
     except csv.Error:  # a cell over 128 KB, as one opened by a stray quote can be
         broken = True
     if broken:
@@ -705,20 +705,23 @@ def csv_text(data: bytes, filename: str) -> str:
     return _rows_text(rows, filename)
 
 
-def _swallowed(rows: list[list[str]], text: str, delimiter: str, quote: str) -> bool:
-    """Whether a quote that never closed ran one cell over the rows below it: the cell runs to the end of
-    the file, or holds lines shaped like the file's rows."""
-    if not rows:
+def _swallowed(rows: list[list[str]], text: str, dialect) -> bool:
+    """Whether a stray quote ran one cell over the rows below it: it never closed, or it closed only at a
+    quote further on that isn't the end of a cell ('Desk,"1"'). A cell whose quotes pair up properly around
+    lines of its own (a remit-to address: "PO Box 1200 / Suite 4, Building B") is one cell, unless lines shaped
+    like the file's rows in it clearly outnumber the rows read."""
+    cells = [cell for row in rows for cell in row if "\n" in cell]
+    if not cells:
         return False
-    if "\n" in "".join(rows[-1][-1:]) and not text.rstrip().endswith(quote):
+    try:
+        # A quote inside a quoted cell is written twice: a lone one ends the cell, so a delimiter must follow it.
+        for _row in csv.reader(io.StringIO(text), dialect, strict=True, doublequote=True):
+            pass
+    except csv.Error:
         return True
     width = len(rows[0]) - 1
-    for row in rows:
-        for cell in row:
-            if width >= 1 and cell.count("\n") >= 2:
-                if sum(line.count(delimiter) == width for line in cell.split("\n")[1:]) >= 2:
-                    return True
-    return False
+    shaped = max(sum(line.count(dialect.delimiter) == width for line in cell.split("\n")[1:]) for cell in cells)
+    return width >= 1 and shaped >= max(3, 2 * len(rows))
 
 
 def _csv_line(line: str, dialect, quote: str) -> list[str]:
