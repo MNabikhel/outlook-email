@@ -946,3 +946,14 @@ def test_a_page_the_model_loops_on_is_read_once_more_with_sampling(settings, mon
     greedy, sampled = server.calls
     assert greedy["temperature"] == 0.0 and "presence_penalty" not in greedy
     assert {key: sampled[key] for key in vision.RETRY_SAMPLING} == vision.RETRY_SAMPLING
+
+
+def test_headings_with_an_extra_blank_at_the_left_are_lined_up_with_the_figures():
+    """Seen on a scanned income statement: the heading lines have one more blank cell at the left than the rows,
+    so every amount sat under the heading to its right."""
+    markdown = (
+        "| | | Month of October | | |\n|---|---|---|---|---|\n| | | 2026 | % of Sales | 2025 |\n"
+        "| 4010 Wholesale | 1,084,215.40 | 62.4% | 942,118.75 |\n| 4020 Retail | 412,880.00 | 23.8% | 401,550.00 |\n"
+    )
+    page = vision.page_text(markdown)
+    assert "Line: 4010 Wholesale | Month of October 2026: 1,084,215.40 | Month of October % of Sales: 62.4% | Month of October 2025: 942,118.75" in page

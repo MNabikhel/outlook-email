@@ -490,11 +490,26 @@ def _joined_headings(header: list[str], row: list[str]) -> list[str]:
     return out
 
 
+def _aligned(header: list[str], rows: list[list[str]]) -> list[str]:
+    """The headings over the right figures: when the model gave the heading lines more blank cells at the left than
+    the rows have (every row with figures is shorter), the extra blanks go, so "Month of October 2026" heads the
+    2026 column, not the row names'."""
+    widths = Counter(len(row) for row in rows if sum(1 for cell in row if cell) >= 2)
+    if not widths:
+        return header
+    width = widths.most_common(1)[0][0]
+    extra = len(header) - width
+    if extra > 0 and all(len(row) <= width for row in rows) and not any(header[: extra + 1]):
+        return header[extra:]
+    return header
+
+
 def _table_lines(header: list[str], rows: list[list[str]]) -> list[str]:
     from controller_inbox.table_lookup import ROW_LABEL
 
     if rows and _second_heading(header, rows[0]):
         header, rows = _joined_headings(header, rows[0]), rows[1:]
+    header = _aligned(header, rows)
     width = max([len(header), *(len(row) for row in rows)]) if rows else len(header)
     labels = [*header, *[""] * (width - len(header))]
     # Every column is named, the row names too ("Line: Less: Allowance for Doubtful Accounts" stays one cell).
