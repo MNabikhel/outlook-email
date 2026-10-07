@@ -305,17 +305,18 @@
   }
 
   function formatSentence(sentence, context, sources, names, whole) {
-    let html = escapeHtml(sentence)
+    const html = escapeHtml(sentence)
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
       .replace(/(^|[\s(])\*(?!\s)([^*\n]+?)\*(?=[\s).,!?:;]|$)/g, "$1<em>$2</em>")
       .replace(/`([^`\n]+)`/g, "<code>$1</code>");
-    if (names.pattern) {
-      html = html.replace(names.pattern, (match) => {
-        const hit = names.byName.get(match.toLowerCase());
-        return hit ? fileLink(fileHref(hit.source, hit.file, context), hit.file.name, match, "cite-name") : match;
-      });
-    }
-    return html.replace(/\[(\d{1,2})\]/g, (match, n) => {
+    // File names and [n] citations in one pass, so a link is never looked through again: a file named
+    // report[1].csv stays one link instead of getting a citation inside its title. Tags pass unchanged.
+    return html.replace(names.pattern, (match, tag, name, n) => {
+      if (tag) return tag;
+      if (name) {
+        const hit = names.byName.get(name.toLowerCase());
+        return hit ? fileLink(fileHref(hit.source, hit.file, context), hit.file.name, name, "cite-name") : name;
+      }
       const source = sources.find((item) => String(item.n) === n);
       if (!source) return match;
       const target = citeTarget(source, context, whole);
@@ -338,11 +339,12 @@
     const unique = new Map(
       [...byName].filter(([key]) => counts.get(key) === 1 && key.length >= 5).map(([key, hit]) => [escapeHtml(key), hit])
     );
-    if (!unique.size) return { byName: unique, pattern: null };
     const escaped = [...unique.keys()]
       .sort((a, b) => b.length - a.length)
       .map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-    return { byName: unique, pattern: new RegExp(`(?<![\\w/])(?:${escaped.join("|")})(?![\\w])`, "gi") };
+    // A tag added for bold, italics or code; a file name (none: matches nothing); a citation.
+    const name = escaped.length ? `(?<![\\w/])(?:${escaped.join("|")})(?![\\w])` : "(?!)";
+    return { byName: unique, pattern: new RegExp(`(<[^>]*>)|(${name})|\\[(\\d{1,2})\\]`, "gi") };
   }
 
   function formatAnswer(text, sources) {

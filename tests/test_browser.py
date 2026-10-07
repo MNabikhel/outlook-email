@@ -6,6 +6,8 @@ fake what they need on it as the other web tests do.
 
 from __future__ import annotations
 
+from email.message import EmailMessage
+
 import pytest
 
 pytest.importorskip("playwright")
@@ -13,6 +15,7 @@ pytest.importorskip("playwright")
 from playwright.sync_api import sync_playwright  # noqa: E402
 
 from controller_inbox import assistant, chats, web  # noqa: E402
+from controller_inbox.folder_mail import ingest_folder  # noqa: E402
 from controller_inbox.web import create_app  # noqa: E402
 from liveserver import chromium_path, serving  # noqa: E402
 
@@ -134,3 +137,35 @@ def test_a_csv_citation_opens_the_cited_cell(site, page, context, store, setting
     cited.goto(site + base + "?at=B3")
     assert "B3 (Department): Finance" in cited.inner_text(".file-part.target mark.cited")
     assert context.errors == []
+
+
+# 5. A file name with [n] in it stays one link: the citation pass doesn't run inside the file's link.
+
+
+def test_a_file_name_with_a_bracketed_number_keeps_the_answer_whole(site, page, context, store, settings):
+    hostile = 'inv<img src=x onerror="alert(1)">.pdf'
+    message = EmailMessage()
+    message["Subject"] = "Invoice and report"
+    message["From"] = "Eve <eve@taz.com>"
+    message["Date"] = "Mon, 28 Sep 2026 14:30:00 +0000"
+    message.set_content("Both attached.")
+    message.add_attachment(b"%PDF-1.4 not really", maintype="application", subtype="pdf", filename=hostile)
+    message.add_attachment(b"a,b\n1,2\n", maintype="text", subtype="csv", filename="report[1].csv")
+    (settings.inbox_incoming / "eve.eml").write_bytes(bytes(message))
+    [email] = ingest_folder(store, settings)
+    assert [att.filename for att in email.attachments] == [hostile, "report[1].csv"]
+    text = f"Eve sent report[1].csv with the totals [1]. The invoice is {hostile} [1]."
+    dialogs: list[str] = []
+    page.on("dialog", lambda dialog: (dialogs.append(dialog.message), dialog.dismiss()))
+    bubble = _open_saved(page, f"{site}/", _saved_answer(store, text, assistant.source_cards([email], settings)))
+
+    links = _links(bubble)
+    assert [name for name, _href in links] == ["report[1].csv", "[1]", hostile, "[1]"]
+    assert all(href.startswith(f"/inbox/{email.id}/files/") for _name, href in links)
+    assert bubble.query_selector_all("a a") == [] and bubble.query_selector_all("img") == []
+    assert [a.get_attribute("title") for a in bubble.query_selector_all(":scope > div a.cite-name")] == [
+        "Open report[1].csv",
+        f"Open {hostile}",
+    ]
+    assert bubble.query_selector(":scope > div").inner_text() == text
+    assert dialogs == [] and context.errors == []
