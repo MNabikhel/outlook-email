@@ -112,27 +112,72 @@ def own_words(body: str, *, keep_disclaimers: bool = False) -> str:
     return "\n\n".join(kept).strip()
 
 
+# Words that name where a payment goes. "Account" and "payment" on their own also name logins, account
+# managers, card details and payment terms, so they count only next to one of these.
+_BANK = r"(?:bank(?:ing|s)?|remit(?:tance)?|remit[- ]to|wire|wiring|ach|iban|swift|bic|sort\s+code)"
+# The details themselves: "bank details", "bank account number", "wire instructions", "our payment details".
+_BANK_DETAILS = (
+    r"(?:" + _BANK + r"\s+(?:account\s+)?(?:details|information|info|instructions|account|numbers?|data|coordinates)"
+    r"|routing\s+(?:and\s+account\s+)?numbers?|account\s+and\s+routing\s+numbers?"
+    r"|(?:payment|remittance)\s+instructions|our\s+payment\s+(?:details|information|info))"
+)
+_CHANGED = r"(?:changed|changing|updated|amended|modified|replaced|moved|switched)"
+
 PAYMENT_CHANGE_RE = re.compile(
-    r"(new\s+(?:bank(?:ing)?|routing|account|wire)\s+instruct|"
-    r"updated\s+(?:bank(?:ing)?|wire|account|payment)\s+instruct|"
-    r"(?<!not a )(?<!not )change(?:d|s)?\s+(?:in|of|to)\s+(?:bank|account|wiring|payment)|"
-    r"please\s+use\s+(?:the\s+)?following\s+(?:account|routing|bank)|"
-    r"wire\s+instructions\s+have\s+changed|"
-    r"our\s+bank(?:ing)?\s+details\s+have\s+changed|"
-    r"do\s+not\s+use\s+(?:the\s+)?previous\s+account|"
-    r"(?<!not )(?:changed|switched|moved)\s+(?:our\s+bank(?:s|ing\s+partner)?|banks|to\s+a\s+new\s+bank)\b|"
-    r"update\s+(?:our|the|your\s+records\s+with\s+our)\s+(?:bank(?:ing)?|remittance|payment|wire|ach)\s+"
-    r"(?:details|information|info|instructions)|"
-    r"(?:updated|new)\s+(?:remittance|remit[- ]to|bank(?:ing)?|payment|wire|ach)\s+(?:account\s+)?(?:details|information|info)|"
-    r"(?:to|into)\s+(?:the|our)\s+new\s+(?:bank\s+)?account|"
-    # "Our bank account details have changed", "remittance information has been updated".
-    r"\b(?:bank(?:ing)?|account|payment|remittance|remit[- ]to|wire|wiring|ach)(?:\s+account)?\s+"
-    r"(?:details|information|info|instructions|number)\s+(?:have|has)\s+(?:recently\s+)?(?:been\s+)?(?:changed|updated)|"
-    # "We have a new bank account", "our new banking account".
-    r"\b(?:a|our)\s+new\s+bank(?:ing)?\s+account\b|"
+    r"(\bnew\s+(?:bank(?:ing)?|routing|account|wire)\s+instruct|"
+    r"\bupdated\s+(?:bank(?:ing)?|wire|account|payment)\s+instruct|"
+    # "Change of bank details", "changes to our banking information", "notice of change of bank."
+    r"(?<!not a )(?<!not )\bchange[ds]?\s+(?:in|of|to)\s+(?:(?:our|the|your|my)\s+)?"
+    r"(?:" + _BANK_DETAILS + r"|bank(?:ing|s)?(?=\s*(?:[.,;:!?)]|\n|$)))|"
+    # "Our bank account has changed", "bank details were updated", "our bank is changing".
+    r"\b(?:" + _BANK_DETAILS + r"|our\s+bank(?:ing|s)?)\s+(?:has|have|had|was|were|is|are)\s+"
+    r"(?:(?:now|just|recently|also|all|since)\s+)?(?:been\s+)?" + _CHANGED + r"\b|"
+    # "Bank account change", "bank details changed".
+    r"\b" + _BANK_DETAILS + r"\s+change[ds]?\b|"
+    # "New bank details", "updated ACH information", "new routing number".
+    r"\b(?:new|updated|revised|changed|different|amended)\s+(?:" + _BANK + r"\s+(?:account\s+)?"
+    r"(?:details|information|info|instructions|numbers?|data)|routing\s+numbers?|(?:payment|remittance)\s+instructions)|"
+    # "We have a new bank account", "our new account details".
+    r"\b(?:a|our)\s+new\s+bank(?:ing)?\s+account\b|\bour\s+new\s+(?:bank\s+)?account\s+(?:details|information|info|number)|"
+    # "Update the bank account on file", "update your records with our payment information".
+    r"\bupdate\s+(?:(?:your|the)\s+(?:records?|files?|vendor\s+(?:file|master|records?))\s+(?:with|to)\s+)?"
+    r"(?:(?:our|the|its|their)\s+)?(?:new\s+)?" + _BANK_DETAILS + r"|"
+    # "Please pay invoice 5521 to the new account", "send this payment to a different account" (not "send the W-9 to
+    # the new account manager").
+    r"\b(?:pay|paid|paying|payments?|remit\w*|wire[ds]?|wiring|transfer\w*|deposit\w*|funds)\b[^.\n]{0,60}?"
+    r"\b(?:to|into)\s+(?:the|our|this|a)\s+(?:new|different|updated)\s+(?:bank\s+)?account\b|"
+    # "Please use the new account for all future payments", "use account ****9981 for all payments going forward".
+    r"\b(?:use|pay|remit|wire|transfer|deposit)\b[^.\n]{0,30}?\b(?:new|different|other|following|bank)\s+account\s+"
+    r"for\s+(?:all|any|future|upcoming|further)\b[^.\n]{0,25}?\bpayments?\b|"
+    r"\b(?:use|pay|remit|wire|transfer|deposit)\b[^.\n]{0,30}?\b(?:account|acct\.?)\s*(?:number|no\.?|#)?\s*[:#]?\s*"
+    r"[*xX•\d][*xX•\d\- ]{2,}[^.\n]{0,50}?\b(?:for\s+(?:all|any|future|upcoming|further)\b[^.\n]{0,25}?\bpayments?\b|"
+    r"going\s+forward|from\s+now\s+on|effective\s+immediately)|"
+    # "Please use the following account for the next payment" (but not "the following account for coding").
+    r"\bplease\s+use\s+(?:the\s+)?following\s+(?:bank(?:ing)?\b|routing\b|(?:account|details)\b"
+    r"(?=[^.\n]{0,60}\b(?:pay\w*|remit\w*|wir(?:e|ing)|ach|routing|bank\w*|transfer\w*|deposit\w*|iban|swift)\b))|"
+    r"\bdo\s+not\s+use\s+(?:the\s+)?previous\s+account|"
+    r"(?<!not )\b(?:changed|switched|moved)\s+(?:our\s+bank(?:s|ing\s+partner)?|banks|to\s+a\s+new\s+bank)\b|"
     # "Kindly remit to the account below".
     r"\b(?:remit|send|pay|wire|transfer|make)\w*\s+(?:all\s+|any\s+|future\s+|the\s+)*(?:payments?\s+|funds\s+)?"
-    r"(?:to|into)\s+(?:the|our)\s+(?:bank\s+)?account\s+(?:below|listed\s+below|shown\s+below|details\s+below|as\s+follows)\b)",
+    r"(?:to|into)\s+(?:the|our)\s+(?:bank\s+)?account\s+(?:below|listed\s+below|shown\s+below|details\s+below|as\s+follows)\b|"
+    # The same in Spanish, French, German and Portuguese (read without accents, see normalize_text).
+    r"\b(?:datos|cuenta|informacion|coordenadas)\s+bancari[oa]s?\b[^.\n]{0,25}?\b(?:ha|han)\s+(?:sido\s+)?"
+    r"(?:cambiad|actualizad|modificad)[oa]s?\b|"
+    r"\bnuev[oa]s?\s+(?:datos|cuenta|informacion)\s+bancari[oa]s?\b|\bcambio\s+de\s+(?:(?:cuenta|datos)\s+bancari[oa]s?|banco)\b|"
+    r"\b(?:coordonnees|informations|donnees|references)\s+bancaires\b[^.\n]{0,25}?\b(?:ont|a)\s+(?:ete\s+)?"
+    r"(?:change|modifie|mis\s+a\s+jour|mise\s+a\s+jour)e?s?\b|"
+    r"\bnouve(?:au|l|lle|lles|aux)\s+(?:rib|iban|compte\s+bancaire|coordonnees\s+bancaires)\b|"
+    r"\bchangement\s+de\s+(?:coordonnees\s+bancaires|rib|compte\s+bancaire|banque)\b|"
+    r"\b(?:rib|compte\s+bancaire|banque)\s+a\s+change\b|"
+    r"\b(?:bankverbindung|bankdaten|kontodaten|kontoverbindung|bankkonto)\b[^.\n]{0,25}?"
+    r"\b(?:(?:hat|haben)\s+sich\s+ge(?:a|ae)ndert|(?:wurde|wurden|ist|sind)\s+(?:ge(?:a|ae)ndert|aktualisiert))\b|"
+    r"\bneue[nrs]?\s+(?:bankverbindung|bankdaten|kontodaten|kontoverbindung|bankkonto|iban)\b|"
+    r"\b(?:a|ae)nderung\s+(?:der|unserer|ihrer)\s+(?:bankverbindung|bankdaten|kontodaten|kontoverbindung)\b|"
+    r"\b(?:uberweisen|uberweisung|zahlen|zahlung\w*)\b[^.\n]{0,40}\b(?:auf|an)\s+(?:das|unser)\s+neue[sn]?\s+konto\b|"
+    r"\b(?:dados|conta|informacoes)\s+bancari[oa]s?\s+(?:(?:foram|foi)\s+)?"
+    r"(?:alterad[oa]s?|atualizad[oa]s?|modificad[oa]s?|mudaram|mudou)\b|"
+    r"\bnov[oa]s?\s+(?:dados|conta|informacoes)\s+bancari[oa]s?\b|"
+    r"\b(?:alteracao|mudanca|troca)\s+(?:de|dos|nos|da)\s+(?:dados|conta)\s+bancari)",
     re.IGNORECASE,
 )
 

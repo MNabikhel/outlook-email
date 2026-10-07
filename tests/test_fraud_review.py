@@ -115,3 +115,78 @@ def test_html_to_text_keeps_words_whole_at_inline_tags():
 def test_plain_mail_reads_the_same_after_normalizing():
     assert normalize_text("Invoice 7781 attached, AT&T R&D \u2014 see <a.smith@x.com>.") == "Invoice 7781 attached, AT&T R&D - see <a.smith@x.com>."
     assert normalize_text("Caf\u00e9 don\u2019t") == "Cafe don't"
+
+
+# 3. Ordinary vendor mail that says "account" or "payment" is not a bank change.
+ORDINARY_VENDOR_MAIL = [
+    ("Introduction", "Please note the change of account manager: Jane Lee will be your new contact from November."),
+    ("Terms", "There are changes to payment terms starting next quarter: net 45 instead of net 30."),
+    ("Schedule", "Heads up on a change in payment schedule for the lease, the next one is on the 15th."),
+    ("Account update", "Your account information has been updated. If you did not make this change, contact support."),
+    ("Receipt", "Thanks! Your payment information has been updated and your card ending 4242 will be charged on renewal."),
+    ("Portal", "Log in to the new account portal to download your statements."),
+    ("Invoice 881 coding", "Please use the following account for coding this invoice: 6100-200 Office Supplies."),
+    ("Policy", "Your policy account number has been updated to reflect the renewal."),
+    ("Welcome", "Welcome! Your new account details are below. Username: jdoe"),
+    ("Card expired", "Please update the payment information on your account; your card has expired."),
+    ("Billing", "Use the new account portal for all payments."),
+    ("Holidays", "Our banking hours have changed for the holidays."),
+    ("W-9", "Please send the signed W-9 to the new account manager."),
+    ("Close", "Changes to bank reconciliation process: please finish by WD3."),
+    ("Invoices", "Please send invoices for this account going forward to ap@newco.example."),
+]
+
+
+def test_ordinary_vendor_mail_is_not_locked(store, settings):
+    for n, (subject, body) in enumerate(ORDINARY_VENDOR_MAIL):
+        email = _mail(store, settings, f"vendor{n}", subject=subject, sender="sales@vendor.example", body=body,
+                      attachments=[("note.txt", body.encode())])
+        assert email.category != DocumentType.PAYMENT_INSTRUCTION_CHANGE, body
+        assert not attachments_locked(email), body
+        assert "bank_change" not in {s["key"] for s in store.fraud_check(f"vendor{n}")["signals"]}, body
+
+
+def test_account_manager_intro_with_a_card_attached_is_not_locked(store, settings):
+    email = _mail(
+        store, settings, "fp1", subject="Introduction", sender="sales@vendor.example",
+        body="Please note the change of account manager: Jane Lee will be your new contact from November.",
+        attachments=[("jane-lee-card.txt", b"Jane Lee, Account Manager")],
+    )
+    assert email.category != DocumentType.PAYMENT_INSTRUCTION_CHANGE
+    assert not attachments_locked(email)
+
+
+# 4. Plain bank-change wording, in English and four other languages.
+PLAIN_BANK_CHANGES = [
+    "Our bank account has changed. Please pay invoice 5521 to account ****9981.",
+    "Our bank details were updated last week, please update your records.",
+    "Please update the bank account on file for us to the one in the attached letter.",
+    "Please find our new account details below and pay invoice 5521 there.",
+    "Please use account ****9981 for all payments going forward.",
+    "Please use the new account for all future payments.",
+    "Our bank is changing, please use the details below.",
+    "Our routing number has changed.",
+    "Please send this payment to a different account than usual: acct 99887766.",
+    "Nuestros datos bancarios han cambiado. Por favor pague la factura 5521 a la cuenta ****9981.",
+    "Adjuntamos nuestra nueva cuenta bancaria.",
+    "Nos coordonnées bancaires ont changé. Merci de mettre à jour votre fichier.",
+    "Veuillez noter notre nouveau RIB ci-joint.",
+    "Unsere Bankverbindung hat sich geändert. Bitte überweisen Sie auf das neue Konto.",
+    "Neue Bankverbindung ab 1. Oktober.",
+    "Nossos dados bancários foram alterados.",
+    "Segue nossa nova conta bancária.",
+]
+
+
+def test_plain_bank_change_wording_is_blocked():
+    for body in PLAIN_BANK_CHANGES:
+        check = _check(body)
+        assert "bank_change" in _keys(check) and check.level == "high", body
+
+
+def test_new_wording_does_not_catch_the_ordinary_mail():
+    # The patterns added for item 4 checked against item 3's list, word for word.
+    for subject, body in ORDINARY_VENDOR_MAIL:
+        assert "bank_change" not in _keys(_check(body, subject=subject, history=5)), body
+    for body in ("Su cuenta nueva ha sido creada.", "Ihr neues Konto wurde erstellt.", "Votre nouveau compte a été créé."):
+        assert "bank_change" not in _keys(_check(body, history=5)), body
