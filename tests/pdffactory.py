@@ -29,7 +29,8 @@ class Text:
     ``placed``: every character moved into place on its own (report writers, some bank statements).
     ``kern``: with ``glyphs``, this much extra room (thousandths of the size) between letters, as
     justified or tracked text is written.
-    ``right``: x is where the text ends (right-aligned numbers)."""
+    ``right``: x is where the text ends (right-aligned numbers).
+    ``scale``: horizontal scaling in percent, how report writers fake a condensed font."""
 
     x: float
     y: float
@@ -43,6 +44,7 @@ class Text:
     right: bool = False
     twice: bool = False
     turn: int = 0
+    scale: float = 100
 
 
 def _escape(value: str) -> str:
@@ -57,6 +59,8 @@ def _ops(item: Text) -> list[str]:
         return [f"BT {font} {item.size} Tf {item.spacing} Tc {matrix} {item.x:.2f} {item.y:.2f} Tm ({_escape(item.text)}) Tj ET"]
     x = item.x - width(item.text, item.size) - item.spacing * len(item.text) if item.right else item.x
     ops = [f"BT {font} {item.size} Tf {item.spacing} Tc 1 0 0 1 {x:.2f} {item.y} Tm"]
+    if item.scale != 100:
+        ops[0] = ops[0].replace(" Tc ", f" Tc {item.scale} Tz ")
     if item.placed:
         at = x
         for ch in item.text:
