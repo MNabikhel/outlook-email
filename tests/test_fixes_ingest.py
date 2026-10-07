@@ -754,3 +754,28 @@ def test_an_email_is_not_stored_when_its_files_cannot_be_saved(settings: Setting
     assert ingest_folder(store, settings, report=report) == []
     assert len(report["failed"]) == 1 and store.counts()["emails"] == 0
     assert (settings.inbox_failed / "Disk full.eml").exists()
+
+
+# 22. Outlook sync reads Reply-To, so mail whose replies go elsewhere is flagged ------------------
+
+
+class _ReplyToClient(_FakeClient):
+    def get_json(self, path, params=None):
+        self.params.append(params)
+        if path.endswith("/attachments"):
+            return {"value": []}
+        return {"value": [{
+            "id": "AAMk1", "subject": "Updated remittance details", "receivedDateTime": "2026-10-05T14:00:00Z",
+            "from": {"emailAddress": {"name": "Acme Billing", "address": "billing@acme.com"}},
+            "replyTo": [{"emailAddress": {"name": "Acme Billing", "address": "Acme.Billing@protonmail.com"}}],
+            "body": {"contentType": "text", "content": "Please use our new bank account for all payments."},
+            "hasAttachments": False, "importance": "normal", "isRead": False,
+        }]}
+
+
+def test_graph_sync_reads_reply_to_for_the_fraud_check(store: Store, settings: Settings):
+    client = _ReplyToClient()
+    [record] = ingest_mailbox(GraphMailbox(client), store, settings, now=NOW)
+    assert "replyTo" in client.params[0]["$select"].split(",")
+    assert record.reply_to == "acme.billing@protonmail.com"
+    assert "reply_to_mismatch" in {signal["key"] for signal in store.fraud_check(record.id)["signals"]}
