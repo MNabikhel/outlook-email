@@ -234,6 +234,11 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _text(value: str | None) -> str:
+    """Attachment text as stored: without NUL characters, where SQLite's length() would stop counting."""
+    return (value or "").replace("\x00", "")
+
+
 class Store:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -368,7 +373,7 @@ class Store:
                         att.content_type,
                         att.size_bytes,
                         att.sha256,
-                        att.extracted_text,
+                        _text(att.extracted_text),
                         att.document_type.value,
                         att.document_confidence,
                         _dumps(att.extracted_fields.to_dict()),
@@ -907,7 +912,7 @@ class Store:
 
     def set_attachment_text(self, attachment_id: str, text: str) -> None:
         with self.connect() as conn:
-            conn.execute("UPDATE attachments SET extracted_text = ? WHERE id = ?", (text, attachment_id))
+            conn.execute("UPDATE attachments SET extracted_text = ? WHERE id = ?", (_text(text), attachment_id))
 
     def get_state(self, key: str) -> str | None:
         with self.connect() as conn:
@@ -1456,5 +1461,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE emails ADD COLUMN done_at TEXT DEFAULT ''")
     if "reply_to" not in cols:
         conn.execute("ALTER TABLE emails ADD COLUMN reply_to TEXT DEFAULT ''")
+    if not conn.execute("SELECT 1 FROM sync_state WHERE key = 'attachment_text_without_nul'").fetchone():
+        # Text stored before NUL characters were dropped: summaries keyed by its length never matched.
+        rows = conn.execute("SELECT id, extracted_text FROM attachments WHERE instr(extracted_text, char(0)) > 0").fetchall()
+        conn.executemany("UPDATE attachments SET extracted_text = ? WHERE id = ?", [(_text(row[1]), row[0]) for row in rows])
+        conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('attachment_text_without_nul', '1')")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_model ON emails(model_status)")

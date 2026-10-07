@@ -822,3 +822,34 @@ def test_a_file_the_model_cannot_summarize_is_not_tried_every_night(store: Store
     assert calls == ["m1:f.txt"]
     file_summaries.summarize_files(store, settings, limit=5, model="bigger")
     assert len(calls) == 2, "another model gets a try"
+
+
+# 24. A NUL character in a file's text is not stored -------------------------------------------
+
+
+NUL_EXPORT = b"2026-09-01  Wire to Alpha Freight   1,250.00\n" * 80 + b"END\x00\x00\n"
+
+
+def test_a_file_with_a_nul_in_its_text_is_summarized_once(store: Store, settings: Settings, monkeypatch):
+    from controller_inbox import file_summaries
+
+    # SQLite's length() stops at a NUL and Python's len() doesn't, so the summary never matched its text.
+    export = RawAttachment(id="export.txt", filename="export.txt", content_type="text/plain", size_bytes=len(NUL_EXPORT), content=NUL_EXPORT)
+    record = process_message(_raw("Export attached", received=NOW, attachments=[export]), store, settings, now=NOW)
+    assert "\x00" not in record.attachments[0].extracted_text
+    calls: list[str] = []
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.id) or "- Wires to Alpha Freight")
+    for _night in range(3):
+        file_summaries.summarize_files(store, settings, limit=20, model="m")
+    assert calls == ["raw-1:export.txt"]
+
+
+def test_text_stored_with_a_nul_before_is_cleaned_once(store: Store, settings: Settings):
+    import sqlite3
+
+    export = RawAttachment(id="export.txt", filename="export.txt", content_type="text/plain", size_bytes=3, content=b"abc")
+    process_message(_raw("Export attached", received=NOW, attachments=[export]), store, settings, now=NOW)
+    with sqlite3.connect(settings.db_path) as conn:  # as an older version left it
+        conn.execute("UPDATE attachments SET extracted_text = ?", ("a\x00b",))
+        conn.execute("DELETE FROM sync_state WHERE key = 'attachment_text_without_nul'")
+    assert Store(settings.db_path).get_email("raw-1").attachments[0].extracted_text == "ab"
