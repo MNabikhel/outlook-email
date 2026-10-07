@@ -995,6 +995,12 @@ class Store:
             row = conn.execute("SELECT COALESCE(done_at, '') AS d FROM emails WHERE id = ?", (email_id,)).fetchone()
         return bool(row and row["d"])
 
+    def done_ids(self) -> set[str]:
+        """Every email marked done."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT id FROM emails WHERE COALESCE(done_at, '') != ''").fetchall()
+        return {row["id"] for row in rows}
+
     def done_count(self, folder: str) -> int:
         with self.connect() as conn:
             return conn.execute(

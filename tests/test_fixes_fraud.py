@@ -82,7 +82,8 @@ def test_bank_change_below_a_quote_marker_gets_at_least_a_caution(body):
 
 def test_a_colleague_disowning_the_quoted_scam_stays_quiet():
     body = "It was not them, I blocked the sender.\n\nFrom: ar@x.example\nSent: Monday\n\nOur banking details have changed."
-    assert _check(body, subject="RE: bank", sender="sam@ourco.example", history=0).level == "none"
+    colleagues = TrustContext(domains={"ourco.example"})
+    assert _check(body, subject="RE: bank", sender="sam@ourco.example", history=0, ctx=colleagues).level == "none"
 
 
 # 3. "Not fraud" answers cannot weaken the block.
