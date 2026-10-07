@@ -49,6 +49,7 @@ def site(settings, store, mail, monkeypatch):
 @pytest.fixture
 def context(browser):
     context = browser.new_context()
+    context.set_default_timeout(15000)
     context.errors = []
     context.on("weberror", lambda error: context.errors.append(str(error.error)))
     yield context
@@ -169,3 +170,25 @@ def test_a_file_name_with_a_bracketed_number_keeps_the_answer_whole(site, page, 
     ]
     assert bubble.query_selector(":scope > div").inner_text() == text
     assert dialogs == [] and context.errors == []
+
+
+# 8. "Open in Outlook" and "Open workbook" say why when the server refuses (LAN mode), not that it's opening.
+
+
+def test_open_buttons_say_why_when_the_server_refuses(site, page, context, mail, monkeypatch):
+    def toast_says(text: str) -> None:
+        page.wait_for_function("text => document.querySelector('#toast').textContent === text", arg=text)
+
+    budget = mail["Q4 budget draft"]
+    page.goto(f"{site}/inbox/{budget.id}")
+    page.click(".detail [data-action='open-original']")
+    toast_says("Opening budget.msg in your mail app.")
+
+    monkeypatch.setattr(web, "LOCAL_CLIENTS", set())  # as if the page were on another computer
+    page.click(".detail [data-action='open-original']")
+    toast_says("Files open on the computer running CloseDesk only.")
+    assert page.url == f"{site}/inbox/{budget.id}"
+    page.goto(f"{site}/coding")
+    page.click("[data-action='open-codes']")
+    toast_says("Files open on the computer running CloseDesk only.")
+    assert context.errors == []

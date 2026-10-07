@@ -111,10 +111,15 @@
 
   /* ---------- Open original, draft a reply ---------- */
 
+  // A refused request says why in "detail" (for example, files open only on the computer running CloseDesk).
+  const refusal = (response, data) =>
+    typeof data.detail === "string" && data.detail ? data.detail : `That didn't work (the server said ${response.status}).`;
+
   async function openOriginal(id) {
     try {
       const response = await fetch(`/inbox/${encodeURIComponent(id)}/open`, { method: "POST", headers: JSON_HEADERS });
-      const data = await response.json();
+      const data = (await response.json().catch(() => null)) || {};
+      if (!response.ok) return toast(refusal(response, data), 6000);
       toast(data.message || "Opening…");
       if (!data.ok && data.download) location.href = data.download;
     } catch (error) {
@@ -125,8 +130,8 @@
   async function openCodes() {
     try {
       const response = await fetch("/coding/open", { method: "POST", headers: JSON_HEADERS });
-      const data = await response.json();
-      toast(data.message || "Opening the workbook…", 6000);
+      const data = (await response.json().catch(() => null)) || {};
+      toast(response.ok ? data.message || "Opening the workbook…" : refusal(response, data), 6000);
     } catch (error) {
       toast("Couldn't open the workbook from here. Its location is on the AP coding page.", 6000);
     }
