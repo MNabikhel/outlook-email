@@ -18,7 +18,7 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, EmailRecord, RawMessage
-from controller_inbox.fraud import assess, reassess_email, save_check, trust_context
+from controller_inbox.fraud import assess, domain_of, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
 
@@ -110,6 +110,7 @@ def process_message(
         attachments=[(att.filename, att.extracted_text) for att in att_records],
         history=store.sender_history(raw.sender_email, exclude=raw.id),
         flags=verdicts,
+        domain_history=store.domain_history(domain_of(raw.sender_email), exclude=raw.id),
     )
     classified_email = _classify(
         store,
