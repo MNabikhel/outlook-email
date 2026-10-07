@@ -243,16 +243,27 @@ def render(found: Answer, limit: int = MAX_CHARS) -> str:
 def tables_in(text: str) -> list[Table]:
     """Every run of rows written as ``Label: value | Label: value`` with the same columns, with each row's page."""
     parsed: list[Row] = []
+    # The rows that come after a heading on their page: a list under its own heading is its own table, even
+    # with the same columns as the one above ("Outstanding checks - Operating", then "... - Payroll").
+    headed: set[int] = set()
     page = ""
+    heading = False
     for at, raw in enumerate((text or "").splitlines()):
         line = raw.strip()
         marker = MARKER_RE.match(line)
         if marker:
             page = marker.group(1)
+            heading = False
+            continue
+        if line == "[heading]":
+            heading = True
             continue
         row = _row(line, page)
         if row is not None:
             row.at = at
+            if heading:
+                headed.add(at)
+                heading = False
             parsed.append(row)
     _with_colon_labels(parsed)
     found: list[Table] = []
@@ -260,7 +271,8 @@ def tables_in(text: str) -> list[Table]:
         labels = tuple(label for label, _value in row.cells)
         # A PDF's table runs on over its pages; a workbook's sheets with the same columns are different tables.
         new_sheet = bool(found) and row.page.startswith("sheet") and row.page != found[-1].rows[-1].page
-        if not found or found[-1].labels != labels or new_sheet:
+        new_list = bool(found) and row.at in headed and row.page == found[-1].rows[-1].page
+        if not found or found[-1].labels != labels or new_sheet or new_list:
             found.append(Table(labels))
         found[-1].rows.append(row)
     for table in found:
@@ -269,6 +281,8 @@ def tables_in(text: str) -> list[Table]:
     for table in found:
         _name_rows(table)
         table.kinds = _kinds(table)
+        if _settle_totals(table):
+            table.kinds = _kinds(table)
     return found
 
 
@@ -294,35 +308,106 @@ def verify(table: Table) -> Verdict:
     for label, kind in table.kinds.items():
         if kind != "figure":
             continue
-        group: list[Decimal] = []
-        body: list[Decimal] = []
-        subtotals: list[Decimal] = []
-        places = 0
+        running = _Running()
         for row in table.rows:
             raw = row.value(label)
             value = _number(raw)
-            if value is not None and "." in raw:
-                places = max(places, len(raw.split(".")[-1].rstrip(")% ")))
             if not row.total:
-                if value is not None:
-                    group.append(value)
-                    body.append(value)
+                running.add(value, raw)
                 continue
-            if value is None or "%" in raw or not (group or subtotals):
+            if value is None or "%" in raw or not running.started():
                 continue
-            # Each part was rounded when it was printed, so a total can be off by half a unit of the last place per part.
-            slack = Decimal(1).scaleb(-places) * (Decimal("0.5") * (len(body) + 1))
-            if group and abs(sum(group) - value) <= slack:
-                subtotals.append(value)
-            elif any(parts and abs(sum(parts) - value) <= slack for parts in (body, subtotals, subtotals + group)):
-                subtotals = []
+            if running.close(value):
+                verdict.matched += 1
             else:
-                verdict.mismatched.append(f"{row.name} ({label}): printed {raw}, the rows above add to {_plain(sum(group or body))}")
-                group = []
-                continue
-            verdict.matched += 1
-            group = []
+                verdict.mismatched.append(f"{row.name} ({label}): printed {raw}, the rows above add to {_plain(running.group_sum())}")
     return verdict
+
+
+class _Running:
+    """For one figure column, read down the table: the sums a total row may print there. A subtotal is the sum
+    of the rows since the last total; a grand total the sum of every row, or of the subtotals."""
+
+    def __init__(self) -> None:
+        self.group: list[Decimal] = []
+        self.body: list[Decimal] = []
+        self.subtotals: list[Decimal] = []
+        self.places = 0
+
+    def add(self, value: Decimal | None, raw: str) -> None:
+        if value is None:
+            return
+        if "." in raw:
+            self.places = max(self.places, len(raw.split(".")[-1].rstrip(")% ")))
+        self.group.append(value)
+        self.body.append(value)
+
+    def started(self) -> bool:
+        return bool(self.group or self.subtotals)
+
+    def group_sum(self) -> Decimal:
+        return sum(self.group or self.body, Decimal(0))
+
+    def holds(self, value: Decimal) -> str:
+        """"group" when ``value`` is the sum of the rows since the last total, "all" when it is the sum of every
+        row or of the subtotals, else "". Each part was rounded when it was printed, so a total can be off by
+        half a unit of the last place per part."""
+        slack = Decimal(1).scaleb(-self.places) * (Decimal("0.5") * (len(self.body) + 1))
+        if self.group and abs(sum(self.group) - value) <= slack:
+            return "group"
+        if any(parts and abs(sum(parts) - value) <= slack for parts in (self.body, self.subtotals, self.subtotals + self.group)):
+            return "all"
+        return ""
+
+    def close(self, value: Decimal) -> bool:
+        """A total row printing ``value``: whether it holds; the next group starts after it either way."""
+        held = self.holds(value)
+        if held == "group":
+            self.subtotals.append(value)
+        elif held == "all":
+            self.subtotals = []
+        self.group = []
+        return bool(held)
+
+
+# A label that is only the word for a total: such a row is a total whatever its figures.
+_TOTAL_WORD = re.compile(r"^(?:grand\s+|sub-?\s?)?totals?:?$|^%", re.I)
+
+
+def _settle_totals(table: Table) -> bool:
+    """Decide which rows are totals by their figures as well as their words. A row named "Total Quality
+    Logistics" whose figures don't add up the rows above it is a vendor, not a total; a row with no name at all
+    whose every figure adds up the rows above it is a total (a sheet often leaves its total row unlabeled).
+    Returns whether any row changed."""
+    figures = [label for label, kind in table.kinds.items() if kind == "figure"]
+    if not figures:
+        return False
+    running = {label: _Running() for label in figures}
+    changed = False
+    seen = 0
+    for row in table.rows:
+        filled = {
+            label: value
+            for label in figures
+            if (value := _number(row.value(label))) is not None and "%" not in row.value(label)
+        }
+        held = {label for label, value in filled.items() if running[label].started() and running[label].holds(value)}
+        named = [value for _label, value in row.cells if value and value != tables.BLANK and not tables.is_value(value)]
+        if row.total and seen and filled and not held and not _TOTAL_WORD.match(row.name.strip()):
+            row.total, changed = False, True
+        elif not row.total and seen >= 2 and not named and len(filled) >= min(2, len(figures)) and held == set(filled) and any(filled.values()):
+            row.total, changed = True, True
+            row.name = row.name if row.name and row.name != tables.BLANK else "Total"
+        for label in figures:
+            raw = row.value(label)
+            if row.total:
+                value = _number(raw)
+                if value is not None and "%" not in raw and running[label].started():
+                    running[label].close(value)
+            else:
+                running[label].add(_number(raw), raw)
+        seen += not row.total
+    return changed
 
 
 def _plain(number: Decimal) -> str:
