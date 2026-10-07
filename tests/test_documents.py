@@ -139,6 +139,36 @@ def test_csv_reads_like_a_sheet():
     assert pairs[1:] == ["A1: Amount due | B1: 12480.00", "A2: Paid | B2: 0"], "a list of values isn't a header"
 
 
+def test_a_file_called_a_workbook_is_read_as_what_it_is():
+    # Windows sends every .csv as application/vnd.ms-excel; only a real 97-2003 workbook goes to xlrd.
+    data = b'Vendor,Invoice,Amount\nAcme,INV-1001,"1,250.00"\nGlobex,INV-1002,980.00\n'
+    lines = extract_text_from_bytes("payments.csv", "application/vnd.ms-excel", data).splitlines()
+    assert lines[0] == '[sheet "payments.csv" A1:C3]'
+    assert lines[2] == "A2 (Vendor): Acme | B2 (Invoice): INV-1001 | C2 (Amount): 1,250.00"
+    page = (
+        b'<html xmlns:o="urn:schemas-microsoft-com:office:office"><head><style>td {color: red}</style></head><body>'
+        b"<table><tr><th>Vendor</th><th>Invoice</th><th>Amount</th></tr>"
+        b"<tr><td>Acme &amp; Sons</td><td>INV-1001</td><td>1,250.00</td></tr>"
+        b"<tr><td colspan=2>Total</td><td>1,250.00</td></tr></table></body></html>"
+    )
+    lines = extract_text_from_bytes("export.xls", "application/vnd.ms-excel", page).splitlines()
+    assert lines[2:] == [
+        "A2 (Vendor): Acme & Sons | B2 (Invoice): INV-1001 | C2 (Amount): 1,250.00",
+        "A3 (Vendor): Total | B3 (Invoice): not listed | C3 (Amount): 1,250.00",
+    ]
+    xml = (
+        b'<?xml version="1.0"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" '
+        b'xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Worksheet ss:Name="AP"><Table>'
+        b'<Row><Cell><Data ss:Type="String">Vendor</Data></Cell><Cell><Data ss:Type="String">Invoice</Data></Cell>'
+        b'<Cell><Data ss:Type="String">Amount</Data></Cell></Row>'
+        b'<Row><Cell><Data ss:Type="String">Acme</Data></Cell><Cell ss:Index="3"><Data ss:Type="Number">1250</Data></Cell></Row>'
+        b"</Table></Worksheet></Workbook>"
+    )
+    assert "A2 (Vendor): Acme | B2 (Invoice): not listed | C2 (Amount): 1250" in extract_text_from_bytes("export.xls", "", xml)
+    renamed = extract_text_from_bytes("budget.xls", "application/vnd.ms-excel", _budget())
+    assert "A2 (Line): Ads | B2 (Q3): 1,000" in renamed
+
+
 def test_a_csv_of_names_only_still_names_its_columns():
     data = "Employee,Department,Manager\nJonathan Reyes,,Priya Raman\nLi Wei,Finance,Dana Cole\n"
     lines = extract_text_from_bytes("staff.csv", "text/csv", data.encode()).splitlines()

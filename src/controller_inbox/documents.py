@@ -61,7 +61,7 @@ def extract_document(filename: str, content_type: str, data: bytes) -> str:
     if name.endswith(SPREADSHEET_SUFFIXES) or "spreadsheetml" in ctype:
         return _cap(xlsx_text(data))
     if name.endswith(".xls") or ctype == "application/vnd.ms-excel":
-        return _cap(xls_text(data))
+        return _cap(_excel_named_text(data, filename or "table.csv"))
     if name.endswith(".pptx") or "presentationml" in ctype:
         return _cap(pptx_text(data))
     if name.endswith((".csv", ".tsv")) or ctype in {"text/csv", "application/csv", "text/tab-separated-values"}:
@@ -464,15 +464,94 @@ def xls_text(data: bytes) -> str:
     return "\n".join(lines).strip()
 
 
-def csv_text(data: bytes, filename: str) -> str:
-    from openpyxl.utils import get_column_letter
+def _excel_named_text(data: bytes, filename: str) -> str:
+    """A file called a workbook, by its name or by the type Windows gives every .csv, read as what it
+    is: an Excel 97-2003 workbook, an .xlsx renamed, a web page table saved as .xls, or delimited text."""
+    if data[:4] == b"\xd0\xcf\x11\xe0":
+        return xls_text(data)
+    if data[:4] == b"PK\x03\x04":
+        return xlsx_text(data)
+    text = decode_text(data[:4096]).lstrip("﻿ \t\r\n")
+    if re.match(r"(?is)(?:<!--.*?-->\s*)*<(?:!doctype\s+html|html|head|body|meta|table|\?xml)\b", text):
+        return markup_table_text(data, filename)
+    return csv_text(data, filename)
 
+
+def markup_table_text(data: bytes, filename: str) -> str:
+    """The rows of the tables in a web page, as a sheet. "Export to Excel" in many web apps sends one
+    named .xls; an Excel 2003 XML workbook has the same shape (``Row`` and ``Cell``)."""
+    from html.parser import HTMLParser
+
+    rows: list[list[str]] = []
+    loose: list[str] = []
+    cell: list[str] = []
+    state = {"in_cell": False, "span": 1, "skip": 0}
+
+    def end_cell() -> None:
+        if state["in_cell"]:
+            rows[-1].append(re.sub(r"\s+", " ", "".join(cell)).strip())
+            rows[-1].extend([""] * (state["span"] - 1))
+            cell.clear()
+            state["in_cell"] = False
+
+    class Reader(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            tag = tag.rsplit(":", 1)[-1]
+            found = {name.rsplit(":", 1)[-1]: value or "" for name, value in attrs}
+            if tag in ("script", "style"):
+                state["skip"] += 1
+            elif tag in ("tr", "row"):
+                end_cell()
+                rows.append([])
+            elif tag in ("td", "th", "cell"):
+                end_cell()
+                if not rows:
+                    rows.append([])
+                # An XML workbook leaves out empty cells and gives the next one's column.
+                if found.get("index", "").isdigit():
+                    rows[-1].extend([""] * (min(int(found["index"]), MAX_COLUMNS) - 1 - len(rows[-1])))
+                span, across = found.get("colspan", ""), found.get("mergeacross", "")
+                span = int(span) if span.isdigit() else int(across) + 1 if across.isdigit() else 1
+                state["span"] = max(1, min(span, MAX_COLUMNS))
+                state["in_cell"] = True
+            elif tag in ("br", "p", "div") and state["in_cell"]:
+                cell.append(" ")
+
+        def handle_endtag(self, tag):
+            tag = tag.rsplit(":", 1)[-1]
+            if tag in ("script", "style"):
+                state["skip"] = max(0, state["skip"] - 1)
+            elif tag in ("td", "th", "cell", "tr", "row", "table"):
+                end_cell()
+
+        def handle_data(self, text):
+            if state["skip"]:
+                return
+            (cell if state["in_cell"] else loose).append(text)
+
+    reader = Reader(convert_charrefs=True)
+    reader.feed(decode_text(data))
+    reader.close()
+    end_cell()
+    if not any(any(row) for row in rows):
+        return re.sub(r"\s+", " ", " ".join(loose)).strip()
+    return _rows_text(rows, filename)
+
+
+def csv_text(data: bytes, filename: str) -> str:
     text = decode_text(data).replace("\x00", "")
     try:
         dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
     except csv.Error:
         dialect = csv.excel_tab if filename.lower().endswith(".tsv") else csv.excel
     rows = list(csv.reader(io.StringIO(text), dialect))
+    return _rows_text(rows, filename)
+
+
+def _rows_text(rows: list[list[str]], filename: str) -> str:
+    """Rows of text cells as one sheet named after the file; the first row is its header when it names the columns."""
+    from openpyxl.utils import get_column_letter
+
     width = max((len(r) for r in rows), default=1)
     lines = [f'[sheet "{filename}" A1:{get_column_letter(max(1, min(width, MAX_COLUMNS)))}{max(len(rows), 1)}]']
     sheet = [
