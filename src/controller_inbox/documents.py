@@ -206,10 +206,20 @@ def _docx_blocks(parent):
             yield child
 
 
-def _docx_paragraph(element) -> str:
-    parts = []
-    for node in element.iter():
-        if node.tag == f"{_W}t" and node.text:
+_MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback"
+
+
+def _docx_runs(element, parts: list[str]) -> None:
+    """The text under ``element``. A text box is stored twice (a drawing, then an older VML copy as the
+    ``mc:Fallback``), so the copy is skipped; its paragraphs go on lines of their own."""
+    for node in element:
+        if node.tag in (_MC_FALLBACK, f"{_W}pPr"):
+            continue
+        if node.tag == f"{_W}p":
+            parts.append("\x00")
+            _docx_runs(node, parts)
+            parts.append("\x00")
+        elif node.tag == f"{_W}t" and node.text:
             parts.append(node.text)
         elif node.tag == f"{_W}delText" and node.text:
             parts.append(f"[deleted: {node.text}]")
@@ -217,7 +227,14 @@ def _docx_paragraph(element) -> str:
             parts.append("\t")
         elif node.tag in {f"{_W}br", f"{_W}cr"}:
             parts.append("\n")
-    text = "".join(parts).strip()
+        else:
+            _docx_runs(node, parts)
+
+
+def _docx_paragraph(element) -> str:
+    parts: list[str] = []
+    _docx_runs(element, parts)
+    text = re.sub(r"\s*\x00[\x00\s]*", "\n", "".join(parts)).strip()
     if not text:
         return ""
     style = element.find(f"{_W}pPr/{_W}pStyle")
@@ -242,7 +259,7 @@ def _docx_table(element) -> list[str]:
             marked = row.find(f"{_W}trPr/{_W}tblHeader") is not None
         cells: list[str | None] = []
         for cell in _docx_cells(row):
-            text = " ".join(filter(None, (_docx_paragraph(p) for p in cell.iter(f"{_W}p")))).strip()
+            text = " ".join(filter(None, (_docx_paragraph(p) for p in cell.iter(f"{_W}p") if _docx_own(p, cell)))).strip()
             properties = cell.find(f"{_W}tcPr")
             span = properties.find(f"{_W}gridSpan") if properties is not None else None
             merge = properties.find(f"{_W}vMerge") if properties is not None else None
@@ -258,6 +275,17 @@ def _docx_table(element) -> list[str]:
             bold.append(bool(runs) and all(_docx_bold(r) for r in runs))
     header = tables.has_header(grid, marked=marked, bold_first=bool(bold and bold[0]))
     return tables.table_lines(grid, header=header)
+
+
+def _docx_own(paragraph, cell) -> bool:
+    """Whether a paragraph is the cell's own (or a nested table's), not one in a text box, which the
+    paragraph holding the box already reads."""
+    for parent in paragraph.iterancestors():
+        if parent is cell:
+            return True
+        if parent.tag in (f"{_W}p", _MC_FALLBACK):
+            return False
+    return True
 
 
 def _docx_cells(row):

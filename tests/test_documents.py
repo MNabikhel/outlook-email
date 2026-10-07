@@ -230,6 +230,40 @@ def test_a_citation_finds_its_section_and_cell():
     assert locate(pages, "page 4") is None and locate(pages, "") is None
 
 
+def _text_box(*lines: str):
+    """A run holding a text box the way Word 2010 and later save it: as a drawing, then again as VML for older Word."""
+    from docx.oxml import parse_xml
+
+    box = "".join(f"<w:p><w:r><w:t>{line}</w:t></w:r></w:p>" for line in lines)
+    return parse_xml(
+        '<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+        'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+        'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+        'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
+        'xmlns:v="urn:schemas-microsoft-com:vml"><mc:AlternateContent>'
+        '<mc:Choice Requires="wps"><w:drawing><wp:anchor><a:graphic><a:graphicData><wps:wsp><wps:txbx>'
+        f"<w:txbxContent>{box}</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>"
+        f"<mc:Fallback><w:pict><v:shape><v:textbox><w:txbxContent>{box}</w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback>"
+        "</mc:AlternateContent></w:r>"
+    )
+
+
+def test_a_word_text_box_is_read_once_a_line_at_a_time():
+    document = Document()
+    document.add_paragraph("Invoice INV-2001")
+    document.add_paragraph("See box").runs[0]._r.addnext(_text_box("Bill To:", "Acme Corp", "Amount due: $4,500.00"))
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Remit to"
+    table.cell(0, 1).paragraphs[0]._p.append(_text_box("First Bank", "Account ending 4471"))
+    out = io.BytesIO()
+    document.save(out)
+    text = extract_text_from_bytes("invoice.docx", "", out.getvalue())
+    assert "See box\nBill To:\nAcme Corp\nAmount due: $4,500.00\n" in text
+    assert text.count("Acme Corp") == 1 and text.count("First Bank") == 1
+    assert "Remit to | First Bank Account ending 4471" in text
+
+
 def test_word_table_with_a_header_row_merged_cells_and_blanks():
     document = Document()
     table = document.add_table(rows=6, cols=4)
