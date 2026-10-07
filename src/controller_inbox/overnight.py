@@ -108,7 +108,8 @@ def read_queue(
             return read_queue(store, settings, limit=limit, now=now, reader=own_reader, on_progress=on_progress)
     result["model"] = reader.model
     batch = limit if limit is not None else settings.overnight_batch
-    waiting = store.list_emails(model_status="script_draft", order="queue", limit=max(1, batch))
+    # 0 means read none (SQLite would read everything for a negative LIMIT).
+    waiting = store.list_emails(model_status="script_draft", order="queue", limit=max(0, batch))
     corrections = store.list_corrections()
     for index, email in enumerate(waiting, start=1):
         if on_progress:

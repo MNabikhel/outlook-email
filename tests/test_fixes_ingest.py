@@ -491,3 +491,11 @@ def test_a_reading_is_not_saved_over_a_correction_or_verdict_made_meanwhile(stor
     verdict = store.get_email(flagged)
     assert {"fraud_risk", "fraud_confirmed"} <= set(verdict.flags)
     assert verdict.model_status == "script_draft", "read again on the next run, as it is now"
+
+
+def test_a_limit_of_zero_reads_nothing(loaded: Store, settings: Settings):
+    from controller_inbox.overnight import read_queue
+    from test_bionic import AgreeingReader
+
+    assert read_queue(loaded, settings, limit=0, reader=AgreeingReader())["read_ids"] == []
+    assert loaded.counts()["waiting_on_bionic"] == 19
