@@ -332,6 +332,21 @@ def test_a_word_row_that_starts_further_right_keeps_its_figures_in_their_columns
     assert "Notes" in lines and widths == [63]
 
 
+def test_a_lone_figure_in_a_table_row_keeps_its_column():
+    from controller_inbox.tables import labelled_row
+
+    document = Document()
+    table = document.add_table(rows=0, cols=4)
+    for values in (["Description", "Q1", "Q2", "Q3"], ["Rent", "3,000", "3,000", "3,000"], ["Utilities", "450", "", "520"], ["", "", "", "12,970"]):
+        for cell, value in zip(table.add_row().cells, values):
+            cell.text = value
+    out = io.BytesIO()
+    document.save(out)
+    lines = extract_text_from_bytes("costs.docx", "", out.getvalue()).splitlines()
+    assert lines[-1] == "Description: not listed | Q1: not listed | Q2: not listed | Q3: 12,970"
+    assert labelled_row(["Employee", "Department", "Manager"], ["Contractors", "", ""]) == "Contractors"
+
+
 def test_powerpoint_table_rows_name_their_columns():
     from pptx import Presentation
     from pptx.util import Inches
