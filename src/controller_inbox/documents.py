@@ -483,14 +483,9 @@ def xls_text(data: bytes) -> str:
                 cell = sheet.cell(r, c)
                 if cell.value in ("", None):
                     continue
-                value = cell.value
-                if cell.ctype == xlrd.XL_CELL_DATE:
-                    try:
-                        value = xlrd.xldate.xldate_as_datetime(cell.value, book.datemode)
-                    except Exception:
-                        pass
-                if _fmt(value):
-                    cells[c + 1] = _fmt(value)
+                shown = _fmt(_xls_value(cell, book.datemode))
+                if shown:
+                    cells[c + 1] = shown
             if cells:
                 if len(rows) >= MAX_ROWS:
                     rows_left = sheet.nrows - r
@@ -502,6 +497,23 @@ def xls_text(data: bytes) -> str:
         if rows_left:
             lines.append(f"[{rows_left} more rows not shown.]")
     return "\n".join(lines).strip()
+
+
+def _xls_value(cell, datemode: int):
+    """An Excel 97-2003 cell's value as the sheet shows it. xlrd gives an error such as #N/A as its code
+    (42) and TRUE as 1, which would read as figures."""
+    import xlrd
+
+    if cell.ctype == xlrd.XL_CELL_ERROR:
+        return xlrd.error_text_from_code.get(cell.value, "#ERROR")
+    if cell.ctype == xlrd.XL_CELL_BOOLEAN:
+        return bool(cell.value)
+    if cell.ctype == xlrd.XL_CELL_DATE:
+        try:
+            return xlrd.xldate.xldate_as_datetime(cell.value, datemode)
+        except Exception:
+            pass
+    return cell.value
 
 
 def _excel_named_text(data: bytes, filename: str) -> str:

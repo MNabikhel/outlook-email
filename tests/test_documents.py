@@ -169,6 +169,20 @@ def test_a_file_called_a_workbook_is_read_as_what_it_is():
     assert "A2 (Line): Ads | B2 (Q3): 1,000" in renamed
 
 
+def test_excel_97_errors_and_yes_no_cells_are_not_read_as_figures():
+    import xlrd
+    from xlrd.sheet import Cell
+
+    from controller_inbox.documents import _fmt, _xls_value
+
+    def shown(ctype: int, value) -> str:
+        return _fmt(_xls_value(Cell(ctype, value), 0))
+
+    assert shown(xlrd.XL_CELL_ERROR, 0x2A) == "#N/A" and shown(xlrd.XL_CELL_ERROR, 0x07) == "#DIV/0!"
+    assert shown(xlrd.XL_CELL_BOOLEAN, 1) == "TRUE" and shown(xlrd.XL_CELL_BOOLEAN, 0) == "FALSE"
+    assert shown(xlrd.XL_CELL_NUMBER, 42.0) == "42" and shown(xlrd.XL_CELL_DATE, 46295.0) == "2026-09-30"
+
+
 def test_a_csv_of_names_only_still_names_its_columns():
     data = "Employee,Department,Manager\nJonathan Reyes,,Priya Raman\nLi Wei,Finance,Dana Cole\n"
     lines = extract_text_from_bytes("staff.csv", "text/csv", data.encode()).splitlines()
