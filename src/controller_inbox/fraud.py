@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from controller_inbox.classify import AUTOMATED_SENDERS, PAYMENT_CHANGE_RE, own_words
+from controller_inbox.classify import AUTOMATED_SENDERS, PAYMENT_CHANGE_RE, QUOTE_START_RE, normalize_text, own_words
 
 if TYPE_CHECKING:
     from controller_inbox.config import Settings
@@ -89,22 +89,25 @@ STRONG_NOTICE_RE = re.compile(
 )
 # A warning word that can just as well introduce a real request ("please be aware our bank details have changed").
 WEAK_NOTICE_RE = re.compile(r"(\bbeware\b|\bbe\s+(?:aware|alert|vigilant)\b|\balways\s+(?:call|verify|confirm)\b)", re.I)
-# What a real warning tells the reader to do.
-PROTECTIVE_RE = re.compile(
-    r"\b(?:call|phone|telephone|verify|verbally|contact\s+(?:us|your)|known\s+number|on\s+file|report|ignore|delete)\b", re.I
-)
-# A colleague saying the quoted request was fake.
+# Where one part of a sentence ends and the next begins ("…, but our bank details have changed").
+CLAUSE_RE = re.compile(r"[,;:]|\s[-–—]+\s|\s(?=(?:but|however|although|though|yet|whereas)\b)", re.I)
+# A colleague saying the quoted request was fake (not "this is not phishing", which vouches for it).
 DISAVOW_RE = re.compile(
     r"\b(?:(?:was|is|it'?s)\s+not\s+(?:them|legit\w*|genuine|real)|(?:wasn'?t|isn'?t)\s+(?:them|legit\w*|genuine|real)|"
-    r"(?:is|was|looks\s+like|seems\s+like)\s+(?:a\s+)?(?:scam|phish\w*|fake|spoof\w*)|phishing|"
+    r"(?:is|was|looks\s+like|seems\s+like)\s+(?:a\s+)?(?:scam|phish\w*|fake|spoof\w*)|"
+    r"(?<!not )(?<!n't )(?<!not a )(?<!no )phishing|"
     r"blocked\s+(?:the|this)\s+sender|reported\s+(?:it|this|the\s+sender))\b",
     re.I,
 )
 GIFT_RE = re.compile(
     r"(?:\b(?:(?:itunes|apple|google\s+play|steam|amazon|visa|target|walmart|ebay|best\s*buy)\s+)?gift\s*-?\s*cards?\b|"
-    r"\b(?:itunes|google\s+play|steam)\s+cards?\b)(?![^.\n]{0,40}\b(?:program|policy|balance)\b)",
+    r"\b(?:itunes|google\s+play|steam)\s+cards?\b)",
     re.I,
 )
+# "Our gift card program", "the gift card policy", "your gift card balance": not an ask by themselves.
+GIFT_PROGRAM_RE = re.compile(r"[^.\n]{0,40}\b(?:program|policy|balance)\b", re.I)
+# ...unless the sentence also says to buy the cards or send their codes.
+GIFT_BUY_RE = re.compile(r"\b(?:buy|purchase|pick\s+up|grab)\b|\bsend\b[^.\n]{0,40}\b(?:codes?|card\s+numbers|pins?)\b", re.I)
 # Gift cards only count when someone is asked to get them or hand over their codes.
 GIFT_ASK_RE = re.compile(
     r"\b(?:buy|purchase|pick\s+up|get\s+(?:me|us|some|them|a\s+few)|grab|send\s+(?:me|us)|need|scratch|codes?|card\s+numbers|pins?)\b",
@@ -221,12 +224,24 @@ def _asks(text: str) -> bool:
     return bool(PAYMENT_CHANGE_RE.search(text) or _gift_ask(text))
 
 
+def _requests(text: str) -> list[int]:
+    """Where in the text a bank change or gift cards are asked for."""
+    starts = [match.start() for match in PAYMENT_CHANGE_RE.finditer(text)]
+    return starts + [match.start() for match in GIFT_RE.finditer(text) if _gift_sentence_asks(text, match)]
+
+
 def _is_notice(sentence: str) -> bool:
-    strong = STRONG_NOTICE_RE.search(sentence)
-    if strong:
-        # "If you receive an email saying our bank details have changed, call us" is a warning;
-        # "we will never ask for gift cards, but our bank details have changed" is a request.
-        return not _asks(sentence) or bool(PROTECTIVE_RE.search(STRONG_NOTICE_RE.sub(" ", sentence)))
+    if STRONG_NOTICE_RE.search(sentence):
+        # A warning covers the words after it, to the end of that part of the sentence:
+        # "if you receive an email saying our bank details have changed, call us" is a warning.
+        # A change asked for anywhere else is a request, whatever the sentence says after it:
+        # "our bank details have changed, pay the new account, and if you receive other instructions call us",
+        # "we will never ask for gift cards, but our bank details have changed".
+        scopes = []
+        for marker in STRONG_NOTICE_RE.finditer(sentence):
+            end = next((cut.start() for cut in CLAUSE_RE.finditer(sentence, marker.end())), len(sentence))
+            scopes.append((marker.start(), end))
+        return all(any(start <= at < end for start, end in scopes) for at in _requests(sentence))
     # "Beware of scams" is a notice; "please be aware our bank details have changed" is not.
     return bool(WEAK_NOTICE_RE.search(sentence)) and not _asks(sentence)
 
@@ -235,7 +250,7 @@ def strip_notices(text: str) -> str:
     """Drop anti-fraud notices ("we will never change our bank details by email") before looking for a request.
 
     Only warnings are dropped: a sentence that asserts a change ("please be aware our banking
-    details have changed") stays, whatever warning word it starts with.
+    details have changed") stays, whatever warning words it starts or ends with.
     """
     parts = re.split(r"(?<=[.!?])\s+|\n+", text or "")
     return " ".join(part for part in parts if not _is_notice(part))
@@ -244,11 +259,19 @@ def strip_notices(text: str) -> str:
 def _gift_ask(text: str) -> re.Match[str] | None:
     """A gift-card mention in a sentence that asks someone to buy them or send their codes."""
     for match in GIFT_RE.finditer(text or ""):
-        start = max(text.rfind(".", 0, match.start()), text.rfind("\n", 0, match.start())) + 1
-        ends = [i for i in (text.find(".", match.end()), text.find("\n", match.end())) if i >= 0]
-        if GIFT_ASK_RE.search(text[start : min(ends) if ends else len(text)]):
+        if _gift_sentence_asks(text, match):
             return match
     return None
+
+
+def _gift_sentence_asks(text: str, match: re.Match[str]) -> bool:
+    start = max(text.rfind(".", 0, match.start()), text.rfind("\n", 0, match.start())) + 1
+    ends = [i for i in (text.find(".", match.end()), text.find("\n", match.end())) if i >= 0]
+    sentence = text[start : min(ends) if ends else len(text)]
+    # "Buy 10 gift cards for our staff rewards program and send me the codes" is still an ask.
+    if GIFT_PROGRAM_RE.match(text, match.end()) and not GIFT_BUY_RE.search(sentence):
+        return False
+    return bool(GIFT_ASK_RE.search(sentence))
 
 
 def assess(
@@ -266,6 +289,8 @@ def assess(
     sender = (sender_email or "").strip().lower()
     domain = domain_of(sender)
     signals: list[Signal] = []
+    # A zero-width space, an empty <span> or a Cyrillic "a" inside "bank" still reads as "bank".
+    subject, body, sender_name = normalize_text(subject), normalize_text(body), normalize_text(sender_name)
 
     def add(key: str, detail: str = "") -> None:
         points = POINTS[key]
@@ -273,7 +298,9 @@ def assess(
             points = round(points * ctx.weights.get(key, 1.0))
         signals.append(Signal(key, points, detail))
 
-    is_reply = bool(REPLY_PREFIX_RE.match(subject or ""))
+    # A reply's subject repeats the thread it answers, so it is left out of the sender's own words, but
+    # only when the body quotes that thread. "RE:" over a body with no quote is just a subject line.
+    is_reply = bool(REPLY_PREFIX_RE.match(subject or "")) and bool(QUOTE_START_RE.search(body or ""))
     mine = strip_notices(own_words(body))
     own = mine if is_reply else f"{subject or ''}. {mine}"
     everything = strip_notices(f"{subject or ''}\n{body or ''}")
@@ -294,7 +321,7 @@ def assess(
         if quoted:
             add("bank_change_quoted", _quote(everything, quoted))
         for filename, text in attachments or []:
-            hit = PAYMENT_CHANGE_RE.search(strip_notices((text or "")[:60_000]))
+            hit = PAYMENT_CHANGE_RE.search(strip_notices(normalize_text((text or "")[:60_000])))
             if hit:
                 add("bank_change_attachment", filename)
                 break
@@ -339,7 +366,12 @@ def assess(
     if spoof:
         add("display_name_spoof", spoof)
 
-    if any(needle in sender for needle in AUTOMATED_SENDERS):
+    # Machine mail ("no-reply@") rarely asks for anything, but anyone can pick that address on a domain of
+    # their own. So it counts only from a sender you have mail from or a domain you trust, and never
+    # against bank-change wording.
+    keys = {item.key for item in signals}
+    familiar = history > 0 or bool(trusted_domain)
+    if any(needle in sender for needle in AUTOMATED_SENDERS) and familiar and not keys & ({"bank_change"} | SOFT_BANK):
         add("automated_sender")
     verdict_for_sender = ctx.senders.get(sender, "")
     reported = verdict_for_sender == "fraud" or (domain and domain_matches(domain, ctx.fraud_domains))
@@ -368,9 +400,11 @@ def assess(
         level = "high"
     elif score >= CAUTION_AT and keys & CONTEXT:
         level = "caution"
-    elif "bank_change_quoted" in keys and not trust and not DISAVOW_RE.search(mine):
-        # Bank-change wording below a quote marker ("From:", ">") can be a forged thread.
-        # Only a colleague saying it was fake ("it was not them") keeps it quiet.
+    elif "bank_change_quoted" in keys and not (trust and DISAVOW_RE.search(mine)):
+        # Bank-change wording below a quote marker ("From:", ">") can be a forged thread, and a
+        # colleague forwarding a vendor's change still needs a phone call before anyone pays.
+        # Only someone you trust saying it was fake ("it was not them") keeps it quiet: anyone
+        # can write "this is not phishing" above a forged thread.
         level = "caution"
     else:
         level = "none"
@@ -592,17 +626,22 @@ def _lookalike(domain: str, ctx: TrustContext) -> str:
     candidates = [(item, True) for item in ctx.domains] + [
         (item, False) for item, count in ctx.known.items() if count > max(mine, 1)
     ]
+    shown = _skeleton(domain)
+    tokens = re.split(r"[.-]", shown.rsplit(".", 1)[0])
     for other, trusted in candidates:
         if other == domain or domain.endswith("." + other) or other.endswith("." + domain):
             continue
-        if _skeleton(domain) == _skeleton(other):
+        theirs = _skeleton(other)
+        if shown == theirs:
             return other
-        limit = 2 if len(other) >= 10 else 1
-        if len(other.split(".")[0]) >= 4 and _distance(domain, other, limit) <= limit:
-            return other
+        # One letter off a name you trust ("tax.com", "tazz.com", "t4z.com" for "taz.com"). A domain you
+        # merely hear from a lot needs a longer name, so "pwc.com" is not taken for "pnc.com".
         label = other.split(".")[0]
-        tokens = re.split(r"[.-]", domain.rsplit(".", 1)[0])
-        if trusted and len(label) >= 3 and label in tokens:
+        limit = 2 if len(other) >= 10 else 1
+        if len(label) >= (3 if trusted else 4) and _distance(shown, theirs, limit) <= limit:
+            return other
+        # A trusted name inside another domain ("taz-payments.net"), both read the same way.
+        if trusted and len(label) >= 3 and theirs.split(".")[0] in tokens:
             return other
     return ""
 
@@ -621,7 +660,17 @@ def _display_name_spoof(name: str, sender: str, domain: str, trusted_domain: str
 
 
 def _skeleton(domain: str) -> str:
-    text = domain.lower()
+    """How a domain reads on screen: punycode labels ("xn--tz-7kc") decoded, Cyrillic, Greek and full-width
+    look-alike letters read as Latin, and pairs that pass for one another ("rn" and "m", "0" and "o") made the same."""
+    labels = []
+    for label in domain.lower().split("."):
+        if label.startswith("xn--"):
+            try:
+                label = label.encode("ascii").decode("idna")
+            except UnicodeError:
+                pass
+        labels.append(label)
+    text = normalize_text(".".join(labels)).lower()
     for old, new in _HOMOGLYPHS:
         text = text.replace(old, new)
     return text

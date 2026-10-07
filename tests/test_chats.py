@@ -128,3 +128,28 @@ def test_the_pop_out_window_is_the_chat_alone(client):
     assert 'class="chat-window"' in page and 'id="chat"' in page and "chat-fab" not in page and 'class="rail"' not in page
     home = client.get("/").text
     assert 'data-action="popout-chat"' in home and 'data-action="chat-history"' in home and 'data-action="attach-file"' in home
+
+
+def test_each_file_past_the_upload_limit_is_reported(client):
+    chat_id = client.post("/chats", headers=PAGE).json()["id"]
+    files = [("files", (f"f{i}.csv", f"a,b\n{i},2\n".encode(), "text/csv")) for i in range(chats.MAX_FILES + 2)]
+    added = client.post(f"/chats/{chat_id}/files", headers=PAGE, files=files).json()
+    assert [file["name"] for file in added["files"]] == [f"f{i}.csv" for i in range(chats.MAX_FILES)]
+    assert added["problems"] == [
+        f"f{i}.csv wasn't added: up to {chats.MAX_FILES} files can be added at once." for i in (chats.MAX_FILES, chats.MAX_FILES + 1)
+    ], "the page shows these, so no file goes missing without a word"
+
+
+def test_a_long_file_name_is_shortened_but_keeps_its_extension(client, settings):
+    chat_id = client.post("/chats", headers=PAGE).json()["id"]
+    long_name = "Quarterly reconciliation of intercompany balances " * 3 + ".csv"
+    added = client.post(f"/chats/{chat_id}/files", headers=PAGE, files=[("files", (long_name, ROSTER, "text/csv"))]).json()
+    assert added["problems"] == []
+    [card] = added["files"]
+    assert card["name"] == long_name[:146] + ".csv" and len(card["name"]) == 150 and card["text"]
+    assert (settings.inbox_extracted / f"chat-{chat_id}" / card["name"]).read_bytes() == ROSTER
+    assert "Jonathan Reyes" in client.get(card["href"]).text
+    assert client.post(f"/chats/{chat_id}/files/1/delete", headers=PAGE).json()["files"] == []
+    assert not (settings.inbox_extracted / f"chat-{chat_id}" / card["name"]).exists()
+    assert chats._kept_name("C:\\Users\\me\\" + "x" * 200 + ".pdf") == "x" * 146 + ".pdf"
+    assert chats._kept_name("short name.xlsx") == "short name.xlsx"

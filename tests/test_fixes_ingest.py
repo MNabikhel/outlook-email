@@ -462,3 +462,434 @@ def test_an_address_in_the_display_name_is_not_the_sender(store: Store, settings
     # Headers the strict parser gives up on still give the address in the brackets.
     assert folder_mail._split_address("Chen, Maya <maya@x.com>") == ("Chen, Maya", "maya@x.com")
     assert folder_mail._split_address("Maya Chen") == ("Maya Chen", "")
+
+
+# 15. The overnight reading never overwrites what the user did while the model was reading -------
+
+
+def test_a_reading_is_not_saved_over_a_correction_or_verdict_made_meanwhile(store: Store, settings: Settings):
+    from controller_inbox.fraud import record_fraud_verdict
+    from controller_inbox.learn import record_correction
+    from controller_inbox.overnight import read_queue
+    from test_bionic import AgreeingReader
+
+    ingest_demo(store, settings, now=NOW)
+    first, corrected, flagged = (e.id for e in store.list_emails(model_status="script_draft", order="queue", limit=3))
+
+    class SlowReader(AgreeingReader):
+        def read(self, packet):
+            if packet["email_id"] == first:
+                # While the model reads the first email, the user corrects the second and calls the third fraud.
+                record_correction(store, settings, email_id=corrected, corrected_category="newsletter", reason="it is a newsletter")
+                record_fraud_verdict(store, settings, flagged, verdict="fraud", note="phoned the vendor; it is fake")
+            return super().read(packet)
+
+    result = read_queue(store, settings, limit=3, now=NOW, reader=SlowReader())
+    assert result["read_ids"] == [first]
+    kept = store.get_email(corrected)
+    assert kept.category.value == "newsletter" and kept.model_status == "corrected"
+    verdict = store.get_email(flagged)
+    assert {"fraud_risk", "fraud_confirmed"} <= set(verdict.flags)
+    assert verdict.model_status == "script_draft", "read again on the next run, as it is now"
+
+
+def test_a_limit_of_zero_reads_nothing(loaded: Store, settings: Settings):
+    from controller_inbox.overnight import read_queue
+    from test_bionic import AgreeingReader
+
+    assert read_queue(loaded, settings, limit=0, reader=AgreeingReader())["read_ids"] == []
+    assert loaded.counts()["waiting_on_bionic"] == 19
+
+
+# 16. Another copy of a stored message keeps the files that came with the first ---------------
+
+
+def _sidecar(settings: Settings, name: str, data: bytes) -> Path:
+    path = settings.inbox_incoming / name
+    path.write_bytes(data)
+    _age(path)
+    return path
+
+
+def test_a_copy_without_the_files_keeps_the_ones_dropped_with_the_first(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    _eml(settings, "Invoice 4410", "Invoice attached, due Oct 30.", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Invoice INV-4410 Freight $1,250.00")
+    [record] = ingest_folder(store, settings)
+    assert [att.filename for att in record.attachments] == ["Invoice 4410.txt"]
+
+    # Exported again later (a bulk "save as" of the folder), this time with no file beside it.
+    _eml(settings, "Invoice 4410", "Invoice attached, due Oct 30.", message_id="<inv4410@vendor.com>")
+    report: dict = {}
+    ingest_folder(store, settings, report=report)
+    assert report["already_read"] == 1 and report["failed"] == []
+    again = store.get_email(record.id)
+    assert [att.filename for att in again.attachments] == ["Invoice 4410.txt"]
+    assert 1250.0 in again.extracted.amounts and again.has_attachments
+    assert "missing_attachment" not in again.flags
+
+
+def test_a_second_copy_in_one_drop_still_brings_its_files(settings: Settings, store: Store):
+    # "Invoice 4410 (2).eml" sorts first and has no file beside it; the copy that does must not be skipped.
+    settings.ensure_data_dir()
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>").rename(settings.inbox_incoming / "Invoice 4410 (2).eml")
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Invoice INV-4410 Freight $1,250.00")
+    report: dict = {}
+    records = ingest_folder(store, settings, report=report)
+    assert (report["read"], report["already_read"]) == (1, 1)
+    assert len(records) == 1 and [att.filename for att in records[0].attachments] == ["Invoice 4410.txt"]
+    assert "INV-4410" in records[0].attachments[0].extracted_text
+    assert not list(settings.inbox_incoming.iterdir())
+
+
+def test_a_copy_of_a_read_message_adds_its_new_files_and_keeps_the_reading(settings: Settings, store: Store):
+    from controller_inbox.reading import apply_bionic_reading
+
+    settings.ensure_data_dir()
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Invoice INV-4410 Freight $1,250.00")
+    [record] = ingest_folder(store, settings)
+    reading = {"category": "ap_invoice", "folder": "important", "importance": "high", "summary": "Freight invoice.", "actions": [], "why": "x"}
+    apply_bionic_reading(store, record.id, reading)
+
+    # The same message again, with a different file under the same name: both files are kept.
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Revised invoice INV-4410 Freight $1,300.00")
+    ingest_folder(store, settings)
+    kept = store.get_email(record.id)
+    assert kept.model_status == "bionic" and kept.summary == "Freight invoice."
+    assert sorted(att.filename for att in kept.attachments) == ["Invoice 4410 (2).txt", "Invoice 4410.txt"]
+    folder = settings.inbox_extracted / record.id
+    assert b"$1,250.00" in (folder / "Invoice 4410.txt").read_bytes()
+    assert b"$1,300.00" in (folder / "Invoice 4410 (2).txt").read_bytes()
+
+    # A third copy with a file already stored adds nothing.
+    _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
+    _sidecar(settings, "Invoice 4410.txt", b"Revised invoice INV-4410 Freight $1,300.00")
+    report: dict = {}
+    assert ingest_folder(store, settings, report=report) == [] and report["already_read"] == 1
+    assert len(store.get_email(record.id).attachments) == 2
+
+
+# 17. Different emails that share a Message-ID stay apart ------------------------------------
+
+
+def test_different_emails_with_one_message_id_are_kept_apart(settings: Settings, store: Store):
+    # A scan-to-email copier gives every scan the same Message-ID.
+    settings.ensure_data_dir()
+    scan = "<scan@copier.local>"
+    _eml(settings, "Scan 0001", "Scanned: vendor invoice", message_id=scan, attach=[("Scan 0001.txt", b"Invoice INV-7001 total $4,200.00")])
+    second = _eml(settings, "Scan 0002", "Scanned: signed contract", message_id=scan, attach=[("Scan 0002.txt", b"Contract signed")],
+                  date_header="Mon, 05 Oct 2026 11:00:00 -0400").read_bytes()
+    report: dict = {}
+    ingest_folder(store, settings, report=report)
+    assert (report["read"], report["already_read"]) == (2, 0)
+
+    # The next day another scan, while the first two are still script drafts.
+    _eml(settings, "Scan 0003", "Scanned: bank statement", message_id=scan, attach=[("Scan 0003.txt", b"Statement Sept 2026")],
+         date_header="Tue, 06 Oct 2026 09:00:00 -0400")
+    ingest_folder(store, settings)
+    stored = {email.subject: [att.filename for att in email.attachments] for email in store.list_emails()}
+    assert stored == {"Scan 0001": ["Scan 0001.txt"], "Scan 0002": ["Scan 0002.txt"], "Scan 0003": ["Scan 0003.txt"]}
+
+    # The second scan dropped again is still one email.
+    path = settings.inbox_incoming / "Scan 0002 again.eml"
+    path.write_bytes(second)
+    _age(path)
+    report = {}
+    ingest_folder(store, settings, report=report)
+    assert report["already_read"] == 1 and store.counts()["emails"] == 3
+
+
+# 18. A message that failed on one sync is read on the next -------------------------------------
+
+
+class _FlakyMailbox(_Mailbox):
+    """Lists messages by their received time, as Graph does; ``failures`` says how often each one fails first."""
+
+    def __init__(self, raws, failures):
+        super().__init__(raws)
+        self.failures = dict(failures)
+        self.fetched: list[str] = []
+
+    def list_messages(self, received_after=None):
+        return iter([raw for raw in self.raws if received_after is None or raw.received_at >= received_after])
+
+    def get_attachments(self, message_id):
+        self.fetched.append(message_id)
+        if self.failures.get(message_id, 0):
+            self.failures[message_id] -= 1
+            from controller_inbox.graph import GraphError
+
+            raise GraphError("Microsoft Graph throttled the request (HTTP 429). Wait and retry.")
+        return []
+
+
+def _graph_raw(message_id: str, received: datetime) -> RawMessage:
+    raw = _raw("Invoice attached", received=received)
+    raw.id, raw.source, raw.has_attachments = message_id, "graph", True
+    return raw
+
+
+def test_a_message_that_failed_on_a_sync_is_read_on_the_next(store: Store, settings: Settings):
+    from datetime import timedelta
+
+    t0 = datetime(2026, 10, 6, 9, 0, tzinfo=timezone.utc)
+    mailbox = _FlakyMailbox([_graph_raw("throttled", t0), _graph_raw("fine", t0 + timedelta(minutes=1))], {"throttled": 1})
+    report: dict = {}
+    ingest_mailbox(mailbox, store, settings, received_after=t0 - timedelta(hours=72), now=t0 + timedelta(minutes=5), report=report)
+    assert [row["id"] for row in report["failed"]] == ["throttled"] and store.get_email("fine")
+    cursor = datetime.fromisoformat(store.get_state("last_sync_at"))
+    assert cursor <= t0, "the cursor waits for the message that failed"
+
+    mailbox.fetched.clear()
+    ingest_mailbox(mailbox, store, settings, received_after=cursor, now=t0 + timedelta(hours=1))
+    assert store.get_email("throttled") is not None
+    assert mailbox.fetched == ["throttled"], "the message read last time is not fetched again"
+    assert store.get_state("last_sync_at") == (t0 + timedelta(hours=1)).isoformat()
+
+
+def test_a_message_that_always_fails_stops_holding_the_cursor(store: Store, settings: Settings, monkeypatch):
+    from datetime import timedelta
+
+    from controller_inbox import pipeline
+
+    monkeypatch.setattr(pipeline, "MAX_SYNC_TRIES", 2)
+    t0 = datetime(2026, 10, 6, 9, 0, tzinfo=timezone.utc)
+    mailbox = _FlakyMailbox([_graph_raw("broken", t0)], {"broken": 99})
+    ingest_mailbox(mailbox, store, settings, now=t0 + timedelta(minutes=5))
+    assert store.get_state("last_sync_at") == t0.isoformat()
+    later = t0 + timedelta(hours=1)
+    ingest_mailbox(mailbox, store, settings, received_after=t0, now=later)
+    assert store.get_state("last_sync_at") == later.isoformat(), "after the last try the sync moves on"
+
+
+# 19. watch reads the drop folder and writes the digest while Outlook is down ---------------------
+
+
+def test_watch_reads_the_drop_folder_while_outlook_is_down(settings: Settings, store: Store, monkeypatch, capsys):
+    from controller_inbox import cli
+    from controller_inbox.graph import GraphError
+
+    class Down:
+        def list_messages(self, received_after=None):
+            raise GraphError("Graph 503: Service Unavailable")
+
+    settings.ensure_data_dir()
+    settings.azure_client_id = "configured"
+    monkeypatch.setattr(cli, "_graph_mailbox", lambda _settings: Down())
+    _eml(settings, "Dropped while Outlook is down", message_id="<w1@x>")
+    result = cli.watch_tick(settings, store, now=datetime(2026, 10, 6, 9, 0, tzinfo=settings.tz))
+    assert [record.subject for record in result["records"]] == ["Dropped while Outlook is down"]
+    assert "503" in result["graph_note"] and result["digest"] is not None
+    assert not list(settings.inbox_incoming.iterdir())
+    assert cli._watch(settings, store, once=True) == 0
+    assert "Outlook could not be read (Graph 503" in capsys.readouterr().out
+
+
+# 20. Reading attachments again never gives a zipped file another file's text --------------------
+
+
+def test_reading_again_reads_a_zipped_file_from_its_zip(settings: Settings, store: Store):
+    from controller_inbox.demo import make_pdf
+
+    settings.ensure_data_dir()
+    outer = make_pdf([["Invoice INV-1001 from Alpha Freight", ["Item", "Amount"], ["Freight", "$1,000.00"]]])
+    inner = make_pdf([["Invoice INV-2002 from Beta Paper", ["Item", "Amount"], ["Paper", "$2,000.00"]]])
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("invoice.pdf", inner)
+    msg = EmailMessage()
+    msg["From"] = "AP <ap@vendor.com>"
+    msg["Subject"] = "Two invoices"
+    msg["Message-ID"] = "<two@x>"
+    msg["Date"] = "Mon, 05 Oct 2026 10:00:00 -0400"
+    msg.set_content("See attached.")
+    # An "invoice.pdf" beside a zip that holds another "invoice.pdf".
+    msg.add_attachment(outer, maintype="application", subtype="pdf", filename="invoice.pdf")
+    msg.add_attachment(buffer.getvalue(), maintype="application", subtype="zip", filename="older.zip")
+    path = settings.inbox_incoming / "two.eml"
+    path.write_bytes(bytes(msg))
+    _age(path)
+    [record] = ingest_folder(store, settings)
+    zipped = next(att for att in record.attachments if att.id.endswith("older.zip:invoice.pdf"))
+    assert "INV-2002" in zipped.extracted_text
+
+    store.set_attachment_text(zipped.id, "[page 1]\nas an older reader left it")
+    store.set_state(folder_mail.READER_KEY, "old")
+    assert reread_attachments(store, settings) == 1
+    texts = {att.id: att.extracted_text for att in store.get_email(record.id).attachments}
+    assert "INV-2002" in texts[zipped.id] and "INV-1001" not in texts[zipped.id]
+    assert "INV-1001" in texts[f"{record.id}:invoice.pdf"]
+
+
+# 21. A long non-Latin attachment name is cut to fit, and files are saved before the email --------
+
+
+def test_a_long_non_latin_file_name_is_cut_to_fit_and_keeps_its_extension(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    name = "請求書" * 30 + ".txt"  # 94 characters but 274 bytes in UTF-8, more than a file name can hold
+    _eml(settings, "請求書", message_id="<jp1@x>", attach=[(name, b"first copy"), (name, b"second copy")])
+    report: dict = {}
+    [record] = ingest_folder(store, settings, report=report)
+    assert report["failed"] == [] and not list(settings.inbox_failed.iterdir())
+    assert record.source_path.endswith(".eml")
+    saved = {path.name: path.read_bytes() for path in (settings.inbox_extracted / record.id).iterdir()}
+    assert sorted(saved.values()) == [b"first copy", b"second copy"]
+    assert all(len(name.encode("utf-8")) <= 255 and name.endswith(".txt") for name in saved)
+    assert any(name.endswith(" (2).txt") for name in saved), "the number of the second copy is not cut off"
+
+
+def test_an_email_is_not_stored_when_its_files_cannot_be_saved(settings: Settings, store: Store, monkeypatch):
+    settings.ensure_data_dir()
+    _eml(settings, "Disk full", message_id="<full@x>", attach=[("a.txt", b"data")])
+
+    def full(*_args):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(folder_mail, "_write_extracted", full)
+    report: dict = {}
+    assert ingest_folder(store, settings, report=report) == []
+    assert len(report["failed"]) == 1 and store.counts()["emails"] == 0
+    assert (settings.inbox_failed / "Disk full.eml").exists()
+
+
+# 22. Outlook sync reads Reply-To, so mail whose replies go elsewhere is flagged ------------------
+
+
+class _ReplyToClient(_FakeClient):
+    def get_json(self, path, params=None):
+        self.params.append(params)
+        if path.endswith("/attachments"):
+            return {"value": []}
+        return {"value": [{
+            "id": "AAMk1", "subject": "Updated remittance details", "receivedDateTime": "2026-10-05T14:00:00Z",
+            "from": {"emailAddress": {"name": "Acme Billing", "address": "billing@acme.com"}},
+            "replyTo": [{"emailAddress": {"name": "Acme Billing", "address": "Acme.Billing@protonmail.com"}}],
+            "body": {"contentType": "text", "content": "Please use our new bank account for all payments."},
+            "hasAttachments": False, "importance": "normal", "isRead": False,
+        }]}
+
+
+def test_graph_sync_reads_reply_to_for_the_fraud_check(store: Store, settings: Settings):
+    client = _ReplyToClient()
+    [record] = ingest_mailbox(GraphMailbox(client), store, settings, now=NOW)
+    assert "replyTo" in client.params[0]["$select"].split(",")
+    assert record.reply_to == "acme.billing@protonmail.com"
+    assert "reply_to_mismatch" in {signal["key"] for signal in store.fraud_check(record.id)["signals"]}
+
+
+# 23. Overnight file summaries: flagged mail doesn't use up the night, empty ones aren't retried -----
+
+
+LONG_FILE = ("Line item freight services rendered in September per contract. " * 60).encode()
+
+
+def _mail_with_long_file(store: Store, settings: Settings, n: int, *, scam: bool):
+    raw = _raw(
+        "Our bank details have changed. Please use the new account for all payments from today."
+        if scam else "Please find the monthly report attached.",
+        received=NOW,
+        attachments=[RawAttachment(id="f.txt", filename=f"file{n}.txt", content_type="text/plain", size_bytes=len(LONG_FILE), content=LONG_FILE)],
+    )
+    raw.id, raw.subject = f"m{n}", "Updated remittance details" if scam else f"Monthly report {n}"
+    raw.sender_email = f"billing@acme-pay{n}.net" if scam else "maya@taz.com"
+    return process_message(raw, store, settings, now=NOW)
+
+
+def test_files_on_flagged_mail_do_not_use_up_the_nights_summaries(store: Store, settings: Settings, monkeypatch):
+    from controller_inbox import file_summaries
+
+    # Flagged mail scores highest, so it would fill a night's quota of 3 and nothing else would ever be summarized.
+    assert all("fraud_risk" in _mail_with_long_file(store, settings, n, scam=True).flags for n in range(3))
+    _mail_with_long_file(store, settings, 9, scam=False)
+    calls: list[str] = []
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.filename) or "- Freight for September")
+    assert file_summaries.summarize_files(store, settings, limit=3, model="m") == 1
+    assert calls == ["file9.txt"]
+
+
+def test_a_file_the_model_cannot_summarize_is_not_tried_every_night(store: Store, settings: Settings, monkeypatch):
+    from controller_inbox import file_summaries
+
+    _mail_with_long_file(store, settings, 1, scam=False)
+    calls: list[str] = []
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.id) or "")
+    for _night in range(3):
+        assert file_summaries.summarize_files(store, settings, limit=5, model="small") == 0
+    assert calls == ["m1:f.txt"]
+    file_summaries.summarize_files(store, settings, limit=5, model="bigger")
+    assert len(calls) == 2, "another model gets a try"
+
+
+# 24. A NUL character in a file's text is not stored -------------------------------------------
+
+
+NUL_EXPORT = b"2026-09-01  Wire to Alpha Freight   1,250.00\n" * 80 + b"END\x00\x00\n"
+
+
+def test_a_file_with_a_nul_in_its_text_is_summarized_once(store: Store, settings: Settings, monkeypatch):
+    from controller_inbox import file_summaries
+
+    # SQLite's length() stops at a NUL and Python's len() doesn't, so the summary never matched its text.
+    export = RawAttachment(id="export.txt", filename="export.txt", content_type="text/plain", size_bytes=len(NUL_EXPORT), content=NUL_EXPORT)
+    record = process_message(_raw("Export attached", received=NOW, attachments=[export]), store, settings, now=NOW)
+    assert "\x00" not in record.attachments[0].extracted_text
+    calls: list[str] = []
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.id) or "- Wires to Alpha Freight")
+    for _night in range(3):
+        file_summaries.summarize_files(store, settings, limit=20, model="m")
+    assert calls == ["raw-1:export.txt"]
+
+
+def test_text_stored_with_a_nul_before_is_cleaned_once(store: Store, settings: Settings):
+    import sqlite3
+
+    export = RawAttachment(id="export.txt", filename="export.txt", content_type="text/plain", size_bytes=3, content=b"abc")
+    process_message(_raw("Export attached", received=NOW, attachments=[export]), store, settings, now=NOW)
+    with sqlite3.connect(settings.db_path) as conn:  # as an older version left it
+        conn.execute("UPDATE attachments SET extracted_text = ?", ("a\x00b",))
+        conn.execute("DELETE FROM sync_state WHERE key = 'attachment_text_without_nul'")
+    assert Store(settings.db_path).get_email("raw-1").attachments[0].extracted_text == "ab"
+
+
+# 25. VIP senders can be separated by semicolons, like trusted domains -----------------------------
+
+
+def test_vip_senders_split_on_semicolons_too():
+    settings = Settings(vip_senders="cfo@taz.com; ceo@taz.com,board@taz.com", _env_file=None)
+    assert settings.vip_list == ["cfo@taz.com", "ceo@taz.com", "board@taz.com"]
+
+
+# 26. An invitation's calendar sent inline, with no file name, is kept ----------------------------
+
+
+INVITE = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nSUMMARY:Q3 close review\r\nDTSTART:20261008T150000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+
+
+def _invite(settings: Settings, name: str, *, attached: bool) -> None:
+    msg = EmailMessage()
+    msg["From"] = "Controller <cfo@taz.com>"
+    msg["Subject"] = "Q3 close review"
+    msg["Message-ID"] = f"<{name}@x>"
+    msg["Date"] = "Mon, 05 Oct 2026 10:00:00 -0400"
+    msg.set_content("You have been invited.")
+    msg.add_alternative(INVITE, subtype="calendar", params={"method": "REQUEST"})
+    if attached:
+        msg.add_attachment(INVITE.encode(), maintype="text", subtype="calendar", filename="invite.ics")
+    path = settings.inbox_incoming / f"{name}.eml"
+    path.write_bytes(bytes(msg))
+    _age(path)
+
+
+def test_an_inline_calendar_is_kept_as_the_invite(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    _invite(settings, "inline", attached=False)
+    _invite(settings, "both", attached=True)
+    records = {record.internet_message_id: record for record in ingest_folder(store, settings)}
+    inline = records["<inline@x>"]
+    assert [att.filename for att in inline.attachments] == ["invite.ics"]
+    assert "Q3 close review" in inline.attachments[0].extracted_text
+    assert [att.filename for att in records["<both@x>"].attachments] == ["invite.ics"], "not kept twice"

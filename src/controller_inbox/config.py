@@ -208,7 +208,8 @@ class Settings(BaseSettings):
 
     @property
     def vip_list(self) -> list[str]:
-        return [part.strip().lower() for part in self.vip_senders.split(",") if part.strip()]
+        """Addresses or domains, separated by commas, semicolons (as Outlook copies a list) or spaces."""
+        return [part.strip().lower() for part in re.split(r"[,;\s]+", self.vip_senders) if part.strip()]
 
     @property
     def trusted_domain_list(self) -> list[str]:

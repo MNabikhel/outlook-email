@@ -670,3 +670,75 @@ def test_a_question_the_tables_work_out_is_answered_in_one_streamed_pass(store, 
     assert "Worked out from the tables with a query (1 row)" in steps
     assert len(prompts) == 1 and "Worked out with a query over the table" in prompts[0][-1]["content"]
     assert _text(events).startswith("Ads is 1,500 in Q4") and not [e for e in events if e["type"] == "check"]
+
+
+def test_clip_always_returns_text_that_fits():
+    import random
+
+    rng = random.Random(7)
+    prose = (
+        "The Northwind invoice INV-10482 for $12,480.00 was received on 15 March 2026 and is due within 45 days. "
+        "Freight of $880.00 is billed separately under PO 7731. "
+    )
+    for _ in range(400):
+        text = prose * rng.randint(1, 6) if rng.random() < 0.5 else "\n".join(prose * rng.randint(1, 2) for _ in range(rng.randint(1, 5)))
+        room = rng.randint(1, agent.prompt_size(text) + 50)
+        cut = agent.clip(text, room)
+        assert agent.prompt_size(cut) <= max(room, agent.prompt_size("…")), (room, len(text))
+
+
+def test_a_check_pass_that_repeats_its_heading_keeps_the_draft(store, settings, mail, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "SQL: NONE")
+    # A draft with a figure that isn't in the files needs a check pass; that pass starts by repeating its heading.
+    monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: ToolReply("The offsite is in Lisbon on 14 November, budget $42,000, deposit $5,000 [1]."))
+    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: iter(["Your draft answer: ", "The offsite is in Lisbon on 14 November, capped at $42,000 [1]."]))
+    events = _events(answer_stream(store, settings, "How does the offsite budget compare with the cap in this memo?", email_id=budget.id))
+    assert not any(e["type"] == "mode" and e["mode"] == "lookup" for e in events)
+    assert "Lisbon on 14 November" in _text(events)
+
+
+def test_an_empty_turn_after_the_tools_read_still_answers_from_the_reading(store, settings, mail, monkeypatch):
+    from controller_inbox.local_llm import EmptyReply
+
+    budget = mail["Q4 budget draft"]
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "SQL: NONE")
+    turns = []
+
+    def tools(_s, messages, *_a, **_k):
+        turns.append(1)
+        if len(turns) == 1:
+            return ToolReply("", [{"id": "c1", "name": "trace_cell", "arguments": {"email": "1", "file": "Q4 budget.xlsx", "sheet": "Budget", "cell": "D4"}}])
+        raise EmptyReply("the model used its whole reply budget thinking")
+
+    streamed = []
+    monkeypatch.setattr(assistant, "chat_with_tools", tools)
+    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: streamed.append(1) or iter(["D4 = D2+D3 [1]."]))
+    events = _events(answer_stream(store, settings, "How is the total change worked out?", email_id=budget.id))
+    assert streamed and "D4 = D2+D3" in _text(events)
+
+
+def test_the_email_a_question_names_is_not_crowded_out_by_its_kind(loaded, settings, monkeypatch):
+    import copy
+
+    from controller_inbox import semantic
+    from controller_inbox.assistant import pick_sources
+    from controller_inbox.models import DocumentType
+
+    monkeypatch.setattr(semantic, "embedding_model", lambda _s: "")
+    base = loaded.get_email("demo-question")
+    for n in range(4):  # a mailbox with more reply-needed mails and invoices than the demo has
+        for category, prefix in ((DocumentType.REPLY_NEEDED, "reply"), (DocumentType.AP_INVOICE, "inv")):
+            email = copy.deepcopy(base)
+            email.id, email.category, email.importance_score = f"{prefix}-{n}", category, 95
+            email.subject, email.body_text, email.attachments, email.actions = f"Other {prefix} {n}", "unrelated", [], []
+            loaded.upsert_email(email)
+    sources, _, found = pick_sources(loaded, "Did Lakeside Tooling reply about the invoice?", settings=settings)
+    assert sources[0].id == "demo-wire-legit", "the Lakeside Tooling email the question names comes first"
+    assert "demo-wire-legit" in found and not any(hit.startswith(("reply-", "inv-")) for hit in found)

@@ -435,8 +435,12 @@ def _ungrounded_amounts(summary: str, email: EmailRecord) -> list[str]:
         except ValueError:
             continue
         if match.group(2):
-            value *= 1_000_000 if match.group(2).strip().lower() == "m" else 1_000
+            suffix = match.group(2).strip()
+            value *= 1_000_000 if suffix.lower() == "m" else 1_000
             if any(abs(value - item) <= max(0.06 * item, 1) for item in known):
+                continue
+            # The email itself writes it this way ("$1.2M", "$250K").
+            if re.search(rf"(?<![\d.]){re.escape(raw)}\s*{re.escape(suffix)}\b", haystack, re.I):
                 continue
         elif any(abs(value - item) < 0.01 for item in known) or _number_in(raw, haystack):
             continue

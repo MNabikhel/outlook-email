@@ -314,12 +314,15 @@ def unlisted_codes(email: EmailRecord, book: Codebook, *, limit: int = 6) -> lis
     """Code-shaped numbers on the invoice that the workbook doesn't have, so a typo or a new code shows up."""
     shapes = _shapes(book) or [_GENERIC_SHAPE]
     known = {code.key for code in book.codes}
+    # A code kept in a number cell (1100.611) is the 1100.6110 on the invoice, which codes_on already found.
+    loose = [pattern for pattern in (_pattern(code) for code in book.codes if code.loose) if pattern is not None]
     out: list[str] = []
     for _where, text in _sources(email):
         for shape in shapes:
             for match in shape.finditer(text):
                 code = re.sub(r"\s", "", match.group(0)).replace(",", ".")
-                if code_key(code) not in known and code not in out:
+                listed = code_key(code) in known or any(pattern.fullmatch(code) for pattern in loose)
+                if not listed and code not in out:
                     out.append(code)
                 if len(out) >= limit:
                     return out
