@@ -498,6 +498,8 @@
     if (!question || busy) return;
     busy = true;
     closeHistory();
+    // Load the saved conversation first: loading it afterwards would start a new round and drop this answer.
+    if (chat && !loaded) await loadChat(chatId);
     const round = ++chatRound;
     openChat(false);
     if (!turns.length) chatLog.innerHTML = "";
@@ -697,6 +699,8 @@
   async function addFiles(list) {
     const files = Array.from(list || []);
     if (!files.length) return;
+    // As in ask(): a conversation still loading would replace the list of files this upload returns.
+    if (chat && !loaded) await loadChat(chatId);
     openChat(false);
     renderFiles(files.map((file) => file.name));
     try {
