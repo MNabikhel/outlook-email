@@ -59,6 +59,19 @@ python -m controller_inbox run
 
 The digest covers mail since the start of the previous working day (Friday, on a Monday). Open tasks and unverified payment-change warnings carry over until you mark them done.
 
+## The workspace (/app)
+
+A second view of the same mailbox that works like a mail app: nothing reloads as you move around. Open it at `http://127.0.0.1:8765/app` (use your dashboard's address and port), or click **Open the new workspace →** in the classic side bar. **Classic view** at the bottom of the workspace's side bar goes back. Both views read and change the same data.
+
+- **Side bar:** Today (the ranked focus list), Tasks, the Important / Informational / Reference folders and All mail with their counts, Fraud check, AP coding, the daily digest and Settings.
+- **List and reading pane:** pick an email to read it beside the list: why it was flagged, what was read from it (amounts, vendor, dates), its tasks (tick them off), its attachments, the fraud check and category correction. An email held as possible payment fraud never shows its files.
+- **Tables:** an attachment's **Tables** button shows each table CloseDesk read as a grid, with a badge saying whether its printed totals add up. A total that doesn't is highlighted, with the difference spelled out.
+- **Ask CloseDesk:** the chat docks on the right and shows its sources, steps and checks as it answers; on an email it asks about that email.
+- **Keys:** `j`/`k` move, `Enter` opens, `e` marks done, `/` filters the list, `c` opens the chat, `Ctrl/Cmd+K` searches mail and jumps anywhere, `?` lists them all.
+- **Light or dark:** follows the computer, or pick one with the moon/sun button or in Settings.
+
+Every address is a link you can keep, such as `/app/mail/<id>` for an email or `/app/mail/<id>/file/1?tab=tables` for its first attachment's tables. Everything is served from this computer; nothing is loaded from the internet.
+
 ## Laptop drop folder
 
 1. Put Outlook messages in `inbox/incoming/` (`.msg` or `.eml`). Attachments stored inside the message are unpacked automatically, including forwarded emails attached as items.
@@ -301,7 +314,9 @@ src/controller_inbox/
   assistant.py   Ask CloseDesk chat and reply drafts (local model, or lookups without one)
   profile.py     General / finance inbox profile
   web.py         Local dashboard
+  web_api.py     The workspace page (/app) and the JSON it is built from (/api)
   static/app.js  Open-in-place preview, chat box, search shortcut
+  static/ui/     The workspace's scripts and styles (no build step, no CDN)
   cli.py         controller-inbox / closedesk commands
 CloseDesk.bat / CloseDesk.command   Double-click launchers (first run sets up .venv)
 scripts/overnight.bat / .sh         For Task Scheduler / cron

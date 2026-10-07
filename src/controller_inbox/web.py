@@ -1160,6 +1160,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "model": model.model if model.active else "",
         }
 
+    from controller_inbox.web_api import register_workspace
+
+    register_workspace(
+        app, store=store, settings=settings, job=job, board_date=board_date,
+        fraud_view=fraud_view, file_cards=file_cards, original_path=original_path,
+    )
     return app
 
 
