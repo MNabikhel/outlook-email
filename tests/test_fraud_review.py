@@ -221,3 +221,13 @@ def test_anyone_cannot_silence_the_quoted_thread_warning():
 def test_a_colleague_vouching_for_the_thread_is_not_disowning_it():
     vouched = FORGED.replace("Hi, this is not phishing", "Hi, I checked, this is not phishing")
     assert _check(vouched, sender="sam@ourco.example", ctx=COLLEAGUES).level == "caution"
+
+
+# 7. "RE:" over a body with no quoted thread: the subject is the sender's own words.
+def test_reply_prefix_without_a_quote_does_not_hide_the_subject():
+    body = "Hi,\n\nAs discussed, please use the details in the attached letter for invoice 5521."
+    check = _check(body, subject="RE: Our bank details have changed")
+    assert "bank_change" in _keys(check) and check.level == "high"
+    # With the thread quoted below, the subject belongs to the thread, as before.
+    quoted = "Thanks, I will call them first.\n\nFrom: Acme AR\nSent: Monday\n\nPlease see below."
+    assert "bank_change" not in _keys(_check(quoted, subject="RE: Our bank details have changed"))

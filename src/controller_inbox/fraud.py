@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from controller_inbox.classify import AUTOMATED_SENDERS, PAYMENT_CHANGE_RE, normalize_text, own_words
+from controller_inbox.classify import AUTOMATED_SENDERS, PAYMENT_CHANGE_RE, QUOTE_START_RE, normalize_text, own_words
 
 if TYPE_CHECKING:
     from controller_inbox.config import Settings
@@ -290,7 +290,9 @@ def assess(
             points = round(points * ctx.weights.get(key, 1.0))
         signals.append(Signal(key, points, detail))
 
-    is_reply = bool(REPLY_PREFIX_RE.match(subject or ""))
+    # A reply's subject repeats the thread it answers, so it is left out of the sender's own words, but
+    # only when the body quotes that thread. "RE:" over a body with no quote is just a subject line.
+    is_reply = bool(REPLY_PREFIX_RE.match(subject or "")) and bool(QUOTE_START_RE.search(body or ""))
     mine = strip_notices(own_words(body))
     own = mine if is_reply else f"{subject or ''}. {mine}"
     everything = strip_notices(f"{subject or ''}\n{body or ''}")
