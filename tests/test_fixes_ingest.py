@@ -664,3 +664,26 @@ def test_a_message_that_always_fails_stops_holding_the_cursor(store: Store, sett
     later = t0 + timedelta(hours=1)
     ingest_mailbox(mailbox, store, settings, received_after=t0, now=later)
     assert store.get_state("last_sync_at") == later.isoformat(), "after the last try the sync moves on"
+
+
+# 19. watch reads the drop folder and writes the digest while Outlook is down ---------------------
+
+
+def test_watch_reads_the_drop_folder_while_outlook_is_down(settings: Settings, store: Store, monkeypatch, capsys):
+    from controller_inbox import cli
+    from controller_inbox.graph import GraphError
+
+    class Down:
+        def list_messages(self, received_after=None):
+            raise GraphError("Graph 503: Service Unavailable")
+
+    settings.ensure_data_dir()
+    settings.azure_client_id = "configured"
+    monkeypatch.setattr(cli, "_graph_mailbox", lambda _settings: Down())
+    _eml(settings, "Dropped while Outlook is down", message_id="<w1@x>")
+    result = cli.watch_tick(settings, store, now=datetime(2026, 10, 6, 9, 0, tzinfo=settings.tz))
+    assert [record.subject for record in result["records"]] == ["Dropped while Outlook is down"]
+    assert "503" in result["graph_note"] and result["digest"] is not None
+    assert not list(settings.inbox_incoming.iterdir())
+    assert cli._watch(settings, store, once=True) == 0
+    assert "Outlook could not be read (Graph 503" in capsys.readouterr().out

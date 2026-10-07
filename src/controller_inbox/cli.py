@@ -506,12 +506,17 @@ def watch_tick(settings: Settings, store: Store, *, force_digest: bool = False, 
 
     records = []
     reading: dict = {"read_ids": []}
+    graph_note = ""
     with run_lock(settings) as locked:
         if locked:
             if settings.graph_configured:
-                last = store.get_state("last_sync_at")
-                after = datetime.fromisoformat(last) if last else datetime.now(timezone.utc) - timedelta(hours=settings.lookback_hours)
-                records = ingest_mailbox(_graph_mailbox(settings), store, settings, received_after=after)
+                try:
+                    last = store.get_state("last_sync_at")
+                    after = datetime.fromisoformat(last) if last else datetime.now(timezone.utc) - timedelta(hours=settings.lookback_hours)
+                    records = ingest_mailbox(_graph_mailbox(settings), store, settings, received_after=after)
+                except Exception as exc:  # Outlook being down must not stop the drop folder or the digest
+                    log.warning("Outlook sync failed", exc_info=True)
+                    graph_note = str(exc)[:300]
             records.extend(ingest_folder(store, settings))
             if records or store.counts()["waiting_on_bionic"]:
                 reading = read_queue(store, settings)
@@ -526,7 +531,14 @@ def watch_tick(settings: Settings, store: Store, *, force_digest: bool = False, 
             payload = make_digest(store, settings, as_of=as_of, now=now)
             write_digest_files(payload, settings.digest_dir, as_of.isoformat())
             wrote = payload
-    return {"records": records, "read": len(reading["read_ids"]), "digest": wrote, "send": send, "busy": not locked}
+    return {
+        "records": records,
+        "read": len(reading["read_ids"]),
+        "digest": wrote,
+        "send": send,
+        "busy": not locked,
+        "graph_note": graph_note,
+    }
 
 
 def _watch(settings: Settings, store: Store, *, once: bool) -> int:
@@ -541,6 +553,8 @@ def _watch(settings: Settings, store: Store, *, once: bool) -> int:
                 print(f"{stamp} another run is processing mail; checking again next time.")
             else:
                 print(f"{stamp} read {len(result['records'])} message(s); model read {result['read']}")
+            if result.get("graph_note"):
+                print(f"{stamp} Outlook could not be read ({result['graph_note']}); the drop folder was still read.", flush=True)
             payload = result["digest"]
             if payload:
                 print(f"Digest {payload['date']} written: {payload['headline']}")
