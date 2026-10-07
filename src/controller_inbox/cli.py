@@ -14,6 +14,7 @@ from controller_inbox.actions import local_today
 from controller_inbox.clock import apply_saved_timezone
 from controller_inbox.config import Settings, load_settings
 from controller_inbox.digest import build_digest, write_digest_files
+from controller_inbox.fraud import _cell
 from controller_inbox.models import DOCUMENT_LABELS, IMPORTANCE_LABELS
 from controller_inbox.pipeline import ingest_demo, ingest_mailbox
 from controller_inbox.profile import is_finance
@@ -577,14 +578,15 @@ def export_actions_csv(store: Store) -> str:
         ["priority", "due_date", "status", "title", "subject", "sender", "category", "source", "email_id"]
     )
     for action, email in store.list_actions(status=None):
+        # The sender writes the subject (and a title can quote it): guarded as in the fraud log export.
         writer.writerow(
             [
                 action.priority.value,
                 action.due_date or "",
                 action.status.value,
-                action.title,
-                email.subject,
-                email.sender_email,
+                _cell(action.title),
+                _cell(email.subject),
+                _cell(email.sender_email),
                 email.category.value,
                 action.source,
                 email.id,

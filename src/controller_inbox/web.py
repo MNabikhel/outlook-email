@@ -8,12 +8,14 @@ import socket
 import subprocess
 import sys
 import threading
+from collections.abc import AsyncIterator, Generator
 from email.message import EmailMessage
 from email.utils import formataddr, format_datetime
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
+import anyio
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import (
     FileResponse,
@@ -26,7 +28,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.concurrency import run_in_threadpool
+from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from controller_inbox import agent, chats, cost_codes, documents, fraud, ocr, semantic
 from controller_inbox.actions import local_today
@@ -741,13 +743,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         instructions = str(data.get("instructions") or "")[:300]
         return JSONResponse(await run_in_threadpool(draft_reply, settings, email, instructions=instructions))
 
-    @app.post("/chat")
-    async def chat(request: Request):
-        _require_page(request)
-        data = await _json_body(request)
-        question = str(data.get("message") or "").strip()
-        if not question:
-            raise HTTPException(status_code=400, detail="Ask a question first.")
+    def answer_lines(data: dict, question: str):
+        """Saves the question and gathers what its answer needs, then gives the answer's lines to stream."""
         chat_id = str(data.get("chat_id") or "")
         if not chats.valid_id(chat_id):
             chat_id = chats.new_id()
@@ -774,9 +771,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         def lines():
             finished = False
             answer = _AnswerLog()
-            yield json.dumps({"type": "chat", "id": chat_id, "title": (store.chat(chat_id) or {}).get("title", "")}) + "\n"
+            events = None
             try:
-                for event in answer_stream(
+                yield json.dumps({"type": "chat", "id": chat_id, "title": (store.chat(chat_id) or {}).get("title", "")}) + "\n"
+                events = answer_stream(
                     store,
                     settings,
                     question,
@@ -786,22 +784,41 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                     today=as_of.isoformat(),
                     uploads=uploads,
                     past=past,
-                ):
+                )
+                for event in events:
                     answer.take(event)
                     finished = finished or event.get("type") == "done"
                     yield json.dumps(event) + "\n"
+            except GeneratorExit:  # the browser went away mid-answer: keep what was said, marked as cut short
+                answer.data["failed"] = True
+                if answer.text:
+                    answer.text += "\n\n(Stopped: the page closed before the answer finished.)"
+                raise
             except Exception as exc:  # the chat box shows a message instead of hanging
                 event = {"type": "error", "text": f"Something went wrong answering that ({type(exc).__name__})."}
                 answer.take(event)
                 yield json.dumps(event) + "\n"
             finally:
+                if events is not None:
+                    events.close()  # stops the model writing an answer nobody will read
                 if not answer.text:
                     answer.data["failed"] = True
                 store.add_chat_turn(chat_id, "assistant", answer.text or "(No answer: the question was stopped.)", answer.data)
             if not finished:
                 yield json.dumps({"type": "done"}) + "\n"
 
-        return StreamingResponse(lines(), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
+        return lines()
+
+    @app.post("/chat")
+    async def chat(request: Request):
+        _require_page(request)
+        data = await _json_body(request)
+        question = str(data.get("message") or "").strip()
+        if not question:
+            raise HTTPException(status_code=400, detail="Ask a question first.")
+        # The database and today's list take a moment: in a worker thread, so other pages aren't held up.
+        lines = await run_in_threadpool(answer_lines, data, question)
+        return StreamingResponse(_closing(lines), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
 
     @app.get("/chats")
     def chat_list(q: str = ""):
@@ -845,6 +862,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                 problems.append(str(exc))
             except Exception as exc:  # a damaged file is reported, the others still go in
                 problems.append(f"{upload.filename}: couldn't be read ({type(exc).__name__}).")
+        for upload in files[chats.MAX_FILES :]:
+            problems.append(f"{upload.filename or 'file'} wasn't added: up to {chats.MAX_FILES} files can be added at once.")
         return JSONResponse({"files": chats.file_cards(store, chat_id), "problems": problems})
 
     @app.post("/chats/{chat_id}/files/{n}/delete")
@@ -1142,6 +1161,20 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         }
 
     return app
+
+
+async def _closing(lines: Generator[str, None, None]) -> AsyncIterator[str]:
+    """Streams a generator's lines from a worker thread, and closes it however the response ends.
+
+    When the browser goes away mid-answer, the response stops reading without closing a plain generator,
+    so its cleanup (saving the answer so far, stopping the model) would never run."""
+    try:
+        async for line in iterate_in_threadpool(lines):
+            yield line
+    finally:
+        # Shielded: the response is being cancelled, which would otherwise cancel this as well.
+        with anyio.CancelScope(shield=True):
+            await run_in_threadpool(lines.close)
 
 
 async def _json_body(request: Request) -> dict:
