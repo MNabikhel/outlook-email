@@ -603,8 +603,42 @@ def csv_text(data: bytes, filename: str) -> str:
         dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
     except csv.Error:
         dialect = csv.excel_tab if filename.lower().endswith(".tsv") else csv.excel
-    rows = list(csv.reader(io.StringIO(text), dialect))
+    quote = getattr(dialect, "quotechar", None) or '"'
+    try:
+        rows = list(csv.reader(io.StringIO(text), dialect))
+        broken = _swallowed(rows, text, dialect.delimiter, quote)
+    except csv.Error:  # a cell over 128 KB, as one opened by a stray quote can be
+        broken = True
+    if broken:
+        rows = [_csv_line(line, dialect, quote) for line in text.splitlines()]
     return _rows_text(rows, filename)
+
+
+def _swallowed(rows: list[list[str]], text: str, delimiter: str, quote: str) -> bool:
+    """Whether a quote that never closed ran one cell over the rows below it: the cell runs to the end of
+    the file, or holds lines shaped like the file's rows."""
+    if not rows:
+        return False
+    if "\n" in "".join(rows[-1][-1:]) and not text.rstrip().endswith(quote):
+        return True
+    width = len(rows[0]) - 1
+    for row in rows:
+        for cell in row:
+            if width >= 1 and cell.count("\n") >= 2:
+                if sum(line.count(delimiter) == width for line in cell.split("\n")[1:]) >= 2:
+                    return True
+    return False
+
+
+def _csv_line(line: str, dialect, quote: str) -> list[str]:
+    """One line of a file whose quotes don't pair up. Quoted cells on a line with whole pairs still read as
+    one cell each; a line with a stray quote is split at every delimiter, the quote kept as a character."""
+    try:
+        if line.count(quote) % 2 == 0:
+            return next(csv.reader([line], dialect), [])
+        return next(csv.reader([line], dialect, quoting=csv.QUOTE_NONE), [])
+    except csv.Error:
+        return line.split(dialect.delimiter)
 
 
 def _rows_text(rows: list[list[str]], filename: str) -> str:
@@ -614,7 +648,7 @@ def _rows_text(rows: list[list[str]], filename: str) -> str:
     width = max((len(r) for r in rows), default=1)
     lines = [f'[sheet "{filename}" A1:{get_column_letter(max(1, min(width, MAX_COLUMNS)))}{max(len(rows), 1)}]']
     sheet = [
-        SheetRow(number, {c + 1: v.strip() for c, v in enumerate(row[:MAX_COLUMNS]) if v.strip()})
+        SheetRow(number, {c + 1: _fmt(v) for c, v in enumerate(row[:MAX_COLUMNS]) if v.strip()})
         for number, row in enumerate(rows[:MAX_ROWS], start=1)
     ]
     lines.extend(sheet_row_lines([row for row in sheet if row.cells], first_names_columns=True))

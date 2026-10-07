@@ -213,6 +213,19 @@ def test_excel_97_errors_and_yes_no_cells_are_not_read_as_figures():
     assert shown(xlrd.XL_CELL_NUMBER, 42.0) == "42" and shown(xlrd.XL_CELL_DATE, 46295.0) == "2026-09-30"
 
 
+def test_a_csv_quote_that_never_closes_does_not_swallow_the_file():
+    from controller_inbox.documents import csv_text
+
+    for repeat in (2, 12_000):  # past 128 KB the csv module raises instead
+        data = 'Item,Qty,Price\n"Monitor 27,1,249.99\n' + "Cable,5,9.99\n" * repeat + 'Desk,"1",120.00\n'
+        lines = csv_text(data.encode(), "order.csv").splitlines()
+        assert lines[0] == f'[sheet "order.csv" A1:C{repeat + 3}]'
+        assert lines[2:4] == ['A2 (Item): "Monitor 27 | B2 (Qty): 1 | C2 (Price): 249.99', "A3 (Item): Cable | B3 (Qty): 5 | C3 (Price): 9.99"]
+        assert lines[-1] == ("A5 (Item): Desk | B5 (Qty): 1 | C5 (Price): 120.00" if repeat == 2 else "[11003 more rows not shown.]")
+    closed = csv_text(b'Item,Note,Price\nDesk,"two\nlines",120.00\nLamp,"one, with a comma",30.00\n', "order.csv")
+    assert "B2 (Note): two lines" in closed and "B3 (Note): one, with a comma" in closed
+
+
 def test_a_csv_of_names_only_still_names_its_columns():
     data = "Employee,Department,Manager\nJonathan Reyes,,Priya Raman\nLi Wei,Finance,Dana Cole\n"
     lines = extract_text_from_bytes("staff.csv", "text/csv", data.encode()).splitlines()
