@@ -50,3 +50,35 @@ def test_comments_are_still_dropped():
     assert normalize_text("Our ba<!-- x -->nk details") == "Our bank details"
     assert normalize_text("a <!-- never closed") == "a <!-- never closed"
     assert html_to_text("<p>x<script>var a = '<b>';</script>y<style>p {}</style>z</p>") == "x y z"
+
+
+# 1. The usual anti-fraud footers are warnings, not requests.
+FOOTERS = [
+    "Please note that we will never notify you of a change to our bank details by email.",
+    "We will never inform you of any change in our bank account details via email, so always call us before paying.",
+    "We won't advise you of changes to our banking details by email.",
+    "If you receive an email, text or call purporting to be from us, advising that our bank details have changed, "
+    "please contact us immediately.",
+    "If you receive an email from us, or from anyone claiming to be us, saying our bank details have changed, please call us.",
+    "If you receive any of the following: emails claiming our bank details have changed or requests for gift cards, call us.",
+]
+
+
+def test_anti_fraud_footers_do_not_block_mail():
+    for footer in FOOTERS:
+        check = _check(f"Please find the completion statement attached.\n\nKind regards,\nJane\n\n{footer}")
+        assert check.level == "none" and not _keys(check), footer
+
+
+def test_a_request_next_to_warning_words_is_still_a_request():
+    for body in (
+        "We will never ask you for your password, our bank details have changed, please update your records.",
+        "If you receive this, it means our bank details have changed, please pay the new account.",
+        "If you get stuck, call me, I am telling you our bank details have changed.",
+        "We never notify customers by email, but our bank details have changed and the new account is attached.",
+        "If you receive an email saying our old account is closed, ignore it, our bank details have changed.",
+    ):
+        check = _check(body)
+        assert "bank_change" in _keys(check) and check.level == "high", body
+    gift = _check("I will never ask this normally, but I am asking you to buy 5 Apple gift cards and send me the codes.")
+    assert "gift_cards" in _keys(gift) and gift.level == "high"

@@ -81,9 +81,11 @@ FREEMAIL = {
     "yandex.com", "zoho.com", "zohomail.com", "fastmail.com", "tutanota.com",
 }
 
-# A warning that frames the sentence as hypothetical ("we will never…", "if you receive…").
+# A warning that frames the sentence as hypothetical ("we will never…", "if you receive…"), including
+# the usual footer "we will never notify you of a change to our bank details by email".
+_NEVER_DO = r"(?:change|ask|request|send|update|contact|email|notify|inform|tell|advise|alert)"
 STRONG_NOTICE_RE = re.compile(
-    r"(\bnever\s+(?:change|ask|request|send|update|contact|email)\b|\b(?:will\s+not|won'?t)\s+(?:change|ask|request)\b|"
+    r"(\bnever\s+" + _NEVER_DO + r"\b|\b(?:will\s+not|won'?t)\s+" + _NEVER_DO + r"\b|"
     r"\bif\s+you\s+(?:receive|get|are\s+contacted)\b|"
     r"\b(?:scam|phishing|fraudulent|spoofed)\s+(?:e-?mails?|messages?|requests?|calls?)\b)",
     re.I,
@@ -92,6 +94,20 @@ STRONG_NOTICE_RE = re.compile(
 WEAK_NOTICE_RE = re.compile(r"(\bbeware\b|\bbe\s+(?:aware|alert|vigilant)\b|\balways\s+(?:call|verify|confirm)\b)", re.I)
 # Where one part of a sentence ends and the next begins ("…, but our bank details have changed").
 CLAUSE_RE = re.compile(r"[,;:]|\s[-–—]+\s|\s(?=(?:but|however|although|though|yet|whereas)\b)", re.I)
+# Words that report what a hypothetical message says ("…, claiming to be us, saying our bank details have changed").
+REPORTING_RE = re.compile(
+    r"\b(?:say(?:s|ing)?|said|claim(?:s|ed|ing)?|stat(?:es|ed|ing)|advis(?:es|ed|ing)|notif(?:y|ies|ied|ying)|"
+    r"inform(?:s|ed|ing)?|tell(?:s|ing)?|told|ask(?:s|ed|ing)?|request(?:s|ed|ing)?|purport(?:s|ed|ing)?|"
+    r"suggest(?:s|ed|ing)?|indicat(?:es|ed|ing)|alert(?:s|ed|ing)?)\b",
+    re.I,
+)
+# A part of the sentence that turns away from the warning: what to do about it ("…, please call us") or a
+# contrast ("…, but our bank details have changed"). A warning's reach ends there.
+TURN_RE = re.compile(
+    r"\s*(?:(?:and|so|then)\s+)?(?:but|however|although|though|yet|whereas|(?:please\s+|kindly\s+)?(?:call|phone|telephone|"
+    r"ring|contact|verify|confirm|check|ignore|delete|report|forward|speak|talk|do\s+not|don'?t|let\s+us\s+know))\b",
+    re.I,
+)
 # A colleague saying the quoted request was fake (not "this is not phishing", which vouches for it).
 DISAVOW_RE = re.compile(
     r"\b(?:(?:was|is|it'?s)\s+not\s+(?:them|legit\w*|genuine|real)|(?:wasn'?t|isn'?t)\s+(?:them|legit\w*|genuine|real)|"
@@ -242,18 +258,41 @@ def _is_notice(sentence: str) -> bool:
         if not requests:
             return True
         # Where each part of the sentence ends, found once for every warning in it.
-        cuts = [cut.start() for cut in CLAUSE_RE.finditer(sentence)]
+        cuts = list(CLAUSE_RE.finditer(sentence))
+        cut_starts = [cut.start() for cut in cuts]
+        markers = list(STRONG_NOTICE_RE.finditer(sentence))
         scopes = []
-        for marker in STRONG_NOTICE_RE.finditer(sentence):
-            after = bisect_left(cuts, marker.end())
-            scopes.append((marker.start(), cuts[after] if after < len(cuts) else len(sentence)))
-        return _all_inside(requests, scopes)
+        for marker in markers:
+            after = bisect_left(cut_starts, marker.end())
+            scopes.append((marker.start(), cut_starts[after] if after < len(cuts) else len(sentence)))
+        inside = _spans_test(scopes)
+        # A later part of the sentence that reports what the hypothetical message says is still the warning:
+        # "if you receive an email from us, or anyone claiming to be us, saying our bank details have
+        # changed, please call us". Its reach ends where the sentence turns to what to do, or to a contrast.
+        turns = [cut.end() for cut in cuts if TURN_RE.match(sentence, cut.end())]
+        reports = list(REPORTING_RE.finditer(sentence))
+        report_starts = [report.start() for report in reports]
+        marker_ends = [marker.end() for marker in markers]
+
+        def reported(at: int) -> bool:
+            before = bisect_left(cut_starts, at)
+            part = cuts[before - 1].end() if before else 0
+            last = bisect_left(report_starts, at) - 1
+            if last < 0 or reports[last].start() < part or reports[last].end() > at:
+                return False
+            warning = bisect_right(marker_ends, part) - 1
+            if warning < 0:
+                return False
+            turn = bisect_left(turns, marker_ends[warning])
+            return not (turn < len(turns) and turns[turn] <= part)
+
+        return all(inside(at) or reported(at) for at in requests)
     # "Beware of scams" is a notice; "please be aware our bank details have changed" is not.
     return bool(WEAK_NOTICE_RE.search(sentence)) and not _asks(sentence)
 
 
-def _all_inside(points: list[int], spans: list[tuple[int, int]]) -> bool:
-    """Every point falls inside one of the spans (start included, end not)."""
+def _spans_test(spans: list[tuple[int, int]]):
+    """A test for whether a point falls inside one of the spans (start included, end not)."""
     merged: list[list[int]] = []
     for start, end in sorted(spans):
         if merged and start <= merged[-1][1]:
@@ -261,11 +300,12 @@ def _all_inside(points: list[int], spans: list[tuple[int, int]]) -> bool:
         else:
             merged.append([start, end])
     starts = [start for start, _end in merged]
-    for at in points:
+
+    def inside(at: int) -> bool:
         index = bisect_right(starts, at) - 1
-        if index < 0 or at >= merged[index][1]:
-            return False
-    return True
+        return index >= 0 and at < merged[index][1]
+
+    return inside
 
 
 def strip_notices(text: str) -> str:
