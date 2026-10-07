@@ -151,7 +151,7 @@ Measured on 15 scanned pages of 12 finance reports the model had never seen (bal
 | | OCR alone | Vision model alone | Both, as CloseDesk shows them |
 |---|---:|---:|---:|
 | Table cells read exactly (right row and column) | 0.7% | 48% | 46% |
-| The reports' figures found on the page | 78% | 95% | 90% |
+| The reports' figures found on the page | 78% | 96% | 90% |
 | Figures read that are nowhere on the page | 2.2% | 9.4% | 2.2% |
 
 The model's table was shown on 11 of the 15 pages; on the 4 densest pages (an AP register and a GL detail in small print) it misread digits and swapped rows, the readings disagreed, and OCR's reading was kept. A page took about 12 minutes on a 4-core server without a graphics card (dense pages up to 45 with a second reading); a graphics card or Apple silicon is many times faster, and CloseDesk measures it on each computer. The choice rule and the two-line heading handling were tuned on these same pages.
