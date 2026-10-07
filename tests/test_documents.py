@@ -581,6 +581,25 @@ def test_scanned_pdf_without_ocr_says_how_to_add_it(monkeypatch):
     assert "looks scanned" in text and 'pip install -e ".[ocr]"' in text and "12,480" not in text
 
 
+def test_a_landscape_scan_keeps_its_ocr_when_a_strip_cant_be_read_again():
+    """RapidOCR fits a picture to 2,000 pixels; a thin full-width strip of a landscape page (read again for a missed
+    heading) then shrinks to nothing and raises. That used to throw away the whole page's reading."""
+    from PIL import Image
+
+    from controller_inbox import ocr
+
+    def refuses(*_a, **_k):
+        raise ValueError("ResizeImgError")
+
+    assert ocr._engine_lines(refuses, Image.new("RGB", (3302, 24), "white")) == []
+    if ocr.engine_name() != "RapidOCR":
+        pytest.skip("RapidOCR not installed")
+    from rapidocr_onnxruntime import RapidOCR
+
+    wide = Image.new("RGB", (1651, 1275), "white")
+    assert ocr._read_gap(RapidOCR(), wide, 100, 108, wide.height) == []
+
+
 def test_cells_on_one_baseline_stay_on_one_line():
     from controller_inbox.ocr import _rows
 

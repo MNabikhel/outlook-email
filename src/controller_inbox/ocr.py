@@ -399,9 +399,14 @@ def _footnote_marker(lines) -> str:
 
 
 def _engine_lines(engine, image) -> list[tuple[float, str]]:
+    """The lines in a strip of the page read again. A strip the engine can't take (on a landscape page a thin one
+    shrinks to nothing when RapidOCR fits it to its size limit) has none, and the page keeps its first reading."""
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
-    result, _elapsed = engine(buffer.getvalue(), text_score=0.2, box_thresh=0.2)
+    try:
+        result, _elapsed = engine(buffer.getvalue(), text_score=0.2, box_thresh=0.2)
+    except Exception:
+        return []
     return [
         (min(point[1] for point in line[0]), str(line[1]))
         for line in result or []
