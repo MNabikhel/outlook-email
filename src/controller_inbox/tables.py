@@ -42,8 +42,9 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
 
     ``marked``: the file says so (a Word header row, PowerPoint's first-row style).
     ``bold_first``: the first row is bold and the rows under it aren't.
-    Otherwise it takes a first row of distinct labels over at least one column of figures,
-    with three or more columns, so a two-column "Amount due | $12,480.00" list isn't mistaken for one.
+    Otherwise it takes a first row of distinct labels over at least one column of figures, with three or more
+    columns, so a two-column "Amount due | $12,480.00" list isn't mistaken for one; with two columns, only labels
+    over four or more rows of a name and an amount (``_names_over_amounts``).
     """
     if len(rows) < 2:
         return False
@@ -55,6 +56,8 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
         return False
     if marked or bold_first:
         return True
+    if len(first) == 2 and len(filled) == 2:
+        return _names_over_amounts(rows)
     if len(first) < 3 or len(rows) < 3:
         return False
     for column, label in enumerate(rows[0]):
@@ -64,6 +67,24 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
         if len(below) >= 2 and sum(map(is_value, below)) >= 0.6 * len(below):
             return True
     return False
+
+
+_AMOUNT_RE = re.compile(r"[(\-−–]?\s*[$€£¥]?\s*[(\-−–]?\d[\d,]*(?:\.\d+)?%?\)?")
+
+
+def _names_over_amounts(rows: list[list[str | None]]) -> bool:
+    """Two columns headed by two labels over a name and an amount on each of four or more rows ("Department | Q3
+    Budget" over each department's budget). A list of labels and values ("Customer | Northwind", "Subtotal |
+    1,200", "Due | 10/28/2026") is shorter, or has dates or words among its values, and keeps its first row as a row."""
+    body = [row for row in rows[1:] if any(cell and cell.strip() for cell in row)]
+    if len(body) < 4 or any(len(row) < 2 for row in body):
+        return False
+    names = [(row[0] or "").strip() for row in body]
+    amounts = [(row[1] or "").strip() for row in body]
+    return (
+        all(names) and len(set(names)) == len(names) and not any(map(is_value, names))
+        and all(_AMOUNT_RE.fullmatch(amount) for amount in amounts)
+    )
 
 
 def table_lines(rows: list[list[str | None]], *, header: bool) -> list[str]:

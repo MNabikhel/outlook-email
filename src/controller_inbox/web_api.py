@@ -22,7 +22,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from controller_inbox import agent, chats, cost_codes, documents, fraud, semantic, table_lookup, vision
+from controller_inbox import agent, chats, cost_codes, documents, fraud, model_roles, semantic, table_lookup, vision
 from controller_inbox.digest import build_digest
 from controller_inbox.local_llm import check_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
@@ -238,6 +238,7 @@ def register_workspace(
                 "label": model.model if model.active else ("off" if model.mode == "off" else "not running"),
                 "describe": model.describe(),
             },
+            "models": model_roles.models_in_use(settings, status=model),
             "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
             "is_sample": bool(counts["emails"]) and not store.real_mail_count(),
             "last_run": format_when(last_run, settings.tz) if last_run else "",

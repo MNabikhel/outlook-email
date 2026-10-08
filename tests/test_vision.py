@@ -451,7 +451,7 @@ def test_a_quick_read_happens_while_the_question_waits(scan, store, settings, mo
     _seconds_per_page(store, 8)
     events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=scan.id))
     assert not [event for event in events if event["type"] == "vision"]
-    assert "Reading balance sheet.pdf with the vision model (about 10 seconds)" in [e["text"] for e in events if e["type"] == "step"]
+    assert "Reading balance sheet.pdf with local-model (about 10 seconds)" in [e["text"] for e in events if e["type"] == "step"]
     assert "[Read two ways, by OCR and by the vision model" in asked[-1] and "Line: Accounts Receivable | 2026: 30,250" in asked[-1]
     checks = [item for event in events if event["type"] == "check" for item in event["items"]]
     assert "30,250 was read from the page by the vision model only (OCR read 30,256): check it against the file." in checks
@@ -1189,6 +1189,9 @@ def test_lm_studio_without_just_in_time_loading_or_with_nothing_loaded(scan, sto
         return httpx.Response(404)
 
     _serve(monkeypatch, nothing_loaded)
+    # Until it is asked again (half an hour, or Setup saved), a reader LM Studio couldn't load isn't the one that reads.
+    assert vision.reading_model(settings) == ""
+    local_llm.forget_reader_failures()
     status = check_model(settings)
     assert status.model == MODEL and status.vision_models == [OVIS] and vision.reading_model(settings) == OVIS
 
@@ -1371,7 +1374,7 @@ def test_a_question_about_a_scan_waits_for_the_document_reader(scan, store, sett
     events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=scan.id))
     assert not [event for event in events if event["type"] == "vision"], "read, not offered"
     steps = [event["text"] for event in events if event["type"] == "step"]
-    assert "Reading balance sheet.pdf, page 1 (1 of 1), with the document reader (the first page shows how long this computer takes)" in steps
+    assert "Reading balance sheet.pdf, page 1 (1 of 1), with OvisOCR2 (the first page shows how long this computer takes)" in steps
     assert "Shown: the document reader's reading" in asked[-1] and "October 31 2026: 30,250" in asked[-1]
     assert not [item for event in events if event["type"] == "check" for item in event["items"] if "vision model only" in item]
 
@@ -1466,3 +1469,262 @@ def test_a_reading_kept_without_the_figure_counts_is_not_taken_to_cover_the_page
     del saved["first_kinds"], saved["confirmed_kinds"]
     row = {"first": OCR_TEXT, "model_text": short, "model": OVIS, "comparison": json.dumps({**saved, "first_name": "OCR"})}
     assert "Shown: OCR's reading" in shown_text("[page 1]\n" + OCR_TEXT, {1: row})
+
+
+# Which reading an answer used, and the models Setup lists ---------------------------------------------------------
+
+
+def test_the_chat_shows_the_document_reader_at_work_and_that_its_reading_was_used(scan, store, settings, reader_server, monkeypatch):
+    _chat_model(monkeypatch)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: OVIS)
+    events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=scan.id))
+    readings = [event for event in events if event["type"] == "reading"]
+    assert [event["state"] for event in readings] == ["running", "vision"]
+    now, used = readings
+    assert (now["reader"], now["file"], now["page"], now["index"], now["of"]) == ("OvisOCR2", "balance sheet.pdf", 1, 1, 1)
+    assert now["text"].startswith("OvisOCR2 is reading balance sheet.pdf, page 1 (1 of 1)")
+    assert used["label"] == "Read by OvisOCR2" and used["text"] == "This answer uses OvisOCR2's reading of balance sheet.pdf."
+    order = [event["type"] for event in events]
+    assert order.index("reading") < order.index("step") and order.index("reading", order.index("reading") + 1) < order.index("delta")
+    # Asked again: nothing left to read, and the answer still says whose reading it used.
+    again = [event for event in assistant.answer_stream(store, settings, "What is the cash for 2026?", email_id=scan.id) if event["type"] == "reading"]
+    assert [event["state"] for event in again] == ["vision"]
+
+
+def test_without_a_document_reader_the_answer_says_it_used_the_older_method_and_why(scan, store, settings, seeing, monkeypatch):
+    _chat_model(monkeypatch)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: MODEL)  # the chat model's own vision: no OvisOCR2 downloaded
+    monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: BALANCE)
+    store.save_page_reading("earlier-file", 1, first="x", model_text="x", model=MODEL, seconds=8, comparison="{}", sha256="s")
+    events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=scan.id))
+    [now, used] = [event for event in events if event["type"] == "reading"]
+    assert now["state"] == "running" and now["reader"] == MODEL
+    assert used["state"] == "fallback" and used["label"] == f"Older method: {MODEL} + OCR"
+    assert used["text"].startswith(f"balance sheet.pdf was read with the older method ({MODEL}'s own vision, side by side with OCR).")
+    assert "OvisOCR2 isn't downloaded in LM Studio" in used["text"] and used["text"].endswith("Check figures against the page.")
+
+
+def test_with_no_model_that_can_see_the_answer_says_it_used_ocr_only(scan, store, settings, monkeypatch):
+    _chat_model(monkeypatch)
+    monkeypatch.setattr(vision, "available", lambda _s: False)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: "")
+    events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=scan.id))
+    [used] = [event for event in events if event["type"] == "reading"]
+    assert used["state"] == "fallback" and used["label"] == "Older method: OCR"
+    assert used["text"].startswith("balance sheet.pdf was read with the older method (OCR only).")
+    settings.vision_mode = "off"
+    [used] = [event for event in assistant.answer_stream(store, settings, "What is the cash for 2026?", email_id=scan.id) if event["type"] == "reading"]
+    assert "Reading scans with a vision model is turned off in Setup." in used["text"]
+
+
+def test_a_page_the_reader_couldnt_read_or_that_would_take_too_long_is_named_as_the_reason(scan, store, settings, reader_server, monkeypatch):
+    _chat_model(monkeypatch)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: OVIS)
+    monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: (_ for _ in ()).throw(httpx.ConnectError("LM Studio stopped")))
+    events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=scan.id))
+    used = [event for event in events if event["type"] == "reading"][-1]
+    assert used["state"] == "fallback" and used["label"] == "Older method: OCR"
+    assert "OvisOCR2 couldn't read balance sheet.pdf page 1 (LM Studio stopped)." in used["text"]
+    store.save_page_reading("earlier-file", 1, first="x", model_text="x", model=OVIS, seconds=900, comparison="{}", sha256="s")
+    events = list(assistant.answer_stream(store, settings, "What is the cash for 2026?", email_id=scan.id))
+    used = [event for event in events if event["type"] == "reading"][-1]
+    assert "Reading 1 page of balance sheet.pdf with OvisOCR2 would take about 15 minutes (use Read with the vision model below)." in used["text"]
+
+
+def test_a_scan_read_partly_says_which_pages_used_the_older_method(store, settings, reader_server, monkeypatch):
+    email = _ingest_scan(store, settings, monkeypatch, pages=2, subject="Two page scan")
+    _read(store, settings, email.id, pages=(1,))  # read before OvisOCR2 is asked for: by the stand-in reader
+    monkeypatch.setattr(vision, "reading_model", lambda _s: OVIS)
+    with store.connect() as conn:
+        conn.execute("UPDATE page_readings SET model = ?", (OVIS,))
+    store.note_page_failure(email.attachments[0].id, 2, sha256=email.attachments[0].sha256, error="x")
+    store.note_page_failure(email.attachments[0].id, 2, sha256=email.attachments[0].sha256, error="x")
+    [found] = vision.scan_readings(store, settings, store.get_email(email.id))
+    assert (found["pages"], found["reader"], found["ocr"], found["models"]) == ([1, 2], [1], [2], ["OvisOCR2"])
+    event = assistant._reading_event(store, settings, store.get_email(email.id), "what is the total", {})
+    assert event["label"] == "Partly older method: OCR"
+    assert event["text"].startswith("OvisOCR2 read balance sheet.pdf page 1; page 2 used the older method (OCR only).")
+
+
+def test_files_with_their_own_text_need_no_reading_note(mail, store, settings):
+    email = next(record for record in store.list_emails(limit=50) if record.attachments and not vision.looks_scanned(record.attachments[0]))
+    assert vision.scan_readings(store, settings, email) == []
+    assert assistant._reading_event(store, settings, email, "what is the total", {}) is None
+
+
+def test_the_reading_an_answer_used_is_kept_with_the_conversation():
+    log = web._AnswerLog()
+    log.take({"type": "reading", "state": "running", "reader": "OvisOCR2", "text": "OvisOCR2 is reading x, page 1 (1 of 1)"})
+    assert "reading" not in log.data, "the indicator while it reads isn't kept"
+    log.take({"type": "reading", "state": "vision", "reader": "OvisOCR2", "label": "Read by OvisOCR2", "text": "This answer uses ..."})
+    assert log.data["reading"] == {"state": "vision", "reader": "OvisOCR2", "label": "Read by OvisOCR2", "text": "This answer uses ..."}
+
+
+class ModelsServer(ReaderServer):
+    """LM Studio with the chat model and an embedding model loaded, and OvisOCR2 downloaded."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/models":
+            reply = super().__call__(request)
+            models = reply.json()["models"] + [
+                {"type": "embedding", "key": "text-embedding-nomic-embed-text-v1.5", "loaded_instances": [{"id": "text-embedding-nomic-embed-text-v1.5"}]}
+            ]
+            return httpx.Response(200, json={"models": models})
+        return super().__call__(request)
+
+
+def test_setup_lists_which_model_does_each_job(store, settings, monkeypatch):
+    from controller_inbox import model_roles, semantic
+
+    server = ModelsServer()
+    settings.llm = None
+    _serve(monkeypatch, server)
+    monkeypatch.setattr(semantic.httpx, "get", local_llm.httpx.get)
+    monkeypatch.setattr(ocr, "engine_name", lambda: "RapidOCR")
+    rows = {row["role"]: row for row in model_roles.models_in_use(settings)}
+    chat, reader = rows["Answers your questions"], rows["Reads scanned pages and pictures"]
+    assert (chat["model"], chat["state"], chat["status"]) == (MODEL, "on", "Loaded with a 16,384-token context.")
+    assert (reader["model"], reader["state"], reader["status"]) == ("OvisOCR2", "on", "Downloaded: LM Studio loads it when a page is read.")
+    assert rows["Finds mail by meaning"]["model"] == "text-embedding-nomic-embed-text-v1.5" and rows["Finds mail by meaning"]["state"] == "on"
+    assert rows["Reads scans as they arrive (OCR)"]["model"] == "RapidOCR"
+    page = TestClient(web.create_app(settings, store)).get("/settings").text
+    assert "Models CloseDesk uses" in page and "Reads scanned pages and pictures" in page and "<b>OvisOCR2</b>" in page
+    assert f"Loaded in LM Studio now: {MODEL}</p>" in page, "OvisOCR2 is downloaded, not loaded: it isn't said to be"
+    state = TestClient(web.create_app(settings, store)).get("/api/state", headers=PAGE).json()
+    assert [row["role"] for row in state["models"]] == list(rows)
+    # Without OvisOCR2 (only the chat model, which can see), the reader row says scans are read the older way, and why.
+    _serve(monkeypatch, FakeVisionServer())
+    local_llm._status_cache.clear()
+    reader = {row["role"]: row for row in model_roles.models_in_use(settings)}["Reads scanned pages and pictures"]
+    assert reader["state"] == "fallback" and reader["status"] == f"Scans are read with {MODEL}'s own vision, side by side with OCR."
+    assert reader["note"].startswith("OvisOCR2 isn't downloaded in LM Studio")
+    settings.vision_mode = "off"
+    reader = {row["role"]: row for row in model_roles.models_in_use(settings)}["Reads scanned pages and pictures"]
+    assert reader["state"] == "off" and "OCR only" in reader["status"]
+
+
+class ReaderWontLoad(ReaderServer):
+    """LM Studio with a chat model that can see, and OvisOCR2 downloaded but too big to load now."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/models/load":
+            return httpx.Response(500, json={"error": "not enough memory to load ath-maas_ovisocr2"})
+        if request.url.path == "/api/v1/models":
+            reply = super().__call__(request).json()
+            reply["models"][0]["capabilities"]["vision"] = True
+            return httpx.Response(200, json=reply)
+        return super().__call__(request)
+
+
+def test_when_lm_studio_cant_load_the_document_reader_scans_are_read_the_older_way_and_setup_says_why(store, settings, monkeypatch):
+    from controller_inbox import model_roles
+
+    settings.llm = None
+    _serve(monkeypatch, ReaderWontLoad())
+    local_llm.forget_reader_failures()
+    assert vision.reading_model(settings) == OVIS
+    problem = local_llm.load_for_reading(settings, OVIS, vision.reader_for(OVIS).context)
+    assert problem.startswith("LM Studio couldn't load ath-maas_ovisocr2")
+    assert vision.reading_model(settings) == MODEL, "the chat model's own vision, beside OCR, until OvisOCR2 loads"
+    why = vision.why_not_reader(settings)
+    assert why.startswith("LM Studio couldn't load ath-maas_ovisocr2") and "tries OvisOCR2 again in half an hour" in why
+    reader = {row["role"]: row for row in model_roles.models_in_use(settings)}["Reads scanned pages and pictures"]
+    assert reader["state"] == "fallback" and reader["note"] == why
+    local_llm.forget_reader_failures()  # Setup saved: asked again
+    assert vision.reading_model(settings) == OVIS
+
+
+def test_pages_read_the_older_way_are_read_again_once_the_document_reader_is_back(scan, store, settings, reader_server, monkeypatch):
+    att = scan.attachments[0]
+    store.save_page_reading(att.id, 1, first=OCR_TEXT, model_text=BALANCE, model=MODEL, seconds=30, comparison="{}", sha256=att.sha256)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: MODEL)
+    assert vision.files_to_read(store, settings, store.get_email(scan.id)) == [], "read: nothing waits"
+    monkeypatch.setattr(vision, "reading_model", lambda _s: OVIS)
+    [(_position, _att, _data, pages)] = vision.files_to_read(store, settings, store.get_email(scan.id))
+    assert pages == [1], "the document reader reads it again"
+    assert vision.offer(store, settings, store.get_email(scan.id), att)["pages"] == [1], "and the file page offers it"
+    store.save_page_reading(att.id, 1, first=OCR_TEXT, model_text=OVIS_PAGE, model=OVIS, seconds=30, comparison="{}", sha256=att.sha256)
+    assert vision.files_to_read(store, settings, store.get_email(scan.id)) == []
+
+
+def test_a_form_the_reader_writes_as_a_two_column_table_reads_label_by_label():
+    form = """# CHECK REQUEST
+
+<table><tr><td>Payee</td><td>Latah County Treasurer</td></tr><tr><td>Amount</td><td>$6,418.22</td></tr>
+<tr><td>GL account</td><td>6420 - Property Taxes</td></tr><tr><td>Approved by:</td><td>R. Okafor, Controller</td></tr></table>"""
+    text = vision.page_text(form)
+    assert "Payee: Latah County Treasurer" in text and "GL account: 6420 - Property Taxes" in text
+    assert "Approved by: R. Okafor, Controller" in text and "Column 2" not in text
+    # Two columns of figures are still a table.
+    numbers = "<table><tr><td>Subtotal</td><td>251.46</td></tr><tr><td>Tax</td><td>15.09</td></tr><tr><td>12</td><td>4.27</td></tr></table>"
+    assert "Column 2" in vision.page_text(numbers)
+
+
+def test_a_blank_page_the_reader_found_nothing_on_is_read_not_left_to_ocr():
+    row = {"first": "(no text on this page)", "model_text": "", "model": OVIS, "comparison": json.dumps({"first_name": "OCR", "choice": "first"})}
+    assert vision.shown_by(row) == "reader"
+    assert vision.shown_by({**row, "model": MODEL}) == "model"
+
+
+def test_the_indicator_comes_down_when_the_page_read_was_a_text_pdfs(store, settings, monkeypatch):
+    # A text PDF whose table doesn't add up is read with the vision model too; no scan, so no reading note follows.
+    from controller_inbox.models import AttachmentRecord
+
+    _chat_model(monkeypatch)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: OVIS)
+    monkeypatch.setattr(vision, "reads_by_default", lambda _s: True)
+    monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: BALANCE)
+    email = _ingest_scan(store, settings, monkeypatch, subject="Text pdf with a doubtful page")
+    email = store.get_email(email.id)
+    att = email.attachments[0]
+    monkeypatch.setattr(vision, "files_to_read", lambda *_a, **_k: [(1, att, b"%PDF", [1])])
+    monkeypatch.setattr(vision, "read_pages", lambda *_a, **_k: vision.Result(pages=1, seconds=1.0))
+    monkeypatch.setattr(vision, "scan_readings", lambda *_a, **_k: [])
+    assert isinstance(att, AttachmentRecord)
+    events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=email.id))
+    assert [event["state"] for event in events if event["type"] == "reading"] == ["running", "done"]
+
+
+def test_a_document_reader_lost_partway_stops_the_reading_and_says_why(store, settings, reader_server, monkeypatch):
+    _chat_model(monkeypatch)
+    email = _ingest_scan(store, settings, monkeypatch, pages=2, subject="Two pages, reader lost after one")
+    # After the first page, LM Studio can't load OvisOCR2 any more: the chat model's vision is what's left.
+    read = []
+    monkeypatch.setattr(vision, "reading_model", lambda _s: MODEL if read else OVIS)
+    monkeypatch.setattr(assistant, "reader_load_problem", lambda _m: "LM Studio couldn't load ath-maas_ovisocr2 (not enough memory).")
+    monkeypatch.setattr(vision, "read_pages", lambda *_a, **_k: read.append(1) or vision.Result(pages=1, seconds=1.0))
+    events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=email.id))
+    running = [event for event in events if event["type"] == "reading" and event["state"] == "running"]
+    assert len(read) == 1 and len(running) == 1 and running[0]["reader"] == "OvisOCR2"
+    final = [event for event in events if event["type"] == "reading"][-1]
+    assert "LM Studio couldn't load ath-maas_ovisocr2 (not enough memory)" in final["text"]
+
+
+def test_failures_of_the_older_method_dont_keep_the_document_reader_from_a_page(scan, store, settings, monkeypatch):
+    att = scan.attachments[0]
+    for _ in range(vision.TRIES):
+        store.note_page_failure(att.id, 1, sha256=att.sha256, error="timed out", model=MODEL)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: MODEL)
+    assert vision.files_to_read(store, settings, store.get_email(scan.id)) == [], "the model that failed twice leaves it"
+    monkeypatch.setattr(vision, "reading_model", lambda _s: OVIS)
+    [(_position, _att, _data, pages)] = vision.files_to_read(store, settings, store.get_email(scan.id))
+    assert pages == [1], "another model may read it"
+
+
+def test_without_the_page_renderer_setup_and_the_chat_say_so(settings, reader_server, monkeypatch):
+    from controller_inbox import model_roles
+
+    monkeypatch.setattr(vision, "can_render", lambda: False)
+    assert vision.why_not_reader(settings, OVIS).startswith("The page renderer isn't installed")
+    reader = {row["role"]: row for row in model_roles.models_in_use(settings)}["Reads scanned pages and pictures"]
+    assert reader["state"] == "fallback" and reader["note"].startswith("The page renderer isn't installed")
+
+
+def test_a_question_naming_a_file_that_isnt_a_scan_gets_no_scan_note(scan, store, settings):
+    import dataclasses
+
+    email = store.get_email(scan.id)
+    email.attachments.append(dataclasses.replace(email.attachments[0], id="notes", filename="notes.docx", extracted_text="Notes"))
+    assert vision.scan_readings(store, settings, email, question="what does notes.docx say?") == []
+    assert [found["file"] for found in vision.scan_readings(store, settings, email, question="what does balance sheet.pdf say?")] == ["balance sheet.pdf"]
+    assert [found["file"] for found in vision.scan_readings(store, settings, email, question="what is the total?")] == ["balance sheet.pdf"]

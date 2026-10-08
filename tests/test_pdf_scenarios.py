@@ -221,6 +221,39 @@ def test_a_bold_total_stays_on_its_table():
     assert "Vendor: Total | Amount: $150" in text
 
 
+def test_a_totals_box_with_its_own_heading_under_the_line_items_is_a_table_of_its_own():
+    # An invoice's line items, then a smaller box centred under them: its one heading ("Amount") repeats a column
+    # name of the items, and its figures sit over the items' Qty column. They are totals, not more line items.
+    items = sheet_rows(
+        [(64, "left"), (90, "left"), (381, "right"), (460, "right"), (546, "right")],
+        [["#", "Description", "Qty", "Unit price", "Amount"], ["1", "Kimwipes, small", "10", "204.68", "2,046.80"],
+         ["2", "Funnel set", "1", "249.17", "249.17"], ["3", "Desiccant packs", "5", "27.66", "138.30"]],
+        top=740, pitch=15,
+    )
+    box = sheet_rows([(211, "left"), (400, "right")], [["", "Amount"], ["Subtotal", "2,434.27"], ["Freight", "186.40"], ["TOTAL DUE", "2,620.67"]], top=668, pitch=15)
+    text = _text(items + box)
+    assert "TOTAL DUE | 2,620.67" in text and "Subtotal | 2,434.27" in text
+    assert "Qty: 2,620.67" not in text and "Description: TOTAL DUE" not in text
+    assert "#: 3 | Description: Desiccant packs | Qty: 5 | Unit price: 27.66 | Amount: 138.30" in text
+
+
+def test_label_value_pairs_side_by_side_are_read_not_dropped_with_the_file():
+    # A filing's cover block: "Label: value" pairs in two columns, the right one ending early. Once the left facts
+    # are taken out of the table, a row of it is blank; that used to fail the whole file ("list index out of range").
+    items = [
+        Text(40, 740, "SERFF Tracking #:", size=9), Text(130, 740, "MEMH-132548319", size=9),
+        Text(250, 740, "State Tracking #:", size=9), Text(335, 740, "MEMH-132548319", size=9), Text(450, 740, "Company Tracking #:", size=9),
+        Text(40, 728, "State:", size=9), Text(130, 728, "Texas", size=9),
+        Text(250, 728, "Filing Company:", size=9), Text(335, 728, "Memorial Hermann Commercial Health Plan, Inc.", size=9),
+        Text(40, 716, "TOI/Sub-TOI:", size=9), Text(130, 716, "HOrg02G Group Health Organizations - HMO", size=9),
+        Text(40, 704, "Product Name:", size=9), Text(130, 704, "2021 MHCHP Large Group HMO Rates", size=9),
+        Text(40, 692, "Project Name/Number:", size=9), Text(130, 692, "/", size=9),
+    ]
+    text = _text(items)
+    assert "SERFF Tracking #: MEMH-132548319" in text and "State: Texas" in text and "Product Name: 2021 MHCHP Large Group HMO Rates" in text
+    assert "Filing Company: Memorial Hermann Commercial Health Plan, Inc." in text
+
+
 def test_a_heading_merged_across_columns_names_each_of_them():
     # The group word may sit on the first sub-column or on the middle one. Both are one merge.
     leaf = [

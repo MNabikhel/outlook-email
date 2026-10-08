@@ -596,7 +596,7 @@ def _column_cuts(lines: list[Line], rules: list[Rule]) -> dict[int, list[float]]
     column on each side of it (so "Mon 09/28" under "Date" stays one cell).
     """
     cuts: dict[int, list[float]] = {}
-    for whole in _regions(lines):
+    for whole in (piece for region in _regions(lines) for piece in _framed(lines, rules, region)):
         parts = _same_columns(lines, whole)
         found = [_region_edges(lines, rules, part) for part in parts]
         if len(parts) > 1:
@@ -626,6 +626,45 @@ def _column_cuts(lines: list[Line], rules: list[Rule]) -> dict[int, list[float]]
     return cuts
 
 
+def _framed(lines: list[Line], rules: list[Rule], region: list[int]) -> list[list[int]]:
+    """A region cut under a small box whose drawn borders differ from those of the rows below it: an invoice's boxed
+    header ("Invoice No. | Date | Due date | Terms" over one row) just above its boxed line items is two tables with
+    their own columns, however close they sit. Only the borders inside a box count (two boxes can share their outer
+    edges); a row whose box has none inside (a heading merged across it) goes with the table it is in. A longer
+    table above is left as it was: its own gaps find its columns."""
+
+    def inside(index: int) -> list[float]:
+        drawn = _box(lines[index], rules)
+        return drawn[1:-1] if drawn else []
+
+    parts = [[region[0]]]
+    previous = inside(region[0])
+    for index in region[1:]:
+        current = inside(index)
+        small = sum(_row_like(lines[row]) for row in parts[-1]) <= BOX_ROWS
+        if small and previous and current and not any(abs(a - b) <= 1.0 for a in previous for b in current):
+            parts.append([index])
+        else:
+            parts[-1].append(index)
+        previous = current or previous
+    return parts
+
+
+# The most rows a box over the line items has (column names over a row of values, maybe wrapped).
+BOX_ROWS = 3
+
+
+def _box(line: Line, rules: list[Rule]) -> list[float]:
+    """The borders drawn down through this line when they close it in (one left of its first word, one right of its
+    last), left to right; [] when the line isn't in a drawn box."""
+    if not line.words:
+        return []
+    drawn = _distinct([rule.x for rule in rules if rule.y0 - 0.5 <= line.mid <= rule.y1 + 0.5])
+    if len(drawn) < 2 or drawn[0] > line.words[0].x0 + 0.5 or drawn[-1] < line.words[-1].x1 - 0.5:
+        return []
+    return drawn
+
+
 def _new_edges(edges: list[float] | None, known: list[float]) -> bool:
     """Whether ``edges`` has one that ``known`` does not (more than a point and a half from each)."""
     return any(all(abs(edge - other) > 1.5 for other in known) for edge in edges or [])
@@ -634,6 +673,8 @@ def _new_edges(edges: list[float] | None, known: list[float]) -> bool:
 def _region_edges(lines: list[Line], rules: list[Rule], region: list[int]) -> list[float] | None:
     """The column edges of one region's rows (see ``_column_cuts``), or None when it has none."""
     rows = _table_rows(lines, region)
+    if 2 <= len(rows) <= BOX_ROWS and (drawn_box := _drawn_edges(lines, rules, rows)):
+        return drawn_box
     if len(rows) < 3:
         return None
     em = statistics.median(lines[index].size for index in rows)
@@ -678,6 +719,25 @@ def _region_edges(lines: list[Line], rules: list[Rule], region: list[int]) -> li
     for cut in narrow:
         if heads and cut in edges and not _headed_both_sides(cut, edges, heads, lo, hi):
             edges.remove(cut)
+    return edges or None
+
+
+def _drawn_edges(lines: list[Line], rules: list[Rule], rows: list[int]) -> list[float] | None:
+    """A small drawn box (column names over a row or two of values, an invoice's "Invoice No. | Date | Due date |
+    Terms") has too few rows to find columns from the gaps, and a value wider than its name ("October 28, 2026" under
+    "Due date", both set right) runs past where the name starts. When every row is closed in by drawn borders, the
+    borders down all of them are the column edges, where no word is written across them."""
+    found = [_box(lines[index], rules) for index in rows]
+    if not all(found):
+        return None
+    lo = min(lines[index].words[0].x0 for index in rows)
+    hi = max(lines[index].words[-1].x1 for index in rows)
+    edges = [
+        x for x in _distinct(found[0])
+        if lo < x < hi
+        and all(any(abs(x - other) <= 1.0 for other in xs) for xs in found[1:])
+        and not any(word.x0 < x - 0.5 and word.x1 > x + 0.5 for index in rows for word in lines[index].words)
+    ]
     return edges or None
 
 
@@ -1025,6 +1085,8 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
             spans = _spans(_columns([line]))
             return all(_owns(seg, spans) for ln in block for seg in ln.segments)
         return False
+    if _repeats_a_heading(line, block):
+        return False
     x0, x1 = line.segments[0][0].x0, line.segments[0][-1].x1
     # A label may run a little into the empty cell beside it ("Operating Expenses" past a narrow column);
     # a title written across the table covers whole columns.
@@ -1049,6 +1111,21 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
         and _fits_columns(nxt, columns)
         and any(_amount_cell(word.text) for segment in nxt.segments for word in segment)
     )
+
+
+def _repeats_a_heading(line: Line, block: list[Line]) -> bool:
+    """A lone label that is one of the table's own column names, printed away from that column ("Amount" over an
+    invoice's totals box, centred under the line items), is the heading of another table starting there, not a group
+    of rows in this one. Under its own column it is that column's text (a wrapped "Journal / Entry")."""
+    if not block or not _new_header(block[0]):
+        return False
+    segment = line.segments[0]
+    label = " ".join(word.text for word in segment).strip().casefold()
+    x0, x1 = segment[0].x0, segment[-1].x1
+    for heading in block[0].segments:
+        if label == " ".join(word.text for word in heading).strip().casefold():
+            return x1 <= heading[0].x0 or x0 >= heading[-1].x1
+    return False
 
 
 def _outdented(line: Line, columns: list[tuple[float, float]]) -> bool:
@@ -1800,9 +1877,15 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
         sizes = [sizes[index] for index in kept]
 
     def render(row: list[str]) -> str:
-        return tables.labelled_row(labels, row) if labels else tables.table_lines([row], header=False)[0]
+        if labels:
+            return tables.labelled_row(labels, row)
+        plain = tables.table_lines([row], header=False)
+        return plain[0] if plain else ""  # a row of blank cells has no line
 
-    body_lines = _grouped_lines(grid, row_x, bolds, render, group_cols, cell_x, sizes) if labels else [render(row) for row in grid]
+    if labels:
+        body_lines = _grouped_lines(grid, row_x, bolds, render, group_cols, cell_x, sizes)
+    else:
+        body_lines = [line for line in map(render, grid) if line]
     first_label = (labels[0] if labels else "") or ""
     carried = None if continued is not None or _names_own_rows(grid) else _carried_over(mids, header_mid if labels else None, previous or [], first_label)
     if carried and labels:

@@ -278,6 +278,25 @@ export function settingsView(meta, { theme, setTheme, railCollapsed, toggleRail 
         ),
         h("p", { class: "small" }, "The model, time zone, profile, search index and sample mailbox are set on the ", h("a", { href: "/settings" }, "classic Setup page"), ".")
       ),
+      card(
+        "Models CloseDesk uses",
+        h(
+          "dl",
+          { class: "rd-facts models-list" },
+          (meta.models || []).map((row) => [
+            h("dt", null, row.role),
+            h(
+              "dd",
+              null,
+              h("span", { class: `model-state ${row.state}` }, { on: "Ready", fallback: "Older method", off: "Off" }[row.state] || row.state),
+              row.model ? h("b", null, ` ${row.model}`) : null,
+              h("span", { class: "small" }, ` ${row.status}`),
+              row.note ? h("span", { class: "small muted model-note" }, row.note) : null
+            ),
+          ])
+        ),
+        h("p", { class: "small" }, "Which model reads pages, and how, is chosen on the ", h("a", { href: "/settings#vision" }, "classic Setup page"), ".")
+      ),
       card("Keyboard", h("dl", { class: "keys-list" }, shortcuts.map(([keys, what]) => [h("dt", null, h("kbd", null, keys)), h("dd", null, what)]))),
       card("Classic view", h("p", null, "Every page of the classic dashboard still works, and links back here. ", h("a", { href: "/" }, "Open the classic view"), "."))
     )

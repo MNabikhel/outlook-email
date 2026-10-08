@@ -378,6 +378,22 @@
     return `<details class="msg-steps"${turn.pending ? " open" : ""}><summary>${label}</summary><ul>${items}</ul></details>`;
   }
 
+  /* The page reader at work on a scan before the answer, then which reading the answer used: the page reader's
+     (OvisOCR2), or the older method (OCR, or a general model's vision beside it) and why. */
+  function renderReadingNow(now) {
+    const done = Math.max(0, Math.min(1, ((Number(now.index) || 1) - 1) / (Number(now.of) || 1)));
+    return (
+      `<div class="msg-reading running" role="status"><b>${escapeHtml(now.reader)} is reading</b>` +
+      `<span>${escapeHtml(now.text)}</span><span class="reading-bar" aria-hidden="true"><i style="width:${Math.round(done * 100)}%"></i></span></div>`
+    );
+  }
+
+  function renderReading(reading) {
+    if (!reading || !reading.label) return "";
+    if (reading.state === "vision") return `<p class="msg-reading vision" title="${escapeHtml(reading.text)}">${escapeHtml(reading.label)}</p>`;
+    return `<div class="msg-reading fallback" role="note"><b>${escapeHtml(reading.label)}</b><span>${escapeHtml(reading.text)}</span></div>`;
+  }
+
   function renderTurn(turn, bubble) {
     const el = bubble || document.createElement("div");
     el.className = `msg ${turn.role}${turn.pending ? " pending" : ""}`;
@@ -386,9 +402,11 @@
     } else {
       let html = turn.warning ? `<p class="msg-warn">${escapeHtml(turn.warning)}</p>` : "";
       if (turn.note) html += `<p class="msg-note">${escapeHtml(turn.note)}</p>`;
+      const now = turn.pending && !turn.text ? turn.readingNow : null;
+      html += now ? renderReadingNow(now) : renderReading(turn.reading);
       html += renderSteps(turn);
       const waiting = turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
-      html += `<div>${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
+      if (turn.text || !now) html += `<div>${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
       if (turn.checks && turn.checks.length) {
         html += `<ul class="msg-check">${turn.checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
       }
@@ -575,6 +593,13 @@
             renderTurn(answer, bubble);
           } else if (event.type === "vision") {
             answer.vision = event;
+          } else if (event.type === "reading") {
+            if (event.state === "running") answer.readingNow = event;
+            else {
+              if (event.label) answer.reading = event;
+              answer.readingNow = null;
+            }
+            renderTurn(answer, bubble);
           } else if (event.type === "error") {
             answer.text = (answer.text ? answer.text + "\n\n" : "") + event.text;
             renderTurn(answer, bubble);

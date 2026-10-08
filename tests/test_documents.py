@@ -22,6 +22,7 @@ from controller_inbox.documents import (
     skim,
     split_parts,
     trace_cell,
+    xlsx_text,
 )
 from controller_inbox.extract import extract_text_from_bytes
 
@@ -884,3 +885,26 @@ def test_a_password_protected_office_file_says_so():
         text = extract_text_from_bytes(name, "", locked.getvalue())
         assert text.startswith("[This file is password-protected") and "zip" not in text
     assert "Payroll" in extract_text_from_bytes("payroll.xlsx", "", plain.getvalue())
+
+
+def test_a_two_column_sheet_of_names_and_amounts_names_its_columns():
+    # Budget on its own sheet, plain headings (not bold): each row still says which department and budget it is,
+    # so a question across the two sheets can be worked out by joining them.
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Q3 Budget"
+    sheet.append(["Department", "Q3 Budget"])
+    for name, amount in [("Finance", 88000), ("Marketing", 128800), ("Operations", 142800), ("IT", 142500)]:
+        sheet.append([name, amount])
+    out = io.BytesIO()
+    book.save(out)
+    text = xlsx_text(out.getvalue())
+    assert "A4 (Department): Operations | B4 (Q3 Budget): 142,800" in text
+    # A short list of labels and values keeps its first line as a row of its own.
+    book = Workbook()
+    for row in [["Customer", "Northwind"], ["Subtotal", 1200], ["Tax", 96], ["Total", 1296]]:
+        book.active.append(row)
+    out = io.BytesIO()
+    book.save(out)
+    text = xlsx_text(out.getvalue())
+    assert "A2: Subtotal | B2: 1,200" in text and "(Customer)" not in text

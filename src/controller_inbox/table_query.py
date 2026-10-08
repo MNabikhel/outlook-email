@@ -26,6 +26,10 @@ from controller_inbox import table_lookup, tables
 from controller_inbox.table_lookup import Table
 
 MAX_TABLES = 6
+# Tables of one row (an aging's buckets, an invoice's header box) loaded beside those, at most.
+MAX_ONE_ROW_TABLES = 4
+# Words that can follow a table's name in FROM or JOIN without being an alias for it.
+_SQL_WORDS = {"where", "group", "order", "limit", "join", "left", "right", "inner", "outer", "cross", "on", "using", "union", "having", "natural"}
 MAX_RESULT_ROWS = 25
 # Distinct names listed for a text column, so the model writes them as the sheet does.
 MAX_NAMES = 30
@@ -173,6 +177,7 @@ class Column:
     under: str = ""  # the heading merged over this column and its neighbours ("Due From (payable entity)")
     most: bool = False  # its formula holds on most rows, not every one (a footer row or two works otherwise)
     same_as: str = ""  # in a _cells table: the table whose column this repeats
+    running: str = ""  # a running balance: what each row adds to the row above's ("+ charges - payments")
 
 
 @dataclass
@@ -213,17 +218,25 @@ class Tables:
         self._db.create_function("like", 2, lambda pattern, value: _like(pattern, value, deadline=self._deadline), deterministic=True)
         self._db.create_function("like", 3, lambda pattern, value, escape: _like(pattern, value, escape, deadline=self._deadline), deterministic=True)
         self.facts: list[tuple[str, str, str]] = []
-        count = 0
-        for source, text in files:
-            lines = (text or "").splitlines()
-            loaded = False
-            found = table_lookup.tables_in(text)
+        count = small = 0
+        read = [(source, (text or "").splitlines(), table_lookup.tables_in(text)) for source, text in files]
+        loaded: set[str] = set()
+        for source, lines, found in read:
             for table in found:
                 if len(table.body) >= 2 and count < MAX_TABLES:
                     count += 1
                     self._load(f"t{count}", table, lines, source)
-                    loaded = True
-            if loaded:
+                    loaded.add(source)
+        # A table of one row is a table too (an aging's buckets, an invoice's box of number, dates and terms), in a
+        # few places of its own, so it never takes the place of a table of rows.
+        for source, lines, found in read:
+            for table in found:
+                if len(table.body) == 1 and small < MAX_ONE_ROW_TABLES:
+                    small += 1
+                    self._load(f"t{count + small}", table, lines, source)
+                    loaded.add(source)
+        for source, lines, found in read:
+            if source in loaded:
                 rows = {row.at for table in found if len(table.rows) >= 2 for row in table.rows}
                 self.facts += [(source, name, value) for name, value in _facts_in(lines, rows)]
         if self.facts:
@@ -279,6 +292,7 @@ class Tables:
         if section:
             columns[0].samples = [row.group for row in table.body if row.group]
         _formulas(columns, values)
+        _running_balances(columns, values)
         self._db.execute(
             f"CREATE TABLE {name} ({', '.join(f'{c.name} {_sql_type(c.kind)}' for c in columns)})"
         )
@@ -397,6 +411,12 @@ class Tables:
         ):
             # Every row of one table against every row of another: its sums are many times too large.
             raise ValueError("the tables are separate lists: query one at a time, or JOIN them ON a column they share")
+        for sheet, column in self._added_up_running(bare):
+            raise ValueError(
+                f"{column.name} in {sheet.name} is a running balance: each row's already includes every row above it, "
+                f"so adding it up means nothing. Take the last row's {column.name}, or add up the columns it moves by "
+                f"({column.running})"
+            )
         started = time.monotonic()
         self._deadline = started + QUERY_SECONDS
         self._db.set_progress_handler(lambda: int(time.monotonic() - started > QUERY_SECONDS), 10_000)
@@ -461,6 +481,26 @@ class Tables:
         currency sign that might not apply, and not a percent column's."""
         samples = [s for sheet in self.sheets for c in sheet.columns if c.kind == "figure" for s in c.samples[:5]]
         return [s.replace("$", "") for s in samples if "%" not in s]
+
+    def _added_up_running(self, sql: str) -> list[tuple[Sheet, Column]]:
+        """The running balances the query adds up (SUM, TOTAL or AVG): by their table's name or alias, or unprefixed
+        in a query that reads their table. A column of the same name in another table is another column."""
+        read = {name.lower() for name in re.findall(r"(?i)\b(?:from|join)\s+(\w+)", sql)}
+        aliases: dict[str, str] = {}
+        for table, alias in re.findall(r"(?i)\b(?:from|join)\s+(\w+)\s+(?:as\s+)?(\w+)", sql):
+            if alias.lower() not in _SQL_WORDS:
+                aliases[alias.lower()] = table.lower()
+        found = []
+        for sheet in self.sheets:
+            for column in sheet.columns:
+                if not column.running:
+                    continue
+                for prefix in re.findall(rf"(?i)\b(?:sum|total|avg)\s*\(\s*(?:(\w+)\.)?{column.name}\b", sql):
+                    owner = aliases.get(prefix.lower(), prefix.lower()) if prefix else ""
+                    if owner == sheet.name.lower() or (not owner and sheet.name.lower() in read):
+                        found.append((sheet, column))
+                        break
+        return found
 
     def hints(self, sql: str, error: str = "") -> list[str]:
         """What a query that failed or found nothing got wrong, in words the model can act on: a column
@@ -683,6 +723,8 @@ def _describe(column: Column, names: int = MAX_NAMES) -> str:
         note = f'"{column.label}" figure' + (f', under "{column.under}"' if column.under else "")
         if column.samples and all("%" in sample for sample in column.samples):
             note += ", a percent (6.3 means 6.3%)"
+        if column.running:
+            return f"{note}, a running balance: each row's is the row above's {column.running}; the last row's is the balance, never add it up"
         return f"{note} = {column.formula} on {'most rows' if column.most else 'every row'}" if column.formula else note
     if column.kind == "date":
         stored = next((_stored(s, "date") for s in column.samples if table_lookup._when(s)), "")
@@ -735,6 +777,36 @@ def _formulas(columns: list[Column], values: list[list]) -> None:
     for target, terms in found.items():
         columns[target].parts = terms
         columns[target].formula = " ".join(("+ " if sign > 0 else "- ") + columns[index].name for index, sign in terms).removeprefix("+ ")
+
+
+def _running_balances(columns: list[Column], values: list[list]) -> None:
+    """Note each figure column that is a running balance: every row's is the row above's plus one column and minus
+    another ("Balance" on a statement of account: + charges - payments), or plus or minus one (a loan's balance less
+    its principal). Each row's already holds every row above it, so adding the column up means nothing; its last
+    row is the balance."""
+    figures = [index for index, column in enumerate(columns) if column.kind == "figure" and not column.formula]
+    values = values[:FORMULA_ROWS]
+    for target in figures:
+        others = [index for index in figures if index != target]
+        options = [[(a, sign)] for a in others for sign in (1, -1)] + [[(a, 1), (b, -1)] for a in others for b in others if a != b]
+        for terms in options:
+            if _runs(values, target, terms):
+                columns[target].running = " ".join(("+ " if sign > 0 else "- ") + columns[index].name for index, sign in terms)
+                break
+
+
+def _runs(values: list[list], target: int, terms: list[tuple[int, int]]) -> bool:
+    """Whether ``target`` is the row above's plus the signed ``terms`` (a blank one adding nothing) on at least
+    nine in ten of the rows after the first, three or more of them, with something added on most of them."""
+    steps = good = moved = 0
+    for above, row in zip(values, values[1:]):
+        if above[target] is None or row[target] is None:
+            continue
+        added = sum(sign * (row[index] or 0.0) for index, sign in terms)
+        steps += 1
+        good += abs(above[target] + added - row[target]) <= 0.015
+        moved += abs(added) > 0.005
+    return steps >= 3 and good >= 0.9 * steps and moved >= 0.5 * steps
 
 
 def _holds(values: list[list], target: int, terms: list[tuple[int, int]], share: float = 1.0) -> bool:

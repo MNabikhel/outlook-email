@@ -38,6 +38,19 @@ def test_questions_about_this_email_stay_on_it(store, settings, mail):
         assert not on_screen_question(question), question
 
 
+def test_a_documents_amount_due_is_no_question_about_today(store, settings, mail):
+    # "Total due", "amount due", "past due" and "due date" are a document's words: a question with them, answered by
+    # the open email, stays on it instead of reading other mail's files too. "What's due?" is still about today.
+    budget = mail["Q4 budget draft"]
+    budget.attachments[0].extracted_text = "[page 1]\nInvoice 4410 | Amount due: $12,480.00 | Due date: 10/28/2026 | Past due: $0.00"
+    store.upsert_email(budget)
+    for question in ("What is the amount due on invoice 4410?", "How much is past due on invoice 4410?", "What is the due date of invoice 4410?"):
+        sources, about_today, _ = pick_sources(store, question, email_id=budget.id)
+        assert [s.id for s in sources] == [budget.id] and not about_today, question
+    for question in ("what's due this week?", "anything due today?", "Which invoices are due on Friday?"):
+        assert pick_sources(store, question, email_id=budget.id)[1], question
+
+
 def test_without_a_model_the_answer_quotes_the_files(store, settings, mail):
     budget = mail["Q4 budget draft"]
     text = _text(answer_stream(store, settings, "what does the memo say about the venue deposit?", email_id=budget.id))

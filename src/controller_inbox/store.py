@@ -231,6 +231,8 @@ CREATE TABLE IF NOT EXISTS page_failures (
     tries INTEGER NOT NULL DEFAULT 0,
     error TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL,
+    -- The model that failed on it: another model's failures don't keep it from reading the page.
+    model TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (attachment_id, page)
 );
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
@@ -977,23 +979,29 @@ class Store:
             )
             conn.execute("DELETE FROM page_failures WHERE attachment_id = ? AND page = ?", (attachment_id, page))
 
-    def note_page_failure(self, attachment_id: str, page: int, *, sha256: str, error: str) -> None:
+    def note_page_failure(self, attachment_id: str, page: int, *, sha256: str, error: str, model: str = "") -> None:
         with self.connect() as conn:
             conn.execute(
                 """
-                INSERT INTO page_failures (attachment_id, page, sha256, tries, error, updated_at) VALUES (?, ?, ?, 1, ?, ?)
+                INSERT INTO page_failures (attachment_id, page, sha256, tries, error, updated_at, model) VALUES (?, ?, ?, 1, ?, ?, ?)
                 ON CONFLICT(attachment_id, page) DO UPDATE SET
-                    tries = CASE WHEN page_failures.sha256 = excluded.sha256 THEN page_failures.tries + 1 ELSE 1 END,
-                    sha256 = excluded.sha256, error = excluded.error, updated_at = excluded.updated_at
+                    tries = CASE WHEN page_failures.sha256 = excluded.sha256 AND page_failures.model = excluded.model
+                        THEN page_failures.tries + 1 ELSE 1 END,
+                    sha256 = excluded.sha256, error = excluded.error, updated_at = excluded.updated_at, model = excluded.model
                 """,
-                (attachment_id, page, sha256 or "", error[:300], _now()),
+                (attachment_id, page, sha256 or "", error[:300], _now(), model or ""),
             )
 
-    def page_failures(self, attachment_id: str, sha256: str = "") -> dict[int, int]:
-        """Page -> how many times in a row the vision model failed to read it (this file's, when sha256 is given)."""
+    def page_failures(self, attachment_id: str, sha256: str = "", model: str | None = None) -> dict[int, int]:
+        """Page -> how many times in a row the vision model failed to read it (this file's, when sha256 is given;
+        only ``model``'s failures, when given, and those kept before the model was)."""
         with self.connect() as conn:
-            rows = conn.execute("SELECT page, sha256, tries FROM page_failures WHERE attachment_id = ?", (attachment_id,)).fetchall()
-        return {int(row["page"]): int(row["tries"]) for row in rows if not sha256 or row["sha256"] in {"", sha256}}
+            rows = conn.execute("SELECT page, sha256, tries, model FROM page_failures WHERE attachment_id = ?", (attachment_id,)).fetchall()
+        return {
+            int(row["page"]): int(row["tries"])
+            for row in rows
+            if (not sha256 or row["sha256"] in {"", sha256}) and (model is None or row["model"] in {"", model})
+        }
 
     def stored_text(self, attachment_id: str) -> str | None:
         """The attachment's text as stored (an email's file, or a file added to a conversation: "chat-<id>:<name>"),
@@ -1681,6 +1689,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_column(conn, "ALTER TABLE emails ADD COLUMN done_at TEXT DEFAULT ''")
     if "reply_to" not in cols:
         _add_column(conn, "ALTER TABLE emails ADD COLUMN reply_to TEXT DEFAULT ''")
+    if "model" not in {row[1] for row in conn.execute("PRAGMA table_info(page_failures)")}:
+        _add_column(conn, "ALTER TABLE page_failures ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if not conn.execute("SELECT 1 FROM sync_state WHERE key = 'attachment_text_without_nul'").fetchone():
         # Text stored before NUL characters were dropped: summaries keyed by its length never matched.
         rows = conn.execute("SELECT id, extracted_text FROM attachments WHERE instr(extracted_text, char(0)) > 0").fetchall()
