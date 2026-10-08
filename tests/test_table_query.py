@@ -254,7 +254,7 @@ def test_a_plan_about_the_left_out_total_rows_is_still_an_answer(aging):
 def test_a_query_block_without_room_for_its_result_is_left_out():
     from controller_inbox.agent import _worked_block
 
-    block = "Worked out with a query over the table (check it is what was asked; the whole file follows):\nQuery: SELECT x\nResult (1 row):\nx: 12,345.67"
+    block = "Worked out with a query over the table (check it is what was asked; the file is above):\nQuery: SELECT x\nResult (1 row):\nx: 12,345.67"
     assert _worked_block(block, 2000) == block
     assert _worked_block(block, 60) == ""
 
@@ -384,6 +384,25 @@ def test_a_table_of_one_row_is_queried_too():
     tables = Tables([("statement.pdf", STATEMENT)])
     assert '"Over 90" figure' in tables.schema() and "1 rows" in tables.schema()
     assert tables.run("SELECT c_61_90 + over_90 FROM t2")[1] == [(428.58,)]
+
+
+def test_a_section_ends_at_its_own_printed_total():
+    # The reading carries "Operating expenses" down to Net income; adding up the section added them all in.
+    statement = """[page 1]
+[table]
+FY2026 | FY2025
+Revenue | FY2026: 18,642,310 | FY2025: 16,905,227
+Gross profit | FY2026: 8,193,408 | FY2025: 7,173,779
+Group: Operating expenses
+Operating expenses | Selling and marketing | FY2026: 2,114,870 | FY2025: 1,982,101
+Operating expenses | General and administrative | FY2026: 2,605,449 | FY2025: 2,411,960
+Operating expenses | Total operating expenses | FY2026: 4,720,319 | FY2025: 4,394,061
+Operating expenses | Operating income | FY2026: 3,473,089 | FY2025: 2,779,718
+Operating expenses | Net income | FY2026: 2,604,817 | FY2025: 2,084,789
+"""
+    tables = Tables([("income.pdf", statement)])
+    assert tables.run("SELECT SUM(fy2025) FROM t1 WHERE section = 'Operating expenses'")[1] == [(4394061.0,)]
+    assert tables.run("SELECT section FROM t1 WHERE line = 'Net income'")[1] == [(None,)]
 
 
 def test_a_table_of_one_row_is_loaded_for_a_question_that_names_one_of_its_columns():

@@ -8,6 +8,7 @@ on their side, and labels that run into the empty cell beside them.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -153,7 +154,9 @@ def _schedule_email(store, settings, name: str):
     return ingest_folder(store, settings)[0]
 
 
-def test_the_model_starts_from_the_rows_the_question_names(store, settings):
+def test_the_model_is_given_the_rows_the_question_names_after_the_file_text(store, settings):
+    # After the file text, nearest the question: what comes before them is the same for every question about the
+    # file, so a model server that keeps what it has read doesn't read the file again for the next question.
     from controller_inbox import agent
 
     email = _schedule_email(store, settings, "AP Aging 9-30-26.pdf")
@@ -161,8 +164,12 @@ def test_the_model_starts_from_the_rows_the_question_names(store, settings):
     block = agent.file_context(ws, ws.question, 12_000)[email.id]
     rows_at = block.index("Rows that match the question")
     assert "Harbor Steel LLC → 31 - 60 Days: $22,150.00" in block
-    assert rows_at < block.index("[AP Aging 9-30-26.pdf · page 1"), "the matching rows come before the file text"
+    assert rows_at > block.index("[AP Aging 9-30-26.pdf · page 1"), "the matching rows follow the file text"
     assert any("picked out the table rows" in read for read in ws.reads)
+    other = agent.Workspace(store, settings, [email], question="How much do we owe Bluewater Logistics in total?", current_id=email.id)
+    again = agent.file_context(other, other.question, 12_000)[email.id]
+    picked = re.search(r"^(?:Rows that match the question|Worked out from the table)", again, re.M)
+    assert picked and block[:rows_at] == again[: picked.start()], "the file text is the same for both"
 
 
 def test_the_model_is_told_how_many_rows_each_table_has(store, settings):

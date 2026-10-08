@@ -42,7 +42,7 @@ MAX_VALUE_BYTES = 100_000
 FORMULA_ROWS = 200
 # Goes at a query: one more when the first fails or finds nothing.
 ATTEMPTS = 2
-WORKED_HEAD = "Worked out with a query over the table (check it is what was asked; the whole file follows):"
+WORKED_HEAD = "Worked out with a query over the table (check it is what was asked; the file is above):"
 
 SYSTEM = """You answer questions about a spreadsheet by writing ONE SQLite query over its tables.
 Write four lines:
