@@ -519,7 +519,7 @@ class Store:
             params.append(_json_contains(flag))
         for word in (q or "").split()[:8]:
             clauses.append(_MATCH_ANY)
-            params.extend([_contains(_fold(word))] * _MATCH_ANY.count("?"))
+            params.extend([_contains(_fold(word)[:_TERM_CHARS])] * _MATCH_ANY.count("?"))
         order = order or ("oldest" if oldest_first else "newest")
         order_sql = {
             "newest": "received_at DESC",
@@ -553,7 +553,7 @@ class Store:
 
     def search_ranked(self, terms: list[str], *, limit: int = 6) -> list[EmailRecord]:
         """Emails that mention the most of ``terms``; subject and sender hits count more."""
-        terms = [t for t in dict.fromkeys(_fold(t) for t in terms if t.strip())][:10]
+        terms = [t for t in dict.fromkeys(_fold(t)[:_TERM_CHARS] for t in terms if t.strip())][:10]
         if not terms:
             return []
         parts, params = [], []
@@ -1636,6 +1636,8 @@ def _email_from_rows(
 _LIKE = "LIKE ? ESCAPE '\\'"
 # Most urgent first; the text values would sort alphabetically (critical, high, low, medium).
 _PRIORITY_ORDER = "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END"
+# Longest search word kept: SQLite refuses a LIKE pattern over 50,000 bytes (a pasted blob in the search box).
+_TERM_CHARS = 200
 _MATCH_ANY = (
     f"(fold(subject) {_LIKE} OR fold(sender_email) {_LIKE} OR fold(sender_name) {_LIKE} OR fold(summary) {_LIKE}"
     f" OR fold(body_text) {_LIKE}"

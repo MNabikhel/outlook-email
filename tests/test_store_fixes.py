@@ -63,3 +63,12 @@ def test_get_email_orders_tasks_by_priority_not_alphabet(store):
     ]
     store.upsert_email(_email("e1", "Invoice", actions=actions))
     assert [a.priority.value for a in store.get_email("e1").actions] == ["high", "medium", "low"]
+
+
+def test_list_emails_with_a_very_long_search_word_does_not_crash(loaded):
+    # A pasted blob in the search box is one "word" of the query; SQLite refuses LIKE patterns over 50,000 bytes.
+    assert loaded.list_emails(q="x" * 60_000) == []
+
+
+def test_search_ranked_with_a_very_long_term_does_not_crash(loaded):
+    assert loaded.search_ranked(["x" * 60_000]) == []

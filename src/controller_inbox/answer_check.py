@@ -19,8 +19,10 @@ from itertools import permutations
 
 # "€1.234,56" is European style: dots group the thousands and a comma marks the decimals.
 _EUROPEAN = r"\d{1,3}(?:\.\d{3})+,\d{1,2}(?!\d)"
+# Under a thousand only the comma shows it, so only beside a euro sign: "€447,15", "447,15 €" (a plain "3,12" is a list).
+_EURO_CENTS = r"(?:(?<=€)|(?<=€ ))\d{1,3},\d{2}(?!\d)|\d{1,3},\d{2}(?=\s?€)"
 NUMBER_RE = re.compile(
-    r"(?<![\w.,\[])(?P<cur>[$€£])?(?P<num>" + _EUROPEAN + r"|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+    r"(?<![\w.,\[])(?P<cur>[$€£])?(?P<num>" + _EUROPEAN + "|" + _EURO_CENTS + r"|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
     r"(?P<suf>%| ?percent\b| ?(?:k|K|m|M|bn)\b| (?:thousand|million|billion)\b)?(?![\w\]])"
 )
 _EUROPEAN_RE = re.compile(_EUROPEAN)
@@ -91,7 +93,7 @@ def numbers_in(text: str) -> list[Number]:
 
 def _plain_digits(num: str) -> str:
     """The figure as Python reads it: "1,234.56" and "1.234,56" are both 1234.56."""
-    if _EUROPEAN_RE.fullmatch(num):
+    if _EUROPEAN_RE.fullmatch(num) or re.fullmatch(r"\d{1,3},\d{2}", num):
         return num.replace(".", "").replace(",", ".")
     return num.replace(",", "")
 

@@ -10,7 +10,7 @@ import pytest
 
 from controller_inbox import table_query
 from controller_inbox.documents import extract_document
-from controller_inbox.table_query import Tables, parse
+from controller_inbox.table_query import Tables, _like, parse
 
 MORE = Path(__file__).parent / "fixtures" / "more_schedules"
 FIRST = Path(__file__).parent / "fixtures" / "excel_schedules"
@@ -542,3 +542,15 @@ def test_an_inline_fence_with_a_language_tag_is_read():
 
 def test_a_fence_opening_on_select_is_not_taken_for_a_tag():
     assert parse("```SELECT\n  name\nFROM t\n```")[1].startswith("SELECT")
+
+
+def test_underscore_matches_one_letter_even_when_it_folds_to_two():
+    # LIKE's "_" stands for one character; "ß" is one character, as SQLite's own LIKE treats it.
+    assert _like("stra_e", "Straße")
+    assert _like("%stra_e%", "Hauptstraße 5")
+
+
+def test_query_with_underscore_finds_the_row():
+    tables = Tables([("book.xlsx", "Customer: Acme | Balance: 1,000\nCustomer: Straße GmbH | Balance: 2,150\n")])
+    _names, rows, _more = tables.run("SELECT balance FROM t1 WHERE customer LIKE 'stra_e%'")
+    assert rows == [(2150.0,)]

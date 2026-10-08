@@ -329,12 +329,17 @@ def _from_localtime() -> str:
     return "/".join(parts[parts.index("zoneinfo") + 1 :])
 
 
+def _computer_offset(moment: datetime) -> timedelta | None:
+    """The computer clock's offset from UTC at ``moment``."""
+    return moment.astimezone().utcoffset()
+
+
 def _matching_offset() -> str:
     """A listed zone that keeps the same hours as the computer clock, when the computer gives no name."""
     now = datetime.now(timezone.utc)
     # Half a year on, so a zone without daylight saving time isn't picked for a computer that has it.
     later = now + timedelta(days=182)
-    current, then = now.astimezone().utcoffset(), later.astimezone().utcoffset()
+    current, then = _computer_offset(now), _computer_offset(later)
     standard = -timedelta(seconds=time.timezone)
     for name, _ in ZONES:
         zone = ZoneInfo(name)

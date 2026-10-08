@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from controller_inbox.answer_check import check_citations, review
+from controller_inbox.answer_check import Grounding, check_citations, check_numbers, numbers_in, review
 
 BUDGET = "\n".join(
     [
@@ -282,3 +282,30 @@ def test_a_list_of_pages_is_not_corrected_to_one_page():
     pdf = "[page 1]\nInvoice 58213\nSubtotal $4,000.00\n[page 2]\nTotal due $4,100.00\n"
     answer = "The total due is $4,100.00 on pages 1, 2 [1]."
     assert review(answer, material=[], files=[("a.pdf", pdf)]).text == answer
+
+
+# Found by fuzzing: a European amount under a thousand ("€447,15") lost its cents.
+
+def test_european_amount_under_one_thousand_keeps_its_cents():
+    # "€447,15" is 447.15 in European style, just like "€1.447,15" is 1447.15.
+    assert [n.value for n in numbers_in("€447,15")] == [447.15]
+
+
+def test_correct_european_list_total_is_not_rewritten():
+    answer = (
+        "Open invoices:\n"
+        "- Vendor A: €3.452,00\n"
+        "- Vendor B: €447,15\n"
+        "- Vendor C: €83.098,00\n"
+        "Total: €86.997,15"
+    )
+    material = "Vendor A €3.452,00. Vendor B €447,15. Vendor C €83.098,00."
+    review = check_numbers(answer, Grounding([material]))
+    assert review.text == answer, review.checks
+
+
+def test_wrong_european_sum_is_corrected_to_the_right_figure_not_spliced():
+    answer = "The invoices were €444,23 and €149,40, a total of €637,25."
+    review = check_numbers(answer, Grounding(["Invoice A €444,23. Invoice B €149,40."]))
+    # Either flagged or corrected to €593,63; never "€593,25" (the euros of the sum glued to the old cents).
+    assert "€593,25" not in review.text, (review.text, review.checks)

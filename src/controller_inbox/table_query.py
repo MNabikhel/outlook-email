@@ -652,24 +652,25 @@ def _like(pattern, value, escape=None, *, deadline: float = 0.0):
     if pattern is None or value is None:
         return None
     tokens: list = []
-    text = str(pattern).casefold()
+    # Folded a character at a time, so "_" still matches the one letter "ß" (folding the whole word makes it "ss").
+    text = str(pattern)
     index = 0
     while index < len(text):
         char = text[index]
-        if escape is not None and char == str(escape).casefold() and index + 1 < len(text):
-            tokens.append(text[index + 1])
+        if escape is not None and char == str(escape) and index + 1 < len(text):
+            tokens.append(text[index + 1].casefold())
             index += 2
             continue
         if char == "%":
             if not tokens or tokens[-1] is not _STAR:
                 tokens.append(_STAR)
         else:
-            tokens.append(_ANY if char == "_" else char)
+            tokens.append(_ANY if char == "_" else char.casefold())
         index += 1
-    return _wildcard(tokens, str(value).casefold(), deadline)
+    return _wildcard(tokens, [char.casefold() for char in str(value)], deadline)
 
 
-def _wildcard(tokens: list, text: str, deadline: float = 0.0) -> bool:
+def _wildcard(tokens: list, text, deadline: float = 0.0) -> bool:
     """Whether ``tokens`` match all of ``text``, going back only to the last % (no runaway backtracking)."""
     at = position = 0
     star, mark = -1, 0
