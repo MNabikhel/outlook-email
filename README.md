@@ -97,6 +97,8 @@ No configuration is needed: `CONTROLLER_INBOX_LLM=auto` (the default) uses a mod
 
 CloseDesk uses the model you have loaded in LM Studio. With nothing loaded, it asks LM Studio for the chat model it last saw loaded, and LM Studio loads that one. It never takes the first model on LM Studio's list, which with just-in-time loading is every model you have downloaded. If it has never seen one loaded, Setup says to load one. `CONTROLLER_INBOX_LLM_MODEL` pins a model instead.
 
+You can also change the model from CloseDesk itself. **Setup → Model that answers your questions** lists the chat models LM Studio has downloaded, and **Load and use** has LM Studio load the one you pick. It is loaded with Setup's minimum context, or the most the model supports. The chat model loaded before is unloaded first, so two don't share the memory. The page reader (OvisOCR2) and the search model are left as they are. If LM Studio can't load the new one (not enough memory), the one before is loaded back and Setup says why. Loading takes a minute or two on a laptop, and an answer being written meanwhile stops. The model that reads pages is chosen in Setup too (below).
+
 A question can take a few minutes on a laptop without a graphics card, because the model reads the email and its files before it writes a word. The chat waits up to 5 minutes for the first word, longer if `CONTROLLER_INBOX_LLM_TIMEOUT` is set higher. A model that is busy loading or reading isn't taken for one that has stopped. If it does run out of time, the chat says so and suggests asking again.
 
 | Problem with small models | What CloseDesk does |

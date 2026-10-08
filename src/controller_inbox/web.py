@@ -50,7 +50,7 @@ from controller_inbox.clock import (
 )
 from controller_inbox.config import PROFILES, Settings
 from controller_inbox.digest import build_digest, write_digest_files
-from controller_inbox.local_llm import check_model, context_target, needs_more_context, set_min_context
+from controller_inbox.local_llm import check_model, context_target, needs_more_context, set_min_context, use_chat_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.profile import active_profile, is_finance, set_profile
 from controller_inbox.store import Store
@@ -99,6 +99,9 @@ NOTICES = {
     "indexing": "Indexing started. This page updates as it goes.",
     "indexed": "Indexed for search. Ask CloseDesk can now find these files by meaning.",
     "vision-saved": "Saved. Scans are read with the vision model as you chose.",
+    "chat-model": "Loaded in LM Studio. It answers your questions now.",
+    "chat-model-failed": "The model that answers wasn't changed.",
+    "chat-model-busy": "Mail is being processed or a scan read with the model right now. Change the model when it finishes.",
     "index-failed": "The embedding model didn't answer, so nothing was indexed. Load one in LM Studio and try again.",
     "index-off": "No embedding model found. Load one in LM Studio (for example nomic-embed-text) and try again.",
     "coding-confirmed": "Cost code confirmed. The next invoice from this sender is suggested the same code.",
@@ -1097,6 +1100,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         write_digest_files(payload, settings.digest_dir, as_of.isoformat())
         return RedirectResponse("/digest", status_code=303)
 
+    # Why the last change of chat model in Setup didn't happen, shown with its notice.
+    chat_switch = {"problem": ""}
+
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, recheck: int = 0):
         model = check_model(settings, use_cache=not recheck)
@@ -1113,6 +1119,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             will_reload=needs_more_context(settings),
             ocr_engine=ocr.engine_name(),
             models=model_roles.models_in_use(settings, status=model),
+            chat_choice=model_roles.chat_choices(settings, model),
+            chat_problem=chat_switch["problem"] if request.query_params.get("notice") == "chat-model-failed" else "",
             vision_setup=vision_setup(model),
             search=semantic.coverage(store, settings),
             timezone_choice=settings.timezone,
@@ -1178,6 +1186,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         except ValueError:
             return RedirectResponse("/settings#vision", status_code=303)
         return RedirectResponse("/settings?notice=vision-saved#vision", status_code=303)
+
+    @app.post("/settings/chat-model")
+    def save_chat_model(model: str = Form(...)):
+        if job.snapshot()["state"] == "running":
+            return RedirectResponse("/settings?notice=chat-model-busy#chat-model", status_code=303)
+        chat_switch["problem"] = use_chat_model(settings, model)
+        notice = "chat-model-failed" if chat_switch["problem"] else "chat-model"
+        return RedirectResponse(f"/settings?notice={notice}#chat-model", status_code=303)
 
     @app.post("/settings/index")
     def index_all():

@@ -75,6 +75,30 @@
     {% if loaded_now %}
     <p class="muted small">Loaded in {{ 'LM Studio' if model.lm_studio else 'the model server' }} now: {{ loaded_now | join(', ') }}</p>
     {% endif %}
+    {% if chat_choice %}
+    <form method="post" action="/settings/chat-model" class="chat-model-form" id="chat-model">
+      {% if chat_problem %}<p class="warn-box small">{{ chat_problem }}</p>{% endif %}
+      {% if chat_choice.pinned %}
+      <p class="muted small">The model that answers is set in <code>.env</code> (<code>CONTROLLER_INBOX_LLM_MODEL={{ settings.llm_model }}</code>). Remove that line to choose it here.</p>
+      {% else %}
+      <label>Model that answers your questions
+        <select name="model" required>
+          {% if not chat_choice.current %}<option value="">Choose a model</option>{% endif %}
+          {% for key in chat_choice.models %}
+          <option value="{{ key }}" {{ 'selected' if key == chat_choice.current }}>{{ key }}{% if key in chat_choice.loaded %} (loaded){% endif %}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit" data-loading="Loading in LM Studio…">Load and use</button>
+      <p class="muted small">CloseDesk has LM Studio load it{% if settings.min_context_tokens %} with a {{ '{:,}'.format(settings.min_context_tokens) }}-token context (or the most it supports){% endif %} and unload the other chat model, so the two don't share the memory. The page reader and the search model are left as they are. Loading can take a minute or two, and an answer being written then stops.</p>
+      {% endif %}
+    </form>
+    <script>
+      document.querySelectorAll('[data-loading]').forEach(function (button) {
+        button.form.addEventListener('submit', function () { button.disabled = true; button.textContent = button.dataset.loading; });
+      });
+    </script>
+    {% endif %}
     {% if model.active %}
     {% set window = model.context_length or settings.chat_context_tokens %}
     <p class="context-line {{ 'ok' if window >= recommended_context else 'short' }}">

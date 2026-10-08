@@ -78,6 +78,9 @@ class ModelStatus:
     # model key and the context it was loaded with.
     lm_studio: bool = False
     instances: dict[str, tuple[str, int]] = field(default_factory=dict)
+    # LM Studio's downloaded models that can answer (not document readers) by key, with the longest context each
+    # supports (0 when it doesn't say): the ones Setup offers to load.
+    chat_models: dict[str, int] = field(default_factory=dict)
 
     @property
     def active(self) -> bool:
@@ -147,6 +150,7 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         status.context_length = contexts.get(status.model, 0)
         status.key, status.max_context = reloadable.get(status.model, ("", 0))
         status.instances = {instance: (reloadable.get(instance, (instance, 0))[0], contexts.get(instance, 0)) for instance in loaded}
+        status.chat_models = listing.chat if status.lm_studio else {}
         status.vision = status.model in seeing
         # By model key, so a model is listed once whether or not it is loaded. A downloaded one when LM Studio loads it
         # when asked (/v1/models lists every downloaded model with just-in-time loading on, the loaded ones only with
@@ -193,6 +197,7 @@ class _Listing:
     downloaded: list[str] = field(default_factory=list)
     # No route answered because one took too long (LM Studio busy), not because the server hasn't got them.
     busy: bool = False
+    chat: dict[str, int] = field(default_factory=dict)  # see ModelStatus.chat_models
 
 
 def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing:
@@ -223,6 +228,7 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
         reloadable: dict[str, tuple[str, int]] = {}
         seeing: set[str] = set()
         downloaded: list[str] = []
+        chat: dict[str, int] = {}
         if isinstance(data.get("models"), list):
             for item in data["models"]:
                 if not isinstance(item, dict) or item.get("type") not in {"llm", "vlm"}:
@@ -235,6 +241,8 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
                     reasoning[str(item["key"])] = options
                     if sees:
                         downloaded.append(str(item["key"]))
+                    if not document_reader(str(item["key"])):
+                        chat[str(item["key"])] = _int(item.get("max_context_length"))
                 for instance in item.get("loaded_instances") or []:
                     if isinstance(instance, dict) and instance.get("id"):
                         loaded.append(str(instance["id"]))
@@ -244,7 +252,7 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
                         reloadable[str(instance["id"])] = (str(item.get("key") or instance["id"]), _int(item.get("max_context_length")))
                         if sees:
                             seeing.add(str(instance["id"]))
-            return _Listing("v1", loaded, reasoning, contexts, reloadable, seeing, downloaded)
+            return _Listing("v1", loaded, reasoning, contexts, reloadable, seeing, downloaded, chat=chat)
         # LM Studio's older route says of each model whether it is loaded; a server that answers it with a plain list
         # of the models it serves isn't LM Studio.
         if isinstance(data.get("data"), list) and any(isinstance(item, dict) and "state" in item for item in data["data"]):
@@ -1089,6 +1097,80 @@ def reader_load_problem(model: str) -> str:
 def forget_reader_failures() -> None:
     """Setup was saved: a model LM Studio couldn't load is asked again (memory may have been freed)."""
     _reader_failed.clear()
+
+
+def _lm_studio_said(exc: httpx.HTTPError) -> str:
+    """LM Studio's own reason for refusing (``{"error": "..."}`` or ``{"error": {"message": "..."}}``), such as
+    running short of memory, rather than the bare status code."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        try:
+            error = exc.response.json().get("error")
+        except (ValueError, AttributeError):
+            error = None
+        said = error.get("message") if isinstance(error, dict) else error
+        if isinstance(said, str) and said.strip():
+            return said.strip()[:200]
+    return _short_error(exc)
+
+
+def use_chat_model(settings: Settings, key: str) -> str:
+    """Make ``key`` (a downloaded model's key in LM Studio) the model that answers, chosen in Setup: the other chat
+    models loaded are unloaded first, so two don't share the memory, then it is loaded with the context Setup asks
+    for. Document readers and embedding models stay loaded. If LM Studio can't load it, the ones unloaded are loaded
+    back. Returns what went wrong, or ""."""
+    with _context_lock:
+        status = check_model(settings, use_cache=False)
+        if not status.reachable:
+            return "LM Studio's server isn't answering. Start it, then try again."
+        if not status.lm_studio:
+            return "Only LM Studio loads models when CloseDesk asks. Load the model in your model server instead."
+        if key not in status.chat_models:
+            return f"LM Studio doesn't have {key} downloaded."
+        root = status.base_url[: -len("/v1")] if status.base_url.endswith("/v1") else status.base_url
+        timeout = httpx.Timeout(max(settings.llm_timeout, CHAT_TIMEOUT), connect=5.0)
+
+        def load(model: str, size: int) -> None:
+            body = {"model": model, **({"context_length": size} if size else {})}
+            httpx.post(root + "/api/v1/models/load", json=body, headers=_headers(settings), timeout=timeout).raise_for_status()
+
+        def load_back(unloaded: list[tuple[str, int]]) -> str:
+            back = []
+            for model, size in unloaded:
+                try:
+                    load(model, size)
+                    back.append(model)
+                except httpx.HTTPError:
+                    pass
+            if back:
+                return f" {', '.join(back)} was loaded back."
+            return " Load a model in LM Studio." if unloaded else ""
+
+        others = [
+            (instance, model, size)
+            for instance, (model, size) in status.instances.items()
+            if model != key and not document_reader(model) and not document_reader(instance)
+        ]
+        unloaded: list[tuple[str, int]] = []
+        try:
+            for instance, model, size in others:
+                try:
+                    httpx.post(
+                        root + "/api/v1/models/unload", json={"instance_id": instance}, headers=_headers(settings), timeout=timeout
+                    ).raise_for_status()
+                except httpx.HTTPError as exc:
+                    return f"LM Studio couldn't unload {model} to make room ({_lm_studio_said(exc)}).{load_back(unloaded)}"
+                unloaded.append((model, size))
+            if not any(model == key for model, _size in status.instances.values()):
+                want, most = settings.min_context_tokens, status.chat_models[key]
+                try:
+                    load(key, min(want, most) if want and most else want)
+                except httpx.HTTPError as exc:
+                    return f"LM Studio couldn't load {key} ({_lm_studio_said(exc)}).{load_back(unloaded)}"
+        finally:
+            _status_cache.clear()
+        _context_raised.discard(key)  # loaded afresh: a longer context may be tried again
+        remember_model(settings, key)
+        return ""
 
 
 def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict], *, max_tokens: int = 500) -> ToolReply:
