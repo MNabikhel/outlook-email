@@ -133,10 +133,10 @@ OCR reads a scanned page's words but loses its table: the title runs into the co
 
 The model that reads pages:
 
-- **OvisOCR2** (recommended): a small model (0.85B, Apache-2.0) made for reading document pages. Download it in LM Studio (search *OvisOCR2*, the `ATH-MaaS_OvisOCR2-GGUF` build at Q8_0, about 1 GB); it doesn't need to be loaded. CloseDesk names it when it reads a page and LM Studio loads it then (*Just-in-Time model loading* in LM Studio's Developer tab, on by default in new installs). A chat model you loaded yourself stays loaded beside it. It is shown the page at 200 DPI and asked its own way (tables in HTML, merged headings kept). It was the most accurate reader we measured and the fastest, see below.
+- **OvisOCR2** (recommended): a small model (0.85B, Apache-2.0) made for reading document pages. Download it in LM Studio (search *OvisOCR2*, the `ATH-MaaS_OvisOCR2-GGUF` build at Q8_0, about 1 GB); it doesn't need to be loaded. Before reading pages CloseDesk has LM Studio load it with room for a page and its reading (a 20,480-token context), and again if LM Studio unloaded it since; the chat model stays loaded beside it. If LM Studio can't load it (not enough memory), the read stops and says so, and it is asked again after half an hour or when Setup is saved. It is shown the page at about 190 DPI (2,048 pixels on the long side) and asked its own way (tables in HTML, merged headings kept); account and routing numbers in its tables are masked. It was the most accurate reader we measured and the fastest, see below.
 - Otherwise the chat model, when it can see (**Qwen3.5** 4B or 9B, Gemma 3; LM Studio shows an eye icon beside it), at about 100 DPI.
 
-**Setup → Read scans with the vision model** says which model reads pages, and the list there picks another one. **Automatic** uses a document reader when LM Studio has one, then the chat model. The comparison:
+**Setup → Reading scans with the model's vision** says which model reads pages, and the list there picks another one. **Automatic** uses a document reader when LM Studio has one, then the chat model. The comparison:
 
 - A figure both readings have is confirmed. Where they differ, both are kept, and each reading's printed totals are checked against the rows above them.
 - The page the chat and the table lookup read is the model's reading when its totals hold up at least as well and most of its figures agree with OCR's; otherwise OCR's. Either way a note at the top of the page says which, and the figures the two read differently are listed under it.
@@ -145,7 +145,7 @@ The model that reads pages:
 
 Pages read this way: a scanned PDF's pages, a picture, and a PDF page whose table doesn't add up as read. The original is never changed: the first reading stays stored, the model's beside it, and a reading is only used while the file is the same one it was made from.
 
-Looking at a page is slow on a laptop without a graphics card (minutes a page; a graphics card or Apple silicon is many times faster), so CloseDesk times each page on this computer and says how long a read will take before it starts one. **Setup → Read scans with the vision model** chooses:
+Looking at a page is slow on a laptop without a graphics card (minutes a page; a graphics card or Apple silicon is many times faster), so CloseDesk times each page on this computer and says how long a read will take before it starts one. **Setup → Reading scans with the model's vision** chooses:
 
 - **Automatically** (default): the overnight run reads waiting scans for up to 30 minutes (`CONTROLLER_INBOX_VISION_MINUTES_PER_RUN`). **Process new mail** only reads pages this computer reads in under a minute, and starting CloseDesk reads none. When you ask about a scan, pages that take under a minute in all are read before the answer; a longer read is offered under the answer with its time (*Read 2 pages with the vision model as well: about 18 minutes on this computer*), runs in the background, and **Ask again** answers from both readings.
 - **Only when I ask**: nothing is read until you click **Read with the vision model** on the file or under an answer.
@@ -153,15 +153,29 @@ Looking at a page is slow on a laptop without a graphics card (minutes a page; a
 
 A read runs in the background, one page at a time; **Stop** in the bar at the top ends it after the page being read. The model reads greedily (the most faithful copy of each figure); when it falls into repeating a line or a cell, the reading is stopped there and the page is read once more with the sampling Qwen recommends, which breaks the loop. A reading cut off at the length limit is not used (the page stays OCR's), and a page the model fails on twice is only read again when you ask.
 
-Measured on 15 scanned pages of 12 finance reports the model had never seen (balance sheet, trial balance, AP register, GL detail, 13-week cash forecast and others, as image-only scans with tilt, noise and JPEG compression), with Qwen3.5 9B (Q4_K_M) and every cell checked against the original workbook:
+Measured on 29 scanned pages of 26 documents none of the models had seen, in three sets: a month-end close package (balance sheet, income statement, trial balance, AP register, GL detail and schedules), a second company's schedules with 6 pages of real published annual reports, and invoices, purchase orders, receipts and bank statements in different vendors' and banks' layouts. Each was made an image-only scan (tilt, noise, JPEG compression) and every figure checked against the original:
 
-| | OCR alone | Vision model alone | Both, as CloseDesk shows them |
+| | OCR alone | OCR + Qwen3.5 9B | OCR + OvisOCR2 |
 |---|---:|---:|---:|
-| Table cells read exactly (right row and column) | 0.7% | 48% | 46% |
-| The reports' figures found on the page | 78% | 96% | 90% |
-| Figures read that are nowhere on the page | 2.2% | 9.4% | 2.2% |
+| Figures in their right row (on the line naming their row) | 26.8% | 85.5% | **99.6%** |
+| Figures found | 83.4% | 92.6% | **99.6%** |
+| Figures read that are nowhere on the page | 24 | 24 | **0** |
+| Time a page (4-core server, no graphics card) | 4 s | 8.4 min | 2.9 min |
 
-The model's table was shown on 11 of the 15 pages; on the 4 densest pages (an AP register and a GL detail in small print) it misread digits and swapped rows, the readings disagreed, and OCR's reading was kept. A page took about 12 minutes on a 4-core server without a graphics card (dense pages up to 45 with a second reading); a graphics card or Apple silicon is many times faster, and CloseDesk measures it on each computer. The choice rule and the two-line heading handling were tuned on these same pages.
+By kind of document (figures in their right row, and figures read that aren't on the page):
+
+| Kind of document | Pages | OCR alone | OCR + Qwen3.5 9B | OCR + OvisOCR2 |
+|---|---:|---:|---:|---:|
+| Invoices | 4 | 42.6%, 0 wrong | 100%, 0 wrong | 100%, 0 wrong |
+| Purchase orders | 2 | 20.8%, 0 wrong | 100%, 0 wrong | 100%, 0 wrong |
+| Receipts | 2 | 25.0%, 0 wrong | 100%, 0 wrong | 100%, 0 wrong |
+| Bank statements | 2 | 13.6%, 0 wrong | 100%, 0 wrong | 100%, 0 wrong |
+| Financial statements | 4 | 25.6%, 0 wrong | 99.0%, 1 wrong | 100%, 0 wrong |
+| Annual report pages | 3 | 3.1%, 0 wrong | 100%, 0 wrong | 100%, 0 wrong |
+| Registers and ledgers | 7 | 14.4%, 23 wrong | 38.9%, 22 wrong | 100%, 0 wrong |
+| Schedules and reports | 5 | 38.8%, 1 wrong | 95.2%, 1 wrong | 98.9%, 0 wrong |
+
+On their own, before the comparison with OCR, OvisOCR2 read 0 figures that aren't on the page and Qwen3.5 9B 137, mostly on dense registers and ledgers in small print; that is why CloseDesk kept OCR's reading on 4 of the 29 pages for Qwen3.5 9B and on 0 for OvisOCR2. The choice rule and the heading handling were tuned on the close package; on the other two sets (14 documents), never used for tuning: 100% in the right row with OvisOCR2, 100% with Qwen3.5 9B, 24.7% with OCR alone. A graphics card or Apple silicon reads pages many times faster, and CloseDesk measures it on each computer.
 
 ### Fraud check
 
