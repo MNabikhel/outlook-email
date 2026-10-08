@@ -28,12 +28,13 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from controller_inbox import tables
 from controller_inbox.documents import MAX_PDF_PAGES
-from controller_inbox.local_llm import EmptyReply, check_model, strip_thinking, stream_text
+from controller_inbox.local_llm import EmptyReply, check_model, load_for_reading, strip_thinking, stream_text
 
 if TYPE_CHECKING:
     from controller_inbox.config import Settings
@@ -85,12 +86,14 @@ class Reader:
     dpi: int = 0
     max_side: int = 0
     max_tokens: int = 0
+    context: int = 0  # LM Studio loads it with this much context (a page's picture and its reading)
 
 
 # OvisOCR2 (0.85B, Apache-2.0, a Qwen3.5-0.8B trained to read document pages) with its own prompt, which asks for
 # tables in HTML (merged headings and all). Measured on scanned finance reports it never saw, it read the figures
 # more accurately than Qwen3.5-9B, several times faster: see README. 200 DPI with the long side at 2,048 pixels (LM
-# Studio shrinks larger pictures to that anyway) gives it about 3,000 image tokens of a letter page.
+# Studio shrinks larger pictures to that anyway) gives it about 3,700 image tokens of a letter page; with its reading
+# of up to 12,288 tokens, it is loaded with a 20,480-token context.
 OVIS_PROMPT = (
     "\nExtract all readable content from the image in natural human reading order and output the result as a single "
     "Markdown document. For charts or images, represent them using an HTML image tag: <img src=\"images/bbox_{left}_"
@@ -100,22 +103,19 @@ OVIS_PROMPT = (
 )
 GENERAL = Reader("a general model that can see")
 # Models made for reading document pages, by a word in their name: preferred over a general one when downloaded.
-READERS = {"ovisocr": Reader("OvisOCR2, a document reader", OVIS_PROMPT, 200, 2048, 12288)}
-
-
-def _plain(name: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+READERS = {"ovisocr": Reader("OvisOCR2, a document reader", OVIS_PROMPT, 200, 2048, 12288, 20480)}
 
 
 def reader_for(model: str) -> Reader:
     """How this model reads pages: a known document reader's own way, else a general model's."""
-    plain = _plain(model)
+    plain = re.sub(r"[^a-z0-9]", "", (model or "").lower())
     return next((reader for key, reader in READERS.items() if key in plain), GENERAL)
 
 
 def reading_model(settings: Settings) -> str:
-    """The model that reads pages: the one chosen in Setup; else a document reader the server has (LM Studio loads a
-    downloaded one when it is first asked); else the chat model when it can see. "" when there is none."""
+    """The model that reads pages: the one chosen in Setup, while the server has it; else a document reader the server
+    has (LM Studio loads a downloaded one when it is first asked); else the chat model when it can see. "" when there
+    is none."""
     if settings.vision_mode == "off":
         return ""
     status = check_model(settings)
@@ -123,7 +123,7 @@ def reading_model(settings: Settings) -> str:
         return ""
     chosen = (settings.vision_model or "").strip()
     if chosen and chosen != "auto":
-        return chosen if chosen in status.vision_models or chosen in status.models else ""
+        return chosen if chosen in status.vision_models else ""
     for model in status.vision_models:
         if reader_for(model) is not GENERAL:
             return model
@@ -425,6 +425,25 @@ def _blank_row(line: str) -> bool:
 # The same few characters over and over at the end of the reading: empty cells written across one line without
 # end ("|  |  |  …"). Sixty in a row is more columns than any printed table has.
 _RUN = re.compile(r"(.{1,12}?)\1{59,}$", re.S)
+# A longer run written on one line: OvisOCR2 writes a whole table on one line, so a loop on an empty row is
+# "<tr><td></td><td></td></tr>" over and over. Thirty in a row, as for empty markdown rows.
+LONG_RUN = (13, 160, LOOP_BLANK_ROWS)
+
+
+def _long_run(text: str) -> tuple[int, int]:
+    """Where a run of one stretch of 13 to 160 characters, written thirty times or more, ends the text (start,
+    length of the stretch); (-1, 0) when it doesn't. A stretch repeats wherever each character is the one a stretch
+    before it, so the run is found wherever the reading stopped within a stretch."""
+    shortest, longest, times = LONG_RUN
+    tail = text[-longest * (times + 1):]
+    for size in range(shortest, longest + 1):
+        span = size * times
+        if len(tail) >= span + size and tail[-span:] == tail[-span - size:-size]:
+            start = len(text) - span - size
+            while start > 0 and text[start - 1] == text[start - 1 + size]:
+                start -= 1
+            return start, size
+    return -1, 0
 
 
 def _looping(text: str) -> bool:
@@ -432,13 +451,16 @@ def _looping(text: str) -> bool:
     run = _repeated_tail(lines)
     if run >= LOOP_LINES or (run >= LOOP_BLANK_ROWS and _blank_row(lines[-1])):
         return True
-    return bool(_RUN.search(text[-1500:].rstrip()))
+    return bool(_RUN.search(text[-1500:].rstrip())) or _long_run(text.rstrip())[0] >= 0
 
 
 def trim_loop(text: str) -> tuple[str, bool]:
     """The reading without a line the model repeated at its end (kept once when it says something), or without
     the characters it repeated across its last line. Blank lines between repeated lines are passed over, as
     ``_looping`` does."""
+    start, size = _long_run(text.rstrip())
+    if start >= 0:
+        return text.rstrip()[: start + size], True  # the stretch once: it can be a row the page has
     tail = _RUN.search(text[-1500:].rstrip())
     if tail:
         cut = len(text[-1500:].rstrip()) - len(tail.group(0))
@@ -486,97 +508,172 @@ _RULE_ROW = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$")
 _FORMATTING = re.compile(r"(?<!\*)\*\*(?!\*)|__|`")
 
 
-_HTML_TABLE = re.compile(r"<table\b.*?</table>", re.S | re.I)
-_HTML_ROW = re.compile(r"<tr\b[^>]*>(.*?)</tr>", re.S | re.I)
-_HTML_CELL = re.compile(r"<t([dh])\b([^>]*)>(.*?)</t[dh]>", re.S | re.I)
-_SPAN = re.compile(r"""\b(colspan|rowspan)\s*=\s*["']?(\d+)""", re.I)
+_TABLE_TAG = re.compile(r"<(/?)table\b[^>]*>", re.I)
 _PICTURE = re.compile(r"^\s*<img\b[^>]*>\s*$", re.M | re.I)  # a region the model saw as a picture (OvisOCR2)
 
 
-def _html_cell_text(markup: str) -> str:
-    import html
+def _html_table_spans(text: str) -> list[tuple[int, int]]:
+    """Where each outermost table is; a table the reading stopped in runs to its end."""
+    spans, depth, start = [], 0, 0
+    for match in _TABLE_TAG.finditer(text):
+        if not match.group(1):
+            if not depth:
+                start = match.start()
+            depth += 1
+        elif depth:
+            depth -= 1
+            if not depth:
+                spans.append((start, match.end()))
+    if depth:
+        spans.append((start, len(text)))
+    return spans
 
-    text = re.sub(r"<br\s*/?>", " ", markup, flags=re.I)
-    text = html.unescape(re.sub(r"<[^>]+>", "", text))
-    return " ".join(text.split()).replace("|", "/")
+
+class _TableCells(HTMLParser):
+    """A table's rows of cells (kind, colspan, rowspan, text), as a browser would read them: a cell or a row ends at
+    the next one even without its closing tag, other tags are spaces, and a table inside a cell is that cell's text."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[list]] = []
+        self.depth = 0
+        self.cell: list | None = None
+
+    def _space(self) -> None:
+        if self.cell is not None:
+            self.cell[3].append(" ")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "table":
+            self.depth += 1
+            self._space()
+        elif self.depth > 1 or tag not in {"tr", "td", "th"}:
+            self._space()
+        elif tag == "tr":
+            self.cell = None
+            self.rows.append([])
+        else:
+            if not self.rows:
+                self.rows.append([])
+            spans = {name: value for name, value in attrs}
+
+            def span(name: str, most: int) -> int:
+                value = re.sub(r"\D", "", spans.get(name) or "")
+                return max(1, min(int(value), most)) if value else 1
+
+            self.cell = [tag, span("colspan", 50), span("rowspan", 200), []]
+            self.rows[-1].append(self.cell)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "table":
+            self.depth -= 1
+            if self.depth <= 0:
+                self.cell = None
+            else:
+                self._space()
+        elif self.depth == 1 and tag in {"tr", "td", "th"}:
+            self.cell = None
+        else:
+            self._space()
+
+    def handle_data(self, data: str) -> None:
+        if self.cell is not None:
+            self.cell[3].append(data)
 
 
 def _html_grid(table: str) -> tuple[list[str], list[list[str]], int]:
     """The table's title lines, its cells on a grid, and how many rows at the top of the grid are column headings.
 
-    Document models write a report's title into the table (one text across the row: the company, the report, its
-    period) and mark no cell as a heading, so the titles come out as lines above the table, and a heading row is one
-    with labels over the figure columns and no figures (a date or a year there is a label: "October 31", "10/09/26").
-    A row with one label across it (ASSETS, "Operating Receipts") starts a section, so it ends the headings. A merged
-    heading is written over every column and row it covers (it names each of them); a merged cell in the body only in
-    its first column, so a label or figure isn't repeated across the row, though a label merged down the rows (a
-    category) is kept on each of them."""
+    Document models write a report's title into the table (one text across the row from its first column: the
+    company, the report, its period) and mark no cell as a heading, so the titles come out as lines above the table.
+    The first heading row has labels over the figure columns and no figures (a date or an aging bucket there is a
+    label: "October 31", "10/09/26", "1-30"); a row under it is a heading too while a heading above reaches into it
+    (merged down) or groups the columns it names ("Q3 2026" over Actual and Budget). A row with one label across it
+    (ASSETS, "Operating Receipts") starts a section. A two-column table is a list of labels and values ("Invoice No. |
+    INV-20417") unless it marks its headings. A merged heading is written over every column and row it covers (it
+    names each of them); a merged cell in the body only in its first column, so a label or figure isn't repeated
+    across the row, though a label merged down the rows (a category) is kept on each of them."""
+    parser = _TableCells()
+    parser.feed(table)
+    parser.close()
     grid: list[list[str]] = []
     marked: list[bool] = []  # every cell of the row a <th>
+    grouping: list[bool] = []  # a cell merged across figure columns
+    reached: list[set[int]] = []  # the rows above whose cells are merged down into this one
     copies: set[tuple[int, int]] = set()  # cells holding a merged cell's text again
-    pending: dict[tuple[int, int], str] = {}  # (row, column) -> text of a cell merged down into it
-    for r, row_markup in enumerate(_HTML_ROW.findall(table)):
+    pending: dict[tuple[int, int], tuple[str, int]] = {}  # (row, column) -> (text, row) of a cell merged down into it
+    for r, cells in enumerate(parser.rows):
         row: list[str] = []
-        cells = _HTML_CELL.findall(row_markup)
+        from_above: set[int] = set()
 
         def take_pending() -> None:
             while (r, len(row)) in pending:
-                text = pending.pop((r, len(row)))
+                text, source = pending.pop((r, len(row)))
+                from_above.add(source)
                 if grid_is_data(text):
                     copies.add((r, len(row)))
                 row.append(text)
 
-        for _kind, attrs, markup in cells:
+        groups = False
+        for _kind, colspan, rowspan, parts in cells:
             take_pending()
-            spans = {name.lower(): int(value) for name, value in _SPAN.findall(attrs)}
-            text = _html_cell_text(markup)
-            for offset in range(max(1, min(spans.get("colspan", 1), 50))):
+            text = " ".join("".join(parts).split()).replace("|", "/")
+            groups = groups or (colspan > 1 and len(row) > 0)
+            for offset in range(colspan):
                 if offset:
                     copies.add((r, len(row)))
-                for down in range(1, max(1, min(spans.get("rowspan", 1), 200))):
-                    pending[(r + down, len(row))] = text
+                for down in range(1, rowspan):
+                    pending[(r + down, len(row))] = (text, r)
                 row.append(text)
         take_pending()
         grid.append(row)
-        marked.append(bool(cells) and all(kind.lower() == "h" for kind, _attrs, _text in cells))
+        marked.append(bool(cells) and all(cell[0] == "th" for cell in cells))
+        grouping.append(groups)
+        reached.append(from_above)
+    width = max((len(row) for row in grid), default=0)
 
     def title(row: list[str]) -> bool:
         """Blank, or one text from the first column on (a text over the figure columns only is their heading)."""
         return all(not cell or cell == row[0] for cell in row)
 
-    def heading(r: int) -> bool:
+    def labels_only(r: int) -> bool:
         row = grid[r]
-        if marked[r]:
-            return True
         labels = [cell for cell in row[1:] if cell and cell != row[0]]
         return bool(labels) and not any(_heading_figure(cell) for cell in row if cell)
+
+    def first_heading(r: int) -> bool:
+        return marked[r] or (width >= 3 and labels_only(r))
 
     # Titles: the rows of one text (or none) above the first heading row, when there is one.
     top = 0
     while top < min(len(grid), 8) and title(grid[top]) and not marked[top]:
         top += 1
-    if not (top < len(grid) and heading(top)):
+    if not (top < len(grid) and first_heading(top)):
         top = 0
     titles = [next(cell for cell in row if cell) for row in grid[:top] if any(row)]
-    grid, marked = grid[top:], marked[top:]
-    copies = {(r - top, column) for r, column in copies if r >= top}
     heading_rows = 0
-    while heading_rows < min(3, len(grid) - 1) and heading(heading_rows):
-        heading_rows += 1
+    if top < len(grid) - 1 and first_heading(top):
+        heading_rows = 1
+        while heading_rows < 3 and top + heading_rows < len(grid) - 1:
+            r = top + heading_rows
+            above = range(top, r)
+            if not (marked[r] or (labels_only(r) and (reached[r] & set(above) or grouping[r - 1]))):
+                break
+            heading_rows += 1
+    grid = grid[top:]
     for r, column in copies:
-        if r >= heading_rows and column < len(grid[r]):
-            grid[r][column] = ""
+        if r - top >= heading_rows and r >= top and column < len(grid[r - top]):
+            grid[r - top][column] = ""
     return titles, grid, heading_rows
 
 
-_MONTH_DAY = re.compile(
-    r"^(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?(\s+\d{2,4})?$", re.I
-)
+# An amount, as a heading row can't hold one ("1-30", "Oct 2026" and "10/09/26" are labels there).
+_AMOUNT = re.compile(r"[-−(]?\s?[$€£]?\s?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\)?%?")
 
 
 def _heading_figure(text: str) -> bool:
-    """A figure in a row that may be headings: a date there is a column's label."""
-    return grid_is_data(text) and not _DATE.fullmatch(text) and not _MONTH_DAY.match(text)
+    text = text.strip()
+    return bool(_AMOUNT.fullmatch(text)) and not _YEAR_LABEL.match(text)
 
 
 def grid_is_data(text: str) -> bool:
@@ -589,8 +686,8 @@ def _html_tables_as_markdown(text: str) -> str:
     one heading line: the heading rows joined per column ("Revenue Recognized" over "Oct-26": "Revenue Recognized
     Oct-26"), so the rest of this module reads it like any other."""
 
-    def one(match: re.Match[str]) -> str:
-        titles, grid, heading_rows = _html_grid(match.group(0))
+    def one(table: str) -> str:
+        titles, grid, heading_rows = _html_grid(table)
         if not grid:
             return "\n\n" + "\n\n".join(titles) + "\n\n" if titles else ""
         width = max(len(row) for row in grid)
@@ -604,14 +701,20 @@ def _html_tables_as_markdown(text: str) -> str:
                         parts.append(row[column])
                 header.append(" ".join(parts))
             body = grid[heading_rows:]
-        else:
-            header, body = [""] * width, grid
+        else:  # the names a table without headings gets anyway, so its first row isn't taken for a second heading line
+            header, body = ["", *(f"Column {index + 1}" for index in range(1, width))], grid
         lines = ["| " + " | ".join(header) + " |", "|" + "---|" * width]
         lines += ["| " + " | ".join(row) + " |" for row in body]
         return "\n\n" + "".join(title + "\n\n" for title in titles) + "\n".join(lines) + "\n\n"
 
     text = _PICTURE.sub("", text or "")
-    return _HTML_TABLE.sub(one, text) if "<table" in text.lower() else text
+    if "<table" not in text.lower():
+        return text
+    out, last = [], 0
+    for start, end in _html_table_spans(text):
+        out += [text[last:start], one(text[start:end])]
+        last = end
+    return "".join(out) + text[last:]
 
 
 def page_text(markdown: str) -> str:
@@ -1095,8 +1198,18 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
     if not same_file(att, data):
         result.failed.append("the file kept under this name isn't this attachment")
         return result
-    model = reading_model(settings) or settings.llm_model
+    model = reading_model(settings)
+    if not model:  # the model went away since the read was offered: nothing is counted against the pages
+        result.failed.append("no model that can look at pictures is answering")
+        return result
     reader = reader_for(model)
+    problem = load_for_reading(settings, model, reader.context)
+    if problem:
+        log.warning("%s", problem)
+        status = check_model(settings)
+        if model not in status.models and model not in {key for key, _size in status.instances.values()}:
+            result.failed.append(problem)  # LM Studio won't load it when asked either: nothing is counted against the pages
+            return result
     suffix = Path(att.filename).suffix.lower()
     scanned = set(scanned_pages(data)) if suffix == ".pdf" else set()
     stored_text = store.stored_text(att.id)
@@ -1119,7 +1232,8 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
         started = time.monotonic()
         try:
             png = render(data, att.filename, page, reader=reader)
-            markdown = mask_secrets(transcribe(settings, png, model=model))
+            # HTML tables (a document reader's) as markdown first, so a number in the cell beside "Account No." is masked.
+            markdown = mask_secrets(_html_tables_as_markdown(transcribe(settings, png, model=model)))
         except Blank:
             markdown = ""  # a blank page (the back of a sheet): nothing on it to read
         except Exception as exc:  # one page failing doesn't lose the others
@@ -1259,8 +1373,8 @@ def read_waiting(
 
 def seconds_per_page(store: Store, settings: Settings) -> float | None:
     """The typical time the model that reads pages has taken on this computer, or None before its first page."""
-    model = reading_model(settings) or settings.llm_model
-    recent = store.vision_seconds(model, limit=12)
+    model = reading_model(settings)
+    recent = store.vision_seconds(model, limit=12) if model else []
     return statistics.median(recent) if recent else None
 
 
@@ -1381,6 +1495,11 @@ def offer(store: Store, settings: Settings, email: EmailRecord, att: AttachmentR
         reason = "The page renderer isn't installed. Double-click CloseDesk once (or run pip install -e .) to add it."
     elif not check_model(settings).reachable:
         reason = "No model server is answering. Start LM Studio's server to read scans both ways."
+    elif settings.vision_model and not available(settings):
+        reason = (
+            f"The model chosen in Setup to read pages ({settings.vision_model}) isn't in LM Studio now. Choose another "
+            "one in Setup, or Automatic, to read scans both ways."
+        )
     elif not available(settings):
         reason = (
             "No model in LM Studio can look at pictures. Download OvisOCR2 (a small model made for reading document "

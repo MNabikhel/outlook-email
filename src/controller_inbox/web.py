@@ -1148,12 +1148,16 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         on = settings if settings.vision_mode != "off" else settings.model_copy(update={"vision_mode": "auto"})
         reader = vision.reading_model(on)
         per_page = vision.seconds_per_page(store, on) if reader else None
+        # A model chosen in Setup that LM Studio no longer has stays chosen (listed as gone) until another is.
+        missing = settings.vision_model if settings.vision_model and settings.vision_model not in model.vision_models else ""
         return {
+            "reachable": model.reachable,
             "sees": bool(reader),
             "reader": reader,
             "reader_label": vision.reader_for(reader).label if reader else "",
             "chosen": settings.vision_model or "auto",
-            "choices": model.vision_models,
+            "missing": missing,
+            "choices": [*model.vision_models, *([missing] if missing else [])],
             "renderer": vision.can_render(),
             "mode": settings.vision_mode,
             "pages_read": store.vision_pages_read(),

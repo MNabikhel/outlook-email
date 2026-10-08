@@ -404,6 +404,12 @@ def test_time_is_said_in_words():
     assert vision.offer_text(3, 1800) == "Read 3 pages with the vision model as well: about 30 minutes on this computer."
 
 
+def _can_read(monkeypatch, model: str = "local-model") -> None:
+    """As if a model that can see were loaded (one the tests don't serve)."""
+    monkeypatch.setattr(vision, "available", lambda _s: True)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: model)
+
+
 def _seconds_per_page(store, seconds: float) -> None:
     """As if this computer had read a page of another file in ``seconds``."""
     store.save_page_reading("earlier-file", 1, first="x", model_text="x", model="local-model", seconds=seconds, comparison="{}", sha256="s")
@@ -421,7 +427,7 @@ def _chat_model(monkeypatch, answer: str = "The receivable is 30,250 [1]."):
     monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: (_ for _ in ()).throw(assistant.ToolsUnsupported("no tools")))
     monkeypatch.setattr(assistant, "stream_text", stream)
     monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "Plan: none.\nSQL: NONE")
-    monkeypatch.setattr(vision, "available", lambda _s: True)
+    _can_read(monkeypatch)
     return asked
 
 
@@ -471,7 +477,7 @@ def test_the_answer_check_flags_a_figure_only_the_model_read():
 
 
 def test_the_overnight_run_reads_waiting_scans_within_its_time(scan, store, settings, monkeypatch):
-    monkeypatch.setattr(vision, "available", lambda _s: True)
+    _can_read(monkeypatch)
     read = []
     monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: read.append(1) or BALANCE)
     assert vision.read_waiting(store, settings, minutes=0).pages == 0, "starting CloseDesk reads no pages"
@@ -617,6 +623,7 @@ def test_a_reading_cut_off_at_the_length_limit_is_not_kept(scan, store, settings
 
 
 def test_a_blank_page_is_read_as_blank_not_failed(scan, store, settings, monkeypatch):
+    _can_read(monkeypatch)
     monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: (_ for _ in ()).throw(vision.Blank("nothing")))
     assert _read(store, settings, scan.id).pages == 1
     shown = store.get_email(scan.id).attachments[0].extracted_text
@@ -626,7 +633,7 @@ def test_a_blank_page_is_read_as_blank_not_failed(scan, store, settings, monkeyp
 def test_a_page_that_keeps_failing_is_left_for_the_user_and_the_night_moves_on(store, settings, monkeypatch):
     first = _ingest_scan(store, settings, monkeypatch, subject="Older scan")
     second = _ingest_scan(store, settings, monkeypatch, subject="Newer scan")
-    monkeypatch.setattr(vision, "available", lambda _s: True)
+    _can_read(monkeypatch)
     bad = store.get_email(second.id).attachments[0].id
     read = []
 
@@ -766,7 +773,7 @@ def test_the_offer_comes_with_an_overnight_summary_too(scan, store, settings, mo
 
 
 def test_a_budget_too_small_for_one_page_doesnt_look_through_the_mail(scan, store, settings, monkeypatch):
-    monkeypatch.setattr(vision, "available", lambda _s: True)
+    _can_read(monkeypatch)
     monkeypatch.setattr(vision, "files_to_read", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("looked")))
     assert vision.read_waiting(store, settings, minutes=0).pages == 0
     _seconds_per_page(store, 300)
@@ -1038,10 +1045,17 @@ OVIS_PAGE = """# BALANCE SHEET
 class ReaderServer(FakeVisionServer):
     """LM Studio with a chat model loaded that can't see, and OvisOCR2 downloaded (loaded when a request names it)."""
 
-    def __init__(self, **kw):
+    def __init__(self, *, jit: bool = True, **kw):
         super().__init__(OVIS_PAGE, **kw)
+        self.jit = jit
+        self.loads: list[dict] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":  # with just-in-time loading off, only the loaded models
+            return httpx.Response(200, json={"data": [{"id": MODEL}, *([{"id": OVIS}] if self.jit else [])]})
+        if request.url.path == "/api/v1/models/load":
+            self.loads.append(json.loads(request.content))
+            return httpx.Response(200, json={"status": "loaded"})
         if request.url.path == "/api/v1/models":
             chat = {"type": "llm", "key": MODEL, "loaded_instances": [{"id": MODEL, "config": {"context_length": 16384}}],
                     "capabilities": {"vision": False, "reasoning": {"allowed_options": ["off", "on"], "default": "on"}}}
@@ -1102,9 +1116,13 @@ def test_setup_shows_and_saves_the_model_that_reads_pages(store, settings, reade
     assert fresh.vision_model == OVIS
     client.post("/settings/vision", data={"mode": "auto", "model": "auto"}, headers=origin, follow_redirects=False)
     assert settings.vision_model == "" and vision.reading_model(settings) == OVIS
-    # A model chosen in Setup that is gone from LM Studio reads nothing, rather than some other model.
+    # A model chosen in Setup that is gone from LM Studio reads nothing, rather than some other model; Setup says so
+    # and keeps it chosen.
     settings.vision_model = "gemma-3-12b"
     assert vision.reading_model(settings) == "" and not vision.available(settings)
+    page = client.get("/settings").text
+    assert "The model chosen to read pages, <b>gemma-3-12b</b>, isn't in LM Studio now" in page
+    assert '<option value="gemma-3-12b" selected>gemma-3-12b (not in LM Studio now)</option>' in page
     # Saving only the mode (the classic form without a model choice) keeps the model chosen.
     vision.save_mode(settings, store, "ask")
     assert settings.vision_model == "gemma-3-12b"
@@ -1114,4 +1132,126 @@ def test_with_vision_off_setup_still_says_which_model_would_read(store, settings
     vision.save_mode(settings, store, "off")
     assert vision.reading_model(settings) == ""
     page = TestClient(web.create_app(settings, store)).get("/settings").text
-    assert f"Pages are read by <b>{OVIS}</b>" in page
+    assert f"When it's on, pages are read by <b>{OVIS}</b>" in page
+
+
+def test_the_reader_is_loaded_with_room_for_a_page_once_and_never_taken_for_the_chat_model(scan, store, settings, reader_server, monkeypatch):
+    _read(store, settings, scan.id)
+    assert reader_server.loads == [{"model": OVIS, "context_length": 20480}], "loaded with room for a page and its reading"
+    _read(store, settings, scan.id)
+    assert len(reader_server.loads) == 1, "asked once"
+    local_llm._status_cache.clear()
+
+    def reader_loaded_first(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/models":
+            reader = {"type": "llm", "key": OVIS, "loaded_instances": [{"id": OVIS, "config": {"context_length": 20480}}],
+                      "capabilities": {"vision": True}}
+            chat = {"type": "llm", "key": MODEL, "loaded_instances": [{"id": MODEL, "config": {"context_length": 16384}}],
+                    "capabilities": {"vision": False}}
+            return httpx.Response(200, json={"models": [reader, chat]})
+        return reader_server(request)
+
+    _serve(monkeypatch, reader_loaded_first)
+    status = check_model(settings)
+    assert status.model == MODEL and status.vision_models == [OVIS] and vision.reading_model(settings) == OVIS
+    assert local_llm._pick_model("local-model", [OVIS], [OVIS]) == "", "a document reader alone is no chat model"
+
+
+def test_lm_studio_without_just_in_time_loading_or_with_nothing_loaded(scan, store, settings, monkeypatch):
+    settings.llm = None
+    server = ReaderServer(jit=False)
+    _serve(monkeypatch, server)
+    assert vision.reading_model(settings) == OVIS, "CloseDesk has LM Studio load it"
+    assert _read(store, settings, scan.id).pages == 1 and server.loads == [{"model": OVIS, "context_length": 20480}]
+    # LM Studio can't load it (not enough memory): the read stops saying so, and no page is counted as failed.
+    local_llm._status_cache.clear()
+    local_llm._reader_loads.clear()
+    refused = ReaderServer(jit=False)
+    original = refused.__call__
+
+    def no_memory(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/models/load":
+            return httpx.Response(500, json={"error": "not enough memory"})
+        return original(request)
+
+    _serve(monkeypatch, no_memory)
+    result = _read(store, settings, scan.id)
+    assert result.pages == 0 and "couldn't load ath-maas_ovisocr2 with a 20,480-token context" in result.failed[0]
+    assert not store.page_failures(scan.attachments[0].id)
+    local_llm._status_cache.clear()
+
+    def nothing_loaded(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": MODEL}, {"id": OVIS}]})
+        if request.url.path == "/api/v1/models":
+            chat = {"type": "llm", "key": MODEL, "loaded_instances": [], "capabilities": {"vision": False}}
+            reader = {"type": "llm", "key": OVIS, "loaded_instances": [], "capabilities": {"vision": True}}
+            return httpx.Response(200, json={"models": [chat, reader]})
+        return httpx.Response(404)
+
+    _serve(monkeypatch, nothing_loaded)
+    status = check_model(settings)
+    assert status.model == MODEL and status.vision_models == [OVIS] and vision.reading_model(settings) == OVIS
+
+
+def test_a_model_chosen_in_setup_must_see_and_one_gone_is_said_so(scan, store, settings, reader_server):
+    settings.vision_model = MODEL  # loaded, but text only
+    assert vision.reading_model(settings) == ""
+    settings.vision_model = "gemma-3-12b"
+    email = store.get_email(scan.id)
+    reason = vision.offer(store, settings, email, email.attachments[0])["reason"]
+    assert "The model chosen in Setup to read pages (gemma-3-12b) isn't in LM Studio now" in reason
+    # Gone in the middle of a read: the read stops, and the pages aren't counted as failed.
+    result = _read(store, settings, scan.id)
+    assert result.pages == 0 and result.failed == ["no model that can look at pictures is answering"]
+    assert not store.page_failures(email.attachments[0].id)
+
+
+def test_html_tables_as_a_reader_writes_invoices_agings_and_broken_markup():
+    # An invoice's list of labels and values isn't a heading over columns.
+    invoice = ("<table><tr><td>Invoice No.</td><td>INV-20417</td></tr><tr><td>Invoice Date</td><td>10/14/2026</td></tr>"
+               "<tr><td>PO Number</td><td>PO 45120</td></tr><tr><td>Subtotal</td><td>4,250.00</td></tr></table>")
+    page = vision.page_text(invoice)
+    assert "Invoice No." in page and page.count("20417") == 1 and page.count("45120") == 1
+    assert "Subtotal" in page and page.count("4,250.00") == 1
+    # Aging buckets and months are column labels.
+    aging = ('<table><tr><td colspan="5">AR Aging as of 10/31/26</td></tr>'
+             "<tr><td>Customer</td><td>Current</td><td>1-30</td><td>31-60</td><td>Oct 2026</td></tr>"
+             "<tr><td>Alpine Ridge</td><td>1,200.00</td><td>300.00</td><td>-</td><td>1,500.00</td></tr></table>")
+    page = vision.page_text(aging)
+    assert page.startswith("[notes]\nAR Aging as of 10/31/26\n\n[table]\nCustomer | Current | 1-30 | 31-60 | Oct 2026\n")
+    assert "Customer: Alpine Ridge | Current: 1,200.00 | 1-30: 300.00" in page
+    # A group heading over sub-headings, with nothing merged down.
+    grouped = ('<table><tr><td></td><td colspan="2">Q3 2026</td></tr><tr><td>Account</td><td>Actual</td><td>Budget</td></tr>'
+               "<tr><td>Rent</td><td>1,200.00</td><td>1,000.00</td></tr></table>")
+    assert "Account: Rent | Q3 2026 Actual: 1,200.00 | Q3 2026 Budget: 1,000.00" in vision.page_text(grouped)
+    # Markup a reading can come out with: no closing tags, no rows, tags inside a figure, a table it stopped in.
+    broken = ("<table><tr><td>Cash</td><td>1,100.00</td><td>9</td>"
+              "<tr><td>Rent<td>1,200.00<td>8</tr><tr><td>Fees</td><td>1,300.00</tr>"
+              "<tr><td>Total</td><td>9,999.00</td><td>8,888.00</td></table>"
+              "<table><td>Note</td><td>1,234.00</td></table>"
+              "<table><tr><td>Loan</td><td>5,000<sup>1</sup></td><td>7</td></tr><tr><td>Interest</td><td>77.00")
+    got = vision.figures(vision.page_text(broken))
+    for figure in ("1,100.00", "1,200.00", "1,300.00", "9,999.00", "8,888.00", "1,234.00", "5,000", "77.00"):
+        assert vision.Decimal(figure.replace(",", "")) in got, figure
+    assert "<t" not in vision.page_text(broken)
+
+
+def test_account_numbers_in_a_readers_html_tables_are_masked(scan, store, settings, monkeypatch):
+    _can_read(monkeypatch)
+    monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: (
+        "<table><tr><td>Account Number</td><td>123456789012</td></tr><tr><td>Cash</td><td>12,400</td></tr></table>"))
+    _read(store, settings, scan.id)
+    [row] = store.page_readings(scan.attachments[0].id, scan.attachments[0].sha256).values()
+    assert "123456789012" not in row["model_text"] and "****9012" in row["model_text"]
+    assert "123456789012" not in store.get_email(scan.id).attachments[0].extracted_text
+
+
+def test_a_reader_looping_on_an_empty_html_row_is_stopped():
+    row = "<tr><td></td><td></td><td></td></tr>"
+    reading = "<table><tr><td>Cash</td><td>1,200.00</td><td>9</td></tr>" + row * 40
+    assert vision._looping(reading)
+    kept, looped = vision.trim_loop(reading)
+    assert looped and kept.count("<tr><td></td>") == 1 and "1,200.00" in vision.page_text(kept)
+    ledger = "<table>" + "".join(f"<tr><td>Row {n}</td><td>{n * 37:,}.00</td></tr>" for n in range(300)) + "</table>"
+    assert not vision._looping(ledger)

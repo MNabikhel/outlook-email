@@ -33,7 +33,7 @@ def _answer(events: list[dict]) -> str:
 def _fake_server(monkeypatch, handler) -> None:
     """Point the model calls at an in-process OpenAI-style server."""
     transport = httpx.MockTransport(handler)
-    monkeypatch.setattr(local_llm, "_chat_request", lambda s, m, t, *, stream: ("http://model.test/v1/chat/completions", {"stream": stream}))
+    monkeypatch.setattr(local_llm, "_chat_request", lambda s, m, t, *, stream, **_kw: ("http://model.test/v1/chat/completions", {"stream": stream}))
     monkeypatch.setattr(local_llm.httpx, "post", lambda url, **kw: httpx.Client(transport=transport).post(url, json=kw.get("json")))
     monkeypatch.setattr(
         local_llm.httpx, "stream", lambda method, url, **kw: httpx.Client(transport=transport).stream(method, url, json=kw.get("json"))
