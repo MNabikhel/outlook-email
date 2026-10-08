@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from controller_inbox.table_lookup import tables_in
+from controller_inbox.table_lookup import lookup, tables_in, verify
 from controller_inbox.table_query import Tables
 
 AGING = """[page 1]
@@ -205,3 +205,32 @@ def test_a_long_table_reads_quickly():
     started = time.monotonic()
     tables_in("[page 1]\n[table]\nDate | Name | Debit | Balance\n" + "\n".join(rows))
     assert time.monotonic() - started < 2.0
+
+
+def test_a_minus_printed_last_is_a_negative():
+    # SAP and Oracle reports print a credit as "1,234.00-"; read as no figure, the total would lose it.
+    text = """[page 1]
+[table]
+Account | Department | Amount
+Account: 4000 Sales | Department: Retail | Amount: 10,000.00
+Account: 4100 Returns | Department: Retail | Amount: 1,234.00-
+Account: 5000 Rent | Department: Admin | Amount: 2,000.00
+Account: 5100 Fees | Department: Admin | Amount: 250.00
+Account: Total | Department: not listed | Amount: 11,016.00
+"""
+    assert verify(tables_in(text)[0]).mismatched == []
+    assert Tables([("GL.pdf", text)]).run("SELECT SUM(amount) FROM t1 WHERE account LIKE '%returns%'")[1] == [(-1234.0,)]
+    assert "Total of \"Amount\" (page 1) over 4 rows: 11,016.00" in lookup(text, "what is the total amount")
+
+
+def test_a_vendor_named_total_is_a_vendor_with_no_total_under_it():
+    text = """[page 1]
+[table]
+Vendor | Invoice | Due | Amount
+Vendor: Harbor Steel | Invoice: INV-1 | Due: 10/14/2026 | Amount: 4,500.00
+Vendor: Total Wine & More | Invoice: INV-2 | Due: 10/15/2026 | Amount: 1,250.00
+Vendor: Acme Supply | Invoice: INV-3 | Due: 10/16/2026 | Amount: 800.00
+Vendor: Blue Freight | Invoice: INV-4 | Due: 10/17/2026 | Amount: 300.00
+"""
+    assert [row.total for row in tables_in(text)[0].rows] == [False, False, False, False]
+    assert Tables([("AP.pdf", text)]).run("SELECT COUNT(*), SUM(amount) FROM t1")[1] == [(4, 6850.0)]

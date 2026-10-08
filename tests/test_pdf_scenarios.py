@@ -564,3 +564,106 @@ def test_a_wrapped_note_stays_on_its_row():
     assert "Item: Travel | Amount: 350 | Note: not listed" in text
     assert "Item: Lodging | Amount: 1,200 | Note: Prepaid" in text
     assert "Note: March" not in text
+
+
+def _sum_and_check(text: str) -> tuple[int, float, list[str]]:
+    from controller_inbox.table_lookup import tables_in, verify
+    from controller_inbox.table_query import Tables
+
+    table = tables_in(text)[0]
+    count, total = Tables([("sheet.pdf", text)]).run("SELECT COUNT(*), SUM(amount) FROM t1")[1][0]
+    return count, total, verify(table).mismatched
+
+
+def test_a_long_table_printed_on_without_its_headings_keeps_its_columns():
+    # Excel prints a long list over several pages without repeating its headings unless told to: the rows on the
+    # next page are the same table's, and its total counts every one of them.
+    columns = [(40, "left"), (200, "left"), (420, "right")]
+    body = [[f"Vendor {i:02d}", f"INV-{1000 + i}", f"{(i * 137) % 5000 + 100:,}.00"] for i in range(1, 61)]
+    total = sum(float(row[2].replace(",", "")) for row in body)
+    first = sheet_rows(columns, [["Vendor", "Invoice", "Amount"], *body[:40]], top=740, pitch=16)
+    rest = [*body[40:], ["Total", "", f"{total:,.2f}"]]
+    second = [
+        Text(x, 740 - r * 16, value, right=align == "right") for r, row in enumerate(rest) for (x, align), value in zip(columns, row) if value
+    ]
+    text = pdf_text(build_pdf([first, second]))
+    page_two = text.split("[page 2]\n", 1)[1]
+    assert "Vendor: Vendor 41 | Invoice: INV-1041 | Amount: 717.00" in page_two
+    assert "Vendor | 41" not in page_two
+    assert _sum_and_check(text) == (60, total, [])
+
+
+def test_a_next_page_with_a_table_of_its_own_is_not_given_the_names_before():
+    columns = [(40, "left"), (200, "left"), (420, "right")]
+    first = sheet_rows(columns, [["Vendor", "Invoice", "Amount"], ["Acme", "INV-1", "1,200.00"], ["Globex", "INV-2", "880.00"], ["Initech", "INV-3", "450.00"]])
+    # Two columns of figures in other places: not the table above.
+    second = [Text(x, 700 - r * 15, value, right=True) for r, row in enumerate([["10.00", "20.00"], ["30.00", "40.00"], ["50.00", "60.00"]]) for x, value in zip((300, 520), row)]
+    page_two = pdf_text(build_pdf([first, second])).split("[page 2]\n", 1)[1]
+    assert "Vendor:" not in page_two and "Amount:" not in page_two
+
+
+def test_negatives_in_the_accounting_format_are_figures_not_a_second_heading_row():
+    # Excel's accounting format draws "$" at the cell's left and "(1,234.00)" at its right: "$(1,234.00)".
+    rows = [
+        ["Account", "Q1", "Q2", "Q3"],
+        ["Refunds", "(1,234.00)", "(500.00)", "(75.25)"],
+        ["Sales", "10,000.00", "12,000.00", "9,500.00"],
+        ["Fees", "250.00", "300.00", "125.00"],
+        ["Rent", "2,000.00", "2,000.00", "2,000.00"],
+        ["Total", "11,016.00", "13,800.00", "11,549.75"],
+    ]
+    items = []
+    for r, row in enumerate(rows):
+        items.append(Text(40, 700 - r * 15, row[0], bold=r == 0))
+        for c, value in enumerate(row[1:]):
+            right = 260 + c * 110
+            if r:
+                items.append(Text(right - 80, 700 - r * 15, "$"))
+            items.append(Text(right, 700 - r * 15, value, bold=r == 0, right=True))
+    lines = _text(items).splitlines()
+    assert lines[0] == "Account | Q1 | Q2 | Q3"
+    assert "Account: Refunds | Q1: $(1,234.00) | Q2: $(500.00) | Q3: $(75.25)" in lines
+
+
+def test_a_note_in_a_column_without_a_heading_keeps_its_row_in_the_sums():
+    columns = [(40, "left"), (180, "left"), (330, "right"), (420, "left")]
+    rows = [
+        ["Vendor", "Invoice", "Amount", ""],
+        ["Harbor Steel", "INV-1", "4,500.00", "Disputed"],
+        ["Acme Supply", "INV-3", "800.00", ""],
+        ["Blue Freight", "INV-4", "300.00", ""],
+        ["Lakeside Power", "INV-5", "1,100.00", ""],
+        ["Total", "", "6,700.00", ""],
+    ]
+    text = _text(sheet_rows(columns, rows))
+    assert "Vendor: Harbor Steel | Invoice: INV-1 | Amount: 4,500.00 | Disputed" in text.splitlines()
+    assert _sum_and_check(text) == (4, 6700.0, [])
+
+
+def test_a_mark_on_some_rows_is_not_copied_onto_the_rows_without_it():
+    # A merged category is named once over its rows; "HOLD" twice in a Status column marks just those two invoices.
+    columns = [(40, "left"), (180, "left"), (260, "left"), (470, "right")]
+    rows = [
+        ["Vendor", "Status", "Invoice", "Amount"],
+        ["Harbor Steel", "HOLD", "INV-1", "4,500.00"],
+        ["Acme Supply", "", "INV-3", "800.00"],
+        ["Blue Freight", "", "INV-4", "300.00"],
+        ["Lakeside Power", "HOLD", "INV-5", "1,100.00"],
+    ]
+    lines = _text(sheet_rows(columns, rows)).splitlines()
+    assert "Vendor: Acme Supply | Status: not listed | Invoice: INV-3 | Amount: 800.00" in lines
+    assert "Vendor: Lakeside Power | Status: HOLD | Invoice: INV-5 | Amount: 1,100.00" in lines
+
+
+def test_whole_numbers_that_look_like_years_are_a_row_not_headings():
+    columns = [(40, "left"), (250, "right"), (360, "right"), (470, "right")]
+    rows = [
+        ["Item", "On Hand", "On Order", "Committed"],
+        ["Hex Bolts", "2000", "1950", "2010"],
+        ["Nuts", "450", "120", "300"],
+        ["Washers", "800", "75", "60"],
+        ["Screws", "1200", "500", "410"],
+    ]
+    lines = _text(sheet_rows(columns, rows)).splitlines()
+    assert lines[0] == "Item | On Hand | On Order | Committed"
+    assert "Item: Hex Bolts | On Hand: 2000 | On Order: 1950 | Committed: 2010" in lines
