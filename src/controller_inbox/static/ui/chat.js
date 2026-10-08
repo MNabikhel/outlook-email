@@ -1,5 +1,5 @@
 /* Ask CloseDesk, docked beside the reading pane. Answers stream in as newline-delimited JSON events
-   (sources, step, note, delta, revise, check, context, mode, error, done) from POST /chat, the same
+   (sources, step, note, delta, revise, check, context, vision, mode, error, done) from POST /chat, the same
    endpoint and events the classic chat uses. The question is about the open email unless you un-scope it. */
 
 import { h, icon, append, replace, toast, plural, reducedMotion } from "./dom.js";
@@ -27,7 +27,7 @@ const store = {
   },
 };
 
-export function createChat({ root, onToggle }) {
+export function createChat({ root, onToggle, visionRead }) {
   let chatId = store.get(CHAT_KEY);
   let turns = [];
   let loaded = false;
@@ -109,6 +109,63 @@ export function createChat({ root, onToggle }) {
     return box;
   }
 
+  /* An answer about a scanned file can offer to read its pages with the vision model too: a read of minutes runs
+     as the background job, and when it finishes the question can be asked again with both readings. */
+  function visionEl(turn) {
+    const vision = turn.vision;
+    if (!vision || turn.pending) return null;
+    if (vision.state === "done") {
+      // A file added to the conversation is read with the conversation; an email's file, about that email.
+      const about = String(vision.email_id || "").startsWith("chat-") ? undefined : vision.email_id;
+      return h(
+        "div",
+        { class: "msg-vision" },
+        h("p", null, vision.message),
+        h("button", { type: "button", class: "btn btn-sm", onclick: () => ask(vision.question, about) }, icon("refresh", 14), h("span", null, "Ask again"))
+      );
+    }
+    if (vision.state === "reading") return h("div", { class: "msg-vision" }, h("p", { class: "muted" }, vision.message));
+    const read = async (event) => {
+      event.currentTarget.disabled = true;
+      const result = visionRead ? await visionRead(vision.email_id, vision.n) : null;
+      if (result && result.started) {
+        vision.state = "reading";
+        vision.message = `Reading ${plural(result.pages.length, "page")} of ${vision.file} with the vision model. Ask again when it's done.`;
+      } else {
+        vision.message = result ? result.message : "It didn't start. Try again in a moment.";
+      }
+      repaint(turn);
+    };
+    return h(
+      "div",
+      { class: "msg-vision" },
+      h("p", null, vision.text),
+      vision.message ? h("p", { class: "muted" }, vision.message) : null,
+      h("button", { type: "button", class: "btn btn-sm", onclick: read }, icon("eye", 14), h("span", null, "Read with the vision model"))
+    );
+  }
+
+  // A read finished (or stopped, or failed): the offers for that file say so. Nothing read: offer it again.
+  window.addEventListener("closedesk:vision", (event) => {
+    const done = event.detail || {};
+    for (const turn of turns) {
+      const vision = turn.vision;
+      if (vision && vision.state !== "done" && vision.email_id === done.email_id && Number(vision.n) === Number(done.n)) {
+        vision.state = done.pages ? "done" : "offered";
+        vision.message = done.message;
+        repaint(turn);
+      }
+    }
+  });
+
+  // Each turn's element, so one turn can be redrawn without rebuilding the log under an answer still streaming.
+  const elements = new WeakMap();
+
+  function repaint(turn) {
+    const el = elements.get(turn);
+    if (el && el.isConnected) turnEl(turn, el);
+  }
+
   function turnEl(turn, el) {
     el = el || h("div");
     el.className = `msg ${turn.role === "user" ? "user" : "bot"}${turn.pending ? " pending" : ""}`;
@@ -131,6 +188,7 @@ export function createChat({ root, onToggle }) {
       answer,
       turn.checks && turn.checks.length ? h("ul", { class: "msg-check" }, turn.checks.map((item) => h("li", null, icon("ok", 13), h("span", null, item)))) : null,
       turn.context ? h("p", { class: "msg-context" }, turn.context, " ", h("a", { href: "/settings" }, "Setup")) : null,
+      visionEl(turn),
       cited.length
         ? h(
             "ul",
@@ -172,7 +230,14 @@ export function createChat({ root, onToggle }) {
       );
       return;
     }
-    replace(log, turns.map((turn) => turnEl(turn)));
+    replace(
+      log,
+      turns.map((turn) => {
+        const el = turnEl(turn);
+        elements.set(turn, el);
+        return el;
+      })
+    );
     log.scrollTop = log.scrollHeight;
   }
 
@@ -283,6 +348,7 @@ export function createChat({ root, onToggle }) {
     turns.push(answer);
     renderLog();
     const bubble = log.lastElementChild;
+    elements.set(answer, bubble);
     let frame = 0;
     const paint = () => {
       if (frame) return;
@@ -327,6 +393,9 @@ export function createChat({ root, onToggle }) {
               break;
             case "context":
               answer.context = event.text;
+              break;
+            case "vision":
+              answer.vision = { ...event, state: "offered", message: "" };
               break;
             case "mode":
               answer.mode = event.mode;

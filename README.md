@@ -127,6 +127,56 @@ Search by meaning: load an embedding model in LM Studio next to the chat model (
 
 Files on an email flagged as possible payment fraud are never given to the model and don't download. You can still read their text on the page.
 
+### Scanned pages read two ways
+
+OCR reads a scanned page's words but loses its table: the title runs into the column names and a row's figures land on the wrong line. When LM Studio has a model that can look at pictures, CloseDesk also shows it the page itself and asks for an exact transcription with every table as a table. The two readings are kept side by side and compared figure by figure.
+
+The model that reads pages:
+
+- **OvisOCR2** (recommended): a small model (0.85B, Apache-2.0) made for reading document pages. Download it in LM Studio (search *OvisOCR2*, the `ATH-MaaS_OvisOCR2-GGUF` build at Q8_0, about 1 GB); it doesn't need to be loaded. Before reading pages CloseDesk has LM Studio load it with room for a page and its reading (a 20,480-token context), and again if LM Studio unloaded it since; the chat model stays loaded beside it. If LM Studio can't load it (not enough memory), the read stops and says so, and it is asked again after half an hour or when Setup is saved. It is shown the page at about 190 DPI (2,048 pixels on the long side) and asked its own way (tables in HTML, merged headings kept); account and routing numbers in its tables are masked. It was the most accurate reader we measured and the fastest, see below.
+- Otherwise the chat model, when it can see (**Qwen3.5** 4B or 9B, Gemma 3; LM Studio shows an eye icon beside it), at about 100 DPI.
+
+**Setup → Reading scans with the model's vision** says which model reads pages, and the list there picks another one. **Automatic** uses a document reader when LM Studio has one, then the chat model. The comparison:
+
+- A figure both readings have is confirmed. Where they differ, both are kept, and each reading's printed totals are checked against the rows above them.
+- With a document reader (OvisOCR2), the page the chat and the table lookup read is its reading, whenever it read the page (OCR's stays only for a page it found nothing on). A note at the top of the page says so, and what OCR read differently is listed under it for whoever checks; those differences are OCR's misreads almost every time, so they don't flag the answer.
+- With a general model (Qwen3.5), the page is the model's reading when its totals hold up at least as well and most of its figures agree with OCR's; otherwise OCR's. A figure in an answer that only that model read (or read differently) gets a check under the answer: *check it against the file*.
+- The file's page (and the workspace's file view) shows both readings side by side, the figures they differ on marked.
+
+Pages read this way: a scanned PDF's pages, a picture, and a PDF page whose table doesn't add up as read. The original is never changed: the first reading stays stored, the model's beside it, and a reading is only used while the file is the same one it was made from.
+
+Looking at a page is slow on a laptop without a graphics card (minutes a page; a graphics card or Apple silicon is many times faster), so CloseDesk times each page on this computer and says how long a read will take before it starts one. **Setup → Reading scans with the model's vision** chooses:
+
+- **Automatically** (default): the overnight run reads waiting scans for up to 30 minutes (`CONTROLLER_INBOX_VISION_MINUTES_PER_RUN`), and starting CloseDesk reads none. With a document reader, scans are read by default: **Process new mail** reads waiting scans for as long as the overnight run does, and a question about a scan not read yet waits for its reading, page by page, when that takes under 10 minutes (before this computer's speed is known, for up to 3 pages); a longer read is offered. With a general model, **Process new mail** only reads pages this computer reads in under a minute, and when you ask about a scan, pages that take under a minute in all are read before the answer; a longer read is offered under the answer with its time (*Read 2 pages with the vision model as well: about 18 minutes on this computer*), runs in the background, and **Ask again** answers from both readings.
+- **Only when I ask**: nothing is read until you click **Read with the vision model** on the file or under an answer.
+- **Off**.
+
+A read runs in the background, one page at a time; **Stop** in the bar at the top ends it after the page being read. The model reads greedily (the most faithful copy of each figure); when it falls into repeating a line or a cell, the reading is stopped there and the page is read once more with the sampling Qwen recommends, which breaks the loop. A reading cut off at the length limit is not used (the page stays OCR's), and a page the model fails on twice is only read again when you ask.
+
+Measured on 29 scanned pages of 26 documents none of the models had seen, in three sets: a month-end close package (balance sheet, income statement, trial balance, AP register, GL detail and schedules), a second company's schedules with 6 pages of real published annual reports, and invoices, purchase orders, receipts and bank statements in different vendors' and banks' layouts. Each was made an image-only scan (tilt, noise, JPEG compression) and every figure checked against the original:
+
+| | OCR alone | OCR + Qwen3.5 9B | OCR + OvisOCR2 |
+|---|---:|---:|---:|
+| Figures in their right row (on the line naming their row) | 26.8% | 85.5% | **99.6%** |
+| Figures found | 83.4% | 92.6% | **99.6%** |
+| Figures read that are nowhere on the page | 24 | 24 | **0** |
+| Time a page (4-core server, no graphics card) | 4 s | 8.4 min | 2.9 min |
+
+By kind of document (figures in their right row, and figures read that aren't on the page):
+
+| Kind of document | Pages | OCR alone | OCR + Qwen3.5 9B | OCR + OvisOCR2 |
+|---|---:|---:|---:|---:|
+| Invoices | 4 | 42.6%, 0 wrong | 100%, 0 wrong | 100%, 0 wrong |
+| Purchase orders | 2 | 20.8%, 0 wrong | 100%, 0 wrong | 100%, 0 wrong |
+| Receipts | 2 | 25.0%, 0 wrong | 100%, 0 wrong | 100%, 0 wrong |
+| Bank statements | 2 | 13.6%, 0 wrong | 100%, 0 wrong | 100%, 0 wrong |
+| Financial statements | 4 | 25.6%, 0 wrong | 99.0%, 1 wrong | 100%, 0 wrong |
+| Annual report pages | 3 | 3.1%, 0 wrong | 100%, 0 wrong | 100%, 0 wrong |
+| Registers and ledgers | 7 | 14.4%, 23 wrong | 38.9%, 22 wrong | 100%, 0 wrong |
+| Schedules and reports | 5 | 38.8%, 1 wrong | 95.2%, 1 wrong | 98.9%, 0 wrong |
+
+On their own, before the comparison with OCR, OvisOCR2 read 0 figures that aren't on the page and Qwen3.5 9B 137, mostly on dense registers and ledgers in small print; that is why CloseDesk kept OCR's reading on 4 of the 29 pages for Qwen3.5 9B and on 0 for OvisOCR2. The choice rule and the heading handling were tuned on the close package; on the other two sets (14 documents), never used for tuning: 100% in the right row with OvisOCR2, 100% with Qwen3.5 9B, 24.7% with OCR alone. A graphics card or Apple silicon reads pages many times faster, and CloseDesk measures it on each computer.
+
 ### Fraud check
 
 Each email gets a score. A bank-detail change or a request to buy gift cards **in the sender's own words** blocks it unless you trust the sender or their domain. That holds even when the request sits in a "this email is confidential" paragraph or follows "please be aware". A real anti-fraud notice ("we will never change our bank details by email", "if you receive such an email, call us") doesn't count, and neither does the model's opinion alone. Bank-change wording below a quote marker (`From:`, `>`), which is what a forged thread looks like, gets a *double-check before paying* note unless the sender's own words say it was fake. Weaker signals — a reply-to on another domain, a lookalike of a known domain, a borrowed display name, pressure, a first email from an address — add up to that same note, which doesn't block anything. Trusted domains and senders count against the score: from them a bank-change request gets a caution rather than a block. Replies are filed by what the sender wrote, so a colleague's "it wasn't them, I blocked the sender" above a quoted scam is neither flagged nor filed as an invoice.
@@ -306,6 +356,7 @@ src/controller_inbox/
   file_summaries.py Overnight summaries of long attachments, checked against the file
   semantic.py    Search by meaning with a local embedding model
   ocr.py         Scanned pages and pictures to text (RapidOCR, else Tesseract)
+  vision.py      Scanned pages read again by a model that can see, compared with OCR figure by figure
   local_llm.py   LM Studio / Ollama client built for small models
   overnight.py   One pass: drop folder → model → digest (run, overnight, watch, dashboard)
   learn.py       Corrections that teach the classifier

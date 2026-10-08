@@ -196,6 +196,8 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .job span { color: var(--muted); }
 .job.running { border-color: var(--navy); }
 .job.running progress { width: 220px; }
+.job-stop { margin: 0; }
+.job-stop button { white-space: nowrap; }
 .job.done { border-left: 4px solid var(--green); display: block; }
 .job.error { border-left: 4px solid var(--danger); display: block; }
 .model-line { padding: 8px 10px; border-left: 3px solid var(--line); background: #f8f5ee; }
@@ -476,3 +478,26 @@ details.correct summary { cursor: pointer; font-family: var(--serif); font-size:
 .coding-filter input { min-width: 280px; }
 .coding-cell { margin: 2px 0; }
 .coding-cell small { display: block; }
+
+/* Reading scans with the vision model: the offer, and both readings side by side */
+.vision-box p { margin: 0 0 8px; }
+.vision-status { margin-left: 8px; }
+.vision-offer { margin-top: 10px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 10px; }
+.vision-offer p { margin: 0 0 8px; }
+.vision-offer button + button { margin-left: 6px; }
+.vision-pages { margin: 12px 0; }
+.vision-page { margin-top: 14px; }
+.vision-page h4 { margin: 0 0 8px; font-size: 13px; }
+.vision-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+.vision-columns h5 { margin: 0 0 6px; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.vision-columns pre { max-height: 520px; overflow: auto; }
+.vision-reading { max-height: 520px; overflow: auto; font-size: 12px; }
+.vision-reading p { margin: 0 0 6px; }
+.vision-table { border-collapse: collapse; width: 100%; margin: 6px 0 10px; font-variant-numeric: tabular-nums; }
+.vision-table th, .vision-table td { border: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; }
+.vision-table th { background: var(--card); font-weight: 600; }
+.vision-form { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.vision-form label { font-size: 13px; }
+.vision-form button { align-self: flex-start; }
+.vision-form .vision-model select { display: block; margin-top: 3px; max-width: 100%; }
+@media (max-width: 860px) { .vision-columns { grid-template-columns: 1fr; } }

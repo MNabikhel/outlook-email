@@ -27,6 +27,36 @@
     <button type="button" class="ghost" data-action="ask-file" data-id="{{ email.id }}" data-file="{{ att.filename }}">Ask about this file</button>
     {% endif %}
   </div>
+  {% if vision_offer and (vision_offer.pages or readings or (vision_offer.reason and not parts)) %}
+  <section class="panel vision-box" id="vision" data-reload>
+    <h3>Read with the vision model too</h3>
+    {% if vision_offer.available and vision_offer.pages %}
+    <p>{{ vision_offer.text }} The model looks at {{ 'page' if vision_offer.pages | length == 1 else 'pages' }} {{ vision_offer.pages | join(', ') }} itself and its reading is compared with {{ 'OCR' if readings and readings[0].first_name == 'OCR' else 'the first reading' }}, figure by figure.</p>
+    <button type="button" data-action="vision-read" data-href="/inbox/{{ email.id }}/files/{{ n }}/vision">Read with the vision model</button>
+    <span class="vision-status muted" data-vision-status aria-live="polite"></span>
+    {% elif vision_offer.reason %}
+    <p class="muted">{{ vision_offer.reason }}</p>
+    {% elif readings %}
+    <p class="muted">Every page that needed it has been read both ways (below).</p>
+    {% endif %}
+  </section>
+  {% endif %}
+  {% if readings %}
+  <section class="panel vision-pages" aria-label="Pages read two ways">
+    <h3>Pages read two ways</h3>
+    <p class="muted small">Figures both readings have are confirmed. A <mark>marked</mark> figure was read differently, or by one of them only: check it against the original. Ask CloseDesk reads the page as shown in the sections below.</p>
+    {% for r in readings %}
+    {% set c = r.comparison %}
+    <article class="vision-page" id="vision-p{{ r.page }}">
+      <h4>Page {{ r.page }} · {{ c.confirmed }} of {{ c.figures }} figures read the same{% if c.differ %} · {{ c.differ | length }} read differently{% endif %} · shown: {{ "the vision model's" if c.choice == 'model' else r.first_name + "'s" }} reading{% if r.seconds %} · read in {{ r.seconds | round | int }}s{% endif %}</h4>
+      <div class="vision-columns">
+        <div><h5>{{ r.first_name }}</h5>{{ r.first_html }}</div>
+        <div><h5>Vision model{% if r.model %} ({{ r.model }}){% endif %}</h5><div class="vision-reading">{{ r.model_html }}</div></div>
+      </div>
+    </article>
+    {% endfor %}
+  </section>
+  {% endif %}
   {% if not parts %}
   <section class="panel"><p class="muted">No readable text in this file. It is probably a scan or a picture; open it from Outlook.</p></section>
   {% else %}

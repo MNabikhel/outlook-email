@@ -87,6 +87,16 @@ class Settings(BaseSettings):
     # per question, so it is off unless asked for.
     table_queries: bool = True
     table_query_thinking: bool = False
+    # A model that can see (Qwen3.5, Gemma 3) also reads scanned pages and pictures, beside OCR (vision.py).
+    # "auto": overnight, and while a question waits when that's quick; "ask": only when asked, with the time it'd
+    # take; "off": never.
+    vision_mode: str = "auto"
+    # The model that reads pages ("" = automatic: a document reader such as OvisOCR2 when LM Studio has it, else the
+    # chat model when it can see). Setup saves the choice.
+    vision_model: str = ""
+    # How long the overnight run may spend reading scanned pages with the vision model. Process new mail reads only
+    # what takes this computer under a minute, and starting CloseDesk reads none, so nobody waits on it.
+    vision_minutes_per_run: float = 30.0
 
     azure_client_id: str = ""
     azure_tenant_id: str = "common"
@@ -102,6 +112,18 @@ class Settings(BaseSettings):
     @classmethod
     def _optional_path(cls, value: str | Path | None) -> Path | None:
         return Path(value).expanduser() if value and str(value).strip() else None
+
+    @field_validator("vision_mode", mode="before")
+    @classmethod
+    def _vision_mode(cls, value) -> str:
+        text = str(value or "").strip().lower()
+        return text if text in {"auto", "ask", "off"} else "auto"
+
+    @field_validator("vision_model", mode="before")
+    @classmethod
+    def _vision_model(cls, value) -> str:
+        text = str(value or "").strip()
+        return "" if text.lower() == "auto" else text
 
     @field_validator("llm", mode="before")
     @classmethod

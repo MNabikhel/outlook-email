@@ -7,6 +7,7 @@ from the script draft, so the morning board is usable either way.
 
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -23,6 +24,9 @@ from controller_inbox.profile import is_finance
 from controller_inbox.reading import build_packet, overlay_reading
 from controller_inbox.semantic import index_mail
 from controller_inbox.store import Store
+from controller_inbox.vision import Result, read_waiting
+
+log = logging.getLogger(__name__)
 
 Progress = Callable[[str, int, int, str], None]
 
@@ -144,12 +148,19 @@ def run_overnight(
     sync_graph: bool = True,
     reader: LocalReader | None = None,
     on_progress: Progress | None = None,
+    vision_minutes: float | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict:
-    """One full pass. Raises ``RunBusy`` instead of racing another run over the same drop folder."""
+    """One full pass. Raises ``RunBusy`` instead of racing another run over the same drop folder. ``vision_minutes``:
+    how long it may spend reading scanned pages with the vision model (default ``Settings.vision_minutes_per_run``);
+    ``should_stop``: the reading of scans ends after the page being read when it says so."""
     with run_lock(settings) as locked:
         if not locked:
             raise RunBusy()
-        return _run_overnight(store, settings, now=now, limit=limit, sync_graph=sync_graph, reader=reader, on_progress=on_progress)
+        return _run_overnight(
+            store, settings, now=now, limit=limit, sync_graph=sync_graph, reader=reader, on_progress=on_progress,
+            vision_minutes=vision_minutes, should_stop=should_stop,
+        )
 
 
 def _run_overnight(
@@ -161,6 +172,8 @@ def _run_overnight(
     sync_graph: bool,
     reader: LocalReader | None,
     on_progress: Progress | None,
+    vision_minutes: float | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     settings.ensure_data_dir()
@@ -184,6 +197,16 @@ def _run_overnight(
     # After reading: the model may have filed more mail as AP invoices, and the workbook may have changed.
     coded = cost_codes.refresh(store, settings)
     stats = reading["stats"]
+    # Scans first, so the summaries below are written from the pages as read both ways.
+    looked = Result()
+    if reading["model"] and not (stats and stats.stopped_reason):
+        try:
+            looked = read_waiting(
+                store, settings, minutes=vision_minutes, should_stop=should_stop,
+                on_progress=(lambda i, n, name: on_progress("vision", i, n, name)) if on_progress else None,
+            )
+        except Exception:  # the rest of the run (search index, digest) still happens
+            log.warning("Reading scans with the vision model failed", exc_info=True)
     summarized = 0
     if reading["model"] and not (stats and stats.stopped_reason) and settings.overnight_file_summaries:
         summarized = summarize_files(
@@ -219,6 +242,7 @@ def _run_overnight(
         "graph_note": graph_note,
         "read_by_bionic": len(reading["read_ids"]),
         "files_summarized": summarized,
+        "pages_seen": looked.pages,
         "files_reread": reread,
         "invoices_coded": coded,
         "indexed_for_search": indexed,
@@ -272,6 +296,7 @@ def _log(summary: dict, *, store: Store) -> str:
         + (f" (about {summary['avg_seconds']}s each)" if summary["avg_seconds"] else ""),
         f"- Still waiting on Bionic: {summary['waiting_on_bionic']}",
         f"- Attachments summarized for Ask CloseDesk: {summary.get('files_summarized', 0)}",
+        f"- Scanned pages read with the vision model: {summary.get('pages_seen', 0)}",
         f"- Emails and file sections added to search by meaning: {summary.get('indexed_for_search', 0)}",
         f"- Important / informational / reference: {folders['important']} / {folders['informational']} / {folders['reference']}",
         f"- Fraud alerts: {summary['fraud_alerts']}",

@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
-from controller_inbox import agent, chats, cost_codes, documents, fraud, ocr, semantic
+from controller_inbox import agent, chats, cost_codes, documents, fraud, ocr, semantic, vision
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.classify import month_end
@@ -79,6 +79,8 @@ NOTICES = {
     "sample-busy": "The sample mailbox was not loaded: mail is being processed right now. Try again when it finishes.",
     "processing": "Processing started. This page updates as it goes.",
     "busy": "Already processing. This page updates as it goes.",
+    "busy-vision": "The vision model is reading pages of a scan. Stop it from the bar at the top, or try again when it's done.",
+    "stopping": "Stopping after the page being read now.",
     "profile": "Saved. The digest and Today page now use this profile; new mail is sorted with it.",
     "timezone": "Saved. Times and “today” now use this time zone.",
     "context": "Saved. If the model in LM Studio is loaded with less, the next question reloads it with this context.",
@@ -96,6 +98,7 @@ NOTICES = {
     "findings-cleared": "Notes cleared. Ask CloseDesk reads the files fresh next time.",
     "indexing": "Indexing started. This page updates as it goes.",
     "indexed": "Indexed for search. Ask CloseDesk can now find these files by meaning.",
+    "vision-saved": "Saved. Scans are read with the vision model as you chose.",
     "index-failed": "The embedding model didn't answer, so nothing was indexed. Load one in LM Studio and try again.",
     "index-off": "No embedding model found. Load one in LM Studio (for example nomic-embed-text) and try again.",
     "coding-confirmed": "Cost code confirmed. The next invoice from this sender is suggested the same code.",
@@ -255,6 +258,8 @@ class _AnswerLog:
         elif kind == "mode":
             self.data["mode"] = event.get("mode", "")
             self.data["note"] = event.get("note", "")
+        elif kind == "vision":
+            self.data["vision"] = {key: event.get(key) for key in ("email_id", "n", "file", "pages", "estimate", "text", "question")}
 
 
 class ProcessJob:
@@ -270,6 +275,22 @@ class ProcessJob:
         self.result: dict | None = None
         self.error = ""
         self.finished_at = ""
+        # What a job other than Process new mail is about (a vision read: its email and file), for the pages.
+        self.about: dict | None = None
+        self._stop = threading.Event()
+
+    @property
+    def stopping(self) -> bool:
+        """Asked to stop: reading scans with the vision model stops before its next page (in Process new mail too,
+        whose other steps run to the end)."""
+        return self._stop.is_set()
+
+    def request_stop(self) -> bool:
+        with self._lock:
+            if self.state != "running":
+                return False
+        self._stop.set()
+        return True
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -282,14 +303,17 @@ class ProcessJob:
                 "result": self.result,
                 "error": self.error,
                 "finished_at": self.finished_at,
+                "about": self.about,
+                "stopping": self._stop.is_set(),
             }
 
-    def start(self, target) -> bool:
+    def start(self, target, *, about: dict | None = None) -> bool:
         with self._lock:
             if self.state == "running":
                 return False
             self.state, self.stage, self.done, self.total = "running", "starting", 0, 0
-            self.note, self.result, self.error = "", None, ""
+            self.note, self.result, self.error, self.about = "", None, "", about
+            self._stop.clear()
         threading.Thread(target=self._run, args=(target,), daemon=True).start()
         return True
 
@@ -299,15 +323,12 @@ class ProcessJob:
 
     def _run(self, target) -> None:
         try:
-            result = target(self.progress)
-            with self._lock:
-                self.state, self.result = "done", result
+            result, state, error = target(self.progress), "done", ""
         except Exception as exc:  # the page shows the error instead of a dead spinner
-            with self._lock:
-                self.state, self.error = "error", str(exc)
-        finally:
-            with self._lock:
-                self.finished_at = datetime.now(timezone.utc).isoformat()
+            result, state, error = None, "error", str(exc)
+        with self._lock:  # all at once: a page that sees the job done also sees when it finished
+            self.state, self.result, self.error = state, result, error
+            self.finished_at = datetime.now(timezone.utc).isoformat()
 
 
 def _nearest_step(tokens: int) -> int:
@@ -319,6 +340,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     settings.ensure_data_dir()
     store = store or Store(settings.db_path)
     apply_saved_timezone(settings, store)
+    vision.apply_saved_mode(settings, store)
     saved_context = store.get_state(MIN_CONTEXT_KEY)
     if saved_context and saved_context.isdigit():
         set_min_context(settings, int(saved_context))
@@ -539,6 +561,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             downloadable=Path(att.filename).suffix.lower() in DOWNLOADABLE and agent.original_file(settings, email, att) is not None,
             viewable=Path(att.filename).suffix.lower() in agent.VIEWABLE and agent.original_file(settings, email, att) is not None,
             search="" if email.source == "chat" else semantic.file_states(store, settings, email).get(att.id, "no_text"),
+            readings=vision.side_by_side(store.page_readings(att.id, att.sha256)),
+            vision_offer=vision.offer(store, settings, email, att) if vision.readable_file(att.filename) else None,
         )
 
     @app.post("/inbox/{email_id}/index")
@@ -578,6 +602,19 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             filename=att.filename,
             headers={"X-Content-Type-Options": "nosniff"},
         )
+
+    @app.get("/inbox/{email_id}/files/{n}/vision")
+    def file_vision(email_id: str, n: int):
+        email, att = email_file(email_id, n)
+        return JSONResponse(vision.offer(store, settings, email, att))
+
+    @app.post("/inbox/{email_id}/files/{n}/vision")
+    def file_vision_read(request: Request, email_id: str, n: int, again: int = 0):
+        """Read the file's pages that need it (``again``: every one of them, a second time) in the background."""
+        _require_page(request)
+        email, att = email_file(email_id, n)
+        reply, status = vision.start(store, settings, job, email, att, n, again=bool(again))
+        return JSONResponse(reply, status_code=status)
 
     @app.get("/inbox/{email_id}/files/{n}/download")
     def file_download(email_id: str, n: int):
@@ -957,12 +994,23 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     def process():
         from controller_inbox.overnight import run_overnight
 
-        started = job.start(lambda progress: run_overnight(store, settings, sync_graph=False, on_progress=progress))
-        return RedirectResponse(f"/?notice={'processing' if started else 'busy'}", status_code=303)
+        started = job.start(
+            lambda progress: run_overnight(
+                store, settings, sync_graph=False, on_progress=progress, vision_minutes=vision.process_minutes(settings),
+                should_stop=lambda: job.stopping,
+            )
+        )
+        busy = "busy-vision" if (job.snapshot()["about"] or {}).get("kind") == "vision" else "busy"
+        return RedirectResponse(f"/?notice={'processing' if started else busy}", status_code=303)
 
     @app.get("/process/status")
     def process_status():
         return JSONResponse(job.snapshot())
+
+    @app.post("/process/stop")
+    def process_stop():
+        job.request_stop()
+        return RedirectResponse("/?notice=stopping", status_code=303)
 
     @app.post("/folder/ingest")
     def folder_ingest():
@@ -1063,6 +1111,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             context_target=context_target(settings, model),
             will_reload=needs_more_context(settings),
             ocr_engine=ocr.engine_name(),
+            vision_setup=vision_setup(model),
             search=semantic.coverage(store, settings),
             timezone_choice=settings.timezone,
             timezone_options=_timezone_options(settings.timezone),
@@ -1097,6 +1146,36 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return RedirectResponse("/settings?notice=timezone#timezone", status_code=303)
+
+    def vision_setup(model) -> dict:
+        # When it is off, still say which model would read pages, so the choice can be made before turning it on.
+        on = settings if settings.vision_mode != "off" else settings.model_copy(update={"vision_mode": "auto"})
+        reader = vision.reading_model(on)
+        per_page = vision.seconds_per_page(store, on) if reader else None
+        # A model chosen in Setup that LM Studio no longer has stays chosen (listed as gone) until another is.
+        missing = settings.vision_model if settings.vision_model and settings.vision_model not in model.vision_models else ""
+        return {
+            "reachable": model.reachable,
+            "by_default": bool(reader) and vision.trusted_reader(reader),
+            "sees": bool(reader),
+            "reader": reader,
+            "reader_label": vision.reader_for(reader).label if reader else "",
+            "chosen": settings.vision_model or "auto",
+            "missing": missing,
+            "choices": [*model.vision_models, *([missing] if missing else [])],
+            "renderer": vision.can_render(),
+            "mode": settings.vision_mode,
+            "pages_read": store.vision_pages_read(),
+            "speed": f"On this computer it reads a page in {vision.duration(per_page)}." if per_page else "",
+        }
+
+    @app.post("/settings/vision")
+    def save_vision(mode: str = Form(...), model: str | None = Form(None)):
+        try:
+            vision.save_mode(settings, store, mode, model)
+        except ValueError:
+            return RedirectResponse("/settings#vision", status_code=303)
+        return RedirectResponse("/settings?notice=vision-saved#vision", status_code=303)
 
     @app.post("/settings/index")
     def index_all():

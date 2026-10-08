@@ -14,13 +14,15 @@ running, the same emails and the matching file passages come back as a list.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from controller_inbox import agent, answer_check, semantic, table_lookup
+from controller_inbox import agent, answer_check, chats, semantic, table_lookup, vision
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
@@ -40,6 +42,8 @@ from controller_inbox.local_llm import (
 from controller_inbox.models import DOCUMENT_LABELS, ActionStatus, DocumentType, EmailRecord
 from controller_inbox.reading import _ungrounded_amounts
 from controller_inbox.store import Store
+
+log = logging.getLogger(__name__)
 
 MAX_SOURCES = 6
 MAX_QUESTION = 1000
@@ -601,6 +605,9 @@ def answer_stream(
         return
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id, past=past)
     state = {"wrote": False, "text": ""}
+    offer = None
+    if current is not None and _should_read_files(ws, question, focus if about_today else None):
+        offer = yield from _vision_first(store, settings, ws, current, question)
     if (ready := agent.summary_request(ws, question)) is not None:
         att, summary = ready
         yield {"type": "step", "text": f"Used the summary of {att.filename} written during the overnight reading"}
@@ -609,6 +616,8 @@ def answer_stream(
             "text": f"**{att.filename}**\n{summary}\n\n*Written overnight and checked against the file. "
             "Ask about a page, sheet or figure to have it read again.*",
         }
+        if offer:
+            yield offer
         yield {"type": "done"}
         return
     try:
@@ -637,7 +646,117 @@ def answer_stream(
     advice = agent.context_advice(context_length(settings), ws.left_out)
     if advice:
         yield {"type": "context", "text": advice}
+    if offer:
+        yield offer
     yield {"type": "done"}
+
+
+# A question about a scan's contents (as opposed to its sender, or a reply to write).
+_ABOUT_FILES = re.compile(
+    r"\b(attach\w*|files?|pdfs?|scan\w*|pages?|tables?|rows?|columns?|lines?|totals?|subtotals?|amounts?|balances?|"
+    r"figures?|numbers?|sum|summar\w*|reports?|statements?|invoices?|receipts?|bills?|checks?|cheques?|schedules?|"
+    r"forecasts?|ledgers?|registers?|images?|pictures?|photos?|screenshots?|documents?|forms?|letters?|dates?|"
+    r"vendors?|payees?|accounts?|items?|costs?|fees?|prices?|paid|owe\w*|due|says?|shows?|contains?|listed|"
+    r"how much|how many|what'?s in|read)\b|[$€£%]|\d[\d,]*\.\d\d|\d{4,}",
+    re.I,
+)
+
+
+def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current: EmailRecord, question: str):
+    """Pages of the email's scans, pictures and doubtful tables the vision model hasn't read, when the question is
+    about what is in them. In "auto", with a document reader, they are read before answering when that takes up to
+    ten minutes (or, before this computer's speed is known, they are three pages at most); with a general model, when
+    this computer's speed is known and the pages are quick to read. Otherwise the answer comes from what was read
+    before, and the event returned offers the read with the time it would take. Nothing is read or offered while a
+    read is already running."""
+    if not vision.can_render() or not vision.available(settings):
+        return None
+    if vision.busy():
+        if vision.reads_by_default(settings) and _ABOUT_FILES.search(question):
+            try:
+                waiting = vision.files_to_read(store, settings, current)
+            except Exception:
+                waiting = []
+            if waiting:
+                yield {"type": "step", "text": "The document reader is reading other pages now; this answer uses what was read so far."}
+        return None
+    try:
+        files = vision.files_to_read(store, settings, current)
+    except Exception:  # a file that can't be opened leaves the answer as it was
+        log.warning("Couldn't check %s for pages to read with the vision model", current.id, exc_info=True)
+        return None
+    named = [item for item in files if item[1].filename.lower() in question.lower()]
+    if not named and not _ABOUT_FILES.search(question):
+        return None
+    files = named or files
+    if not files:
+        return None
+    pages = sum(len(todo) for *_rest, todo in files)
+    seconds = vision.estimate(store, settings, pages)
+    if vision.reads_by_default(settings) and (
+        (seconds is not None and seconds <= vision.READER_WAIT_SECONDS) or (seconds is None and pages <= vision.READER_FIRST_PAGES)
+    ):
+        # A document reader's reading is the page: worth waiting for, page by page so the wait shows. It stops at a
+        # page that fails, when another read starts, or when what is left would take the wait past its limit (this
+        # computer's speed is known after the first page); what is left is then offered.
+        started = time.monotonic()
+        queue = [(position, att, data, todo[: vision.MAX_PAGES]) for position, att, data, todo in files]
+        beyond = [(position, att, data, todo[vision.MAX_PAGES :]) for position, att, data, todo in files if len(todo) > vision.MAX_PAGES]
+        left: list = []
+        stopped = ""
+        for number, (position, att, data, todo) in enumerate(queue):
+            for index, page in enumerate(todo):
+                each = vision.estimate(store, settings, 1)
+                remaining = len(todo) - index + sum(len(later) for *_rest, later in queue[number + 1 :])
+                if (number or index) and each is not None and time.monotonic() - started + each * remaining > vision.READER_WAIT_SECONDS:
+                    stopped = "time"
+                elif vision.busy():
+                    stopped = "busy"
+                if stopped:
+                    left = [(position, att, data, todo[index:]), *queue[number + 1 :]]
+                    break
+                took = vision.duration(each) if each is not None else "the first page shows how long this computer takes"
+                yield {"type": "step", "text": f"Reading {att.filename}, page {page} ({index + 1} of {len(todo)}), with the document reader ({took})"}
+                try:
+                    one = vision.read_pages(store, settings, current, att, data, [page])
+                except Exception as exc:  # the answer still comes, from what was read before
+                    log.warning("Reading %s page %s with the vision model failed", att.filename, page, exc_info=True)
+                    one = vision.Result(failed=[str(exc)[:160]])
+                if one.failed:
+                    stopped = "failed"
+                    why = re.sub(r"^page \d+: ", "", one.failed[0])
+                    yield {"type": "step", "text": f"The document reader couldn't read {att.filename} page {page} ({why}); the answer uses what was read."}
+                    break
+            if stopped:
+                break
+        fresh = chats.chat_mail(store, chats.chat_id_of(current.id)) if chats.chat_id_of(current.id) else store.get_email(current.id)
+        if fresh is not None:
+            ws.sources[:] = [fresh if email.id == current.id else email for email in ws.sources]
+        if not left and stopped != "failed":
+            left = beyond  # a file longer than one read takes: the rest is offered
+        if not left:
+            return None
+        files = left
+        seconds = vision.estimate(store, settings, sum(len(todo) for *_rest, todo in files))
+    elif settings.vision_mode == "auto" and seconds is not None and seconds <= vision.QUICK_SECONDS:
+        for _position, att, data, todo in files:
+            yield {"type": "step", "text": f"Reading {att.filename} with the vision model ({vision.duration(vision.estimate(store, settings, len(todo)) or 0)})"}
+            try:
+                vision.read_pages(store, settings, current, att, data, todo)
+            except Exception:  # the answer still comes, from what was read before
+                log.warning("Reading %s with the vision model failed", att.filename, exc_info=True)
+        fresh = chats.chat_mail(store, chats.chat_id_of(current.id)) if chats.chat_id_of(current.id) else store.get_email(current.id)
+        if fresh is not None:
+            ws.sources[:] = [fresh if email.id == current.id else email for email in ws.sources]
+        return None
+    position, att, _data, todo = files[0]
+    single = vision.estimate(store, settings, len(todo))
+    return {
+        "type": "vision", "email_id": current.id, "n": position, "file": att.filename, "pages": len(todo),
+        "estimate": round(single) if single is not None else None, "question": question,
+        "text": f"{att.filename} has {len(todo)} page{'s' if len(todo) != 1 else ''} the vision model could read too, "
+        f"beside {'OCR' if vision.looks_scanned(att) else 'the PDF text'}. {vision.offer_text(len(todo), single)}",
+    }
 
 
 def _should_read_files(ws: agent.Workspace, question: str, focus) -> bool:

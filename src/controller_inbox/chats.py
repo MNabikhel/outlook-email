@@ -15,7 +15,7 @@ from controller_inbox.config import Settings
 from controller_inbox.folder_mail import safe_filename
 from controller_inbox.models import AttachmentRecord, DocumentType, EmailRecord, Importance
 from controller_inbox.pipeline import attachment_text
-from controller_inbox.store import Store
+from controller_inbox.store import Store, shown_text
 
 PREFIX = "chat-"
 MAX_FILES = 10
@@ -111,6 +111,7 @@ def chat_mail(store: Store, chat_id: str) -> EmailRecord | None:
     if not rows:
         return None
     email_id = f"{PREFIX}{chat_id}"
+    readings = store.chat_readings(chat_id)
     attachments = [
         AttachmentRecord(
             id=f"{email_id}:{row['filename']}",
@@ -119,7 +120,7 @@ def chat_mail(store: Store, chat_id: str) -> EmailRecord | None:
             content_type=row["content_type"] or "",
             size_bytes=row["size_bytes"] or 0,
             sha256=row["sha256"] or "",
-            extracted_text=row["text"] or "",
+            extracted_text=shown_text(row["text"] or "", readings.get(f"{email_id}:{row['filename']}"), row["sha256"] or ""),
             document_type=DocumentType.OTHER,
             document_confidence=0.0,
         )

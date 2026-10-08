@@ -126,6 +126,38 @@
       <p class="muted small">Off: search matches words only. Load an embedding model in LM Studio (it ships <b>nomic-embed-text</b>), then come back here to index your mail.</p>
       {% endif %}
     </div>
+    <div class="search-box" id="vision">
+      <h4>Reading scans with the model's vision</h4>
+      {% if not vision_setup.reachable %}
+      <p class="muted small">No model server is answering, so scans are read with OCR only. Start LM Studio's server to read them with a model as well.</p>
+      {% elif vision_setup.missing %}
+      <p class="muted small">The model chosen to read pages, <b>{{ vision_setup.missing }}</b>, isn't in LM Studio now or can't look at pictures, so scans are read with OCR only. Choose another one below, or Automatic.</p>
+      {% elif vision_setup.sees and vision_setup.mode == 'off' %}
+      <p class="muted small">Off: scans are read with OCR only. When it's on, pages are read by <b>{{ vision_setup.reader }}</b> ({{ vision_setup.reader_label }}) as well, side by side with OCR.</p>
+      {% elif vision_setup.sees %}
+      <p class="muted small">Pages are read by <b>{{ vision_setup.reader }}</b> ({{ vision_setup.reader_label }}). {% if vision_setup.by_default %}Scanned PDFs and pictures are read by it and by OCR; its reading is the one the chat and the table lookup use, and the file's page shows where OCR read differently.{% else %}Scanned PDFs and pictures are read by OCR and by the model side by side: figures both read the same way are confirmed, and the file's page shows where they differ.{% endif %} {{ vision_setup.speed or 'The first page read shows how long one takes on this computer; a laptop without a graphics card can take a few minutes.' }}</p>
+      {% else %}
+      <p class="muted small">No model in LM Studio can look at pictures, so scans are read with OCR only. Download <b>OvisOCR2</b> in LM Studio (a small model made for reading document pages: the most accurate and fastest we measured), or load one that can see (Qwen3.5 9B, Gemma 3), to read them both ways.</p>
+      {% endif %}
+      {% if not vision_setup.renderer %}<p class="warn-box small">The page renderer isn't installed. Double-click CloseDesk once (or run <code>pip install -e .</code>) to add it.</p>{% endif %}
+      <form method="post" action="/settings/vision" class="vision-form">
+        <label><input type="radio" name="mode" value="auto" {{ 'checked' if vision_setup.mode == 'auto' }}/> <b>Automatic</b>: {% if vision_setup.by_default %}scans are read with the document reader, and its reading is the one the chat uses. Process new mail and the overnight run read waiting scans ({{ settings.vision_minutes_per_run | round | int }} minutes at most each); a question about a scan not read yet waits for it when that takes under 10 minutes, and a longer read is offered with its time.{% else %}the overnight run reads waiting scans ({{ settings.vision_minutes_per_run | round | int }} minutes at most). Process new mail and a question only read pages this computer reads in under a minute; a longer read is offered with its time.{% endif %}</label>
+        <label><input type="radio" name="mode" value="ask" {{ 'checked' if vision_setup.mode == 'ask' }}/> <b>Only when I ask</b>: nothing is read until you click Read with the vision model, after seeing how long it will take.</label>
+        <label><input type="radio" name="mode" value="off" {{ 'checked' if vision_setup.mode == 'off' }}/> <b>Off</b>: OCR only.</label>
+        {% if vision_setup.choices %}
+        <label class="vision-model">Model that reads pages
+          <select name="model">
+            <option value="auto" {{ 'selected' if vision_setup.chosen == 'auto' }}>Automatic: a document reader when there is one{% if vision_setup.chosen == 'auto' and vision_setup.reader %} (now {{ vision_setup.reader }}){% endif %}</option>
+            {% for choice in vision_setup.choices %}
+            <option value="{{ choice }}" {{ 'selected' if vision_setup.chosen == choice }}>{{ choice }}{% if choice == vision_setup.missing %} (can't read pages now){% endif %}</option>
+            {% endfor %}
+          </select>
+        </label>
+        {% endif %}
+        <button type="submit">Save</button>
+        {% if vision_setup.pages_read %}<span class="muted small">{{ vision_setup.pages_read }} page{{ '' if vision_setup.pages_read == 1 else 's' }} read both ways so far.</span>{% endif %}
+      </form>
+    </div>
     {% set chosen = context_steps[context_step] %}
     <form method="post" action="/settings/context" class="context-form" id="context">
       <label for="context-slider">Minimum context for Ask CloseDesk: <b data-context-label>{{ chosen.label }}</b></label>
