@@ -209,7 +209,10 @@ def own_words(body: str, *, keep_disclaimers: bool = False) -> str:
 
 # Words that name where a payment goes. "Account" and "payment" on their own also name logins, account
 # managers, card details and payment terms, so they count only next to one of these.
-_BANK = r"(?:bank(?:ing|s)?|remit(?:tance)?|remit[- ]to|wire|wiring|ach|iban|swift|bic|sort\s+code)"
+# "Beneficiary" only with "account" after it: "beneficiary information" is also a pension or insurance form.
+_BANK = (
+    r"(?:bank(?:ing|s)?|remit(?:tance)?|remit[- ]to|wire|wiring|ach|iban|swift|bic|sort\s+code|beneficiary(?=\s+account))"
+)
 # The details themselves: "bank details", "bank account number", "wire instructions", "our payment details".
 _BANK_DETAILS = (
     r"(?:" + _BANK + r"\s+(?:account\s+)?(?:details|information|info|instructions|account|numbers?|data|coordinates)"
@@ -237,14 +240,27 @@ PAYMENT_CHANGE_RE = re.compile(
     # auditor's "the log of bank account changes": the details must be the writer's or the payee's own).
     r"\b(?:our|my|its|their)\s+(?:new\s+)?(?:" + _BANK_DETAILS + r"|(?:payment|remittance)\s+(?:details|information|info))"
     r"\s+change[ds]?\b|"
-    # "New bank details", "updated ACH information", "new routing number".
-    r"\b(?:new|updated|revised|changed|different|amended)\s+(?:" + _BANK + r"\s+(?:account\s+)?"
+    # "New bank details", "updated ACH information", "new routing number". Not "send us your updated bank details"
+    # or "please provide updated bank information": those ask for the reader's details, not a payee's change.
+    r"(?<!your )(?<!provide )\b(?:new|updated|revised|changed|different|amended)\s+(?:" + _BANK + r"\s+(?:account\s+)?"
     r"(?:details|information|info|instructions|numbers?|data)|routing\s+numbers?|(?:payment|remittance)\s+instructions)|"
     # "We have a new bank account", "our new account details".
     r"\b(?:a|our)\s+new\s+bank(?:ing)?\s+account\b|\bour\s+new\s+(?:bank\s+)?account\s+(?:details|information|info|number)|"
     # "Update the bank account on file", "update your records with our payment information".
     r"\bupdate\s+(?:(?:your|the)\s+(?:records?|files?|vendor\s+(?:file|master|records?))\s+(?:with|to)\s+)?"
     r"(?:(?:our|the|its|their)\s+)?(?:new\s+)?" + _BANK_DETAILS + r"|"
+    # "Please change our bank details to the following", "amend the bank account on file", "update the IBAN to…",
+    # "we have updated our banking information" (not the reader's own: "change your bank details in the portal").
+    r"\b(?:change|amend|modify|correct|replace)\s+(?:our|the|its|their)\s+(?:new\s+)?" + _BANK_DETAILS + r"|"
+    r"\b(?:updated|amended|modified|replaced)\s+(?:our|its|their)\s+(?:new\s+)?" + _BANK_DETAILS + r"|"
+    r"(?<!your )\b(?:new|updated|revised|changed|different)\s+(?:iban|swift|bic|sort\s+code)\b|"
+    r"\b(?:update|change|amend)\s+(?:our|the|its|their)\s+(?:iban|swift|bic|sort\s+code)\b|"
+    # "Payments should now be made to the account below", "all future payments must be sent to our account at…".
+    # Not an invoice's own "payment should be made to the account below": that is how to pay it, not a change.
+    r"\b(?:(?:all\s+)?(?:future|further|upcoming)\s+payments?\s+(?:should|must|will|are\s+to|need\s+to)\s+(?:now\s+)?be|"
+    r"payments?\s+(?:should|must|will|are\s+to|need\s+to)\s+(?:now|henceforth|from\s+now\s+on|going\s+forward)\s+be)\s+"
+    r"(?:made|sent|remitted|wired|paid|transferred|directed)\s+(?:to|into)\s+(?:the|our|this)\s+"
+    r"(?:new\s+|following\s+|updated\s+)?(?:bank\s+)?account\b|"
     # "Please pay invoice 5521 to the new account", "send this payment to a different account" (not "send the W-9 to
     # the new account manager").
     r"\b(?:pay|paid|paying|payments?|remit\w*|wire[ds]?|wiring|transfer\w*|deposit\w*|funds)\b[^.\n]{0,60}?"
@@ -261,7 +277,8 @@ PAYMENT_CHANGE_RE = re.compile(
     r"\bplease\s+use\s+(?:the\s+)?following\s+(?:bank(?:ing)?\b|routing\b|(?:account|details)\b"
     r"(?=[^.\n]{0,60}\b(?:pay\w*|remit\w*|wir(?:e|ing)|ach|routing|bank\w*|transfer\w*|deposit\w*|iban|swift)\b))|"
     r"\bdo\s+not\s+use\s+(?:the\s+)?previous\s+account|"
-    r"(?<!not )\b(?:changed|switched|moved)\s+(?:our\s+bank(?:s|ing\s+partner)?|banks|to\s+a\s+new\s+bank)\b|"
+    r"(?<!not )\b(?:changed|switched|moved|changing|switching|moving)\s+"
+    r"(?:our\s+bank(?:s|ing\s+partner)?|banks|to\s+a\s+new\s+bank)\b|"
     # "Kindly remit to the account below".
     r"\b(?:remit|send|pay|wire|transfer|make)\w*\s+(?:all\s+|any\s+|future\s+|the\s+)*(?:payments?\s+|funds\s+)?"
     r"(?:to|into)\s+(?:the|our)\s+(?:bank\s+)?account\s+(?:below|listed\s+below|shown\s+below|details\s+below|as\s+follows)\b|"
@@ -269,6 +286,10 @@ PAYMENT_CHANGE_RE = re.compile(
     r"\b(?:datos|cuenta|informacion|coordenadas)\s+bancari[oa]s?\b" + _GAP + r"\b(?:ha|han)\s+(?:sido\s+)?"
     r"(?:cambiad|actualizad|modificad)[oa]s?\b|"
     r"\bnuev[oa]s?\s+(?:datos|cuenta|informacion)\s+bancari[oa]s?\b|\bcambio\s+de\s+(?:(?:cuenta|datos)\s+bancari[oa]s?|banco)\b|"
+    # "Hemos cambiado de banco", "nous avons changé de banque", "wir haben die Bank gewechselt".
+    r"\b(?:(?:hemos|han|ha)\s+)?cambiado\s+de\s+(?:banco|cuenta\s+bancaria)\b|"
+    r"(?<!pas )\bchange\s+de\s+(?:banque|compte\s+bancaire|rib)\b|"
+    r"\b(?:bank|bankverbindung|konto|kontoverbindung)\s+gewechselt\b|"
     r"\b(?:coordonnees|informations|donnees|references)\s+bancaires\b" + _GAP + r"\b(?:ont|a)\s+(?:ete\s+)?"
     r"(?:change|modifie|mis\s+a\s+jour|mise\s+a\s+jour)e?s?\b|"
     r"\bnouve(?:au|l|lle|lles|aux)\s+(?:rib|iban|compte\s+bancaire|coordonnees\s+bancaires)\b|"
@@ -598,10 +619,10 @@ VIP_DEFAULT = (
 
 
 def _keyword_hit(blob: str, keyword: str) -> bool:
-    """Whole-word match so 'irs' does not fire inside 'first'."""
+    """Whole-word match so 'irs' does not fire inside 'first' or 'irs.gov', but does end a sentence ("our invoice.")."""
     if not keyword:
         return False
-    pattern = r"(?<![\w.])" + re.escape(keyword.lower()) + r"s?(?![\w.])"
+    pattern = r"(?<![\w.])" + re.escape(keyword.lower()) + r"s?(?![\w]|\.\w)"
     return re.search(pattern, blob) is not None
 
 
@@ -610,6 +631,7 @@ def _haystack(subject: str, body: str, filename: str, sender: str, extracted_tex
 
 
 FILENAME_BONUS = 25
+KEYWORD_BONUS = 5
 
 
 def _name_hit(filename: str, keyword: str) -> bool:
@@ -644,10 +666,10 @@ def score_rules(
         blob = own_blob if rule.own_words_only else full_blob
         hit = False
         reasons: list[str] = []
-        matched_kw = next((k for k in rule.keywords if _keyword_hit(blob, k)), None)
-        if matched_kw:
+        matched = [k for k in rule.keywords if _keyword_hit(blob, k)]
+        if matched:
             hit = True
-            reasons.append(f"keyword:{matched_kw}")
+            reasons.append(f"keyword:{matched[0]}")
         for rx in rule.regexes:
             if rx.search(blob):
                 hit = True
@@ -667,8 +689,13 @@ def score_rules(
         flags = list(dict.fromkeys(list(prev[2]) + list(rule.flags)))
         # What a file is called says more about it than one word somewhere in its pages.
         named = FILENAME_BONUS if "filename" in reasons else 0
+        # Many of a rule's own words say more than one stray word of another's: an invoice with its invoice number,
+        # amount due, bill-to and payment terms is an invoice even when it says "we accept ACH credit or wire
+        # transfer". Only from the fourth word on, so a remittance advice listing invoice numbers and amounts due,
+        # or an auditor's list of invoice fields, is not taken for an invoice.
+        many = KEYWORD_BONUS * min(4, max(0, len(matched) - 3))
         scores[rule.document_type] = (
-            prev[0] + rule.weight + named,
+            prev[0] + rule.weight + named + many,
             list(dict.fromkeys(prev[1] + reasons + ([rule.reason] if rule.reason else []))),
             flags,
         )

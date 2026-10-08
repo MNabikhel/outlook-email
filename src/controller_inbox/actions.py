@@ -29,7 +29,10 @@ ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 
-SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
+# A sentence ends at ".", "!" or "?", but not at a month's short form: "by Oct. 15, 2026" is one date.
+SENTENCE_SPLIT = re.compile(
+    r"(?<=[.!?])(?<!\b(?:jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\.)(?<!\bsept\.)\s+|\n+", re.IGNORECASE
+)
 
 
 def extract_actions(

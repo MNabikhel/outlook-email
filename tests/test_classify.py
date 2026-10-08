@@ -186,3 +186,31 @@ def test_what_a_file_is_called_outweighs_one_word_in_its_pages():
     assert contract.document_type == DocumentType.CONTRACT
     assert classify_document(filename="Sep2026_close_calendar.xlsx", extracted_text="Close checklist").document_type != DocumentType.CONTRACT
     assert classify_document(filename="ChaseStmt_Sep.pdf", extracted_text="Summary").document_type == DocumentType.BANK_STATEMENT
+
+
+def test_a_keyword_that_ends_a_sentence_still_counts():
+    assert _email("Hello", "Hi, attached is our invoice.").document_type == DocumentType.AP_INVOICE
+    assert _email("September", "Please see the attached remittance advice.").document_type == DocumentType.REMITTANCE_ADVICE
+    assert _email("Docs", "Attached is the payroll register.").document_type == DocumentType.PAYROLL
+    assert _email("Docs", "We received a notice from the IRS.").document_type == DocumentType.TAX_DOCUMENT
+    # Still whole words: "irs" is not in "first." and an address such as irs.gov is not the word.
+    assert _email("Docs", "Who was first.").document_type != DocumentType.TAX_DOCUMENT
+    assert _email("Docs", "Copy sent to records@irs.gov for them").document_type != DocumentType.TAX_DOCUMENT
+
+
+_INVOICE_TEXT = "INVOICE\nInvoice Number: INV-20931\nBill To: Our Co\nAmount Due: $4,250.00\nPayment Terms: Net 30\n"
+
+
+def test_an_invoice_with_many_invoice_words_outweighs_one_stray_word():
+    for line in ("Payment by wire transfer to: Beneficiary bank: Chase", "We accept checks, ACH credit or wire transfer.",
+                 "Audit fees for the external audit of FY2025."):
+        result = classify_document(subject="Invoice INV-20931", body="Please find attached our invoice.", filename="20931.pdf",
+                                   extracted_text=_INVOICE_TEXT + line)
+        assert result.document_type == DocumentType.AP_INVOICE, line
+    # A remittance advice listing invoice numbers and amounts, and an auditor's list of invoice fields, keep their own type.
+    remittance = classify_document(subject="Remittance advice", body="Please see attached remittance advice.", filename="pay_0921.pdf",
+                                   extracted_text="REMITTANCE ADVICE\nInvoice Number  Invoice Date  Amount Due  Amount Paid\nINV-1001 1,200.00")
+    assert remittance.document_type == DocumentType.REMITTANCE_ADVICE
+    pbc = classify_document(subject="PBC list", body="Attached is the PBC list for the external audit.", filename="list.xlsx",
+                            extracted_text="Invoice number | Amount due | Payment terms | Bill to")
+    assert pbc.document_type == DocumentType.AUDIT_REQUEST

@@ -95,14 +95,20 @@ FREEMAIL = {
 _NEVER_DO = r"(?:change|ask|request|send|update|contact|email|notify|inform|tell|advise|alert)"
 STRONG_NOTICE_RE = re.compile(
     r"(\bnever\s+" + _NEVER_DO + r"\b|\b(?:will\s+not|won'?t)\s+" + _NEVER_DO + r"\b|"
-    r"\bif\s+you\s+(?:receive|get|are\s+contacted)\b|"
+    # Not "if you get a chance, buy gift cards": that is a request, said politely.
+    r"\bif\s+you\s+(?:receive|get(?!\s+(?:a\s+)?(?:chance|moment|minute|second|sec)\b)|are\s+contacted)\b|"
+    r"\bif\s+(?:anyone|anybody|someone|somebody)\s+(?:tells?|says?|claims?|emails?|calls?|contacts?)\b|"
     r"\b(?:scam|phishing|fraudulent|spoofed)\s+(?:e-?mails?|messages?|requests?|calls?)\b)",
     re.I,
 )
 # A warning word that can just as well introduce a real request ("please be aware our bank details have changed").
 WEAK_NOTICE_RE = re.compile(r"(\bbeware\b|\bbe\s+(?:aware|alert|vigilant)\b|\balways\s+(?:call|verify|confirm)\b)", re.I)
-# Where one part of a sentence ends and the next begins ("…, but our bank details have changed").
-CLAUSE_RE = re.compile(r"[,;:]|\s[-–—]+\s|\s(?=(?:but|however|although|though|yet|whereas)\b)", re.I)
+# Where one part of a sentence ends and the next begins ("…, but our bank details have changed"). A "please"
+# starts a new part even without a comma: "if you receive our next invoice please pay it to our new account"
+# asks for the change itself. Not "asked to please update", which still reports the hypothetical message.
+CLAUSE_RE = re.compile(
+    r"[,;:]|\s[-–—]+\s|\s(?=(?:but|however|although|though|yet|whereas)\b)|(?<!\bto)\s(?=(?:please|kindly)\b)", re.I
+)
 # Words that report what a hypothetical message says ("…, claiming to be us, saying our bank details have changed").
 REPORTING_RE = re.compile(
     r"\b(?:say(?:s|ing)?|said|claim(?:s|ed|ing)?|stat(?:es|ed|ing)|advis(?:es|ed|ing)|notif(?:y|ies|ied|ying)|"
@@ -117,6 +123,25 @@ TURN_RE = re.compile(
     r"ring|contact|verify|confirm|check|ignore|delete|report|forward|speak|talk|do\s+not|don'?t|let\s+us\s+know))\b",
     re.I,
 )
+# What someone else's message claims, told as a warning: "emails claiming", "fraudsters may … claim",
+# "criminals are sending emails purporting to come from us stating". It must lead straight to the change, and
+# not be the sender's own message ("as our letter said our bank details have changed" is the sender's claim).
+HEARSAY_RE = re.compile(
+    r"(?<!\bour )(?<!\bmy )\b(?:e-?mails?|messages?|letters?|calls?|texts?|requests?|notifications?|anyone|anybody|someone|somebody|"
+    r"fraudsters?|criminals?|scammers?|imp[oe]stors?)\b[^.,;:!?\n]{0,60}?"
+    r"\b(?:claim(?:s|ed|ing)?|say(?:s|ing)?|said|stat(?:es|ed|ing)|purport(?:s|ed|ing)?|tell(?:s|ing)?|told|"
+    r"pretend(?:s|ed|ing)?|suggest(?:s|ed|ing)?|advis(?:es|ed|ing)|notif(?:y|ies|ied|ying)|inform(?:s|ed|ing)?)"
+    r"(?:\s+(?:you|us|to\s+you|to\s+us|that))*(?:\s+(?:our|the|their|its|my))?\s*$",
+    re.I,
+)
+# Words that make a sentence a warning about fraud, so reported claims in it are not the sender's own.
+FRAUD_WORD_RE = re.compile(r"\b(?:fraud\w*|criminals?|scam\w*|phish\w*|imperson\w*|imp[oe]stors?|spoof\w*)\b", re.I)
+# A change spoken of in general: "any notification of a change of bank details", "all requests to update".
+ANY_CHANGE_RE = re.compile(
+    r"\b(?:any|all|every)\s+(?:notifications?|notices?|requests?|e-?mails?|messages?|letters?|calls?|instructions?)\s+"
+    r"(?:of|about|regarding|for|to|asking\s+(?:you\s+)?to)\s+(?:a\s+)?$",
+    re.I,
+)
 # A colleague saying the quoted request was fake (not "this is not phishing", which vouches for it).
 DISAVOW_RE = re.compile(
     r"\b(?:(?:was|is|it'?s)\s+not\s+(?:them|legit\w*|genuine|real)|(?:wasn'?t|isn'?t)\s+(?:them|legit\w*|genuine|real)|"
@@ -125,8 +150,9 @@ DISAVOW_RE = re.compile(
     r"blocked\s+(?:the|this)\s+sender|reported\s+(?:it|this|the\s+sender))\b",
     re.I,
 )
+# "eGift cards" and "e-gift cards" are gift cards too.
 GIFT_RE = re.compile(
-    r"(?:\b(?:(?:itunes|apple|google\s+play|steam|amazon|visa|target|walmart|ebay|best\s*buy)\s+)?gift\s*-?\s*cards?\b|"
+    r"(?:\b(?:(?:itunes|apple|google\s+play|steam|amazon|visa|target|walmart|ebay|best\s*buy)\s+)?(?:e-?)?gift\s*-?\s*cards?\b|"
     r"\b(?:itunes|google\s+play|steam)\s+cards?\b)",
     re.I,
 )
@@ -139,8 +165,10 @@ GIFT_BUY_BEFORE_RE = re.compile(
 )
 # ...or the sentence asks for their codes.
 GIFT_SEND_CODES_RE = re.compile(r"(?<!not )(?<!n't )(?<!never )\bsend\b[^.\n]{0,40}\b(?:codes?|card\s+numbers|pins?)\b", re.I)
-# Gift cards only count when someone is asked to get them or hand over their codes.
+# Gift cards only count when someone is asked to get them or hand over their codes. Not "employees may not
+# purchase gift cards" or "never buy gift cards for anyone who emails you".
 GIFT_ASK_RE = re.compile(
+    r"(?<!not )(?<!n't )(?<!never )"
     r"\b(?:buy|purchase|pick\s+up|get\s+(?:me|us|some|them|a\s+few)|grab|send\s+(?:me|us)|need|scratch|codes?|card\s+numbers|pins?)\b",
     re.I,
 )
@@ -285,11 +313,6 @@ def learned_weights(store: "Store") -> dict[str, float]:
     return weights
 
 
-def _asks(text: str) -> bool:
-    """The sentence itself asks for a bank change or gift cards."""
-    return bool(PAYMENT_CHANGE_RE.search(text) or _gift_ask(text))
-
-
 def _requests(text: str) -> list[int]:
     """Where in the text a bank change or gift cards are asked for."""
     starts = [match.start() for match in PAYMENT_CHANGE_RE.finditer(text)]
@@ -335,9 +358,32 @@ def _is_notice(sentence: str) -> bool:
             turn = bisect_left(turns, marker_ends[warning])
             return not (turn < len(turns) and turns[turn] <= part)
 
-        return all(inside(at) or reported(at) for at in requests)
+        return all(inside(at) or reported(at) or _spoken_of(sentence, at) for at in requests)
     # "Beware of scams" is a notice; "please be aware our bank details have changed" is not.
-    return bool(WEAK_NOTICE_RE.search(sentence)) and not _asks(sentence)
+    requests = _requests(sentence)
+    if not requests:
+        return bool(WEAK_NOTICE_RE.search(sentence))
+    # "Beware of emails claiming our bank details have changed" and "any notification of a change of bank
+    # details must be verified by phone" speak of a change; they do not ask for one.
+    return all(_spoken_of(sentence, at) for at in requests)
+
+
+def _spoken_of(sentence: str, at: int) -> bool:
+    """The change asked for at ``at`` is one the sentence speaks of rather than asks for.
+
+    In general terms ("any notification of a change of bank details", "any change of bank details"), or, in a
+    sentence that warns of fraud ("beware", "fraudsters"), as what someone else's message claims ("fraudsters may
+    send emails claiming our bank details have changed"). Only that part of the sentence counts, so "beware, our
+    bank details have changed" still asks.
+    """
+    starts = [cut.end() for cut in CLAUSE_RE.finditer(sentence, 0, at)]
+    part = sentence[starts[-1] if starts else 0 : at]
+    if ANY_CHANGE_RE.search(part):
+        return True
+    if sentence[at : at + 6].lower() == "change" and re.search(r"\b(?:any|all|every)\s+$", part, re.I):
+        return True
+    warned = WEAK_NOTICE_RE.search(sentence) or FRAUD_WORD_RE.search(sentence)
+    return bool(warned and HEARSAY_RE.search(part))
 
 
 def _spans_test(spans: list[tuple[int, int]]):
@@ -362,8 +408,13 @@ def strip_notices(text: str) -> str:
 
     Only warnings are dropped: a sentence that asserts a change ("please be aware our banking
     details have changed") stays, whatever warning words it starts or ends with.
+
+    A line that goes on in lower case is the same sentence, wrapped by the sender's mail program
+    ("if you receive an email from anyone\\nsaying our bank details have changed, call us"), so it is
+    read with the line before it. A new paragraph, or a line that starts afresh, is a part of its own.
     """
-    parts = re.split(r"(?<=[.!?])\s+|\n+", text or "")
+    parts = re.split(r"(?<=[.!?])\s+|\n[ \t]*\n\s*|\n(?![ \t]*[a-z])", text or "")
+    parts = [re.sub(r"[ \t]*\n[ \t]*", " ", part) for part in parts]
     return " ".join(part for part in parts if not _is_notice(part))
 
 
