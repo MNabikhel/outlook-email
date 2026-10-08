@@ -256,3 +256,20 @@ def test_saving_a_reading_over_a_corrected_message_is_a_json_error(loaded, setti
     result = tools.dispatch(loaded, settings, "save_reading", SimpleNamespace(json=json.dumps(payload)))
     assert result["ok"] is False and "corrected" in result["error"]
     assert loaded.get_email(email.id).model_status == "corrected"
+
+
+def test_a_figure_from_an_earlier_answer_is_still_flagged_in_a_follow_up(store, settings):
+    # The model's own earlier answers are not something it read: a made-up figure it repeats stays flagged.
+    ws = agent.Workspace(store, settings, [], question="What was the Ridgeview total again?")
+    history = [
+        {"role": "user", "text": "What is the Ridgeview total?"},
+        {"role": "assistant", "text": "The Ridgeview total is $12,345.67 [1]."},
+    ]
+    events = list(assistant._checked(ws, "As I said, the Ridgeview total is $12,345.67 [1].", history=history, today="2026-10-08"))
+    checks = [item for event in events if event["type"] == "check" for item in event["items"]]
+    assert any("$12,345.67" in item for item in checks), events
+
+
+def test_a_last_comma_first_name_greets_by_the_first_name():
+    assert assistant._first_name("Smith, John") == "John"
+    assert assistant._first_name("John Smith") == "John"

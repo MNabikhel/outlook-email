@@ -591,6 +591,7 @@ export function createChat({ root, onToggle, visionRead }) {
   if (document.documentElement.dataset.chat === "open") {
     root.hidden = false;
     load(chatId, false);
+    onToggle(true); // its button says it's open
   }
 
   return {

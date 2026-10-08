@@ -214,3 +214,44 @@ def test_an_invoice_with_many_invoice_words_outweighs_one_stray_word():
     pbc = classify_document(subject="PBC list", body="Attached is the PBC list for the external audit.", filename="list.xlsx",
                             extracted_text="Invoice number | Amount due | Payment terms | Bill to")
     assert pbc.document_type == DocumentType.AUDIT_REQUEST
+
+
+def test_a_domain_needle_matches_only_the_sender_domain():
+    # "ey.com" and "chase.com" used to match anywhere in the address: surveymonkey.com and purchase.com.
+    survey = classify_document(subject="We want your feedback", body="Take our 2 minute survey.", sender="member@surveymonkey.com")
+    assert survey.document_type != DocumentType.AUDIT_REQUEST, survey.reasons
+    shop = classify_document(subject="Your order", body="Thanks for shopping.", sender="orders@purchase.com")
+    assert shop.document_type != DocumentType.BANK_STATEMENT, shop.reasons
+    survey_mail = classify_email(subject="Quick survey", body="Tell us what you think.", sender="member@surveymonkey.com",
+                                 outlook_importance="normal", attachments=[], fields=ExtractedFields(), as_of=AS_OF)
+    assert "VIP / elevated sender" not in survey_mail.importance_reasons
+    # The domain itself and its subdomains still match.
+    auditor = classify_email(subject="Quick question", body="Tell us what you think.", sender="partner@uk.ey.com",
+                             outlook_importance="normal", attachments=[], fields=ExtractedFields(), as_of=AS_OF)
+    assert "VIP / elevated sender" in auditor.importance_reasons
+
+
+def test_a_vip_entry_with_a_dot_in_the_name_still_matches():
+    # Domain matching for "ey.com" made the VIP entry "maya.chen" look for a domain "maya.chen".
+    kw = dict(subject="Quick question", body="Can we talk today?", outlook_importance="normal", attachments=[],
+              fields=ExtractedFields(), as_of=AS_OF)
+    assert "VIP / elevated sender" in classify_email(sender="maya.chen@taz.example", vip_senders=["maya.chen"], **kw).importance_reasons
+    # An entry written "@taz.com" names a domain.
+    assert "VIP / elevated sender" in classify_email(sender="bob@uk.taz.com", vip_senders=["@taz.com"], **kw).importance_reasons
+    assert "VIP / elevated sender" not in classify_email(sender="bob@notaz.com", vip_senders=["@taz.com"], **kw).importance_reasons
+
+
+def test_a_learned_category_is_scored_as_that_category():
+    # A no-reply notification corrected to an AP invoice kept the notification's Low score and "Automated notification".
+    from controller_inbox.classify import score_importance
+    from controller_inbox.learn import apply_learned
+
+    kw = dict(subject="New document available", body="A new document from VendorCo is available in the portal.",
+              sender="noreply@billing.vendorco.com", outlook_importance="normal", fields=ExtractedFields(), as_of=AS_OF)
+    classified = classify_email(attachments=[], fraud="none", **kw)
+    assert classified.document_type == DocumentType.NOTIFICATION
+    learned = apply_learned(classified, {"corrected_category": "ap_invoice", "reason": "These are vendor invoices"})
+    assert learned.document_type == DocumentType.AP_INVOICE
+    assert "Automated notification" not in learned.importance_reasons, learned.importance_reasons
+    expected = score_importance(category=DocumentType.AP_INVOICE, flags=[], high_amount=10_000, vip_senders=[], **kw)
+    assert (learned.importance, learned.importance_score) == expected[:2]

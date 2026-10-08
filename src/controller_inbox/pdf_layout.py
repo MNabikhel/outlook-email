@@ -1845,6 +1845,7 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
         bolds = [False] * len(grid)
         cell_x = [row[2:] for row in cell_x]
         cell_end = [row[2:] for row in cell_end]
+        columns = columns[2:]
 
     if _prose(grid):
         width = len(grid[0]) if grid else 0
@@ -2159,7 +2160,9 @@ def _peel_side_facts(grid: list[list[str]]) -> tuple[list[str], list[list[str]]]
         return None
     if sum(1 for row in grid if row[0].rstrip().endswith(":")) < 0.7 * len(grid):
         return None
-    facts = [f"{row[0]} {row[1]}".strip() if row[0].endswith(":") else row[0] for row in grid]
+    # Both cells, so a label without a colon ("Ship via" | UPS Ground) or a wrapped value under a
+    # blank label keeps its value.
+    facts = [" ".join(cell.strip() for cell in row[:2] if cell.strip()) for row in grid]
     rest = [row[2:] for row in grid]
     if max((len(row) for row in rest), default=0) < 2:
         return None

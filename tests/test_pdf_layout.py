@@ -162,3 +162,55 @@ def test_a_font_without_a_text_layer_falls_back_to_the_old_reader():
 
     glyphs = [pdf_layout.Glyph("(cid:12)", i * 6.0, i * 6.0 + 5, 700, 10, False) for i in range(20)]
     assert pdf_layout.page_text(glyphs).unreadable
+
+
+SIDE_COLUMNS = [(40, "left"), (100, "left"), (250, "left"), (380, "right"), (500, "right")]
+
+
+def _side_page(rows: list[list[str]], columns=SIDE_COLUMNS) -> list[Text]:
+    """A label column ("Invoice:" | INV-4471) printed beside a table, header row left-aligned."""
+    return [
+        Text(x, 700 - r * 15, value, right=align == "right" and r > 0)
+        for r, row in enumerate(rows)
+        for (x, align), value in zip(columns, row)
+        if value
+    ]
+
+
+def test_side_fact_values_without_a_colon_label_are_kept():
+    # The side facts kept only the label cell of a row without a colon, so "UPS Ground" and the
+    # address line wrapped under "Bill to:" (blank label cell) were dropped.
+    rows = [
+        ["Invoice:", "INV-4471", "Item", "Qty", "Amount"],
+        ["Bill to:", "Acme Corp", "Widget", "2", "40.00"],
+        ["", "12 Main St", "Gadget", "1", "15.00"],
+        ["Ship via", "UPS Ground", "Bolt", "5", "2.50"],
+        ["Date:", "10/01/2026", "Nut", "10", "1.00"],
+        ["Terms:", "Net 30", "Pin", "3", "0.90"],
+        ["PO:", "PO-889", "Cap", "4", "1.20"],
+        ["Rep:", "Dana Kim", "Hook", "6", "3.10"],
+    ]
+    text = pdf_text(build_pdf([_side_page(rows)]))
+    assert "Item: Widget | Qty: 2 | Amount: 40.00" in text
+    assert "12 Main St" in text and "Ship via UPS Ground" in text
+
+
+def test_a_table_beside_side_facts_keeps_its_column_names_on_the_next_page():
+    # Peeling the label column left the table one column name short of its column positions, so
+    # the rows continued on page 2 were not matched back to Item / Qty / Amount.
+    rows = [
+        ["Invoice:", "INV-4471", "Item", "Qty", "Amount"],
+        ["Date:", "10/01/2026", "Widget", "2", "40.00"],
+        ["PO:", "PO-889", "Gadget", "1", "15.00"],
+        ["Terms:", "Net 30", "Bolt", "5", "2.50"],
+        ["Rep:", "Dana Kim", "Nut", "10", "1.00"],
+    ]
+    more = [["Washer", "100", "3.00"], ["Screw", "50", "4.50"], ["Hinge", "4", "12.00"]]
+    page_two = [
+        Text(x, 700 - r * 15, value, right=align == "right")
+        for r, row in enumerate(more)
+        for (x, align), value in zip(SIDE_COLUMNS[2:], row)
+    ]
+    text = pdf_text(build_pdf([_side_page(rows), page_two]))
+    assert "Item: Widget | Qty: 2 | Amount: 40.00" in text
+    assert "Item: Washer | Qty: 100 | Amount: 3.00" in text

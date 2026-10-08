@@ -17,10 +17,15 @@ import re
 from dataclasses import dataclass, field
 from itertools import permutations
 
+# "€1.234,56" is European style: dots group the thousands and a comma marks the decimals.
+_EUROPEAN = r"\d{1,3}(?:\.\d{3})+,\d{1,2}(?!\d)"
+# Under a thousand only the comma shows it, so only beside a euro sign: "€447,15", "447,15 €" (a plain "3,12" is a list).
+_EURO_CENTS = r"(?:(?<=€)|(?<=€ ))\d{1,3},\d{2}(?!\d)|\d{1,3},\d{2}(?=\s?€)"
 NUMBER_RE = re.compile(
-    r"(?<![\w.,\[])(?P<cur>[$€£])?(?P<num>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+    r"(?<![\w.,\[])(?P<cur>[$€£])?(?P<num>" + _EUROPEAN + "|" + _EURO_CENTS + r"|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
     r"(?P<suf>%| ?percent\b| ?(?:k|K|m|M|bn)\b| (?:thousand|million|billion)\b)?(?![\w\]])"
 )
+_EUROPEAN_RE = re.compile(_EUROPEAN)
 _SCALE = {"k": 1e3, "thousand": 1e3, "m": 1e6, "million": 1e6, "bn": 1e9, "billion": 1e9}
 _REFERENCE_BEFORE = re.compile(r"(?:\bpages?|\bp\.|\bsections?|\brows?|\bsheets?|\bsteps?|\bitems?|\bfinding|#|\bno\.)\s*$", re.I)
 _SENTENCE_RE = re.compile(r"(?:[^\n.!?]|[.!?](?!\s|$))+(?:[.!?]+|\n|$)")
@@ -30,15 +35,17 @@ _PAGE_SPLIT = re.compile(r"^\[page (\d+)\]\s*$", re.M)
 _SHEET_SPLIT = re.compile(r'^\[sheet "([^"]+)"[^\]]*\]\s*$', re.M)
 _CELL_VALUE = re.compile(r"(?:^|\| )([A-Z]{1,3}\d{1,6})(?: \((?:[^()\n]|\([^()\n]*\))*\))?: ([^|\n]*)")
 _WORKED_OUT_BEFORE = re.compile(
-    r"\b(?:increase|decrease|difference|change|total|sum|gap|variance|rise|drop|growth|up|down|rose|fell|grew|shrank|"
-    r"more|less|higher|lower)\b(?: \w+){0,2}\s*(?:of|by|is|was|=|:)?\s*[−-]?$",
+    r"\b(?:increas(?:e|es|ed|ing)|decreas(?:e|es|ed|ing)|difference|chang(?:e|es|ed)|total(?:s|ed|led|ing|ling)?|sum(?:med)?|"
+    r"gap|variance|ris(?:e|es|en|ing)|drop(?:s|ped|ping)?|fall(?:s|en|ing)?|growth|grow(?:s|n)?|up|down|rose|fell|grew|"
+    r"shr(?:ank|unk)|more|less|higher|lower)\b(?: \w+){0,2}\s*(?:of|by|is|was|=|:)?\s*[−-]?$",
     re.I,
 )
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
 _MONTH_AFTER = re.compile(r"^(?:st|nd|rd|th)?\s+(?:of\s+)?" + _MONTH + r"\b", re.I)
 _MONTH_BEFORE = re.compile(r"\b" + _MONTH + r"\s+$", re.I)
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z-]{5,}")
-_ISO_DATE = re.compile(r"(?<!\d)\d{4}-\d{1,2}-\d{1,2}(?!\d)")
+# 2026-10-05, 11/14/2026, 14.11.2026
+_DATE = re.compile(r"(?<![\d.,/])(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}([/.])\d{1,2}\1(?:\d{4}|\d{2}))(?![\d]|[.,/]\d)")
 _RELATIVE = 0.15
 
 
@@ -65,7 +72,7 @@ class Review:
 def numbers_in(text: str) -> list[Number]:
     found = []
     for match in NUMBER_RE.finditer(text):
-        digits = match["num"].replace(",", "")
+        digits = _plain_digits(match["num"])
         decimals = len(digits.split(".")[1]) if "." in digits else 0
         suffix = (match["suf"] or "").strip().lower()
         scale = _SCALE.get(suffix, 1.0)
@@ -82,6 +89,13 @@ def numbers_in(text: str) -> list[Number]:
             )
         )
     return found
+
+
+def _plain_digits(num: str) -> str:
+    """The figure as Python reads it: "1,234.56" and "1.234,56" are both 1234.56."""
+    if _EUROPEAN_RE.fullmatch(num) or re.fullmatch(r"\d{1,3},\d{2}", num):
+        return num.replace(".", "").replace(",", ".")
+    return num.replace(",", "")
 
 
 class Grounding:
@@ -109,8 +123,8 @@ def _is_claim(text: str, number: Number) -> bool:
     """Figures worth checking: money, percentages, decimals, and whole numbers from 10 up that aren't years or references."""
     if _REFERENCE_BEFORE.search(text[max(0, number.start - 12): number.start]):
         return False
-    if any(m.start() <= number.start and number.end <= m.end() for m in _ISO_DATE.finditer(text, max(0, number.start - 8), number.end + 6)):
-        return False  # a piece of a date such as 2026-10-05, not a figure
+    if any(m.start() <= number.start and number.end <= m.end() for m in _DATE.finditer(text, max(0, number.start - 10), number.end + 11)):
+        return False  # a piece of a date such as 2026-10-05 or 11/14/2026, not a figure
     if number.value <= 31 and not (number.money or number.percent) and (
         _MONTH_AFTER.search(text[number.end: number.end + 16]) or _MONTH_BEFORE.search(text[max(0, number.start - 12): number.start])
     ):
@@ -125,16 +139,38 @@ def _is_claim(text: str, number: Number) -> bool:
 
 def _format_like(value: float, like: Number) -> str:
     shown = like.shown
-    decimals = len(re.sub(r"[^\d.]", "", shown).split(".")[1]) if "." in re.sub(r"[^\d.]", "", shown) else 0
+    european = bool(_EUROPEAN_RE.search(shown))
+    digits = _plain_digits(re.sub(r"[^\d.,]", "", shown))
+    decimals = len(digits.split(".")[1]) if "." in digits else 0
     suffix = re.search(r"(%| ?percent| ?(?:k|K|m|M|bn)| (?:thousand|million|billion))$", shown)
     scale = _SCALE.get(suffix.group(1).strip().lower(), 1.0) if suffix else 1.0
     if like.percent and round(value, decimals) != round(value, max(decimals, 1)):
         decimals = max(decimals, 1)
     body = f"{value / scale:,.{decimals}f}" if "," in shown or value / scale >= 10_000 else f"{value / scale:.{decimals}f}"
+    if european:
+        body = body.translate(str.maketrans(",.", ".,"))
     return (shown[0] if shown[0] in "$€£" else "") + body + (suffix.group(1) if suffix else "")
 
 
-def _worked_out(target: Number, operands: list[Number]) -> tuple[float, str] | None:
+_FALL = re.compile(r"\b(?:fell|fall(?:s|en|ing)?|drop(?:s|ped|ping)?|decreas(?:e|es|ed|ing)|declin(?:e|es|ed|ing)|down|lower|less|"
+                   r"shr(?:ank|unk|ink|inks)|reduc(?:e|es|ed|ing|tion))\b", re.I)
+_RISE = re.compile(r"\b(?:rose|ris(?:e|es|en|ing)|increas(?:e|es|ed|ing)|up|grew|grow(?:s|n|th)?|higher|more|gain(?:s|ed)?|"
+                   r"jump(?:s|ed)?)\b", re.I)
+
+
+def _direction(chunk: str) -> str | None:
+    """"fall" or "rise" when the sentence says which way the change went, else None."""
+    fall, rise = bool(_FALL.search(chunk)), bool(_RISE.search(chunk))
+    return "fall" if fall and not rise else "rise" if rise and not fall else None
+
+
+def _changes_from(x: Number, y: Number, direction: str | None) -> bool:
+    """Whether a change between ``x`` and ``y`` is measured from ``y``: a fall from the larger figure, a rise from the
+    smaller one. With no direction either could be meant."""
+    return direction is None or (y.value > x.value if direction == "fall" else y.value < x.value)
+
+
+def _worked_out(target: Number, operands: list[Number], direction: str | None = None) -> tuple[float, str] | None:
     """The one sum, difference or percentage of the sentence's own figures that ``target`` was meant to be, if clear."""
     near: dict[float, str] = {}
     exact = False
@@ -143,11 +179,14 @@ def _worked_out(target: Number, operands: list[Number]) -> tuple[float, str] | N
         candidates = [(x.value + y.value, f"{x.shown} + {y.shown}"), (x.value - y.value, f"{x.shown} − {y.shown}")]
         if y.value:
             if target.percent:
-                # A fall is written as a positive percentage ("fell 10%"): its size is what is compared.
-                candidates += [
-                    (100 * x.value / y.value, f"{x.shown} ÷ {y.shown}"),
-                    (abs(100 * (x.value - y.value) / y.value), f"({x.shown} − {y.shown}) ÷ {y.shown}"),
-                ]
+                candidates.append((100 * x.value / y.value, f"{x.shown} ÷ {y.shown}"))
+            # A fall is written as a positive percentage ("fell 10%"): its size is what is compared. Which figure it
+            # is measured from depends on which way it went; with no word for that, it isn't rewritten.
+            change = abs(100 * (x.value - y.value) / y.value)
+            if target.percent and direction is None and abs(change - target.value) <= _RELATIVE * max(target.value, 1e-9):
+                return None
+            if target.percent and _changes_from(x, y, direction):
+                candidates.append((change, f"({x.shown} − {y.shown}) ÷ {y.shown}"))
         for value, how in candidates:
             if value <= 0 and target.value > 0:
                 continue
@@ -179,7 +218,8 @@ def check_numbers(answer: str, grounding: Grounding) -> Review:
             if worked_out and _sum_of_some(number, others):
                 # "$5,800 ($500 + $2,500 + $2,800)": a total of more than two figures, worked out right.
                 continue
-            fix = _worked_out(number, others) if worked_out else None
+            direction = _direction(chunk)
+            fix = _worked_out(number, others, direction) if worked_out else None
             if fix is None:
                 fix = _list_total(answer, start + number.start, number, grounding)
                 if fix == "matches":
@@ -192,7 +232,7 @@ def check_numbers(answer: str, grounding: Grounding) -> Review:
                     text = text[:at] + right + text[start + number.end:]
                     checks.insert(0, f"Corrected {number.shown} to {right} ({how}).")
                     continue
-            if number not in grounded and not any(_derivable(number, grounded)):
+            if number not in grounded and not any(_derivable(number, grounded, direction)):
                 checks.insert(0, f"{number.shown} isn't in the emails or files I read; check it before relying on it.")
     return Review(text=text, checks=checks)
 
@@ -259,10 +299,10 @@ def _sum_of_some(target: Number, operands: list[Number]) -> bool:
     )
 
 
-def _derivable(target: Number, operands: list[Number]):
+def _derivable(target: Number, operands: list[Number], direction: str | None = None):
     for x, y in permutations(operands[:6], 2):
-        for value in (x.value + y.value, x.value - y.value, 100 * x.value / y.value if y.value else None,
-                      abs(100 * (x.value - y.value) / y.value) if y.value else None):
+        change = abs(100 * (x.value - y.value) / y.value) if y.value and _changes_from(x, y, direction) else None
+        for value in (x.value + y.value, x.value - y.value, 100 * x.value / y.value if y.value else None, change):
             if value is not None and abs(value - target.value) <= target.tolerance + 1e-9:
                 yield True
                 return
@@ -366,13 +406,18 @@ def _fix_page(chunk: str, paged: list[tuple[str, dict[int, str]]], others: list[
     page = int(cited[0]["page"])
     plain = _without_names(chunk, [name, *(others or [])])
     figures = [n.shown.lstrip("$€£") for n in numbers_in(plain) if _is_claim(plain, n)]
+    # A figure standing on its own: "500.00" is not in "$2,500.00". A whole figure may be written with zero
+    # cents on the page: "$1,300" is "1,300.00".
+    patterns = [
+        re.compile(rf"(?<![\d.,]){re.escape(f)}{'0*' if '.' in f else r'(?:[.]0+)?'}(?!\d|[.,]\d)") for f in figures
+    ]
     words = {w.lower() for w in _WORD_RE.findall(plain)} - {name.lower()}
     if not figures and len(words) < 3:
         return None
 
     def score(body: str) -> tuple[int, int]:
         lowered = body.lower()
-        return sum(f in body for f in figures), sum(w in lowered for w in words)
+        return sum(bool(p.search(body)) for p in patterns), sum(w in lowered for w in words)
 
     scores = {number: score(body) for number, body in pages.items()}
     best = max(scores.values())
@@ -393,8 +438,8 @@ def _fix_page(chunk: str, paged: list[tuple[str, dict[int, str]]], others: list[
     return new, f"Corrected the page for {name}: that is on page {right}, not page {page}."
 
 
-# "pages 1-2", "pages 2 to 3": a range of pages, which a one-page correction would break.
-_PAGE_RANGE_AFTER = re.compile(r"\s*(?:[-–—]|to|through|and)\s*\d", re.I)
+# "pages 1-2", "pages 2 to 3", "pages 1, 2": a range or list of pages, which a one-page correction would break.
+_PAGE_RANGE_AFTER = re.compile(r"\s*(?:[-–—,]|to|through|and)\s*\d", re.I)
 _CELL_WORD_BEFORE = re.compile(r"\bcells?\s+(?:[A-Z]{1,3}\d{1,6}\s*(?:,|and|to|:)\s*)*$", re.I)
 
 

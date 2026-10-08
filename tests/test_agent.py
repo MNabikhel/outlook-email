@@ -365,13 +365,16 @@ def test_an_email_a_tool_found_before_the_context_filled_gets_its_card(store, se
         ("(301500-259400)/259400*100", "= 16.2298"),
         ("$9,600.00 - $8,900", "= 700"),
         ("15% * 1200", "= 180"),
+        # Compound growth over many periods: refused while any exponent over 12 was.
+        ("1.05**30", "= 4.3219"),
+        ("250000*(1+0.06/12)**360", "= 1,505,643.8031"),
     ],
 )
 def test_calculate_does_the_arithmetic_and_dates(expression, answer):
     assert answer in agent.calculate(expression)
 
 
-@pytest.mark.parametrize("expression", ['__import__("os").system("ls")', "2**100", "1/0", "open('x')", ""])
+@pytest.mark.parametrize("expression", ['__import__("os").system("ls")', "2**100", "0.5**-100", "(-2)**0.5", "1/0", "open('x')", ""])
 def test_calculate_refuses_anything_but_numbers(expression):
     result = agent.calculate(expression)
     assert "=" not in result.split(".")[0] and ("Couldn't" in result or result.startswith("Write numbers"))
@@ -841,3 +844,98 @@ def test_the_email_a_question_names_is_not_crowded_out_by_its_kind(loaded, setti
     sources, _, found = pick_sources(loaded, "Did Lakeside Tooling reply about the invoice?", settings=settings)
     assert sources[0].id == "demo-wire-legit", "the Lakeside Tooling email the question names comes first"
     assert "demo-wire-legit" in found and not any(hit.startswith(("reply-", "inv-")) for hit in found)
+
+
+def test_only_the_file_named_in_the_question_is_picked():
+    """ "Q4 Budget.xlsx" in the question also named "Budget.xlsx": the full-name check had no word boundary."""
+    from controller_inbox.models import AttachmentRecord, DocumentType
+
+    def att(name):
+        return AttachmentRecord(id=name, email_id="e", filename=name, content_type="", size_bytes=1, sha256=name,
+                                extracted_text="x", document_type=DocumentType.OTHER, document_confidence=0.5)
+
+    picked = agent.named_files([att("Budget.xlsx"), att("Q4 Budget.xlsx")], "What is the total in Q4 Budget.xlsx?")
+    assert [a.filename for a in picked] == ["Q4 Budget.xlsx"]
+
+
+def test_two_files_with_the_same_name_are_both_named():
+    """Setting aside the matched name dropped the second "invoice.pdf" (one on each of two emails)."""
+    from controller_inbox.models import AttachmentRecord, DocumentType
+
+    files = [
+        AttachmentRecord(id=f"{email}:1", email_id=email, filename="invoice.pdf", content_type="application/pdf",
+                         size_bytes=1, sha256="", extracted_text="", document_type=DocumentType.OTHER, document_confidence=0.0)
+        for email in ("e1", "e2")
+    ]
+    assert len(agent.named_files(files, "what is the total on invoice.pdf?")) == 2
+
+
+def test_a_file_named_like_one_in_a_zip_is_named_too():
+    """The zip's "budget.xlsx" matched first and set the name aside, so the loose budget.xlsx asked about was dropped."""
+    from controller_inbox.models import AttachmentRecord, DocumentType
+
+    files = [
+        AttachmentRecord(id=f"e1:{n}", email_id="e1", filename=name, content_type="", size_bytes=1, sha256="",
+                         extracted_text="", document_type=DocumentType.OTHER, document_confidence=0.0)
+        for n, name in enumerate(["budget.xlsx", "older.zip › budget.xlsx"])
+    ]
+    assert len(agent.named_files(files, "what is the total in budget.xlsx?")) == 2
+
+
+def test_a_zipped_workbook_is_not_read_from_the_top_level_file_with_its_name(store, settings):
+    """A budget.xlsx inside older.zip was served from the top-level budget.xlsx of another attachment, so its cells
+    came back with the other workbook's figures."""
+    import hashlib
+    import io
+    import zipfile
+
+    from msgfactory import XLSX, write_msg
+    from openpyxl import Workbook
+
+    from controller_inbox.folder_mail import ingest_folder
+
+    def book(ads: int) -> bytes:
+        workbook = Workbook()
+        workbook.active.title = "Budget"
+        workbook.active.append(["Line", "Q4"])
+        workbook.active.append(["Ads", ads])
+        out = io.BytesIO()
+        workbook.save(out)
+        return out.getvalue()
+
+    settings.ensure_data_dir()
+    new, old = book(1500), book(999)
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("budget.xlsx", old)
+    write_msg(
+        settings.inbox_incoming / "b.msg", "Budgets", "New budget attached, last year's in the zip.",
+        sender_name="Maya", sender_email="maya@taz.com",
+        attachments=[("budget.xlsx", new, XLSX), ("older.zip", archive.getvalue(), "application/zip")],
+    )
+    [email] = ingest_folder(store, settings)
+    email = store.get_email(email.id)
+    [zipped] = [a for a in email.attachments if a.sha256 == hashlib.sha256(old).hexdigest()]
+    [top] = [a for a in email.attachments if a.sha256 == hashlib.sha256(new).hexdigest()]
+    assert agent.original_file(settings, email, zipped) is None, "the zipped file isn't kept on its own"
+    assert agent.original_file(settings, email, top) is not None
+    ws = agent.Workspace(store=store, settings=settings, sources=[email])
+    assert ws.original(email, zipped) == old, "read from the zip it came in"
+    file = str(email.attachments.index(zipped) + 1)
+    out = agent.run_tool(ws, "read_cells", {"email": "1", "file": file, "sheet": "Budget", "cells": "A1:B2"}, limit=3000)
+    assert "999" in out and "1500" not in out.replace(",", ""), out
+
+
+def test_an_original_file_is_hashed_once_until_it_changes(tmp_path, monkeypatch):
+    """The pages check every attachment's original on every render; each check read and hashed the whole file."""
+    import hashlib
+
+    path = tmp_path / "budget.xlsx"
+    path.write_bytes(b"one")
+    reads = []
+    real = type(path).read_bytes
+    monkeypatch.setattr(type(path), "read_bytes", lambda self: reads.append(self) or real(self))
+    assert agent._file_sha256(path) == agent._file_sha256(path) == hashlib.sha256(b"one").hexdigest()
+    assert len(reads) == 1
+    path.write_bytes(b"two!")
+    assert agent._file_sha256(path) == hashlib.sha256(b"two!").hexdigest()

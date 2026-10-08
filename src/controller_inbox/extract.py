@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 import hashlib
 import io
 import re
@@ -18,13 +19,15 @@ from controller_inbox.ocr import image_text
 # A further "-0457" segment belongs to the number ("INV-2024-0457"); a segment needs a digit, so
 # "12345-due" stays "12345".
 _ID_TAIL = r"(?:[-_](?=[A-Z0-9]*\d)[A-Z0-9]{1,12})*"
+# "Invoice Number: 12345", "PO No. 4500123": the label word is read whole, or the separators would take its "No".
+_NUMBER_WORD = r"(?:\s*(?:number|num|no)\b\.?)?"
 INVOICE_RE = re.compile(
-    r"\b(?:invoice|inv(?![-_]?\d)\.?|bill)[\s#:No.-]*((?:[A-Z]{1,6}[-_]?\d{2,12}|\d{3,12})" + _ID_TAIL + r")",
+    r"\b(?:invoice|inv(?![-_]?\d)\.?|bill)" + _NUMBER_WORD + r"[\s#:No.-]*((?:[A-Z]{1,6}[-_]?\d{2,12}|\d{3,12})" + _ID_TAIL + r")",
     re.IGNORECASE,
 )
 INVOICE_BARE_RE = re.compile(r"\b(INV[-_]?\d{3,8}(?:[-_]\d{1,8})*|IN[-_]?\d{4,8}(?:[-_]\d{1,8})*)\b", re.IGNORECASE)
 PO_RE = re.compile(
-    r"\b(?:purchase\s+order|p\.?o\.?)[\s#:No.-]*([A-Z]{0,4}-?\d{3,10})\b",
+    r"\b(?:purchase\s+order|p\.?o\.?)" + _NUMBER_WORD + r"[\s#:No.-]*([A-Z]{0,4}-?\d{3,10})\b",
     re.IGNORECASE,
 )
 # After a currency mark, cents are optional ("$48,000"). Not followed by a further digit group,
@@ -39,15 +42,22 @@ AMOUNT_WORDS_RE = re.compile(
     r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+\.[0-9]{2})(?![\w]|[.,]\d)",
     re.IGNORECASE,
 )
-# "October 15" with no year: read against the date the mail was sent (see parse_due_date).
-_MONTH_DAY = (
+_MONTH = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
-    r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?(?!\d)"
+    r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 )
+# "October 15" with no year: read against the date the mail was sent (see parse_due_date).
+_MONTH_DAY = _MONTH + r"\.?\s+\d{1,2}(?:st|nd|rd|th)?(?!\d)"
+# A weekday before a date names the date's day ("Friday, October 16"): the date is read, not the next Friday.
+_WEEKDAY_BEFORE = r"(?:(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?\.?,?\s+)?"
 DUE_RE = re.compile(
     r"\b(?:due(?:\s+date)?|payment\s+due|remit\s+by|pay\s+by|respond\s+by|needed\s+by|"
-    r"please\s+(?:complete|provide|respond|approve)\s+by|deadline|by)\s*[:\-]?\s*"
+    r"please\s+(?:complete|provide|respond|approve)\s+by|deadline|by)\s*[:\-]?\s*" + _WEEKDAY_BEFORE +
     r"([A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{2,4}(?!\d)|" + _MONTH_DAY + r"|"
+    # Day first, as UK and EU suppliers write it: "15 October 2026", "15-Oct-26", "15 October". A two-digit year
+    # only follows directly ("15 Oct 26"): in "due 15 October, 10% late fee" and "by 2 June, 12 cases" the
+    # figure is not a year, nor in "by 2 June 12 cases short".
+    r"\d{1,2}(?:st|nd|rd|th)?[\s-]+" + _MONTH + r"\b\.?(?:,?[\s-]+\d{4}|[\s-]\d{2}(?!\s*[a-z]))?(?![\d%])|"
     r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2}|"
     r"EOD|COB|today|tomorrow|Monday|Tuesday|Wednesday|Thursday|Friday)",
     re.IGNORECASE,
@@ -79,7 +89,8 @@ def _grouped(least: int) -> str:
 
 
 # After its label a number may follow "is", a colon, a dash or "#": "Account Number - 12345678", "A/C No: 12345678".
-_SECRET_LABEL_END = r"(?:\s+is\b)?[\s#:\-\u2013]*"
+# A short note in brackets may come between: "Account Number (IBAN): DE89 …".
+_SECRET_LABEL_END = r"(?:\s*\([^()\n]{1,20}\))?(?:\s+is\b)?[\s#:\-\u2013]*"
 # Masked to the last four digits wherever text is stored or shown: bank account, routing and sort-code numbers,
 # IBANs, and card numbers, written whole or in groups as statements and remittance letters print them
 # ("IBAN GB29 NWBK 6016 1331 9268 19"). Only a number beside its label is masked, so invoice and PO numbers,
@@ -88,7 +99,7 @@ BANK_SECRET_RE = re.compile(
     r"\b(?P<routing>(?:routing|aba)(?:\s+(?:number|no\.?|#))?|sort\s+code)" + _SECRET_LABEL_END
     + r"(?:\d{6,9}\b|\d{3}[ -]\d{3}[ -]\d{3}(?![\d-])|\d{2}[ -]\d{2}[ -]\d{2}(?![\d-]))|"
     r"\b(?P<account>(?:account|acct\.?|a/c)(?:\s+(?:number|no\.?|#))?)" + _SECRET_LABEL_END
-    + r"(?:" + _ACCOUNT_NUMBER + "|" + _grouped(6) + r")|"
+    + r"(?:" + _ACCOUNT_NUMBER + "|" + _grouped(6) + r"|[A-Z]{2}\d{2}(?:[ -][A-Z0-9]{4}){2,7}(?:[ -][A-Z0-9]{1,3})?\b)|"
     r"\b(?P<iban>iban)" + _SECRET_LABEL_END
     + r"[A-Z]{2}\d{2}(?:[A-Z0-9]{10,30}\b|(?:[ -][A-Z0-9]{4}){2,7}(?:[ -][A-Z0-9]{1,3})?\b)|"
     r"\b(?P<card>(?:(?:credit|debit)\s+)?card|visa|mastercard|amex)(?:\s+(?:number|no\.?|#))?" + _SECRET_LABEL_END
@@ -140,9 +151,10 @@ def html_to_text(html: str) -> str:
     # What the reader is never shown (display:none, visibility:hidden, font-size:0, Outlook's mso-hide:all) is
     # dropped with all it holds: "Our bank <span style="display:none">zz</span>details" reads "Our bank details".
     # Each hidden element ends at its own closing tag; one that is never closed hides only its tag.
+    # The style value runs to its own closing quote: Word writes style='font-family:"Calibri";display:none'.
+    hides = r"(?:display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all|font-size\s*:\s*0(?![.\d]*[1-9]))"
     hidden = re.compile(
-        r"<([a-z][a-z0-9]*)\b[^<>]*?\bstyle\s*=\s*[\"'][^\"'<>]*?"
-        r"(?:display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all|font-size\s*:\s*0(?![.\d]*[1-9]))[^<>]*>",
+        r"<([a-z][a-z0-9]*)\b[^<>]*?\bstyle\s*=\s*(?:\"[^\"<>]*?" + hides + r"|'[^'<>]*?" + hides + r")[^<>]*>",
         re.I,
     )
     if hidden.search(text):
@@ -215,7 +227,7 @@ def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> st
         if name.endswith(".rtf") or "rtf" in ctype:
             return _rtf_text(data)
         if "html" in ctype or name.endswith((".html", ".htm")):
-            return html_to_text(data.decode("utf-8", errors="replace"))
+            return html_to_text(decode_text(data))
         if ctype.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp")):
             return image_text(data)
         if name.endswith(".zip") or "zip" in ctype:
@@ -349,7 +361,7 @@ def _zip_plan(infos: list, limit: int) -> tuple[list, list[tuple[str, str]]]:
     chosen, skipped = [], []
     total = 0
     for info in infos:
-        filename = _basename(info.filename)
+        filename = _basename(_entry_name(info))
         if info.is_dir() or info.filename.startswith("__MACOSX") or not filename or filename.startswith("."):
             continue
         if len(chosen) >= limit:
@@ -378,12 +390,12 @@ def _unzip(item, *, limit: int, skipped: list | None = None) -> list:
         return []
     try:
         archive = zipfile.ZipFile(io.BytesIO(item.content))
-    except zipfile.BadZipFile:
+    except Exception:  # damaged in ways zipfile reports differently (bad name encoding, unknown version): kept as is
         return []
     chosen, left = _zip_plan(archive.infolist(), limit)
     out = []
     for info in chosen:
-        filename = _basename(info.filename)
+        filename = _basename(_entry_name(info))
         try:
             payload = archive.read(info)
         except Exception:
@@ -424,6 +436,17 @@ def zip_text(data: bytes) -> str:
     )
 
 
+def _entry_name(info) -> str:
+    """A zip entry's name. Without the UTF-8 flag zipfile reads the name as cp437, but many zippers (macOS Archive
+    Utility among them) write UTF-8 there anyway: a name that is valid UTF-8 is read as UTF-8."""
+    if info.flag_bits & 0x800:
+        return info.filename
+    try:
+        return info.filename.encode("cp437").decode("utf-8")
+    except UnicodeError:
+        return info.filename
+
+
 def _basename(filename: str) -> str:
     return filename.replace("\\", "/").split("/")[-1]
 
@@ -454,11 +477,19 @@ def parse_due_date(raw: str, *, as_of: date) -> str | None:
         if delta == 0:
             delta = 7
         return date.fromordinal(as_of.toordinal() + delta).isoformat()
-    try:
-        parsed = date_parser.parse(token, default=datetime(as_of.year, as_of.month, as_of.day), fuzzy=False).date()
-    except (ValueError, OverflowError, TypeError):
-        return None
     has_year = len(re.findall(r"\d+", token)) >= 2
+    year = as_of.year
+    while True:
+        try:
+            parsed = date_parser.parse(token, default=datetime(year, as_of.month, as_of.day), fuzzy=False).date()
+            break
+        except (ValueError, OverflowError, TypeError):
+            # "February 29" with no year, written in a common year, is the next leap year's.
+            if has_year or calendar.isleap(year):
+                return None
+            year += 1
+            while not calendar.isleap(year):
+                year += 1
     shift = 0
     if not has_year and (as_of - parsed).days > 90:
         # "January 5" written in late December is next January, not eleven months ago.
@@ -495,9 +526,13 @@ def extract_fields(text: str, *, as_of: date, extra_vendor: str | None = None) -
         vendors = _unique([extra_vendor, *vendors])
     last4: list[str] = []
     mentions_account = False
-    for match in list(ACCOUNT_RE.finditer(text)) + list(ROUTING_RE.finditer(text)):
+    numbers = [m.group(1) for m in list(ACCOUNT_RE.finditer(text)) + list(ROUTING_RE.finditer(text))]
+    # The bank numbers that are masked are bank numbers here too: an IBAN or account number written in groups
+    # ("DE89 3704 0044 0532 0130 00"), or after a dash. Its label holds no digits, so the match's digits are the number's.
+    numbers += [m.group(0) for m in BANK_SECRET_RE.finditer(text) if not m.group("card")]
+    for number in numbers:
         mentions_account = True
-        digits = re.sub(r"\D", "", match.group(1))
+        digits = re.sub(r"\D", "", number)
         if len(digits) >= 4:
             last4.append(digits[-4:])
     return ExtractedFields(

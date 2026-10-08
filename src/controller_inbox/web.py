@@ -121,6 +121,11 @@ LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 MAIL_FILES = {".msg", ".eml"}
 
 
+def original_downloads(path: Path | None) -> bool:
+    """Whether an email's original downloads: a rebuilt .eml (no original), or a mail or downloadable file."""
+    return path is None or path.suffix.lower() in MAIL_FILES | DOWNLOADABLE
+
+
 def open_file(path: Path) -> None:
     """Open a file with the computer's default app (Outlook for .msg/.eml on most work laptops)."""
     if sys.platform.startswith("win"):
@@ -495,6 +500,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             coding=store.cost_coding(email.id),
             codebook=cost_codes.load(settings),
             has_original=original_path(email) is not None,
+            original_downloads=original_downloads(original_path(email)),
             check=fraud_view(email),
             files=file_cards(email),
             locked=fraud.attachments_locked(email),
@@ -726,6 +732,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             back=_local_path(next, "/"),
             done=store.is_done(email.id),
             has_original=original_path(email) is not None,
+            original_downloads=original_downloads(original_path(email)),
             files=file_cards(email),
             locked=fraud.attachments_locked(email),
         )
@@ -743,6 +750,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if path is None:
             return JSONResponse(
                 {"ok": False, "download": download, "message": "No original file for this email, so here is a copy to open."}
+            )
+        if path.suffix.lower() not in MAIL_FILES | DOWNLOADABLE:
+            # A file dropped loose in the inbox, of a kind that doesn't download: it was never in Outlook.
+            return JSONResponse(
+                {"ok": False, "message": f"This came in as a {path.suffix or 'plain'} file, which CloseDesk doesn't open "
+                 f"or download. Open it from {path.parent} on this computer."}
             )
         if path.suffix.lower() not in MAIL_FILES:
             return JSONResponse(
@@ -768,7 +781,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
                     status_code=403,
                     detail="This email may be payment fraud, so its original (with its files) doesn't download. Open it in Outlook.",
                 )
-            return FileResponse(path, filename=path.name)
+            # A file dropped loose in the inbox is its own original; the attachment rule applies to it too.
+            if not original_downloads(path):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"This came in as a {path.suffix or 'plain'} file, which CloseDesk doesn't download. "
+                    "Open it from the inbox's processed folder on the computer running CloseDesk.",
+                )
+            return FileResponse(path, filename=path.name, headers={"X-Content-Type-Options": "nosniff"})
         return Response(
             content=_rebuilt_eml(email),
             media_type="message/rfc822",
@@ -1298,13 +1318,30 @@ def _rebuilt_eml(email) -> bytes:
     one_line = lambda value: re.sub(r"[\r\n]+", " ", value or "").strip()  # noqa: E731
     message["Subject"] = one_line(email.subject)
     sender = one_line(email.sender_email)
-    message["From"] = formataddr((one_line(email.sender_name), sender)) if email.sender_name else sender
+    message["From"] = _from_header(one_line(email.sender_name), sender)
     try:
         message["Date"] = format_datetime(datetime.fromisoformat(email.received_at.replace("Z", "+00:00")))
     except (TypeError, ValueError):
         pass
     message.set_content(email.body_text or "")
     return bytes(message)
+
+
+def _from_header(name: str, sender: str) -> str:
+    """``Name <address>``. An internationalized domain is written in its ASCII (IDNA) form, which formataddr
+    needs; an address it still can't write, such as one with a non-ASCII local part, goes in on its own."""
+    local, at, domain = sender.rpartition("@")
+    if at and not domain.isascii():
+        try:
+            sender = f"{local}@{domain.encode('idna').decode('ascii')}"
+        except UnicodeError:
+            pass
+    if not name:
+        return sender
+    try:
+        return formataddr((name, sender))
+    except UnicodeEncodeError:
+        return sender
 
 
 def _back(next_path: str, fallback: str, notice: str, anchor: str = "") -> RedirectResponse:

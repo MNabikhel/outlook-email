@@ -290,6 +290,8 @@ class Store:
         # Another process (the scheduled run, the dashboard) may be writing; wait for it instead of failing.
         conn = sqlite3.connect(self.path, timeout=BUSY_TIMEOUT_SECONDS)
         conn.row_factory = sqlite3.Row
+        # SQLite's lower() and LIKE only fold A-Z; search compares fold(column) with a folded pattern instead.
+        conn.create_function("fold", 1, _fold, deterministic=True)
         conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}")
         conn.execute("PRAGMA foreign_keys = ON")
         try:
@@ -461,7 +463,7 @@ class Store:
                 (email_id,),
             ).fetchall()
             actions = conn.execute(
-                "SELECT * FROM action_items WHERE email_id = ? ORDER BY due_date IS NULL, due_date, priority",
+                f"SELECT * FROM action_items WHERE email_id = ? ORDER BY due_date IS NULL, due_date, {_PRIORITY_ORDER}",
                 (email_id,),
             ).fetchall()
             readings = _readings_for(conn, [item["id"] for item in attachments])
@@ -517,7 +519,7 @@ class Store:
             params.append(_json_contains(flag))
         for word in (q or "").split()[:8]:
             clauses.append(_MATCH_ANY)
-            params.extend([_contains(word)] * _MATCH_ANY.count("?"))
+            params.extend([_contains(_fold(word)[:_TERM_CHARS])] * _MATCH_ANY.count("?"))
         order = order or ("oldest" if oldest_first else "newest")
         order_sql = {
             "newest": "received_at DESC",
@@ -551,19 +553,19 @@ class Store:
 
     def search_ranked(self, terms: list[str], *, limit: int = 6) -> list[EmailRecord]:
         """Emails that mention the most of ``terms``; subject and sender hits count more."""
-        terms = [t for t in dict.fromkeys(t.lower() for t in terms if t.strip())][:10]
+        terms = [t for t in dict.fromkeys(_fold(t)[:_TERM_CHARS] for t in terms if t.strip())][:10]
         if not terms:
             return []
         parts, params = [], []
         for term in terms:
             like = _contains(term)
             parts.append(
-                f"(CASE WHEN lower(subject) {_LIKE} THEN 3 ELSE 0 END"
-                f" + CASE WHEN lower(sender_name) {_LIKE} OR lower(sender_email) {_LIKE} THEN 3 ELSE 0 END"
-                f" + CASE WHEN lower(summary) {_LIKE} THEN 2 ELSE 0 END"
-                f" + CASE WHEN lower(body_text) {_LIKE} THEN 1 ELSE 0 END"
+                f"(CASE WHEN fold(subject) {_LIKE} THEN 3 ELSE 0 END"
+                f" + CASE WHEN fold(sender_name) {_LIKE} OR fold(sender_email) {_LIKE} THEN 3 ELSE 0 END"
+                f" + CASE WHEN fold(summary) {_LIKE} THEN 2 ELSE 0 END"
+                f" + CASE WHEN fold(body_text) {_LIKE} THEN 1 ELSE 0 END"
                 f" + CASE WHEN EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
-                f" AND (lower(a.filename) {_LIKE} OR lower(a.extracted_text) {_LIKE})) THEN 1 ELSE 0 END)"
+                f" AND (fold(a.filename) {_LIKE} OR fold(a.extracted_text) {_LIKE})) THEN 1 ELSE 0 END)"
             )
             params.extend([like] * 7)
         sql = (
@@ -579,8 +581,8 @@ class Store:
             email = self.get_email(email_id)
             if email is None:
                 continue
-            head = f"{email.subject}\n{email.sender_name}\n{email.sender_email}".lower()
-            rest = f"{email.summary}\n{email.body_text}".lower()
+            head = _fold(f"{email.subject}\n{email.sender_name}\n{email.sender_email}")
+            rest = _fold(f"{email.summary}\n{email.body_text}")
             whole = sum(4 if rx.search(head) else 1 if rx.search(rest) else 0 for rx in words)
             scored.append((whole, hits, -position, email))
         if any(item[0] for item in scored):
@@ -621,8 +623,7 @@ class Store:
             FROM action_items a
             JOIN emails e ON e.id = a.email_id
             WHERE {' AND '.join(clauses)}
-            ORDER BY CASE a.priority
-                WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+            ORDER BY {_PRIORITY_ORDER.replace("priority", "a.priority")},
                 a.due_date IS NULL, a.due_date, e.received_at DESC
         """
         with self.connect() as conn:
@@ -685,18 +686,21 @@ class Store:
                 FROM emails e
                 WHERE e.id != ?
                   AND (
-                    e.extracted LIKE ? ESCAPE '\\'
+                    EXISTS (
+                        SELECT 1 FROM json_each(CASE WHEN json_valid(e.extracted) THEN e.extracted ELSE '{}' END,
+                                                '$.invoice_numbers') n
+                        WHERE fold(n.value) = ?
+                    )
                     OR EXISTS (
-                        SELECT 1 FROM attachments a
-                        WHERE a.email_id = e.id AND a.extracted_fields LIKE ? ESCAPE '\\'
+                        SELECT 1 FROM attachments a,
+                            json_each(CASE WHEN json_valid(a.extracted_fields) THEN a.extracted_fields ELSE '{}' END,
+                                      '$.invoice_numbers') n
+                        WHERE a.email_id = e.id AND fold(n.value) = ?
                     )
                   )
                 """,
-                (
-                    exclude_email_id,
-                    _json_contains(invoice_number),
-                    _json_contains(invoice_number),
-                ),
+                # Only an invoice number counts: the same digits as a PO number or an account ending are not a repeat.
+                (exclude_email_id, _fold(invoice_number), _fold(invoice_number)),
             ).fetchall()
         return [row["id"] for row in rows]
 
@@ -1630,13 +1634,23 @@ def _email_from_rows(
 
 
 _LIKE = "LIKE ? ESCAPE '\\'"
+# Most urgent first; the text values would sort alphabetically (critical, high, low, medium).
+_PRIORITY_ORDER = "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END"
+# Longest search word kept: SQLite refuses a LIKE pattern over 50,000 bytes (a pasted blob in the search box).
+_TERM_CHARS = 200
 _MATCH_ANY = (
-    f"(subject {_LIKE} OR sender_email {_LIKE} OR sender_name {_LIKE} OR summary {_LIKE} OR body_text {_LIKE}"
+    f"(fold(subject) {_LIKE} OR fold(sender_email) {_LIKE} OR fold(sender_name) {_LIKE} OR fold(summary) {_LIKE}"
+    f" OR fold(body_text) {_LIKE}"
     " OR EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
-    f" AND (a.filename {_LIKE} OR a.extracted_text {_LIKE}))"
+    f" AND (fold(a.filename) {_LIKE} OR fold(a.extracted_text) {_LIKE}))"
     # The cost code an AP invoice was coded to, and its description, find it too.
-    f" OR EXISTS (SELECT 1 FROM cost_codings c WHERE c.email_id = emails.id AND c.codes {_LIKE}))"
+    f" OR EXISTS (SELECT 1 FROM cost_codings c WHERE c.email_id = emails.id AND fold(c.codes) {_LIKE}))"
 )
+
+
+def _fold(text: str | None) -> str | None:
+    """Case-folded text for search, so "MÜLLER" finds "Müller" (SQLite folds only A-Z). Registered as fold()."""
+    return text.casefold() if isinstance(text, str) else text
 
 
 def _like_escape(text: str) -> str:

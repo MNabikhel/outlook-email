@@ -243,3 +243,28 @@ def test_a_reading_slip_of_a_listed_code_is_not_called_unlisted(settings):
     email = _invoice("u", text="AP coding: 1100.6110.1OO\nFreight 1100.642O\nNew code 1100.6999.100")
     assert [item["code"] for item in cost_codes.codes_on(email, book)] == ["1100.6110.100", "1100.6420"]
     assert cost_codes.unlisted_codes(email, book) == ["1100.6999.100"]
+
+
+def test_a_cost_code_description_heading_is_not_taken_for_the_code_column(settings):
+    # "Cost Code Description" | "Cost Code": both headings say "code", so the sheet was skipped.
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["Cost Code Description", "Cost Code"])
+    sheet.append(["Office supplies - head office", "1100.6110.100"])
+    path = cost_codes.workbook_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    book.save(path)
+    codes = cost_codes.load(settings).codes
+    assert [(c.code, c.description) for c in codes] == [("1100.6110.100", "Office supplies - head office")]
+
+
+def test_quantities_and_unit_prices_are_not_unlisted_codes():
+    # With a 4.4 code shape, "Qty 2.0000  Unit price 1250.0000" was reported as two unlisted codes.
+    book = cost_codes.Codebook(codes=[cost_codes.CostCode("1100.6420", "Freight"), cost_codes.CostCode("1100.6110.100", "Office supplies")])
+    email = _invoice("q", body="Line 1: Toner  Qty 2.0000  Unit price 1250.0000  Total 2,500.00\nCode 1100.6420")
+    assert cost_codes.unlisted_codes(email, book) == []
+
+
+def test_a_tax_code_column_is_not_taken_for_the_account_column():
+    # "Account | Description | Tax Code": the account is the code; the tax code is not.
+    assert cost_codes._header_columns(("Account", "Description", "Tax Code")) == (1, 0)

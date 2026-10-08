@@ -237,3 +237,64 @@ def test_setup_offers_the_chat_models_and_loads_the_one_chosen(settings, store, 
     local_llm._status_cache.clear()
     page = client.get("/settings").text
     assert f"CONTROLLER_INBOX_LLM_MODEL={CODER}" in page and 'name="model" required' not in page
+
+
+class _WithPageReader(LMStudio):
+    """LM Studio with a general vision model chosen in Setup as the page reader, listed before the chat model."""
+
+    VL = "google/gemma-3-12b"
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": key} for key in (self.VL, CHAT)]})
+        if path == "/api/v1/models":
+
+            def item(kind, key, **extra):
+                instances = [{"id": key, "config": {"context_length": self.contexts.get(key, 4096)}}] if key in self.loaded else []
+                return {"type": kind, "key": key, "loaded_instances": instances, "max_context_length": 131072, **extra}
+
+            return httpx.Response(200, json={"models": [item("vlm", self.VL, capabilities={"vision": True}), item("llm", CHAT)]})
+        return super().__call__(request)
+
+
+def test_the_chat_model_keeps_answering_after_the_page_reader_chosen_in_setup_loads(settings, monkeypatch):
+    """The page reader loaded beside the chat model to read a scan came first on LM Studio's list, so it became the
+    chat model (and the remembered one)."""
+    settings.llm = None
+    settings.ensure_data_dir()
+    settings.vision_model = _WithPageReader.VL
+    server = _WithPageReader(loaded=[])
+    _serve(monkeypatch, server)
+    assert use_chat_model(settings, CHAT) == ""
+    assert local_llm.load_for_reading(settings, _WithPageReader.VL, 12288) == ""
+    assert sorted(server.loaded) == sorted([CHAT, _WithPageReader.VL])
+    assert check_model(settings, use_cache=False).model == CHAT
+    assert local_llm.remembered_model(settings) == CHAT
+
+
+def test_switching_the_chat_model_leaves_the_page_reader_chosen_in_setup_loaded(settings, monkeypatch):
+    """Only an OvisOCR page reader was spared: a general vision model chosen in Setup was unloaded."""
+    settings.llm = None
+    settings.ensure_data_dir()
+    settings.vision_model = _WithPageReader.VL
+    server = _WithPageReader(loaded=[_WithPageReader.VL])
+    _serve(monkeypatch, server)
+    assert use_chat_model(settings, CHAT) == ""
+    assert _WithPageReader.VL in server.loaded
+
+
+def test_a_search_model_only_downloaded_is_not_said_to_be_loaded(settings, monkeypatch):
+    """LM Studio lists every downloaded model on /v1/models, so Setup said the search model was "Loaded."."""
+    from controller_inbox import model_roles
+
+    settings.llm = None
+    settings.embedding_model = EMBED
+    server = LMStudio(loaded=[CHAT])
+    _serve(monkeypatch, server)
+    status = check_model(settings)
+    assert model_roles.search_row(settings, status)["status"] == "Downloaded: LM Studio loads it when mail is searched."
+    server.loaded.append(EMBED)
+    status = check_model(settings, use_cache=False)
+    assert model_roles.search_row(settings, status)["status"] == "Loaded."
+    assert EMBED not in status.instances and status.model == CHAT

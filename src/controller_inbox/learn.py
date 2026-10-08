@@ -66,6 +66,12 @@ def apply_learned(classification: Classification, correction: dict) -> Classific
 
     classification.flags = [flag for flag in classification.flags if flag not in {"fraud_risk", "do_not_process"}]
     classification.flags.append("user_trained")
+    if classification.scoring:
+        # Score it as the learned category, as ``record_correction`` does: a no-reply notice learned as an invoice
+        # must not keep the notice's Low score and "Automated notification".
+        classification.importance, classification.importance_score, classification.importance_reasons = score_importance(
+            category=corrected, flags=classification.flags, **classification.scoring
+        )
     if corrected == DocumentType.NEWSLETTER:
         classification.importance = Importance.LOW
         classification.importance_score = min(classification.importance_score, 15)

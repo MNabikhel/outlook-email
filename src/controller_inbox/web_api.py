@@ -383,6 +383,7 @@ def register_workspace(
             ],
             "attachments": files,
             "has_original": original_path(email) is not None,
+            "original_downloads": _original_downloads(original_path(email)),
             "fraud": {
                 **check,
                 "sender_domain": sender_domain,
@@ -677,3 +678,9 @@ def register_workspace(
     @app.get("/app/{rest:path}", response_class=HTMLResponse)
     def workspace_page(request: Request, rest: str):
         return workspace(request)
+
+
+def _original_downloads(path: Path | None) -> bool:
+    from controller_inbox.web import original_downloads  # web imports this module
+
+    return original_downloads(path)

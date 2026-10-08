@@ -66,7 +66,8 @@ def search_row(settings: Settings, status: ModelStatus) -> dict:
     if not model:
         return {"role": "Finds mail by meaning", "model": "", "state": "off", "note": "",
                 "status": "Off: search matches words only. Load an embedding model in LM Studio (nomic-embed-text)."}
-    loaded = _loaded(status, model) or model in status.models
+    # LM Studio lists every downloaded model on /v1/models (just-in-time loading): only its loaded instances count.
+    loaded = model in status.embeddings if status.lm_studio else _loaded(status, model) or model in status.models
     return {"role": "Finds mail by meaning", "model": model, "state": "on", "note": "",
             "status": "Loaded." if loaded else "Downloaded: LM Studio loads it when mail is searched."}
 

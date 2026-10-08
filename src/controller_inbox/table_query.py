@@ -159,10 +159,12 @@ _CROSS = re.compile(r"(?i)\bFROM\s+(?:\([^()]*\)|\w+)(?:\s+(?:AS\s+)?\w+)?\s*,")
 _JOIN = re.compile(r"(?i)\bJOIN\s+(?:\([^()]*\)|\w+)((?:\s+\w+){0,4})")
 _QUOTED = re.compile(r'"([^"]+)"')
 _ALIAS = re.compile(r'(?i)\bAS\s+"([^"]+)"')
-_SQL_LINE = re.compile(r"(?is)\bSQL:\s*(.*)")
+# "SQL:", "**SQL**:" or "**SQL:**".
+_SQL_LINE = re.compile(r"(?is)\bSQL\**:\**\s*(.*)")
 # The reasoning lines before the query (and "Plan:", which the model sometimes writes instead).
-_REASONING = re.compile(r"(?im)^\s*\**(Plan|Table|Rows|Value)\**:\s*(.+?)\s*$")
-_FENCE = re.compile(r"```(?:sql)?\s*(.*?)```", re.S)
+_REASONING = re.compile(r"(?im)^\s*\**(Plan|Table|Rows|Value)\**:\**\s*(.+?)\s*$")
+# A fence tagged any way ("```sql", "```SQL", "```sqlite") or not at all, or on one line ("```sql SELECT …```").
+_FENCE = re.compile(r"```(?:(?!(?i:select|with)\b)[\w+-]*[ \t]*\n|(?i:sql(?:ite)?|postgres(?:ql)?|mysql|duckdb)[ \t]+)?\s*(.*?)```", re.S)
 
 
 @dataclass
@@ -318,15 +320,20 @@ class Tables:
         much in all" across them, as a list the query filters and counts like any other."""
         columns = sheet.columns
         months = [_month(columns[index].label) for index in family]
+        if not all(months) or len(set(months)) < len(months):
+            # By month only when each column is its own month: "Budget Jul-26 | Actual Jul-26" are two headings
+            # (one month would add them together), and beside "Adjustments" the schema lists them as headed.
+            months = [""] * len(family)
         keys = [index for index, column in enumerate(columns) if index not in family and column.kind != "figure"]
         if not keys:
             # Nothing would tell its rows apart.
             return
         taken = {columns[index].name for index in keys}
         figures = columns[family[0]].kind == "figure"
-        axis = Column(over or ("Month" if all(months) else "heading"), _ident(over or ("month" if all(months) else "heading"), taken), "text")
+        by_month = all(months)
+        axis = Column(over or ("Month" if by_month else "heading"), _ident(over or ("month" if by_month else "heading"), taken), "text")
         axis.samples = [columns[index].label for index in family]
-        if all(months):
+        if by_month:
             axis.written = {month: columns[index].label for month, index in zip(months, family)}
         value = Column("Amount" if figures else "Value", _ident("amount" if figures else "value", taken), "figure" if figures else "text")
         value.samples = [sample for index in family for sample in columns[index].samples]
@@ -467,6 +474,11 @@ class Tables:
                 return f"{value:g}"
             column = self._labels.get(name.lower())
             if column and column.kind == "figure":
+                # A figure the query worked out under the column's name ("AVG(days) AS days"): its decimals
+                # too, when it has more than the column writes (45.67, not 46).
+                if -number.as_tuple().exponent > _style(column)[3]:
+                    finer = ("0.0000" if abs(number) < 1 else "0.00") + ("%" if column.samples and _style(column)[1] else "")
+                    return table_lookup._format(number, [*column.samples, finer])
                 return table_lookup._format(number, column.samples)
             # A figure the query worked out (a sum, an average): the sheet's decimals, two when it isn't whole,
             # four for a ratio under one ("0.0347", not "0.03").
@@ -499,7 +511,7 @@ class Tables:
             for column in sheet.columns:
                 if not column.running:
                     continue
-                for prefix in re.findall(rf"(?i)\b(?:sum|total|avg)\s*\(\s*(?:(\w+)\.)?{column.name}\b", sql):
+                for prefix in re.findall(rf'(?i)\b(?:sum|total|avg)\s*\(\s*(?:distinct\s+|all\s+)?(?:"?(\w+)"?\.)?"?{column.name}\b', sql):
                     owner = aliases.get(prefix.lower(), prefix.lower()) if prefix else ""
                     if owner == sheet.name.lower() or (not owner and sheet.name.lower() in read):
                         found.append((sheet, column))
@@ -608,7 +620,7 @@ def parse(reply: str) -> tuple[str, str]:
     plan = " ".join(f"{m.group(1)}: {m.group(2)}" for m in _REASONING.finditer(before))
     sql = fenced.group(1) if fenced else sql_line.group(1) if sql_line else text
     # Anything the model wrote after the query, past a blank line, is not part of it.
-    sql = sql.strip().split("\n\n")[0].strip("`").strip().rstrip(";").strip()
+    sql = sql.strip().split("\n\n")[0].strip("`*").strip().rstrip(";").strip()
     if not re.match(r"(?is)^(select|with)\b", sql):
         sql = ""
     return plan, sql
@@ -640,24 +652,25 @@ def _like(pattern, value, escape=None, *, deadline: float = 0.0):
     if pattern is None or value is None:
         return None
     tokens: list = []
-    text = str(pattern).casefold()
+    # Folded a character at a time, so "_" still matches the one letter "ß" (folding the whole word makes it "ss").
+    text = str(pattern)
     index = 0
     while index < len(text):
         char = text[index]
-        if escape is not None and char == str(escape).casefold() and index + 1 < len(text):
-            tokens.append(text[index + 1])
+        if escape is not None and char == str(escape) and index + 1 < len(text):
+            tokens.append(text[index + 1].casefold())
             index += 2
             continue
         if char == "%":
             if not tokens or tokens[-1] is not _STAR:
                 tokens.append(_STAR)
         else:
-            tokens.append(_ANY if char == "_" else char)
+            tokens.append(_ANY if char == "_" else char.casefold())
         index += 1
-    return _wildcard(tokens, str(value).casefold(), deadline)
+    return _wildcard(tokens, [char.casefold() for char in str(value)], deadline)
 
 
-def _wildcard(tokens: list, text: str, deadline: float = 0.0) -> bool:
+def _wildcard(tokens: list, text, deadline: float = 0.0) -> bool:
     """Whether ``tokens`` match all of ``text``, going back only to the last % (no runaway backtracking)."""
     at = position = 0
     star, mark = -1, 0

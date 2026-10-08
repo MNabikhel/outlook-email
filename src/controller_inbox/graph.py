@@ -10,8 +10,9 @@ from typing import Any, Iterable
 import httpx
 import msal
 
+from controller_inbox.classify import DOCUMENT_OUTLOOK
 from controller_inbox.extract import html_to_text
-from controller_inbox.models import RawAttachment, RawMessage
+from controller_inbox.models import DocumentType, RawAttachment, RawMessage
 
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -142,12 +143,19 @@ class GraphMailbox:
             url = payload.get("@odata.nextLink")
 
     def get_attachments(self, message_id: str) -> list[RawAttachment]:
+        from controller_inbox.folder_mail import _inline_picture
+
         payload = self.client.get_json(f"{self.client._user_root()}/messages/{message_id}/attachments")
         attachments: list[RawAttachment] = []
         for item in payload.get("value", []):
             odata_type = item.get("@odata.type", "")
             if odata_type.endswith("fileAttachment") or item.get("contentBytes"):
                 content = base64.b64decode(item.get("contentBytes") or "")
+                name = item.get("name") or ""
+                ctype = item.get("contentType") or ""
+                if _inline_picture(ctype, name, len(content), bool(item.get("isInline"))):
+                    # A signature logo or pasted picture, dropped as the .msg/.eml readers drop it.
+                    continue
                 attachments.append(
                     RawAttachment(
                         id=item.get("id") or item.get("name") or "attachment",
@@ -172,17 +180,23 @@ class GraphMailbox:
             f"{self.client._user_root()}/messages/{message_id}/attachments/{item_id}/$value"
         )
         inner = BytesParser(policy=policy.default).parsebytes(mime or b"")
-        found = forwarded_attachments(inner, f"{name}.eml")
+        found = forwarded_attachments(inner, name)
         for att in found:
             att.id = f"{item_id}:{att.filename}"
         return found
 
     def apply_categories(self, message_id: str, categories: list[str], flag: bool) -> str:
-        body: dict[str, Any] = {"categories": categories}
+        """Set CloseDesk's categories on a message. Graph replaces the whole list, so the categories the user (or a
+        colleague on a shared mailbox) set are read first and kept; CloseDesk's own from an earlier filing go."""
+        path = f"{self.client._user_root()}/messages/{message_id}"
+        current = self.client.get_json(path, params={"$select": "categories"}).get("categories") or []
+        filed = "CloseDesk" in current
+        kept = [name for name in current if not _closedesk_category(name, filed) and name not in categories]
+        body: dict[str, Any] = {"categories": kept + list(categories)}
         if flag:
             body["flag"] = {"flagStatus": "flagged"}
             body["importance"] = "high"
-        self.client.request("PATCH", f"{self.client._user_root()}/messages/{message_id}", json=body)
+        self.client.request("PATCH", path, json=body)
         return "written"
 
     def send_mail(self, to: str, subject: str, html: str) -> None:
@@ -223,6 +237,18 @@ class GraphMailbox:
             reply_to=_reply_to(item, sender.get("address") or ""),
             attachments=[],
         )
+
+
+# The document labels ``classify.outlook_categories`` gives, beside "CloseDesk" and "CloseDesk-…".
+_DOCUMENT_CATEGORIES = set(DOCUMENT_OUTLOOK.values()) | {kind.value for kind in DocumentType}
+
+
+def _closedesk_category(name: str, filed: bool) -> bool:
+    """Whether CloseDesk set this category. A document label ("AP-Invoice", "Tax") counts only on a message
+    CloseDesk has filed (``filed``: it carries "CloseDesk"), as a user may use one of those names too."""
+    if name == "CloseDesk" or name.startswith("CloseDesk-"):
+        return True
+    return filed and name in _DOCUMENT_CATEGORIES
 
 
 def _reply_to(item: dict[str, Any], sender: str) -> str:

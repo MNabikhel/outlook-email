@@ -1035,9 +1035,10 @@ _CITED = re.compile(r"\[\d+\]")
 def _read_material(ws: agent.Workspace, *, history, today: str, focus: list[dict] | None = None) -> dict[str, Any]:
     """Everything the model was shown, for checking an answer against: the question, the focus list, each
     email's header, summary, tasks and text, notes from earlier reading, earlier conversations, what the
-    tools returned, the queries worked out over the tables, and the files."""
+    tools returned, the queries worked out over the tables, and the files. Of the conversation, only what the user
+    said: the model's own earlier answers are not something it read, and a figure it made up then is still made up."""
     material = [ws.question, today, ws.past, *ws.evidence, *ws.notes, *ws.worked.values()]
-    material += [str(turn.get("text") or "") for turn in history or []]
+    material += [str(turn.get("text") or "") for turn in history or [] if turn.get("role") == "user"]
     material += [" · ".join(str(value) for value in row.values() if isinstance(value, (str, int, float))) for row in focus or []]
     primary = ws.primary()
     if primary is not None:
@@ -1330,11 +1331,19 @@ def _automated(email: EmailRecord) -> bool:
     )
 
 
+_NAME_SUFFIXES = {"inc", "llc", "ltd", "co", "corp", "gmbh", "plc", "jr", "sr"}
+
+
 def _first_name(name: str) -> str:
     token = (name or "").replace(",", " ").split()
     if not token:
         return "there"
     first = token[0]
+    # Directories often show people as "Smith, John": the first name is after the comma ("Acme, Inc." is not one).
+    last, comma, rest = (name or "").partition(",")
+    after = rest.replace(",", " ").split()
+    if comma and len(last.split()) == 1 and after and after[0].strip(".").lower() not in _NAME_SUFFIXES:
+        first = after[0]
     if not first.isalpha() or {t.lower() for t in token} & _COMPANY_WORDS or first.lower() == "the":
         return "there"
     return first.capitalize()

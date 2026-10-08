@@ -18,6 +18,9 @@ class Classification:
     importance: Importance = Importance.MEDIUM
     importance_score: int = 40
     importance_reasons: list[str] = field(default_factory=list)
+    # What ``classify_email`` scored importance from (less the category and flags), so a learned category can be
+    # scored again as itself (``learn.apply_learned``).
+    scoring: dict = field(default_factory=dict, repr=False, compare=False)
 
 
 @dataclass
@@ -276,6 +279,17 @@ PAYMENT_CHANGE_RE = re.compile(
     # "Please use the following account for the next payment" (but not "the following account for coding").
     r"\bplease\s+use\s+(?:the\s+)?following\s+(?:bank(?:ing)?\b|routing\b|(?:account|details)\b"
     r"(?=[^.\n]{0,60}\b(?:pay\w*|remit\w*|wir(?:e|ing)|ach|routing|bank\w*|transfer\w*|deposit\w*|iban|swift)\b))|"
+    # "Please use the details below for future payments" (not an invoice's "use the details below to pay this invoice").
+    r"\bplease\s+use\s+(?:the\s+)?(?:(?:bank(?:ing)?|account|payment)\s+)?details\s+below\b"
+    # Only with change wording: "use the bank details below for all payments" is a normal invoice footer.
+    r"(?=[^.\n]{0,40}\b(?:(?:future|upcoming|further)\s+(?:payments?|remittances?)|going\s+forward|from\s+now\s+on|"
+    r"new\s+(?:bank|account)\w*)\b)|"
+    # "We are now banking with Wells Fargo", "we switched our bank account over to…", "we moved our account to
+    # Chase Bank" (but not "we have moved our accounts to Xero", which is accounting software).
+    r"\b(?:now|currently)\s+bank(?:ing|s)?\s+with\b|"
+    r"\b(?:moved|switched|transferred|moving|switching|transferring)\s+our\s+(?:bank(?:ing)?\s+accounts?\s+(?:over\s+)?to\b|"
+    r"banking\s+(?:over\s+)?to\b|"
+    r"accounts?\s+(?:over\s+)?to\s+(?:a\s+(?:new|different)\s+bank|bank\s+of\s+\w+|(?!the\s)(?:[\w&'-]+\s+){1,2}bank)\b)|"
     r"\bdo\s+not\s+use\s+(?:the\s+)?previous\s+account|"
     r"(?<!not )\b(?:changed|switched|moved|changing|switching|moving)\s+"
     r"(?:our\s+bank(?:s|ing\s+partner)?|banks|to\s+a\s+new\s+bank)\b|"
@@ -618,6 +632,16 @@ VIP_DEFAULT = (
 )
 
 
+def _sender_hit(sender_low: str, needle: str) -> bool:
+    """A domain ("ey.com") matches the sender's domain or a parent of it, not "surveymonkey.com"; any other
+    needle ("noreply", "ceo@", "deloitte") matches anywhere in the address."""
+    if "." in needle and "@" not in needle:
+        domain = sender_low.rsplit("@", 1)[1].strip(">. ") if "@" in sender_low else ""
+        needle = needle.strip(".")
+        return domain == needle or domain.endswith("." + needle)
+    return needle in sender_low
+
+
 def _keyword_hit(blob: str, keyword: str) -> bool:
     """Whole-word match so 'irs' does not fire inside 'first' or 'irs.gov', but does end a sentence ("our invoice.")."""
     if not keyword:
@@ -680,7 +704,7 @@ def score_rules(
         if rule.filename_keywords and any(_name_hit(file_low, k) for k in rule.filename_keywords):
             hit = True
             reasons.append("filename")
-        if rule.sender_keywords and any(k in sender_low for k in rule.sender_keywords):
+        if rule.sender_keywords and any(_sender_hit(sender_low, k) for k in rule.sender_keywords):
             hit = True
             reasons.append("sender")
         if not hit:
@@ -820,9 +844,7 @@ def classify_email(
     elif fraud == "caution":
         combined_flags.append("payment_caution")
 
-    importance, score, imp_reasons = _importance(
-        category=category,
-        flags=combined_flags,
+    scoring = dict(
         fields=fields,
         outlook_importance=outlook_importance,
         sender=sender,
@@ -833,6 +855,7 @@ def classify_email(
         body=body,
         finance=finance,
     )
+    importance, score, imp_reasons = _importance(category=category, flags=combined_flags, **scoring)
     return Classification(
         document_type=category,
         confidence=round(confidence, 2),
@@ -841,6 +864,7 @@ def classify_email(
         importance=importance,
         importance_score=score,
         importance_reasons=imp_reasons,
+        scoring=scoring,
     )
 
 
@@ -1008,8 +1032,12 @@ def _importance(
         score += 10
         reasons.append("Sender marked the message as high importance in Outlook")
 
-    vip_needles = list(vip_senders) + list(VIP_DEFAULT)
-    if any(needle in sender_low for needle in vip_needles):
+    # The built-in domains match by domain ("ey.com" is not surveymonkey.com). The user's entries are looked for
+    # anywhere in the address, as Settings.vip_list promises ("maya.chen"), unless written "@taz.com".
+    if any(_sender_hit(sender_low, needle) for needle in VIP_DEFAULT) or any(
+        _sender_hit(sender_low, needle[1:]) if needle.startswith("@") and "." in needle else needle in sender_low
+        for needle in (str(n).strip().lower() for n in vip_senders) if needle
+    ):
         score += 12
         reasons.append("VIP / elevated sender")
 

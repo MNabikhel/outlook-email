@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
+from controller_inbox import clock
 from controller_inbox.clock import (
     ZONES,
     _matching_offset,
@@ -174,3 +175,28 @@ def test_an_evening_email_belongs_to_the_local_day():
 def test_a_stamp_with_z_matches_the_offset_form():
     zulu = datetime(2026, 1, 15, 18, 30, tzinfo=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert format_when(zulu, ZoneInfo("America/New_York")) == "Jan 15 · 13:30"
+
+
+def test_the_fallback_zone_keeps_the_computers_daylight_saving(monkeypatch):
+    # A New York computer in January that names no zone was matched to Bogota (UTC-5, but no daylight time).
+    new_york = ZoneInfo("America/New_York")
+    monkeypatch.setattr(clock, "_computer_offset", lambda moment: moment.astimezone(new_york).utcoffset())
+    monkeypatch.setattr(clock.time, "timezone", 5 * 60 * 60)
+
+    class January(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            moment = datetime(2026, 1, 15, 15, 0, tzinfo=timezone.utc)
+            return moment if tz is None else moment.astimezone(tz)
+
+    monkeypatch.setattr(clock, "datetime", January)
+    name = _matching_offset()
+    july = datetime(2026, 7, 15, 15, 0, tzinfo=timezone.utc)
+    assert july.astimezone(ZoneInfo(name)).utcoffset() == july.astimezone(ZoneInfo("America/New_York")).utcoffset(), name
+
+
+def test_casablanca_is_listed_with_its_windows_standard_offset():
+    # tzdata calls Morocco's usual UTC+1 daylight time; Windows and Outlook list "(UTC+01:00) Casablanca".
+    winter = datetime(2026, 1, 15, tzinfo=timezone.utc)
+    assert zone_option("Africa/Casablanca", winter) == "(UTC+01:00) Casablanca"
+    assert not on_daylight_time(ZoneInfo("Africa/Casablanca"), winter)

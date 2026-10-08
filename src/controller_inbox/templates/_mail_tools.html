@@ -1,6 +1,6 @@
 <div class="mail-tools">
   <button type="button" class="ghost" data-action="open-original" data-id="{{ email.id }}" title="{{ 'Open the original file with your mail app' if has_original else 'Opens a copy of this email in your mail app' }}">Open in Outlook</button>
-  {% if not (locked is defined and locked) %}
+  {% if not (locked is defined and locked) and (original_downloads is not defined or original_downloads) %}
   <a class="ghost" href="/inbox/{{ email.id }}/original" download>{{ 'Download original' if has_original else 'Download .eml' }}</a>
   {% endif %}
   <button type="button" data-action="draft" data-id="{{ email.id }}">Draft a reply</button>

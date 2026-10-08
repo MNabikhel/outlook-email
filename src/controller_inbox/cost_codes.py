@@ -233,7 +233,14 @@ def _read_workbook(path: Path, book: Codebook, seen: set[str]) -> None:
 def _header_columns(row: tuple) -> tuple[int, int] | None:
     labels = [str(value).strip().lower() if value is not None else "" for value in row]
     describe = next((i for i, label in enumerate(labels) if "description" in label or label in {"desc", "name"}), None)
-    coded = next((i for i, label in enumerate(labels) if "code" in label or label in {"account", "gl account"}), None)
+    # "Cost Code Description" | "Cost Code": the code column is the one that says "code" without "description".
+    # A "Tax Code" column is not the account's code ("Account | Description | Tax Code").
+    coded = next(
+        (i for i, label in enumerate(labels) if "code" in label and "description" not in label and "tax" not in label),
+        None,
+    )
+    if coded is None:
+        coded = next((i for i, label in enumerate(labels) if "code" in label or label in {"account", "gl account"}), None)
     if describe is None or coded is None or describe == coded:
         return None
     return describe, coded
@@ -329,6 +336,10 @@ def unlisted_codes(email: EmailRecord, book: Codebook, *, limit: int = 6) -> lis
         for shape in shapes:
             for match in shape.finditer(text):
                 code = re.sub(r"\s", "", match.group(0)).replace(",", ".")
+                tail = _segments(code)[1:]
+                if tail and all(set(segment) <= {"0"} for segment in tail):
+                    # "Qty 2.0000", "Unit price 1250.0000": a quantity or price, not a code.
+                    continue
                 listed = code_key(code) in known or any(pattern.fullmatch(code) for pattern in patterns)
                 if not listed and code not in out:
                     out.append(code)
