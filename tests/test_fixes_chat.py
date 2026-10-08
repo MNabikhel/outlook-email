@@ -110,6 +110,20 @@ def test_an_answer_that_starts_with_today_is_kept():
     assert "".join(assistant.without_echo(iter([echoed]))) == "INV-10482 is overdue [1]."
 
 
+def test_an_answer_that_says_what_day_it_is_on_its_own_line_is_kept():
+    for answer in (
+        "INV-10482 [1] was due 2026-10-01.\nToday is 2026-10-08. It is 7 days overdue, so pay it this week.",
+        "INV-10482 [1] was due 2026-10-01.\n\nToday is 2026-10-08.\nThat makes it 7 days late.",
+    ):
+        streamed = [answer[i : i + 5] for i in range(0, len(answer), 5)]
+        assert "".join(assistant.without_echo(iter(streamed))) == answer
+        assert "".join(assistant.without_echo(iter([answer]))) == answer
+    # The prompt's header copied after the answer, with the first email under it, or left on its own at the end.
+    copied = "INV-10482 is overdue [1].\n\nToday is 2026-10-06.\n\n[1] 2026-09-22 · from Maya Chen · \"Q4 budget\""
+    assert "".join(assistant.without_echo(iter([copied]))) == "INV-10482 is overdue [1]."
+    assert "".join(assistant.without_echo(iter(["INV-10482 is overdue [1].", "\nToday is 2026-10-06."]))) == "INV-10482 is overdue [1]."
+
+
 # 6. Tool-call arguments that aren't a JSON object ------------------------------------------------
 
 

@@ -146,7 +146,8 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
             *[status.instances[m][0] for m in loaded if m in seeing],
             *[key for key in listing.downloaded if key in ids or key in loaded_keys or (status.lm_studio and document_reader(key))],
         ]))
-        # llama.cpp reports the loaded context on the model itself (meta.n_ctx). LM Studio uses its own route.
+        # llama.cpp reports the loaded context on the model itself (meta.n_ctx, a request's share of it), older
+        # builds on /props only (below). LM Studio uses its own route.
         if not status.context_length:
             for item in listed:
                 if isinstance(item, dict) and str(item.get("id")) == status.model:
@@ -154,8 +155,13 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
                     status.context_length = _int(meta.get("n_ctx"))
                     break
         if not listing.route and status.model:  # llama.cpp, or another server with one model
-            status.vision = _llama_cpp_sees(settings, base, timeout)
+            props = _llama_cpp_props(settings, base, timeout)
+            modalities = props.get("modalities")
+            status.vision = isinstance(modalities, dict) and modalities.get("vision") is True
             status.vision_models = [status.model] if status.vision else []
+            # Older llama.cpp builds put only n_ctx_train on the model; /props has the context each request gets.
+            if not status.context_length and isinstance(props.get("default_generation_settings"), dict):
+                status.context_length = _int(props["default_generation_settings"].get("n_ctx"))
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         status.error = _short_error(exc)
     _status_cache[key] = (time.monotonic(), status)
@@ -233,16 +239,16 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
     return _Listing()
 
 
-def _llama_cpp_sees(settings: Settings, base: str, timeout: float) -> bool:
-    """llama.cpp's server says on ``/props`` whether it was started with a vision projector (``--mmproj``)."""
+def _llama_cpp_props(settings: Settings, base: str, timeout: float) -> dict:
+    """llama.cpp's server ``/props``: whether it was started with a vision projector (``--mmproj``, in
+    ``modalities``) and the context each request gets (``default_generation_settings.n_ctx``). {} from other servers."""
     root = base[: -len("/v1")] if base.endswith("/v1") else base
     try:
         response = httpx.get(root + "/props", headers=_headers(settings), timeout=timeout)
         data = response.json() if response.status_code == 200 else None
     except (httpx.HTTPError, ValueError):
-        return False
-    modalities = data.get("modalities") if isinstance(data, dict) else None
-    return isinstance(modalities, dict) and modalities.get("vision") is True
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _int(value) -> int:
@@ -816,15 +822,20 @@ def _stream_pieces(response: httpx.Response, reply: Reply):
     thinking = ThinkFilter()
     for line in response.iter_lines():
         line = line.strip()
+        if line.startswith("error:"):
+            _stream_error(line[6:].strip())
         if not line.startswith("data:"):
             continue
         chunk = line[5:].strip()
         if chunk == "[DONE]":
             break
         try:
-            choice = _first_choice(json.loads(chunk))
+            data = json.loads(chunk)
         except ValueError:
             continue
+        if isinstance(data, dict) and data.get("error") and not data.get("choices"):
+            _stream_error(data["error"])
+        choice = _first_choice(data)
         part = choice.get("delta") if isinstance(choice.get("delta"), dict) else choice.get("message")
         part = part if isinstance(part, dict) else {}
         if _reasoning_text(part):
@@ -839,6 +850,25 @@ def _stream_pieces(response: httpx.Response, reply: Reply):
     rest = thinking.flush()
     if rest:
         yield rest
+
+
+def _stream_error(error) -> None:
+    """A failure the server wrote into the stream after answering 200: llama.cpp sends an "error:" line, LM Studio
+    and OpenAI a chunk with "error". Raised, so a reply cut short isn't taken for the whole answer and a prompt too
+    long for the context is retried shorter."""
+    if isinstance(error, str):
+        try:
+            error = json.loads(error)
+        except ValueError:
+            pass
+    if isinstance(error, dict):
+        error = error.get("error") or error
+    if isinstance(error, dict):
+        error = error.get("message") or json.dumps(error)
+    text = " ".join(str(error or "unknown error").split())[:200]
+    if _OVERFLOW_RE.search(text):
+        raise ContextOverflow(text)
+    raise httpx.HTTPError(f"the model server stopped with an error ({text})")
 
 
 class ContextOverflow(RuntimeError):

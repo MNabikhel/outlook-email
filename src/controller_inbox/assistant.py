@@ -642,7 +642,7 @@ def answer_stream(
             yield {"type": "mode", "mode": "lookup", "note": "The local model sent an empty answer."}
             yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True)}
         else:
-            yield from _checked(ws, state["text"], history=history, today=today, focus=focus)
+            yield from _checked(ws, state["text"], history=history, today=today, focus=state.get("focus"))
     advice = agent.context_advice(context_length(settings), ws.left_out)
     if advice:
         yield {"type": "context", "text": advice}
@@ -786,12 +786,15 @@ def _model_answer(ws: agent.Workspace, question: str, state: dict, *, history, f
     """Answer with the model; when the prompt overflows its context, try once more with half the text."""
     settings = ws.settings
     about_files = _should_read_files(ws, question, focus)
+    known = len(ws.sources)
     for attempt in range(2):
         shrink = 2**attempt
         try:
             if about_files:
                 yield from _read_and_answer(ws, question, state, history=history, today=today, shrink=shrink)
             else:
+                # The answer is checked against the focus list only when the model was given it.
+                state["focus"] = focus
                 messages = build_messages(
                     question,
                     ws.sources,
@@ -809,6 +812,9 @@ def _model_answer(ws: agent.Workspace, question: str, state: dict, *, history, f
                 raise
             ws.left_out.append("the emails and files")
             ws.evidence.clear()
+            if len(ws.sources) > known:
+                # Emails the tools found before the overflow keep their numbers in the next prompt: the answer may cite them.
+                yield {"type": "sources", "sources": source_cards(ws.sources, settings), "mode": "model"}
             yield {"type": "step", "text": "That was more than the model can take at once; trying again with less text."}
 
 
@@ -906,13 +912,15 @@ _ECHO_RE = re.compile(
     )
     + r"|(?:^|\n)[^\n]*· \d+ sections? · [\d,]+ characters"
     + r"|(?:^|\n)\W*File: [^\n]*\([^)\n]+\) ·"
-    # The prompt's own header line ("Today is 2026-10-06." then the focus list or the emails), or that line
-    # copied after the answer. Not an answer that says what day it is ("Today is 2026-10-06, so ...").
-    + r"|(?:^|\n)Today is \d{4}-\d\d-\d\d\.[ \t]*\n\s*(?:Focus list|Emails:)"
-    + r"|\nToday is \d{4}-\d\d-\d\d\.(?=\s|$)"
+    # The prompt's own header line ("Today is 2026-10-06." then the focus list, the emails or the first of them)
+    # copied after the answer. Not an answer that says what day it is ("Today is 2026-10-06, so ...", or
+    # "\nToday is 2026-10-08. It is 7 days overdue.").
+    + r"|(?:^|\n)Today is \d{4}-\d\d-\d\d\.[ \t]*\n\s*(?:Focus list|Emails:|\[\d+\] \d{4}-\d\d-\d\d · )"
     + r"|(?:(?<=[.!?]\s)|(?<=\n)|^)(?:[^.!?\n]|[.!?](?!\s))*\bnot asked about\b",
     re.IGNORECASE,
 )
+# The header line left on its own at the end of the answer, or just before an echo that was cut off.
+_TODAY_LINE = re.compile(r"\n+Today is \d{4}-\d\d-\d\d\.[ \t]*$", re.IGNORECASE)
 _HOLD = 120
 
 
@@ -924,7 +932,7 @@ def without_echo(pieces: Iterator[str]) -> Iterator[str]:
         pending += piece
         echo = _ECHO_RE.search(pending)
         if echo:
-            kept = pending[: echo.start()].rstrip()
+            kept = _TODAY_LINE.sub("", pending[: echo.start()].rstrip()).rstrip()
             if kept:
                 yield kept
             elif not sent:
@@ -934,6 +942,7 @@ def without_echo(pieces: Iterator[str]) -> Iterator[str]:
             sent = True
             yield pending[:-_HOLD]
             pending = pending[-_HOLD:]
+    pending = _TODAY_LINE.sub("", pending)
     if pending:
         yield pending
 
@@ -984,7 +993,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
             raise
     if len(ws.sources) > known:
         yield {"type": "sources", "sources": source_cards(ws.sources, settings), "mode": "model"}
-    draft = _ECHO_RE.split(draft, maxsplit=1)[0].rstrip()
+    draft = _TODAY_LINE.sub("", _ECHO_RE.split(draft, maxsplit=1)[0].rstrip()).rstrip()
     if not ws.read_files and not ws.evidence:
         if draft:
             state["wrote"] = True
