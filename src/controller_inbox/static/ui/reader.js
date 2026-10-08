@@ -1,7 +1,7 @@
 /* The reading pane: one email (header, why it was flagged, what was read from it, tasks, files, coding,
    fraud check), and an attachment's Page, Tables and Text views. */
 
-import { h, icon, replace, toast, plural, $ } from "./dom.js";
+import { h, icon, replace, toast, plural, isTyping, $ } from "./dom.js";
 import { getJSON, getBlob, postJSON, mailPath, filePath } from "./api.js";
 
 const enc = encodeURIComponent;
@@ -718,73 +718,383 @@ function tipFor(region, view) {
   return lines;
 }
 
+// How big the page is drawn: the width of the pane, or its printed size (the page is drawn at 150 dots an inch, a
+// screen shows 96) and half as big again. Remembered on this computer.
+const ZOOMS = [
+  ["fit", "Fit width"],
+  ["100", "100%"],
+  ["150", "150%"],
+];
+const ZOOM_KEY = "closedesk-page-zoom";
+
+function savedZoom() {
+  try {
+    const value = localStorage.getItem(ZOOM_KEY);
+    return ZOOMS.some(([key]) => key === value) ? value : "fit";
+  } catch {
+    return "fit";
+  }
+}
+
+function saveZoom(value) {
+  try {
+    if (value === "fit") localStorage.removeItem(ZOOM_KEY);
+    else localStorage.setItem(ZOOM_KEY, value);
+  } catch {
+    /* Private windows can refuse storage; the zoom then lasts until the page is left. */
+  }
+}
+
+// Esc closes a table opened over the page before it leaves the file; one listener for every page view.
+let closeOpenTable = null;
+window.addEventListener(
+  "keydown",
+  (event) => {
+    if (event.key !== "Escape" || !closeOpenTable || isTyping(event.target)) return;
+    if (closeOpenTable()) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  },
+  true
+);
+
+/** Calls back once the window has stopped scrolling (a box just scrolled to), so its card isn't closed by it. */
+function settled(callback) {
+  let timer = setTimeout(done, 90);
+  function moved() {
+    clearTimeout(timer);
+    timer = setTimeout(done, 90);
+  }
+  function done() {
+    document.removeEventListener("scroll", moved, true);
+    callback();
+  }
+  document.addEventListener("scroll", moved, true);
+}
+
+// The box last flashed, so only one flashes at a time.
+let flashed = null;
+
+function flash(el) {
+  if (flashed && flashed !== el) flashed.classList.remove("pv-flash");
+  flashed = el;
+  el.classList.remove("pv-flash");
+  void el.offsetWidth; // start the animation again when it is already running
+  el.classList.add("pv-flash");
+  setTimeout(() => el.classList.remove("pv-flash"), 1800);
+}
+
+/** Boxes in reading order: line by line down the page, left to right along a line. */
+function readingOrder(regions, indices) {
+  const middle = (r) => r.y + r.h / 2;
+  const sorted = [...indices].sort((a, b) => middle(regions[a]) - middle(regions[b]));
+  const lines = [];
+  for (const index of sorted) {
+    const line = lines[lines.length - 1];
+    const first = line && regions[line[0]];
+    if (first && Math.abs(middle(first) - middle(regions[index])) <= 0.6 * Math.max(first.h, regions[index].h)) line.push(index);
+    else lines.push([index]);
+  }
+  return lines.flatMap((line) => line.sort((a, b) => regions[a].x - regions[b].x));
+}
+
+/** How tall the file's bar is, which stays at the top of the reading pane. */
+function barHeight() {
+  const bar = document.querySelector(".file-view .rd-bar");
+  return bar ? bar.offsetHeight : 0;
+}
+
 function pageView(data) {
   const { email, file } = data;
   const api = `/api/mail/${encodeURIComponent(email.id)}/files/${file.n}/pages`;
   const sheet = h("div", { class: "pv-sheet loading" });
+  const frame = h("div", { class: "pv-frame" }, sheet);
   const where = h("span", { class: "pv-where", "aria-live": "polite" }, "Page 1");
   const prev = h("button", { type: "button", class: "icon-btn pv-prev", title: "Previous page", "aria-label": "Previous page", disabled: true }, icon("right", 15));
   const next = h("button", { type: "button", class: "icon-btn", title: "Next page", "aria-label": "Next page", disabled: true }, icon("right", 15));
   const about = h("p", { class: "pv-about" });
   const legend = h("div", { class: "pv-legend" });
+  const keys = h("div", { class: "pv-keys", hidden: true });
+  const tools = h("div", { class: "pv-tools", hidden: true });
+  const panel = h("section", { class: "pv-panel", hidden: true, "aria-live": "polite" });
   let page = 1;
   let pages = 0;
   let token = 0;
+  let zoom = savedZoom();
+  let view = null;
 
   const key = (shade, words) => h("span", { class: "pv-key" }, h("i", { class: `pv-swatch ${shade}` }), words);
+
+  const zoomButtons = ZOOMS.map(([value, words]) =>
+    h("button", { type: "button", class: `seg${value === zoom ? " on" : ""}`, "aria-pressed": String(value === zoom), dataset: { zoom: value }, onclick: () => setZoom(value) }, words)
+  );
+  const zooms = h("div", { class: "segs small pv-zoom", role: "group", "aria-label": "Page size" }, zoomButtons);
+
+  function sizeSheet() {
+    if (!view) return;
+    sheet.style.width = zoom === "fit" ? "" : `${Math.round((view.width * 96) / 150 * (Number(zoom) / 100))}px`;
+    frame.classList.toggle("zoomed", zoom !== "fit");
+  }
+
+  function setZoom(value) {
+    zoom = value;
+    saveZoom(value);
+    hideTip();
+    for (const button of zoomButtons) {
+      const on = button.dataset.zoom === value;
+      button.classList.toggle("on", on);
+      button.setAttribute("aria-pressed", String(on));
+    }
+    sizeSheet();
+  }
 
   async function show(number) {
     const mine = ++token;
     hideTip();
+    closeTable();
     page = number;
     where.textContent = pages ? `Page ${page} of ${pages}` : `Page ${page}`;
     prev.disabled = next.disabled = true;
     sheet.classList.add("loading");
-    let view;
     let picture;
+    let got;
     try {
-      [view, picture] = await Promise.all([getJSON(`${api}/${page}/regions`), getBlob(`${api}/${page}.png`)]);
+      [got, picture] = await Promise.all([getJSON(`${api}/${page}/regions`), getBlob(`${api}/${page}.png`)]);
     } catch (error) {
       if (mine !== token) return;
       sheet.classList.remove("loading");
       replace(sheet, h("p", { class: "pv-fail muted" }, `Couldn't show this page (${error.message}).`));
+      keys.hidden = tools.hidden = true;
       prev.disabled = page <= 1;
       next.disabled = !pages || page >= pages;
       return;
     }
     if (mine !== token || !sheet.isConnected) return;
+    view = got;
     pages = view.pages;
     where.textContent = `Page ${page} of ${pages}`;
     prev.disabled = page <= 1;
     next.disabled = page >= pages;
     if (pageUrl) URL.revokeObjectURL(pageUrl);
     pageUrl = URL.createObjectURL(picture);
+    draw(view);
+  }
+
+  function draw(view) {
     const reading = Boolean(view.model_name);
     const counts = { ok: 0, check: 0, differs: 0 };
-    const boxes = view.regions.map((region) => {
-      const shade = tone(region, view.source);
-      counts[shade] += 1;
+    const shades = view.regions.map((region) => tone(region, view.source));
+    for (const shade of shades) counts[shade] += 1;
+    // The cells of the open table that each box was read into, to point at them from the page.
+    const cellsOf = new Map();
+    const boxes = view.regions.map((region, index) => {
       const box = h("div", {
-        class: `pv-box ${shade}`,
+        class: `pv-box ${shades[index]}`,
         tabindex: "0",
         role: "button",
         "aria-label": region.text,
         "aria-describedby": "pv-tip",
+        dataset: { region: String(index) },
         style: { left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.w * 100}%`, height: `${region.h * 100}%` },
       });
       const open = () => showTip(box, tipFor(region, view));
-      box.addEventListener("pointerenter", open);
+      const mark = (on) => (cellsOf.get(index) || []).forEach((cell) => cell.classList.toggle("pv-hl", on));
+      box.addEventListener("pointerenter", () => (open(), mark(true)));
       box.addEventListener("focus", open);
       box.addEventListener("click", open);
-      box.addEventListener("pointerleave", hideTip);
+      box.addEventListener("pointerleave", () => (hideTip(), mark(false)));
       box.addEventListener("blur", hideTip);
       return box;
     });
+
+    function reveal(index, { card = false } = {}) {
+      const box = boxes[index];
+      if (!box) return;
+      hideTip();
+      box.scrollIntoView({ block: "center", inline: "center" });
+      flash(box);
+      if (card) settled(() => box.isConnected && showTip(box, tipFor(view.regions[index], view)));
+    }
+
+    // The tables on the page: an outline each, under the boxes so the boxes can still be pointed at.
+    const outlines = (view.tables || []).filter((table) => table.box).map((table) => {
+      const outline = h(
+        "div",
+        {
+          class: "pv-tbl",
+          role: "button",
+          tabindex: "0",
+          "aria-label": `${table.label}: show this table`,
+          title: `${table.label}: click to show it as a table`,
+          dataset: { table: table.id },
+          style: { left: `${table.box.x * 100}%`, top: `${table.box.y * 100}%`, width: `${table.box.w * 100}%`, height: `${table.box.h * 100}%` },
+        },
+        h("span", { class: "pv-tbl-tag" }, table.label)
+      );
+      outline.addEventListener("click", () => toggleTable(table));
+      outline.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          toggleTable(table);
+        }
+      });
+      return outline;
+    });
+
+    sizeSheet();
     sheet.style.aspectRatio = `${view.width} / ${view.height}`;
     sheet.classList.remove("loading");
     const img = h("img", { alt: `Page ${page} of ${file.name}`, draggable: "false" });
     img.src = pageUrl; // a blob: address made just above, which h() only takes for links to this server
-    replace(sheet, img, boxes);
+    replace(sheet, img, outlines, boxes);
+
+    // A table shown as a grid above the page: pointing at a cell marks its box, and the other way round.
+    let openId = "";
+    const chips = (view.tables || []).map((table) =>
+      h("button", { type: "button", class: "pv-chip", "aria-pressed": "false", dataset: { table: table.id }, onclick: () => toggleTable(table) }, icon("table", 13), table.label)
+    );
+
+    function toggleTable(table) {
+      if (openId === table.id) closeTable();
+      else openTable(table);
+    }
+
+    function openTable(table) {
+      closeTable();
+      openId = table.id;
+      for (const chip of chips) chip.setAttribute("aria-pressed", String(chip.dataset.table === table.id));
+      for (const outline of outlines) outline.classList.toggle("on", outline.dataset.table === table.id);
+      const cell = (tag, text, region, attrs = {}) => {
+        const el = h(tag, { ...attrs, class: `${attrs.class || ""}${region === null || region === undefined ? " pv-nobox" : ""}`.trim() || null }, text);
+        if (region !== null && region !== undefined) {
+          el.dataset.region = String(region);
+          if (!cellsOf.has(region)) cellsOf.set(region, []);
+          cellsOf.get(region).push(el);
+          const box = boxes[region];
+          el.addEventListener("pointerenter", () => box && box.classList.add("pv-hl"));
+          el.addEventListener("pointerleave", () => box && box.classList.remove("pv-hl"));
+          el.addEventListener("click", () => reveal(region));
+          el.title = "Click to find it on the page";
+        }
+        return el;
+      };
+      const numeric = table.columns.map((_c, i) => {
+        const filled = table.rows.map((row) => (row[i] ? row[i].text : "")).filter(Boolean);
+        return filled.length > 0 && filled.every((text) => /^[-(]?\s*[$€£]?\s*[\d.,]+\)?%?$/.test(text.trim()));
+      });
+      const headed = table.columns.some(Boolean);
+      const grid = h(
+        "table",
+        { class: "grid pv-grid" },
+        headed
+          ? h("thead", null, h("tr", null, table.columns.map((label, i) => cell("th", label, (table.column_regions || [])[i], { scope: "col", class: numeric[i] ? "num" : "" }))))
+          : null,
+        h(
+          "tbody",
+          null,
+          table.rows.map((row) => h("tr", null, row.map((item, i) => cell("td", item.text, item.region, { class: numeric[i] ? "num" : "" }))))
+        )
+      );
+      const found = table.rows.flat().filter((item) => item.text && item.region !== null).length;
+      const filled = table.rows.flat().filter((item) => item.text).length;
+      replace(
+        panel,
+        h(
+          "div",
+          { class: "pv-panel-head" },
+          h("div", null, h("b", null, table.label), h("small", null, `${plural(table.rows.length, "row")} · ${found} of ${plural(filled, "cell")} found on the page · point at a cell to see where it was read`)),
+          h("button", { type: "button", class: "icon-btn", title: "Close (Esc)", "aria-label": "Close the table", onclick: closeTable }, icon("x", 15))
+        ),
+        h("div", { class: "grid-wrap" }, grid)
+      );
+      panel.hidden = false;
+      const stuck = barHeight() + (tools.hidden ? 0 : tools.offsetHeight);
+      panel.style.top = `${stuck}px`;
+      closeOpenTable = () => (sheet.isConnected && openId ? (closeTable(), true) : false);
+      // Bring the table on the page into view below the grid.
+      const outline = outlines.find((o) => o.dataset.table === table.id);
+      const scroller = sheet.closest(".reader-pane");
+      if (outline && scroller) {
+        // Where the page shows from once the grid is kept at the top of the pane.
+        const cover = scroller.getBoundingClientRect().top + stuck + panel.offsetHeight + 32; // room for its label
+        const at = outline.getBoundingClientRect();
+        if (at.top < cover || at.top > window.innerHeight - 80) scroller.scrollBy({ top: at.top - cover });
+      }
+    }
+
+    closeTable = () => {
+      if (!openId) return;
+      openId = "";
+      cellsOf.clear();
+      for (const chip of chips) chip.setAttribute("aria-pressed", "false");
+      for (const outline of outlines) outline.classList.remove("on");
+      for (const box of boxes) box.classList.remove("pv-hl");
+      panel.hidden = true;
+      replace(panel);
+    };
+
+    // What to check: the amber and red boxes, in reading order.
+    const toCheck = readingOrder(
+      view.regions,
+      shades.flatMap((shade, index) => (shade === "ok" ? [] : [index]))
+    );
+    let at = -1;
+    const count = h("span", { class: "pv-count-check", "aria-live": "polite" }, toCheck.length ? `${plural(toCheck.length, "box", "boxes")} to check` : "");
+    const step = h(
+      "button",
+      { type: "button", class: "btn btn-sm pv-next", disabled: !toCheck.length, title: toCheck.length ? "Go to the next amber or red box" : null },
+      icon(toCheck.length ? "down" : "check", 14),
+      h("span", null, toCheck.length ? "Next to check" : "Nothing to check")
+    );
+    step.addEventListener("click", () => {
+      if (!toCheck.length) return;
+      at = (at + 1) % toCheck.length;
+      count.textContent = `${at + 1} of ${toCheck.length} to check`;
+      reveal(toCheck[at], { card: true });
+    });
+    const only = h("input", { type: "checkbox", class: "pv-only-input" });
+    only.addEventListener("change", () => {
+      hideTip();
+      sheet.classList.toggle("only-check", only.checked);
+    });
+    sheet.classList.remove("only-check");
+    replace(
+      tools,
+      h("div", { class: "pv-check" }, step, count, view.regions.length ? h("label", { class: "pv-only" }, only, "Only show what needs checking") : null),
+      chips.length ? h("div", { class: "pv-chips" }, h("span", { class: "pv-chips-h" }, `${chips.length === 1 ? "Table" : "Tables"} on this page`), chips) : null
+    );
+    tools.hidden = !view.regions.length;
+    // Kept in view under the file's own bar, so "Next to check" stays at hand while the page scrolls.
+    tools.style.top = `${barHeight()}px`;
+
+    // Key details, each pointing at the box it was read from.
+    const fields = view.fields || [];
+    replace(
+      keys,
+      h("h2", { class: "pv-keys-h" }, "Key details"),
+      h(
+        "div",
+        { class: "pv-keys-list" },
+        fields.map((field) => {
+          const shade = field.region === null ? "" : shades[field.region];
+          const said = { ok: view.source === "text" ? "exact" : "readings agree", check: "check it", differs: "read differently" }[shade] || "";
+          return h(
+            "button",
+            {
+              type: "button",
+              class: "pv-field",
+              dataset: { label: field.label },
+              title: `Show where it is on the page${said ? ` (${said})` : ""}`,
+              onclick: () => reveal(field.region),
+            },
+            h("span", { class: "pv-field-label" }, field.label),
+            h("span", { class: "pv-field-value" }, h("i", { class: `pv-dot ${shade}`, "aria-label": said || null, role: said ? "img" : null }), h("span", { class: "pv-field-text", title: field.value }, field.value))
+          );
+        })
+      )
+    );
+    keys.hidden = !fields.length;
 
     const told = [];
     if (view.source === "text") told.push("Read from the file's own text (exact): each box is exactly what the file says.");
@@ -793,6 +1103,7 @@ function pageView(data) {
     if (reading) told.push(`${view.model_name} read this page too, and each box shows what it read there.`);
     else if (view.source === "ocr") told.push("The vision model hasn't read this page.");
     if (view.regions.length) told.push("Point at a box, or tab to it, to see what was read.");
+    if (outlines.length) told.push(`Dashed outlines are tables: click one to see it as a table.`);
     replace(about, told.join(" "));
     replace(
       legend,
@@ -807,10 +1118,21 @@ function pageView(data) {
     );
   }
 
+  let closeTable = () => {};
+
   prev.addEventListener("click", () => page > 1 && show(page - 1));
   next.addEventListener("click", () => page < pages && show(page + 1));
   show(1);
-  return h("div", { class: "pv" }, h("div", { class: "pv-bar" }, h("div", { class: "pv-nav" }, prev, where, next), legend), about, h("div", { class: "pv-frame" }, sheet));
+  return h(
+    "div",
+    { class: "pv" },
+    h("div", { class: "pv-bar" }, h("div", { class: "pv-nav" }, prev, where, next), zooms, legend),
+    about,
+    keys,
+    tools,
+    panel,
+    frame
+  );
 }
 
 export function fileView(data, tab, ctx) {

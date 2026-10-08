@@ -255,3 +255,122 @@ def test_the_page_tab_marks_where_text_was_read_and_says_what_on_hover(settings,
         page.click("button[aria-label='Next page']")
         page.wait_for_function("() => document.querySelector('.pv-where').textContent === 'Page 2 of 2'")
         page.wait_for_selector(".pv-box[aria-label='Terms and conditions, page 2']")
+
+
+def _harbor(settings, store, *attachments):
+    from controller_inbox.folder_mail import ingest_folder
+    from msgfactory import write_msg
+
+    settings.trusted_domains = "taz.com"
+    settings.ensure_data_dir()
+    write_msg(settings.inbox_incoming / "harbor.msg", "Invoice HS-10482", "Our invoice is attached.", sender_name="Harbor Steel",
+              sender_email="ar@taz.com", attachments=list(attachments))
+    [email] = ingest_folder(store, settings)
+    return email
+
+
+def _open_page_tab(page, base, email):
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.goto(f"{base}/app/mail/{email.id}/file/1")
+    page.wait_for_selector(".tab.on:has-text('Page')")
+    page.wait_for_function("() => { const i = document.querySelector('.pv-sheet img'); return i && i.naturalWidth > 0; }")
+
+
+def test_the_page_tab_shows_tables_and_key_details_where_they_are_printed(settings, store, page):
+    from liveserver import serving
+    from msgfactory import PDF
+    from test_page_view import _detailed_invoice
+
+    email = _harbor(settings, store, ("HS-10482.pdf", _detailed_invoice(), PDF))
+    with serving(web.create_app(settings, store)) as base:
+        _open_page_tab(page, base, email)
+        # Every box is the file's own text: nothing to check.
+        assert page.is_disabled(".pv-next") and page.text_content(".pv-next") == "Nothing to check"
+        # Key details, found on the page.
+        assert page.text_content(".pv-field[data-label='Invoice no.'] .pv-field-text") == "HS-10482"
+        page.click(".pv-field[data-label='Total due']")
+        total = page.locator(".pv-box[aria-label='$6,327.59']")
+        assert "pv-flash" in total.get_attribute("class") and "ok" in total.get_attribute("class")
+        # A table's outline opens it as a grid; pointing at a cell marks its box on the page.
+        outline = page.locator(".pv-tbl:has(.pv-tbl-tag:text-is('Line items'))")
+        outline.locator(".pv-tbl-tag").click()
+        page.wait_for_selector(".pv-panel:not([hidden]) .pv-grid")
+        assert page.text_content(".pv-panel-head b") == "Line items"
+        assert page.get_attribute(".pv-chip[aria-pressed='true']", "data-table") == outline.get_attribute("data-table")
+        cell = page.locator(".pv-grid td:text-is('1,874.40')")
+        cell.hover()
+        region = cell.get_attribute("data-region")
+        box = page.locator(f".pv-box[data-region='{region}']")
+        assert box.get_attribute("aria-label") == "1,874.40" and "pv-hl" in box.get_attribute("class")
+        # And pointing at the box marks its cell.
+        page.mouse.move(5, 5)
+        assert "pv-hl" not in box.get_attribute("class")
+        page.locator(".pv-box[aria-label='412.50']").hover()
+        assert "pv-hl" in page.get_attribute(".pv-grid td:text-is('412.50')", "class")
+        # Esc closes the table and stays on the page.
+        page.keyboard.press("Escape")
+        page.wait_for_selector(".pv-panel", state="hidden")
+        assert "/file/1" in page.url and page.locator(".pv-box").count() > 20
+        # The size it is drawn at is kept, and the boxes stay on their words.
+        page.click(".pv-zoom .seg:text-is('150%')")
+        width = page.evaluate("() => document.querySelector('.pv-sheet').getBoundingClientRect().width")
+        assert width > 1100
+        sheet = page.evaluate("() => document.querySelector('.pv-sheet').getBoundingClientRect().left")
+        left = page.evaluate("() => document.querySelector(\".pv-box[aria-label='$6,327.59']\").getBoundingClientRect().left")
+        assert 0.8 < (left - sheet) / width < 0.85
+        page.reload()
+        page.wait_for_function("() => { const i = document.querySelector('.pv-sheet img'); return i && i.naturalWidth > 0; }")
+        assert page.get_attribute(".pv-zoom .seg[aria-pressed='true']", "data-zoom") == "150"
+
+
+def test_next_to_check_steps_through_a_scans_amber_and_red_boxes(settings, store, page, monkeypatch):
+    from controller_inbox import ocr, page_view, vision
+    from liveserver import serving
+    from test_page_view import LINES, OVIS, _detailed_invoice
+
+    pdf = _detailed_invoice()
+    scan = vision.render(pdf, "HS-10482.pdf", 1, reader=page_view.VIEW)
+    width, height = page_view.png_size(scan)
+    # OCR as RapidOCR gives it, from where the words are printed: unsure of one description.
+    lines = [
+        {"left": r["x"] * width, "top": r["y"] * height, "right": (r["x"] + r["w"]) * width, "bottom": (r["y"] + r["h"]) * height,
+         "text": r["text"], "score": 0.62 if r["text"].startswith("Anchor bolts") else 0.97}
+        for r in page_view._text_layer(pdf, 1)
+    ]
+    monkeypatch.setattr(ocr, "image_text", lambda _data: "")
+    monkeypatch.setattr(ocr, "line_boxes", lambda _png: lines)
+    email = _harbor(settings, store, ("HS-10482 signed.png", scan, "image/png"))
+    att = email.attachments[0]
+    rows = "".join(f"<tr><td>{d}</td><td>{q}</td><td>{p:,.2f}</td><td>{'1,847.40' if q == 6 else f'{q * p:,.2f}'}</td></tr>" for d, q, p in LINES)
+    # The vision model read the page the same, but for the plate's amount.
+    reading = (
+        "# Harbor Steel LLC\n88 Dockside Way, Tacoma WA 98421\n\nInvoice no.: HS-10482\nInvoice date: 09/28/2026\nDue date: 10/28/2026\n"
+        f"PO number: 4500-1163\n\n<table><tr><td>Description</td><td>Qty</td><td>Unit price</td><td>Amount</td></tr>{rows}"
+        "<tr><td>Subtotal</td><td></td><td></td><td>$5,941.40</td></tr><tr><td>Sales tax 6.5%</td><td></td><td></td><td>$386.19</td></tr>"
+        "<tr><td>Total due</td><td></td><td></td><td>$6,327.59</td></tr></table>"
+    )
+    store.save_page_reading(att.id, 1, first="", model_text=reading, model=OVIS, seconds=30, comparison="{}", sha256=att.sha256)
+    with serving(web.create_app(settings, store)) as base:
+        _open_page_tab(page, base, email)
+        assert page.locator(".pv-box.differs").count() == 1
+        to_check = page.locator(".pv-box.check, .pv-box.differs").count()
+        assert to_check >= 2
+        assert page.text_content(".pv-count-check") == f"{to_check} boxes to check"
+        seen = []
+        for step in range(1, 3):
+            page.click(".pv-next")
+            page.wait_for_function(f"() => document.querySelector('.pv-count-check').textContent === '{step} of {to_check} to check'")
+            page.wait_for_selector(".pv-tip:not([hidden])")
+            flashed = page.locator(".pv-box.pv-flash")
+            assert flashed.count() == 1
+            seen.append(page.evaluate("() => parseFloat(document.querySelector('.pv-box.pv-flash').style.top)"))
+        # In reading order: down the page.
+        assert seen[0] <= seen[1]
+        # The red box's card says the two read it differently.
+        while "1,874.40" not in page.text_content(".pv-tip"):
+            page.click(".pv-next")
+            page.wait_for_timeout(150)
+        assert "differs" in page.text_content(".pv-tip") and "1,847.40" in page.text_content(".pv-tip")
+        # Only what needs checking: the green boxes hide.
+        page.check(".pv-only input")
+        assert page.locator(".pv-box.ok").first.is_hidden() and page.locator(".pv-box.differs").is_visible()

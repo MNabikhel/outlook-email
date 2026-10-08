@@ -673,7 +673,8 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 .pv-swatch { width: 14px; height: 10px; border-radius: 2px; border: 1.5px solid var(--tone); background: color-mix(in srgb, var(--tone) 22%, transparent); }
 .pv-about { margin: 0; font-size: 13px; color: var(--text-2); }
 .pv-frame { background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
-.pv-sheet { position: relative; width: 100%; background: #fff; box-shadow: var(--shadow-1); line-height: 0; }
+/* Its own stacking order, so nothing drawn on the page rises over the table kept above it. */
+.pv-sheet { position: relative; z-index: 0; width: 100%; background: #fff; box-shadow: var(--shadow-1); line-height: 0; }
 .pv-sheet.loading { min-height: 320px; opacity: 0.55; }
 .pv-sheet img { display: block; width: 100%; height: auto; user-select: none; }
 .pv-fail { margin: 0; padding: 24px; line-height: 1.5; background: var(--surface); }
@@ -707,6 +708,94 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 .pv-tip-model { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 .pv-tip-text { margin: 3px 0 0; font: 12.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pv-tip-tag { padding: 0 7px; border-radius: 999px; font-size: 11.5px; font-weight: 650; color: var(--tone); background: color-mix(in srgb, var(--tone) 14%, transparent); border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent); }
+
+/* Page size, what to check next, and the tables on the page. */
+.pv-zoom .seg { font-variant-numeric: tabular-nums; }
+.pv-tools {
+  position: sticky; z-index: 3;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px 18px; flex-wrap: wrap;
+  margin: 0 -8px; padding: 6px 8px;
+  background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px);
+}
+.pv-tools[hidden], .pv-keys[hidden], .pv-panel[hidden] { display: none; }
+.pv-check { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.pv-count-check { font-size: 12.5px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.pv-only { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2); cursor: pointer; }
+.pv-only input { margin: 0; accent-color: var(--accent); }
+.pv-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pv-chips-h { font-size: 12px; color: var(--muted); }
+.pv-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 26px; padding: 0 10px;
+  border: 1px dashed var(--border-strong); border-radius: 999px;
+  background: var(--surface); color: var(--text-2);
+  font: inherit; font-size: 12.5px; cursor: pointer;
+}
+.pv-chip:hover { background: var(--surface-3); }
+.pv-chip[aria-pressed="true"] { border-style: solid; border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+/* Key details: each one a button that finds it on the page. */
+.pv-keys { padding: 10px 12px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.pv-keys-h { margin: 0 0 8px; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: 0.02em; }
+.pv-keys-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 6px; }
+.pv-field {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.pv-field:hover { border-color: var(--border-strong); background: var(--surface-3); }
+.pv-field-label { font-size: 11.5px; color: var(--muted); }
+.pv-field-value { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.pv-field-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pv-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--tone, var(--faint)); }
+.pv-dot.ok { --tone: var(--ok); }
+.pv-dot.check { --tone: var(--imp-high); }
+.pv-dot.differs { --tone: var(--danger); }
+
+/* A table opened from the page: kept in view at the top while the page scrolls under it. */
+.pv-panel {
+  position: sticky; z-index: 2;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+  overflow: hidden;
+}
+.pv-panel-head { display: flex; align-items: center; gap: 12px; padding: 8px 8px 8px 14px; border-bottom: 1px solid var(--border); }
+.pv-panel-head > div { display: flex; flex-direction: column; min-width: 0; margin-right: auto; }
+.pv-panel-head small { color: var(--muted); font-size: 12px; }
+.pv-panel .grid-wrap { max-height: min(34vh, 320px); }
+.pv-grid td[data-region], .pv-grid th[data-region] { cursor: pointer; }
+.pv-grid .pv-nobox { color: var(--muted); }
+.pv-grid td.pv-hl, .pv-grid th.pv-hl, .pv-grid tbody tr:hover td.pv-hl { background: var(--accent-soft); box-shadow: inset 0 0 0 1.5px var(--accent); }
+.pv-grid td[data-region]:hover, .pv-grid th[data-region]:hover { background: var(--accent-soft); }
+
+/* On the page (always white paper): the outlines of tables, and a box pointed at from a grid or the key details. */
+.pv-frame.zoomed { overflow: auto; }
+.pv-frame.zoomed .pv-sheet { margin: 0 auto; max-width: none; }
+.pv-tbl {
+  position: absolute;
+  border: 1.5px dashed #2557a7; border-radius: 4px;
+  cursor: pointer;
+}
+.pv-tbl:hover, .pv-tbl.on { background: rgba(37, 87, 167, 0.06); border-style: solid; }
+.pv-tbl:focus-visible { outline: 2px solid #2557a7; outline-offset: 2px; }
+.pv-tbl-tag {
+  position: absolute; left: -1.5px; bottom: 100%; z-index: 4;
+  padding: 1px 7px; border-radius: 4px 4px 0 0;
+  background: #2557a7; color: #fff;
+  font: 600 11px/1.5 var(--font); white-space: nowrap;
+}
+.pv-box.pv-hl { z-index: 2; outline: 3px solid #2557a7; outline-offset: 1px; background: rgba(37, 87, 167, 0.22); }
+.pv-sheet.only-check .pv-box.ok { display: none; }
+.pv-box.pv-flash { z-index: 3; animation: pv-flash 0.6s ease-in-out 3; }
+@keyframes pv-flash {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--tone) 55%, transparent); background: color-mix(in srgb, var(--tone) 40%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pv-box.pv-flash { animation: none; outline: 3px solid var(--tone); outline-offset: 2px; }
+}
 
 /* A page read two ways: OCR (or the PDF's text) beside the vision model's reading. */
 .vision-box { display: flex; flex-direction: column; gap: 8px; margin: 0 0 14px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -22,7 +23,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from controller_inbox import agent, chats, cost_codes, documents, fraud, model_roles, page_view, semantic, table_lookup, vision
+from controller_inbox import agent, chats, cost_codes, documents, fraud, model_roles, page_details, page_view, semantic, table_lookup, vision
 from controller_inbox.digest import build_digest
 from controller_inbox.local_llm import check_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
@@ -30,6 +31,8 @@ from controller_inbox.profile import active_profile, is_finance
 from controller_inbox.classify import month_end
 from controller_inbox.clock import format_when
 from controller_inbox.web import DOWNLOADABLE, _json_body, _require_page, _same_origin, templates
+
+log = logging.getLogger(__name__)
 
 UI_DIR = Path(__file__).parent / "static" / "ui"
 # Each script is fetched by a URL that changes with its contents, so an update never runs beside an old copy.
@@ -434,8 +437,8 @@ def register_workspace(
             },
         }
 
-    def page_file(email_id: str, n: int) -> tuple[Any, bytes]:
-        """The attachment and its bytes as they arrived, for showing its pages; never a locked file's."""
+    def page_file(email_id: str, n: int) -> tuple[Any, Any, bytes]:
+        """The email, the attachment and its bytes as they arrived, for showing its pages; never a locked file's."""
         email = known(email_id)
         if not 1 <= n <= len(email.attachments):
             raise HTTPException(status_code=404, detail="No such file on this email")
@@ -449,7 +452,7 @@ def register_workspace(
         data = vision.original_bytes(settings, email, att)
         if data is None:
             raise HTTPException(status_code=404, detail="The original file wasn't kept for this email.")
-        return att, data
+        return email, att, data
 
     def no_page(p: int) -> HTTPException:
         return HTTPException(status_code=404, detail=f"This file has no page {p}.")
@@ -457,7 +460,7 @@ def register_workspace(
     @api.get("/mail/{email_id}/files/{n}/pages/{p}.png")
     def mail_file_page(email_id: str, n: int, p: int):
         """The page drawn as a picture (a picture file is its page 1)."""
-        att, data = page_file(email_id, n)
+        _email, att, data = page_file(email_id, n)
         try:
             png = page_view.page_png(settings, data, att.filename, p)
         except ValueError:
@@ -469,8 +472,9 @@ def register_workspace(
     @api.get("/mail/{email_id}/files/{n}/pages/{p}/regions")
     def mail_file_regions(email_id: str, n: int, p: int):
         """Where each piece of the page's text was read, how sure the reading is, and what the vision model read
-        there (when it has read the page)."""
-        att, data = page_file(email_id, n)
+        there (when it has read the page); the tables on the page and the invoice's key details, each tied to its
+        boxes."""
+        email, att, data = page_file(email_id, n)
         try:
             pages = page_view.page_count(data, att.filename)
         except Exception:
@@ -486,8 +490,23 @@ def register_workspace(
             raise HTTPException(status_code=422, detail="This page couldn't be read.") from None
         reading = store.page_readings(att.id, att.sha256).get(p)
         boxes = found["regions"]
+        model_text = (reading.get("model_text") or "") if reading is not None else None
         if reading is not None:
-            boxes = page_view.with_model(boxes, reading.get("model_text") or "")
+            boxes = page_view.with_model(boxes, model_text)
+        known_fields = [att.extracted_fields, email.extracted]
+        extracted = {
+            "invoices": [value for fields in known_fields for value in fields.invoice_numbers],
+            "pos": [value for fields in known_fields for value in fields.po_numbers],
+            "due_dates": [value for fields in known_fields for value in fields.due_dates],
+            "vendors": [*(value for fields in known_fields for value in fields.vendor_candidates), email.sender_name or ""],
+        }
+        try:
+            on_page = page_details.page_tables(boxes, found["source"], att.extracted_text or "", p, model_text)
+            details = page_details.key_details(boxes, found["source"], model_text, extracted)
+        except Exception:
+            # Tables and details only help to read the page; the page and its boxes still show without them.
+            log.exception("Couldn't find the tables and key details on page %s of %s", p, att.filename)
+            on_page, details = [], []
         return {
             "page": p,
             "pages": pages,
@@ -497,6 +516,8 @@ def register_workspace(
             "reason": found["reason"],
             "regions": [box if reading is not None else {**box, "model": None} for box in boxes],
             "model_name": (vision.reader_name(reading.get("model") or "") or "The vision model") if reading is not None else "",
+            "tables": on_page,
+            "fields": details,
         }
 
     @api.post("/mail/{email_id}/files/{n}/vision")
