@@ -97,6 +97,10 @@ class Table:
     header_mid: float | None
     rows: dict[int, str]
     row_label: str
+    # Its column names and where each column sits, so rows printed on the next page without the names repeated
+    # still get them (see ``_continued``).
+    labels: tuple[str, ...] = ()
+    columns: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass
@@ -542,7 +546,7 @@ def _word(glyphs: list[Glyph]) -> Word:
 # A spreadsheet's accounting format draws the currency sign at the cell's left edge and the figure at
 # its right, with a dash for zero: "$       1,845.20" and "$      -".
 _CURRENCY = {"$", "US$", "C$", "A$", "€", "£", "¥"}
-_FIGURE = re.compile(r"^\(?-?[\d.,]*\d[\d.,]*\)?%?$|^[-–—]$")
+_FIGURE = re.compile(r"^\(?-?[\d.,]*\d[\d.,]*-?\)?%?$|^[-–—]$")
 # A zero in the accounting format, alone or with its currency sign (see ``_with_currency``).
 _ZERO_DASHES = {"-", "–", "—", *(f"{sign}0" for sign in _CURRENCY)}
 
@@ -1579,12 +1583,18 @@ def _fill_grouping_columns(rows: list[list[str]], mids: list[float]) -> list[int
     for row in rows:
         blocks.append(block)
         block += _total_row(row)
+    marks: list[int] = []
     for column in columns:
         anchors = [
             index for index, row in enumerate(rows)
             if column < len(row) and row[column].strip() and not _TOTAL.match(row[column].strip())
         ]
         if not anchors:
+            continue
+        # A merged category is named once over its rows. The same word again further down the same run ("HOLD",
+        # "HOLD" in a Status column) is a mark on just those rows: the rows between them don't have it.
+        if any(blocks[a] == blocks[b] and rows[a][column].strip() == rows[b][column].strip() for a, b in zip(anchors, anchors[1:])):
+            marks.append(column)
             continue
         for index, row in enumerate(rows):
             if column >= len(row) or row[column].strip() or not _has_value(row, value_cols) or _total_row(row):
@@ -1593,7 +1603,7 @@ def _fill_grouping_columns(rows: list[list[str]], mids: list[float]) -> list[int
             nearest = min(near, key=lambda anchor: (abs(mids[anchor] - mids[index]), anchor > index, anchor))
             row[column] = rows[nearest][column]
         _whole_names(rows, column, blocks)
-    return columns
+    return [column for column in columns if column not in marks]
 
 
 def _whole_names(rows: list[list[str]], column: int, blocks: list[int]) -> None:
@@ -1698,6 +1708,9 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
     # Columns found across the page can be empty in this block (another table's columns).
     used = sorted({_place(segment, columns) for line in block for segment in line.segments})
     columns = [columns[index] for index in used]
+    continued = _continued(block, previous)
+    if continued is not None:
+        columns = list(continued.columns)
     grid: list[list[str]] = []
     bolds: list[bool] = []
     seg_rows: list[list[tuple[float, float, str]]] = []
@@ -1755,8 +1768,11 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
     bold_first = bolds[0] and not all(bolds[1:])
     heads = _header_depth(grid) if not peeled else 1
     spanned = _span_labels(seg_rows[:heads], columns) if not peeled else None
-    header_mid = mids[0]
-    if spanned and (_usable_header(spanned, grid[heads:], bold_first) or heads > 1):
+    header_mid = None if continued is not None else mids[0]
+    if continued is not None:
+        # More rows of the table on the page before, under its column names.
+        labels = list(continued.labels)
+    elif spanned and (_usable_header(spanned, grid[heads:], bold_first) or heads > 1):
         labels = spanned
         grid, bolds, mids, row_x, cell_x, cell_end, sizes = (
             grid[heads:], bolds[heads:], mids[heads:], row_x[heads:], cell_x[heads:], cell_end[heads:], sizes[heads:]
@@ -1788,7 +1804,7 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
 
     body_lines = _grouped_lines(grid, row_x, bolds, render, group_cols, cell_x, sizes) if labels else [render(row) for row in grid]
     first_label = (labels[0] if labels else "") or ""
-    carried = None if _names_own_rows(grid) else _carried_over(mids, header_mid if labels else None, previous or [], first_label)
+    carried = None if continued is not None or _names_own_rows(grid) else _carried_over(mids, header_mid if labels else None, previous or [], first_label)
     if carried and labels:
         prior, names = carried
         lines = [f"[These columns continue the table on the page before; each row starts with its {prior.row_label}.]"]
@@ -1797,9 +1813,35 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
             lines.append(f"{prior.row_label}: {name} | {line}" if name else line)
         return lines, Table(header_mid, prior.rows, prior.row_label), facts
 
-    lines = ([" | ".join(label for label in labels if label)] if labels else []) + body_lines
+    lines = ([" | ".join(label for label in labels if label)] if labels and continued is None else []) + body_lines
     rows = {round(mid): row[0] for mid, row in zip(mids, grid) if row and row[0]}
-    return lines, Table(header_mid if labels else None, rows, first_label), facts
+    named = tuple(labels) if labels and len(labels) == len(columns) else ()
+    return lines, Table(header_mid if labels else None, rows, first_label, named, tuple(columns) if named else ()), facts
+
+
+def _continued(block: list[Line], previous: list[Table] | None) -> Table | None:
+    """The table on the page before, when this block is more of its rows: a long sheet printed over several pages
+    without its column names repeated. The block starts with a row of figures, not names, and every piece of it
+    sits in one of that table's columns, with each of those columns filled somewhere. A narrow gap the block
+    alone would split a cell at ("Vendor | 41") is inside one of those columns, so the cell stays whole."""
+    prior = previous[-1] if previous else None
+    if prior is None or len(prior.columns) < 2 or len(prior.labels) != len(prior.columns):
+        return None
+    first = [" ".join(word.text for word in segment) for segment in block[0].segments]
+    if not any(_amount_cell(cell) for cell in first):
+        return None
+    columns = list(prior.columns)
+    filled: set[int] = set()
+    for line in block:
+        for segment in line.segments:
+            x0, x1 = segment[0].x0, segment[-1].x1
+            overlaps = [min(x1, right) - max(x0, left) for left, right in columns]
+            inside = [index for index, overlap in enumerate(overlaps) if overlap > 1]
+            # A piece across two of its columns, or off them all, is another table's.
+            if len(inside) > 1 or (not inside and max(overlaps) < -2):
+                return None
+            filled.add(inside[0] if inside else overlaps.index(max(overlaps)))
+    return prior if len(filled) == len(columns) else None
 
 
 def _wrapped_headings(
@@ -1896,9 +1938,19 @@ def _header_depth(grid: list[list[str]]) -> int:
     if not any(_amount_cell(cell) for row in grid[1:] for cell in row):
         return 1
     heads = 1
-    while heads < min(4, len(grid) - 1) and _label_row(grid[heads]):
+    while heads < min(4, len(grid) - 1) and _label_row(grid[heads]) and not _counts_like_years(grid[heads]):
         heads += 1
     return heads
+
+
+def _counts_like_years(row: list[str]) -> bool:
+    """A named row of whole numbers that only look like years ("Hex Bolts | 2000 | 1950 | 2010" on hand, on order
+    and committed) is a row of figures. Years that head columns sit side by side ("2026 | 2025 | 2024")."""
+    filled = [cell.strip() for cell in row if cell.strip()]
+    if not row or not row[0].strip() or _YEAR.fullmatch(row[0].strip()):
+        return False
+    years = [int(cell) for cell in filled[1:] if _YEAR.fullmatch(cell)]
+    return len(years) >= 2 and len(years) == len(filled) - 1 and max(years) - min(years) > len(years)
 
 
 def _usable_header(labels: list[str], body: list[list[str]], bold_first: bool) -> bool:

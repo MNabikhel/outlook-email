@@ -225,3 +225,21 @@ def test_an_invoice_dropped_in_the_inbox_is_coded_when_processed(settings, store
     coding = store.cost_coding(email.id)
     assert [item["code"] for item in coding["codes"]] == ["1100.6420"]
     assert coding["codes"][0]["where"] == "INV-2231.pdf"
+
+
+def test_a_scan_spacing_the_periods_finds_only_the_longer_code(settings):
+    _write_codes(settings, [("Office supplies", "1100.6110"), ("Office supplies - head office", "1100.6110.100")])
+    book = cost_codes.load(settings)
+    for scan in ("Coded 1100.6110. 100", "Coded 1100. 6110. 100", "Coded 1100.6110 .100"):
+        assert [item["code"] for item in cost_codes.codes_on(_invoice("s", text=scan), book)] == ["1100.6110.100"], scan
+    # The shorter code still counts where it is written on its own, in the order printed.
+    both = cost_codes.codes_on(_invoice("t", text="Coded 1100.6110. 100\nFreight 1100.6110"), book)
+    assert [item["code"] for item in both] == ["1100.6110.100", "1100.6110"]
+
+
+def test_a_reading_slip_of_a_listed_code_is_not_called_unlisted(settings):
+    _write_codes(settings, CODES)
+    book = cost_codes.load(settings)
+    email = _invoice("u", text="AP coding: 1100.6110.1OO\nFreight 1100.642O\nNew code 1100.6999.100")
+    assert [item["code"] for item in cost_codes.codes_on(email, book)] == ["1100.6110.100", "1100.6420"]
+    assert cost_codes.unlisted_codes(email, book) == ["1100.6999.100"]

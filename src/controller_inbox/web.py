@@ -1009,8 +1009,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/process/stop")
     def process_stop():
-        job.request_stop()
-        return RedirectResponse("/?notice=stopping", status_code=303)
+        return RedirectResponse("/?notice=stopping" if job.request_stop() else "/", status_code=303)
 
     @app.post("/folder/ingest")
     def folder_ingest():

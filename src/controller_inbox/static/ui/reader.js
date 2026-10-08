@@ -385,6 +385,7 @@ async function openOriginal(d) {
   try {
     const response = await fetch(`${mailPath(d.id)}/open`, { method: "POST", headers: { "X-CloseDesk": "1" } });
     const data = await response.json();
+    if (!response.ok) return toast(data.detail || data.message || "CloseDesk couldn't open it.", { tone: "error" });
     toast(data.message || "Opening…");
     if (!data.ok && data.download) location.href = `${mailPath(d.id)}/original`;
   } catch (error) {

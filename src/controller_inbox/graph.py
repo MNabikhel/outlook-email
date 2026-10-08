@@ -15,7 +15,9 @@ from controller_inbox.models import RawAttachment, RawMessage
 
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
-DELEGATED_SCOPES = ["User.Read", "Mail.Read", "Mail.ReadWrite", "Mail.Send", "offline_access"]
+# MSAL asks for "offline_access" (the refresh token) by itself and refuses a sign-in that names it, or
+# "openid" or "profile", so they are not listed here.
+DELEGATED_SCOPES = ["User.Read", "Mail.Read", "Mail.ReadWrite", "Mail.Send"]
 APP_SCOPES = ["https://graph.microsoft.com/.default"]
 
 

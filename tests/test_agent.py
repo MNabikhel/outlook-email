@@ -129,6 +129,21 @@ def test_tools_read_exact_cells_and_trace_a_total(store, settings, mail):
     assert "No file like" in agent.run_tool(ws, "read_file", {"email": "1", "file": "nope.pdf"}, limit=500)
 
 
+def test_a_file_whose_name_starts_another_is_not_read_for_it(store, settings, mail):
+    budget = mail["Q4 budget draft"]
+    report, appendix, memo = (copy.deepcopy(budget.attachments[0]) for _ in range(3))
+    report.filename, report.extracted_text = "Q3 report.pdf", "[page 1]\nNet revenue: $1,000,000"
+    appendix.filename, appendix.extracted_text = "Q3 report appendix.pdf", "[page 1]\nNet revenue restated: $940,000"
+    memo.filename, memo.extracted_text = "Invoice.pdf", "Invoice 1"
+    budget.attachments = [report, appendix, memo]
+    ws = agent.Workspace(store, settings, [budget], question="q", current_id=budget.id)
+    page = agent.run_tool(ws, "read_file", {"email": "1", "file": "Q3 report appendix", "part": "page 1"}, limit=2000)
+    assert page.startswith("Q3 report appendix.pdf") and "$940,000" in page
+    assert ws.file(budget, "the Q3 report appendix, page 1").filename == "Q3 report appendix.pdf"
+    assert ws.file(budget, "Q3 report").filename == "Q3 report.pdf"
+    assert ws.file(budget, "invoice").filename == "Invoice.pdf"
+
+
 def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monkeypatch):
     budget = mail["Q4 budget draft"]
     turns = []
@@ -271,6 +286,29 @@ def test_a_full_context_window_is_retried_smaller_and_explained(store, settings,
     assert advice and "Context Length 16,384" in advice[0]
 
 
+def test_an_email_a_tool_found_before_the_context_filled_gets_its_card(store, settings, mail, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    turns = []
+
+    def tools(_s, messages, _tools, *, max_tokens):
+        turns.append(messages[-1]["content"])
+        if len(turns) == 1:
+            return ToolReply("", [{"id": "c1", "name": "search_mail", "arguments": {"query": "Acme quote"}}])
+        if len(turns) == 2:
+            raise ContextOverflow("the request exceeds the available context size")
+        return ToolReply("The Acme quote [2] is $9,600.00; this budget's Ads rose by 500 [1].")
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
+    monkeypatch.setattr(assistant, "chat_with_tools", tools)
+    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: iter(["The Acme quote [2] is $9,600.00; Ads rose by 500 [1]."]))
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "SQL: NONE")
+    events = _events(answer_stream(store, settings, "What is the total change in this budget?", email_id=budget.id))
+    assert "FW: Acme quote" in turns[-1], "the retry's prompt still numbers the email search_mail found"
+    cards = [[card["subject"] for card in e["sources"]] for e in events if e["type"] == "sources"]
+    assert cards[0] == ["Q4 budget draft"] and cards[-1][:2] == ["Q4 budget draft", "FW: Acme quote"]
+
+
 @pytest.mark.parametrize(
     "expression, answer",
     [
@@ -366,6 +404,22 @@ def test_llama_cpp_context_length_comes_from_the_model(settings, monkeypatch):
     settings.llm_model = "qwen2.5-3b-instruct"
     status = local_llm.check_model(settings, use_cache=False)
     assert status.context_length == 16384
+
+
+def test_an_older_llama_cpp_says_its_context_on_props(settings, monkeypatch):
+    def fake_get(url, **_kwargs):
+        request = httpx.Request("GET", url)
+        if request.url.path == "/v1/models":  # before meta.n_ctx: only the length the model was trained with
+            return httpx.Response(200, request=request, json={"data": [{"id": "qwen2.5-3b-instruct", "meta": {"n_ctx_train": 32768}}]})
+        if request.url.path == "/props":
+            props = {"default_generation_settings": {"n_ctx": 8192, "params": {}}, "total_slots": 1, "modalities": {"vision": False}}
+            return httpx.Response(200, request=request, json=props)
+        return httpx.Response(404, request=request)
+
+    monkeypatch.setattr(local_llm.httpx, "get", fake_get)
+    settings.llm = True
+    status = local_llm.check_model(settings, use_cache=False)
+    assert (status.model, status.context_length, status.vision) == ("qwen2.5-3b-instruct", 8192, False)
 
 
 def test_lm_studio_context_length_and_tool_replies_are_read(settings, monkeypatch):

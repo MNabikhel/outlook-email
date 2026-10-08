@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import mimetypes
+import quopri
 import re
 import shutil
 import time
@@ -16,9 +18,10 @@ from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 
 from controller_inbox.config import Settings
-from controller_inbox.extract import explode_archives, html_to_text, sha256_bytes
+from controller_inbox.documents import decode_text
+from controller_inbox.extract import _rtf_text, explode_archives, html_to_text, redact_financial_secrets, sha256_bytes
 from controller_inbox.models import RawAttachment, RawMessage
-from controller_inbox.pipeline import KEEP_READINGS, attachment_text, process_message
+from controller_inbox.pipeline import attachment_text, process_message
 from controller_inbox.store import Store
 
 
@@ -41,7 +44,7 @@ def ingest_folder(
     """Read everything in the drop folder. Returns the records that were read.
 
     ``report`` (when given) is filled with ``read``, ``already_read`` (same mail
-    dropped again after the model or the user filed it), and ``failed`` rows.
+    dropped again; only files it brings that aren't stored yet are added), and ``failed`` rows.
     A file that cannot be read moves to ``inbox/failed`` with a note, so it is
     not retried on every run.
     """
@@ -77,7 +80,9 @@ def ingest_folder(
             if existing is not None:
                 # Another copy of a stored message: only files it doesn't hold yet are read and added.
                 raw.attachments = _new_files(settings, raw, existing)
-            if not raw.attachments and (raw.id in seen or (existing is not None and existing.model_status in KEEP_READINGS)):
+            # A copy that brings no new file is already read, however it was filed: reading it again would put
+            # back the tasks the user snoozed, and a copy without a subject or date would rename and redate it.
+            if not raw.attachments and (raw.id in seen or existing is not None):
                 report["already_read"] += 1
                 archived = _archive(settings, owned)
                 if existing is not None and not existing.source_path and archived and archived[0]:
@@ -245,14 +250,26 @@ def _parse_message(path: Path) -> RawMessage:
 def _parse_eml(path: Path) -> RawMessage:
     data = path.read_bytes()
     parsed = BytesParser(policy=policy.default).parsebytes(data)
-    subject = str(parsed.get("subject") or "")
-    sender_name, sender_email = _split_address(str(parsed.get("from") or ""))
+    subject = _header(parsed, "subject")
+    sender_name, sender_email = _split_address(_header(parsed, "from"))
     received = _email_date(parsed.get("date"))
     body, attachments = _eml_content(parsed)
     message_id = str(parsed.get("message-id") or "").strip()
     raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
     raw.reply_to = _reply_address(str(parsed.get("reply-to") or ""))
     return raw
+
+
+def _header(message, name: str) -> str:
+    """A header's text. One sent as raw 8-bit bytes instead of an encoded word (=?utf-8?...?=), as some older mail
+    systems do, is read as UTF-8 or Windows-1252 rather than losing its accented letters."""
+    value = str(message.get(name) or "")
+    if "\ufffd" not in value:
+        return value
+    for key, raw in message.raw_items():
+        if key.lower() == name and any("\udc80" <= char <= "\udcff" for char in raw):
+            return _tidy(decode_text(raw.encode("ascii", "surrogateescape")))
+    return value
 
 
 def _eml_content(message, prefix: str = "", depth: int = 0) -> tuple[str, list[RawAttachment]]:
@@ -274,6 +291,10 @@ def _eml_content(message, prefix: str = "", depth: int = 0) -> tuple[str, list[R
         if _inline_picture(ctype, filename or "", len(payload), disposition != "attachment" and bool(part.get("content-id"))):
             continue
         if filename or disposition == "attachment":
+            mail = mail_file_attachments(filename or "", ctype, payload, prefix, depth)
+            if mail is not None:
+                attachments.extend(mail)
+                continue
             attachments.append(
                 RawAttachment(
                     id=prefix + (filename or f"part-{len(attachments)+1}"),
@@ -312,6 +333,16 @@ def _eml_leaves(part):
 def _attached_email(part, filename: str, prefix: str, depth: int) -> list[RawAttachment]:
     payload = part.get_payload()
     inner = payload[0] if isinstance(payload, list) and payload else None
+    encoding = str(part.get("content-transfer-encoding") or "").strip().lower()
+    if inner is not None and encoding in ("base64", "quoted-printable"):
+        # Some mail programs encode an attached email, which the standard doesn't allow; the parser then reads the
+        # encoded text as the email, and its subject, text and files would be lost. It is decoded and read again.
+        try:
+            encoded = inner.as_bytes()
+            decoded = base64.b64decode(encoded) if encoding == "base64" else quopri.decodestring(encoded)
+            inner = BytesParser(policy=policy.default).parsebytes(decoded)
+        except Exception:
+            log.warning("Couldn't decode an attached email", exc_info=True)
     if inner is None:
         data = part.as_bytes() if hasattr(part, "as_bytes") else b""
         return [_attachment(prefix + (filename or "forwarded message.eml"), "message/rfc822", data)]
@@ -358,12 +389,7 @@ def _parse_msg(path: Path) -> RawMessage:
         if "@" not in sender_email:
             sender_email = _msg_smtp_address(message) or ""
             sender_name = sender_name if sender_name and "/o=" not in sender_name.lower() else sender_email
-        body = message.body or ""
-        html_body = getattr(message, "htmlBody", None)
-        if not body and html_body:
-            if isinstance(html_body, bytes):
-                html_body = html_body.decode("utf-8", errors="replace")
-            body = html_to_text(html_body)
+        body = _msg_body(message)
         received = _coerce_date(getattr(message, "date", None))
         attachments = _msg_attachments(message)
         header = getattr(message, "header", None)
@@ -380,10 +406,59 @@ def _parse_msg(path: Path) -> RawMessage:
 MAX_NESTING = 3
 
 
+def _msg_body(message) -> str:
+    """A .msg's text: its plain body, else its HTML body, else its RTF body (mail written in Outlook's Rich Text
+    format may keep only that). A body extract-msg fails to convert is left out, not the whole email."""
+    body = _msg_property(message, "body")
+    if body:
+        return body if isinstance(body, str) else decode_text(body)
+    html = _msg_html(message)
+    if html:
+        return html_to_text(html)
+    rtf = _msg_property(message, "rtfBody")
+    return _rtf_text(rtf) if isinstance(rtf, (bytes, bytearray)) and rtf else ""
+
+
+def _msg_property(message, name: str):
+    """One of extract-msg's properties, read when asked; None when reading it fails (its RTF converter
+    raises on some bodies)."""
+    try:
+        return getattr(message, name, None)
+    except Exception:
+        log.warning("Couldn't read the %s of a .msg file", name, exc_info=True)
+        return None
+
+
+def _msg_html(message) -> str:
+    """A .msg's HTML body. Outlook saves it in the code page its <meta> tag names, often Windows-1252."""
+    html = _msg_property(message, "htmlBody") or b""
+    return html if isinstance(html, str) else _decode_html(bytes(html), None)
+
+
+def _decode_html(data: bytes, charset: str | None) -> str:
+    """HTML in the character set its email part declares, else the one its <meta> tag names, else UTF-8 or
+    Windows-1252, so "€" and "é" aren't lost."""
+    if not charset:
+        named = re.search(rb"""charset\s*=\s*["']?([\w.:-]+)""", data[:4096], re.IGNORECASE)
+        charset = named.group(1).decode("ascii") if named else None
+    return _decode_with(data, charset)
+
+
+def _decode_with(data: bytes, charset: str | None) -> str:
+    """Text in its declared character set. Undeclared, or declared ASCII while it holds other bytes (as many
+    mail programs send it), it is read as UTF-8, else Windows-1252."""
+    name = (charset or "").strip().lower()
+    if name in ("", "us-ascii", "ascii", "ansi_x3.4-1968"):
+        return decode_text(data)
+    try:
+        return data.decode(name, errors="replace")
+    except LookupError:
+        return decode_text(data)
+
+
 def _msg_attachments(message, prefix: str = "", depth: int = 0) -> list[RawAttachment]:
     """Files on a .msg, and the files inside any email attached to it (named "forwarded › file.pdf")."""
-    html = getattr(message, "htmlBody", None) or b""
-    html = html.decode("utf-8", errors="replace") if isinstance(html, bytes) else str(html)
+    html = _msg_html(message)
     found: list[RawAttachment] = []
     for att in getattr(message, "attachments", None) or []:
         filename = att.longFilename or att.shortFilename or getattr(att, "displayName", None) or "attachment"
@@ -392,6 +467,10 @@ def _msg_attachments(message, prefix: str = "", depth: int = 0) -> list[RawAttac
             payload = payload.encode("utf-8", errors="replace")
         if isinstance(payload, (bytes, bytearray)):
             content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            mail = mail_file_attachments(filename, content_type, bytes(payload), prefix, depth)
+            if mail is not None:
+                found.extend(mail)
+                continue
             cid = str(getattr(att, "cid", None) or getattr(att, "contentId", None) or "")
             inline = bool(getattr(att, "hidden", False)) or bool(cid and cid.strip("<>") in html)
             if _inline_picture(content_type, filename, len(payload), inline):
@@ -406,6 +485,49 @@ def _msg_attachments(message, prefix: str = "", depth: int = 0) -> list[RawAttac
         if depth < MAX_NESTING:
             found.extend(_msg_attachments(payload, f"{prefix}{stem} › ", depth + 1))
     return found
+
+
+_OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+_SIGNATURE_TYPES = {"application/pkcs7-signature", "application/x-pkcs7-signature"}
+
+
+def mail_file_attachments(
+    filename: str, content_type: str, data: bytes, prefix: str = "", depth: int = 0
+) -> list[RawAttachment] | None:
+    """An email attached as a file, read as a forwarded email is: an Outlook .msg dragged into another mail
+    program, an .eml attached to a .msg, either one in a zip. Its text comes as "<name>.txt" and its files as
+    "<name> › file". A message Outlook signed (S/MIME) keeps its files in one "smime.p7m"; they are read from it.
+    None when the file isn't an email CloseDesk can read, so it is kept as it came."""
+    lower = (filename or "").lower()
+    ctype = (content_type or "").lower()
+    if not data or depth >= MAX_NESTING:
+        return None
+    try:
+        if (lower.endswith(".msg") or ctype == "application/vnd.ms-outlook") and data.startswith(_OLE_SIGNATURE):
+            import extract_msg
+
+            message = extract_msg.Message(data)
+            try:
+                stem = _forward_stem(filename, _tidy(_msg_property(message, "subject")))
+                inner = getattr(message, "attachments", None) or []
+                text = _embedded_message_text(message, [a.longFilename or a.shortFilename or "" for a in inner])
+                found = [_attachment(f"{prefix}{stem}.txt", "text/plain", text.encode("utf-8"))]
+                found.extend(_msg_attachments(message, f"{prefix}{stem} › ", depth + 1))
+                return found
+            finally:
+                message.close()
+        if lower.endswith(".eml") or ctype == "message/rfc822":
+            parsed = BytesParser(policy=policy.default).parsebytes(data)
+            if any(parsed.get(name) for name in ("from", "subject", "date", "message-id")):
+                return forwarded_attachments(parsed, filename, prefix, depth)
+        if lower == "smime.p7m" or ctype == "multipart/signed":
+            parsed = BytesParser(policy=policy.default).parsebytes(data)
+            if parsed.get_content_type() == "multipart/signed":
+                _body, files = _eml_content(parsed, prefix, depth)
+                return [att for att in files if att.content_type not in _SIGNATURE_TYPES]
+    except Exception:
+        log.warning("Couldn't read the email %s attached as a file", filename, exc_info=True)
+    return None
 
 
 def _attachment(filename: str, content_type: str, payload: bytes) -> RawAttachment:
@@ -450,10 +572,7 @@ def _embedded_message_text(item, filenames: list[str] | None = None) -> str:
     header = getattr(item, "header", None)
     if not date and header is not None:
         date = _tidy(str(header.get("Date") or ""))
-    body = getattr(item, "body", "") or ""
-    if isinstance(body, bytes):
-        body = body.decode("utf-8", errors="replace")
-    return _forward_text(subject, sender, date, filenames or [], body)
+    return _forward_text(subject, sender, date, filenames or [], _msg_body(item))
 
 
 def _forward_text(subject, sender, date, filenames: list[str], body: str) -> str:
@@ -543,7 +662,9 @@ def _another_message(stored, raw: RawMessage) -> bool:
 
     Only what the message itself says counts: a message without a subject is named after its file and one
     without a date is dated by its file, and those differ between two copies of it saved at different times."""
-    if "subject" not in raw.from_file and _tidy(stored.subject).casefold() != _tidy(raw.subject).casefold():
+    # The stored subject has its account numbers masked, as this one's will be.
+    subject = redact_financial_secrets(raw.subject)
+    if "subject" not in raw.from_file and _tidy(stored.subject).casefold() != _tidy(subject).casefold():
         return True
     if (stored.sender_email or "").strip().lower() != (raw.sender_email or "").strip().lower():
         return True
@@ -591,26 +712,29 @@ def _email_date(value) -> datetime | None:
             parsed = parsedate_to_datetime(str(value))
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
+            # A date such as 31 Dec 9999 west of UTC has no UTC time; it is no date, not a reason to set the email aside.
+            parsed.astimezone(timezone.utc)
             return parsed
-        except (TypeError, ValueError, IndexError):
+        except (TypeError, ValueError, IndexError, OverflowError):
             pass
     return None
 
 
 def _coerce_date(value) -> datetime | None:
     if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
+        value = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        try:
+            value.astimezone(timezone.utc)
+        except OverflowError:
+            return None
         return value
     return _email_date(value)
 
 
 def _decode_text_part(part, payload: bytes) -> str:
-    charset = part.get_content_charset() or "utf-8"
-    try:
-        return payload.decode(charset, errors="replace")
-    except LookupError:
-        return payload.decode("utf-8", errors="replace")
+    if part.get_content_type() == "text/html":
+        return _decode_html(payload, part.get_content_charset())
+    return _decode_with(payload, part.get_content_charset())
 
 
 def _new_files(settings: Settings, raw: RawMessage, existing) -> list[RawAttachment]:

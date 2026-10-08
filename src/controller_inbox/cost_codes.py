@@ -288,40 +288,48 @@ def _snippet(text: str, start: int, end: int) -> str:
 
 def codes_on(email: EmailRecord, book: Codebook) -> list[dict]:
     """Workbook codes written on the invoice or in the email, in the order they appear."""
-    found: list[tuple[int, int, dict]] = []
+    hits: list[tuple[int, int, int, CostCode, str, str]] = []
     for code in book.codes:
         pattern = _pattern(code)
         if pattern is None:
             continue
         for order, (where, text) in enumerate(_sources(email)):
-            match = pattern.search(text)
-            if match:
-                found.append(
-                    (order, match.start(), {
-                        "code": code.code,
-                        "description": code.description,
-                        "source": ON_INVOICE,
-                        "where": where,
-                        "evidence": _snippet(text, match.start(), match.end()),
-                    })
-                )
-                break
-    found.sort(key=lambda item: (item[0], item[1]))
-    return [item for _order, _at, item in found]
+            hits += [(order, match.start(), match.end(), code, where, text) for match in pattern.finditer(text)]
+
+    # A scan that spaces the periods ("1100.6110. 100") shows a shorter code inside a longer one: it is the longer one.
+    def inside_longer(hit) -> bool:
+        return any(
+            other[0] == hit[0] and other[1] <= hit[1] and hit[2] <= other[2] and other[2] - other[1] > hit[2] - hit[1]
+            for other in hits
+        )
+
+    found: dict[CostCode, tuple[int, int, dict]] = {}
+    for order, start, end, code, where, text in sorted(hits, key=lambda item: (item[0], item[1])):
+        if code in found or inside_longer((order, start, end)):
+            continue
+        found[code] = (order, start, {
+            "code": code.code,
+            "description": code.description,
+            "source": ON_INVOICE,
+            "where": where,
+            "evidence": _snippet(text, start, end),
+        })
+    return [item for _order, _at, item in found.values()]
 
 
 def unlisted_codes(email: EmailRecord, book: Codebook, *, limit: int = 6) -> list[str]:
     """Code-shaped numbers on the invoice that the workbook doesn't have, so a typo or a new code shows up."""
     shapes = _shapes(book) or [_GENERIC_SHAPE]
     known = {code.key for code in book.codes}
-    # A code kept in a number cell (1100.611) is the 1100.6110 on the invoice, which codes_on already found.
-    loose = [pattern for pattern in (_pattern(code) for code in book.codes if code.loose) if pattern is not None]
+    # A code kept in a number cell (1100.611) is the 1100.6110 on the invoice, and "1100.6110.1OO" is 1100.6110.100
+    # read with an O for a zero: codes_on already found both, so neither is a code the workbook lacks.
+    patterns = [pattern for pattern in (_pattern(code) for code in book.codes) if pattern is not None]
     out: list[str] = []
     for _where, text in _sources(email):
         for shape in shapes:
             for match in shape.finditer(text):
                 code = re.sub(r"\s", "", match.group(0)).replace(",", ".")
-                listed = code_key(code) in known or any(pattern.fullmatch(code) for pattern in loose)
+                listed = code_key(code) in known or any(pattern.fullmatch(code) for pattern in patterns)
                 if not listed and code not in out:
                     out.append(code)
                 if len(out) >= limit:

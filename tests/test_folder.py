@@ -136,10 +136,11 @@ def test_a_zip_bomb_is_not_unpacked(monkeypatch):
         return [part.filename for part in explode_archives([item])]
 
     # Zeros shrink a thousandfold: each entry is under the 30 MB limit, but no real document packs like that.
-    assert explode({"ledger_1.csv": b"0" * 20_000_000, "notes.txt": b"Invoice INV-42", "ledger_2.csv": b"0" * 20_000_000}) == ["notes.txt"]
+    # The zip itself is kept beside the file that was unpacked, and its text names the ones that weren't.
+    assert explode({"ledger_1.csv": b"0" * 20_000_000, "notes.txt": b"Invoice INV-42", "ledger_2.csv": b"0" * 20_000_000}) == ["notes.txt", "ledgers.zip"]
     # And what all the entries unpack to together is capped.
     monkeypatch.setattr(extract, "MAX_UNZIPPED", 2_500)
-    assert explode({f"scan_{n}.bin": os.urandom(1_000) for n in range(4)}) == ["scan_0.bin", "scan_1.bin"]
+    assert explode({f"scan_{n}.bin": os.urandom(1_000) for n in range(4)}) == ["scan_0.bin", "scan_1.bin", "ledgers.zip"]
 
 
 def test_attachments_read_by_an_older_reader_are_read_again_once(store, settings, mail):

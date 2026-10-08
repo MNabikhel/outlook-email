@@ -69,10 +69,30 @@ ATTACHMENT_MENTION_RE = re.compile(
     r"\b(attached|attachment|enclosed|please\s+see\s+attached|see\s+the\s+attached)\b",
     re.IGNORECASE,
 )
+
+
+def _grouped(least: int) -> str:
+    """A number written in groups of digits ("1234 5678 9012", "1234-5678-9012"), with at least ``least`` digits
+    in all; a date (2026-09-30, 10-15-2026) is not one."""
+    not_a_date = r"(?!\d{4}-\d{2}-\d{2}\b|\d{1,2}[ -]\d{1,2}[ -](?:19|20)\d{2}(?![\d-]))"
+    return not_a_date + r"(?=(?:[ -]?\d){" + str(least) + r"})\d{2,}(?:[ -]\d{2,}){1,7}(?![\d-])"
+
+
+# After its label a number may follow "is", a colon, a dash or "#": "Account Number - 12345678", "A/C No: 12345678".
+_SECRET_LABEL_END = r"(?:\s+is\b)?[\s#:\-\u2013]*"
+# Masked to the last four digits wherever text is stored or shown: bank account, routing and sort-code numbers,
+# IBANs, and card numbers, written whole or in groups as statements and remittance letters print them
+# ("IBAN GB29 NWBK 6016 1331 9268 19"). Only a number beside its label is masked, so invoice and PO numbers,
+# phone numbers, dates and amounts stay as written.
 BANK_SECRET_RE = re.compile(
-    r"\b(?:routing(?:\s+number)?|aba)[\s#:]*\d{6,9}\b|"
-    r"\b(?:account(?:\s+(?:number|no\.?))?|acct\.?(?:\s+(?:number|no\.?))?|a/c)[\s#:]*" + _ACCOUNT_NUMBER + r"|"
-    r"\b(?:iban)[\s#:]*[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b",
+    r"\b(?P<routing>(?:routing|aba)(?:\s+(?:number|no\.?|#))?|sort\s+code)" + _SECRET_LABEL_END
+    + r"(?:\d{6,9}\b|\d{3}[ -]\d{3}[ -]\d{3}(?![\d-])|\d{2}[ -]\d{2}[ -]\d{2}(?![\d-]))|"
+    r"\b(?P<account>(?:account|acct\.?|a/c)(?:\s+(?:number|no\.?|#))?)" + _SECRET_LABEL_END
+    + r"(?:" + _ACCOUNT_NUMBER + "|" + _grouped(6) + r")|"
+    r"\b(?P<iban>iban)" + _SECRET_LABEL_END
+    + r"[A-Z]{2}\d{2}(?:[A-Z0-9]{10,30}\b|(?:[ -][A-Z0-9]{4}){2,7}(?:[ -][A-Z0-9]{1,3})?\b)|"
+    r"\b(?P<card>(?:(?:credit|debit)\s+)?card|visa|mastercard|amex)(?:\s+(?:number|no\.?|#))?" + _SECRET_LABEL_END
+    + r"(?:\d{12,19}\b|" + _grouped(12) + r")",
     re.IGNORECASE,
 )
 
@@ -116,7 +136,37 @@ def _drop_scripts(html: str) -> str:
 
 
 def html_to_text(html: str) -> str:
-    text = _drop_scripts(html)
+    text = strip_html_comments(_drop_scripts(html))
+    # What the reader is never shown (display:none, visibility:hidden, font-size:0, Outlook's mso-hide:all) is
+    # dropped with all it holds: "Our bank <span style="display:none">zz</span>details" reads "Our bank details".
+    # Each hidden element ends at its own closing tag; one that is never closed hides only its tag.
+    hidden = re.compile(
+        r"<([a-z][a-z0-9]*)\b[^<>]*?\bstyle\s*=\s*[\"'][^\"'<>]*?"
+        r"(?:display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all|font-size\s*:\s*0(?![.\d]*[1-9]))[^<>]*>",
+        re.I,
+    )
+    if hidden.search(text):
+        pieces: list[str] = []
+        pos = 0
+        unclosed: set[str] = set()
+        while (opener := hidden.search(text, pos)) is not None:
+            name, end = opener.group(1).lower(), opener.end()
+            void = name in {"img", "br", "hr", "input", "meta", "link", "wbr"} or opener.group(0).endswith("/>")
+            if not void and name not in unclosed:
+                depth = 1
+                for tag in re.compile(rf"<(/?){name}\b[^<>]*>", re.I).finditer(text, end):
+                    if not tag.group(0).endswith("/>"):
+                        depth += -1 if tag.group(1) else 1
+                    if depth == 0:
+                        end = tag.end()
+                        break
+                else:
+                    # Not closed by the end of the text: later ones of that name hide only their tag, so a long
+                    # run of unclosed tags is read once, not once each.
+                    unclosed.add(name)
+            pieces.append(text[pos : opener.start()])
+            pos = end
+        text = "".join(pieces) + text[pos:]
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"(?i)</p>", "\n", text)
     text = re.sub(r"(?i)</div>", "\n", text)
@@ -140,10 +190,12 @@ def redact_financial_secrets(text: str) -> str:
         raw = match.group(0)
         digits = re.sub(r"\D", "", raw)
         last4 = digits[-4:] if len(digits) >= 4 else "****"
-        if re.search(r"routing|aba|sort", raw, re.I):
+        if match.group("routing"):
             return f"routing ****{last4}"
-        if re.search(r"iban", raw, re.I):
+        if match.group("iban"):
             return f"IBAN ****{last4}"
+        if match.group("card"):
+            return f"card ****{last4}"
         return f"account ****{last4}"
 
     return BANK_SECRET_RE.sub(_mask, text)
@@ -166,6 +218,8 @@ def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> st
             return html_to_text(data.decode("utf-8", errors="replace"))
         if ctype.startswith("image/") or name.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp")):
             return image_text(data)
+        if name.endswith(".zip") or "zip" in ctype:
+            return zip_text(data)
     except Exception as exc:  # extraction should never fail the pipeline
         return f"[extraction error: {exc}]"
     # Last resort: if it looks like text, keep a sample. Cut on a character boundary, so a
@@ -252,7 +306,8 @@ def _rtf_text(data: bytes) -> str:
 
 
 def explode_archives(items: list, *, limit: int = 40) -> list:
-    """Unpack zip attachments into the files inside, so a zipped workbook is still classified."""
+    """Unpack zip attachments into the files inside, so a zipped workbook is still classified. A zip with files
+    that weren't unpacked (too many, too large, password-protected) is kept too: its text says which they are."""
     from controller_inbox.models import RawAttachment
 
     exploded: list[RawAttachment] = []
@@ -261,9 +316,26 @@ def explode_archives(items: list, *, limit: int = 40) -> list:
         if not name.endswith(".zip") and "zip" not in (item.content_type or "").lower():
             exploded.append(item)
             continue
-        inner = _unzip(item, limit=limit)
-        exploded.extend(inner or [item])
+        skipped: list[tuple[str, str]] = []
+        inner = _unzip(item, limit=limit, skipped=skipped)
+        exploded.extend(_read_mail_files(item, inner) + ([item] if skipped else []) if inner else [item])
     return exploded
+
+
+def _read_mail_files(item, parts: list) -> list:
+    """Emails saved as files in a zip (.msg, .eml) are read as forwarded emails, as when attached to a message:
+    their text, then the files they carried."""
+    # Imported here: folder_mail reads mail and imports this module.
+    from controller_inbox.folder_mail import mail_file_attachments
+
+    out = []
+    for part in parts:
+        is_mail = part.filename.lower().endswith((".msg", ".eml"))
+        mail = mail_file_attachments(part.filename, "", part.content or b"") if is_mail else None
+        for att in mail or []:
+            att.id = f"{item.id}:{att.filename}"
+        out.extend(mail if mail is not None else [part])
+    return out
 
 
 # A zip bomb is a small file that unpacks to gigabytes: zipped zeros shrink a thousandfold, documents
@@ -272,7 +344,32 @@ MAX_UNZIPPED = 100_000_000
 MAX_ZIP_RATIO = 100
 
 
-def _unzip(item, *, limit: int) -> list:
+def _zip_plan(infos: list, limit: int) -> tuple[list, list[tuple[str, str]]]:
+    """The entries of a zip to unpack, and the files left packed with the reason why."""
+    chosen, skipped = [], []
+    total = 0
+    for info in infos:
+        filename = _basename(info.filename)
+        if info.is_dir() or info.filename.startswith("__MACOSX") or not filename or filename.startswith("."):
+            continue
+        if len(chosen) >= limit:
+            skipped.append((filename, f"past the first {limit} files"))
+        elif info.file_size > 30_000_000:
+            skipped.append((filename, "over 30 MB"))
+        # zipfile stops reading an entry at its stated size, so the stated sizes bound what is unpacked.
+        elif total + info.file_size > MAX_UNZIPPED or (
+            info.file_size > 1_000_000 and info.file_size > MAX_ZIP_RATIO * info.compress_size
+        ):
+            skipped.append((filename, "unpacks to too much"))
+        elif info.flag_bits & 0x1:
+            skipped.append((filename, "password-protected"))
+        else:
+            chosen.append(info)
+            total += info.file_size
+    return chosen, skipped
+
+
+def _unzip(item, *, limit: int, skipped: list | None = None) -> list:
     import zipfile
 
     from controller_inbox.models import RawAttachment
@@ -283,26 +380,15 @@ def _unzip(item, *, limit: int) -> list:
         archive = zipfile.ZipFile(io.BytesIO(item.content))
     except zipfile.BadZipFile:
         return []
+    chosen, left = _zip_plan(archive.infolist(), limit)
     out = []
-    total = 0
-    for info in archive.infolist():
-        if info.is_dir() or len(out) >= limit:
-            continue
-        if info.file_size > 30_000_000 or info.filename.startswith("__MACOSX"):
-            continue
-        # zipfile stops reading an entry at its stated size, so the stated sizes bound what is unpacked.
-        if total + info.file_size > MAX_UNZIPPED:
-            continue
-        if info.file_size > 1_000_000 and info.file_size > MAX_ZIP_RATIO * info.compress_size:
-            continue
+    for info in chosen:
         filename = _basename(info.filename)
-        if not filename or filename.startswith("."):
-            continue
         try:
             payload = archive.read(info)
         except Exception:
+            left.append((filename, "damaged"))
             continue
-        total += len(payload)
         out.append(
             RawAttachment(
                 id=f"{item.id}:{filename}",
@@ -312,7 +398,30 @@ def _unzip(item, *, limit: int) -> list:
                 content=payload,
             )
         )
+    if skipped is not None:
+        skipped.extend(left)
     return out
+
+
+def zip_text(data: bytes) -> str:
+    """A zip's own text: which of its files CloseDesk didn't unpack, and why. The files it did unpack are read
+    as attachments of their own."""
+    import zipfile
+
+    try:
+        infos = zipfile.ZipFile(io.BytesIO(data)).infolist()
+    except Exception:
+        return ""
+    chosen, skipped = _zip_plan(infos, 40)
+    if not skipped:
+        return ""
+    shown = [f"- {name} ({why})" for name, why in skipped[:60]]
+    if len(skipped) > 60:
+        shown.append(f"- … and {len(skipped) - 60} more")
+    return (
+        f"[Zip file with {len(chosen) + len(skipped)} files. CloseDesk read {len(chosen)} of them separately and did not "
+        f"unpack these; open the zip to see them:]\n" + "\n".join(shown)
+    )
 
 
 def _basename(filename: str) -> str:

@@ -131,6 +131,29 @@ def test_vectors_are_unit_length_and_a_named_model_skips_the_lookup(store, setti
     assert semantic.index_mail(store, settings) > 0 and store.has_embeddings()
 
 
+def test_a_new_index_with_as_many_vectors_is_searched_not_the_old_one(store, settings, mail, server, monkeypatch):
+    budget = mail["Q4 budget draft"]
+    semantic.index_mail(store, settings)
+    assert [email.id for email in semantic.search(store, settings, "team trip in Portugal")] == [budget.id]
+    # The mail's vectors are cleared (loading the sample mailbox does it) and the same rows indexed again with a
+    # model that places ideas differently: as many rows, the same last row number, other vectors.
+    with store.connect() as conn:
+        conn.execute("DELETE FROM embeddings")
+    original = semantic.httpx.post
+
+    def other_model(url, json=None, **kwargs):
+        response = original(url, json=json, **kwargs)
+        data = response.json()["data"]
+        for row in data:
+            v = row["embedding"]
+            row["embedding"] = [v[2], v[3], v[0], v[1], *v[4:]]
+        return httpx.Response(200, request=response.request, json={"data": data})
+
+    monkeypatch.setattr(semantic.httpx, "post", other_model)
+    semantic.index_mail(store, settings)
+    assert [email.id for email in semantic.search(store, settings, "team trip in Portugal")] == [budget.id]
+
+
 def test_every_part_of_a_long_file_is_indexed(store, mail):
     budget = mail["Q4 budget draft"]
     memo = next(att for att in budget.attachments if att.filename == "Offsite memo.docx")

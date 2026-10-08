@@ -1044,3 +1044,169 @@ def test_a_shorter_manual_sync_keeps_the_message_the_cursor_waits_for(store: Sto
     ingest_mailbox(mailbox, store, settings, received_after=datetime.fromisoformat(held), now=later + timedelta(hours=1))
     assert store.get_email("throttled") is not None
     assert store.get_state("last_sync_at") == (later + timedelta(hours=1)).isoformat()
+
+
+# 32. A copy dropped again doesn't rename or redate the email, or bring back snoozed tasks ----------
+
+
+def _bare_copy(settings: Settings, name: str, body: str, message_id: str) -> Path:
+    """The same message saved again by a tool that kept only some of its headers (no Subject, no Date)."""
+    msg = EmailMessage()
+    msg["From"] = "Vendor AP <ap@vendor.com>"
+    msg["Message-ID"] = message_id
+    msg.set_content(body)
+    path = settings.inbox_incoming / name
+    path.write_bytes(bytes(msg))
+    _age(path)
+    return path
+
+
+def test_a_copy_dropped_again_keeps_the_name_the_date_and_snoozed_tasks(settings: Settings, store: Store):
+    from controller_inbox.reading import apply_bionic_reading
+
+    settings.ensure_data_dir()
+    body = "Please approve and pay invoice INV-4410 for $12,400.00. Due date: October 15, 2026."
+    subject = "Invoice INV-4410 due October 15, 2026"
+    _eml(settings, subject, body, message_id="<inv4410@vendor.com>", date_header="Mon, 21 Sep 2026 10:00:00 +0000")
+    [record] = ingest_folder(store, settings)
+    assert record.actions
+    for task in record.actions:
+        store.set_action_status(task.id, "snoozed")
+    snoozed = {task.title for task in record.actions}
+
+    def check(email) -> None:
+        assert email.subject == subject and email.received_at == record.received_at
+        assert {task.title: task.status.value for task in email.actions if task.title in snoozed} == dict.fromkeys(snoozed, "snoozed")
+        assert store.counts()["emails"] == 1
+
+    # A copy with nothing new is already read: nothing about the email changes.
+    _bare_copy(settings, "scan-export-0001.eml", body, "<inv4410@vendor.com>")
+    report: dict = {}
+    assert ingest_folder(store, settings, report=report) == [] and report["already_read"] == 1
+    check(store.get_email(record.id))
+
+    # A copy that brings a file still adds it, and keeps the name, the date and the snoozed tasks.
+    _bare_copy(settings, "scan-export-0002.eml", body, "<inv4410@vendor.com>")
+    _sidecar(settings, "scan-export-0002.txt", b"Remittance advice for INV-4410 $12,400.00")
+    report = {}
+    ingest_folder(store, settings, report=report)
+    assert report["already_read"] == 1 and report["failed"] == []
+    again = store.get_email(record.id)
+    assert [att.filename for att in again.attachments] == ["scan-export-0002.txt"]
+    check(again)
+
+    # The model can still read it afterwards.
+    reading = {"category": "ap_invoice", "folder": "important", "importance": "high", "summary": "Pay INV-4410.", "actions": [], "why": "x"}
+    assert apply_bionic_reading(store, record.id, reading).model_status == "bionic"
+
+
+def test_a_copy_of_an_email_whose_subject_has_an_account_number_is_still_one_email(settings: Settings, store: Store):
+    # The stored subject is masked ("account ****6677"); the copy's own subject isn't yet when they are compared.
+    settings.ensure_data_dir()
+    _eml(settings, "Remittance - Acct 44556677", "Paid.", message_id="<rem1@vendor.com>")
+    [record] = ingest_folder(store, settings)
+    assert record.subject == "Remittance - account ****6677"
+    copy = _eml(settings, "Remittance - Acct 44556677", "Paid.", message_id="<rem1@vendor.com>")
+    copy.rename(settings.inbox_incoming / "Remittance copy.eml")
+    report: dict = {}
+    ingest_folder(store, settings, report=report)
+    assert report["already_read"] == 1 and store.counts()["emails"] == 1
+
+
+# 33. A Date header past year 9999 in UTC, 8-bit text with no character set ------------------------
+
+
+def test_an_email_dated_past_what_utc_can_hold_is_read_and_dated_by_its_file(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    path = _eml(settings, "Odd date", "Invoice INV-1 for $10.00.", date_header="Fri, 31 Dec 9999 23:30:00 -0100")
+    dropped = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    report: dict = {}
+    [record] = ingest_folder(store, settings, report=report)
+    assert report["failed"] == []
+    assert datetime.fromisoformat(record.received_at) == dropped
+
+
+def test_8bit_text_without_a_character_set_keeps_its_accents(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    data = (
+        b"From: =?utf-8?q?Jos=C3=A9?= <jose@vendor.com>\r\nTo: ap@co.com\r\n"
+        b"Subject: Factura n\xba 4471 \xe9t\xe9\r\nDate: Mon, 21 Sep 2026 10:00:00 +0000\r\nMessage-ID: <a1@vendor.com>\r\n"
+        b"MIME-Version: 1.0\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: 8bit\r\n\r\n"
+        b"Montant d\xfb: 1 200,00 EUR. Caf\xe9.\r\n"
+    )
+    path = settings.inbox_incoming / "factura.eml"
+    path.write_bytes(data)
+    _age(path)
+    [record] = ingest_folder(store, settings)
+    assert record.subject == "Factura nº 4471 été"
+    assert record.body_text == "Montant dû: 1 200,00 EUR. Café."
+    # Declared UTF-8 stays UTF-8.
+    assert folder_mail._decode_with("Café".encode(), "utf-8") == "Café"
+
+
+# 34. An attached email its sender's program encoded in base64 is still read --------------------
+
+
+def test_an_attached_email_encoded_in_base64_is_read(settings: Settings, store: Store):
+    import base64
+
+    settings.ensure_data_dir()
+    inner = (
+        b"From: Vendor <ar@vendor.com>\r\nSubject: Invoice INV-9001\r\nDate: Mon, 21 Sep 2026 09:00:00 +0000\r\n"
+        b"MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=YY\r\n\r\n--YY\r\nContent-Type: text/plain\r\n\r\n"
+        b"Invoice INV-9001 for $3,400.00 attached.\r\n--YY\r\nContent-Type: text/csv\r\n"
+        b"Content-Disposition: attachment; filename=\"inv.csv\"\r\n\r\nitem,amount\r\nwidgets,3400.00\r\n--YY--\r\n"
+    )
+    outer = (
+        b"From: Ann <ann@co.com>\r\nTo: ap@co.com\r\nSubject: FW invoice\r\nDate: Mon, 21 Sep 2026 10:00:00 +0000\r\n"
+        b"Message-ID: <fw-b64@co.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=XX\r\n\r\n"
+        b"--XX\r\nContent-Type: text/plain\r\n\r\nFYI\r\n--XX\r\nContent-Type: message/rfc822; name=\"Invoice.eml\"\r\n"
+        b"Content-Disposition: attachment; filename=\"Invoice.eml\"\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+        + base64.encodebytes(inner) + b"\r\n--XX--\r\n"
+    )
+    path = settings.inbox_incoming / "fw.eml"
+    path.write_bytes(outer)
+    _age(path)
+    [record] = ingest_folder(store, settings)
+    files = {att.filename: att.extracted_text for att in record.attachments}
+    assert set(files) == {"Invoice.txt", "Invoice › inv.csv"}
+    assert "Subject: Invoice INV-9001" in files["Invoice.txt"] and "3400.00" in files["Invoice › inv.csv"]
+    assert "INV-9001" in record.extracted.invoice_numbers
+
+
+# 35. A zip with files CloseDesk doesn't unpack keeps a note of them ------------------------------
+
+
+def test_a_zip_with_more_files_than_are_unpacked_is_kept_with_a_list_of_the_rest(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as packed:
+        for number in range(1, 46):
+            packed.writestr(f"invoices/INV-{number:04d}.csv", f"invoice,amount\nINV-{number:04d},{number * 100}.00\n")
+    path = settings.inbox_incoming / "September AP batch.zip"
+    path.write_bytes(archive.getvalue())
+    _age(path)
+    [record] = ingest_folder(store, settings)
+    names = {att.filename: att for att in record.attachments}
+    assert len(names) == 41 and "INV-0040.csv" in names and "INV-0041.csv" not in names
+    note = names["September AP batch.zip"].extracted_text
+    assert "did not unpack" in note and "INV-0041.csv (past the first 40 files)" in note and "INV-0045.csv" in note
+
+    # Dropped again, it adds nothing and stays one email.
+    path.write_bytes(archive.getvalue())
+    _age(path)
+    report: dict = {}
+    ingest_folder(store, settings, report=report)
+    assert report["already_read"] == 1 and len(store.get_email(record.id).attachments) == 41
+
+
+def test_a_zip_that_is_unpacked_whole_is_not_kept_beside_its_files(settings: Settings, store: Store):
+    settings.ensure_data_dir()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as packed:
+        packed.writestr("INV-1.csv", "invoice,amount\nINV-1,100.00\n")
+    path = settings.inbox_incoming / "one.zip"
+    path.write_bytes(archive.getvalue())
+    _age(path)
+    [record] = ingest_folder(store, settings)
+    assert [att.filename for att in record.attachments] == ["INV-1.csv"]

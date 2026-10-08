@@ -313,3 +313,41 @@ def test_a_formula_is_said_to_hold_on_every_row_only_when_it_does():
 def test_a_very_long_cell_does_not_stop_the_table_loading():
     text = "Name: " + "x" * 120_000 + " | Amount: 1\nName: B | Amount: 2\nName: C | Amount: 3\n"
     assert Tables([("f.pdf", text)]).run("SELECT SUM(amount) FROM t1")[1] == [(6.0,)]
+
+
+QUARTER_ENDS = """[page 1]
+[heading]
+Prepaid Balances 2026
+[table]
+Account | Mar 31 | Jun 30 | Sep 30 | Dec 31
+Account: Insurance | Mar 31: 1,000.00 | Jun 30: 750.00 | Sep 30: 500.00 | Dec 31: 250.00
+Account: Software | Mar 31: 2,000.00 | Jun 30: 1,500.00 | Sep 30: 1,000.00 | Dec 31: 500.00
+Account: Rent | Mar 31: 3,000.00 | Jun 30: 3,000.00 | Sep 30: 3,000.00 | Dec 31: 3,000.00
+"""
+
+
+def test_quarter_end_columns_are_days_not_years():
+    # "Mar 31" is the balance at March 31st, not March 2031.
+    assert [table_query._month(label) for label in ("Mar 31", "Jun 30", "Feb 28", "Apr-26", "Apr 26", "Dec 2031")] == [
+        "", "", "", "2026-04", "2026-04", "2031-12",
+    ]
+    assert "2031" not in Tables([("Prepaids.pdf", QUARTER_ENDS)]).schema()
+
+
+def test_a_straight_line_schedule_is_not_read_as_a_formula():
+    # Equal steps fit "Mar 31 = Jun 30 + Sep 30 - Dec 31" on every row; that is amortization, not how the sheet adds up.
+    schema = Tables([("Prepaids.pdf", QUARTER_ENDS)]).schema()
+    assert '"Mar 31" figure\n' in schema + "\n" and " = " not in schema
+
+
+def test_the_rows_of_a_page_s_only_table_are_not_facts():
+    # A page holding nothing but its table isn't marked [table]; its rows' cells are still not details beside it.
+    text = """[page 1]
+Vendor | Invoice | Amount
+Vendor: Harbor Steel | Invoice: INV-1 | Amount: 4,500.00
+Vendor: Acme Supply | Invoice: INV-3 | Amount: 800.00
+Vendor: Blue Freight | Invoice: INV-4 | Amount: 300.00
+Prepared by: L. Wei | Date: 10/2/2026
+"""
+    tables = Tables([("AP.pdf", text)])
+    assert [(name, value) for _file, name, value in tables.facts] == [("Prepared by", "L. Wei"), ("Date", "10/2/2026")]

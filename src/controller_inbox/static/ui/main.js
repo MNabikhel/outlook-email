@@ -188,7 +188,8 @@ async function stopJob(event) {
   event.currentTarget.disabled = true;
   S.jobSeq += 1; // a status fetched before the click mustn't bring the button back
   try {
-    await postJSON("/api/process/stop");
+    const reply = await postJSON("/api/process/stop");
+    if (reply && reply.stopping === false) return toast("Nothing is running now.");
     toast("Stopping after the page being read now.");
     if (S.meta) {
       S.meta.job = { ...S.meta.job, stopping: true };
@@ -1079,6 +1080,8 @@ document.addEventListener("keydown", (event) => {
     }
     return;
   }
+  // On a full page (the digest, Setup), the list behind it is hidden: its keys mustn't act on it.
+  if (ws.classList.contains("doc") && ["j", "k", "ArrowDown", "ArrowUp", "Enter", "o", "e"].includes(event.key)) return;
   const inList = listPane.contains(document.activeElement) || document.activeElement === document.body;
   const onControl = event.target.closest && event.target.closest("a, button, summary, [role=tab]");
   switch (event.key) {

@@ -13,6 +13,9 @@ import shutil
 import threading
 
 MAX_CHARS = 20_000
+# A letter-size page scanned at 600 dpi is 34 million pixels. A picture far larger than any scan (a small file can
+# declare a huge blank picture) would take gigabytes of memory to read, so it isn't.
+MAX_PIXELS = 80_000_000
 
 _engine = None
 _engine_lock = threading.Lock()
@@ -31,6 +34,8 @@ def image_text(data: bytes) -> str:
     """The text in a picture, top to bottom, or "" when it has none or no OCR engine is installed."""
     name = engine_name()
     try:
+        if name and _pixels(data) > MAX_PIXELS:
+            return ""
         if name == "RapidOCR":
             return _rapid(data)
         if name == "Tesseract":
@@ -38,6 +43,14 @@ def image_text(data: bytes) -> str:
     except Exception:
         return ""
     return ""
+
+
+def _pixels(data: bytes) -> int:
+    """The picture's size in pixels, read from its header without unpacking it."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as image:
+        return image.width * image.height
 
 
 def _rapid(data: bytes) -> str:
