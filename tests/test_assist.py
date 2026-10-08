@@ -105,6 +105,25 @@ def test_chat_streams_from_the_local_model_with_sources(settings, loaded, monkey
     assert len(user["content"]) < settings.llm_max_prompt_chars
 
 
+def test_a_figure_only_in_the_focus_list_counts_only_when_the_model_was_given_it(settings, loaded, monkeypatch):
+    focus = [{"rank": 1, "label": "Pay", "title": "Pay Northwind INV-77 ($4,250.00)", "email_id": "elsewhere", "summary": "Northwind $4,250.00"}]
+    seen = {}
+
+    def fake_stream(_settings, messages, *, max_tokens):
+        seen["prompt"] = messages[-1]["content"]
+        yield "Maya asks for the Q4 headcount numbers; the plan comes to $4,250.00 [1]."
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "stream_text", fake_stream)
+    events = list(answer_stream(loaded, settings, "What does Maya want?", email_id="demo-question", focus=focus))
+    checks = [item for event in events if event["type"] == "check" for item in event["items"]]
+    assert "4,250" not in seen["prompt"], "a question that isn't about today gets no focus list"
+    assert checks == ["$4,250.00 isn't in the emails or files I read; check it before relying on it."]
+    # About today, the model is given the list, and its figures are what it read.
+    events = list(answer_stream(loaded, settings, "What should I do first today?", focus=focus))
+    assert "4,250" in seen["prompt"] and not any(event["type"] == "check" for event in events)
+
+
 def test_chat_falls_back_to_lookup_when_the_model_fails(settings, loaded, monkeypatch):
     def broken(*_args, **_kwargs):
         raise httpx.ConnectError("refused")

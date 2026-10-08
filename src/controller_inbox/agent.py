@@ -361,12 +361,15 @@ class Workspace:
         if text.isdigit() and 1 <= int(text) <= len(files):
             return files[int(text) - 1]
         for att in files:
-            if att.filename.lower() == text:
+            if att.filename.lower() == text or Path(att.filename).stem.lower() == text:
                 return att
         for att in files:
-            if text in att.filename.lower() or Path(att.filename).stem.lower() in text:
+            if text in att.filename.lower():
                 return att
-        return None
+        # A file whose name is in what was asked ("Q3 report appendix, page 2"): when one name starts another
+        # ("Q3 report" and "Q3 report appendix"), the longer one is the file asked for.
+        inside = [att for att in files if Path(att.filename).stem.lower() in text]
+        return max(inside, key=lambda att: len(Path(att.filename).stem)) if inside else None
 
     def original(self, email: EmailRecord, att: AttachmentRecord) -> bytes | None:
         path = original_file(self.settings, email, att)

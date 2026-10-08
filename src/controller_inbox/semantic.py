@@ -169,6 +169,9 @@ def index_mail(
         if vectors is None:
             return -1
         store.save_embeddings(model, [(key, email_id, _key(text), v.tobytes()) for (key, email_id, text), v in zip(batch, vectors)])
+        # The vectors kept for search are read again: after the mail was cleared, a new index can have as many rows
+        # and the same last row number as the old one, which the version check alone takes for no change.
+        _vector_cache.pop((str(store.path), model), None)
         added += len(batch)
     if emails is None:
         store.set_state(INDEXED_AT, datetime.now(settings.tz).isoformat(timespec="seconds"))

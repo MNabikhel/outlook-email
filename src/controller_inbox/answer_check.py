@@ -198,6 +198,11 @@ def check_numbers(answer: str, grounding: Grounding) -> Review:
 
 
 _TOTAL_LINE = re.compile(r"^[\s*_#>|-]*(?:grand\s+)?total\b[^\n]*$", re.I)
+# "Total:", "**Total Due:**", "Grand total owed:": a total of the list itself. "Total owed to all four vendors:" can be
+# a total of more than the lines listed (the top three of four), so a sum that differs is flagged, not rewritten.
+_PLAIN_TOTAL = re.compile(
+    r"^[\s*_#>|-]*(?:grand\s+)?total(?:\s+(?:due|owed|outstanding|amount|payable|balance|cost|costs|spend|value)){0,2}\W*$", re.I
+)
 _ITEM_LINE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+")
 _MAX_ITEMS = 8
 _CREDIT_SIGN = re.compile(r"[-−(][$€£]?$")
@@ -208,15 +213,17 @@ def _list_total(answer: str, at: int, target: Number, grounding: Grounding):
 
     Returns "matches" when the figure is the sum of some of them (the model may have meant only those),
     the sum of all of them with how it was worked out when it is none of those sums, and None when there is
-    no such list, or one of its amounts wasn't in what was read."""
+    no such list, or one of its amounts wasn't in what was read, or it isn't clear which sum the total is (the
+    figure is then flagged, not rewritten)."""
     line_start = answer.rfind("\n", 0, at) + 1
+    label = answer[line_start:at]
     # Only the line's first figure is its total ("Total: $63,330.00, leaving $36,670.00 of the budget").
-    if not _TOTAL_LINE.match(answer[line_start:at]) or numbers_in(answer[line_start:at]):
+    if not _TOTAL_LINE.match(label) or numbers_in(label):
         return None
     lines = answer[:line_start].split("\n")[:-1]
     while lines and not lines[-1].strip():
         lines.pop()
-    amounts: list[Number] = []
+    rows: list[list[float]] = []
     while lines and _ITEM_LINE.match(lines[-1]):
         line = lines.pop()
         body = line[_ITEM_LINE.match(line).end():]
@@ -226,13 +233,19 @@ def _list_total(answer: str, at: int, target: Number, grounding: Grounding):
         # A credit is listed as "-$300.00" or "($300.00)": it takes away from the total. A dash with a space after
         # it separates the name from the amount ("Harbor Steel LLC - $48,500.00").
         sign = -1 if _CREDIT_SIGN.search(body[: figures[0].start]) else 1
-        amounts.insert(0, Number(figures[0].shown, sign * figures[0].value, figures[0].tolerance, 0, 0, money=figures[0].money))
-    if not 2 <= len(amounts) <= _MAX_ITEMS:
+        rows.insert(0, [sign * figure.value for figure in figures])
+    if not 2 <= len(rows) <= _MAX_ITEMS:
         return None
-    values = [n.value for n in amounts]
-    for mask in range(1, 2 ** len(values)):
-        if abs(sum(v for i, v in enumerate(values) if mask >> i & 1) - target.value) <= target.tolerance + 1e-9:
-            return "matches"
+    # A line with two figures ("Ads: $1,000 → $1,500") leaves open which of them the total adds up: each column is tried.
+    width = max(len(row) for row in rows)
+    for column in range(width):
+        values = [row[column] for row in rows if len(row) > column]
+        for mask in range(1, 2 ** len(values)):
+            if abs(sum(v for i, v in enumerate(values) if mask >> i & 1) - target.value) <= target.tolerance + 1e-9:
+                return "matches"
+    if width > 1 or not _PLAIN_TOTAL.match(label):
+        return None
+    values = [row[0] for row in rows]
     return sum(values), f"the sum of the {len(values)} amounts listed above it"
 
 
@@ -289,8 +302,9 @@ def check_citations(answer: str, files: list[tuple[str, str]]) -> Review:
     paged = [(name, pages) for name, pages in paged if pages]
     books = [(name, cells_of(body)) for name, body in files]
     books = [(name, cells) for name, cells in books if cells]
+    names = [name for name, _body in files]
     for start, chunk in reversed(list(_sentences(answer))):
-        fixed = _fix_page(chunk, paged) or _fix_cell(chunk, books)
+        fixed = _fix_page(chunk, paged, names) or _fix_cell(chunk, books, names)
         if fixed:
             new_chunk, note = fixed
             text = text[:start] + new_chunk + text[start + len(chunk):]
@@ -316,15 +330,23 @@ def _other_file(chunk: str, paged: list[tuple[str, dict[int, str]]], files: list
     return f"{shown} is in {holders[0]}, not {name}: check where that figure comes from."
 
 
-def _named(chunk: str, files: list[tuple[str, object]]):
+def _named(chunk: str, files: list[tuple[str, object]], others: list[str] | None = None):
+    """The files the sentence names, or the only one there is. ``others``: every file read; a sentence that names
+    one of them ("contract.docx, page 2", a file with no pages marked) is not about the only file with pages."""
     lowered = chunk.lower()
-    named = [item for item in files if item[0].lower() in lowered or item[0].rsplit(".", 1)[0].lower() in lowered]
-    return named or (files if len(files) == 1 else [])
+
+    def says(name: str) -> bool:
+        return name.lower() in lowered or name.rsplit(".", 1)[0].lower() in lowered
+
+    named = [item for item in files if says(item[0])]
+    if named or (others and any(says(name) for name in others)):
+        return named
+    return files if len(files) == 1 else []
 
 
-def _fix_page(chunk: str, paged: list[tuple[str, dict[int, str]]]):
+def _fix_page(chunk: str, paged: list[tuple[str, dict[int, str]]], others: list[str] | None = None):
     cited = list(PAGE_RE.finditer(chunk))
-    named = _named(chunk, paged)
+    named = _named(chunk, paged, others)
     if len(cited) != 1 or len(named) != 1 or _PAGE_RANGE_AFTER.match(chunk, cited[0].end()):
         return None
     name, pages = named[0]
@@ -368,8 +390,8 @@ def _is_cell_ref(chunk: str, match: re.Match) -> bool:
     return bool(match["sheet"]) or bool(_CELL_WORD_BEFORE.search(chunk[max(0, match.start() - 40): match.start()]))
 
 
-def _fix_cell(chunk: str, books: list[tuple[str, dict[tuple[str, str], str]]]):
-    named = _named(chunk, books)
+def _fix_cell(chunk: str, books: list[tuple[str, dict[tuple[str, str], str]]], others: list[str] | None = None):
+    named = _named(chunk, books, others)
     if not named or len(named) > 1:
         return None
     name, cells = named[0]

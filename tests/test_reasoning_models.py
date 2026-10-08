@@ -225,6 +225,34 @@ def test_chat_raises_instead_of_a_blank_answer(auto, monkeypatch):
         list(stream_text(auto, [{"role": "user", "content": "hi"}]))
 
 
+def test_an_error_the_server_writes_into_the_stream_is_not_taken_for_the_answer(loaded, auto, monkeypatch):
+    sent = {}
+
+    def handler(request):
+        if request.url.path != "/v1/chat/completions":
+            return httpx.Response(404)
+        start = f"data: {json.dumps({'choices': [{'delta': {'content': 'INV-10482 is for $4,200 and is due'}}]})}\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=start + sent["error"])
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(local_llm.httpx, "get", lambda url, **kw: client.get(url))
+    monkeypatch.setattr(local_llm.httpx, "stream", lambda method, url, **kw: client.stream(method, url, json=kw.get("json")))
+    # llama.cpp writes a failure partway as an "error:" line; LM Studio and OpenAI as a chunk with "error".
+    sent["error"] = f"error: {json.dumps({'code': 500, 'message': 'slot crashed', 'type': 'server_error'})}\n\n"
+    with pytest.raises(httpx.HTTPError, match="slot crashed"):
+        list(stream_text(auto, [{"role": "user", "content": "hi"}]))
+    sent["error"] = f"data: {json.dumps({'error': {'message': 'the request exceeds the available context size'}})}\n\n"
+    with pytest.raises(local_llm.ContextOverflow):
+        list(stream_text(auto, [{"role": "user", "content": "hi"}]))
+
+    sent["error"] = f"data: {json.dumps({'error': 'Model crashed (exit code 1)'})}\n\n"
+    monkeypatch.setattr("controller_inbox.assistant.llm_active", lambda _s: True)
+    events = list(answer_stream(loaded, auto, "Who sent this?", email_id="demo-inv-10482"))
+    text = "".join(event["text"] for event in events if event["type"] == "delta")
+    note = next(event["note"] for event in events if event["type"] == "mode")
+    assert "Model crashed (exit code 1)" in note and "is due" not in text and "straight lookup instead" in text
+
+
 def test_chat_box_says_the_model_failed_not_that_it_is_off(loaded, auto, monkeypatch):
     monkeypatch.setattr("controller_inbox.assistant.llm_active", lambda _s: True)
 

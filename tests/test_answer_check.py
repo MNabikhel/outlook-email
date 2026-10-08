@@ -78,6 +78,22 @@ def test_a_total_under_a_list_is_the_sum_of_the_amounts_listed():
     assert alone.text == "Total due: $73,330.00" and alone.checks[0].startswith("$73,330.00 isn't in")
 
 
+def test_a_right_total_under_a_list_is_not_rewritten_to_another_sum():
+    # Two figures a line: the total adds up the second column (Q4), not the first (Q3).
+    workbook = '[sheet "Budget" A1:D4]\nA2 (Line): Ads | B2 (Q3): 1,000 | C2 (Q4): 1,500\nA3 (Line): Travel | B3 (Q3): 250 | C3 (Q4): 300'
+    by_line = "Q3 to Q4 by line [1]:\n- Ads: $1,000 → $1,500\n- Travel: $250 → $300\nTotal: $1,800"
+    right = review(by_line, material=[], files=[("budget.xlsx", workbook)])
+    assert (right.text, right.checks) == (by_line, [])
+    # It isn't clear which column a wrong total meant to add up: it is flagged, not rewritten.
+    slip = review(by_line.replace("$1,800", "$1,900"), material=[], files=[("budget.xlsx", workbook)])
+    assert slip.text.endswith("Total: $1,900") and slip.checks == ["$1,900 isn't in the emails or files I read; check it before relying on it."]
+    # A total of more than the lines listed (the top three of four vendors) is flagged, not rewritten to their sum.
+    ap = "Vendor: Harbor Steel | Balance: $22,150.00\nVendor: Ajax | Balance: $15,000.00\nVendor: Brio | Balance: $9,000.00\nVendor: Cole | Balance: $4,000.00"
+    top = "Largest balances:\n- Harbor Steel: $22,150.00\n- Ajax: $15,000.00\n- Brio: $9,000.00\nTotal owed to all four vendors: $50,150.00"
+    result = review(top, material=[], files=[("ap.xlsx", ap)])
+    assert result.text == top and not any(check.startswith("Corrected") for check in result.checks)
+
+
 def test_a_cited_page_that_is_not_in_the_file_is_corrected():
     roster = "[page 1]\nEmployee: Jonathan Alvarez | Department: not listed | Manager: Priya Raman | Salary: $112,000"
     result = review(
@@ -87,6 +103,17 @@ def test_a_cited_page_that_is_not_in_the_file_is_corrected():
     )
     assert "page 1" in result.text and "page 2" not in result.text
     assert result.checks == ["Corrected the page for roster.pdf: that is on page 1, not page 2."]
+
+
+def test_a_page_of_a_file_without_pages_is_not_corrected_to_a_page_of_another_file():
+    contract = "# Master services agreement\nSection 4. Either party may cancel with 90 days notice before renewal. Fees are $12,500 a year."
+    quote = "[page 1]\nAcme quote Q-881\n[page 2]\nSupport plan $9,600.00\n[page 3]\nTerms: payment due in 90 days. Annual fee $12,500 for the renewal and cancel notice."
+    answer = "You can cancel with 90 days notice before renewal, and the fee is $12,500 a year (contract.docx, page 2) [1]."
+    result = review(answer, material=[], files=[("contract.docx", contract), ("quote.pdf", quote)])
+    assert (result.text, result.checks) == (answer, [])
+    # A sentence that names no file is still about the only file with pages.
+    unnamed = review("The annual fee of $12,500 for the renewal is on page 2.", material=[], files=[("contract.docx", contract), ("quote.pdf", quote)])
+    assert unnamed.text == "The annual fee of $12,500 for the renewal is on page 3."
 
 
 def test_a_wrong_page_is_corrected_when_the_finding_is_on_one_other_page():
