@@ -134,7 +134,7 @@ _WEEKDAY = re.compile(r"^(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*\.
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9&]*|#|%")
 _CELL_REF = re.compile(r"^([A-Z]{1,3}\d{1,7})(?: \((.+)\))?$")
 _DASHES = frozenset({"-", "–", "—", "$ -", "$-"})
-_LEADING_FIGURE = re.compile(r"\s*([(\-−])?\s*([$€£¥])?\s*([(\-−])?\s*(\d[\d,]*(?:\.\d+)?|\.\d+)")
+_LEADING_FIGURE = re.compile(r"\s*([(\-−–])?\s*([$€£¥])?\s*([(\-−–])?\s*(\d[\d,]*(?:\.\d+)?|\.\d+)")
 
 When = tuple  # (year or None, month, day)
 
@@ -358,7 +358,7 @@ class _Running:
         if value is None:
             return
         if "." in raw:
-            self.places = max(self.places, len(raw.split(".")[-1].rstrip(")% ")))
+            self.places = max(self.places, len(raw.split(".")[-1].rstrip(")%-− ")))
         self.group.append(value)
         self.group_total.add(value)
         self.body.add(value)
@@ -488,12 +488,30 @@ def _settle_totals(table: Table) -> bool:
         if not _figures_of(row, figures) or not any(not other.total for other in rows[:index]):
             continue
         trial = _held_totals(rows, figures, as_rows | {index})
-        if sum(trial.values()) > sum(count for at, count in held.items() if at != index):
+        others = sum(count for at, count in held.items() if at != index)
+        # With no total below to settle it, a row that has a record's own details ("Total Wine & More | INV-2 |
+        # 10/15/2026") is a record, as long as counting it as one breaks no total.
+        if sum(trial.values()) > others or (sum(trial.values()) >= others and _record_details(row, table, figures)):
             as_rows.add(index)
             held = trial
     for index in as_rows:
         rows[index].total, changed = False, True
     return changed
+
+
+def _record_details(row: Row, table: Table, figures: list[str]) -> bool:
+    """A row that has a record's own details beside its name: a date, or a code in a column that gives every row
+    its own ("INV-2" under "Invoice"). A total row leaves those cells blank."""
+    body = [other for other in table.rows if not other.total]
+    for label, value in row.cells:
+        if label in figures or not value or value == tables.BLANK or _TOTAL.match(value) or _TOTAL_LAST.search(value):
+            continue
+        if _when(value) is not None:
+            return True
+        codes = [other.value(label) for other in body if other.value(label)]
+        if any(ch.isdigit() for ch in value) and len(codes) >= max(2, 0.8 * len(body)) and len(set(codes)) == len(codes):
+            return True
+    return False
 
 
 def _plain(number: Decimal) -> str:
@@ -592,8 +610,8 @@ def _row(line: str, page: str) -> Row | None:
             refs.append(ref)
         elif not cells:
             group.append(part)
-        else:
-            return None
+        # A cell in a column with no heading ("Disputed" in an unheaded notes column) has no name to go by. It stays
+        # in the row's line; the row keeps its named cells, so its figures still count.
     if len(cells) < 2:
         return None
     return Row(page, " > ".join(group), cells, line, refs)
@@ -1260,7 +1278,7 @@ def _numeric(word: str) -> bool:
 
 
 def _number(value: str) -> Decimal | None:
-    """The figure in a cell ("(87,550)", "$(1,250.00)", "4.1%", "1,800 (=SUM(C2:C3))"), or None for a date,
+    """The figure in a cell ("(87,550)", "$(1,250.00)", "1,250.00-", "4.1%", "1,800 (=SUM(C2:C3))"), or None for a date,
     a code like "8-5" or "V-302", or text."""
     text = (value or "").strip()
     if text in _DASHES:
@@ -1272,13 +1290,17 @@ def _number(value: str) -> Decimal | None:
     if not match:
         return None
     rest = text[match.end():].strip()
+    # SAP and Oracle reports print a negative with its minus last ("1,234.56-").
+    minus_last = rest[:1] in {"-", "−"} and not (match.group(1) or match.group(3))
+    if minus_last:
+        rest = rest[1:].strip()
     if rest not in {"", "%", ")", "%)"} and not rest.startswith("(="):
         return None
     try:
         number = Decimal(match.group(4).replace(",", ""))
     except InvalidOperation:
         return None
-    return -number if match.group(1) or match.group(3) else number
+    return -number if match.group(1) or match.group(3) or minus_last else number
 
 
 def _format(number: Decimal, samples: list[str]) -> str:

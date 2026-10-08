@@ -217,13 +217,15 @@ class Tables:
         for source, text in files:
             lines = (text or "").splitlines()
             loaded = False
-            for table in table_lookup.tables_in(text):
+            found = table_lookup.tables_in(text)
+            for table in found:
                 if len(table.body) >= 2 and count < MAX_TABLES:
                     count += 1
                     self._load(f"t{count}", table, lines, source)
                     loaded = True
             if loaded:
-                self.facts += [(source, name, value) for name, value in _facts_in(lines)]
+                rows = {row.at for table in found if len(table.rows) >= 2 for row in table.rows}
+                self.facts += [(source, name, value) for name, value in _facts_in(lines, rows)]
         if self.facts:
             self._db.execute("CREATE TABLE facts (file TEXT COLLATE NOCASE, name TEXT COLLATE NOCASE, value TEXT COLLATE NOCASE)")
             self._db.executemany("INSERT INTO facts VALUES (?, ?, ?)", self.facts)
@@ -737,8 +739,10 @@ def _formulas(columns: list[Column], values: list[list]) -> None:
 
 def _holds(values: list[list], target: int, terms: list[tuple[int, int]], share: float = 1.0) -> bool:
     """Whether ``target`` is the signed sum of ``terms`` on at least ``share`` of the rows that have it."""
-    used = good = 0
+    used = good = steady = 0
     copies = [0] * len(terms)
+    # The columns in the sheet's order, to tell a straight-line schedule (each column the same step from the last).
+    in_order = sorted([target, *(index for index, _sign in terms)])
     for row in values:
         # A blank part adds nothing, as in the sheet's SUM.
         parts = [row[index] or 0.0 for index, _sign in terms]
@@ -750,9 +754,13 @@ def _holds(values: list[list], target: int, terms: list[tuple[int, int]], share:
         good += abs(sum(sign * part for (_index, sign), part in zip(terms, parts)) - row[target]) <= 0.015 * len(terms)
         for position, part in enumerate(parts):
             copies[position] += abs(part - row[target]) < 0.005
+        cells = [row[index] or 0.0 for index in in_order]
+        steps = [after - before for before, after in zip(cells, cells[1:])]
+        steady += max(steps) - min(steps) <= 0.015 * len(terms)
     nonzero = sum(1 for row in values if row[target])
-    # Equal months ("Oct = Jul - Aug + Sep" when every month is the same) only look like a formula.
-    return used >= 3 and nonzero >= 2 and good >= share * used and max(copies) < 0.8 * used
+    # Equal months ("Oct = Jul - Aug + Sep" when every month is the same) only look like a formula, and so do equal
+    # steps: a balance amortized straight-line ("Mar 31 = Jun 30 + Sep 30 - Dec 31") fits a + d = b + c every time.
+    return used >= 3 and nonzero >= 2 and good >= share * used and max(copies) < 0.8 * used and steady < 0.8 * used
 
 
 def _headings_above(lines: list[str], at: int) -> list[str]:
@@ -799,16 +807,19 @@ def _overlap(a: Column, b: Column) -> float:
     return len(first & second) / max(1, len(first | second))
 
 
-_MONTH_LABEL = re.compile(r"(?:^|\s)([a-z]{3,9})\.?[\s\-'/]*(\d{2}|\d{4})$", re.I)
+_MONTH_LABEL = re.compile(r"(?:^|\s)([a-z]{3,9})\.?([\s\-'/]*)(\d{2}|\d{4})$", re.I)
 
 
 def _month(label: str) -> str:
-    """ "Apr-26", "April 2026", "Tax Collected Jul-26" as 2026-04 (2026-07), else ""."""
+    """ "Apr-26", "April 2026", "Tax Collected Jul-26" as 2026-04 (2026-07), else "". A month's last day after a
+    space ("Mar 31", "Jun 30": balances at each quarter end) is that day, not the year 2031."""
     match = _MONTH_LABEL.search(label.strip())
     month = table_lookup._MONTHS.get(match.group(1).lower()) if match else None
     if not month:
         return ""
-    year = int(match.group(2))
+    year = int(match.group(3))
+    if len(match.group(3)) == 2 and not match.group(2).strip() and year in ({28, 29} if month == 2 else {table_lookup._DAYS[month - 1]}):
+        return ""
     return f"{year + 2000 if year < 100 else year:04d}-{month:02d}"
 
 
@@ -826,12 +837,17 @@ def _over(headings: list[str], columns: list[Column], family: list[int]) -> str:
 _FACT = re.compile(r"^([A-Z][\w .&/()#'-]{1,40}?):\s+(\S.{0,100})$")
 
 
-def _facts_in(lines: list[str]) -> list[tuple[str, str]]:
+def _facts_in(lines: list[str], rows: set[int] = frozenset()) -> list[tuple[str, str]]:
     """Details printed beside a file's tables as "Name: value" on a line of their own ("Pay Date: Oct 15,
-    2026", "Prepared by: L. Wei 10/2/2026"); a table row has several of them and is left alone."""
+    2026", "Prepared by: L. Wei 10/2/2026"); a table row has several of them and is left alone. ``rows``: the
+    lines that are rows of the file's tables, which a page holding only its table doesn't mark as one."""
     found: list[tuple[str, str]] = []
     block = ""
-    for line in lines:
+    for at, line in enumerate(lines):
+        if len(found) >= 30:
+            break
+        if at in rows:
+            continue
         if line.startswith("["):
             block = line.strip()
             continue

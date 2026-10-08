@@ -19,8 +19,10 @@ BLANK = "not listed"
 EMPTY = "(empty)"
 
 _MONTH = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?"
+# A negative figure can be "(1,250.00)", "$(1,250.00)" (a currency sign before its parentheses), "-1,250.00",
+# "–1,250.00" (a typeset minus), or "1,250.00-" with its minus last, as SAP and Oracle reports print it.
 _VALUE_RE = re.compile(
-    r"[(\-+−]?\s*[$€£¥]?\s*[-+−]?\d[\d,.' ]*(?:%|k|m|bn|x)?\)?"
+    r"[(\-+−–]?\s*[$€£¥]?\s*[(\-+−–]?\d[\d,.' ]*(?:%|k|m|bn|x)?[-−]?\)?"
     r"|\d{1,4}[-/.]\d{1,2}(?:[-/.]\d{1,4})?"
     r"|\d{1,2}(?:st|nd|rd|th)?\s+" + _MONTH + r"(?:,?\s+\d{2,4})?"
     r"|" + _MONTH + r"\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{2,4})?"
