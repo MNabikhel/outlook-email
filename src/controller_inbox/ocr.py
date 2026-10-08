@@ -53,7 +53,8 @@ def _pixels(data: bytes) -> int:
         return image.width * image.height
 
 
-def _rapid(data: bytes) -> str:
+def _read(data: bytes):
+    """RapidOCR's lines for the picture (box, text, score, and each character's box), one read at a time."""
     global _engine
     with _engine_lock:
         if _engine is None:
@@ -61,6 +62,27 @@ def _rapid(data: bytes) -> str:
 
             _engine = RapidOCR()
         result, _elapsed = _engine(data, return_word_box=True)
+    return result
+
+
+def line_boxes(data: bytes) -> list[dict] | None:
+    """Where on the picture each phrase was read, for showing the reading over the page: {left, top, right,
+    bottom (pixels), text, score (how sure RapidOCR is, 0 to 1)}, split at column gaps as ``image_text`` splits
+    them. None when RapidOCR isn't installed (Tesseract's reading keeps no score per line here)."""
+    if engine_name() != "RapidOCR" or _pixels(data) > MAX_PIXELS:
+        return None
+    out = []
+    for line in _read(data) or []:
+        bottom = max(point[1] for point in line[0])
+        score = float(line[2]) if len(line) > 2 and isinstance(line[2], (int, float)) else None
+        for top, left, right, text in map(_prepared, _cells(line)):
+            if text:
+                out.append({"left": left, "top": top, "right": right, "bottom": float(bottom), "text": text, "score": score})
+    return out
+
+
+def _rapid(data: bytes) -> str:
+    result = _read(data)
     from PIL import Image
 
     image = Image.open(io.BytesIO(data)).convert("RGB")

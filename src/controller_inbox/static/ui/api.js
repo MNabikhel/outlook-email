@@ -29,6 +29,13 @@ export async function getJSON(path, { signal } = {}) {
   return handle(await fetch(path, { headers: PAGE, signal, credentials: "same-origin", cache: "no-store" }));
 }
 
+/** A picture (a file's page), fetched with the header the server requires, so an <img> can't load it itself. */
+export async function getBlob(path, { signal } = {}) {
+  const response = await fetch(path, { headers: PAGE, signal, credentials: "same-origin", cache: "no-store" });
+  if (!response.ok) await handle(response);
+  return response.blob();
+}
+
 export async function postJSON(path, body = {}, { signal } = {}) {
   return handle(
     await fetch(path, {
