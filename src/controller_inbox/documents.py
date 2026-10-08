@@ -56,6 +56,9 @@ def extract_document(filename: str, content_type: str, data: bytes) -> str:
     ctype = (content_type or "").lower()
     if name.endswith(".pdf") or "pdf" in ctype:
         return _cap(pdf_text(data))
+    office = name.endswith((".docx", ".pptx", *SPREADSHEET_SUFFIXES)) or "openxmlformats" in ctype
+    if office and _password_protected(data):
+        return _PROTECTED_NOTE
     if name.endswith(".docx") or "wordprocessingml" in ctype:
         return _cap(docx_text(data))
     if name.endswith(SPREADSHEET_SUFFIXES) or "spreadsheetml" in ctype:
@@ -67,6 +70,26 @@ def extract_document(filename: str, content_type: str, data: bytes) -> str:
     if name.endswith((".csv", ".tsv")) or ctype in {"text/csv", "application/csv", "text/tab-separated-values"}:
         return _cap(csv_text(data, filename or "table.csv"))
     return ""
+
+
+_PROTECTED_NOTE = "[This file is password-protected, so CloseDesk can't read it. Open it with its password to see what it says.]"
+
+
+def _password_protected(data: bytes) -> bool:
+    """A Word, Excel or PowerPoint file saved with a password: it is no longer a zip but an encrypted package
+    inside an OLE file."""
+    if not data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return False
+    try:
+        import olefile
+
+        ole = olefile.OleFileIO(data)
+        try:
+            return bool(ole.exists("EncryptedPackage"))
+        finally:
+            ole.close()
+    except Exception:
+        return False
 
 
 def _cap(text: str) -> str:
@@ -93,7 +116,6 @@ def pdf_text(data: bytes) -> str:
                 return "[This PDF is password-protected, so CloseDesk can't read it.]"
         except Exception:
             return "[This PDF is password-protected, so CloseDesk can't read it.]"
-    miner = _Miner.open(data)
     listed = None
     if reader is not None:
         try:
@@ -101,6 +123,10 @@ def pdf_text(data: bytes) -> str:
             listed = reader.pages[:MAX_PDF_PAGES]
         except Exception as exc:
             failure = exc
+    # pdfminer unpacks a page's drawing instructions whole, with no limit (pypdf stops at its own). A file whose
+    # pages unpack to far more than any page of text needs (a "PDF bomb") is read with pypdf alone.
+    heavy = listed is not None and not _content_fits(listed)
+    miner = None if heavy else _Miner.open(data)
     if listed is None:
         # pypdf can't read the file: pdfminer's pages alone, when it can.
         if miner is None or not miner.pages:
@@ -130,7 +156,9 @@ def pdf_text(data: bytes) -> str:
         pages.append(f"[page {number}]\n{text.strip() or '(no text on this page)'}")
     if total > MAX_PDF_PAGES:
         pages.append(f"[CloseDesk read the first {MAX_PDF_PAGES} of {total} pages.]")
-    if total and words < 5 * total:
+    if heavy:
+        pages.insert(0, _HEAVY_NOTE)
+    elif total and words < 5 * total:
         pages.insert(0, _SCANNED_NOTE if ocr.engine_name() else _SCANNED_NOTE + _OCR_HINT)
     elif scanned:
         pages.insert(0, f"[Scanned {'page' if len(scanned) == 1 else 'pages'} {_page_list(scanned)} read with OCR: check figures against the file.]")
@@ -147,6 +175,38 @@ _SCANNED_NOTE = (
 )
 _OCR_HINT = ' [To read scanned pages, install the OCR add-on: pip install -e ".[ocr]"]'
 MAX_OCR_PAGES = 40
+# A page of dense text or a detailed drawing is a few MB of drawing instructions; this is far past any real file.
+MAX_PDF_CONTENT = 100_000_000
+_HEAVY_NOTE = (
+    "[This PDF unpacks to far more than its pages need, as a damaged or malicious file does, so CloseDesk read "
+    "only the text it could get safely. Open the file to check it.]"
+)
+
+
+def _content_fits(pages) -> bool:
+    """Whether the pages' drawing instructions (their content streams, and the forms they draw) unpack to less
+    than ``MAX_PDF_CONTENT`` in all, with none past pypdf's own limit for one stream."""
+    from pypdf.errors import LimitReachedError
+
+    total = 0
+    for page in pages:
+        try:
+            resources = page.get("/Resources")
+            xobjects = resources.get_object().get("/XObject") if resources is not None else None
+            forms = [item.get_object() for item in (xobjects.get_object().values() if xobjects is not None else [])]
+            contents = page.get("/Contents")
+            contents = contents.get_object() if contents is not None else None
+            streams = list(contents) if isinstance(contents, list) else [contents] if contents is not None else []
+            streams += [form for form in forms if form.get("/Subtype") == "/Form"]
+            for stream in streams:
+                total += len(stream.get_object().get_data())
+        except LimitReachedError:
+            return False
+        except Exception:
+            continue
+        if total > MAX_PDF_CONTENT:
+            return False
+    return True
 
 
 class _Miner:
@@ -258,6 +318,36 @@ def _ocr_page_images(page) -> str:
     return "\n".join(t for t in texts if t)
 
 
+# Office files are zips of XML parts ---------------------------------------------------------------
+
+
+def _office_refusal(data: bytes, *, workbook: bool = False) -> str:
+    """A note saying why an Office file is not opened, or "" when it can be.
+
+    A Word, Excel or PowerPoint file is a zip of XML parts, and a few hundred KB can unpack to gigabytes (a "zip
+    bomb"); Word and PowerPoint files are read into memory whole. As with zip attachments, a file whose parts
+    unpack to more than ``MAX_UNZIPPED`` (a workbook, read row by row, four times that), or a large part packed
+    tighter than ``MAX_ZIP_RATIO``, is not opened.
+    """
+    import zipfile
+
+    from controller_inbox.extract import MAX_UNZIPPED, MAX_ZIP_RATIO
+
+    try:
+        parts = zipfile.ZipFile(io.BytesIO(data)).infolist()
+    except Exception:
+        return ""  # not a zip: the reader says what is wrong with it
+    limit, large = (4 * MAX_UNZIPPED, 25_000_000) if workbook else (MAX_UNZIPPED, 1_000_000)
+    unpacked = sum(part.file_size for part in parts if part.filename.lower().endswith((".xml", ".rels", ".vml")))
+    tight = any(part.file_size > large and part.file_size > MAX_ZIP_RATIO * max(1, part.compress_size) for part in parts)
+    if unpacked <= limit and not tight:
+        return ""
+    return (
+        f"[CloseDesk didn't open this file: it unpacks to {max(unpacked, 1_000_000) // 1_000_000:,} MB or more, "
+        "far more than a real document holds, as a damaged or malicious file does. Open it only if you trust the sender.]"
+    )
+
+
 # Word ----------------------------------------------------------------------------------------
 
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -267,6 +357,8 @@ def docx_text(data: bytes) -> str:
     """Paragraphs and tables in reading order, with headings, tracked insertions, and comments."""
     from docx import Document
 
+    if refused := _office_refusal(data):
+        return refused
     document = Document(io.BytesIO(data))
     lines: list[str] = []
     for block in _docx_blocks(document.element.body):
@@ -422,6 +514,8 @@ def _docx_comments(document) -> list[str]:
 def xlsx_text(data: bytes) -> str:
     from openpyxl import load_workbook
 
+    if refused := _office_refusal(data, workbook=True):
+        return refused
     values = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
     formulas = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
     lines: list[str] = []
@@ -824,6 +918,8 @@ def _fmt(value) -> str:
 def pptx_text(data: bytes) -> str:
     from pptx import Presentation
 
+    if refused := _office_refusal(data):
+        return refused
     deck = Presentation(io.BytesIO(data))
     parts: list[str] = []
     for index, slide in enumerate(deck.slides, start=1):
@@ -1121,6 +1217,8 @@ def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200) -> str:
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter, range_boundaries
 
+    if refused := _office_refusal(data, workbook=True):
+        return refused
     values = load_workbook(io.BytesIO(data), data_only=True)
     formulas = load_workbook(io.BytesIO(data), data_only=False)
     try:
@@ -1179,6 +1277,8 @@ def trace_cell(data: bytes, sheet: str, cell: str, *, depth: int = 2) -> str:
     """A cell's formula and the cells it depends on, ``depth`` levels down."""
     from openpyxl import load_workbook
 
+    if refused := _office_refusal(data, workbook=True):
+        return refused
     values = load_workbook(io.BytesIO(data), data_only=True)
     formulas = load_workbook(io.BytesIO(data), data_only=False)
     try:
@@ -1201,6 +1301,8 @@ def compare_columns(data: bytes, sheet: str, first: str, second: str, *, limit: 
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
 
+    if refused := _office_refusal(data, workbook=True):
+        return refused
     book = load_workbook(io.BytesIO(data), data_only=True)
     try:
         ws = _find_sheet(book, sheet)
