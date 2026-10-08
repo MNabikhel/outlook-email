@@ -222,3 +222,36 @@ def test_ask_closedesk_reopened_on_load_says_so_on_its_button(site, page):
     assert page.eval_on_selector("#chat", "e => e.hidden") is False
     assert page.get_attribute("#chat-btn", "aria-expanded") == "true"
     assert page.eval_on_selector("#chat-btn", "e => e.classList.contains('on')")
+
+
+def test_the_page_tab_marks_where_text_was_read_and_says_what_on_hover(settings, store, page):
+    # A PDF opens on its page, a box over each piece of text read there; pointing at one says what was read.
+    from controller_inbox.folder_mail import ingest_folder
+    from liveserver import serving
+    from msgfactory import PDF, write_msg
+    from test_page_view import _invoice
+
+    settings.trusted_domains = "taz.com"
+    settings.ensure_data_dir()
+    write_msg(settings.inbox_incoming / "invoice.msg", "Invoice INV-1042", "Our invoice is attached.", sender_name="Harbor Steel",
+              sender_email="ar@taz.com", attachments=[("invoice.pdf", _invoice(pages=2), PDF)])
+    [email] = ingest_folder(store, settings)
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size({"width": 1440, "height": 900})
+        page.goto(f"{base}/app/mail/{email.id}/file/1")
+        page.wait_for_selector(".tab.on:has-text('Page')")
+        page.wait_for_selector(".pv-sheet img")
+        page.wait_for_function("() => document.querySelector('.pv-sheet img').naturalWidth > 0")
+        assert page.text_content(".pv-where") == "Page 1 of 2"
+        assert "Read from the file's own text (exact)" in page.text_content(".pv-about")
+        total = page.locator(".pv-box[aria-label='1,560.50']")
+        assert page.locator(".pv-box").count() >= 10
+        total.hover()
+        page.wait_for_selector(".pv-tip:not([hidden])")
+        card = page.text_content(".pv-tip")
+        assert "From the file's own text" in card and "exact" in card and "1,560.50" in card
+        box = page.evaluate("() => { const r = document.querySelector('.pv-tip').getBoundingClientRect(); return [r.left, r.right, r.top, r.bottom]; }")
+        assert box[0] >= 0 and box[1] <= 1440 and box[2] >= 0 and box[3] <= 900, "the card stays in the window"
+        page.click("button[aria-label='Next page']")
+        page.wait_for_function("() => document.querySelector('.pv-where').textContent === 'Page 2 of 2'")
+        page.wait_for_selector(".pv-box[aria-label='Terms and conditions, page 2']")

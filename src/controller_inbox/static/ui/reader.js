@@ -1,8 +1,8 @@
 /* The reading pane: one email (header, why it was flagged, what was read from it, tasks, files, coding,
-   fraud check), and an attachment's Tables and Text views. */
+   fraud check), and an attachment's Page, Tables and Text views. */
 
 import { h, icon, replace, toast, plural, $ } from "./dom.js";
-import { postJSON, mailPath, filePath } from "./api.js";
+import { getJSON, getBlob, postJSON, mailPath, filePath } from "./api.js";
 
 const enc = encodeURIComponent;
 
@@ -203,6 +203,7 @@ function attachments(d, ctx) {
         : h(
             "div",
             { class: "file-actions" },
+            file.preview ? h("a", { class: "btn btn-sm", href: ctx.fileUrl(file.n, "page"), dataset: { nav: "" }, title: "The page itself, with where each piece of text was read" }, icon("eye", 14), "Page") : null,
             tables ? h("a", { class: "btn btn-sm btn-primary", href: ctx.fileUrl(file.n, "tables"), dataset: { nav: "" } }, icon("table", 14), "Tables") : null,
             file.has_text ? h("a", { class: "btn btn-sm", href: ctx.fileUrl(file.n, "text"), dataset: { nav: "" } }, icon("text", 14), "Text") : null,
             file.view ? h("a", { class: "btn btn-sm", href: `${base}/view`, target: "_blank", rel: "noopener" }, icon("external", 14), "Open") : null,
@@ -581,7 +582,7 @@ function modelReading(blocks, marks) {
   );
 }
 
-function visionBox(data, ctx) {
+function visionBox(data, ctx, { brief = false } = {}) {
   const vision = data.vision || {};
   const offer = vision.offer;
   const readings = vision.readings || [];
@@ -609,7 +610,7 @@ function visionBox(data, ctx) {
     body = [h("p", { class: "muted" }, offer.reason)];
   } else {
     body = [
-      h("p", { class: "muted" }, "Every page that needed it has been read both ways (below)."),
+      h("p", { class: "muted" }, `Every page that needed it has been read both ways${brief ? "" : " (below)"}.`),
       offer.available ? h("div", { class: "vision-go" }, btn("Read them again", { class: "btn-sm btn-quiet", onclick: start(true) }, "refresh"), status) : null,
     ];
   }
@@ -640,7 +641,10 @@ function visionBox(data, ctx) {
     { class: "vision-box" },
     h("h2", { class: "rd-h" }, icon("eye", 15), "Read with the vision model too"),
     body,
-    readings.length
+    // On the Page tab the two readings are on the page itself; the full side by side stays on the other tabs.
+    readings.length && brief
+      ? h("p", { class: "muted small" }, "Point at a box on the page to see both readings there, or ", h("a", { href: ctx.fileUrl(data.file.n, "text"), dataset: { nav: "", replace: "" } }, "see them side by side"), ".")
+      : readings.length
       ? h(
           "div",
           { class: "vision-pages" },
@@ -651,18 +655,182 @@ function visionBox(data, ctx) {
   );
 }
 
+/* ---------- An attachment's page, with where each piece of text was read marked on it ---------- */
+
+// One hover card for every page view, kept on <body> so the reading pane's scrolling and animation can't clip it.
+let tip = null;
+let pageUrl = "";
+
+function hideTip() {
+  if (tip) tip.hidden = true;
+}
+
+function showTip(box, children) {
+  if (!tip) {
+    tip = h("div", { class: "pv-tip", role: "tooltip", id: "pv-tip", hidden: true });
+    document.body.append(tip);
+    document.addEventListener("scroll", hideTip, true);
+    window.addEventListener("resize", hideTip);
+  }
+  replace(tip, children);
+  tip.hidden = false;
+  // Below the box when it fits, else above it; never past the edges of the window.
+  const at = box.getBoundingClientRect();
+  const { offsetWidth: w, offsetHeight: tall } = tip;
+  const gap = 8;
+  const left = Math.min(Math.max(gap, at.left + at.width / 2 - w / 2), window.innerWidth - w - gap);
+  let top = at.bottom + gap;
+  if (top + tall > window.innerHeight - gap) top = at.top - tall - gap;
+  tip.style.left = `${Math.max(gap, left)}px`;
+  tip.style.top = `${Math.max(gap, Math.min(top, window.innerHeight - tall - gap))}px`;
+}
+
+const sure = (value) => `${Math.round(value * 100)}% sure`;
+
+/** "ok" (green), "check" (amber) or "differs" (red), as the legend above the page explains. */
+function tone(region, source) {
+  const model = region.model;
+  if (model && model.agrees === false) return "differs";
+  if (model && model.agrees === true) return "ok";
+  if (source === "text") return "ok";
+  if (region.confidence !== null && region.confidence < 0.8) return "check";
+  return model ? "check" : "ok";
+}
+
+function tipFor(region, view) {
+  const lines = [];
+  if (view.source === "text") {
+    lines.push(h("div", { class: "pv-tip-row" }, h("b", null, "From the file's own text"), h("span", { class: "pv-tip-tag ok" }, "exact")));
+  } else {
+    const low = region.confidence !== null && region.confidence < 0.8;
+    lines.push(h("div", { class: "pv-tip-row" }, h("b", null, "OCR read"), region.confidence === null ? null : h("span", { class: `pv-tip-tag ${low ? "check" : "ok"}` }, sure(region.confidence))));
+  }
+  lines.push(h("p", { class: "pv-tip-text" }, region.text));
+  const model = region.model;
+  if (model) {
+    const [shade, words] =
+      model.agrees === true ? ["ok", "agrees"] : model.agrees === false ? ["differs", "differs"] : model.text ? ["check", "close, not the same"] : ["check", "not in its reading"];
+    lines.push(
+      h("div", { class: "pv-tip-row pv-tip-model" }, h("b", null, `${view.model_name} read`), h("span", { class: `pv-tip-tag ${shade}` }, words)),
+      model.text ? h("p", { class: "pv-tip-text" }, model.text) : h("p", { class: "pv-tip-text muted" }, "Nothing it read matches this.")
+    );
+  }
+  return lines;
+}
+
+function pageView(data) {
+  const { email, file } = data;
+  const api = `/api/mail/${encodeURIComponent(email.id)}/files/${file.n}/pages`;
+  const sheet = h("div", { class: "pv-sheet loading" });
+  const where = h("span", { class: "pv-where", "aria-live": "polite" }, "Page 1");
+  const prev = h("button", { type: "button", class: "icon-btn pv-prev", title: "Previous page", "aria-label": "Previous page", disabled: true }, icon("right", 15));
+  const next = h("button", { type: "button", class: "icon-btn", title: "Next page", "aria-label": "Next page", disabled: true }, icon("right", 15));
+  const about = h("p", { class: "pv-about" });
+  const legend = h("div", { class: "pv-legend" });
+  let page = 1;
+  let pages = 0;
+  let token = 0;
+
+  const key = (shade, words) => h("span", { class: "pv-key" }, h("i", { class: `pv-swatch ${shade}` }), words);
+
+  async function show(number) {
+    const mine = ++token;
+    hideTip();
+    page = number;
+    where.textContent = pages ? `Page ${page} of ${pages}` : `Page ${page}`;
+    prev.disabled = next.disabled = true;
+    sheet.classList.add("loading");
+    let view;
+    let picture;
+    try {
+      [view, picture] = await Promise.all([getJSON(`${api}/${page}/regions`), getBlob(`${api}/${page}.png`)]);
+    } catch (error) {
+      if (mine !== token) return;
+      sheet.classList.remove("loading");
+      replace(sheet, h("p", { class: "pv-fail muted" }, `Couldn't show this page (${error.message}).`));
+      prev.disabled = page <= 1;
+      next.disabled = !pages || page >= pages;
+      return;
+    }
+    if (mine !== token || !sheet.isConnected) return;
+    pages = view.pages;
+    where.textContent = `Page ${page} of ${pages}`;
+    prev.disabled = page <= 1;
+    next.disabled = page >= pages;
+    if (pageUrl) URL.revokeObjectURL(pageUrl);
+    pageUrl = URL.createObjectURL(picture);
+    const reading = Boolean(view.model_name);
+    const counts = { ok: 0, check: 0, differs: 0 };
+    const boxes = view.regions.map((region) => {
+      const shade = tone(region, view.source);
+      counts[shade] += 1;
+      const box = h("div", {
+        class: `pv-box ${shade}`,
+        tabindex: "0",
+        role: "button",
+        "aria-label": region.text,
+        "aria-describedby": "pv-tip",
+        style: { left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.w * 100}%`, height: `${region.h * 100}%` },
+      });
+      const open = () => showTip(box, tipFor(region, view));
+      box.addEventListener("pointerenter", open);
+      box.addEventListener("focus", open);
+      box.addEventListener("click", open);
+      box.addEventListener("pointerleave", hideTip);
+      box.addEventListener("blur", hideTip);
+      return box;
+    });
+    sheet.style.aspectRatio = `${view.width} / ${view.height}`;
+    sheet.classList.remove("loading");
+    const img = h("img", { alt: `Page ${page} of ${file.name}`, draggable: "false" });
+    img.src = pageUrl; // a blob: address made just above, which h() only takes for links to this server
+    replace(sheet, img, boxes);
+
+    const told = [];
+    if (view.source === "text") told.push("Read from the file's own text (exact): each box is exactly what the file says.");
+    else if (view.regions.length) told.push("This page is a scan. OCR read it on this computer, and each box says how sure it was.");
+    if (view.reason) told.push(view.reason);
+    if (reading) told.push(`${view.model_name} read this page too, and each box shows what it read there.`);
+    else if (view.source === "ocr") told.push("The vision model hasn't read this page.");
+    if (view.regions.length) told.push("Point at a box, or tab to it, to see what was read.");
+    replace(about, told.join(" "));
+    replace(
+      legend,
+      view.regions.length
+        ? [
+            key("ok", view.source === "text" ? (reading ? "Exact, and the vision model agrees" : "Exact") : reading ? "Both readings agree" : "Read clearly (80% sure or more)"),
+            view.source === "ocr" || counts.check ? key("check", reading ? "Check it: OCR less sure, or not clearly in the vision model's reading" : "Check it: OCR under 80% sure") : null,
+            reading ? key("differs", "The vision model read a different figure") : null,
+            h("span", { class: "pv-count muted" }, `${plural(view.regions.length, "box", "boxes")}${counts.differs ? ` · ${counts.differs} differ` : ""}${counts.check ? ` · ${counts.check} to check` : ""}`),
+          ]
+        : null
+    );
+  }
+
+  prev.addEventListener("click", () => page > 1 && show(page - 1));
+  next.addEventListener("click", () => page < pages && show(page + 1));
+  show(1);
+  return h("div", { class: "pv" }, h("div", { class: "pv-bar" }, h("div", { class: "pv-nav" }, prev, where, next), legend), about, h("div", { class: "pv-frame" }, sheet));
+}
+
 export function fileView(data, tab, ctx) {
   const { email, file } = data;
   const base = filePath(email.id, file.n);
-  tab = tab === "text" || !data.tables.length ? "text" : "tables";
+  hideTip();
+  // A PDF or a picture opens on its page; any other file on its tables, or its text when it has none.
+  if (!tab || (tab === "page" && !file.preview)) tab = file.preview ? "page" : "tables";
+  if (tab !== "page") tab = tab === "text" || !data.tables.length ? "text" : "tables";
   const tabs = h(
     "div",
     { class: "tabs", role: "tablist" },
+    file.preview ? h("a", { class: `tab${tab === "page" ? " on" : ""}`, role: "tab", "aria-selected": String(tab === "page"), href: ctx.fileUrl(file.n, "page"), dataset: { nav: "", replace: "" } }, icon("eye", 14), "Page") : null,
     h("a", { class: `tab${tab === "tables" ? " on" : ""}`, role: "tab", "aria-selected": String(tab === "tables"), href: ctx.fileUrl(file.n, "tables"), dataset: { nav: "", replace: "" } }, icon("table", 14), `Tables (${data.tables.length})`),
     h("a", { class: `tab${tab === "text" ? " on" : ""}`, role: "tab", "aria-selected": String(tab === "text"), href: ctx.fileUrl(file.n, "text"), dataset: { nav: "", replace: "" } }, icon("text", 14), `Text (${data.parts.length})`)
   );
   let content;
-  if (tab === "tables") {
+  if (tab === "page") {
+    content = pageView(data);
+  } else if (tab === "tables") {
     const off = data.tables.filter((t) => t.check.mismatched.length).length;
     const ok = data.tables.reduce((n, t) => n + t.check.matched, 0);
     content = h(
@@ -724,7 +892,7 @@ export function fileView(data, tab, ctx) {
         "div",
         { class: "rd-inner wide" },
         h("header", { class: "rd-head" }, h("div", { class: "rd-tags" }, h("span", { class: "rd-tag" }, file.kind), h("span", { class: "rd-tag" }, file.size), h("span", { class: "rd-tag" }, file.type_label)), h("h1", { class: "rd-subject" }, file.name), h("p", { class: "rd-from muted" }, `From ${email.sender} · `, h("a", { href: ctx.emailUrl(), dataset: { nav: "" } }, email.subject))),
-        visionBox(data, ctx),
+        visionBox(data, ctx, { brief: tab === "page" }),
         tabs,
         content
       )

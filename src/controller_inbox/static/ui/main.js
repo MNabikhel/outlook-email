@@ -47,7 +47,7 @@ function parse() {
   });
   const q = new URLSearchParams(location.search);
   const [first = "", second = "", third = "", fourth = ""] = parts;
-  const route = { view: first || "today", list: "today", emailId: null, file: null, tab: q.get("tab") || "tables", date: q.get("date") || "" };
+  const route = { view: first || "today", list: "today", emailId: null, file: null, tab: q.get("tab") || "", date: q.get("date") || "" };
   if (first === "folder") route.list = `folder:${second}${q.get("done") === "1" ? ":done" : ""}`;
   else if (first === "all") route.list = q.get("q") ? `search:${q.get("q")}` : "all";
   else if (first === "tasks") route.list = `tasks:${q.get("status") || "open"}`;

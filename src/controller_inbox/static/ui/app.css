@@ -662,6 +662,52 @@ a.fchip:hover { text-decoration: none; }
 .part pre { margin: 0; font: 12.5px/1.55 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
 mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: inherit; border-radius: 2px; }
 
+/* The Page tab: the page itself, a box over each piece of text read, a card with what was read there. */
+.pv { display: flex; flex-direction: column; gap: 10px; }
+.pv-bar { display: flex; align-items: center; gap: 8px 16px; flex-wrap: wrap; }
+.pv-nav { display: inline-flex; align-items: center; gap: 4px; }
+.pv-prev .ic { transform: rotate(180deg); }
+.pv-where { min-width: 92px; text-align: center; font-size: 13px; font-weight: 600; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.pv-legend { display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-2); }
+.pv-key { display: inline-flex; align-items: center; gap: 6px; }
+.pv-swatch { width: 14px; height: 10px; border-radius: 2px; border: 1.5px solid var(--tone); background: color-mix(in srgb, var(--tone) 22%, transparent); }
+.pv-about { margin: 0; font-size: 13px; color: var(--text-2); }
+.pv-frame { background: var(--surface-3); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
+.pv-sheet { position: relative; width: 100%; background: #fff; box-shadow: var(--shadow-1); line-height: 0; }
+.pv-sheet.loading { min-height: 320px; opacity: 0.55; }
+.pv-sheet img { display: block; width: 100%; height: auto; user-select: none; }
+.pv-fail { margin: 0; padding: 24px; line-height: 1.5; background: var(--surface); }
+.pv-box {
+  position: absolute;
+  /* A little room around the words, so a short figure is still easy to point at. */
+  margin: -2px 0 0 -2px; padding: 2px;
+  box-sizing: content-box;
+  border: 1.5px solid var(--tone);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--tone) 14%, transparent);
+  cursor: help;
+}
+.pv-box:hover, .pv-box:focus-visible { background: color-mix(in srgb, var(--tone) 30%, transparent); outline: 2px solid var(--tone); outline-offset: 1px; z-index: 1; }
+:is(.pv-box, .pv-swatch, .pv-tip-tag).ok { --tone: var(--ok); }
+:is(.pv-box, .pv-swatch, .pv-tip-tag).check { --tone: var(--imp-high); }
+:is(.pv-box, .pv-swatch, .pv-tip-tag).differs { --tone: var(--danger); }
+.pv-tip {
+  position: fixed; z-index: 60;
+  max-width: min(380px, calc(100vw - 16px));
+  padding: 10px 12px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  box-shadow: var(--shadow-2);
+  font-size: 12.5px; line-height: 1.45;
+  pointer-events: none;
+}
+.pv-tip[hidden] { display: none; }
+.pv-tip-row { display: flex; align-items: center; gap: 8px; }
+.pv-tip-row b { font-weight: 650; color: var(--text-2); }
+.pv-tip-model { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.pv-tip-text { margin: 3px 0 0; font: 12.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.pv-tip-tag { padding: 0 7px; border-radius: 999px; font-size: 11.5px; font-weight: 650; color: var(--tone); background: color-mix(in srgb, var(--tone) 14%, transparent); border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent); }
+
 /* A page read two ways: OCR (or the PDF's text) beside the vision model's reading. */
 .vision-box { display: flex; flex-direction: column; gap: 8px; margin: 0 0 14px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 .vision-box .rd-h { display: flex; align-items: center; gap: 6px; margin: 0; }

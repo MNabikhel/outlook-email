@@ -8,7 +8,7 @@ helpers), so both views always agree.
 Every request under /api must come from CloseDesk's own page: it carries the X-CloseDesk header (which
 another website cannot add without the browser asking this server first, and it never agrees), and a
 browser that says the request came from another site is refused, as the classic forms are. Files of an
-email held as possible payment fraud are never shown here: not their text, not their tables.
+email held as possible payment fraud are never shown here: not their text, not their tables, not their pages.
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from controller_inbox import agent, chats, cost_codes, documents, fraud, model_roles, semantic, table_lookup, vision
+from controller_inbox import agent, chats, cost_codes, documents, fraud, model_roles, page_view, semantic, table_lookup, vision
 from controller_inbox.digest import build_digest
 from controller_inbox.local_llm import check_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
@@ -337,6 +337,7 @@ def register_workspace(
                     tables=len(table_lookup.tables_in(text)) if text.strip() else 0,
                     download=bool(card["downloadable"]),
                     view=suffix in agent.VIEWABLE and agent.original_file(settings, email, att) is not None,
+                    preview=vision.readable_file(att.filename) and vision.can_render() and agent.original_file(settings, email, att) is not None,
                 )
             files.append(item)
         coding = store.cost_coding(email.id)
@@ -421,6 +422,8 @@ def register_workspace(
                 "search": semantic.file_states(store, settings, email).get(att.id, "no_text"),
                 "view": suffix in agent.VIEWABLE and original is not None,
                 "download": suffix in DOWNLOADABLE and original is not None,
+                # Its pages can be shown as pictures, with where each piece of text was read (the Page tab).
+                "preview": vision.readable_file(att.filename) and original is not None and vision.can_render(),
             },
             "parts": [{"label": part.label, "text": part.text} for part in documents.split_parts(text)] if text.strip() else [],
             "tables": [table_json(table, number) for number, table in enumerate(found[:MAX_TABLES], start=1)],
@@ -429,6 +432,71 @@ def register_workspace(
                 "offer": vision.offer(store, settings, email, att) if vision.readable_file(att.filename) else None,
                 "readings": vision.readings_json(store.page_readings(att.id, att.sha256)),
             },
+        }
+
+    def page_file(email_id: str, n: int) -> tuple[Any, bytes]:
+        """The attachment and its bytes as they arrived, for showing its pages; never a locked file's."""
+        email = known(email_id)
+        if not 1 <= n <= len(email.attachments):
+            raise HTTPException(status_code=404, detail="No such file on this email")
+        if fraud.attachments_locked(email):
+            raise HTTPException(status_code=403, detail=LOCKED_MESSAGE)
+        att = email.attachments[n - 1]
+        if not vision.readable_file(att.filename):
+            raise HTTPException(status_code=404, detail="Only a PDF or a picture has pages to show.")
+        if not vision.can_render():
+            raise HTTPException(status_code=404, detail="The page renderer isn't installed (double-click CloseDesk once to install it).")
+        data = vision.original_bytes(settings, email, att)
+        if data is None:
+            raise HTTPException(status_code=404, detail="The original file wasn't kept for this email.")
+        return att, data
+
+    def no_page(p: int) -> HTTPException:
+        return HTTPException(status_code=404, detail=f"This file has no page {p}.")
+
+    @api.get("/mail/{email_id}/files/{n}/pages/{p}.png")
+    def mail_file_page(email_id: str, n: int, p: int):
+        """The page drawn as a picture (a picture file is its page 1)."""
+        att, data = page_file(email_id, n)
+        try:
+            png = page_view.page_png(settings, data, att.filename, p)
+        except ValueError:
+            raise no_page(p) from None
+        except Exception:
+            raise HTTPException(status_code=422, detail="This page couldn't be drawn.") from None
+        return Response(png, media_type="image/png", headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
+
+    @api.get("/mail/{email_id}/files/{n}/pages/{p}/regions")
+    def mail_file_regions(email_id: str, n: int, p: int):
+        """Where each piece of the page's text was read, how sure the reading is, and what the vision model read
+        there (when it has read the page)."""
+        att, data = page_file(email_id, n)
+        try:
+            pages = page_view.page_count(data, att.filename)
+        except Exception:
+            raise HTTPException(status_code=422, detail="This file's pages couldn't be read.") from None
+        if not 1 <= p <= pages:
+            raise no_page(p)
+        try:
+            found = page_view.regions(settings, data, att.filename, p)
+            width, height = page_view.png_size(page_view.page_png(settings, data, att.filename, p))
+        except ValueError:
+            raise no_page(p) from None
+        except Exception:
+            raise HTTPException(status_code=422, detail="This page couldn't be read.") from None
+        reading = store.page_readings(att.id, att.sha256).get(p)
+        boxes = found["regions"]
+        if reading is not None:
+            boxes = page_view.with_model(boxes, reading.get("model_text") or "")
+        return {
+            "page": p,
+            "pages": pages,
+            "width": width,
+            "height": height,
+            "source": found["source"],
+            "reason": found["reason"],
+            "regions": [box if reading is not None else {**box, "model": None} for box in boxes],
+            "model_name": (vision.reader_name(reading.get("model") or "") or "The vision model") if reading is not None else "",
         }
 
     @api.post("/mail/{email_id}/files/{n}/vision")
