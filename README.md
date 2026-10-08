@@ -95,6 +95,10 @@ Supported attachments: PDF, Excel (`.xlsx`, `.xlsm`, `.xls`), Word (`.docx`), Po
 
 No configuration is needed: `CONTROLLER_INBOX_LLM=auto` (the default) uses a model whenever LM Studio's server has one loaded, and files from the script draft when it does not. `python -m controller_inbox llm-check` shows the loaded model, times a sample reading, and estimates how long the waiting queue will take.
 
+CloseDesk uses the model you have loaded in LM Studio. With nothing loaded, it asks LM Studio for the chat model it last saw loaded, and LM Studio loads that one. It never takes the first model on LM Studio's list, which with just-in-time loading is every model you have downloaded. If it has never seen one loaded, Setup says to load one. `CONTROLLER_INBOX_LLM_MODEL` pins a model instead.
+
+A question can take a few minutes on a laptop without a graphics card, because the model reads the email and its files before it writes a word. The chat waits up to 5 minutes for the first word, longer if `CONTROLLER_INBOX_LLM_TIMEOUT` is set higher. A model that is busy loading or reading isn't taken for one that has stopped. If it does run out of time, the chat says so and suggests asking again.
+
 | Problem with small models | What CloseDesk does |
 | --- | --- |
 | Short context windows | Each packet is plain text under a hard budget (`CONTROLLER_INBOX_LLM_MAX_PROMPT_CHARS`, default 6000). |
@@ -191,7 +195,7 @@ Tell it when it is wrong: **Not fraud**, **Trust sender**, **Trust everyone at @
 # Optional overrides (see .env.example)
 CONTROLLER_INBOX_LLM=auto                     # auto | true | false
 CONTROLLER_INBOX_LLM_BASE_URL=http://127.0.0.1:1234/v1   # Ollama: http://127.0.0.1:11434/v1
-CONTROLLER_INBOX_LLM_MODEL=local-model        # "whatever is loaded"; set an id to pin one
+CONTROLLER_INBOX_LLM_MODEL=local-model        # "whatever is loaded" (else the last one loaded); set an id to pin one
 ```
 
 The Bionic Studio skill in `bionic/closedesk-inbox/` lets the agent do the reading in chat and answer "what do I need to do today?" with `tool focus`.

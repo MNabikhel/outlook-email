@@ -48,6 +48,9 @@ REPLY_SHAPE = (
 )
 
 _STATUS_TTL_SECONDS = 30.0
+# How long a server that answered stays answering when a check then times out: it is busy (loading a model, reading
+# a long prompt on a laptop), not gone.
+BUSY_GRACE_SECONDS = 600.0
 _status_cache: dict[str, tuple[float, "ModelStatus"]] = {}
 
 
@@ -126,12 +129,19 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         status.reachable = True
         status.models = ids
         listing = _lm_studio_models(settings, base, timeout)
+        if listing.busy and cached and cached[1].reachable and time.monotonic() - cached[0] < BUSY_GRACE_SECONDS:
+            # LM Studio answered, then took too long to list its models: busy loading one or reading a long prompt.
+            return ModelStatus(**{**cached[1].__dict__, "mode": mode})
         loaded, reasoning, contexts, reloadable, seeing = (
             listing.loaded, listing.reasoning, listing.contexts, listing.reloadable, listing.seeing
         )
         status.loaded = loaded
         status.lm_studio = listing.route == "v1"
-        status.model = _pick_model(settings.llm_model, ids, loaded)
+        # LM Studio (or a server that didn't say what it has loaded) lists every model it could load.
+        knows_loaded = bool(listing.route) or listing.busy
+        status.model = _pick_model(settings.llm_model, ids, loaded, lm_studio=knows_loaded, remembered=remembered_model(settings))
+        if listing.route and status.model in loaded:
+            remember_model(settings, reloadable.get(status.model, (status.model, 0))[0])
         status.reasoning = reasoning.get(status.model, [])
         status.reasoning_options = reasoning
         status.context_length = contexts.get(status.model, 0)
@@ -163,6 +173,10 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
             if not status.context_length and isinstance(props.get("default_generation_settings"), dict):
                 status.context_length = _int(props["default_generation_settings"].get("n_ctx"))
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
+        if isinstance(exc, httpx.TimeoutException) and cached and cached[1].reachable and time.monotonic() - cached[0] < BUSY_GRACE_SECONDS:
+            # It answered a moment ago: a model server loading a model or reading a long prompt can take longer than
+            # this check allows. It is busy, not gone, and the chat still uses it (the next check asks again).
+            return ModelStatus(**{**cached[1].__dict__, "mode": mode})
         status.error = _short_error(exc)
     _status_cache[key] = (time.monotonic(), status)
     return status
@@ -177,6 +191,8 @@ class _Listing:
     reloadable: dict[str, tuple[str, int]] = field(default_factory=dict)
     seeing: set[str] = field(default_factory=set)
     downloaded: list[str] = field(default_factory=list)
+    # No route answered because one took too long (LM Studio busy), not because the server hasn't got them.
+    busy: bool = False
 
 
 def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing:
@@ -189,10 +205,14 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
     don't have these routes; they get empty results.
     """
     root = base[: -len("/v1")] if base.endswith("/v1") else base
+    busy = False
     for path in ("/api/v1/models", "/api/v0/models"):
         try:
             response = httpx.get(root + path, headers=_headers(settings), timeout=timeout)
             data = response.json() if response.status_code == 200 else None
+        except httpx.TimeoutException:
+            busy = True
+            continue
         except (httpx.HTTPError, ValueError):
             continue
         if not isinstance(data, dict):
@@ -225,7 +245,9 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
                         if sees:
                             seeing.add(str(instance["id"]))
             return _Listing("v1", loaded, reasoning, contexts, reloadable, seeing, downloaded)
-        if isinstance(data.get("data"), list):
+        # LM Studio's older route says of each model whether it is loaded; a server that answers it with a plain list
+        # of the models it serves isn't LM Studio.
+        if isinstance(data.get("data"), list) and any(isinstance(item, dict) and "state" in item for item in data["data"]):
             for item in data["data"]:
                 if isinstance(item, dict) and item.get("id") and item.get("state") == "loaded" and item.get("type") in {"llm", "vlm"}:
                     loaded.append(str(item["id"]))
@@ -236,7 +258,7 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
                 if isinstance(item, dict) and item.get("id") and item.get("type") == "vlm":
                     downloaded.append(str(item["id"]))
             return _Listing("v0", loaded, reasoning, contexts, reloadable, seeing, downloaded)
-    return _Listing()
+    return _Listing(busy=busy)
 
 
 def _llama_cpp_props(settings: Settings, base: str, timeout: float) -> dict:
@@ -283,17 +305,47 @@ def document_reader(model: str) -> bool:
     return any(name in plain for name in DOCUMENT_READERS)
 
 
-def _pick_model(requested: str, ids: list[str], loaded: list[str] | None = None) -> str:
+def _pick_model(
+    requested: str, ids: list[str], loaded: list[str] | None = None, *, lm_studio: bool = False, remembered: str = ""
+) -> str:
+    """The model to ask: the one set in the settings, else the chat model loaded now. With nothing loaded, LM Studio
+    (``lm_studio``) lists every downloaded model and loads whichever a request names, so the first on its list (a
+    coding model, say) would be loaded though nobody chose it: only the chat model last seen loaded (``remembered``)
+    is asked for, or none, and Setup says to load one. Other servers list only what they serve."""
     if requested in ids:
         return requested
     chat = [item for item in loaded or [] if not document_reader(item)]
     if chat:
         return chat[0]
+    if lm_studio:
+        return remembered if remembered in ids and not document_reader(remembered) else ""
     if not ids:
         return "" if requested in {"", "local-model"} else requested
     others = [item for item in ids if not document_reader(item)]
     usable = [item for item in others if "embed" not in item.lower()]
     return (usable or others or [""])[0]
+
+
+# The chat model last seen loaded in LM Studio, kept in the data folder: asked for (and so loaded) when nothing is.
+LAST_MODEL_FILE = "chat_model.txt"
+
+
+def remembered_model(settings: Settings) -> str:
+    try:
+        return (settings.data_dir / LAST_MODEL_FILE).read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return ""
+
+
+def remember_model(settings: Settings, model: str) -> None:
+    """Kept only where CloseDesk keeps its data already (the data folder exists)."""
+    if not model or document_reader(model) or model == remembered_model(settings):
+        return
+    try:
+        if settings.data_dir.is_dir():
+            (settings.data_dir / LAST_MODEL_FILE).write_text(model, encoding="utf-8")
+    except OSError:
+        pass
 
 
 class ModelUnavailable(RuntimeError):
@@ -308,6 +360,9 @@ class EmptyReply(RuntimeError):
 # needs far more than the usual token budget unless thinking can be turned off.
 THINKING_ROOM = 2048
 THINKING_TIMEOUT = 300.0
+# The chat's calls send a long prompt (an email with its files, or a file's tables): a laptop can take minutes to read
+# it before the first word comes back, longer when LM Studio loads the model first.
+CHAT_TIMEOUT = 300.0
 _RETRYABLE = {400, 404, 415, 422, 500, 501}
 # A server that refuses a parameter says so with one of these; a 500 or 404 can be a busy or reloading server.
 _REFUSES = {400, 415, 422, 501}
@@ -710,7 +765,7 @@ def complete_text(
             payload["temperature"] = temperature
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(httpx.post, url, payload, settings, timeout=_timeout(settings, budget))
+        response = _post_chat(httpx.post, url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
         _raise_for(response)
         try:
             data = response.json()
@@ -786,7 +841,9 @@ def _stream_once(
         payload["temperature"] = temperature
     if sampling:
         payload.update(sampling)
-    timeout = httpx.Timeout(max(settings.llm_timeout, wait or 0.0), connect=5.0)
+    # Nothing comes until the model has read the whole prompt (and LM Studio has loaded it, if it wasn't), so a laptop
+    # reading a long prompt isn't taken for a model that stopped.
+    timeout = httpx.Timeout(max(settings.llm_timeout, CHAT_TIMEOUT, wait or 0.0), connect=5.0)
     with httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
         if effort and response.status_code in _RETRYABLE:
             rejected = True
@@ -1045,7 +1102,7 @@ def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict],
         payload["tools"] = tools
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(httpx.post, url, payload, settings, timeout=_timeout(settings, budget))
+        response = _post_chat(httpx.post, url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
         text = response.text[:600]
         if response.status_code in _RETRYABLE and re.search(r"\btools?\b|function", text, re.I) and not _OVERFLOW_RE.search(text):
             # This question goes on without tools. The model is only remembered as having none when the server
@@ -1241,3 +1298,13 @@ def _headers(settings: Settings) -> dict[str, str]:
 def _short_error(exc: Exception) -> str:
     text = str(exc) or exc.__class__.__name__
     return text.splitlines()[0][:160]
+
+
+def failure_note(exc: Exception) -> str:
+    """Why the chat's model didn't answer, in words a person can act on."""
+    if isinstance(exc, httpx.TimeoutException):
+        return (
+            "The local model took too long to start answering: LM Studio may still be loading it or reading a long "
+            "prompt. Ask again in a minute; on a slow computer, give it longer with CONTROLLER_INBOX_LLM_TIMEOUT."
+        )
+    return f"The local model didn't answer ({str(exc)[:120]})."
