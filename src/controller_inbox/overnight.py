@@ -149,14 +149,17 @@ def run_overnight(
     reader: LocalReader | None = None,
     on_progress: Progress | None = None,
     vision_minutes: float | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict:
     """One full pass. Raises ``RunBusy`` instead of racing another run over the same drop folder. ``vision_minutes``:
-    how long it may spend reading scanned pages with the vision model (default ``Settings.vision_minutes_per_run``)."""
+    how long it may spend reading scanned pages with the vision model (default ``Settings.vision_minutes_per_run``);
+    ``should_stop``: the reading of scans ends after the page being read when it says so."""
     with run_lock(settings) as locked:
         if not locked:
             raise RunBusy()
         return _run_overnight(
-            store, settings, now=now, limit=limit, sync_graph=sync_graph, reader=reader, on_progress=on_progress, vision_minutes=vision_minutes
+            store, settings, now=now, limit=limit, sync_graph=sync_graph, reader=reader, on_progress=on_progress,
+            vision_minutes=vision_minutes, should_stop=should_stop,
         )
 
 
@@ -170,6 +173,7 @@ def _run_overnight(
     reader: LocalReader | None,
     on_progress: Progress | None,
     vision_minutes: float | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     settings.ensure_data_dir()
@@ -198,7 +202,8 @@ def _run_overnight(
     if reading["model"] and not (stats and stats.stopped_reason):
         try:
             looked = read_waiting(
-                store, settings, minutes=vision_minutes, on_progress=(lambda i, n, name: on_progress("vision", i, n, name)) if on_progress else None
+                store, settings, minutes=vision_minutes, should_stop=should_stop,
+                on_progress=(lambda i, n, name: on_progress("vision", i, n, name)) if on_progress else None,
             )
         except Exception:  # the rest of the run (search index, digest) still happens
             log.warning("Reading scans with the vision model failed", exc_info=True)

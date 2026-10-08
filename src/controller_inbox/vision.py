@@ -69,6 +69,12 @@ WAIT_SECONDS = 900.0
 # In "auto", pages are read while the question waits when they take no longer than this all told; longer reads are
 # offered with the time they'd take.
 QUICK_SECONDS = 60.0
+# With a document reader (trusted_reader), a question about a scan waits for its reading when that takes up to this
+# long, and before this computer's speed is known, for up to this many pages; Process new mail reads waiting scans as
+# long as the overnight run does. A general model's reading only helps where it agrees with OCR, so it is waited for
+# only when quick.
+READER_WAIT_SECONDS = 600.0
+READER_FIRST_PAGES = 3
 # One request reads at most this many pages, so a long scan isn't a job of hours by accident.
 MAX_PAGES = 20
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"}
@@ -119,6 +125,33 @@ def reader_for(model: str) -> Reader:
     return next((reader for key, reader in READERS.items() if key in plain), GENERAL)
 
 
+def trusted_reader(model: str) -> bool:
+    """A document reader's reading is the page, over OCR's: on 29 scanned pages of 26 documents none of the models had
+    seen, OvisOCR2 read none of 2,209 figures wrong and put 99.6% in their right row, where OCR misread 24 and lost the
+    table (README). OCR's reading stays for a page the reader found nothing on, and its differences are listed."""
+    return reader_for(model or "") is not GENERAL
+
+
+# A document reader's reading of the whole page has at least this share of the different figures OCR read (OvisOCR2:
+# 87% or more on all 39 test pages); one with less stopped early or read something else, and is weighed as any other.
+READER_COVERS = 0.5
+
+
+def _covers(comparison: Comparison) -> bool:
+    if not comparison.first_kinds:  # OCR read no figures, or a comparison kept before the count was: not known to cover
+        return not comparison.first_figures
+    return comparison.confirmed_kinds / comparison.first_kinds >= READER_COVERS
+
+
+def shown_choice(comparison: Comparison, model_page: str, *, model: str, first_name: str) -> str:
+    """Which reading a page is shown as: a document reader's over OCR's (not over a PDF's own text) when it read the
+    page and has most of OCR's figures, else as the comparison chose. The chat, the file's page and the workspace
+    all go by this."""
+    if first_name == "OCR" and trusted_reader(model) and said_something(model_page) and _covers(comparison):
+        return "model"
+    return comparison.choice
+
+
 def reading_model(settings: Settings) -> str:
     """The model that reads pages: the one chosen in Setup, while the server has it; else a document reader the server
     has (LM Studio loads a downloaded one when it is first asked); else the chat model when it can see. "" when there
@@ -167,6 +200,16 @@ def save_mode(settings: Settings, store: Store, mode: str, model: str | None = N
         model = "" if model.strip() == "auto" else model.strip()[:200]
         store.set_state(MODEL_KEY, model)
         settings.vision_model = model
+
+
+def reads_by_default(settings: Settings) -> bool:
+    """Scans are read with a document reader, whose reading is the page: they are read without being asked."""
+    return settings.vision_mode == "auto" and trusted_reader(reading_model(settings))
+
+
+def process_minutes(settings: Settings) -> float:
+    """How long Process new mail may spend reading waiting scans."""
+    return settings.vision_minutes_per_run if reads_by_default(settings) else QUICK_SECONDS / 60
 
 
 def available(settings: Settings) -> bool:
@@ -921,9 +964,10 @@ class Comparison:
         )
 
 
-def compare(first: str, model_page: str, *, ocr: bool = True) -> Comparison:
+def compare(first: str, model_page: str, *, ocr: bool = True, trusted: bool = False) -> Comparison:
     """Figure by figure, and by each reading's printed totals: which reading the page is shown as. ``ocr``: the
-    first reading is OCR's (a scan or a picture), not a PDF's own text."""
+    first reading is OCR's (a scan or a picture), not a PDF's own text. ``trusted``: the model is a document reader
+    (``trusted_reader``), whose reading is shown whenever it read the page."""
     mine, theirs = figures(_ungrouped(model_page)), figures(_ungrouped(first))
     model_count = Counter({value: len(shown) for value, shown in mine.items()})
     first_count = Counter({value: len(shown) for value, shown in theirs.items()})
@@ -940,7 +984,10 @@ def compare(first: str, model_page: str, *, ocr: bool = True) -> Comparison:
     comparison.only_first = [theirs[value][0] for value in left_first]
     comparison.model_totals = _totals(model_page)
     comparison.first_totals = _totals(first)
-    comparison.choice = _choose(comparison, ocr=ocr) if said_something(first) else ("model" if model_page.strip() else "first")
+    if trusted and ocr and said_something(model_page) and _covers(comparison):
+        comparison.choice = "model"
+    else:
+        comparison.choice = _choose(comparison, ocr=ocr) if said_something(first) else ("model" if model_page.strip() else "first")
     return comparison
 
 
@@ -1039,12 +1086,16 @@ def _digits(value: Decimal) -> str:
 # The page as CloseDesk shows it ---------------------------------------------------------------
 
 
-def merged_page(first: str, model_markdown: str, comparison: Comparison, *, first_name: str, model: str) -> str:
+def merged_page(
+    first: str, model_markdown: str, comparison: Comparison, *, first_name: str, model: str, model_page: str | None = None
+) -> str:
     """The page as the chat and the table lookup read it: the reading that holds up best, with what the other one
-    read differently written under it."""
-    model_page = page_text(model_markdown)
+    read differently written under it. ``model_page``: ``page_text(model_markdown)``, when already made."""
+    model_page = page_text(model_markdown) if model_page is None else model_page
     shown = model_page if comparison.choice == "model" else first
     who = f"{MODEL_NAME} ({model})" if model else MODEL_NAME
+    if comparison.choice == "model" and trusted_reader(model) and first_name == "OCR":
+        return _reader_page(first, model_page, comparison, first_name=first_name, who=who)
     if comparison.choice == "model" and not said_something(first):
         return (
             f"{NOTE}, by {first_name} and by {who}: {first_name} {ALONE}, so it is shown as {MODEL_NAME} read it and "
@@ -1069,6 +1120,25 @@ def merged_page(first: str, model_markdown: str, comparison: Comparison, *, firs
     if comparison.choice == "model" and comparison.only_first:
         lines.append(f"[Read only by {first_name}: {'; '.join(comparison.only_first[:LISTED])}]")
     return "\n".join(line for line in lines if line)
+
+
+def _reader_page(first: str, model_page: str, comparison: Comparison, *, first_name: str, who: str) -> str:
+    """A document reader's page: shown as it read it. What the first reading had differently is listed for whoever
+    checks the page, worded so the answer check doesn't flag the reader's figures (OCR's misreads, mostly)."""
+    if not said_something(first):
+        return f"{NOTE}, by {first_name} and by {who}, a document reader: {first_name} found no text here.]\n{model_page}"
+    same = f"{comparison.confirmed} of {comparison.figures} figures read the same" if comparison.figures else "no figures to compare"
+    matched, mismatched = comparison.model_totals
+    totals = ""
+    if matched or mismatched:
+        totals = f"; its printed totals {'add up' if not mismatched else f'add up {matched} of {matched + mismatched} times'}"
+    lines = [f"{NOTE}, by {first_name} and by {who}: {same}. Shown: the document reader's reading{totals}.]", model_page]
+    if comparison.differ:
+        listed = "; ".join(f"{theirs} where the reader read {mine}" for mine, theirs in comparison.differ[:LISTED])
+        lines.append(f"[{first_name} read differently: {listed}]")
+    if comparison.only_first:
+        lines.append(f"[Read only by {first_name}: {'; '.join(comparison.only_first[:LISTED])}]")
+    return "\n".join(lines)
 
 
 _ONLY_MODEL = re.compile(r"^\[Read only by the vision model: (.+)\]$", re.M)
@@ -1159,9 +1229,16 @@ def _saved(row: dict) -> dict:
 def _page_for(first: str, row: dict) -> str:
     saved = _saved(row)
     model_text = row.get("model_text") or ""
-    ocr = (saved.get("first_name") or "OCR") == "OCR"
-    comparison = Comparison.from_dict(saved) if row.get("first") == first and saved else compare(first, page_text(model_text), ocr=ocr)
-    return merged_page(first, model_text, comparison, first_name=saved.get("first_name") or "OCR", model=row.get("model") or "")
+    first_name = saved.get("first_name") or "OCR"
+    model = row.get("model") or ""
+    model_page = page_text(model_text)
+    if row.get("first") == first and saved:
+        comparison = Comparison.from_dict(saved)
+    else:
+        comparison = compare(first, model_page, ocr=first_name == "OCR", trusted=trusted_reader(model))
+    # Also a reading kept before document readers were shown over OCR.
+    comparison.choice = shown_choice(comparison, model_page, model=model, first_name=first_name)
+    return merged_page(first, model_text, comparison, first_name=first_name, model=model, model_page=model_page)
 
 
 # Reading pages and keeping them ---------------------------------------------------------------
@@ -1256,7 +1333,7 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
             continue
         seconds = time.monotonic() - started
         named = first_name(first, page, scanned, att.filename)
-        comparison = compare(first, page_text(markdown), ocr=named == "OCR")
+        comparison = compare(first, page_text(markdown), ocr=named == "OCR", trusted=trusted_reader(model))
         store.save_page_reading(
             att.id, page, first=first, model_text=markdown, model=model, seconds=seconds, sha256=att.sha256,
             comparison=json.dumps({**comparison.to_dict(), "first_name": named, "kind": kind}),
@@ -1340,11 +1417,17 @@ UNKNOWN_SECONDS = 300.0
 
 
 def read_waiting(
-    store: Store, settings: Settings, *, minutes: float | None = None, on_progress: Callable[[int, int, str], None] | None = None
+    store: Store,
+    settings: Settings,
+    *,
+    minutes: float | None = None,
+    on_progress: Callable[[int, int, str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> Result:
     """In "auto": the scanned pages and pictures still waiting for a second reading, newest mail first, for as long
     as the run may spend (``minutes``; default ``Settings.vision_minutes_per_run``). A page is only started when it
-    is expected to fit, at this computer's speed (``UNKNOWN_SECONDS`` before the first page shows it)."""
+    is expected to fit, at this computer's speed (``UNKNOWN_SECONDS`` before the first page shows it), and while
+    ``should_stop`` (Stop in the bar at the top) says go on."""
     total = Result()
     if settings.vision_mode != "auto" or not can_render() or not available(settings):
         return total
@@ -1362,6 +1445,9 @@ def read_waiting(
         for _position, att, data, pages in files_to_read(store, settings, email, doubtful=False):
             for page in pages:
                 if time.monotonic() - started + expected() > budget or total.pages + len(total.failed) >= RUN_PAGES:
+                    return total
+                if should_stop and should_stop():
+                    total.stopped = True
                     return total
                 if on_progress:
                     on_progress(total.pages, 0, f"{att.filename}, page {page}")
@@ -1441,6 +1527,9 @@ def side_by_side(rows: dict[int, dict]) -> list[dict]:
     for page, row in sorted(rows.items()):
         saved = _saved(row)
         comparison = Comparison.from_dict(saved)
+        comparison.choice = shown_choice(
+            comparison, page_text(row.get("model_text") or ""), model=row.get("model") or "", first_name=saved.get("first_name") or "OCR"
+        )
         mine = {a for a, _b in comparison.differ} | set(comparison.only_model)
         theirs = {b for _a, b in comparison.differ} | set(comparison.only_first)
         out.append({
@@ -1575,6 +1664,9 @@ def readings_json(rows: dict[int, dict]) -> list[dict]:
     for page, row in sorted(rows.items()):
         saved = _saved(row)
         comparison = Comparison.from_dict(saved)
+        comparison.choice = shown_choice(
+            comparison, page_text(row.get("model_text") or ""), model=row.get("model") or "", first_name=saved.get("first_name") or "OCR"
+        )
         out.append({
             "page": page,
             "first_name": saved.get("first_name") or "OCR",

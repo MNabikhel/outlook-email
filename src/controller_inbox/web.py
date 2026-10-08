@@ -281,7 +281,8 @@ class ProcessJob:
 
     @property
     def stopping(self) -> bool:
-        """Asked to stop: a vision read stops before its next page (Process new mail runs to the end)."""
+        """Asked to stop: reading scans with the vision model stops before its next page (in Process new mail too,
+        whose other steps run to the end)."""
         return self._stop.is_set()
 
     def request_stop(self) -> bool:
@@ -994,7 +995,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         from controller_inbox.overnight import run_overnight
 
         started = job.start(
-            lambda progress: run_overnight(store, settings, sync_graph=False, on_progress=progress, vision_minutes=vision.QUICK_SECONDS / 60)
+            lambda progress: run_overnight(
+                store, settings, sync_graph=False, on_progress=progress, vision_minutes=vision.process_minutes(settings),
+                should_stop=lambda: job.stopping,
+            )
         )
         busy = "busy-vision" if (job.snapshot()["about"] or {}).get("kind") == "vision" else "busy"
         return RedirectResponse(f"/?notice={'processing' if started else busy}", status_code=303)
@@ -1152,6 +1156,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         missing = settings.vision_model if settings.vision_model and settings.vision_model not in model.vision_models else ""
         return {
             "reachable": model.reachable,
+            "by_default": bool(reader) and vision.trusted_reader(reader),
             "sees": bool(reader),
             "reader": reader,
             "reader_label": vision.reader_for(reader).label if reader else "",

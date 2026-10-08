@@ -5,7 +5,7 @@
     <strong>{{ stage_labels.get(job.stage, job.stage) }}{% if job.total > 1 %} · {{ job.done }} of {{ job.total }}{% endif %}</strong>
     <span>{{ job.note }}</span>
   </div>
-  {% if job.stage == 'vision' and job.about and not job.stopping %}
+  {% if job.stage == 'vision' and not job.stopping %}
   <form method="post" action="/process/stop" class="job-stop"><button type="submit" class="ghost">Stop after this page</button></form>
   {% endif %}
   <progress {% if job.total %}value="{{ job.done }}" max="{{ job.total }}"{% endif %}></progress>

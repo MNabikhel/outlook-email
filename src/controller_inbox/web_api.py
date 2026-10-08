@@ -644,7 +644,10 @@ def register_workspace(
         from controller_inbox.overnight import run_overnight
 
         started = job.start(
-            lambda progress: run_overnight(store, settings, sync_graph=False, on_progress=progress, vision_minutes=vision.QUICK_SECONDS / 60)
+            lambda progress: run_overnight(
+                store, settings, sync_graph=False, on_progress=progress, vision_minutes=vision.process_minutes(settings),
+                should_stop=lambda: job.stopping,
+            )
         )
         return {"ok": True, "started": started, "job": job.snapshot()}
 

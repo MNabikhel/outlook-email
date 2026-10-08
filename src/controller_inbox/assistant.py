@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -663,10 +664,21 @@ _ABOUT_FILES = re.compile(
 
 def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current: EmailRecord, question: str):
     """Pages of the email's scans, pictures and doubtful tables the vision model hasn't read, when the question is
-    about what is in them. In "auto", with this computer's speed known and the pages quick to read, they are read
-    before answering; otherwise the answer comes from what was read before, and the event returned offers the read
-    with the time it would take. Nothing is read or offered while a read is already running."""
-    if not vision.can_render() or not vision.available(settings) or vision.busy():
+    about what is in them. In "auto", with a document reader, they are read before answering when that takes up to
+    ten minutes (or, before this computer's speed is known, they are three pages at most); with a general model, when
+    this computer's speed is known and the pages are quick to read. Otherwise the answer comes from what was read
+    before, and the event returned offers the read with the time it would take. Nothing is read or offered while a
+    read is already running."""
+    if not vision.can_render() or not vision.available(settings):
+        return None
+    if vision.busy():
+        if vision.reads_by_default(settings) and _ABOUT_FILES.search(question):
+            try:
+                waiting = vision.files_to_read(store, settings, current)
+            except Exception:
+                waiting = []
+            if waiting:
+                yield {"type": "step", "text": "The document reader is reading other pages now; this answer uses what was read so far."}
         return None
     try:
         files = vision.files_to_read(store, settings, current)
@@ -681,7 +693,52 @@ def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current
         return None
     pages = sum(len(todo) for *_rest, todo in files)
     seconds = vision.estimate(store, settings, pages)
-    if settings.vision_mode == "auto" and seconds is not None and seconds <= vision.QUICK_SECONDS:
+    if vision.reads_by_default(settings) and (
+        (seconds is not None and seconds <= vision.READER_WAIT_SECONDS) or (seconds is None and pages <= vision.READER_FIRST_PAGES)
+    ):
+        # A document reader's reading is the page: worth waiting for, page by page so the wait shows. It stops at a
+        # page that fails, when another read starts, or when what is left would take the wait past its limit (this
+        # computer's speed is known after the first page); what is left is then offered.
+        started = time.monotonic()
+        queue = [(position, att, data, todo[: vision.MAX_PAGES]) for position, att, data, todo in files]
+        beyond = [(position, att, data, todo[vision.MAX_PAGES :]) for position, att, data, todo in files if len(todo) > vision.MAX_PAGES]
+        left: list = []
+        stopped = ""
+        for number, (position, att, data, todo) in enumerate(queue):
+            for index, page in enumerate(todo):
+                each = vision.estimate(store, settings, 1)
+                remaining = len(todo) - index + sum(len(later) for *_rest, later in queue[number + 1 :])
+                if (number or index) and each is not None and time.monotonic() - started + each * remaining > vision.READER_WAIT_SECONDS:
+                    stopped = "time"
+                elif vision.busy():
+                    stopped = "busy"
+                if stopped:
+                    left = [(position, att, data, todo[index:]), *queue[number + 1 :]]
+                    break
+                took = vision.duration(each) if each is not None else "the first page shows how long this computer takes"
+                yield {"type": "step", "text": f"Reading {att.filename}, page {page} ({index + 1} of {len(todo)}), with the document reader ({took})"}
+                try:
+                    one = vision.read_pages(store, settings, current, att, data, [page])
+                except Exception as exc:  # the answer still comes, from what was read before
+                    log.warning("Reading %s page %s with the vision model failed", att.filename, page, exc_info=True)
+                    one = vision.Result(failed=[str(exc)[:160]])
+                if one.failed:
+                    stopped = "failed"
+                    why = re.sub(r"^page \d+: ", "", one.failed[0])
+                    yield {"type": "step", "text": f"The document reader couldn't read {att.filename} page {page} ({why}); the answer uses what was read."}
+                    break
+            if stopped:
+                break
+        fresh = chats.chat_mail(store, chats.chat_id_of(current.id)) if chats.chat_id_of(current.id) else store.get_email(current.id)
+        if fresh is not None:
+            ws.sources[:] = [fresh if email.id == current.id else email for email in ws.sources]
+        if not left and stopped != "failed":
+            left = beyond  # a file longer than one read takes: the rest is offered
+        if not left:
+            return None
+        files = left
+        seconds = vision.estimate(store, settings, sum(len(todo) for *_rest, todo in files))
+    elif settings.vision_mode == "auto" and seconds is not None and seconds <= vision.QUICK_SECONDS:
         for _position, att, data, todo in files:
             yield {"type": "step", "text": f"Reading {att.filename} with the vision model ({vision.duration(vision.estimate(store, settings, len(todo)) or 0)})"}
             try:

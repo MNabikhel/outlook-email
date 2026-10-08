@@ -1331,3 +1331,138 @@ def test_more_markup_a_reading_can_come_out_with():
     dashes = vision.page_text("<table><tr><td>Opening balance</td><td>-</td><td>-</td></tr>"
                               "<tr><td>Rent</td><td>1,200.00</td><td>1,000.00</td></tr></table>")
     assert "Line: Opening balance" in dashes and "Line: Rent | Column 2: 1,200.00" in dashes
+
+
+# The document reader by default -----------------------------------------------------------------------------------
+
+
+def test_the_document_readers_reading_is_the_page_and_ocrs_differences_raise_no_flags():
+    # OCR misreads two figures and adds two from the page's notes; the reader's reading has a total that doesn't add
+    # up as printed. A general model's reading wouldn't be shown (its totals hold up worse than OCR's, which has none),
+    # a document reader's is.
+    first = OCR_TEXT + "\nNote 7,710.00\nNote 3,054.00"
+    reading = BALANCE.replace("41,400", "41,900")
+    model_page = vision.page_text(reading)
+    assert vision.compare(first, model_page).choice == "first"
+    comparison = vision.compare(first, model_page, trusted=True)
+    assert comparison.choice == "model"
+    page = vision.merged_page(first, reading, comparison, first_name="OCR", model=OVIS)
+    assert page.startswith(f"[Read two ways, by OCR and by the vision model ({OVIS}):") and "Shown: the document reader's reading" in page
+    assert "[OCR read differently: 30,256 where the reader read 30,250; 41,400 where the reader read 41,900]" in page
+    assert vision.unconfirmed("[page 1]\n" + page) == {}, "OCR's misreads don't flag the reader's figures"
+    # OCR found nothing: the reader's reading, unflagged.
+    alone = vision.compare("(no text on this page)", model_page, trusted=True)
+    assert vision.unconfirmed("[page 1]\n" + vision.merged_page("(no text on this page)", BALANCE, alone, first_name="OCR", model=OVIS)) == {}
+    # A reading it found nothing on leaves OCR's.
+    assert vision.compare(OCR_TEXT, "", trusted=True).choice == "first"
+    assert vision.trusted_reader(OVIS) and not vision.trusted_reader(MODEL)
+
+
+def test_a_reading_kept_before_is_shown_as_the_document_reader_read_it():
+    row = {"first": OCR_TEXT, "model_text": BALANCE, "model": OVIS,
+           "comparison": json.dumps({**vision.compare(OCR_TEXT, vision.page_text(BALANCE)).to_dict(), "choice": "first", "first_name": "OCR"})}
+    shown = shown_text("[page 1]\n" + OCR_TEXT, {1: row})
+    assert "Shown: the document reader's reading" in shown and "Line: Accounts Receivable | 2026: 30,250" in shown
+
+
+def test_a_question_about_a_scan_waits_for_the_document_reader(scan, store, settings, reader_server, monkeypatch):
+    asked = _chat_model(monkeypatch)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: OVIS)
+    events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=scan.id))
+    assert not [event for event in events if event["type"] == "vision"], "read, not offered"
+    steps = [event["text"] for event in events if event["type"] == "step"]
+    assert "Reading balance sheet.pdf, page 1 (1 of 1), with the document reader (the first page shows how long this computer takes)" in steps
+    assert "Shown: the document reader's reading" in asked[-1] and "October 31 2026: 30,250" in asked[-1]
+    assert not [item for event in events if event["type"] == "check" for item in event["items"] if "vision model only" in item]
+
+
+def test_a_long_read_with_the_document_reader_is_still_offered(scan, store, settings, reader_server, monkeypatch):
+    _chat_model(monkeypatch)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: OVIS)
+    store.save_page_reading("earlier-file", 1, first="x", model_text="x", model=OVIS, seconds=900, comparison="{}", sha256="s")
+    monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("read without asking")))
+    events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=scan.id))
+    [offer] = [event for event in events if event["type"] == "vision"]
+    assert offer["estimate"] == 900
+
+
+def test_process_new_mail_reads_waiting_scans_with_the_document_reader(store, settings, reader_server, monkeypatch):
+    from controller_inbox import overnight
+
+    given = []
+    monkeypatch.setattr(overnight, "run_overnight", lambda *_a, vision_minutes=None, **_k: given.append(vision_minutes) or {})
+    monkeypatch.setattr(web.ProcessJob, "start", lambda self, target, **_kw: target(lambda *_a: None) is not None)
+    client = TestClient(web.create_app(settings, store))
+    client.post("/process", follow_redirects=False)
+    client.post("/api/process", headers=PAGE)
+    assert given == [settings.vision_minutes_per_run] * 2
+    vision.save_mode(settings, store, "ask")
+    assert vision.process_minutes(settings) == 1.0, "only when asked: nothing read by default"
+    page = client.get("/settings").text
+    assert "its reading is the one the chat and the table lookup use" in page
+
+
+def test_a_document_reader_is_not_shown_when_it_read_little_of_the_page_or_over_a_pdfs_own_text():
+    # A reading that stopped after the heading: OCR's whole page stays.
+    first = OCR_TEXT
+    short = vision.page_text("# BALANCE SHEET\n\n| | 2026 | 2025 |\n|---|---|---|\n| Cash | 12,400 | 9,800 |")
+    assert vision.compare(first, short, trusted=True).choice == "first"
+    row = {"first": first, "model_text": "# BALANCE SHEET\n\n| | 2026 | 2025 |\n|---|---|---|\n| Cash | 12,400 | 9,800 |", "model": OVIS,
+           "comparison": json.dumps({**vision.compare(first, short, trusted=True).to_dict(), "first_name": "OCR"})}
+    assert "Shown: OCR's reading" in shown_text("[page 1]\n" + first, {1: row})
+    # A PDF's own text is no OCR: weighed as before, and the reader's differences flagged.
+    pdf_text = vision.page_text(BALANCE)
+    misread = BALANCE.replace("30,250", "30,256")
+    comparison = vision.compare(pdf_text, vision.page_text(misread), ocr=False, trusted=True)
+    page = vision.merged_page(pdf_text, misread, comparison, first_name="the PDF's text", model=OVIS)
+    assert "document reader" not in page and vision.unconfirmed("[page 1]\n" + page)
+
+
+def test_the_file_page_shows_what_the_chat_uses_for_a_reading_kept_before(scan, store, settings, reader_server):
+    att = scan.attachments[0]
+    store.save_page_reading(att.id, 1, first=OCR_TEXT, model_text=BALANCE, model=OVIS, seconds=60, sha256=att.sha256,
+                            comparison=json.dumps({**vision.compare(OCR_TEXT, vision.page_text(BALANCE)).to_dict(), "choice": "first", "first_name": "OCR"}))
+    rows = store.page_readings(att.id, att.sha256)
+    assert vision.side_by_side(rows)[0]["comparison"].choice == "model"
+    assert vision.readings_json(rows)[0]["comparison"]["choice"] == "model"
+
+
+def test_reading_before_answering_stops_at_a_failure_and_offers_what_is_left(store, settings, reader_server, monkeypatch):
+    email = _ingest_scan(store, settings, monkeypatch, pages=3, subject="Three page scan")
+    _chat_model(monkeypatch)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: OVIS)
+    store.save_page_reading("earlier-file", 1, first="x", model_text="x", model=OVIS, seconds=30, comparison="{}", sha256="s")
+    calls = []
+
+    def failing(*_a, **_k):
+        calls.append(1)
+        raise httpx.ConnectError("LM Studio stopped")
+
+    monkeypatch.setattr(vision, "transcribe", failing)
+    events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=email.id))
+    steps = [event["text"] for event in events if event["type"] == "step"]
+    assert len(calls) == 1, "stopped at the first page that failed"
+    assert any("couldn't read balance sheet.pdf page 1" in step for step in steps)
+    # The time it would take past the limit: the rest is offered, not waited for.
+    monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: BALANCE)
+    store.save_page_reading("earlier-file", 1, first="x", model_text="x", model=OVIS, seconds=400, comparison="{}", sha256="s")
+    other = _ingest_scan(store, settings, monkeypatch, pages=3, subject="Another three page scan")
+    events = list(assistant.answer_stream(store, settings, "What is the accounts receivable for 2026?", email_id=other.id))
+    assert [event for event in events if event["type"] == "vision"], "a read past ten minutes is offered"
+
+
+def test_process_new_mail_reading_scans_can_be_stopped(store, settings, monkeypatch):
+    _ingest_scan(store, settings, monkeypatch, pages=3, subject="Scan to stop")
+    _can_read(monkeypatch)
+    read = []
+    monkeypatch.setattr(vision, "transcribe", lambda *_a, **_k: read.append(1) or BALANCE)
+    result = vision.read_waiting(store, settings, minutes=30, should_stop=lambda: len(read) >= 1)
+    assert result.stopped and len(read) == 1
+
+
+def test_a_reading_kept_without_the_figure_counts_is_not_taken_to_cover_the_page():
+    short = "# BALANCE SHEET"
+    saved = vision.compare(OCR_TEXT, vision.page_text(short)).to_dict()
+    del saved["first_kinds"], saved["confirmed_kinds"]
+    row = {"first": OCR_TEXT, "model_text": short, "model": OVIS, "comparison": json.dumps({**saved, "first_name": "OCR"})}
+    assert "Shown: OCR's reading" in shown_text("[page 1]\n" + OCR_TEXT, {1: row})

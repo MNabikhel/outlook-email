@@ -139,15 +139,15 @@ The model that reads pages:
 **Setup → Reading scans with the model's vision** says which model reads pages, and the list there picks another one. **Automatic** uses a document reader when LM Studio has one, then the chat model. The comparison:
 
 - A figure both readings have is confirmed. Where they differ, both are kept, and each reading's printed totals are checked against the rows above them.
-- The page the chat and the table lookup read is the model's reading when its totals hold up at least as well and most of its figures agree with OCR's; otherwise OCR's. Either way a note at the top of the page says which, and the figures the two read differently are listed under it.
-- A figure in an answer that only the vision model read (or read differently) gets a check under the answer: *check it against the file*.
+- With a document reader (OvisOCR2), the page the chat and the table lookup read is its reading, whenever it read the page (OCR's stays only for a page it found nothing on). A note at the top of the page says so, and what OCR read differently is listed under it for whoever checks; those differences are OCR's misreads almost every time, so they don't flag the answer.
+- With a general model (Qwen3.5), the page is the model's reading when its totals hold up at least as well and most of its figures agree with OCR's; otherwise OCR's. A figure in an answer that only that model read (or read differently) gets a check under the answer: *check it against the file*.
 - The file's page (and the workspace's file view) shows both readings side by side, the figures they differ on marked.
 
 Pages read this way: a scanned PDF's pages, a picture, and a PDF page whose table doesn't add up as read. The original is never changed: the first reading stays stored, the model's beside it, and a reading is only used while the file is the same one it was made from.
 
 Looking at a page is slow on a laptop without a graphics card (minutes a page; a graphics card or Apple silicon is many times faster), so CloseDesk times each page on this computer and says how long a read will take before it starts one. **Setup → Reading scans with the model's vision** chooses:
 
-- **Automatically** (default): the overnight run reads waiting scans for up to 30 minutes (`CONTROLLER_INBOX_VISION_MINUTES_PER_RUN`). **Process new mail** only reads pages this computer reads in under a minute, and starting CloseDesk reads none. When you ask about a scan, pages that take under a minute in all are read before the answer; a longer read is offered under the answer with its time (*Read 2 pages with the vision model as well: about 18 minutes on this computer*), runs in the background, and **Ask again** answers from both readings.
+- **Automatically** (default): the overnight run reads waiting scans for up to 30 minutes (`CONTROLLER_INBOX_VISION_MINUTES_PER_RUN`), and starting CloseDesk reads none. With a document reader, scans are read by default: **Process new mail** reads waiting scans for as long as the overnight run does, and a question about a scan not read yet waits for its reading, page by page, when that takes under 10 minutes (before this computer's speed is known, for up to 3 pages); a longer read is offered. With a general model, **Process new mail** only reads pages this computer reads in under a minute, and when you ask about a scan, pages that take under a minute in all are read before the answer; a longer read is offered under the answer with its time (*Read 2 pages with the vision model as well: about 18 minutes on this computer*), runs in the background, and **Ask again** answers from both readings.
 - **Only when I ask**: nothing is read until you click **Read with the vision model** on the file or under an answer.
 - **Off**.
 
