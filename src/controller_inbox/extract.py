@@ -116,7 +116,37 @@ def _drop_scripts(html: str) -> str:
 
 
 def html_to_text(html: str) -> str:
-    text = _drop_scripts(html)
+    text = strip_html_comments(_drop_scripts(html))
+    # What the reader is never shown (display:none, visibility:hidden, font-size:0, Outlook's mso-hide:all) is
+    # dropped with all it holds: "Our bank <span style="display:none">zz</span>details" reads "Our bank details".
+    # Each hidden element ends at its own closing tag; one that is never closed hides only its tag.
+    hidden = re.compile(
+        r"<([a-z][a-z0-9]*)\b[^<>]*?\bstyle\s*=\s*[\"'][^\"'<>]*?"
+        r"(?:display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all|font-size\s*:\s*0(?![.\d]*[1-9]))[^<>]*>",
+        re.I,
+    )
+    if hidden.search(text):
+        pieces: list[str] = []
+        pos = 0
+        unclosed: set[str] = set()
+        while (opener := hidden.search(text, pos)) is not None:
+            name, end = opener.group(1).lower(), opener.end()
+            void = name in {"img", "br", "hr", "input", "meta", "link", "wbr"} or opener.group(0).endswith("/>")
+            if not void and name not in unclosed:
+                depth = 1
+                for tag in re.compile(rf"<(/?){name}\b[^<>]*>", re.I).finditer(text, end):
+                    if not tag.group(0).endswith("/>"):
+                        depth += -1 if tag.group(1) else 1
+                    if depth == 0:
+                        end = tag.end()
+                        break
+                else:
+                    # Not closed by the end of the text: later ones of that name hide only their tag, so a long
+                    # run of unclosed tags is read once, not once each.
+                    unclosed.add(name)
+            pieces.append(text[pos : opener.start()])
+            pos = end
+        text = "".join(pieces) + text[pos:]
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"(?i)</p>", "\n", text)
     text = re.sub(r"(?i)</div>", "\n", text)
