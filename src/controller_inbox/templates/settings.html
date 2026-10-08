@@ -131,7 +131,7 @@
       {% if not vision_setup.reachable %}
       <p class="muted small">No model server is answering, so scans are read with OCR only. Start LM Studio's server to read them with a model as well.</p>
       {% elif vision_setup.missing %}
-      <p class="muted small">The model chosen to read pages, <b>{{ vision_setup.missing }}</b>, isn't in LM Studio now, so scans are read with OCR only. Choose another one below, or Automatic.</p>
+      <p class="muted small">The model chosen to read pages, <b>{{ vision_setup.missing }}</b>, isn't in LM Studio now or can't look at pictures, so scans are read with OCR only. Choose another one below, or Automatic.</p>
       {% elif vision_setup.sees and vision_setup.mode == 'off' %}
       <p class="muted small">Off: scans are read with OCR only. When it's on, pages are read by <b>{{ vision_setup.reader }}</b> ({{ vision_setup.reader_label }}) as well, side by side with OCR.</p>
       {% elif vision_setup.sees %}
@@ -149,7 +149,7 @@
           <select name="model">
             <option value="auto" {{ 'selected' if vision_setup.chosen == 'auto' }}>Automatic: a document reader when there is one{% if vision_setup.chosen == 'auto' and vision_setup.reader %} (now {{ vision_setup.reader }}){% endif %}</option>
             {% for choice in vision_setup.choices %}
-            <option value="{{ choice }}" {{ 'selected' if vision_setup.chosen == choice }}>{{ choice }}{% if choice == vision_setup.missing %} (not in LM Studio now){% endif %}</option>
+            <option value="{{ choice }}" {{ 'selected' if vision_setup.chosen == choice }}>{{ choice }}{% if choice == vision_setup.missing %} (can't read pages now){% endif %}</option>
             {% endfor %}
           </select>
         </label>

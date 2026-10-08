@@ -1121,8 +1121,8 @@ def test_setup_shows_and_saves_the_model_that_reads_pages(store, settings, reade
     settings.vision_model = "gemma-3-12b"
     assert vision.reading_model(settings) == "" and not vision.available(settings)
     page = client.get("/settings").text
-    assert "The model chosen to read pages, <b>gemma-3-12b</b>, isn't in LM Studio now" in page
-    assert '<option value="gemma-3-12b" selected>gemma-3-12b (not in LM Studio now)</option>' in page
+    assert "The model chosen to read pages, <b>gemma-3-12b</b>, isn't in LM Studio now or can't look at pictures" in page
+    assert '<option value="gemma-3-12b" selected>gemma-3-12b (can\'t read pages now)</option>' in page
     # Saving only the mode (the classic form without a model choice) keeps the model chosen.
     vision.save_mode(settings, store, "ask")
     assert settings.vision_model == "gemma-3-12b"
@@ -1138,8 +1138,6 @@ def test_with_vision_off_setup_still_says_which_model_would_read(store, settings
 def test_the_reader_is_loaded_with_room_for_a_page_once_and_never_taken_for_the_chat_model(scan, store, settings, reader_server, monkeypatch):
     _read(store, settings, scan.id)
     assert reader_server.loads == [{"model": OVIS, "context_length": 20480}], "loaded with room for a page and its reading"
-    _read(store, settings, scan.id)
-    assert len(reader_server.loads) == 1, "asked once"
     local_llm._status_cache.clear()
 
     def reader_loaded_first(request: httpx.Request) -> httpx.Response:
@@ -1165,7 +1163,7 @@ def test_lm_studio_without_just_in_time_loading_or_with_nothing_loaded(scan, sto
     assert _read(store, settings, scan.id).pages == 1 and server.loads == [{"model": OVIS, "context_length": 20480}]
     # LM Studio can't load it (not enough memory): the read stops saying so, and no page is counted as failed.
     local_llm._status_cache.clear()
-    local_llm._reader_loads.clear()
+    local_llm._reader_failed.clear()
     refused = ReaderServer(jit=False)
     original = refused.__call__
 
@@ -1175,9 +1173,10 @@ def test_lm_studio_without_just_in_time_loading_or_with_nothing_loaded(scan, sto
         return original(request)
 
     _serve(monkeypatch, no_memory)
-    result = _read(store, settings, scan.id)
-    assert result.pages == 0 and "couldn't load ath-maas_ovisocr2 with a 20,480-token context" in result.failed[0]
-    assert not store.page_failures(scan.attachments[0].id)
+    for _ in range(2):  # the second read isn't counted against the pages either, and LM Studio isn't asked again
+        result = _read(store, settings, scan.id)
+        assert result.pages == 0 and "couldn't load ath-maas_ovisocr2 with a 20,480-token context" in result.failed[0]
+        assert not store.page_failures(scan.attachments[0].id)
     local_llm._status_cache.clear()
 
     def nothing_loaded(request: httpx.Request) -> httpx.Response:
@@ -1255,3 +1254,80 @@ def test_a_reader_looping_on_an_empty_html_row_is_stopped():
     assert looped and kept.count("<tr><td></td>") == 1 and "1,200.00" in vision.page_text(kept)
     ledger = "<table>" + "".join(f"<tr><td>Row {n}</td><td>{n * 37:,}.00</td></tr>" for n in range(300)) + "</table>"
     assert not vision._looping(ledger)
+
+
+class LoadingServer(ReaderServer):
+    """LM Studio that keeps track of what is loaded, with just-in-time loading off and nothing loaded at first."""
+
+    def __init__(self, *, loaded: dict[str, int] | None = None, memory: bool = True):
+        super().__init__(jit=False)
+        self.instances = dict(loaded or {})  # instance id -> context
+        self.memory = memory
+        self.unloads: list[str] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": name} for name in self.instances]})
+        if path == "/api/v1/models/load":
+            body = json.loads(request.content)
+            self.loads.append(body)
+            if not self.memory:
+                return httpx.Response(500, json={"error": "not enough memory"})
+            name = body["model"] if body["model"] not in self.instances else body["model"] + ":2"
+            self.instances[name] = body["context_length"]
+            return httpx.Response(200, json={"status": "loaded"})
+        if path == "/api/v1/models/unload":
+            name = json.loads(request.content)["instance_id"]
+            self.unloads.append(name)
+            self.instances.pop(name, None)
+            return httpx.Response(200, json={})
+        if path == "/api/v1/models":
+            reader = {"type": "llm", "key": OVIS, "capabilities": {"vision": True},
+                      "loaded_instances": [{"id": name, "config": {"context_length": size}} for name, size in self.instances.items()]}
+            gemma = {"type": "vlm", "key": "gemma-3-12b", "loaded_instances": [], "capabilities": {"vision": True}}
+            return httpx.Response(200, json={"models": [reader, gemma]})
+        return FakeVisionServer.__call__(self, request)
+
+
+def test_the_reader_is_loaded_again_when_lm_studio_unloaded_it_and_longer_when_short(scan, store, settings, monkeypatch):
+    settings.llm = None
+    server = LoadingServer()
+    _serve(monkeypatch, server)
+    assert check_model(settings).vision_models == [OVIS], "a general model LM Studio wouldn't load isn't offered"
+    assert _read(store, settings, scan.id).pages == 1 and server.loads == [{"model": OVIS, "context_length": 20480}]
+    _read(store, settings, scan.id)
+    assert len(server.loads) == 1, "loaded with room for a page: not loaded again"
+    server.instances.clear()  # LM Studio restarted, or the reader was ejected
+    assert _read(store, settings, scan.id).pages == 1 and len(server.loads) == 2
+    # Loaded by hand with LM Studio's short default: a longer one is loaded, then the short one unloaded.
+    server.instances = {OVIS: 4096}
+    assert _read(store, settings, scan.id).pages == 1
+    assert server.unloads == [OVIS] and server.instances == {OVIS + ":2": 20480}
+    # No memory for the longer one: the short one stays, and pages are read with it.
+    short = LoadingServer(loaded={OVIS: 4096}, memory=False)
+    _serve(monkeypatch, short)
+    local_llm._status_cache.clear()
+    assert _read(store, settings, scan.id).pages == 1 and short.instances == {OVIS: 4096} and not short.unloads
+    # Saving Setup asks LM Studio again (memory may have been freed).
+    vision.save_mode(settings, store, "auto")
+    _read(store, settings, scan.id)
+    assert len(short.loads) == 2
+
+
+def test_more_markup_a_reading_can_come_out_with():
+    # A table never closed before the next one, and "<table>" in a sentence: no text is lost.
+    page = vision.page_text("<table><tr><td>A</td><td>1,111.00</td><td>2</td></tr>"
+                            "<table><tr><td>B</td><td>3,333.00</td><td>4</td></tr></table> after 6,666.00")
+    for figure in ("1,111.00", "3,333.00", "6,666.00"):
+        assert figure in page
+    prose = vision.page_text("A <table> is drawn below, 1,234.00 in all.\n\nThen 5,678.00.")
+    assert "1,234.00" in prose and "5,678.00" in prose
+    # A cell after a row's end starts a row; a span written "2.0" is two columns.
+    page = vision.page_text('<table><tr><td>Item</td><td colspan="2.0">Q3</td></tr><tr><td></td><td>Actual</td><td>Budget</td></tr>'
+                            "<tr><td>Rent</td><td>1,200.00</td><td>1,000.00</td></tr><td>Fees</td><td>50.00</td><td>40.00</td></table>")
+    assert "Item: Rent | Q3 Actual: 1,200.00 | Q3 Budget: 1,000.00" in page and "Item: Fees | Q3 Actual: 50.00" in page
+    # A row of dashes holds figures' places: it is no heading.
+    dashes = vision.page_text("<table><tr><td>Opening balance</td><td>-</td><td>-</td></tr>"
+                              "<tr><td>Rent</td><td>1,200.00</td><td>1,000.00</td></tr></table>")
+    assert "Line: Opening balance" in dashes and "Line: Rent | Column 2: 1,200.00" in dashes

@@ -138,13 +138,13 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         status.key, status.max_context = reloadable.get(status.model, ("", 0))
         status.instances = {instance: (reloadable.get(instance, (instance, 0))[0], contexts.get(instance, 0)) for instance in loaded}
         status.vision = status.model in seeing
-        # By model key, so a model is listed once whether or not it is loaded. A downloaded one when CloseDesk can have
-        # LM Studio load it (load_for_reading), or LM Studio loads it when asked (/v1/models lists every downloaded
-        # model with just-in-time loading on, the loaded ones only with it off).
+        # By model key, so a model is listed once whether or not it is loaded. A downloaded one when LM Studio loads it
+        # when asked (/v1/models lists every downloaded model with just-in-time loading on, the loaded ones only with
+        # it off), or it is a document reader, which CloseDesk has LM Studio load (load_for_reading).
         loaded_keys = {key for key, _context in status.instances.values()}
         status.vision_models = list(dict.fromkeys([
             *[status.instances[m][0] for m in loaded if m in seeing],
-            *[key for key in listing.downloaded if status.lm_studio or key in ids or key in loaded_keys],
+            *[key for key in listing.downloaded if key in ids or key in loaded_keys or (status.lm_studio and document_reader(key))],
         ]))
         # llama.cpp reports the loaded context on the model itself (meta.n_ctx). LM Studio uses its own route.
         if not status.context_length:
@@ -946,41 +946,56 @@ def _reload_with_context(settings: Settings) -> str:
     return f"LM Studio couldn't reload {status.key} ({errors[-1]}). Load it again in LM Studio."
 
 
-_reader_loads: set[str] = set()  # models CloseDesk had LM Studio load to read pages (tried once each)
+# Models LM Studio couldn't load to read pages: (when, what it said). Not asked again for a while, or until Setup is
+# saved, so a machine without the memory isn't asked on every page.
+_reader_failed: dict[str, tuple[float, str]] = {}
+READER_RETRY_SECONDS = 1800.0
 
 
 def load_for_reading(settings: Settings, model: str, context: int) -> str:
     """Have LM Studio load ``model`` (a downloaded model's key) with at least ``context`` tokens before pages are
     read with it. A model LM Studio loads on its own when first asked gets its default context, which can be shorter
-    than a page and its reading. Tried once per model, so a machine without the memory isn't asked again and again;
-    the chat model is left as it is. Returns what went wrong, or ""."""
+    than a page and its reading. Checked before every read, so a reader LM Studio unloaded since is loaded again; one
+    loaded too short is loaded again longer, the short one unloaded only once the longer one is in. The chat model is
+    left as it is. Returns what went wrong, or ""."""
     if not context:
         return ""
     with _context_lock:
-        status = check_model(settings)
-        if not status.lm_studio or model in _reader_loads:
+        status = check_model(settings, use_cache=False)
+        if not status.lm_studio:
             return ""
-        instance = next((name for name, (key, _size) in status.instances.items() if model in (name, key)), "")
-        if instance == status.model:
+        mine = [(size, name) for name, (key, size) in status.instances.items() if model in (name, key)]
+        size, instance = max(mine) if mine else (0, "")
+        if instance and (instance == status.model or not size or size >= context):
             return ""
-        size = status.instances[instance][1] if instance else 0
-        if instance and (not size or size >= context):
-            return ""
-        _reader_loads.add(model)
+        failed = _reader_failed.get(model)
+        if failed and time.monotonic() - failed[0] < READER_RETRY_SECONDS:
+            return failed[1]
         root = status.base_url[: -len("/v1")] if status.base_url.endswith("/v1") else status.base_url
         timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
         key = status.instances[instance][0] if instance else model
         try:
-            if instance:
-                httpx.post(root + "/api/v1/models/unload", json={"instance_id": instance}, headers=_headers(settings), timeout=timeout).raise_for_status()
             httpx.post(
                 root + "/api/v1/models/load", json={"model": key, "context_length": context}, headers=_headers(settings), timeout=timeout
             ).raise_for_status()
         except httpx.HTTPError as exc:
-            return f"LM Studio couldn't load {key} with a {context:,}-token context ({_short_error(exc)})."
+            problem = f"LM Studio couldn't load {key} with a {context:,}-token context ({_short_error(exc)})."
+            _reader_failed[model] = (time.monotonic(), problem)
+            return problem
         finally:
             _status_cache.clear()
+        _reader_failed.pop(model, None)
+        if instance:  # the shorter one, now that the longer one is loaded
+            try:
+                httpx.post(root + "/api/v1/models/unload", json={"instance_id": instance}, headers=_headers(settings), timeout=timeout)
+            except httpx.HTTPError:
+                pass
         return ""
+
+
+def forget_reader_failures() -> None:
+    """Setup was saved: a model LM Studio couldn't load is asked again (memory may have been freed)."""
+    _reader_failed.clear()
 
 
 def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict], *, max_tokens: int = 500) -> ToolReply:

@@ -34,7 +34,14 @@ from typing import TYPE_CHECKING
 
 from controller_inbox import tables
 from controller_inbox.documents import MAX_PDF_PAGES
-from controller_inbox.local_llm import EmptyReply, check_model, load_for_reading, strip_thinking, stream_text
+from controller_inbox.local_llm import (
+    EmptyReply,
+    check_model,
+    forget_reader_failures,
+    load_for_reading,
+    stream_text,
+    strip_thinking,
+)
 
 if TYPE_CHECKING:
     from controller_inbox.config import Settings
@@ -155,6 +162,7 @@ def save_mode(settings: Settings, store: Store, mode: str, model: str | None = N
         raise ValueError(f"Vision reading is one of {', '.join(MODES)}.")
     store.set_state(MODE_KEY, mode)
     settings.vision_mode = mode
+    forget_reader_failures()
     if model is not None:
         model = "" if model.strip() == "auto" else model.strip()[:200]
         store.set_state(MODEL_KEY, model)
@@ -379,10 +387,11 @@ def _transcribe_once(
 
 
 # An account or routing number beside its label in the model's markdown ("| Account Number | 123456789012 |",
-# "**Routing:** 021000021"): only the number is masked, so the table keeps its cells.
+# "**Routing:** 021000021", or an HTML table's "<td>Account No.</td><td>123456789012</td>"): only the number is
+# masked, so the table keeps its cells.
 _SECRET = re.compile(
     r"(\b(?:routing(?:\s+(?:number|no\.?))?|aba|sort\s+code|iban|account(?:\s+(?:number|no\.?|#))?|"
-    r"acct\.?(?:\s+(?:number|no\.?))?|a/c)\b[\s#:*_|.]*)([A-Z]{2}\d{2}[A-Z0-9]{10,30}|(?=(?:[A-Z]*\d){6})[A-Z0-9][A-Z0-9 -]{4,32}[A-Z0-9])\b",
+    r"acct\.?(?:\s+(?:number|no\.?))?|a/c)\b(?:[\s#:*_|.]|</?t[dhr]\b[^>]*>)*)([A-Z]{2}\d{2}[A-Z0-9]{10,30}|(?=(?:[A-Z]*\d){6})[A-Z0-9][A-Z0-9 -]{4,32}[A-Z0-9])\b",
     re.IGNORECASE,
 )
 
@@ -458,9 +467,6 @@ def trim_loop(text: str) -> tuple[str, bool]:
     """The reading without a line the model repeated at its end (kept once when it says something), or without
     the characters it repeated across its last line. Blank lines between repeated lines are passed over, as
     ``_looping`` does."""
-    start, size = _long_run(text.rstrip())
-    if start >= 0:
-        return text.rstrip()[: start + size], True  # the stretch once: it can be a row the page has
     tail = _RUN.search(text[-1500:].rstrip())
     if tail:
         cut = len(text[-1500:].rstrip()) - len(tail.group(0))
@@ -476,10 +482,22 @@ def trim_loop(text: str) -> tuple[str, bool]:
     kept = [lines[index] for index in filled]
     run = _repeated_tail(kept)
     if not kept or not (run >= LOOP_LINES or (run >= LOOP_BLANK_ROWS and _blank_row(kept[-1]))):
-        return text, False
+        return _without_long_run(text)
     first_dropped = len(kept) - run + (0 if _blank_row(kept[-1]) else 1)
     end = filled[first_dropped] if first_dropped < len(filled) else len(lines)
     return "\n".join(lines[:end]).rstrip(), True
+
+
+def _without_long_run(text: str) -> tuple[str, bool]:
+    """The reading without one stretch of a line repeated at its end, the stretch kept once (it can be a row the page
+    has), from a line or tag end on: the run can begin part way into a row."""
+    clean = text.rstrip()
+    start, size = _long_run(clean)
+    if start < 0:
+        return text, False
+    ends = [index for index in (clean.find("\n", start, start + size), clean.find(">", start, start + size)) if index >= 0]
+    end = min(ends) + 1 + size if ends else start + size
+    return clean[:end].rstrip(), True
 
 
 class CutOff(Exception):
@@ -509,76 +527,70 @@ _FORMATTING = re.compile(r"(?<!\*)\*\*(?!\*)|__|`")
 
 
 _TABLE_TAG = re.compile(r"<(/?)table\b[^>]*>", re.I)
+_STRAY_TAG = re.compile(r"</?(?:table|thead|tbody|tfoot|tr|td|th)\b[^>]*>", re.I)
 _PICTURE = re.compile(r"^\s*<img\b[^>]*>\s*$", re.M | re.I)  # a region the model saw as a picture (OvisOCR2)
 
 
 def _html_table_spans(text: str) -> list[tuple[int, int]]:
-    """Where each outermost table is; a table the reading stopped in runs to its end."""
-    spans, depth, start = [], 0, 0
+    """Where each table is: from its <table> to its </table>, or to the next <table> (a table inside a cell is
+    rare; one the reading never closed ends there), or to the end of the reading (one it stopped in)."""
+    spans, start = [], None
     for match in _TABLE_TAG.finditer(text):
         if not match.group(1):
-            if not depth:
-                start = match.start()
-            depth += 1
-        elif depth:
-            depth -= 1
-            if not depth:
-                spans.append((start, match.end()))
-    if depth:
+            if start is not None:
+                spans.append((start, match.start()))
+            start = match.start()
+        elif start is not None:
+            spans.append((start, match.end()))
+            start = None
+    if start is not None:
         spans.append((start, len(text)))
     return spans
 
 
 class _TableCells(HTMLParser):
-    """A table's rows of cells (kind, colspan, rowspan, text), as a browser would read them: a cell or a row ends at
-    the next one even without its closing tag, other tags are spaces, and a table inside a cell is that cell's text."""
+    """A table's rows of cells [kind, colspan, rowspan, text parts], as a browser would read them: a cell or a row
+    ends at the next one even without its closing tag, a cell after a row's end starts a row, other tags are spaces,
+    and text outside any cell is kept (``outside``)."""
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.rows: list[list[list]] = []
-        self.depth = 0
+        self.outside: list[str] = []
         self.cell: list | None = None
-
-    def _space(self) -> None:
-        if self.cell is not None:
-            self.cell[3].append(" ")
+        self.row_open = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "table":
-            self.depth += 1
-            self._space()
-        elif self.depth > 1 or tag not in {"tr", "td", "th"}:
-            self._space()
-        elif tag == "tr":
+        if tag == "tr":
             self.cell = None
             self.rows.append([])
-        else:
-            if not self.rows:
+            self.row_open = True
+        elif tag in {"td", "th"}:
+            if not self.row_open:
                 self.rows.append([])
+                self.row_open = True
             spans = {name: value for name, value in attrs}
 
             def span(name: str, most: int) -> int:
-                value = re.sub(r"\D", "", spans.get(name) or "")
-                return max(1, min(int(value), most)) if value else 1
+                number = re.match(r"\s*(\d+)", spans.get(name) or "")
+                return max(1, min(int(number.group(1)), most)) if number else 1
 
             self.cell = [tag, span("colspan", 50), span("rowspan", 200), []]
             self.rows[-1].append(self.cell)
+        else:
+            self.handle_data(" ")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag == "table":
-            self.depth -= 1
-            if self.depth <= 0:
-                self.cell = None
-            else:
-                self._space()
-        elif self.depth == 1 and tag in {"tr", "td", "th"}:
+        if tag in {"td", "th"}:
             self.cell = None
+        elif tag == "tr":
+            self.cell = None
+            self.row_open = False
         else:
-            self._space()
+            self.handle_data(" ")
 
     def handle_data(self, data: str) -> None:
-        if self.cell is not None:
-            self.cell[3].append(data)
+        (self.cell[3] if self.cell is not None else self.outside).append(data)
 
 
 def _html_grid(table: str) -> tuple[list[str], list[list[str]], int]:
@@ -596,6 +608,7 @@ def _html_grid(table: str) -> tuple[list[str], list[list[str]], int]:
     parser = _TableCells()
     parser.feed(table)
     parser.close()
+    said = " ".join("".join(parser.outside).split())
     grid: list[list[str]] = []
     marked: list[bool] = []  # every cell of the row a <th>
     grouping: list[bool] = []  # a cell merged across figure columns
@@ -638,7 +651,8 @@ def _html_grid(table: str) -> tuple[list[str], list[list[str]], int]:
 
     def labels_only(r: int) -> bool:
         row = grid[r]
-        labels = [cell for cell in row[1:] if cell and cell != row[0]]
+        # A dash or "n/a" holds a figure's place; it is no label.
+        labels = [cell for cell in row[1:] if cell and cell != row[0] and not (tables.is_value(cell) and not re.search(r"\d", cell))]
         return bool(labels) and not any(_heading_figure(cell) for cell in row if cell)
 
     def first_heading(r: int) -> bool:
@@ -650,7 +664,7 @@ def _html_grid(table: str) -> tuple[list[str], list[list[str]], int]:
         top += 1
     if not (top < len(grid) and first_heading(top)):
         top = 0
-    titles = [next(cell for cell in row if cell) for row in grid[:top] if any(row)]
+    titles = [*([said] if said else []), *(next(cell for cell in row if cell) for row in grid[:top] if any(row))]
     heading_rows = 0
     if top < len(grid) - 1 and first_heading(top):
         heading_rows = 1
@@ -712,9 +726,9 @@ def _html_tables_as_markdown(text: str) -> str:
         return text
     out, last = [], 0
     for start, end in _html_table_spans(text):
-        out += [text[last:start], one(text[start:end])]
+        out += [_STRAY_TAG.sub(" ", text[last:start]), one(text[start:end])]
         last = end
-    return "".join(out) + text[last:]
+    return "".join(out) + _STRAY_TAG.sub(" ", text[last:])
 
 
 def page_text(markdown: str) -> str:
@@ -1232,8 +1246,7 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
         started = time.monotonic()
         try:
             png = render(data, att.filename, page, reader=reader)
-            # HTML tables (a document reader's) as markdown first, so a number in the cell beside "Account No." is masked.
-            markdown = mask_secrets(_html_tables_as_markdown(transcribe(settings, png, model=model)))
+            markdown = mask_secrets(transcribe(settings, png, model=model))
         except Blank:
             markdown = ""  # a blank page (the back of a sheet): nothing on it to read
         except Exception as exc:  # one page failing doesn't lose the others
@@ -1497,8 +1510,8 @@ def offer(store: Store, settings: Settings, email: EmailRecord, att: AttachmentR
         reason = "No model server is answering. Start LM Studio's server to read scans both ways."
     elif settings.vision_model and not available(settings):
         reason = (
-            f"The model chosen in Setup to read pages ({settings.vision_model}) isn't in LM Studio now. Choose another "
-            "one in Setup, or Automatic, to read scans both ways."
+            f"The model chosen in Setup to read pages ({settings.vision_model}) isn't in LM Studio now, or can't look "
+            "at pictures. Choose another one in Setup, or Automatic, to read scans both ways."
         )
     elif not available(settings):
         reason = (

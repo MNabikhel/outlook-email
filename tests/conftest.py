@@ -36,7 +36,7 @@ def _fresh_model_memory():
         local_llm._effort_rejected,
         local_llm._tools_rejected,
         local_llm._context_raised,
-        local_llm._reader_loads,
+        local_llm._reader_failed,
         semantic._model_cache,
         semantic._vector_cache,
     )

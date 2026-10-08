@@ -119,6 +119,12 @@ class Settings(BaseSettings):
         text = str(value or "").strip().lower()
         return text if text in {"auto", "ask", "off"} else "auto"
 
+    @field_validator("vision_model", mode="before")
+    @classmethod
+    def _vision_model(cls, value) -> str:
+        text = str(value or "").strip()
+        return "" if text.lower() == "auto" else text
+
     @field_validator("llm", mode="before")
     @classmethod
     def _llm_mode(cls, value):
