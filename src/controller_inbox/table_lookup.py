@@ -31,8 +31,8 @@ MAX_ROWS = 6
 MAX_LISTED = 25
 MAX_CHARS = 1800
 
-FOUND_HEAD = "Rows that match the question, copied from the table (the whole file follows):"
-WORKED_HEAD = "Worked out from the table, exactly (check it is what was asked; the whole file follows):"
+FOUND_HEAD = "Rows that match the question, copied from the table (the file is above):"
+WORKED_HEAD = "Worked out from the table, exactly (check it is what was asked; the file is above):"
 
 # Words that carry no meaning for matching a column or a row.
 _STOP = frozenset(
@@ -277,6 +277,7 @@ def tables_in(text: str) -> list[Table]:
         found[-1].rows.append(row)
     for table in found:
         _with_row_labels(table)
+        _close_sections(table)
     found = _joined_across_pages(found)
     for table in found:
         _name_rows(table)
@@ -556,6 +557,24 @@ def _with_row_labels(table: Table) -> None:
         if row.refs:
             row.refs.insert(0, "")
         row.group = section
+
+
+def _close_sections(table: Table) -> None:
+    """A section ends at its own printed total ("Total operating expenses"): the rows after it ("Operating income",
+    "Net income") are not in it, though the reading carries the section's name down to the end of the table. A
+    query adding up the section would otherwise add them in."""
+    closed: set[str] = set()
+    for row in table.rows:
+        if not row.group:
+            continue
+        outer, _sep, section = row.group.rpartition(" > ")
+        name = section.strip().rstrip(":").casefold()
+        if name in closed:
+            row.group = outer
+            continue
+        label = (row.cells[0][1] if row.cells else "").strip().rstrip(":").casefold()
+        if label in (f"total {name}", f"{name} total", f"total {name.removeprefix('total ')}"):
+            closed.add(name)
 
 
 def _joined_across_pages(found: list[Table]) -> list[Table]:

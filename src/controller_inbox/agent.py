@@ -488,12 +488,15 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
     skipped = [att for att in readable if att not in named] if named else []
     readable = named or readable
     lines: list[str] = []
+    # What is picked out or worked out for the question follows the files, so everything before it is the same for
+    # each question about them: a model server that keeps what it has read reads only what changed (a question
+    # after another about the same file took two thirds of the time on a computer without a graphics card).
+    for_question: list[str] = []
     files_shown = 0
     used = 0
-    # The query worked out over the tables answers the question as asked; it leads, ahead of the files.
+    # The query worked out over the tables answers the question as asked; it comes last, nearest the question.
     worked = "" if whole else _worked_block(ws.worked.get(email.id, ""), room // 3)
     if worked:
-        lines.append(worked)
         used += prompt_size(worked)
     per_file = max(600, (room - used) // len(readable))
     for att in readable:
@@ -513,8 +516,8 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             block.append(counted)
         budget = per_file - prompt_size(head) - prompt_size(counted) - 200
         size = prompt_size(text)
-        # The table rows the question names, and anything worked out from them, so a small model starts from the
-        # right cell. A file that fits whole comes first; one too long to show gets this index whatever it costs,
+        # The table rows the question names, and anything worked out from them, so a small model goes to the right
+        # cell. A file that fits whole is shown first; one too long to show gets this index whatever it costs,
         # since it points into the parts that are left out.
         rows = "" if whole else table_lookup.lookup(text, question, limit=table_lookup.MAX_CHARS)
         if worked and rows.startswith(table_lookup.WORKED_HEAD):
@@ -524,7 +527,6 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         space = spare if spare >= 0 else budget // 3
         rows = clip(rows, space) if rows and space >= 200 else ""
         if rows:
-            block.append(rows)
             budget -= prompt_size(rows) + 1
         summary = overnight_summary(ws.store, att) if size > budget else ""
         if summary:
@@ -548,7 +550,8 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
             else:
                 read = f"Read {shown} of {len(parts)} sections of {att.filename}{', one cut short' if cut else ''} ({how})"
         piece = "\n".join(block)
-        if used + prompt_size(piece) > room and files_shown:
+        picked = (rows if len(readable) == 1 else f"From {att.filename}:\n{rows}") if rows else ""
+        if used + prompt_size(piece) + prompt_size(picked) > room and files_shown:
             ws.left_out.append(att.filename)
             ws.reads.append(f"Left out {att.filename}: no room (the assistant can still open it)")
             lines.append(f"── File: {att.filename} (not shown; read it with read_file)")
@@ -556,10 +559,12 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         read = f"{read}; picked out the table rows the question names" if rows else read
         ws.reads.append(f"{read}; {checked}" if checked else read)
         lines.append(piece)
+        if picked:
+            for_question.append(picked)
         files_shown += 1
-        used += prompt_size(piece)
+        used += prompt_size(piece) + prompt_size(picked)
     lines += [f"── File: {att.filename} ({file_kind(att)}; not asked about, read it with read_file)" for att in skipped]
-    return "\n".join(lines)
+    return "\n".join(lines + for_question + ([worked] if worked else []))
 
 
 def _tables_note(text: str) -> tuple[str, str]:
