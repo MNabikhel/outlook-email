@@ -47,11 +47,37 @@ class Text:
     scale: float = 100
 
 
+@dataclass
+class Stroke:
+    """A line drawn from (x0, y0) to (x1, y1): a cell border."""
+
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+def grid(columns: list[float], rows: list[list[str]], *, top: float, pitch: float = 17, size: float = 9) -> list[Text | Stroke]:
+    """A table drawn with every cell bordered, as report writers draw one: ``columns`` are the borders left to right,
+    each row's cells written left in theirs; the first row is a bold header."""
+    items: list[Text | Stroke] = []
+    for r, row in enumerate(rows):
+        for left, value in zip(columns, row):
+            if value:
+                items.append(Text(left + 4, top - (r + 1) * pitch + 5, value, size=size, bold=r == 0))
+    bottom = top - len(rows) * pitch
+    items += [Stroke(x, bottom, x, top) for x in columns]
+    items += [Stroke(columns[0], top - r * pitch, columns[-1], top - r * pitch) for r in range(len(rows) + 1)]
+    return items
+
+
 def _escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
-def _ops(item: Text) -> list[str]:
+def _ops(item: Text | Stroke) -> list[str]:
+    if isinstance(item, Stroke):
+        return [f"0.5 w {item.x0:.2f} {item.y0:.2f} m {item.x1:.2f} {item.y1:.2f} l S"]
     font = "/F2" if item.bold else "/F1"
     if item.turn:
         # Text turned on its side. 90 reads upward from y; -90 reads downward from y.
@@ -85,7 +111,7 @@ def _ops(item: Text) -> list[str]:
     return ops
 
 
-def build_pdf(pages: list[list[Text]]) -> bytes:
+def build_pdf(pages: list[list[Text | Stroke]]) -> bytes:
     objects: list[bytes] = [b"<< /Type /Catalog /Pages 2 0 R >>", b""]
     kids = []
     for items in pages:

@@ -1517,6 +1517,34 @@ def test_with_no_model_that_can_see_the_answer_says_it_used_ocr_only(scan, store
     assert "Reading scans with a vision model is turned off in Setup." in used["text"]
 
 
+def test_a_question_not_about_the_files_gets_no_reading_note(scan, store, settings, monkeypatch):
+    # The page reader isn't asked to read for "who is Maya Chen?", and the answer says nothing of how the scan was read.
+    _chat_model(monkeypatch)
+    monkeypatch.setattr(vision, "available", lambda _s: False)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: "")
+    events = list(assistant.answer_stream(store, settings, "Who is Maya Chen and how do I reach her?", email_id=scan.id))
+    assert not [event for event in events if event["type"] == "reading"]
+
+
+def test_the_older_methods_reading_set_aside_isnt_blamed_on_the_document_reader(scan, store, settings, reader_server, monkeypatch):
+    monkeypatch.setattr(vision, "reading_model", lambda _s: OVIS)
+    email = store.get_email(scan.id)
+    att = email.attachments[0]
+    first = dict(vision.page_bodies(att.extracted_text))[1]
+    # The chat model read the page before OvisOCR2 was downloaded, and its reading wasn't shown: OvisOCR2 hasn't read it.
+    store.save_page_reading(att.id, 1, first=first, model_text="Nothing legible.", model=MODEL, seconds=5, sha256=att.sha256, comparison="{}")
+    [found] = vision.scan_readings(store, settings, email)
+    assert (found["ocr"], found["not_shown"], found["left_out_by"]) == ([1], [], [])
+    event = assistant._reading_event(store, settings, email, "what is the total", {})
+    assert "OvisOCR2 hasn't read it yet" in event["text"] and "left out" not in event["text"]
+    # OvisOCR2's own reading, set aside for leaving out much of the page, is named as the reason.
+    store.save_page_reading(att.id, 1, first=first, model_text="Nothing legible.", model=OVIS, seconds=5, sha256=att.sha256, comparison="{}")
+    [found] = vision.scan_readings(store, settings, email)
+    assert (found["not_shown"], found["left_out_by"]) == ([1], ["OvisOCR2"])
+    event = assistant._reading_event(store, settings, email, "what is the total", {})
+    assert "OvisOCR2's reading left out much of the page, so OCR's reading is shown" in event["text"]
+
+
 def test_a_page_the_reader_couldnt_read_or_that_would_take_too_long_is_named_as_the_reason(scan, store, settings, reader_server, monkeypatch):
     _chat_model(monkeypatch)
     monkeypatch.setattr(vision, "reading_model", lambda _s: OVIS)

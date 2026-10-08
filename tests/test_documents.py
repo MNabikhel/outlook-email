@@ -908,3 +908,14 @@ def test_a_two_column_sheet_of_names_and_amounts_names_its_columns():
     book.save(out)
     text = xlsx_text(out.getvalue())
     assert "A2: Subtotal | B2: 1,200" in text and "(Customer)" not in text
+
+
+def test_a_form_of_fields_and_numbers_keeps_its_first_line_as_a_field():
+    # A form in Word or a PDF: its numbers are an invoice's, a PO's and an account's, not amounts under a heading.
+    from controller_inbox.tables import has_header
+
+    form = [["Vendor", "Northwind Traders"], ["Invoice No.", "58213"], ["PO Number", "4410"], ["GL Account", "6420"], ["Amount", "$1,200.00"]]
+    assert not has_header(form)
+    # Its numbers written as money, a field for an ID still says it's a form; a sheet of names over amounts is not.
+    assert not has_header([["Vendor", "Northwind"], ["Invoice #", "58,213"], ["Subtotal", "1,200.00"], ["Tax", "96.00"], ["Total", "1,296.00"]])
+    assert has_header([["Department", "Budget"], ["Finance", "88,000"], ["Marketing", "128,800"], ["Operations", "$142,800"], ["IT", "(1,250.00)"]])

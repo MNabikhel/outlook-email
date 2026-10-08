@@ -386,6 +386,15 @@ def test_a_table_of_one_row_is_queried_too():
     assert tables.run("SELECT c_61_90 + over_90 FROM t2")[1] == [(428.58,)]
 
 
+def test_a_table_of_one_row_is_loaded_for_a_question_that_names_one_of_its_columns():
+    # The aging box is for "how much is over 60 days?"; beside the statement's lines for "what did we pay in
+    # September?", a small model added up every payment instead of September's.
+    for question in ("How much of the balance is more than 60 days past due?", "What is in the Over 90 bucket?", "What is the amount due?"):
+        assert "1 rows" in Tables([("statement.pdf", STATEMENT)], question).schema(), question
+    schema = Tables([("statement.pdf", STATEMENT)], "How much did we pay them in September?").schema()
+    assert "1 rows" not in schema and "t2" not in schema and "CREATE TABLE t1" in schema
+
+
 def test_a_query_adding_up_a_running_balance_is_asked_again_with_why():
     tables = Tables([("statement.pdf", STATEMENT)])
     replies = iter([

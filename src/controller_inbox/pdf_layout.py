@@ -1029,8 +1029,16 @@ def _table_blocks(lines: list[Line]) -> list[tuple[int, int]]:
         while end < len(lines) and _continues(lines, i, end):
             end += 1
         if _is_table(lines[i:end]) and len(_columns(lines[i:end])) >= 2:
-            start = i - 1 if i > 0 and _labels_above(lines[i - 1], lines[i:end]) else i
-            if start == i and _section_under_names(lines, i, end):
+            # Column names or a section's name just above, even when they ended the block before (headings set on
+            # lines of their own); but not a row of values of the table before (an invoice's boxed header right over
+            # its line items: "PF-20417 | October 2, 2026 | Net 45" is that box's row, not the items' column names).
+            floor = blocks[-1][1] if blocks else 0
+
+            def free(index: int) -> bool:
+                return index >= floor or _new_header(lines[index]) or len(lines[index].segments) < 2
+
+            start = i - 1 if i > 0 and free(i - 1) and _labels_above(lines[i - 1], lines[i:end]) else i
+            if start == i and i >= 2 and free(i - 2) and free(i - 1) and _section_under_names(lines, i, end):
                 start = i - 2
             blocks.append((start, end))
             i = end

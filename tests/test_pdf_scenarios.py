@@ -4,7 +4,7 @@ A page with more than one kind of text is labeled [heading], [facts], [table] or
 figure stays in the column it was printed in.
 """
 
-from pdffactory import Text, build_pdf, sheet_rows
+from pdffactory import Text, build_pdf, grid, sheet_rows
 
 from controller_inbox.documents import pdf_text
 
@@ -235,6 +235,24 @@ def test_a_totals_box_with_its_own_heading_under_the_line_items_is_a_table_of_it
     assert "TOTAL DUE | 2,620.67" in text and "Subtotal | 2,434.27" in text
     assert "Qty: 2,620.67" not in text and "Description: TOTAL DUE" not in text
     assert "#: 3 | Description: Desiccant packs | Qty: 5 | Unit price: 27.66 | Amount: 138.30" in text
+
+
+def test_an_invoices_boxed_header_right_over_its_line_items_is_read_once_in_its_own_table():
+    # Two bordered tables with different columns, ten points apart: the header box's row of values is its own row,
+    # not the line items' column names as well ("PF-20417 Description | October 2, 2026 Qty").
+    header = grid([108, 202, 310, 389, 504], [["Invoice #", "Invoice date", "Terms", "Due date"], ["PF-20417", "October 2, 2026", "Net 45", "November 16, 2026"]], top=694)
+    items = grid(
+        [83, 299, 349, 436, 529],
+        [["Description", "Qty", "Unit price", "Amount"], ["Hydraulic hose 1/2in x 25ft", "6", "84.20", "505.20"],
+         ["Quick coupler, steel", "12", "17.85", "214.20"], ["Pressure gauge 0-3000 psi", "4", "46.10", "184.40"],
+         ["", "", "Subtotal", "903.80"], ["", "", "Balance due", "958.03"]],
+        top=650,
+    )
+    text = _text([Text(83, 740, "Prairie Fluid Power, Inc.", size=14, bold=True), *header, *items])
+    assert "Invoice #: PF-20417 | Invoice date: October 2, 2026 | Terms: Net 45 | Due date: November 16, 2026" in text
+    assert "Description | Qty | Unit price | Amount" in text
+    assert "Description: Quick coupler, steel | Qty: 12 | Unit price: 17.85 | Amount: 214.20" in text
+    assert text.count("PF-20417") == 1 and "Net 45:" not in text
 
 
 def test_label_value_pairs_side_by_side_are_read_not_dropped_with_the_file():

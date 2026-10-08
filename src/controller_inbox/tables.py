@@ -70,12 +70,16 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
 
 
 _AMOUNT_RE = re.compile(r"[(\-−–]?\s*[$€£¥]?\s*[(\-−–]?\d[\d,]*(?:\.\d+)?%?\)?")
+_MONEY_RE = re.compile(r"[$€£¥]|\d,\d{3}|\.\d\d\b")
+# A field a form fills in with a number that is not an amount: "Invoice No.", "PO Number", "Vendor #", "Tax ID".
+_ID_LABEL_RE = re.compile(r"(?i)(?:\b(?:no|nos|number|id|code|ref|reference)\.?|#)\s*:?$")
 
 
 def _names_over_amounts(rows: list[list[str | None]]) -> bool:
     """Two columns headed by two labels over a name and an amount on each of four or more rows ("Department | Q3
-    Budget" over each department's budget). A list of labels and values ("Customer | Northwind", "Subtotal |
-    1,200", "Due | 10/28/2026") is shorter, or has dates or words among its values, and keeps its first row as a row."""
+    Budget" over each department's budget). A list of labels and values keeps its first row as a row: it is
+    shorter ("Customer | Northwind", "Subtotal | 1,200"), or has dates, words or numbers not written as money
+    among its values, or a field for one ("Invoice No. | 58213")."""
     body = [row for row in rows[1:] if any(cell and cell.strip() for cell in row)]
     if len(body) < 4 or any(len(row) < 2 for row in body):
         return False
@@ -83,7 +87,8 @@ def _names_over_amounts(rows: list[list[str | None]]) -> bool:
     amounts = [(row[1] or "").strip() for row in body]
     return (
         all(names) and len(set(names)) == len(names) and not any(map(is_value, names))
-        and all(_AMOUNT_RE.fullmatch(amount) for amount in amounts)
+        and not any(_ID_LABEL_RE.search(name) for name in names)
+        and all(_AMOUNT_RE.fullmatch(amount) and _MONEY_RE.search(amount) for amount in amounts)
     )
 
 

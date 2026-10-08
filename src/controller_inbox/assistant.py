@@ -231,7 +231,8 @@ def pick_sources(
     current = store.get_email(email_id) if email_id else None
     if current is not None:
         picked[current.id] = current
-        if on_screen_question(question) or (not about_today and not _ELSEWHERE.search(question) and answered_here(current, question)):
+        here = not _ELSEWHERE.search(question) and answered_here(current, question)
+        if on_screen_question(question) or (here and (not about_today or _due_here(current, question))):
             return [current], False, set()
     stripped = _TODAY.sub(" ", question) if about_today else question
     by_kind: list[EmailRecord] = []
@@ -291,13 +292,44 @@ def answered_here(email: EmailRecord, question: str) -> bool:
     terms = keywords(question)
     if len(terms) < 2:
         return False
-    text = _spaced(" ".join([email.subject, email.body_text or ""] + [att.extracted_text or "" for att in email.attachments]))
-    found = [term for term in terms if _spaced(term) in text]
+    found = _found_in(email, terms)
     if len(found) >= 2 and len(found) * 2 >= len(terms):
         return True
     # The names, codes and figures the question turns on ("Harbor Steel", "31-60", "F-150") are all here.
     named = [term for term in terms if _distinctive(term, question)]
     return len(found) >= 2 and bool(named) and all(term in found for term in named)
+
+
+def asks_for_help(question: str, found: set[str], screen: EmailRecord | None) -> bool:
+    """"How do I set up the local model?": help with CloseDesk. Not when the mail answers it: the search found
+    emails with its words, or the email on screen has them ("the Clearwater vendor setup form")."""
+    if not _HELP.search(question) or found:
+        return False
+    return screen is None or not (agent.named_files(screen.attachments, question) or answered_here(screen, question))
+
+
+def _due_here(email: EmailRecord, question: str) -> bool:
+    """"When is invoice PF-20417 due?": "due" asked of a document this email names, by a code or a name, not
+    "what's due?" of the whole inbox."""
+    if _MY_DAY.search(question) or {match.group(0).lower() for match in _TODAY.finditer(question)} != {"due"}:
+        return False
+    # A day or a month ("due on Friday", "due in March") names when, not which document.
+    named = [term for term in keywords(question) if _distinctive(term, question) and term not in _DAYS + _MONTHS]
+    return bool(named) and len(_found_in(email, named)) == len(named)
+
+
+_MONTHS = "january february march april june july august september october november december".split()
+_DAYS = "monday tuesday wednesday thursday friday saturday sunday".split()
+
+
+def _found_in(email: EmailRecord, terms: list[str]) -> list[str]:
+    """The terms in this email or its files; a month also as a sheet heads it ("August" as "Aug" or "Aug-26")."""
+    text = _spaced(" ".join([email.subject, email.body_text or ""] + [att.extracted_text or "" for att in email.attachments]))
+    return [
+        term
+        for term in terms
+        if _spaced(term) in text or (term in _MONTHS and re.search(rf"\b{term[:3]}t?\b", text))
+    ]
 
 
 def _spaced(text: str) -> str:
@@ -497,7 +529,7 @@ def offline_answer(
     found = found or set()
     current = next((email for email in sources if email.id == current_id), None)
     numbers = {email.id: index for index, email in enumerate(sources, start=1)}
-    if _HELP.search(question) and not found:
+    if asks_for_help(question, found, current):
         return HELP_TEXT
     note = "Here's a straight lookup instead." if model_failed else "The local model isn't running, so this is a straight lookup."
     if current is not None and not found and not about_today:
@@ -583,7 +615,7 @@ def answer_stream(
         else:
             sources = sources[:1] + [uploads] + sources[1:]
         found = found | {uploads.id}
-    if _HELP.search(question) and not found:
+    if asks_for_help(question, found, next((email for email in sources if email.id == email_id), None)):
         yield {"type": "sources", "sources": [], "mode": "help"}
         yield {"type": "delta", "text": HELP_TEXT}
         yield {"type": "done"}
@@ -612,7 +644,10 @@ def answer_stream(
     if current is not None and _should_read_files(ws, question, focus if about_today else None):
         outcome: dict[str, Any] = {}
         offer = yield from _vision_first(store, settings, ws, current, question, outcome)
-        if reading := _reading_event(store, settings, current, question, outcome):
+        # Which reading of a scan the answer rests on, for a question about what the files say, as the page reader
+        # reads for one: not for "who sent this?".
+        about = _ABOUT_FILES.search(question) or agent.named_files(current.attachments, question)
+        if about and (reading := _reading_event(store, settings, current, question, outcome)):
             yield reading
         elif outcome.get("ran"):  # the indicator went up for a page of a text PDF: it comes down again
             yield {"type": "reading", "state": "done"}
@@ -845,7 +880,8 @@ def _reading_event(store: Store, settings: Settings, current: EmailRecord, quest
     elif outcome.get("busy"):
         reasons.append(f"{reader} was reading other pages")
     elif trusted and any(found["not_shown"] for found in older):
-        reasons.append(f"{reader}'s reading left out much of the page, so OCR's reading is shown")
+        who = next(name for found in older for name in found["left_out_by"])
+        reasons.append(f"{who}'s reading left out much of the page, so OCR's reading is shown")
     elif trusted:
         reasons.append(f"{reader} hasn't read it yet")
     reason = ". ".join(part[:1].upper() + part[1:] for part in reasons if part)

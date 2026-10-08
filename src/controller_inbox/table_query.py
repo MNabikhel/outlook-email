@@ -204,8 +204,11 @@ class Result:
 class Tables:
     """A file's tables as a database the model's query runs on."""
 
-    def __init__(self, files: list[tuple[str, str]]):
-        """``files``: (file name, extracted text) for each file whose tables the question may be about."""
+    def __init__(self, files: list[tuple[str, str]], question: str = ""):
+        """``files``: (file name, extracted text) for each file whose tables the question may be about. ``question``:
+        when given, a table of one row is loaded only when the question names one of its columns ("past due", "over
+        60 days", "terms"). Beside a statement's lines, its aging box led a small model to add up every payment on
+        the statement for "how much did we pay them in September?"."""
         self.sheets: list[Sheet] = []
         # Each column name's column, or None when two tables use the name for different columns.
         self._labels: dict[str, Column | None] = {}
@@ -229,9 +232,10 @@ class Tables:
                     loaded.add(source)
         # A table of one row is a table too (an aging's buckets, an invoice's box of number, dates and terms), in a
         # few places of its own, so it never takes the place of a table of rows.
+        asked = [word for word in table_lookup.read_question(question).words if len(word) >= 3 or table_lookup._numeric(word)]
         for source, lines, found in read:
             for table in found:
-                if len(table.body) == 1 and small < MAX_ONE_ROW_TABLES:
+                if len(table.body) == 1 and small < MAX_ONE_ROW_TABLES and (not question or _names_a_column(table, asked)):
                     small += 1
                     self._load(f"t{count + small}", table, lines, source)
                     loaded.add(source)
@@ -611,6 +615,12 @@ def parse(reply: str) -> tuple[str, str]:
 
 
 # Building the tables ----------------------------------------------------------------------------
+
+
+def _names_a_column(table: Table, asked: list[str]) -> bool:
+    """One of the question's words is in a column name of the table ("due" in "Due date", "60" in "31-60")."""
+    labels = [word for label in table.labels for word in table_lookup._label_words(label)]
+    return any(table_lookup._matches(word, labels) for word in asked)
 
 
 def _authorize(action: int, _table, function, _db, _trigger) -> int:

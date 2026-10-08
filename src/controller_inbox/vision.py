@@ -231,8 +231,9 @@ def shown_by(row: dict) -> str:
 def scan_readings(store: Store, settings: Settings, email: EmailRecord, *, question: str = "") -> list[dict]:
     """For each scanned PDF and picture on the email (those the question names, when it names any): which of its
     scanned pages are shown as a document reader read them (``reader``), as a general model read them (``model``,
-    the older method) or as OCR read them (``ocr``; ``not_shown``: those of them a model read, its reading not shown),
-    and the names of the models whose reading is shown (``models``)."""
+    the older method) or as OCR read them (``ocr``; ``not_shown``: those of them a document reader read, its reading
+    not shown, and ``left_out_by``: that reader's name), and the names of the models whose reading is shown
+    (``models``)."""
     from controller_inbox import fraud
 
     if fraud.attachments_locked(email):
@@ -251,15 +252,21 @@ def scan_readings(store: Store, settings: Settings, email: EmailRecord, *, quest
             if not pages:  # the original isn't kept: the pages OCR read are taken for the scanned ones
                 pages = [number for number, _body in page_bodies(att.extracted_text or "")]
         rows = store.page_readings(att.id, att.sha256)
-        found: dict = {"file": att.filename, "pages": pages, "reader": [], "model": [], "ocr": [], "not_shown": [], "models": []}
+        found: dict = {
+            "file": att.filename, "pages": pages, "reader": [], "model": [], "ocr": [], "not_shown": [], "left_out_by": [], "models": [],
+        }
         for page in pages:
             row = rows.get(page)
             way = shown_by(row) if row else "first"
             found["ocr" if way == "first" else way].append(page)
-            if row and way == "first":
-                found["not_shown"].append(page)
-            name = reader_name(row.get("model") or "") if row and way != "first" else ""
-            if name and name not in found["models"]:
+            name = reader_name(row.get("model") or "") if row else ""
+            if way == "first":
+                # A general model's reading set aside is the older method's; it says nothing of the page reader.
+                if row and trusted_reader(row.get("model") or ""):
+                    found["not_shown"].append(page)
+                    if name not in found["left_out_by"]:
+                        found["left_out_by"].append(name)
+            elif name and name not in found["models"]:
                 found["models"].append(name)
         out.append(found)
     return out
