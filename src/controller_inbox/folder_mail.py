@@ -292,7 +292,7 @@ def _parse_eml(path: Path) -> RawMessage:
     sender_name, sender_email = _split_address(_header(parsed, "from"))
     received = _email_date(parsed.get("date"))
     body, attachments = _eml_content(parsed)
-    message_id = str(parsed.get("message-id") or "").strip()
+    message_id = _header(parsed, "message-id").strip()
     raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
     raw.reply_to = _reply_address(str(parsed.get("reply-to") or ""))
     return raw
@@ -300,8 +300,12 @@ def _parse_eml(path: Path) -> RawMessage:
 
 def _header(message, name: str) -> str:
     """A header's text. One sent as raw 8-bit bytes instead of an encoded word (=?utf-8?...?=), as some older mail
-    systems do, is read as UTF-8 or Windows-1252 rather than losing its accented letters."""
-    value = str(message.get(name) or "")
+    systems do, is read as UTF-8 or Windows-1252 rather than losing its accented letters. One the standard parser
+    can't read ("Message-ID: <>" from some scanners makes it raise) is taken as written."""
+    try:
+        value = str(message.get(name) or "")
+    except Exception:
+        return next((str(raw) for key, raw in message.raw_items() if key.lower() == name), "")
     if "\ufffd" not in value:
         return value
     for key, raw in message.raw_items():
@@ -582,7 +586,7 @@ def mail_file_attachments(
                 message.close()
         if lower.endswith(".eml") or ctype == "message/rfc822":
             parsed = BytesParser(policy=policy.default).parsebytes(data)
-            if any(parsed.get(name) for name in ("from", "subject", "date", "message-id")):
+            if any(_header(parsed, name) for name in ("from", "subject", "date", "message-id")):
                 return forwarded_attachments(parsed, filename, prefix, depth)
         if lower == "smime.p7m" or ctype == "multipart/signed":
             parsed = BytesParser(policy=policy.default).parsebytes(data)

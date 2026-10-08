@@ -9,7 +9,7 @@ from datetime import date, datetime, timezone
 import pytest
 from openpyxl import Workbook
 
-from controller_inbox.documents import xlsx_text
+from controller_inbox.documents import read_part, xlsx_text
 from controller_inbox.extract import (
     explode_archives,
     extract_fields,
@@ -135,3 +135,45 @@ def test_percent_rounds_half_up_like_excel():
     book.save(buf)
     text = xlsx_text(buf.getvalue())
     assert "13%" in text and "12%" not in text  # Excel shows 13%
+
+
+# Found by fuzzing.
+
+def test_iban_in_groups_after_account_label_is_masked():
+    # Invoices commonly print "Account Number (IBAN): ..." or "Account: GB29 NWBK ...".
+    for text in ("Account: GB29 NWBK 6016 1331 9268 19", "Account Number (IBAN): DE89 3704 0044 0532 0130 00"):
+        red = redact_financial_secrets(text)
+        assert "1331" not in red and "0044 0532" not in red, red
+
+
+def test_iban_in_groups_after_account_label_counts_as_bank_detail():
+    fields = extract_fields("Account: GB29 NWBK 6016 1331 9268 19", as_of=date(2026, 10, 8))
+    assert fields.mentions_routing_or_account
+    assert "6819" in fields.account_last4
+
+
+def _workbook() -> str:
+    book = Workbook()
+    first = book.active
+    first.title = "Budget 2025"
+    first.append(["Line", "Amount"])
+    first.append(["Rent", 1111])
+    second = book.create_sheet("Budget")
+    second.append(["Line", "Amount"])
+    second.append(["Rent", 2222])
+    buf = io.BytesIO()
+    book.save(buf)
+    return xlsx_text(buf.getvalue())
+
+
+def test_sheet_label_with_quotes_reads_that_sheet():
+    text = _workbook()
+    part = read_part(text, 'sheet "Budget"')  # how the read tool's description names a sheet
+    assert part is not None and part.label.startswith('sheet "Budget" '), part
+    assert "2,222" in part.text
+
+
+def test_bare_sheet_name_prefers_the_exact_sheet():
+    text = _workbook()
+    part = read_part(text, "Budget")
+    assert part is not None and part.label.startswith('sheet "Budget" '), part

@@ -89,7 +89,8 @@ def _grouped(least: int) -> str:
 
 
 # After its label a number may follow "is", a colon, a dash or "#": "Account Number - 12345678", "A/C No: 12345678".
-_SECRET_LABEL_END = r"(?:\s+is\b)?[\s#:\-\u2013]*"
+# A short note in brackets may come between: "Account Number (IBAN): DE89 …".
+_SECRET_LABEL_END = r"(?:\s*\([^()\n]{1,20}\))?(?:\s+is\b)?[\s#:\-\u2013]*"
 # Masked to the last four digits wherever text is stored or shown: bank account, routing and sort-code numbers,
 # IBANs, and card numbers, written whole or in groups as statements and remittance letters print them
 # ("IBAN GB29 NWBK 6016 1331 9268 19"). Only a number beside its label is masked, so invoice and PO numbers,
@@ -98,7 +99,7 @@ BANK_SECRET_RE = re.compile(
     r"\b(?P<routing>(?:routing|aba)(?:\s+(?:number|no\.?|#))?|sort\s+code)" + _SECRET_LABEL_END
     + r"(?:\d{6,9}\b|\d{3}[ -]\d{3}[ -]\d{3}(?![\d-])|\d{2}[ -]\d{2}[ -]\d{2}(?![\d-]))|"
     r"\b(?P<account>(?:account|acct\.?|a/c)(?:\s+(?:number|no\.?|#))?)" + _SECRET_LABEL_END
-    + r"(?:" + _ACCOUNT_NUMBER + "|" + _grouped(6) + r")|"
+    + r"(?:" + _ACCOUNT_NUMBER + "|" + _grouped(6) + r"|[A-Z]{2}\d{2}(?:[ -][A-Z0-9]{4}){2,7}(?:[ -][A-Z0-9]{1,3})?\b)|"
     r"\b(?P<iban>iban)" + _SECRET_LABEL_END
     + r"[A-Z]{2}\d{2}(?:[A-Z0-9]{10,30}\b|(?:[ -][A-Z0-9]{4}){2,7}(?:[ -][A-Z0-9]{1,3})?\b)|"
     r"\b(?P<card>(?:(?:credit|debit)\s+)?card|visa|mastercard|amex)(?:\s+(?:number|no\.?|#))?" + _SECRET_LABEL_END
@@ -389,7 +390,7 @@ def _unzip(item, *, limit: int, skipped: list | None = None) -> list:
         return []
     try:
         archive = zipfile.ZipFile(io.BytesIO(item.content))
-    except zipfile.BadZipFile:
+    except Exception:  # damaged in ways zipfile reports differently (bad name encoding, unknown version): kept as is
         return []
     chosen, left = _zip_plan(archive.infolist(), limit)
     out = []

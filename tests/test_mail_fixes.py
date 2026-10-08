@@ -1,10 +1,15 @@
 """Fixes to reading mail from the drop folder and from Microsoft Graph."""
 
 import base64
+import io
 import os
 import time
+import zipfile
 from email import policy
+from email.message import EmailMessage
 from email.parser import BytesParser
+
+import pytest
 
 from controller_inbox.folder_mail import collect_messages, forwarded_attachments, ingest_folder
 from controller_inbox.graph import GraphMailbox
@@ -256,3 +261,71 @@ def test_each_failed_file_keeps_its_own_note(store, settings):
     notes = [n for n in failed if n.endswith(".why.txt")]
     assert len(files) == 2
     assert sorted(f"{n}.why.txt" for n in files) == notes, failed
+
+
+# Found by fuzzing.
+
+def _zip_with_name(name: str) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        archive.writestr(name, b"%PDF-1.4 not really")
+    return out.getvalue()
+
+
+def _utf8_flag_with_cp1252_name() -> bytes:
+    # A zipper that sets the UTF-8 flag but writes the name in Windows-1252 ("Rechnung März.pdf").
+    data = bytearray(_zip_with_name("Rechnung M?rz.pdf"))
+    central = data.index(b"PK\x01\x02")
+    data[central + 9] |= 0x08  # flag 0x800: names are UTF-8
+    name_at = data.index(b"M?rz", central)
+    data[name_at + 1] = 0xE4
+    return bytes(data)
+
+
+def _version_too_new() -> bytes:
+    data = bytearray(_zip_with_name("statement.pdf"))
+    central = data.index(b"PK\x01\x02")
+    data[central + 6] = 64  # "version needed to extract" 6.4, above what zipfile supports
+    return bytes(data)
+
+
+@pytest.mark.parametrize("make_zip", [_utf8_flag_with_cp1252_name, _version_too_new])
+def test_email_with_unreadable_zip_is_still_read(store, settings, make_zip):
+    settings.ensure_data_dir()
+    message = EmailMessage()
+    message["Subject"] = "Invoice INV-555 and backup"
+    message["From"] = "Harbor AP <ap@harbor.example>"
+    message["Date"] = "Tue, 22 Sep 2026 09:00:00 -0400"
+    message.set_content("Invoice INV-555, amount due $2,200.00. Backup zipped.")
+    message.add_attachment(make_zip(), maintype="application", subtype="zip", filename="backup.zip")
+    path = settings.inbox_incoming / "harbor.eml"
+    path.write_bytes(message.as_bytes())
+    old = time.time() - 3600
+    os.utime(path, (old, old))
+
+    report: dict = {}
+    records = ingest_folder(store, settings, report=report)
+    # A zip that can't be opened is kept as it came (explode_archives keeps a BadZipFile so); the email is read.
+    assert report["failed"] == [], report["failed"]
+    assert [r.subject for r in records] == ["Invoice INV-555 and backup"]
+
+
+def test_eml_with_empty_message_id_is_read_not_failed(store, settings):
+    # Some scanners and bulk mailers write an empty "Message-ID: <>". The stdlib's header parser raises
+    # IndexError reading it, which sends the whole message to inbox/failed.
+    settings.ensure_data_dir()
+    path = settings.inbox_incoming / "statement.eml"
+    path.write_bytes(
+        b"From: Harbor AP <ap@harbor.example>\r\n"
+        b"Subject: Invoice INV-555\r\n"
+        b"Date: Tue, 22 Sep 2026 09:00:00 -0400\r\n"
+        b"Message-ID: <>\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+        b"Amount due $2,200.00.\r\n"
+    )
+    old = time.time() - 3600
+    os.utime(path, (old, old))
+    report: dict = {}
+    records = ingest_folder(store, settings, report=report)
+    assert report["failed"] == [], report["failed"]
+    assert [r.subject for r in records] == ["Invoice INV-555"]

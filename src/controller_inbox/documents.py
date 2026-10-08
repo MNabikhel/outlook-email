@@ -1184,7 +1184,9 @@ def locate(parts: list[Part], at: str) -> tuple[int, str] | None:
 def read_part(text: str, label: str) -> Part | None:
     """A section by its label ("page 3", "slide 2", "Budget", "part 4"), matched loosely."""
     parts = split_parts(text)
-    wanted = re.sub(r"\s+", " ", (label or "").strip().lower().strip('"'))
+    wanted = re.sub(r"\s+", " ", (label or "").strip().lower())
+    if len(wanted) > 1 and wanted[0] == wanted[-1] == '"':
+        wanted = wanted[1:-1]
     if not wanted:
         return parts[0] if parts else None
     for part in parts:
@@ -1199,6 +1201,11 @@ def read_part(text: str, label: str) -> Part | None:
         index = int(number.group(2)) - 1
         if not kind and 0 <= index < len(parts):
             return parts[index]
+    # "Budget" or 'sheet "Budget"' is that sheet, not "Budget 2025" that merely starts the same way.
+    for part in parts:
+        name = part.label.lower()
+        if name.startswith((wanted + " ", f'sheet "{wanted}"', f'{wanted}"')):
+            return part
     for part in parts:
         if wanted in part.label.lower():
             return part
