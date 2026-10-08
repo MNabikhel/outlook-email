@@ -209,6 +209,9 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .model-state.on { background: #e3efe5; color: var(--green); }
 .model-state.fallback { background: #f6e9d9; color: var(--warn); }
 .model-state.off { background: var(--chip); color: var(--muted); }
+.chat-model-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px 10px; margin: 0 0 12px; font-size: 13px; }
+.chat-model-form select { display: block; margin-top: 3px; max-width: 100%; }
+.chat-model-form p { flex-basis: 100%; margin: 0; }
 @media (max-width: 640px) { .models-table thead { display: none; } .models-table tr { display: block; padding: 6px 0; border-top: 1px solid var(--line); } .models-table th, .models-table td { display: block; border: 0; padding: 2px 0; } }
 .model-line { padding: 8px 10px; border-left: 3px solid var(--line); background: #f8f5ee; }
 .model-line.on { border-left-color: var(--green); }

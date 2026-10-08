@@ -82,6 +82,20 @@ def ocr_row() -> dict:
             "status": 'Not installed: scans wait for the page reader. Run pip install -e ".[ocr]" to add it.'}
 
 
+def chat_choices(settings: Settings, status: ModelStatus) -> dict | None:
+    """What Setup's chat model list offers: LM Studio's downloaded chat models (``models``), the one answering now
+    (``current``, its key) and the loaded ones (``loaded``). ``pinned`` when the settings name a model, so loading
+    another wouldn't change which one answers. None when the server can't load models when asked (not LM Studio)."""
+    if status.mode == "off" or not status.lm_studio or not status.chat_models:
+        return None
+    return {
+        "models": list(status.chat_models),
+        "current": status.instances.get(status.model, (status.model, 0))[0],
+        "loaded": {key for key, _context in status.instances.values()},
+        "pinned": settings.llm_model not in {"", "local-model"},
+    }
+
+
 def models_in_use(settings: Settings, *, status: ModelStatus | None = None) -> list[dict]:
     """One row per job: ``role``, ``model`` (its name, "" when none), ``state`` ("on", "fallback" for the older
     method, "off"), ``status`` (loaded, downloaded, or what happens instead) and ``note`` (why, for a fallback)."""

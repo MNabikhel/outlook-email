@@ -295,7 +295,7 @@ export function settingsView(meta, { theme, setTheme, railCollapsed, toggleRail 
             ),
           ])
         ),
-        h("p", { class: "small" }, "Which model reads pages, and how, is chosen on the ", h("a", { href: "/settings#vision" }, "classic Setup page"), ".")
+        h("p", { class: "small" }, "Which model answers, and which reads pages, are chosen on the ", h("a", { href: "/settings#models" }, "classic Setup page"), ".")
       ),
       card("Keyboard", h("dl", { class: "keys-list" }, shortcuts.map(([keys, what]) => [h("dt", null, h("kbd", null, keys)), h("dd", null, what)]))),
       card("Classic view", h("p", null, "Every page of the classic dashboard still works, and links back here. ", h("a", { href: "/" }, "Open the classic view"), "."))
