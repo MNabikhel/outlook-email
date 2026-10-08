@@ -55,3 +55,63 @@ def test_rtf_text_keeps_coded_characters_and_leaves_out_hidden_groups():
     text = extract_text_from_bytes("remittance.rtf", "application/rtf", rtf.encode("latin-1"))
     assert text == "Invoice INV-7781\nAmount due: £4,250.00 – net 30\nCafé Rouge Ltd, {ref} € 12\nItem | Amount"
     assert extract_fields(text, as_of=date(2026, 10, 1)).invoice_numbers == ["INV-7781"]
+
+
+def test_account_iban_routing_and_card_numbers_are_masked_however_they_are_printed():
+    cases = {
+        "Account number: 1234 5678 9012": "account ****9012",
+        "Account number: 1234-5678-9012": "account ****9012",
+        "IBAN: GB29 NWBK 6016 1331 9268 19": "IBAN ****6819",
+        "IBAN DE89-3704-0044-0532-0130-00": "IBAN ****3000",
+        "A/C No: 12345678": "account ****5678",
+        "A/C No. 12345678": "account ****5678",
+        "Account Number - 12345678": "account ****5678",
+        "Account number is 12345678": "account ****5678",
+        "Routing: 021-000-021": "routing ****0021",
+        "Sort code: 12-34-56": "routing ****3456",
+        "Credit card 4111 1111 1111 1111": "card ****1111",
+        "Card number: 4111111111111111": "card ****1111",
+    }
+    for text, masked in cases.items():
+        assert redact_financial_secrets(text) == masked, text
+    # Already masked text stays as it is.
+    assert redact_financial_secrets("account ****9012, IBAN ****6819") == "account ****9012, IBAN ****6819"
+
+
+def test_masking_leaves_invoice_po_phone_date_amount_and_zip_numbers_alone():
+    untouched = [
+        "Invoice INV-2024-0457 for $12,450.00 due 2026-10-15",
+        "Invoice 1234 5678 attached",
+        "PO 4500012345, PO# 4500-0123",
+        "Call 555-123-4567 or (212) 555-0199, +44 20 7946 0958",
+        "Account manager: 555-123-4567. Accounts payable: 212 555 0199",
+        "Account statement 2026-09-30 attached",
+        "Account: 10-15-2026 review",
+        "Account balance 12,345.67, account as of 09/30/2026",
+        "Ship to 123 Main St, Springfield, IL 62704-1234",
+        "Card 2 of 3 enclosed. Visa application 2026-10-01",
+        "GL Account 1200",
+        "Order 1234-5678-9012-3456 shipped",
+    ]
+    for text in untouched:
+        assert redact_financial_secrets(text) == text, text
+
+
+def test_an_account_number_in_the_subject_is_masked_too(tmp_path):
+    from controller_inbox.config import Settings
+    from controller_inbox.models import RawMessage
+    from controller_inbox.pipeline import process_message
+    from controller_inbox.store import Store
+    from datetime import datetime, timezone
+
+    settings = Settings(data_dir=tmp_path, inbox_dir=tmp_path / "inbox", llm_base_url="http://127.0.0.1:9/v1", _env_file=None)
+    store = Store(settings.db_path)
+    raw = RawMessage(
+        id="m1", subject="New remittance details - Acct 44556677", sender_name="Vendor", sender_email="ar@vendor.com",
+        received_at=datetime(2026, 9, 21, 10, tzinfo=timezone.utc), body_text="Please use IBAN DE89 3704 0044 0532 0130 00.",
+        body_preview="", has_attachments=False, source="folder",
+    )
+    email = process_message(raw, store, settings)
+    assert email.subject == "New remittance details - account ****6677"
+    assert email.body_text == "Please use IBAN ****3000."
+    assert all("44556677" not in task.title for task in email.actions)

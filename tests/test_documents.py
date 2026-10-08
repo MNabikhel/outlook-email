@@ -802,3 +802,85 @@ def test_ocr_puts_back_dropped_spaces_without_splitting_codes_or_times():
     assert _spaced("Order 200ct2026, Due10ctober") == "Order 20 Oct 2026, Due 1 October"
     for kept in ("INVOICE4471", "INV-4471 Q4 FY26", "Meeting at 10:30", "Total:$12,480.00", "Box of 500ct", "Paid $100ct 2026"):
         assert _spaced(kept) == kept
+
+
+# A small Office file or PDF that unpacks to far more than any real document is not read into memory -----------
+
+
+def _inflated(data: bytes, part: str, filler: bytes, before: bytes) -> bytes:
+    """``data`` (an Office zip) with ``filler`` written into ``part`` just before ``before``, packed tight."""
+    import zipfile
+
+    source = zipfile.ZipFile(io.BytesIO(data))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as target:
+        for info in source.infolist():
+            body = source.read(info)
+            if info.filename == part:
+                head, tail = body.split(before, 1)
+                body = head + filler + before + tail
+            target.writestr(info, body, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+    return out.getvalue()
+
+
+def test_a_word_file_that_unpacks_to_far_more_than_it_holds_is_not_opened():
+    plain = io.BytesIO()
+    document = Document()
+    document.add_paragraph("Invoice INV-9 total $10.00")
+    document.save(plain)
+    bomb = _inflated(plain.getvalue(), "word/document.xml", b"<w:p><w:r><w:t>0000000000</w:t></w:r></w:p>" * 120_000, b"<w:sectPr")
+    assert len(bomb) < 100_000
+    text = extract_text_from_bytes("invoice.docx", "", bomb)
+    assert text.startswith("[CloseDesk didn't open this file") and "MB" in text
+    assert "INV-9" in extract_text_from_bytes("invoice.docx", "", plain.getvalue()), "a normal file is still read"
+
+
+def test_a_workbook_part_packed_like_a_zip_bomb_is_not_opened():
+    book = Workbook()
+    book.active["A1"] = "Total"
+    plain = io.BytesIO()
+    book.save(plain)
+    filler = b'<row r="2"><c r="A2" t="inlineStr"><is><t>0</t></is></c></row>' * 450_000
+    bomb = _inflated(plain.getvalue(), "xl/worksheets/sheet1.xml", filler, b"</sheetData>")
+    assert extract_text_from_bytes("ledger.xlsx", "", bomb).startswith("[CloseDesk didn't open this file")
+    assert read_cells(bomb, "", "A1:A2").startswith("[CloseDesk didn't open this file")
+    assert "Total" in extract_text_from_bytes("ledger.xlsx", "", plain.getvalue())
+
+
+def test_a_pdf_whose_pages_unpack_to_too_much_is_read_without_pdfminer(monkeypatch):
+    from controller_inbox import documents
+
+    data = make_pdf([["Invoice INV-77", "Amount due $500.00 by October 15, 2026"]])
+    assert "unpacks to far more" not in pdf_text(data)
+    monkeypatch.setattr(documents, "MAX_PDF_CONTENT", 10)
+    monkeypatch.setattr(documents._Miner, "open", classmethod(lambda cls, data: pytest.fail("pdfminer was asked")))
+    text = pdf_text(data)
+    assert text.startswith("[This PDF unpacks to far more") and "INV-77" in text and "$500.00" in text
+
+
+def test_a_picture_far_larger_than_any_scan_is_not_read_with_ocr(monkeypatch):
+    from PIL import Image
+
+    from controller_inbox import ocr
+
+    picture = io.BytesIO()
+    Image.new("L", (400, 300), 255).save(picture, format="PNG")
+    monkeypatch.setattr(ocr, "engine_name", lambda: "RapidOCR")
+    monkeypatch.setattr(ocr, "_rapid", lambda data: "Invoice INV-5")
+    assert ocr.image_text(picture.getvalue()) == "Invoice INV-5"
+    monkeypatch.setattr(ocr, "MAX_PIXELS", 400 * 300 - 1)
+    assert ocr.image_text(picture.getvalue()) == ""
+
+
+def test_a_password_protected_office_file_says_so():
+    ooxml = pytest.importorskip("msoffcrypto.format.ooxml")
+    book = Workbook()
+    book.active["A1"] = "Payroll"
+    plain = io.BytesIO()
+    book.save(plain)
+    locked = io.BytesIO()
+    ooxml.OOXMLFile(io.BytesIO(plain.getvalue())).encrypt("secret", locked)
+    for name in ("payroll.xlsx", "payroll.docx"):
+        text = extract_text_from_bytes(name, "", locked.getvalue())
+        assert text.startswith("[This file is password-protected") and "zip" not in text
+    assert "Payroll" in extract_text_from_bytes("payroll.xlsx", "", plain.getvalue())

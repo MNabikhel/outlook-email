@@ -58,6 +58,8 @@ def process_message(
     existing = store.get_email(raw.id)
     if existing is not None and existing.model_status in KEEP_READINGS and not raw.attachments:
         return existing
+    if existing is not None and raw.from_file:
+        raw = _as_stored(raw, existing)
     # Two dates. "By Friday" and "October 15" in the text are read against the day the mail was
     # sent (``anchor``); how urgent or overdue it is now is judged against today (``as_of``).
     as_of = as_of or now.astimezone(settings.tz).date()
@@ -66,6 +68,7 @@ def process_message(
     # change is asked for); everything stored or shown is built from the masked text.
     clean = replace(
         raw,
+        subject=redact_financial_secrets(raw.subject),
         body_text=redact_financial_secrets(raw.body_text),
         body_preview=redact_financial_secrets(raw.body_preview or raw.body_text[:240]),
     )
@@ -102,7 +105,7 @@ def process_message(
     verdicts = [flag for flag in (existing.flags if existing else []) if flag in VERDICT_FLAGS]
     check = assess(
         trust_context(store, settings),
-        subject=raw.subject,
+        subject=clean.subject,
         body=body_text,
         sender_name=raw.sender_name,
         sender_email=raw.sender_email,
@@ -116,7 +119,7 @@ def process_message(
         store,
         settings,
         email_id=raw.id,
-        subject=raw.subject,
+        subject=clean.subject,
         body=raw.body_text,
         sender_email=raw.sender_email,
         outlook_importance=raw.outlook_importance,
@@ -135,7 +138,7 @@ def process_message(
 
     actions = extract_actions(
         email_id=raw.id,
-        subject=raw.subject,
+        subject=clean.subject,
         body=body_text,
         category=classified_email.document_type,
         importance=classified_email.importance,
@@ -147,6 +150,8 @@ def process_message(
         has_invite=any(att.filename.lower().endswith(".ics") for att in att_records),
         received_on=anchor,
     )
+    if existing is not None:
+        actions = _keep_task_status(actions, existing.actions)
 
     writeback_status = "skipped"
     do_write = settings.writeback if writeback is None else writeback
@@ -160,7 +165,7 @@ def process_message(
 
     record = EmailRecord(
         id=raw.id,
-        subject=raw.subject,
+        subject=clean.subject,
         sender_name=raw.sender_name,
         sender_email=raw.sender_email,
         received_at=raw.received_at.astimezone(timezone.utc).isoformat(),
@@ -194,6 +199,32 @@ def process_message(
 
     cost_codes.refresh(store, settings, email_ids=[record.id])
     return store.get_email(record.id) or record
+
+
+def _as_stored(raw: RawMessage, stored: EmailRecord) -> RawMessage:
+    """Another copy of a stored email that has no subject or sent time of its own keeps the stored ones, so the
+    email isn't renamed after the copy's file or dated the day that file was saved."""
+    received = raw.received_at
+    if "sent" in raw.from_file:
+        try:
+            received = datetime.fromisoformat(str(stored.received_at))
+        except ValueError:
+            received = raw.received_at
+        received = received if received.tzinfo else received.replace(tzinfo=timezone.utc)
+    subject = stored.subject if "subject" in raw.from_file and stored.subject else raw.subject
+    return replace(raw, subject=subject, received_at=received)
+
+
+def _keep_task_status(fresh: list[ActionItem], stored: list[ActionItem]) -> list[ActionItem]:
+    """When an email is read again, a task it still asks for keeps its id and what the user did with it:
+    a snoozed task stays snoozed instead of coming back as a new open one. As in ``rescore_stored``, a task
+    the user snoozed or finished is kept even when the new reading doesn't ask for it."""
+    held = {item.title.strip().lower(): item for item in stored}
+    kept = []
+    for item in fresh:
+        old = held.pop(item.title.strip().lower(), None)
+        kept.append(replace(item, id=old.id, status=old.status, created_at=old.created_at) if old else item)
+    return kept + [item for item in held.values() if item.status != ActionStatus.OPEN]
 
 
 def sent_date(received_at, settings: Settings, *, fallback):
@@ -338,7 +369,7 @@ def ingest_mailbox(
             processed.append(process_message(raw, store, settings, mailbox, now=now))
         except Exception as exc:
             log.warning("Couldn't read message %s (%s)", raw.id, raw.subject, exc_info=True)
-            report["failed"].append({"id": raw.id, "subject": raw.subject, "error": str(exc)[:300]})
+            report["failed"].append({"id": raw.id, "subject": redact_financial_secrets(raw.subject), "error": str(exc)[:300]})
             failed[raw.id] = tries.get(raw.id, 0) + 1
             if failed[raw.id] < MAX_SYNC_TRIES:
                 held.append(received)
