@@ -48,6 +48,8 @@
     <details class="coding-revise">
       <summary>{{ 'Revise' if coding.codes else 'Choose a code' }}</summary>
       <form method="post" action="/inbox/{{ email.id }}/coding/revise">
+        {# Enter in the filter box mustn't save the ticked codes, some of them filtered out of view. #}
+        <button type="submit" hidden disabled aria-hidden="true" tabindex="-1"></button>
         <input type="hidden" name="next" value="{{ back }}"/>
         <input type="search" placeholder="Filter by code or description" aria-label="Filter cost codes" data-code-filter autocomplete="off"/>
         <div class="code-pick">

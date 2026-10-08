@@ -5,9 +5,8 @@
     <strong>{{ stage_labels.get(job.stage, job.stage) }}{% if job.total > 1 %} · {{ job.done }} of {{ job.total }}{% endif %}</strong>
     <span>{{ job.note }}</span>
   </div>
-  {% if job.stage == 'vision' and not job.stopping %}
-  <form method="post" action="/process/stop" class="job-stop"><button type="submit" class="ghost">Stop after this page</button></form>
-  {% endif %}
+  {# Shown while scans are read, also when the run gets there after the page loaded. #}
+  <form method="post" action="/process/stop" class="job-stop" {{ '' if job.stage == 'vision' and not job.stopping else 'hidden' }}><button type="submit" class="ghost">Stop after this page</button></form>
   <progress {% if job.total %}value="{{ job.done }}" max="{{ job.total }}"{% endif %}></progress>
 </section>
 <script>
@@ -21,6 +20,8 @@
           box.querySelector('span').textContent = s.note || '';
           var bar = box.querySelector('progress');
           if (s.total) { bar.max = s.total; bar.value = s.done; }
+          var stop = box.querySelector('.job-stop');
+          if (stop) { stop.hidden = !(s.stage === 'vision' && !s.stopping); }
           poll();
         } else {
           window.location.href = '/';

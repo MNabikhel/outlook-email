@@ -61,3 +61,31 @@ def test_the_digest_counts_every_email_in_its_window_past_a_thousand(loaded: Sto
     morning = datetime(2030, 1, 9, 7, 0, tzinfo=timezone.utc)
     payload = build_digest(loaded, as_of=date(2030, 1, 9), generated_at=morning, tz=timezone.utc, save=False)
     assert payload["kpis"]["emails"] == 1005
+
+
+# What the sweep found in the pages.
+
+
+def test_enter_in_a_note_or_filter_box_presses_no_button(loaded: Store, settings: Settings):
+    import re
+
+    from fastapi.testclient import TestClient
+
+    from controller_inbox.web import create_app
+
+    client = TestClient(create_app(settings, loaded))
+    page = client.get("/inbox/demo-bec-wire").text
+    form = page[page.index('class="verdict-form"'):]
+    first = re.search(r"<button[^>]*>", form).group(0)
+    assert "disabled" in first and "hidden" in first, "Enter in the note box mustn't press Not fraud"
+
+
+def test_stop_when_nothing_runs_says_nothing_about_stopping(loaded: Store, settings: Settings):
+    from fastapi.testclient import TestClient
+
+    from controller_inbox.web import create_app
+
+    client = TestClient(create_app(settings, loaded), follow_redirects=False)
+    reply = client.post("/process/stop", headers={"Origin": "http://testserver"})
+    assert reply.headers["location"] == "/"
+    assert client.post("/api/process/stop", headers={"Origin": "http://testserver", "X-CloseDesk": "1"}).json()["stopping"] is False

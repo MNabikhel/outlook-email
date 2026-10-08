@@ -27,6 +27,9 @@
   </ul>
   {% endif %}
   <form method="post" action="/inbox/{{ email.id }}/fraud" class="verdict-form">
+    {# Enter in the note box mustn't press the first button ("Not fraud" unlocks the email): with a disabled default
+       button first, Enter does nothing. #}
+    <button type="submit" hidden disabled aria-hidden="true" tabindex="-1"></button>
     <label>Note for the log <span class="muted">(optional)</span>
       <input type="text" name="note" maxlength="300" placeholder="e.g. Called Dana at the number on file, confirmed"/>
     </label>
