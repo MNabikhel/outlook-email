@@ -221,8 +221,6 @@ python -m controller_inbox demo --serve
 
 Open [http://127.0.0.1:8765](http://127.0.0.1:8765). The sample is a September 2026 mailbox: Northwind invoice INV-10482, a Chase statement, ADP payroll, an IRS CP2000, an auditor PBC, a customer remittance, a close calendar, and a fraudulent wiring-instruction change. There is everyday mail too: a colleague's question, an approval request, a meeting invite, an IT notice, and an FYI. Once your own mail is in the database, `demo` and the **Load sample mailbox** button refuse to run so they cannot erase it; use `CONTROLLER_INBOX_DATA_DIR=./data-sample` to look at the sample separately. Loading the sample replaces only mail: your Setup choices (time zone, profile, context size), trusted and reported domains, and saved conversations stay.
 
-To try CloseDesk in a browser without installing it, there is a test environment (the sample mailbox, no local model) for Streamlit Community Cloud: see [streamlit/README.md](streamlit/README.md).
-
 | Command | What it does |
 | --- | --- |
 | `python -m controller_inbox run` | The everyday command: drop folder, local model, today's digest, open the dashboard |
