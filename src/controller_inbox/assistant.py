@@ -34,6 +34,7 @@ from controller_inbox.local_llm import (
     context_length,
     context_target,
     ensure_context,
+    failure_note,
     llm_active,
     needs_more_context,
     reply_budget,
@@ -630,7 +631,7 @@ def answer_stream(
         if state["wrote"]:
             yield {"type": "delta", "text": "\n\n(The local model stopped answering partway.)"}
         else:
-            note = f"The local model didn't answer ({str(exc)[:120]})."
+            note = failure_note(exc)
             if isinstance(exc, ContextOverflow):
                 note = "The question and its files didn't fit the model's context window. " + agent.context_advice(
                     context_length(settings), ["the emails and files"]
