@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import ipaddress
-import os
 import re
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from pydantic import field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 
 from controller_inbox.clock import AUTO, effective_timezone, is_timezone
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -31,6 +30,17 @@ def _on_this_network(host: str) -> bool:
     return address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified
 
 
+def _plain_path(value: str | Path) -> str | Path:
+    """A folder from .env, refused with a clear message when it holds a control character: a Windows path in double
+    quotes ("C:\\Users\\nancy") has its \\n read as a new line."""
+    if isinstance(value, str) and re.search(r"[\x00-\x1f]", value):
+        raise ValueError(
+            f"The folder {value!r} has a control character in it. In .env, write Windows paths without quotes or in "
+            "single quotes: CONTROLLER_INBOX_DATA_DIR='C:\\Users\\you\\CloseDesk data'."
+        )
+    return value
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="CONTROLLER_INBOX_",
@@ -38,6 +48,8 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         populate_by_name=True,
+        # A line left as "NAME=" (uncommented from .env.example) means the default, not an empty number.
+        env_ignore_empty=True,
     )
 
     data_dir: Path = Path("./data")
@@ -98,20 +110,29 @@ class Settings(BaseSettings):
     # what takes this computer under a minute, and starting CloseDesk reads none, so nobody waits on it.
     vision_minutes_per_run: float = 30.0
 
-    azure_client_id: str = ""
-    azure_tenant_id: str = "common"
-    azure_client_secret: str = ""
-    openai_api_key: str = ""
+    # Read with or without the CONTROLLER_INBOX_ prefix, from the environment or .env (.env.example has them without).
+    azure_client_id: str = Field("", validation_alias=AliasChoices("CONTROLLER_INBOX_AZURE_CLIENT_ID", "AZURE_CLIENT_ID", "azure_client_id"))
+    azure_tenant_id: str = Field("common", validation_alias=AliasChoices("CONTROLLER_INBOX_AZURE_TENANT_ID", "AZURE_TENANT_ID", "azure_tenant_id"))
+    azure_client_secret: str = Field(
+        "", validation_alias=AliasChoices("CONTROLLER_INBOX_AZURE_CLIENT_SECRET", "AZURE_CLIENT_SECRET", "azure_client_secret")
+    )
+    openai_api_key: str = Field("", validation_alias=AliasChoices("CONTROLLER_INBOX_OPENAI_API_KEY", "OPENAI_API_KEY", "openai_api_key"))
 
     @field_validator("data_dir", "inbox_dir", mode="before")
     @classmethod
     def _path(cls, value: str | Path) -> Path:
-        return Path(value).expanduser()
+        return Path(_plain_path(value)).expanduser()
 
     @field_validator("cost_codes_dir", mode="before")
     @classmethod
     def _optional_path(cls, value: str | Path | None) -> Path | None:
-        return Path(value).expanduser() if value and str(value).strip() else None
+        return Path(_plain_path(value)).expanduser() if value and str(value).strip() else None
+
+    @field_validator("high_amount", mode="before")
+    @classmethod
+    def _amount(cls, value):
+        """10,000 or $10,000 as written in .env."""
+        return re.sub(r"[,$\s]", "", value) if isinstance(value, str) else value
 
     @field_validator("vision_mode", mode="before")
     @classmethod
@@ -167,11 +188,8 @@ class Settings(BaseSettings):
         return text if text in PROFILES else "general"
 
     @model_validator(mode="after")
-    def _unprefixed_secrets(self) -> "Settings":
-        self.azure_client_id = self.azure_client_id or os.getenv("AZURE_CLIENT_ID", "")
-        self.azure_tenant_id = os.getenv("AZURE_TENANT_ID", "") or self.azure_tenant_id or "common"
-        self.azure_client_secret = self.azure_client_secret or os.getenv("AZURE_CLIENT_SECRET", "")
-        self.openai_api_key = self.openai_api_key or os.getenv("OPENAI_API_KEY", "")
+    def _tenant(self) -> "Settings":
+        self.azure_tenant_id = self.azure_tenant_id or "common"
         return self
 
     @property

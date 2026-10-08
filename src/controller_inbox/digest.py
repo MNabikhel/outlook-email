@@ -68,7 +68,7 @@ def build_digest(
         received_from=_utc(start),
         received_before=_utc(end),
         order="score",
-        limit=1000,
+        limit=-1,  # every email in the window, so the counts are right however busy the mailbox (SQLite: no limit)
     )
     total_emails = store.counts()["emails"]
     open_actions = store.list_actions(status="open")

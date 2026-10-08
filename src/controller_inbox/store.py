@@ -1652,24 +1652,35 @@ def _col(row: sqlite3.Row, name: str, default: Any) -> Any:
     return row[name]
 
 
+def _add_column(conn: sqlite3.Connection, sql: str) -> bool:
+    """Add a column, unless another process (the dashboard and the overnight run starting together after an update)
+    added it a moment ago. True when this one added it."""
+    try:
+        conn.execute(sql)
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+        return False
+    return True
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(emails)")}
     if "folder" not in cols:
-        conn.execute("ALTER TABLE emails ADD COLUMN folder TEXT DEFAULT ''")
+        _add_column(conn, "ALTER TABLE emails ADD COLUMN folder TEXT DEFAULT ''")
     if "summary" not in cols:
-        conn.execute("ALTER TABLE emails ADD COLUMN summary TEXT DEFAULT ''")
+        _add_column(conn, "ALTER TABLE emails ADD COLUMN summary TEXT DEFAULT ''")
     if "model_status" not in cols:
-        conn.execute("ALTER TABLE emails ADD COLUMN model_status TEXT DEFAULT 'script_draft'")
-    if "source_path" not in cols:
-        conn.execute("ALTER TABLE emails ADD COLUMN source_path TEXT DEFAULT ''")
+        _add_column(conn, "ALTER TABLE emails ADD COLUMN model_status TEXT DEFAULT 'script_draft'")
+    if "source_path" not in cols and _add_column(conn, "ALTER TABLE emails ADD COLUMN source_path TEXT DEFAULT ''"):
         # Databases from before profiles existed were all finance boards; keep them that way.
         real = conn.execute("SELECT COUNT(*) FROM emails WHERE COALESCE(source, '') != 'demo'").fetchone()[0]
         if real:
             conn.execute("INSERT OR IGNORE INTO sync_state(key, value) VALUES ('profile', 'finance')")
     if "done_at" not in cols:
-        conn.execute("ALTER TABLE emails ADD COLUMN done_at TEXT DEFAULT ''")
+        _add_column(conn, "ALTER TABLE emails ADD COLUMN done_at TEXT DEFAULT ''")
     if "reply_to" not in cols:
-        conn.execute("ALTER TABLE emails ADD COLUMN reply_to TEXT DEFAULT ''")
+        _add_column(conn, "ALTER TABLE emails ADD COLUMN reply_to TEXT DEFAULT ''")
     if not conn.execute("SELECT 1 FROM sync_state WHERE key = 'attachment_text_without_nul'").fetchone():
         # Text stored before NUL characters were dropped: summaries keyed by its length never matched.
         rows = conn.execute("SELECT id, extracted_text FROM attachments WHERE instr(extracted_text, char(0)) > 0").fetchall()
