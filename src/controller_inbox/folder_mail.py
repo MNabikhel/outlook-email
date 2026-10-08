@@ -30,7 +30,9 @@ logging.getLogger("extract_msg").setLevel(logging.ERROR)
 log = logging.getLogger(__name__)
 
 MESSAGE_SUFFIXES = {".msg", ".eml"}
-SKIP_NAMES = {".gitkeep", ".ds_store"}
+# Compared in lower case. Windows writes desktop.ini and Thumbs.db into folders; Office's "~$" lock files are
+# skipped by their prefix (``_files``).
+SKIP_NAMES = {".gitkeep", ".ds_store", "desktop.ini", "thumbs.db"}
 
 
 def ingest_folder(
@@ -44,7 +46,8 @@ def ingest_folder(
     """Read everything in the drop folder. Returns the records that were read.
 
     ``report`` (when given) is filled with ``read``, ``already_read`` (same mail
-    dropped again; only files it brings that aren't stored yet are added), and ``failed`` rows.
+    dropped again; only files it brings that aren't stored yet are added), ``failed`` rows, and ``waiting``
+    (names of files left for a later run: still being copied in, or waiting for their message).
     A file that cannot be read moves to ``inbox/failed`` with a note, so it is
     not retried on every run.
     """
@@ -53,7 +56,7 @@ def ingest_folder(
     report.update({"read": 0, "already_read": 0, "failed": [], "waiting": []})
     records = []
     seen: set[str] = set()
-    batches = collect_batches(settings)
+    batches = collect_batches(settings, report["waiting"])
     busy = _still_copying([file for path, sidecars in batches for file in (path, *sidecars)])
     sample_checked = False
     for index, (path, sidecars) in enumerate(batches, start=1):
@@ -199,7 +202,9 @@ def collect_messages(settings: Settings) -> list[tuple[RawMessage, list[Path]]]:
     return parsed
 
 
-def collect_batches(settings: Settings) -> list[tuple[Path, list[Path]]]:
+def collect_batches(settings: Settings, waiting: list[str] | None = None) -> list[tuple[Path, list[Path]]]:
+    """Each message with the files that belong to it, then the loose files. Files left for a later run (an
+    attachments folder still waiting for its message) are named in ``waiting``."""
     incoming = [p for p in _files(settings.inbox_incoming)]
     attachment_files = [p for p in _files(settings.inbox_attachments)]
     messages = [p for p in incoming if p.suffix.lower() in MESSAGE_SUFFIXES]
@@ -213,14 +218,47 @@ def collect_batches(settings: Settings) -> list[tuple[Path, list[Path]]]:
         consumed.update(sidecars)
         batches.append((path, sidecars))
 
+    # A file in inbox/attachments/<name>/ whose message isn't here (read on an earlier run, or named otherwise)
+    # is read as a loose file, so it still reaches the board. The folder is often copied in before its message
+    # is saved, so it is only read on its own once nothing in it has changed for a day; until then it waits.
+    orphans: dict[Path, list[Path]] = {}
+    attachments_root = settings.inbox_attachments
     for path in loose + attachment_files:
         if path in consumed:
             continue
-        if path.parent != settings.inbox_incoming and path.parent != settings.inbox_attachments:
-            if path.parent.parent == settings.inbox_attachments:
+        if path.parent != settings.inbox_incoming and path.parent != attachments_root:
+            try:
+                folder = attachments_root / path.relative_to(attachments_root).parts[0]
+            except ValueError:
+                folder = None
+            if folder is not None:
+                orphans.setdefault(folder, []).append(path)
                 continue
         batches.append((path, []))
+    now = time.time()
+    for folder, files in orphans.items():
+        if now - _newest_mtime(files) < ORPHAN_WAIT_SECONDS:
+            if waiting is not None:
+                waiting.extend(path.name for path in files)
+            continue
+        batches.extend((path, []) for path in files)
     return batches
+
+
+# How long files in inbox/attachments/<name>/ wait for their message before they are read without it.
+ORPHAN_WAIT_SECONDS = 24 * 60 * 60
+
+
+def _newest_mtime(paths: list[Path]) -> float:
+    newest = 0.0
+    for path in paths:
+        try:
+            stat = path.stat()
+            # A copy keeps its old modified time (Explorer, robocopy): when it arrived is the later of the two.
+            newest = max(newest, stat.st_mtime, stat.st_ctime)
+        except OSError:
+            continue
+    return newest
 
 
 def _sidecars_for(
@@ -280,15 +318,25 @@ def _eml_content(message, prefix: str = "", depth: int = 0) -> tuple[str, list[R
     html_fallback = ""
     calendar = b""
     ics_attached = False
+    # A picture is shown inside the body only when the HTML refers to its Content-ID, as the .msg reader checks.
+    html = "\n".join(
+        _decode_text_part(part, part.get_payload(decode=True) or b"")
+        for part in _eml_leaves(message)
+        if part.get_content_type() == "text/html" and not part.get_filename()
+    )
     for part in _eml_leaves(message):
         filename = part.get_filename()
         ctype = part.get_content_type()
         if ctype == "message/rfc822":
             attachments.extend(_attached_email(part, filename or "", prefix, depth))
             continue
+        if ctype in _SIGNATURE_TYPES:
+            # An S/MIME signature (smime.p7s), not a file anyone sent.
+            continue
         disposition = (part.get_content_disposition() or "").lower()
         payload = part.get_payload(decode=True) or b""
-        if _inline_picture(ctype, filename or "", len(payload), disposition != "attachment" and bool(part.get("content-id"))):
+        cid = str(part.get("content-id") or "").strip().strip("<>")
+        if _inline_picture(ctype, filename or "", len(payload), disposition != "attachment" and bool(cid and cid in html)):
             continue
         if filename or disposition == "attachment":
             mail = mail_file_attachments(filename or "", ctype, payload, prefix, depth)
@@ -371,8 +419,11 @@ def forwarded_attachments(inner, filename: str = "", prefix: str = "", depth: in
 
 
 def _forward_stem(filename: str, subject: str) -> str:
-    stem = Path(filename).stem if filename else ""
-    stem = stem or subject or "forwarded message"
+    """A forwarded email's name for its files: its file name without a .eml/.msg extension, else its subject.
+    Names are often the subject itself ("Statement 09/30", "Q3 accruals v2.1 final"), so only a real mail
+    extension is cut, and slashes are replaced rather than read as folders."""
+    stem = re.sub(r"\.(eml|msg)$", "", _tidy(filename), flags=re.IGNORECASE)
+    stem = stem or _tidy(subject) or "forwarded message"
     return re.sub(r"[\\/]", "_", stem).strip()[:80] or "forwarded message"
 
 
@@ -444,10 +495,23 @@ def _decode_html(data: bytes, charset: str | None) -> str:
     return _decode_with(data, charset)
 
 
+# Character set names Outlook and other mail programs use that Python doesn't know.
+_CHARSET_ALIASES = {
+    "windows-874": "cp874",
+    "iso-8859-8-i": "iso-8859-8",
+    "iso-8859-8-e": "iso-8859-8",
+    "iso-8859-6-i": "iso-8859-6",
+    "iso-8859-6-e": "iso-8859-6",
+    "x-sjis": "shift_jis",
+    "x-gbk": "gbk",
+}
+
+
 def _decode_with(data: bytes, charset: str | None) -> str:
     """Text in its declared character set. Undeclared, or declared ASCII while it holds other bytes (as many
     mail programs send it), it is read as UTF-8, else Windows-1252."""
     name = (charset or "").strip().lower()
+    name = _CHARSET_ALIASES.get(name, name)
     if name in ("", "us-ascii", "ascii", "ansi_x3.4-1968"):
         return decode_text(data)
     try:
@@ -478,7 +542,7 @@ def _msg_attachments(message, prefix: str = "", depth: int = 0) -> list[RawAttac
             found.append(_attachment(prefix + filename, content_type, bytes(payload)))
             continue
         # A forwarded email attached as an item: keep its text, then the files it carried.
-        stem = Path(filename).stem or "forwarded message"
+        stem = _forward_stem(filename, "")
         inner = getattr(payload, "attachments", None) or []
         text = _embedded_message_text(payload, [a.longFilename or a.shortFilename or "" for a in inner])
         found.append(_attachment(f"{prefix}{stem}.txt", "text/plain", text.encode("utf-8")))
@@ -684,7 +748,7 @@ def _files(folder: Path) -> list[Path]:
         return []
     found = []
     for path in folder.rglob("*"):
-        if path.is_file() and path.name.lower() not in SKIP_NAMES and not path.name.startswith("."):
+        if path.is_file() and path.name.lower() not in SKIP_NAMES and not path.name.startswith((".", "~$")):
             found.append(path)
     return sorted(found)
 
@@ -896,9 +960,10 @@ def _quarantine(settings: Settings, paths: list[Path], exc: Exception) -> None:
     dest_root = settings.inbox_failed
     try:
         dest_root.mkdir(parents=True, exist_ok=True)
-        _move_all(dest_root, paths)
+        landed = _move_all(dest_root, paths)
         if paths:
-            note = dest_root / f"{paths[0].name}.why.txt"
+            # Named after where the file landed: a second file of the same name gets a new name, and its own note.
+            note = dest_root / f"{(landed[0] or paths[0]).name}.why.txt"
             note.write_text(
                 "CloseDesk could not read this file.\n"
                 f"Reason: {exc}\n\n"

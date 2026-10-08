@@ -110,3 +110,20 @@ def test_the_question_s_first_word_is_not_a_name():
     assert not _distinctive("payroll", "Payroll accrual variance for March?")
     assert _distinctive("march", "Payroll accrual variance for March?")
     assert _distinctive("31-60", "how much is in 31-60?")
+
+
+def test_the_last_row_by_date_is_the_latest_dated_one():
+    # An undated row sorted as if dated 9999-12-31, so "the last amount" was the opening balance.
+    text = (
+        "Date: not listed | Description: Opening balance | Amount: 1,000.00\n"
+        "Date: 10/01/2026 | Description: Payment ACH | Amount: 250.00\n"
+        "Date: 10/15/2026 | Description: Payment wire | Amount: 300.00\n"
+        "Date: 10/20/2026 | Description: Invoice 77 | Amount: 410.00\n"
+    )
+    answer = lookup(text, "what's the last amount")
+    assert "Invoice 77" in answer and "410.00" in answer and "Opening balance" not in answer
+
+
+def test_a_half_cent_rounds_up_as_a_spreadsheet_does():
+    # The average of 1.00 and 2.01 is 1.505: a spreadsheet shows 1.51, Python's half to even 1.50.
+    assert "1.51" in lookup("Item: A | Amount: 1.00\nItem: B | Amount: 2.01\n", "what is the average amount")

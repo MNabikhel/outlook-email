@@ -217,11 +217,15 @@ def _due_priority(due: str | None, as_of: date, fallback: Importance) -> Importa
         days = (date.fromisoformat(due) - as_of).days
     except ValueError:
         return fallback
+    # A close due date raises the priority; it never lowers what the email already earned.
     if days <= 2:
-        return Importance.HIGH
+        return max(fallback, Importance.HIGH, key=_RANK.index)
     if days <= 7:
-        return Importance.HIGH if fallback == Importance.CRITICAL else Importance.MEDIUM
+        return max(fallback, Importance.MEDIUM, key=_RANK.index)
     return fallback
+
+
+_RANK = [Importance.LOW, Importance.MEDIUM, Importance.HIGH, Importance.CRITICAL]
 
 
 def _plus_days(as_of: date, days: int) -> str:

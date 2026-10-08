@@ -81,6 +81,8 @@ class ModelStatus:
     # LM Studio's downloaded models that can answer (not document readers) by key, with the longest context each
     # supports (0 when it doesn't say): the ones Setup offers to load.
     chat_models: dict[str, int] = field(default_factory=dict)
+    # LM Studio's loaded embedding models, by instance id and by key (kept apart from ``instances``: none answers).
+    embeddings: set[str] = field(default_factory=set)
 
     @property
     def active(self) -> bool:
@@ -142,7 +144,10 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         status.lm_studio = listing.route == "v1"
         # LM Studio (or a server that didn't say what it has loaded) lists every model it could load.
         knows_loaded = bool(listing.route) or listing.busy
-        status.model = _pick_model(settings.llm_model, ids, loaded, lm_studio=knows_loaded, remembered=remembered_model(settings))
+        status.model = _pick_model(
+            settings.llm_model, ids, loaded, lm_studio=knows_loaded, remembered=remembered_model(settings),
+            reader=(settings.vision_model or "").strip(), keys={item: reloadable.get(item, (item, 0))[0] for item in loaded},
+        )
         if listing.route and status.model in loaded:
             remember_model(settings, reloadable.get(status.model, (status.model, 0))[0])
         status.reasoning = reasoning.get(status.model, [])
@@ -151,6 +156,7 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         status.key, status.max_context = reloadable.get(status.model, ("", 0))
         status.instances = {instance: (reloadable.get(instance, (instance, 0))[0], contexts.get(instance, 0)) for instance in loaded}
         status.chat_models = listing.chat if status.lm_studio else {}
+        status.embeddings = listing.embeddings
         status.vision = status.model in seeing
         # By model key, so a model is listed once whether or not it is loaded. A downloaded one when LM Studio loads it
         # when asked (/v1/models lists every downloaded model with just-in-time loading on, the loaded ones only with
@@ -198,6 +204,7 @@ class _Listing:
     # No route answered because one took too long (LM Studio busy), not because the server hasn't got them.
     busy: bool = False
     chat: dict[str, int] = field(default_factory=dict)  # see ModelStatus.chat_models
+    embeddings: set[str] = field(default_factory=set)  # see ModelStatus.embeddings
 
 
 def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing:
@@ -229,8 +236,15 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
         seeing: set[str] = set()
         downloaded: list[str] = []
         chat: dict[str, int] = {}
+        embeddings: set[str] = set()
         if isinstance(data.get("models"), list):
             for item in data["models"]:
+                if isinstance(item, dict) and item.get("type") == "embedding":
+                    instances = [str(i["id"]) for i in item.get("loaded_instances") or [] if isinstance(i, dict) and i.get("id")]
+                    if instances:
+                        embeddings.update(instances)
+                        embeddings.add(str(item.get("key") or instances[0]))
+                    continue
                 if not isinstance(item, dict) or item.get("type") not in {"llm", "vlm"}:
                     continue
                 caps = item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {}
@@ -252,7 +266,7 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
                         reloadable[str(instance["id"])] = (str(item.get("key") or instance["id"]), _int(item.get("max_context_length")))
                         if sees:
                             seeing.add(str(instance["id"]))
-            return _Listing("v1", loaded, reasoning, contexts, reloadable, seeing, downloaded, chat=chat)
+            return _Listing("v1", loaded, reasoning, contexts, reloadable, seeing, downloaded, chat=chat, embeddings=embeddings)
         # LM Studio's older route says of each model whether it is loaded; a server that answers it with a plain list
         # of the models it serves isn't LM Studio.
         if isinstance(data.get("data"), list) and any(isinstance(item, dict) and "state" in item for item in data["data"]):
@@ -314,17 +328,30 @@ def document_reader(model: str) -> bool:
 
 
 def _pick_model(
-    requested: str, ids: list[str], loaded: list[str] | None = None, *, lm_studio: bool = False, remembered: str = ""
+    requested: str,
+    ids: list[str],
+    loaded: list[str] | None = None,
+    *,
+    lm_studio: bool = False,
+    remembered: str = "",
+    reader: str = "",
+    keys: dict[str, str] | None = None,
 ) -> str:
-    """The model to ask: the one set in the settings, else the chat model loaded now. With nothing loaded, LM Studio
-    (``lm_studio``) lists every downloaded model and loads whichever a request names, so the first on its list (a
-    coding model, say) would be loaded though nobody chose it: only the chat model last seen loaded (``remembered``)
-    is asked for, or none, and Setup says to load one. Other servers list only what they serve."""
+    """The model to ask: the one set in the settings, else the chat model loaded now. With several loaded, the chat
+    model last seen loaded (``remembered``), else not the page reader chosen in Setup (``reader``, loaded beside the
+    chat model to read a scan): LM Studio's own order would make it the chat model. ``keys`` gives each loaded
+    instance's model key. With nothing loaded, LM Studio (``lm_studio``) lists every downloaded model and loads
+    whichever a request names, so the first on its list (a coding model, say) would be loaded though nobody chose it:
+    only the remembered chat model is asked for, or none, and Setup says to load one. Other servers list only what
+    they serve."""
     if requested in ids:
         return requested
     chat = [item for item in loaded or [] if not document_reader(item)]
     if chat:
-        return chat[0]
+        names = {item: {item, (keys or {}).get(item, item)} for item in chat}
+        mine = [item for item in chat if remembered and remembered in names[item]]
+        others = [item for item in chat if not reader or reader not in names[item]]
+        return (mine or others or chat)[0]
     if lm_studio:
         return remembered if remembered in ids and not document_reader(remembered) else ""
     if not ids:
@@ -589,16 +616,20 @@ class LocalReader:
             payload["reasoning_effort"] = self._effort
         try:
             response = _post_chat(self.client.post, url, payload, self.settings, timeout=_timeout(self.settings, self._max_tokens))
-            if "reasoning_effort" not in payload:
+            # A busy moment (a 500 the same request without the effort got past) is not a refusal: the effort and the
+            # schema are only dropped for the rest of the run when the server said no to them.
+            if self.model in _effort_rejected:
                 self._effort = None
             if self._structured and response.status_code in _RETRYABLE:
                 # Older LM Studio / Ollama builds reject response_format. Ask again, plain.
-                self._structured = False
+                refused = response.status_code in _REFUSES
                 payload.pop("response_format", None)
                 response = _post_chat(
                     self.client.post, url, payload, self.settings, timeout=_timeout(self.settings, self._max_tokens)
                 )
-                if "reasoning_effort" not in payload:
+                if refused and response.status_code < 400:
+                    self._structured = False
+                if self.model in _effort_rejected:
                     self._effort = None
             response.raise_for_status()
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as exc:
@@ -1116,7 +1147,7 @@ def _lm_studio_said(exc: httpx.HTTPError) -> str:
 def use_chat_model(settings: Settings, key: str) -> str:
     """Make ``key`` (a downloaded model's key in LM Studio) the model that answers, chosen in Setup: the other chat
     models loaded are unloaded first, so two don't share the memory, then it is loaded with the context Setup asks
-    for. Document readers and embedding models stay loaded. If LM Studio can't load it, the ones unloaded are loaded
+    for. Document readers, the page reader chosen in Setup and embedding models stay loaded. If LM Studio can't load it, the ones unloaded are loaded
     back. Returns what went wrong, or ""."""
     with _context_lock:
         status = check_model(settings, use_cache=False)
@@ -1128,6 +1159,8 @@ def use_chat_model(settings: Settings, key: str) -> str:
             return f"LM Studio doesn't have {key} downloaded."
         root = status.base_url[: -len("/v1")] if status.base_url.endswith("/v1") else status.base_url
         timeout = httpx.Timeout(max(settings.llm_timeout, CHAT_TIMEOUT), connect=5.0)
+        # The page reader chosen in Setup (a general vision model, not only a document reader) stays loaded too.
+        reader = (settings.vision_model or "").strip() or None
 
         def load(model: str, size: int) -> None:
             body = {"model": model, **({"context_length": size} if size else {})}
@@ -1148,7 +1181,7 @@ def use_chat_model(settings: Settings, key: str) -> str:
         others = [
             (instance, model, size)
             for instance, (model, size) in status.instances.items()
-            if model != key and not document_reader(model) and not document_reader(instance)
+            if model != key and not document_reader(model) and not document_reader(instance) and reader not in (model, instance)
         ]
         unloaded: list[tuple[str, int]] = []
         try:

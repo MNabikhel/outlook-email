@@ -930,7 +930,7 @@ def test_new_files_on_a_read_email_keep_what_the_user_did_meanwhile(settings: Se
     reading = {"category": "ap_invoice", "folder": "important", "importance": "high", "summary": "Freight invoice.", "actions": [], "why": "x"}
     apply_bionic_reading(store, record.id, reading)
 
-    real = pipeline.attachment_text
+    real = pipeline.extract_text_from_bytes
 
     def slow_read(filename, content_type, data):
         # A scan read with OCR takes a while; the user works on the email in the dashboard meanwhile.
@@ -940,7 +940,7 @@ def test_new_files_on_a_read_email_keep_what_the_user_did_meanwhile(settings: Se
             record_fraud_verdict(store, settings, record.id, verdict="fraud", note="phoned the vendor; it is fake")
         return real(filename, content_type, data)
 
-    monkeypatch.setattr(pipeline, "attachment_text", slow_read)
+    monkeypatch.setattr(pipeline, "extract_text_from_bytes", slow_read)
     _eml(settings, "Invoice 4410", message_id="<inv4410@vendor.com>")
     _sidecar(settings, "Invoice 4410.txt", b"Revised invoice INV-4410 Freight $1,300.00")
     ingest_folder(store, settings)

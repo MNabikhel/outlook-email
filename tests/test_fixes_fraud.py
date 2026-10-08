@@ -244,3 +244,70 @@ def test_subject_correction_does_not_cross_senders(loaded, settings):
     assert match_correction(loaded, sender_email="someone@else.example", subject=email.subject) is None
     assert match_correction(loaded, sender_email=f"colleague@{domain}", subject=email.subject) is not None
     assert match_correction(loaded, sender_email="", subject=email.subject) is None
+
+
+# 14. A free-mail mailbox does not make every sender at that provider trusted.
+def test_freemail_mailbox_does_not_trust_every_sender_there(tmp_path, store):
+    from controller_inbox.config import Settings
+    from controller_inbox.fraud import trust_context
+
+    settings = Settings(data_dir=tmp_path, inbox_dir=tmp_path / "inbox", mailbox="controller@gmail.com", _env_file=None)
+    ctx = trust_context(store, settings)
+    check = assess(ctx, subject="Bank change", body="Our bank details have changed. Please pay invoice 5521 to the new account.",
+                   sender_name="Acme AP", sender_email="acme.ap.billing@gmail.com")
+    assert check.level == "high", (check.level, check.score, [s.key for s in check.signals])
+
+
+# 15. Country and ISP free-mail domains cannot be trusted as a company domain.
+@pytest.mark.parametrize("domain", ["hotmail.co.uk", "yahoo.co.uk", "outlook.fr", "comcast.net"])
+def test_country_freemail_cannot_be_trusted_as_a_domain(settings, store, domain):
+    from controller_inbox.fraud import set_domain_trust
+
+    with pytest.raises(ValueError):
+        set_domain_trust(store, settings, domain)
+
+
+# 16. "We are now banking with…" and "we moved our account to…" are bank changes too.
+@pytest.mark.parametrize("body", [
+    "We are now banking with Wells Fargo. Please direct all future payments there.",
+    "We moved our account to Chase. Please use the details below for future payments.",
+])
+def test_bank_switch_wording_is_high(body):
+    check = assess(TrustContext(domains={"taz.com"}), subject="Payment update", body=body,
+                   sender_name="Vendor AP", sender_email="ap@vendorco.com")
+    assert check.level == "high", (check.level, [s.key for s in check.signals])
+
+
+# 16b. ...but an invoice's standing payment footer and a move to new accounting software are not.
+@pytest.mark.parametrize("body", [
+    "Please find attached invoice INV-2231, total $4,180.00, due October 30, 2026.\n"
+    "Please use the bank details below for all payments.\nBank: Chase\nAccount name: Harbor Packaging LLC",
+    "We have moved our accounts to Xero, so from next month our invoices will come from Xero.\n"
+    "Invoice INV-2232 for $1,200.00 is attached.",
+])
+def test_invoice_footer_and_software_move_are_not_bank_changes(body):
+    from controller_inbox.classify import PAYMENT_CHANGE_RE
+    from controller_inbox.fraud import CAUTION_AT
+
+    assert PAYMENT_CHANGE_RE.search(body) is None
+    check = assess(TrustContext(), subject="Invoice INV-2231", body=body, sender_name="Harbor AP",
+                   sender_email="ap@harbor.example", history=12, domain_history=12)
+    assert check.score < CAUTION_AT, (check.level, [s.key for s in check.signals])
+
+
+@pytest.mark.parametrize("body", [
+    "We moved our account to Chase Bank, effective today.",
+    "We have switched our accounts to a new bank. Please update your records.",
+    "Please note we have moved our accounts to Bank of America. Please update your records.",
+    "We moved our banking to Chase, please update your records.",
+])
+def test_moving_accounts_to_a_bank_is_still_a_bank_change(body):
+    from controller_inbox.classify import PAYMENT_CHANGE_RE
+
+    assert PAYMENT_CHANGE_RE.search(body)
+
+
+def test_moving_accounts_to_the_bank_for_collection_is_not_a_bank_change():
+    from controller_inbox.classify import PAYMENT_CHANGE_RE
+
+    assert PAYMENT_CHANGE_RE.search("We transferred our accounts to the bank for collection last month.") is None

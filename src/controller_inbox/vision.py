@@ -533,10 +533,11 @@ def _transcribe_once(
 
 # An account or routing number beside its label in the model's markdown ("| Account Number | 123456789012 |",
 # "**Routing:** 021000021", or an HTML table's "<td>Account No.</td><td>123456789012</td>"): only the number is
-# masked, so the table keeps its cells.
+# masked, so the table keeps its cells. The number is one word, or groups of digits ("1234 5678 9012"): not the words
+# and amount after it ("account 987654321 for 4,750.00").
 _SECRET = re.compile(
     r"(\b(?:routing(?:\s+(?:number|no\.?))?|aba|sort\s+code|iban|account(?:\s+(?:number|no\.?|#))?|"
-    r"acct\.?(?:\s+(?:number|no\.?))?|a/c)\b(?:[\s#:*_|.]|</?t[dhr]\b[^>]*>)*)([A-Z]{2}\d{2}[A-Z0-9]{10,30}|(?=(?:[A-Z]*\d){6})[A-Z0-9][A-Z0-9 -]{4,32}[A-Z0-9])\b",
+    r"acct\.?(?:\s+(?:number|no\.?))?|a/c)\b(?:[\s#:*_|.]|</?t[dhr]\b[^>]*>)*)([A-Z]{2}\d{2}[A-Z0-9]{10,30}|(?=(?:[A-Z]*[ -]?\d){6})[A-Z0-9]+(?:[ -]\d+)*(?![\d,.]\d))\b",
     re.IGNORECASE,
 )
 
@@ -577,8 +578,9 @@ def _blank_row(line: str) -> bool:
 
 
 # The same few characters over and over at the end of the reading: empty cells written across one line without
-# end ("|  |  |  …"). Sixty in a row is more columns than any printed table has.
-_RUN = re.compile(r"(.{1,12}?)\1{59,}$", re.S)
+# end ("|  |  |  …"). Sixty in a row is more columns than any printed table has. A run of nothing but dots, dashes,
+# underscores and spaces is the page's own (a line to sign on, a dot leader), not a loop.
+_RUN = re.compile(r"(?!(?:[^\w|<>]|_)*$)(.{1,12}?)\1{59,}$", re.S)
 # A longer run written on one line: OvisOCR2 writes a whole table on one line, so a loop on an empty row is
 # "<tr><td></td><td></td></tr>" over and over. Thirty in a row, as for empty markdown rows.
 LONG_RUN = (13, 160, LOOP_BLANK_ROWS)
@@ -603,7 +605,7 @@ def _long_run(text: str) -> tuple[int, int]:
 def _looping(text: str) -> bool:
     lines = [line for line in text.split("\n")[:-1] if line.strip()]  # complete lines only
     run = _repeated_tail(lines)
-    if run >= LOOP_LINES or (run >= LOOP_BLANK_ROWS and _blank_row(lines[-1])):
+    if lines and run >= (LOOP_BLANK_ROWS if _blank_row(lines[-1]) else LOOP_LINES):
         return True
     return bool(_RUN.search(text[-1500:].rstrip())) or _long_run(text.rstrip())[0] >= 0
 
@@ -626,7 +628,7 @@ def trim_loop(text: str) -> tuple[str, bool]:
             filled = filled[:-1]  # the repeated line, cut off part way when the reply stopped
     kept = [lines[index] for index in filled]
     run = _repeated_tail(kept)
-    if not kept or not (run >= LOOP_LINES or (run >= LOOP_BLANK_ROWS and _blank_row(kept[-1]))):
+    if not kept or run < (LOOP_BLANK_ROWS if _blank_row(kept[-1]) else LOOP_LINES):
         return _without_long_run(text)
     first_dropped = len(kept) - run + (0 if _blank_row(kept[-1]) else 1)
     end = filled[first_dropped] if first_dropped < len(filled) else len(lines)

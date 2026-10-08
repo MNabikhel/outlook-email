@@ -202,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{report['already_read']} were already filed earlier and were left as they were.")
         for row in report.get("failed", []):
             print(f"Could not read {row['file']}: {row['error']} (moved to {settings.inbox_failed})")
+        if report.get("waiting"):
+            print(f"{len(report['waiting'])} file(s) were left for a later run (still copying in, or waiting for their message).")
         if not records:
             print(f"Nothing new. Drop .msg or .eml files in {settings.inbox_incoming}")
             print(f"Put related attachments in {settings.inbox_attachments}/<message name>/")

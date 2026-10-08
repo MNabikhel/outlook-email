@@ -478,3 +478,67 @@ Item: B{page} | Amount: {page}0.00
     rows = [sheet for sheet in tables.sheets if sheet.rows >= 2]
     one = [sheet for sheet in tables.sheets if sheet.rows == 1]
     assert len(rows) == table_query.MAX_TABLES and len(one) == table_query.MAX_ONE_ROW_TABLES
+
+
+def test_budget_and_actual_of_one_month_are_two_headings():
+    # Both columns were stored as month 2026-07, so adding up July added the budget to the actual.
+    text = "\n".join(
+        f"Account: {a} | Budget Jul-26: {b} | Actual Jul-26: {c} | Budget Aug-26: {b} | Actual Aug-26: {c + 1} | "
+        f"Budget Sep-26: {b} | Actual Sep-26: {c + 2}"
+        for a, b, c in [("Rent", 1000, 1100), ("Payroll", 5000, 5300), ("Utilities", 200, 170)]
+    )
+    tables = Tables([("bva.xlsx", text)])
+    assert "CREATE TABLE t1_cells" in tables.schema()
+    assert tables.run("SELECT amount FROM t1_cells WHERE account = 'Rent' AND heading = 'Actual Jul-26'")[1] == [(1100.0,)]
+    assert len(tables.run("SELECT DISTINCT heading FROM t1_cells")[1]) == 6
+
+
+def test_headings_beside_months_are_stored_as_the_schema_lists_them():
+    # The schema listed "Jul-26" while the rows held "2026-07", so a query written as listed found nothing.
+    data = [("Acme", 100, 200, 300, 50), ("Bolt", 10, 20, 30, 5), ("Cato", 7, 8, 9, 1), ("Dyna", 1, 2, 4, 8)]
+    text = "\n".join(
+        f"Customer: {c} | Jul-26: {a:,.2f} | Aug-26: {b:,.2f} | Sep-26: {d:,.2f} | Adjustments: {e:,.2f} | Total: {a + b + d + e:,.2f}"
+        for c, a, b, d, e in data
+    )
+    tables = Tables([("x.xlsx", text)])
+    assert '"heading": Jul-26, Aug-26, Sep-26, Adjustments' in tables.schema()
+    assert tables.run("SELECT amount FROM t1_cells WHERE customer = 'Acme' AND heading = 'Jul-26'")[1] == [(100.0,)]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "Table: t1\nRows: all\nValue: amount\n```sqlite\nSELECT SUM(amount) FROM t1\n```",
+        "Table: t1\nRows: all\nValue: amount\n```SQL\nSELECT SUM(amount) FROM t1\n```",
+        "Table: t1\nRows: all\nValue: amount\nSQL:\n```sqlite\nSELECT SUM(amount) FROM t1\n```",
+        "**Table**: t1\n**Rows**: all\n**Value**: amount\n**SQL**: SELECT SUM(amount) FROM t1",
+        "**Table:** t1\n**Rows:** all\n**Value:** amount\n**SQL:** SELECT SUM(amount) FROM t1",
+    ],
+)
+def test_the_query_is_read_from_any_fence_or_bold_label(reply):
+    # A fence tagged other than "sql", or a bold "SQL" label, left a valid query unread: no answer.
+    assert parse(reply) == ("Table: t1 Rows: all Value: amount", "SELECT SUM(amount) FROM t1")
+
+
+@pytest.mark.parametrize("sql", ["SELECT SUM(DISTINCT balance) FROM t1", 'SELECT SUM("balance") FROM t1', "SELECT TOTAL(ALL balance) FROM t1"])
+def test_a_running_balance_is_never_added_up_however_written(sql):
+    with pytest.raises(ValueError, match="running balance"):
+        Tables([("statement.pdf", STATEMENT)]).run(sql)
+
+
+def test_an_average_named_as_its_column_keeps_its_decimals():
+    # Shown in the whole-number column's format, the average 45.67 days read as 46.
+    tables = Tables([("d.xlsx", "Vendor: A | Days: 45\nVendor: B | Days: 46\nVendor: C | Days: 46\n")])
+    names, rows, more = tables.run("SELECT AVG(days) AS days FROM t1")
+    assert "Days: 45.67" in tables.render(table_query.Result("", "q", names, rows, more))
+    names, rows, more = tables.run("SELECT days FROM t1 WHERE vendor = 'A'")
+    assert "Days: 45" in tables.render(table_query.Result("", "q", names, rows, more)).splitlines()[-1]
+
+
+def test_an_inline_fence_with_a_language_tag_is_read():
+    # Reading any tag left "sql SELECT ..." as the query when the fence was on one line.
+    assert parse("Table: sales\n```sql SELECT SUM(amount) FROM sales```")[1] == "SELECT SUM(amount) FROM sales"
+
+
+def test_a_fence_opening_on_select_is_not_taken_for_a_tag():
+    assert parse("```SELECT\n  name\nFROM t\n```")[1].startswith("SELECT")

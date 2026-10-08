@@ -84,11 +84,42 @@ LEARNABLE = {key for key, points in POINTS.items() if points > 0 and key != "rep
 HIGH_AT = 50
 CAUTION_AT = 20
 
-FREEMAIL = {
-    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "outlook.com", "hotmail.com", "live.com", "msn.com",
-    "aol.com", "icloud.com", "me.com", "proton.me", "protonmail.com", "gmx.com", "gmx.net", "mail.com",
-    "yandex.com", "zoho.com", "zohomail.com", "fastmail.com", "tutanota.com",
+# Providers that hand out mailboxes under their name in many countries: yahoo.co.uk, hotmail.fr, outlook.com.br, gmx.de.
+_FREEMAIL_PROVIDERS = {
+    "gmail", "googlemail", "yahoo", "ymail", "rocketmail", "outlook", "hotmail", "live", "msn", "windowslive", "aol",
+    "gmx", "yandex",
 }
+# What follows the provider's name: a country code ("fr"), or "com", "net", "org" or "co", maybe with one ("co.uk").
+_FREEMAIL_TAIL_RE = re.compile(r"(?:(?:com|net|org|co)(?:\.[a-z]{2})?|[a-z]{2})")
+
+
+class _FreeMail(frozenset):
+    """The free-mail and ISP domains, where anyone can get an address. ``domain in FREEMAIL`` also covers a known
+    provider under any country ending (``yahoo.co.uk``, ``hotmail.fr``), not only the domains listed."""
+
+    def __contains__(self, domain: object) -> bool:
+        if not isinstance(domain, str):
+            return False
+        domain = domain.strip().lower().strip(".")
+        if frozenset.__contains__(self, domain):
+            return True
+        label, _, tail = domain.partition(".")
+        return label in _FREEMAIL_PROVIDERS and bool(_FREEMAIL_TAIL_RE.fullmatch(tail))
+
+
+FREEMAIL = _FreeMail({
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "outlook.com", "hotmail.com", "live.com", "msn.com",
+    "aol.com", "icloud.com", "me.com", "mac.com", "proton.me", "protonmail.com", "pm.me", "gmx.com", "gmx.net",
+    "mail.com", "yandex.com", "zoho.com", "zohomail.com", "fastmail.com", "tutanota.com", "tuta.io", "hey.com",
+    # Country mail services.
+    "web.de", "t-online.de", "freenet.de", "orange.fr", "wanadoo.fr", "free.fr", "laposte.net", "sfr.fr", "libero.it",
+    "virgilio.it", "mail.ru", "inbox.ru", "rambler.ru", "qq.com", "163.com", "126.com", "naver.com", "rediffmail.com",
+    "seznam.cz", "wp.pl", "o2.pl", "interia.pl",
+    # Internet providers' mailboxes.
+    "btinternet.com", "sky.com", "virginmedia.com", "talktalk.net", "ntlworld.com", "comcast.net", "att.net",
+    "verizon.net", "sbcglobal.net", "bellsouth.net", "cox.net", "charter.net", "earthlink.net", "optonline.net",
+    "frontier.com", "rogers.com", "shaw.ca", "sympatico.ca", "bigpond.com", "optusnet.com.au",
+})
 
 # A warning that frames the sentence as hypothetical ("we will never…", "if you receive…"), including
 # the usual footer "we will never notify you of a change to our bank details by email".
@@ -283,7 +314,8 @@ def domain_matches(domain: str, trusted: set[str] | list[str]) -> str:
 
 
 def trust_context(store: "Store", settings: "Settings") -> TrustContext:
-    ctx = TrustContext(domains=set(settings.trusted_domain_list))
+    # Not a free-mail domain, though: a mailbox at gmail.com does not make every gmail.com sender a colleague.
+    ctx = TrustContext(domains={domain for domain in settings.trusted_domain_list if domain not in FREEMAIL})
     for row in store.trust_entries():
         if row["kind"] == "domain":
             (ctx.domains if row["verdict"] == "safe" else ctx.fraud_domains).add(row["value"])

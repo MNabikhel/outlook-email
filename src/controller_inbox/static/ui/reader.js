@@ -26,7 +26,7 @@ function toolbar(d, ctx) {
     btn("Ask", { class: "btn-quiet", title: "Ask CloseDesk about this email", onclick: () => ctx.ask("What does this email need from me?", d.id) }, "chat"),
     btn("Draft reply", { class: "btn-quiet", onclick: (event) => draftReply(d, event.currentTarget.closest(".rd")) }, "pen"),
     btn("Open in Outlook", { class: "btn-quiet", title: d.has_original ? "Open the original file with your mail app" : "Opens a copy of this email in your mail app", onclick: () => openOriginal(d) }, "mail"),
-    d.locked ? null : h("a", { class: "btn btn-quiet", href: `${mailPath(d.id)}/original`, download: true, title: d.has_original ? "Download original" : "Download .eml" }, icon("download", 15), h("span", { class: "hide-narrow" }, "Download")),
+    d.locked || d.original_downloads === false ? null : h("a", { class: "btn btn-quiet", href: `${mailPath(d.id)}/original`, download: true, title: d.has_original ? "Download original" : "Download .eml" }, icon("download", 15), h("span", { class: "hide-narrow" }, "Download")),
     h("span", { class: "rd-bar-gap" }),
     pos.total
       ? h(

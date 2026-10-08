@@ -376,3 +376,23 @@ def test_a_busy_server_does_not_stop_thinking_being_turned_off(settings, monkeyp
     local_llm.complete_text(settings, [{"role": "user", "content": "hi"}])
     local_llm.complete_text(settings, [{"role": "user", "content": "hi"}])
     assert [payload.get("reasoning_effort") for payload in sent] == ["none", None, "none"]
+
+
+def test_a_busy_server_does_not_turn_the_readers_thinking_back_on_for_the_run(settings):
+    """LocalReader dropped its reasoning effort (and schema) for the rest of the run after one busy 500, though
+    only a refusal is remembered."""
+    local_llm._reasoning_seen.add("qwen3")  # a thinker: its effort is turned down to "none"
+    reading = {"category": "ap_invoice", "folder": "important", "importance": "high", "summary": "Pay it.", "actions": [], "why": "x"}
+    sent = []
+
+    def server(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append((body.get("reasoning_effort"), "response_format" in body))
+        if len(sent) == 1:
+            return httpx.Response(500, json={"error": "Model is reloading"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(reading)}, "finish_reason": "stop"}]})
+
+    reader = LocalReader(settings, model="qwen3", client=httpx.Client(transport=httpx.MockTransport(server)))
+    packet = {"subject": "Invoice", "body": "Please pay", "attachments": []}
+    assert reader.read(packet) is not None and reader.read(packet) is not None
+    assert sent == [("none", True), (None, True), ("none", True)]

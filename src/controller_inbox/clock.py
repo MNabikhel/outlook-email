@@ -160,6 +160,10 @@ ZONES: tuple[tuple[str, str], ...] = (
 )
 _ZONE_NAMES = dict(ZONES)
 
+# Zones whose tz data calls the usual offset daylight time. Morocco is on UTC+1 all year except Ramadan, and
+# tzdata models that as UTC+0 standard with a "daylight" +1; Windows and Outlook list it as UTC+01:00 standard.
+_STANDARD_OVERRIDES = {"Africa/Casablanca": timedelta(hours=1)}
+
 
 def is_timezone(name: str) -> bool:
     try:
@@ -240,12 +244,17 @@ def zone_name(name: str) -> str:
 
 def standard_offset(zone: ZoneInfo, when: datetime | None = None) -> timedelta:
     """The zone's offset outside daylight saving time. Windows and Outlook label zones by this."""
+    if getattr(zone, "key", None) in _STANDARD_OVERRIDES:
+        return _STANDARD_OVERRIDES[zone.key]
     local = _moment(when).astimezone(zone)
     return (local.utcoffset() or timedelta(0)) - (local.dst() or timedelta(0))
 
 
 def on_daylight_time(zone: ZoneInfo, when: datetime | None = None) -> bool:
-    return bool(_moment(when).astimezone(zone).dst())
+    local = _moment(when).astimezone(zone)
+    if getattr(zone, "key", None) in _STANDARD_OVERRIDES:
+        return (local.utcoffset() or timedelta(0)) > _STANDARD_OVERRIDES[zone.key]
+    return bool(local.dst())
 
 
 def zone_option(name: str, when: datetime | None = None) -> str:
@@ -323,10 +332,16 @@ def _from_localtime() -> str:
 def _matching_offset() -> str:
     """A listed zone that keeps the same hours as the computer clock, when the computer gives no name."""
     now = datetime.now(timezone.utc)
-    current = now.astimezone().utcoffset()
+    # Half a year on, so a zone without daylight saving time isn't picked for a computer that has it.
+    later = now + timedelta(days=182)
+    current, then = now.astimezone().utcoffset(), later.astimezone().utcoffset()
     standard = -timedelta(seconds=time.timezone)
     for name, _ in ZONES:
         zone = ZoneInfo(name)
-        if now.astimezone(zone).utcoffset() == current and standard_offset(zone, now) == standard:
+        if (
+            now.astimezone(zone).utcoffset() == current
+            and later.astimezone(zone).utcoffset() == then
+            and standard_offset(zone, now) == standard
+        ):
             return name
     return ""

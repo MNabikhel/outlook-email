@@ -1756,3 +1756,53 @@ def test_a_question_naming_a_file_that_isnt_a_scan_gets_no_scan_note(scan, store
     assert vision.scan_readings(store, settings, email, question="what does notes.docx say?") == []
     assert [found["file"] for found in vision.scan_readings(store, settings, email, question="what does balance sheet.pdf say?")] == ["balance sheet.pdf"]
     assert [found["file"] for found in vision.scan_readings(store, settings, email, question="what is the total?")] == ["balance sheet.pdf"]
+
+
+def test_masking_an_account_number_stops_at_the_number():
+    """The account number's pattern ran on through the words after it and took the next amount's first digits:
+    "account 987654321 for 4,750.00" read "account ****3214,750.00"."""
+    masked = vision.mask_secrets("Please wire to account 987654321 for 4,750.00 by 15 October 2026.")
+    assert "987654321" not in masked and "for 4,750.00" in masked and "15 October 2026" in masked
+    masked = vision.mask_secrets("Bank account 12345678 Total due 2,000.00")
+    assert masked == "Bank account ****5678 Total due 2,000.00"
+    assert vision.mask_secrets("| Account Number | 1234 5678 9012 |") == "| Account Number | ****9012 |", "in groups too"
+
+
+def test_an_invoice_with_twenty_odd_empty_rows_is_not_a_loop():
+    """Twenty repeats of any line was taken for a loop before the thirty allowed empty rows were counted."""
+    invoice = (
+        "| Item | Qty | Amount |\n|---|---|---|\n| Paper | 10 | 45.00 |\n| Toner | 2 | 160.00 |\n" + "| | | |\n" * 22
+        + "| Subtotal | | 205.00 |\n| Tax | | 16.40 |\n| Total | | 221.40 |\n"
+    )
+    assert not vision._looping(invoice.split("| Subtotal")[0]), "as streamed, at the 22nd empty row"
+    assert vision.trim_loop(invoice) == (invoice, False)
+
+
+SIGNED = (
+    "PAYMENT REQUEST\n\n| Vendor | Invoice | Amount |\n|---|---|---|\n| Acme Supply | INV-20417 | 4,750.00 |\n\n"
+    "Approved by: " + "_" * 64 + "\n\nTotal " + "." * 70 + " 5,990.00\n\n| Total due | | 5,990.00 |\n"
+    "Pay by 15 October 2026 from the operating account."
+)
+
+
+def test_a_signature_line_or_dot_leader_is_not_a_loop(settings, monkeypatch):
+    """Sixty underscores (a line to sign on) or dots (a leader to a total) were taken for a loop and the rest of
+    the page was dropped."""
+    assert not vision._looping(SIGNED.split("\n\nTotal")[0] + "\n")
+    assert not vision._looping(SIGNED.split(" 5,990.00")[0] + "\n")
+    assert vision.trim_loop(SIGNED) == (SIGNED, False)
+
+    class ByLine(FakeVisionServer):  # a piece per line and per newline, as a model streams
+        def __call__(self, request):
+            response = super().__call__(request)
+            if not request.url.path.endswith("/chat/completions"):
+                return response
+            pieces = [piece for line in self.page.split("\n") for piece in (line, "\n") if piece]
+            events = [{"choices": [{"delta": {"content": piece}}]} for piece in pieces]
+            events.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+            body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    settings.llm = None
+    _serve(monkeypatch, ByLine(page=SIGNED))
+    assert "5,990.00\n\n| Total due" in vision.transcribe(settings, b"png"), "read to the end of the page"

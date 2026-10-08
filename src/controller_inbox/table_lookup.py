@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from controller_inbox import tables
 from controller_inbox.documents import MARKER_RE
@@ -1012,7 +1012,9 @@ def _worked(
         dated = [label for label in columns if table.kinds.get(label) == "date"] or [
             label for label in table.labels if table.kinds.get(label) == "date"
         ]
-        order = sorted(body, key=lambda row: _date_key(_when(row.value(dated[0])))) if dated else body
+        # Among the rows with a date: an undated one ("Opening balance") is neither the first nor the last.
+        order = [row for row in body if _when(row.value(dated[0]))] if dated else []
+        order = sorted(order, key=lambda row: _date_key(_when(row.value(dated[0])))) if order else body
         row = order[0] if op == "first" else order[-1]
         shown = [label for label in columns] or figures
         lines = [f"- The {op} row{where}{reading}" + (f", by {dated[0]}" if dated else "") + ":"]
@@ -1327,7 +1329,8 @@ def _format(number: Decimal, samples: list[str]) -> str:
     places = max((len(m.group(1)) for sample in samples for m in [re.search(r"\.(\d+)", sample)] if m), default=0)
     money = any("$" in sample for sample in samples)
     percent = bool(samples) and all("%" in sample for sample in samples)
-    text = f"{abs(number):,.{min(places, 4)}f}"
+    # Half up, as a spreadsheet rounds (1.505 is 1.51), not Python's half to even.
+    text = f"{abs(Decimal(number)).quantize(Decimal(1).scaleb(-min(places, 4)), ROUND_HALF_UP):,f}"
     text = f"${text}" if money else text
     text = f"{text}%" if percent else text
     return f"-{text}" if number < 0 else text

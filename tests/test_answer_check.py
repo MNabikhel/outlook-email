@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from controller_inbox.answer_check import review
+from controller_inbox.answer_check import check_citations, review
 
 BUDGET = "\n".join(
     [
@@ -190,3 +190,95 @@ def test_a_files_name_is_left_out_only_where_it_stands_alone():
 
     assert _without_names("The total in 100.pdf is $4,100.00 on page 2.", ["100.pdf"]) == "The total in         is $4,100.00 on page 2."
     assert "4,100.50" in _without_names("Statement 100 shows 4,100.50 and 100.25", ["Statement 100.pdf"])
+
+
+# A percentage change is measured from the earlier figure: a fall from the larger one, a rise from the smaller one.
+def test_a_fall_is_measured_from_the_figure_it_fell_from():
+    material = ["Costs: 10,000 last year, 8,500 this year"]
+    # 20% was "corrected" to 17.6%, the change measured against 8,500. The fall is 15%: too far off to rewrite, so flagged.
+    answer = "Costs fell 20% from $10,000 to $8,500 [1]."
+    result = review(answer, material=material, files=[])
+    assert result.text == answer and result.checks
+    close = "Costs fell 16% from $10,000 to $8,500 [1]."
+    assert review(close, material=material, files=[]).text == close.replace("16%", "15%")
+    # 18% (the change over 8,500, rounded) passed as right; the fall is 15%.
+    wrong = "Costs fell 18% from $10,000 to $8,500 [1]."
+    result = review(wrong, material=material, files=[])
+    assert result.checks or result.changed(wrong)
+
+
+def test_a_rise_is_measured_from_the_figure_it_rose_from():
+    material = ["Costs: 8,500 last year, 10,000 this year"]
+    answer = "Costs rose 20% from $8,500 to $10,000 [1]."
+    assert review(answer, material=material, files=[]).text == answer.replace("20%", "17.6%")
+
+
+def test_a_change_with_no_direction_is_flagged_not_rewritten():
+    answer = "Costs saw a change of 20% from $10,000 to $8,500 [1]."
+    result = review(answer, material=["10,000 and 8,500"], files=[])
+    assert result.text == answer and result.checks
+
+
+# European-style amounts ("€1.234,56") were read as 1.234.
+def test_a_european_formatted_amount_matches_the_same_amount_written_us_style():
+    result = review("The invoice total is €1,234.56 [1].", material=[], files=[("Rechnung.pdf", "[page 1]\nGesamtbetrag: €1.234,56\n")])
+    assert result.checks == []
+
+
+def test_a_right_total_under_european_formatted_lines_is_not_rewritten():
+    body = "[page 1]\nPosition A: €1.234,56\nPosition B: €2.000,00\nGesamt: €3.234,56\n"
+    answer = "The two lines are:\n- A: €1.234,56\n- B: €2.000,00\nTotal: €3,234.56"
+    result = review(answer, material=[], files=[("Rechnung.pdf", body)])
+    assert result.text == answer, result.checks
+
+
+def test_us_format_numbers_and_short_lists_read_as_before():
+    from controller_inbox.answer_check import numbers_in
+
+    assert [n.value for n in numbers_in("$1,234.56 and 1.234 and items 1,2 and 1,234,567 and 1.5,2")] == [1234.56, 1.234, 1, 1234567, 1.5]
+
+
+# The day and month of a numeric date are not figures.
+def test_numeric_dates_are_not_flagged():
+    for answer, said in [("Invoice 58213 is due 11/14/2026 [1].", "due November 14, 2026"), ("Invoice 58213 is due 14.11.2026 [1].", "due 14 November 2026")]:
+        assert review(answer, material=[f"Invoice 58213, {said}"], files=[]).checks == []
+
+
+# "increased by", like "rose by", says the figure was worked out from the ones beside it.
+def test_a_figure_after_a_past_tense_verb_is_recomputed():
+    for verb in ["increased by", "dropped by", "decreased by"]:
+        result = review(f"Costs {verb} $1,600, between $8,500 and $10,000 [1].", material=["8,500 and 10,000"], files=[])
+        assert "$1,500" in result.text, (verb, result.text, result.checks)
+
+
+def test_a_page_correction_does_not_match_a_figure_inside_a_bigger_one():
+    pdf = (
+        "[page 1]\nDeposit received $500.00\n"
+        "[page 2]\nRemaining balance $2,500.00 after the deposit received toward it\n"
+        "[page 3]\nTerms and conditions\n"
+    )
+    answer = "The deposit received toward the balance was $500.00 (page 3) [1]."
+    # $500.00 is only on page 1; page 2's $2,500.00 merely contains the characters "500.00".
+    assert "(page 2)" not in review(answer, material=[], files=[("statement.pdf", pdf)]).text
+
+
+def test_a_page_is_corrected_when_the_answer_drops_zero_cents():
+    # The standalone-figure match read "1,300" as not in "1,300.00", so the wrong page stood.
+    text = (
+        "[page 1]\nHarbor Packaging invoice INV-2231. Bill to Taz Corp. Terms net 30.\n"
+        "[page 2]\nLine items\nFreight charge 1,300.00\nPallets 2,880.00\nTotal 4,180.00\n"
+    )
+    result = check_citations("The freight charge was $1,300 (invoice.pdf, page 1).", [("invoice.pdf", text)])
+    assert "page 2" in result.text, result
+
+
+def test_a_page_is_corrected_when_the_answer_drops_a_trailing_zero():
+    text = "[page 1]\nCover letter and general terms of the agreement.\n[page 2]\nInterest rate 2.50 per annum fixed.\n"
+    result = check_citations("The interest rate is 2.5 per annum (loan.pdf, page 1).", [("loan.pdf", text)])
+    assert "page 2" in result.text, result
+
+
+def test_a_list_of_pages_is_not_corrected_to_one_page():
+    pdf = "[page 1]\nInvoice 58213\nSubtotal $4,000.00\n[page 2]\nTotal due $4,100.00\n"
+    answer = "The total due is $4,100.00 on pages 1, 2 [1]."
+    assert review(answer, material=[], files=[("a.pdf", pdf)]).text == answer

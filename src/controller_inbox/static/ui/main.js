@@ -250,7 +250,7 @@ function listHeader(spec) {
     class: "list-search",
     placeholder: spec.kind === "mail" ? "Filter, or Enter to search all mail" : "Filter this list",
     "aria-label": "Filter this list",
-    value: spec.q || "",
+    value: spec.q || S.query, // a filter kept from before (a visit to Settings) shows in the box
     autocomplete: "off",
   });
   if (spec.q) S.query = "";
@@ -519,15 +519,26 @@ function showOverview() {
   else setReader(emptyReader(spec.q ? `${plural(data.items.length, "email")} mention “${spec.q}”. Choose one to read it.` : "Choose an email to read it here."), key);
 }
 
+/* The open email's row: the selected one when it is this email's (an email can have several task rows). */
+function openIndex(shown) {
+  if (!S.email) return -1;
+  const i = shown.findIndex((item) => item.key === S.sel && item.emailId === S.email.id);
+  return i >= 0 ? i : shown.findIndex((item) => item.emailId === S.email.id);
+}
+
 const ctx = {
   position() {
     const shown = visible();
-    return { index: S.email ? shown.findIndex((item) => item.emailId === S.email.id) : -1, total: shown.length };
+    return { index: openIndex(shown), total: shown.length };
   },
   step(dir) {
     const shown = visible();
-    const i = shown.findIndex((item) => item.emailId === (S.email && S.email.id));
-    const next = shown[i + dir];
+    let i = openIndex(shown);
+    if (i < 0) return;
+    // Past the other rows of the same email, to the next email.
+    do i += dir;
+    while (shown[i] && shown[i].emailId === S.email.id);
+    const next = shown[i];
     if (next) {
       S.sel = next.key;
       navigate(mailUrl(next.emailId), { replace: true });
@@ -600,7 +611,12 @@ function visionDone(result) {
 
 function drawEmail({ keepScroll = false } = {}) {
   const top = reader.scrollTop;
-  setReader(emailView(S.email, ctx), `email:${S.email.id}`, { animate: !keepScroll });
+  // A reply being written survives a redraw of the same email (a task ticked, Done, Undo).
+  const old = $(".rd", reader);
+  const draft = old && old.dataset.email === S.email.id ? $(".draft", old) : null;
+  const view = emailView(S.email, ctx);
+  if (draft) $(".rd-head", view).after(draft);
+  setReader(view, `email:${S.email.id}`, { animate: !keepScroll });
   if (keepScroll) reader.scrollTop = top;
 }
 
@@ -681,11 +697,15 @@ function showDigest(date) {
   document.title = "Daily digest · CloseDesk";
   const key = `digest:${date}`;
   if (S.shown !== key) setReader(skeletonReader(), "", { animate: false });
+  // An answer that comes back after you've moved on (another page, another date) is dropped.
+  const wanted = () => S.route.view === "digest" && S.route.date === date;
   getJSON(`/api/digest${date ? `?date=${enc(date)}` : ""}`)
     .then((data) => {
-      if (S.route.view === "digest") setReader(digestView(data), key);
+      if (wanted()) setReader(digestView(data), key);
     })
-    .catch((error) => setReader(errorView(error.message), "error"));
+    .catch((error) => {
+      if (wanted()) setReader(errorView(error.message), "error");
+    });
 }
 
 function showSettings() {
@@ -1041,6 +1061,14 @@ document.addEventListener("click", (event) => {
 let goPending = 0;
 const GO = { t: "/app", i: "/app/folder/important", n: "/app/folder/informational", r: "/app/folder/reference", a: "/app/all", k: "/app/tasks", f: "/app/fraud", c: "/app/coding", d: "/app/digest", s: "/app/settings" };
 
+/* A field that takes typing: a textarea, a contenteditable, or a text-like input (not a checkbox or a button). */
+const TEXT_INPUTS = new Set(["", "text", "search", "email", "number", "url", "tel", "password"]);
+function isTextField(target) {
+  if (!target) return false;
+  if (target.isContentEditable || target.tagName === "TEXTAREA") return true;
+  return target.tagName === "INPUT" && TEXT_INPUTS.has((target.getAttribute("type") || "").toLowerCase());
+}
+
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
     event.preventDefault();
@@ -1062,6 +1090,13 @@ document.addEventListener("keydown", (event) => {
       event.preventDefault();
       chat.close();
       $("#chat-btn").focus();
+      return;
+    }
+    // In a text field of the reading pane (a reply draft, a note, find in file), Esc leaves the field, not the
+    // email. A ticked checkbox or a chosen option keeps focus but holds nothing typed, so Esc closes as usual.
+    if (isTextField(event.target)) {
+      event.preventDefault();
+      event.target.blur();
       return;
     }
     if (S.route && (S.route.emailId || S.route.file)) {

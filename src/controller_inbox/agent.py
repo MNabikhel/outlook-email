@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import calendar
+import hashlib
 import json
 import math
 import operator
@@ -373,7 +374,15 @@ class Workspace:
 
     def original(self, email: EmailRecord, att: AttachmentRecord) -> bytes | None:
         path = original_file(self.settings, email, att)
-        return path.read_bytes() if path is not None else None
+        if path is not None:
+            return path.read_bytes()
+        # A file that came in a zip is read from the zip kept for the email.
+        from controller_inbox.folder_mail import _zipped_files
+
+        folder = (self.settings.inbox_extracted / email.id).resolve()
+        if not att.sha256 or not folder.is_relative_to(self.settings.inbox_extracted.resolve()) or not folder.is_dir():
+            return None
+        return _zipped_files(folder).get(att.sha256)
 
 
 # Originals the browser shows itself, so a citation can open the file (a PDF at the cited page).
@@ -381,14 +390,34 @@ VIEWABLE = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg"
 
 
 def original_file(settings: Settings, email: EmailRecord, att: AttachmentRecord) -> Path | None:
-    """The attachment as it arrived, from inbox/extracted/<email id>/ (never outside it)."""
+    """The attachment as it arrived, from inbox/extracted/<email id>/ (never outside it). Only when the file there
+    holds its bytes: a file that came in a zip ("budget.xlsx" in "older.zip") isn't kept on its own, and the
+    file with its name is another attachment ("budget.xlsx" beside the zip)."""
     from controller_inbox.folder_mail import safe_filename
 
     root = settings.inbox_extracted.resolve()
     path = (root / email.id / safe_filename(att.filename)).resolve()
     if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
         return None
+    if att.sha256 and _file_sha256(path) != att.sha256:
+        return None
     return path
+
+
+# A file's hash by (path, size, mtime): the pages ask for every attachment's original on every render.
+_HASHES: dict[tuple[str, int, int], str] = {}
+
+
+def _file_sha256(path: Path) -> str:
+    stat = path.stat()
+    key = (str(path), stat.st_size, stat.st_mtime_ns)
+    digest = _HASHES.get(key)
+    if digest is None:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if len(_HASHES) >= 512:
+            _HASHES.clear()
+        _HASHES[key] = digest
+    return digest
 
 
 # The context the model starts from ---------------------------------------------------------
@@ -700,16 +729,26 @@ def summary_request(ws: Workspace, question: str) -> tuple[AttachmentRecord, str
     return (candidates[0], summary) if summary else None
 
 
+def _names(name: str) -> list[str]:
+    """The ways a question can name a file: its whole name, its name inside a zip, and its stem (4+ letters)."""
+    stem = Path(name).stem.split(" › ")[-1]
+    return [name, name.split(" › ")[-1]] + ([stem] if len(stem) >= 4 else [])
+
+
 def named_files(files: list[AttachmentRecord], question: str) -> list[AttachmentRecord]:
-    """The files a question mentions by name ("the budget.xlsx", "in Q3 Budget")."""
+    """The files a question mentions by name ("the budget.xlsx", "in Q3 Budget"). Longer names are looked for
+    first and what they matched is set aside, so "Q4 Budget.xlsx" doesn't also name "Budget.xlsx"."""
     text = question.lower()
-    named = []
-    for att in files:
-        name = att.filename.lower()
-        stem = Path(name).stem.split(" › ")[-1]
-        if name in text or name.split(" › ")[-1] in text or (len(stem) >= 4 and re.search(rf"(?<!\w){re.escape(stem)}(?!\w)", text)):
-            named.append(att)
-    return named
+    named = set()
+    for att in sorted(files, key=lambda att: -len(att.filename)):
+        pattern = "|".join(rf"(?<!\w){re.escape(item)}(?!\w)" for item in _names(att.filename.lower()))
+        found = {match.group() for match in re.finditer(pattern, text)}
+        if found:
+            # Every file going by what was matched ("invoice.pdf" on two emails, budget.xlsx loose and in a zip),
+            # before it is set aside.
+            named.update(id(other) for other in files if found & set(_names(other.filename.lower())))
+            text = re.sub(pattern, lambda match: "\0" * len(match.group()), text)
+    return [att for att in files if id(att) in named]
 
 
 NOTES_HEAD = (
@@ -1018,10 +1057,14 @@ def _evaluate(node):
     if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
         left, right = _evaluate(node.left), _evaluate(node.right)
         # A power is worked out only when its result stays a figure a schedule could hold: (9**12)**12 nested a
-        # few times would keep the computer busy for minutes.
-        if isinstance(node.op, ast.Pow) and (abs(right) > 12 or (abs(left) > 1 and abs(right) * math.log10(abs(left)) > 15)):
+        # few times would keep the computer busy for minutes. Bounded by the result's size, so compound growth over
+        # many periods (1.05**30, a mortgage's (1+r)**360) is worked out.
+        if isinstance(node.op, ast.Pow) and left and right * math.log10(abs(left)) > 15:
             raise ValueError("exponent too large")
-        return _OPS[type(node.op)](left, right)
+        value = _OPS[type(node.op)](left, right)
+        if isinstance(value, complex):  # (-2)**0.5
+            raise ValueError("no real result")
+        return value
     if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
         return _OPS[type(node.op)](_evaluate(node.operand))
     raise ValueError("only numbers and + - * / ( ) are allowed")

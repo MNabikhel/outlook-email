@@ -57,10 +57,10 @@ def test_open_in_outlook_never_launches_a_non_mail_file(settings: Settings, stor
     monkeypatch.setattr(web, "open_file", opened.append)
     client = TestClient(create_app(settings, store))
     result = client.post(f"/inbox/{record.id}/open", headers=PAGE).json()
-    assert result["ok"] is False and result["download"].endswith("/original")
+    # A program doesn't download either: the attachment rule (DOWNLOADABLE) covers the original file too.
+    assert result["ok"] is False and "download" not in result
     assert opened == []
-    download = client.get(f"/inbox/{record.id}/original")
-    assert download.headers["content-disposition"].startswith("attachment")
+    assert client.get(f"/inbox/{record.id}/original").status_code == 403
 
 
 def test_requests_for_another_hostname_are_refused(settings: Settings, loaded: Store):

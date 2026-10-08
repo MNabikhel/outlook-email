@@ -23,6 +23,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
+from decimal import ROUND_HALF_UP, Decimal
 
 from controller_inbox import ocr, pdf_layout, tables
 
@@ -878,7 +879,10 @@ def _formatted(value, cell) -> str:
     bare = re.sub(r'"[^"]*"|\\.', "", section)
     if isinstance(value, (int, float)) and not isinstance(value, bool) and "%" in bare and math.isfinite(value):
         decimals = re.search(r"\.([0#?]+)", bare)
-        return f"{value * 100:,.{len(decimals.group(1)) if decimals else 0}f}%"
+        # Rounded half up, as Excel shows it (0.125 as 0% is 13%), from the value as written, not its binary form.
+        places = len(decimals.group(1)) if decimals else 0
+        shown = (Decimal(str(value)) * 100).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+        return f"{shown:,.{places}f}%"
     if isinstance(value, (datetime, date)) and "m" in bare.lower() and "y" in bare.lower():
         parts = list(_DATE_PART.finditer(section))
         if "".join(part.group(0) for part in parts) == section:
