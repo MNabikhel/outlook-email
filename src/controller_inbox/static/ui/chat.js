@@ -1,5 +1,5 @@
 /* Ask CloseDesk, docked beside the reading pane. Answers stream in as newline-delimited JSON events
-   (sources, step, note, delta, revise, check, context, vision, mode, error, done) from POST /chat, the same
+   (sources, step, note, delta, revise, check, context, vision, reading, mode, error, done) from POST /chat, the same
    endpoint and events the classic chat uses. The question is about the open email unless you un-scope it. */
 
 import { h, icon, append, replace, toast, plural, reducedMotion } from "./dom.js";
@@ -109,6 +109,26 @@ export function createChat({ root, onToggle, visionRead }) {
     return box;
   }
 
+  /* The page reader at work on a scan before the answer (OvisOCR2 reading page 1 of 2), and afterwards which reading
+     the answer used: the page reader's, or the older method (OCR, or a general model's vision beside it) and why. */
+  function readingNowEl(now) {
+    const done = Math.max(0, Math.min(1, ((Number(now.index) || 1) - 1) / (Number(now.of) || 1)));
+    return h(
+      "div",
+      { class: "msg-reading running", role: "status" },
+      h("span", { class: "reading-head" }, icon("eye", 14), h("b", null, `${now.reader} is reading`), h("span", { class: "reading-pulse", "aria-hidden": "true" })),
+      h("span", { class: "reading-text" }, now.text),
+      h("span", { class: "reading-bar", "aria-hidden": "true" }, h("i", { style: `width:${Math.round(done * 100)}%` }))
+    );
+  }
+
+  function readingEl(reading) {
+    if (!reading || !reading.label) return null;
+    if (reading.state === "vision")
+      return h("p", { class: "msg-reading vision", title: reading.text }, icon("eye", 13), h("span", null, reading.label));
+    return h("div", { class: "msg-reading fallback", role: "note" }, h("b", null, icon("alert", 13), h("span", null, reading.label)), h("span", null, reading.text));
+  }
+
   /* An answer about a scanned file can offer to read its pages with the vision model too: a read of minutes runs
      as the background job, and when it finishes the question can be asked again with both readings. */
   function visionEl(turn) {
@@ -174,8 +194,9 @@ export function createChat({ root, onToggle, visionRead }) {
       return el;
     }
     const answer = h("div", { class: "msg-text" });
+    const reading = turn.pending && !turn.text ? turn.readingNow : null;
     if (turn.text) answer.innerHTML = formatAnswer(turn.text, turn.sources); // escaped first, see format.js
-    else {
+    else if (!reading) {
       const steps = turn.steps || [];
       append(answer, h("span", { class: "typing" }, steps.length ? `${steps[steps.length - 1]}…` : "Thinking…"));
     }
@@ -184,6 +205,7 @@ export function createChat({ root, onToggle, visionRead }) {
       el,
       turn.warning ? h("p", { class: "msg-warn" }, icon("alert", 14), h("span", null, turn.warning)) : null,
       turn.note ? h("p", { class: "msg-note" }, turn.note) : null,
+      reading ? readingNowEl(reading) : readingEl(turn.reading),
       stepsEl(turn),
       answer,
       turn.checks && turn.checks.length ? h("ul", { class: "msg-check" }, turn.checks.map((item) => h("li", null, icon("ok", 13), h("span", null, item)))) : null,
@@ -396,6 +418,13 @@ export function createChat({ root, onToggle, visionRead }) {
               break;
             case "vision":
               answer.vision = { ...event, state: "offered", message: "" };
+              break;
+            case "reading":
+              if (event.state === "running") answer.readingNow = event;
+              else {
+                if (event.label) answer.reading = event;
+                answer.readingNow = null;
+              }
               break;
             case "mode":
               answer.mode = event.mode;

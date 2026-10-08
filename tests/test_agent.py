@@ -38,6 +38,51 @@ def test_questions_about_this_email_stay_on_it(store, settings, mail):
         assert not on_screen_question(question), question
 
 
+def test_a_documents_amount_due_is_no_question_about_today(store, settings, mail):
+    # "Total due", "amount due", "past due" and "due date" are a document's words: a question with them, answered by
+    # the open email, stays on it instead of reading other mail's files too. "What's due?" is still about today.
+    budget = mail["Q4 budget draft"]
+    budget.attachments[0].extracted_text = "[page 1]\nInvoice 4410 | Amount due: $12,480.00 | Due date: 10/28/2026 | Past due: $0.00"
+    store.upsert_email(budget)
+    for question in ("What is the amount due on invoice 4410?", "How much is past due on invoice 4410?", "What is the due date of invoice 4410?"):
+        sources, about_today, _ = pick_sources(store, question, email_id=budget.id)
+        assert [s.id for s in sources] == [budget.id] and not about_today, question
+    for question in ("what's due this week?", "anything due today?", "Which invoices are due on Friday?"):
+        assert pick_sources(store, question, email_id=budget.id)[1], question
+    # "When is invoice 4410 due?" asks it of the invoice on screen, named by its number; one the email doesn't
+    # name, or "what's due?" alone, is still a question about the inbox.
+    for question in ("When is invoice 4410 due, and on what terms?", "When is the Invoice 4410 due?"):
+        sources, about_today, _ = pick_sources(store, question, email_id=budget.id)
+        assert [s.id for s in sources] == [budget.id] and not about_today, question
+    for question in ("When is invoice 5120 due?", "what's due?", "When is invoice 4410 due this week?", "What is due before Friday?"):
+        assert pick_sources(store, question, email_id=budget.id)[1], question
+
+
+def test_a_month_matches_the_sheets_short_heading(store, settings, mail):
+    # "August" in the question is the sheet's "Aug" column: the open workbook answers it, without other mail.
+    budget = mail["Q4 budget draft"]
+    budget.attachments[0].extracted_text = "A1: Department | B1: Jul | C1: Aug\nA2 (Department): Marketing | B2 (Jul): 47,547.13 | C2 (Aug): 43,095.38"
+    store.upsert_email(budget)
+    sources, about_today, _ = pick_sources(store, "What did Marketing actually spend in August?", email_id=budget.id)
+    assert [s.id for s in sources] == [budget.id] and not about_today
+    assert assistant.answered_here(budget, "What did Marketing actually spend in August?")
+    assert not assistant.answered_here(budget, "What did Marketing actually spend in October?")
+
+
+def test_a_vendor_setup_form_on_screen_is_read_not_taken_for_a_help_question(store, settings, mail):
+    budget = mail["Q4 budget draft"]
+    budget.attachments[0].filename = "Vendor setup form Clearwater.pdf"
+    budget.attachments[0].extracted_text = "[page 1]\nVendor setup form\nVendor: Clearwater Labs\nPayment terms: Net 30\nPayment method: ACH"
+    store.upsert_email(budget)
+    question = "What payment terms and payment method does the Clearwater vendor setup form list?"
+    assert not assistant.asks_for_help(question, set(), budget)
+    text = _text(answer_stream(store, settings, question, email_id=budget.id))
+    assert "Quick help" not in text and "Net 30" in text
+    # Help with CloseDesk is still help, whatever email is open.
+    assert assistant.asks_for_help("How do I set up the local model?", set(), budget)
+    assert "Quick help" in _text(answer_stream(store, settings, "How do I set up the local model?", email_id=budget.id))
+
+
 def test_without_a_model_the_answer_quotes_the_files(store, settings, mail):
     budget = mail["Q4 budget draft"]
     text = _text(answer_stream(store, settings, "what does the memo say about the venue deposit?", email_id=budget.id))

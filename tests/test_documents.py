@@ -22,6 +22,7 @@ from controller_inbox.documents import (
     skim,
     split_parts,
     trace_cell,
+    xlsx_text,
 )
 from controller_inbox.extract import extract_text_from_bytes
 
@@ -884,3 +885,37 @@ def test_a_password_protected_office_file_says_so():
         text = extract_text_from_bytes(name, "", locked.getvalue())
         assert text.startswith("[This file is password-protected") and "zip" not in text
     assert "Payroll" in extract_text_from_bytes("payroll.xlsx", "", plain.getvalue())
+
+
+def test_a_two_column_sheet_of_names_and_amounts_names_its_columns():
+    # Budget on its own sheet, plain headings (not bold): each row still says which department and budget it is,
+    # so a question across the two sheets can be worked out by joining them.
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Q3 Budget"
+    sheet.append(["Department", "Q3 Budget"])
+    for name, amount in [("Finance", 88000), ("Marketing", 128800), ("Operations", 142800), ("IT", 142500)]:
+        sheet.append([name, amount])
+    out = io.BytesIO()
+    book.save(out)
+    text = xlsx_text(out.getvalue())
+    assert "A4 (Department): Operations | B4 (Q3 Budget): 142,800" in text
+    # A short list of labels and values keeps its first line as a row of its own.
+    book = Workbook()
+    for row in [["Customer", "Northwind"], ["Subtotal", 1200], ["Tax", 96], ["Total", 1296]]:
+        book.active.append(row)
+    out = io.BytesIO()
+    book.save(out)
+    text = xlsx_text(out.getvalue())
+    assert "A2: Subtotal | B2: 1,200" in text and "(Customer)" not in text
+
+
+def test_a_form_of_fields_and_numbers_keeps_its_first_line_as_a_field():
+    # A form in Word or a PDF: its numbers are an invoice's, a PO's and an account's, not amounts under a heading.
+    from controller_inbox.tables import has_header
+
+    form = [["Vendor", "Northwind Traders"], ["Invoice No.", "58213"], ["PO Number", "4410"], ["GL Account", "6420"], ["Amount", "$1,200.00"]]
+    assert not has_header(form)
+    # Its numbers written as money, a field for an ID still says it's a form; a sheet of names over amounts is not.
+    assert not has_header([["Vendor", "Northwind"], ["Invoice #", "58,213"], ["Subtotal", "1,200.00"], ["Tax", "96.00"], ["Total", "1,296.00"]])
+    assert has_header([["Department", "Budget"], ["Finance", "88,000"], ["Marketing", "128,800"], ["Operations", "$142,800"], ["IT", "(1,250.00)"]])

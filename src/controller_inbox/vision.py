@@ -39,6 +39,7 @@ from controller_inbox.local_llm import (
     check_model,
     forget_reader_failures,
     load_for_reading,
+    reader_load_problem,
     stream_text,
     strip_thinking,
 )
@@ -154,8 +155,8 @@ def shown_choice(comparison: Comparison, model_page: str, *, model: str, first_n
 
 def reading_model(settings: Settings) -> str:
     """The model that reads pages: the one chosen in Setup, while the server has it; else a document reader the server
-    has (LM Studio loads a downloaded one when it is first asked); else the chat model when it can see. "" when there
-    is none."""
+    has (LM Studio loads a downloaded one when it is first asked), unless LM Studio couldn't load it lately; else the
+    chat model when it can see, the older method. "" when there is none."""
     if settings.vision_mode == "off":
         return ""
     status = check_model(settings)
@@ -165,9 +166,110 @@ def reading_model(settings: Settings) -> str:
     if chosen and chosen != "auto":
         return chosen if chosen in status.vision_models else ""
     for model in status.vision_models:
-        if reader_for(model) is not GENERAL:
+        if reader_for(model) is not GENERAL and not reader_load_problem(model):
             return model
     return status.model if status.active and status.vision else ""
+
+
+def reader_name(model: str) -> str:
+    """The page reader as the user knows it: a document reader by its name ("OvisOCR2"), any other model by its id."""
+    reader = reader_for(model)
+    return reader.label.split(",")[0] if reader is not GENERAL else model
+
+
+def older_method(settings: Settings, model: str | None = None) -> str:
+    """How scans are read when no document reader can: the model's own vision beside OCR (the reading CloseDesk had
+    before document readers), or OCR alone. ``model``: ``reading_model(settings)``, when already asked."""
+    model = reading_model(settings) if model is None else model
+    if model and not trusted_reader(model):
+        return f"{model}'s own vision, side by side with OCR"
+    return "OCR only"
+
+
+def why_not_reader(settings: Settings, model: str | None = None) -> str:
+    """Why scans aren't read by a document reader (OvisOCR2) now, as one sentence; "" when they are."""
+    if settings.vision_mode == "off":
+        return "Reading scans with a vision model is turned off in Setup."
+    if not can_render():
+        return "The page renderer isn't installed (double-click CloseDesk once, or run pip install -e .)."
+    model = reading_model(settings) if model is None else model
+    if model and trusted_reader(model):
+        return ""
+    status = check_model(settings)
+    if not status.reachable:
+        return "LM Studio's server isn't answering."
+    chosen = (settings.vision_model or "").strip()
+    if chosen and chosen != "auto":
+        if chosen not in status.vision_models:
+            return f"The model chosen in Setup to read pages ({chosen}) isn't in LM Studio now."
+        return f"Setup has {chosen} chosen to read pages; choose Automatic there to read them with OvisOCR2."
+    for reader in status.vision_models:
+        if trusted_reader(reader) and (problem := reader_load_problem(reader)):
+            return f"{problem.rstrip('.')}. CloseDesk tries {reader_name(reader)} again in half an hour, or when Setup is saved."
+    return "OvisOCR2 isn't downloaded in LM Studio (search OvisOCR2, ATH-MaaS build, Q8_0, about 1 GB)."
+
+
+def shown_by(row: dict) -> str:
+    """Which reading a page read by a model is shown as: "reader" (a document reader's), "model" (a general model's,
+    the older method) or "first" (OCR's or the PDF's own text), as ``shown_text`` shows it."""
+    saved = _saved(row)
+    model = row.get("model") or ""
+    model_page = page_text(row.get("model_text") or "")
+    named = saved.get("first_name") or "OCR"
+    if not model_page.strip() and not said_something(row.get("first") or ""):
+        # A blank page (the back of a sheet): the model read it and found nothing, as OCR did.
+        return "reader" if trusted_reader(model) else "model"
+    if saved:
+        comparison = Comparison.from_dict(saved)
+    else:
+        comparison = compare(row.get("first") or "", model_page, ocr=named == "OCR", trusted=trusted_reader(model))
+    if shown_choice(comparison, model_page, model=model, first_name=named) != "model":
+        return "first"
+    return "reader" if trusted_reader(model) else "model"
+
+
+def scan_readings(store: Store, settings: Settings, email: EmailRecord, *, question: str = "") -> list[dict]:
+    """For each scanned PDF and picture on the email (those the question names, when it names any): which of its
+    scanned pages are shown as a document reader read them (``reader``), as a general model read them (``model``,
+    the older method) or as OCR read them (``ocr``; ``not_shown``: those of them a document reader read, its reading
+    not shown, and ``left_out_by``: that reader's name), and the names of the models whose reading is shown
+    (``models``)."""
+    from controller_inbox import fraud
+
+    if fraud.attachments_locked(email):
+        return []
+    scans = [att for att in email.attachments if readable_file(att.filename) and looks_scanned(att)]
+    named = [att for att in scans if att.filename.lower() in (question or "").lower()]
+    if not named and any(att.filename.lower() in (question or "").lower() for att in email.attachments):
+        return []  # the question names a file that isn't a scan
+    out = []
+    for att in named or scans:
+        if Path(att.filename or "").suffix.lower() in IMAGE_SUFFIXES:
+            pages = [1]
+        else:
+            data = original_bytes(settings, email, att)
+            pages = scanned_pages(data) if data is not None else []
+            if not pages:  # the original isn't kept: the pages OCR read are taken for the scanned ones
+                pages = [number for number, _body in page_bodies(att.extracted_text or "")]
+        rows = store.page_readings(att.id, att.sha256)
+        found: dict = {
+            "file": att.filename, "pages": pages, "reader": [], "model": [], "ocr": [], "not_shown": [], "left_out_by": [], "models": [],
+        }
+        for page in pages:
+            row = rows.get(page)
+            way = shown_by(row) if row else "first"
+            found["ocr" if way == "first" else way].append(page)
+            name = reader_name(row.get("model") or "") if row else ""
+            if way == "first":
+                # A general model's reading set aside is the older method's; it says nothing of the page reader.
+                if row and trusted_reader(row.get("model") or ""):
+                    found["not_shown"].append(page)
+                    if name not in found["left_out_by"]:
+                        found["left_out_by"].append(name)
+            elif name and name not in found["models"]:
+                found["models"].append(name)
+        out.append(found)
+    return out
 
 
 # Whether it can be used ------------------------------------------------------------------------
@@ -749,6 +851,16 @@ def _html_tables_as_markdown(text: str) -> str:
             return "\n\n" + "\n\n".join(titles) + "\n\n" if titles else ""
         width = max(len(row) for row in grid)
         grid = [[*row, *[""] * (width - len(row))] for row in grid]
+        filled = [row for row in grid if any(row)]
+        if (
+            not heading_rows and width == 2 and len(filled) >= 2
+            and all(_form_label(label) and value.strip() for label, value in filled)
+            and 2 * sum(tables.is_value(value) for _label, value in filled) <= len(filled)
+        ):
+            # A form ("Payee | Latah County Treasurer", "GL account | 6420 - Property Taxes"): a value on every line,
+            # mostly words. Each line is written as its label and value. Labels beside figures stay a table.
+            lines = [f"{label.rstrip(': ')}: {value}" for label, value in filled]
+            return "\n\n" + "".join(title + "\n\n" for title in titles) + "\n".join(lines) + "\n\n"
         if heading_rows:
             header = []
             for column in range(width):
@@ -772,6 +884,12 @@ def _html_tables_as_markdown(text: str) -> str:
         out += [_STRAY_TAG.sub(" ", text[last:start]), one(text[start:end])]
         last = end
     return "".join(out) + _STRAY_TAG.sub(" ", text[last:])
+
+
+def _form_label(cell: str) -> bool:
+    """A form's label: a few words, not a figure ("Payee", "Date needed by", "GL account")."""
+    cell = (cell or "").strip()
+    return bool(cell) and len(cell) <= 48 and len(cell.split()) <= 6 and not tables.is_value(cell)
 
 
 def page_text(markdown: str) -> str:
@@ -1291,7 +1409,8 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
         return result
     model = reading_model(settings)
     if not model:  # the model went away since the read was offered: nothing is counted against the pages
-        result.failed.append("no model that can look at pictures is answering")
+        problem = next((reader_load_problem(name) for name in check_model(settings).vision_models if reader_load_problem(name)), "")
+        result.failed.append(problem.rstrip(".") or "no model that can look at pictures is answering")
         return result
     reader = reader_for(model)
     problem = load_for_reading(settings, model, reader.context)
@@ -1328,7 +1447,7 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
             markdown = ""  # a blank page (the back of a sheet): nothing on it to read
         except Exception as exc:  # one page failing doesn't lose the others
             log.warning("Vision reading of %s page %s failed: %s", att.filename, page, exc)
-            store.note_page_failure(att.id, page, sha256=att.sha256, error=str(exc))
+            store.note_page_failure(att.id, page, sha256=att.sha256, error=str(exc), model=model)
             result.failed.append(f"page {page}: {str(exc)[:160]}")
             continue
         seconds = time.monotonic() - started
@@ -1366,14 +1485,18 @@ def original_bytes(settings: Settings, email: EmailRecord, att: AttachmentRecord
 
 
 def unread_pages(
-    store: Store, att: AttachmentRecord, data: bytes, *, doubtful: bool = True, retry_failed: bool = False
+    store: Store, att: AttachmentRecord, data: bytes, *, doubtful: bool = True, retry_failed: bool = False, upgrade: bool = False,
+    model: str | None = None,
 ) -> list[int]:
     """The pages worth a second reading that haven't had one. ``doubtful``: also text pages whose totals don't add
     up (finding them reads every table, so the overnight run looks at scans and pictures only). A page the model
-    failed on ``TRIES`` times is left out unless ``retry_failed`` (the user asked)."""
-    done = set(store.page_readings(att.id, att.sha256))
+    (``model``, when given: another model's failures don't count) failed on ``TRIES`` times is left out unless
+    ``retry_failed`` (the user asked). ``upgrade``: a document reader reads pages now, so a page read the older way
+    (by a general model) is read again by it."""
+    readings = store.page_readings(att.id, att.sha256)
+    done = {page for page, row in readings.items() if not upgrade or trusted_reader(row.get("model") or "")}
     if not retry_failed:
-        done |= {page for page, tries in store.page_failures(att.id, att.sha256).items() if tries >= TRIES}
+        done |= {page for page, tries in store.page_failures(att.id, att.sha256, model).items() if tries >= TRIES}
     if doubtful:
         wanted = wanted_pages(data, att.filename, att.extracted_text or "")
     elif Path(att.filename or "").suffix.lower() in IMAGE_SUFFIXES:
@@ -1397,6 +1520,8 @@ def files_to_read(
 
     if fraud.attachments_locked(email):
         return []
+    model = reading_model(settings)
+    upgrade = trusted_reader(model)
     out = []
     for position, att in enumerate(email.attachments, start=1):
         if not readable_file(att.filename) or (not doubtful and not looks_scanned(att)):
@@ -1404,7 +1529,7 @@ def files_to_read(
         data = original_bytes(settings, email, att)
         if data is None:
             continue
-        pages = unread_pages(store, att, data, doubtful=doubtful)
+        pages = unread_pages(store, att, data, doubtful=doubtful, upgrade=upgrade, model=model)
         if pages:
             out.append((position, att, data, pages))
     return out
@@ -1612,7 +1737,7 @@ def offer(store: Store, settings: Settings, email: EmailRecord, att: AttachmentR
         if data is None:
             reason = "The original file wasn't kept, so its pages can't be looked at."
         else:
-            pages = unread_pages(store, att, data, retry_failed=True)
+            pages = unread_pages(store, att, data, retry_failed=True, upgrade=trusted_reader(reading_model(settings)))
     seconds = estimate(store, settings, len(pages)) if pages else None
     return {
         "available": not reason,

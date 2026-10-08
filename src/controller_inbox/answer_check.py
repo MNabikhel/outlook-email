@@ -344,6 +344,19 @@ def _named(chunk: str, files: list[tuple[str, object]], others: list[str] | None
     return files if len(files) == 1 else []
 
 
+def _without_names(chunk: str, names: list[str]) -> str:
+    """The sentence with each file's name it writes ("Ridgeview Invoice 58213.pdf", or without ".pdf") blanked out, the
+    length kept: a figure or word in a file's name says nothing about which page or cell holds the answer."""
+    for name in names:
+        for form in sorted({name, name.rsplit(".", 1)[0]}, key=len, reverse=True):
+            if len(form) < 3:
+                continue
+            # The name standing on its own, not part of a figure ("100.pdf" in "$4,100.00") or a longer word.
+            pattern = re.compile(rf"(?<![\w$.,]){re.escape(form)}(?![\w]|[.,]\d)", re.I)
+            chunk = pattern.sub(lambda match: " " * len(match.group(0)), chunk)
+    return chunk
+
+
 def _fix_page(chunk: str, paged: list[tuple[str, dict[int, str]]], others: list[str] | None = None):
     cited = list(PAGE_RE.finditer(chunk))
     named = _named(chunk, paged, others)
@@ -351,8 +364,9 @@ def _fix_page(chunk: str, paged: list[tuple[str, dict[int, str]]], others: list[
         return None
     name, pages = named[0]
     page = int(cited[0]["page"])
-    figures = [n.shown.lstrip("$€£") for n in numbers_in(chunk) if _is_claim(chunk, n)]
-    words = {w.lower() for w in _WORD_RE.findall(chunk)} - {name.lower()}
+    plain = _without_names(chunk, [name, *(others or [])])
+    figures = [n.shown.lstrip("$€£") for n in numbers_in(plain) if _is_claim(plain, n)]
+    words = {w.lower() for w in _WORD_RE.findall(plain)} - {name.lower()}
     if not figures and len(words) < 3:
         return None
 
@@ -403,7 +417,8 @@ def _fix_cell(chunk: str, books: list[tuple[str, dict[tuple[str, str], str]]], o
         return None
     ref = refs[0]
     sheet = ref["sheet"].strip("'\"") if ref["sheet"] else None
-    figures = [n for n in numbers_in(chunk) if _is_claim(chunk, n) and not (ref.start() <= n.start < ref.end())]
+    plain = _without_names(chunk, [name, *(others or [])])
+    figures = [n for n in numbers_in(plain) if _is_claim(plain, n) and not (ref.start() <= n.start < ref.end())]
     if not figures:
         return None
     in_scope = {key: value for key, value in cells.items() if sheet is None or key[0] == sheet}

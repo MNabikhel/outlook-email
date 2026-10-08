@@ -1023,6 +1023,12 @@ def load_for_reading(settings: Settings, model: str, context: int) -> str:
         return ""
 
 
+def reader_load_problem(model: str) -> str:
+    """Why LM Studio couldn't load this page reader lately (it is asked again after ``READER_RETRY_SECONDS``), or ""."""
+    failed = _reader_failed.get(model)
+    return failed[1] if failed and time.monotonic() - failed[0] < READER_RETRY_SECONDS else ""
+
+
 def forget_reader_failures() -> None:
     """Setup was saved: a model LM Studio couldn't load is asked again (memory may have been freed)."""
     _reader_failed.clear()

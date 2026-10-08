@@ -445,7 +445,7 @@ def query_tables(ws: Workspace, question: str, complete) -> Iterator[dict]:
     readable = named_files(readable, question) or readable
     tables = None
     try:
-        tables = table_query.Tables([(att.filename, att.extracted_text or "") for att in readable])
+        tables = table_query.Tables([(att.filename, att.extracted_text or "") for att in readable], question)
         if not tables or not tables.about(question):
             return
         yield {"type": "step", "text": "Writing a query over the tables for the question"}

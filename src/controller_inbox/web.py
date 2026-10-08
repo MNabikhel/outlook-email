@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
-from controller_inbox import agent, chats, cost_codes, documents, fraud, ocr, semantic, vision
+from controller_inbox import agent, chats, cost_codes, documents, fraud, model_roles, ocr, semantic, vision
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.classify import month_end
@@ -260,6 +260,8 @@ class _AnswerLog:
             self.data["note"] = event.get("note", "")
         elif kind == "vision":
             self.data["vision"] = {key: event.get(key) for key in ("email_id", "n", "file", "pages", "estimate", "text", "question")}
+        elif kind == "reading" and event.get("label"):  # which reading of the scans the answer used
+            self.data["reading"] = {key: event.get(key) for key in ("state", "reader", "label", "text")}
 
 
 class ProcessJob:
@@ -1110,6 +1112,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             context_target=context_target(settings, model),
             will_reload=needs_more_context(settings),
             ocr_engine=ocr.engine_name(),
+            models=model_roles.models_in_use(settings, status=model),
             vision_setup=vision_setup(model),
             search=semantic.coverage(store, settings),
             timezone_choice=settings.timezone,

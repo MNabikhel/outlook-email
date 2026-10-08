@@ -58,8 +58,22 @@
     {% else %}
     <p class="model-line {{ 'on' if model.active else 'off' }}">{{ model.describe() }}</p>
     {% endif %}
-    {% if model.models %}
-    <p class="muted">Loaded on the server: {{ model.models | join(', ') }}</p>
+    <table class="models-table" id="models">
+      <caption>Models CloseDesk uses</caption>
+      <thead><tr><th scope="col">Job</th><th scope="col">Model</th><th scope="col">Status</th></tr></thead>
+      <tbody>
+        {% for row in models %}
+        <tr>
+          <th scope="row">{{ row.role }}</th>
+          <td>{% if row.model %}<b>{{ row.model }}</b>{% else %}<span class="muted">none</span>{% endif %}</td>
+          <td><span class="model-state {{ row.state }}">{{ {'on': 'Ready', 'fallback': 'Older method', 'off': 'Off'}[row.state] }}</span> {{ row.status }}{% if row.note %}<br><small class="muted">{{ row.note }}</small>{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% set loaded_now = model.loaded if model.lm_studio else model.models %}
+    {% if loaded_now %}
+    <p class="muted small">Loaded in {{ 'LM Studio' if model.lm_studio else 'the model server' }} now: {{ loaded_now | join(', ') }}</p>
     {% endif %}
     {% if model.active %}
     {% set window = model.context_length or settings.chat_context_tokens %}

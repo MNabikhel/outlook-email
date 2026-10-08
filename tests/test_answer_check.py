@@ -122,6 +122,18 @@ def test_a_wrong_page_is_corrected_when_the_finding_is_on_one_other_page():
     assert result.checks == ["Corrected the page for FY26 Audit.pdf: that is on page 17, not page 12."]
 
 
+def test_a_number_in_the_files_name_doesnt_move_a_right_page():
+    # The invoice number is in the file's name and printed on page 1; the row cited is on page 2.
+    invoice = (
+        "[page 1]\nInvoice No. 58213 | Due date: October 28, 2026\n#: 36 | Description: Lens paper | Qty: 6 | Amount: 719.16\n"
+        "[page 2]\n#: 37 | Description: Kimwipes, small (box 280) | Qty: 10 | Amount: 2,046.80"
+    )
+    answer = "Ten boxes of Kimwipes were ordered, for $2,046.80. That is row 37 on page 2 of Ridgeview Invoice 58213.pdf."
+    assert review(answer, material=[], files=[("Ridgeview Invoice 58213.pdf", invoice)]).checks == []
+    wrong = review("The lens paper line comes to $719.16 (Ridgeview Invoice 58213.pdf, page 2).", material=[], files=[("Ridgeview Invoice 58213.pdf", invoice)])
+    assert wrong.checks == ["Corrected the page for Ridgeview Invoice 58213.pdf: that is on page 1, not page 2."]
+
+
 def test_a_wrong_cell_is_corrected_when_one_cell_holds_the_figure():
     result = _review("Marketing's change of 31,500 is in Q4 budget.xlsx cell D3.")
     assert result.text == "Marketing's change of 31,500 is in Q4 budget.xlsx cell D2."
@@ -171,3 +183,10 @@ def test_a_dash_between_a_name_and_its_amount_is_not_a_minus_sign():
     material = ["Harbor Steel LLC $48,500.00", "Acme Industrial Supply $24,310.50", "Orion Software $18,600.00"]
     result = review(answer, material=material, files=[])
     assert (result.text, result.checks) == (answer, [])
+
+
+def test_a_files_name_is_left_out_only_where_it_stands_alone():
+    from controller_inbox.answer_check import _without_names
+
+    assert _without_names("The total in 100.pdf is $4,100.00 on page 2.", ["100.pdf"]) == "The total in         is $4,100.00 on page 2."
+    assert "4,100.50" in _without_names("Statement 100 shows 4,100.50 and 100.25", ["Statement 100.pdf"])

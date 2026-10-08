@@ -351,3 +351,111 @@ Prepared by: L. Wei | Date: 10/2/2026
 """
     tables = Tables([("AP.pdf", text)])
     assert [(name, value) for _file, name, value in tables.facts] == [("Prepared by", "L. Wei"), ("Date", "10/2/2026")]
+
+
+STATEMENT = """[page 1]
+[table]
+Date | Type | Reference | Charges | Payments | Balance
+Date: 06/09/2026 | Type: Invoice | Reference: TF-22268 | Charges: 2,130.75 | Payments: not listed | Balance: 2,130.75
+Date: 06/18/2026 | Type: Invoice | Reference: TF-21671 | Charges: 2,019.02 | Payments: not listed | Balance: 4,149.77
+Date: 07/07/2026 | Type: Payment | Reference: ACH 380837 | Charges: not listed | Payments: 3,721.19 | Balance: 428.58
+Date: 07/16/2026 | Type: Invoice | Reference: TF-25845 | Charges: 1,219.23 | Payments: not listed | Balance: 1,647.81
+Date: 07/27/2026 | Type: Invoice | Reference: TF-26084 | Charges: 697.35 | Payments: not listed | Balance: 2,345.16
+
+[table]
+Current | 1-30 | 31-60 | 61-90 | Over 90 | Amount due
+Current: 697.35 | 1-30: 1,219.23 | 31-60: 0.00 | 61-90: 428.58 | Over 90: 0.00 | Amount due: 2,345.16
+"""
+
+
+def test_a_running_balance_is_said_to_be_one_and_never_added_up():
+    tables = Tables([("statement.pdf", STATEMENT)])
+    schema = tables.schema()
+    assert "a running balance: each row's is the row above's + charges - payments; the last row's is the balance, never add it up" in schema
+    with pytest.raises(ValueError, match="running balance"):
+        tables.run("SELECT SUM(balance) FROM t1 WHERE balance > 0")
+    with pytest.raises(ValueError, match="running balance"):
+        tables.run("SELECT avg(t1.balance) FROM t1")
+    assert tables.run("SELECT SUM(charges) FROM t1")[1] == [(6066.35,)], "its parts still add up"
+    assert tables.run("SELECT balance FROM t1 ORDER BY date DESC LIMIT 1")[1] == [(2345.16,)]
+
+
+def test_a_table_of_one_row_is_queried_too():
+    tables = Tables([("statement.pdf", STATEMENT)])
+    assert '"Over 90" figure' in tables.schema() and "1 rows" in tables.schema()
+    assert tables.run("SELECT c_61_90 + over_90 FROM t2")[1] == [(428.58,)]
+
+
+def test_a_table_of_one_row_is_loaded_for_a_question_that_names_one_of_its_columns():
+    # The aging box is for "how much is over 60 days?"; beside the statement's lines for "what did we pay in
+    # September?", a small model added up every payment instead of September's.
+    for question in ("How much of the balance is more than 60 days past due?", "What is in the Over 90 bucket?", "What is the amount due?"):
+        assert "1 rows" in Tables([("statement.pdf", STATEMENT)], question).schema(), question
+    schema = Tables([("statement.pdf", STATEMENT)], "How much did we pay them in September?").schema()
+    assert "1 rows" not in schema and "t2" not in schema and "CREATE TABLE t1" in schema
+
+
+def test_a_query_adding_up_a_running_balance_is_asked_again_with_why():
+    tables = Tables([("statement.pdf", STATEMENT)])
+    replies = iter([
+        "Table: t1.\nRows: all.\nValue: balance.\nSQL: SELECT SUM(balance) FROM t1",
+        "Table: t2, the aging.\nRows: its one row.\nValue: 61-90 plus over 90.\nSQL: SELECT c_61_90 + over_90 AS over_60 FROM t2",
+    ])
+    asked = []
+
+    def complete(_settings, messages, **_kw):
+        asked.append(messages[-1]["content"])
+        return next(replies)
+
+    found = table_query.ask(None, tables, "How much of the balance is more than 60 days past due?", complete=complete)
+    assert found is not None and found.rows == [(428.58,)]
+    assert "running balance" in asked[-1], "the second try is told why the first was refused"
+
+
+def test_a_loan_balance_paid_down_is_a_running_balance_too():
+    schedule = """[page 1]
+[table]
+Payment | Date | Interest | Principal | Balance
+Payment: 1 | Date: 01/31/2027 | Interest: 312.50 | Principal: 1,687.50 | Balance: 73,312.50
+Payment: 2 | Date: 02/28/2027 | Interest: 305.47 | Principal: 1,694.53 | Balance: 71,617.97
+Payment: 3 | Date: 03/31/2027 | Interest: 298.41 | Principal: 1,701.59 | Balance: 69,916.38
+Payment: 4 | Date: 04/30/2027 | Interest: 291.32 | Principal: 1,708.68 | Balance: 68,207.70
+"""
+    tables = Tables([("loan.pdf", schedule)])
+    assert "a running balance: each row's is the row above's - principal" in tables.schema()
+    assert "interest REAL,  -- \"Interest\" figure\n" in tables.schema(), "a column that only looks steady isn't one"
+
+
+def test_a_balance_column_in_another_table_is_its_own_and_may_be_added_up():
+    # A statement of account (a running balance) and a list of open invoices (each one's balance) on one page.
+    tables = Tables([("statement.pdf", STATEMENT + """
+[table]
+Invoice | Due date | Balance
+Invoice: TF-1 | Due date: 08/01/2026 | Balance: 100.00
+Invoice: TF-2 | Due date: 08/15/2026 | Balance: 250.00
+Invoice: TF-3 | Due date: 09/01/2026 | Balance: 75.00
+""")])
+    assert tables.run("SELECT SUM(balance) FROM t2")[1] == [(425.0,)]
+    assert tables.run("SELECT SUM(x.balance) FROM t2 AS x")[1] == [(425.0,)]
+    for sql in ("SELECT SUM(balance) FROM t1", "SELECT SUM(a.balance) FROM t1 a", "SELECT SUM(t1.balance) FROM t1 JOIN t2 ON 1=0"):
+        with pytest.raises(ValueError):
+            tables.run(sql)
+
+
+def test_tables_of_one_row_never_take_the_place_of_tables_of_rows():
+    pages = []
+    for page in range(1, 9):  # each page: an invoice's header box over its line items
+        pages.append(f"""[page {page}]
+[table]
+Invoice No. | Due date
+Invoice No.: {page} | Due date: 10/{page:02d}/2026
+
+[table]
+Item | Amount
+Item: A{page} | Amount: {page}.00
+Item: B{page} | Amount: {page}0.00
+""")
+    tables = Tables([("invoices.pdf", "\n".join(pages))])
+    rows = [sheet for sheet in tables.sheets if sheet.rows >= 2]
+    one = [sheet for sheet in tables.sheets if sheet.rows == 1]
+    assert len(rows) == table_query.MAX_TABLES and len(one) == table_query.MAX_ONE_ROW_TABLES

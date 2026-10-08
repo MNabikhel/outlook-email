@@ -36,6 +36,7 @@ from controller_inbox.local_llm import (
     ensure_context,
     llm_active,
     needs_more_context,
+    reader_load_problem,
     reply_budget,
     stream_text,
 )
@@ -67,7 +68,9 @@ _STOP = set(
 )
 _WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9.@&'-]*[A-Za-z0-9]|[A-Za-z0-9]")
 _TODAY = re.compile(
-    r"\b(today|focus|urgent|priorit\w*|first|overdue|due|to-?do|tasks?|what should|what do i|"
+    r"\b(today|focus|urgent|priorit\w*|first|overdue|to-?do|tasks?|what should|what do i|"
+    # "What's due?", not a document's own "total due", "amount due", "past due" or "due date".
+    r"(?<!total\s)(?<!amount\s)(?<!balance\s)(?<!past\s)(?<!net\s)(?<!now\s)due(?!\s+dates?\b)|"
     r"what needs|behind|catch me up|morning|this week)\b",
     re.I,
 )
@@ -228,7 +231,8 @@ def pick_sources(
     current = store.get_email(email_id) if email_id else None
     if current is not None:
         picked[current.id] = current
-        if on_screen_question(question) or (not about_today and not _ELSEWHERE.search(question) and answered_here(current, question)):
+        here = not _ELSEWHERE.search(question) and answered_here(current, question)
+        if on_screen_question(question) or (here and (not about_today or _due_here(current, question))):
             return [current], False, set()
     stripped = _TODAY.sub(" ", question) if about_today else question
     by_kind: list[EmailRecord] = []
@@ -288,13 +292,44 @@ def answered_here(email: EmailRecord, question: str) -> bool:
     terms = keywords(question)
     if len(terms) < 2:
         return False
-    text = _spaced(" ".join([email.subject, email.body_text or ""] + [att.extracted_text or "" for att in email.attachments]))
-    found = [term for term in terms if _spaced(term) in text]
+    found = _found_in(email, terms)
     if len(found) >= 2 and len(found) * 2 >= len(terms):
         return True
     # The names, codes and figures the question turns on ("Harbor Steel", "31-60", "F-150") are all here.
     named = [term for term in terms if _distinctive(term, question)]
     return len(found) >= 2 and bool(named) and all(term in found for term in named)
+
+
+def asks_for_help(question: str, found: set[str], screen: EmailRecord | None) -> bool:
+    """"How do I set up the local model?": help with CloseDesk. Not when the mail answers it: the search found
+    emails with its words, or the email on screen has them ("the Clearwater vendor setup form")."""
+    if not _HELP.search(question) or found:
+        return False
+    return screen is None or not (agent.named_files(screen.attachments, question) or answered_here(screen, question))
+
+
+def _due_here(email: EmailRecord, question: str) -> bool:
+    """"When is invoice PF-20417 due?": "due" asked of a document this email names, by a code or a name, not
+    "what's due?" of the whole inbox."""
+    if _MY_DAY.search(question) or {match.group(0).lower() for match in _TODAY.finditer(question)} != {"due"}:
+        return False
+    # A day or a month ("due on Friday", "due in March") names when, not which document.
+    named = [term for term in keywords(question) if _distinctive(term, question) and term not in _DAYS + _MONTHS]
+    return bool(named) and len(_found_in(email, named)) == len(named)
+
+
+_MONTHS = "january february march april june july august september october november december".split()
+_DAYS = "monday tuesday wednesday thursday friday saturday sunday".split()
+
+
+def _found_in(email: EmailRecord, terms: list[str]) -> list[str]:
+    """The terms in this email or its files; a month also as a sheet heads it ("August" as "Aug" or "Aug-26")."""
+    text = _spaced(" ".join([email.subject, email.body_text or ""] + [att.extracted_text or "" for att in email.attachments]))
+    return [
+        term
+        for term in terms
+        if _spaced(term) in text or (term in _MONTHS and re.search(rf"\b{term[:3]}t?\b", text))
+    ]
 
 
 def _spaced(text: str) -> str:
@@ -494,7 +529,7 @@ def offline_answer(
     found = found or set()
     current = next((email for email in sources if email.id == current_id), None)
     numbers = {email.id: index for index, email in enumerate(sources, start=1)}
-    if _HELP.search(question) and not found:
+    if asks_for_help(question, found, current):
         return HELP_TEXT
     note = "Here's a straight lookup instead." if model_failed else "The local model isn't running, so this is a straight lookup."
     if current is not None and not found and not about_today:
@@ -580,7 +615,7 @@ def answer_stream(
         else:
             sources = sources[:1] + [uploads] + sources[1:]
         found = found | {uploads.id}
-    if _HELP.search(question) and not found:
+    if asks_for_help(question, found, next((email for email in sources if email.id == email_id), None)):
         yield {"type": "sources", "sources": [], "mode": "help"}
         yield {"type": "delta", "text": HELP_TEXT}
         yield {"type": "done"}
@@ -607,7 +642,15 @@ def answer_stream(
     state = {"wrote": False, "text": ""}
     offer = None
     if current is not None and _should_read_files(ws, question, focus if about_today else None):
-        offer = yield from _vision_first(store, settings, ws, current, question)
+        outcome: dict[str, Any] = {}
+        offer = yield from _vision_first(store, settings, ws, current, question, outcome)
+        # Which reading of a scan the answer rests on, for a question about what the files say, as the page reader
+        # reads for one: not for "who sent this?".
+        about = _ABOUT_FILES.search(question) or agent.named_files(current.attachments, question)
+        if about and (reading := _reading_event(store, settings, current, question, outcome)):
+            yield reading
+        elif outcome.get("ran"):  # the indicator went up for a page of a text PDF: it comes down again
+            yield {"type": "reading", "state": "done"}
     if (ready := agent.summary_request(ws, question)) is not None:
         att, summary = ready
         yield {"type": "step", "text": f"Used the summary of {att.filename} written during the overnight reading"}
@@ -662,15 +705,22 @@ _ABOUT_FILES = re.compile(
 )
 
 
-def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current: EmailRecord, question: str):
+def _vision_first(
+    store: Store, settings: Settings, ws: agent.Workspace, current: EmailRecord, question: str, outcome: dict | None = None
+):
     """Pages of the email's scans, pictures and doubtful tables the vision model hasn't read, when the question is
     about what is in them. In "auto", with a document reader, they are read before answering when that takes up to
     ten minutes (or, before this computer's speed is known, they are three pages at most); with a general model, when
     this computer's speed is known and the pages are quick to read. Otherwise the answer comes from what was read
     before, and the event returned offers the read with the time it would take. Nothing is read or offered while a
-    read is already running."""
+    read is already running. A "reading" event goes out before each page, for the chat to show the reader at work.
+
+    ``outcome`` is told why a page wasn't read: ``failed`` (what the reader said), ``busy`` (it was reading other
+    pages) or ``offered`` (reading them would take longer than an answer waits); and ``ran`` when the indicator went up."""
+    outcome = {} if outcome is None else outcome
     if not vision.can_render() or not vision.available(settings):
         return None
+    reader = vision.reader_name(vision.reading_model(settings))
     if vision.busy():
         if vision.reads_by_default(settings) and _ABOUT_FILES.search(question):
             try:
@@ -678,7 +728,8 @@ def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current
             except Exception:
                 waiting = []
             if waiting:
-                yield {"type": "step", "text": "The document reader is reading other pages now; this answer uses what was read so far."}
+                outcome["busy"] = True
+                yield {"type": "step", "text": f"{reader} is reading other pages now; this answer uses what was read so far."}
         return None
     try:
         files = vision.files_to_read(store, settings, current)
@@ -700,6 +751,7 @@ def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current
         # page that fails, when another read starts, or when what is left would take the wait past its limit (this
         # computer's speed is known after the first page); what is left is then offered.
         started = time.monotonic()
+        first_model = vision.reading_model(settings)
         queue = [(position, att, data, todo[: vision.MAX_PAGES]) for position, att, data, todo in files]
         beyond = [(position, att, data, todo[vision.MAX_PAGES :]) for position, att, data, todo in files if len(todo) > vision.MAX_PAGES]
         left: list = []
@@ -712,11 +764,19 @@ def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current
                     stopped = "time"
                 elif vision.busy():
                     stopped = "busy"
+                elif not vision.trusted_reader(now := vision.reading_model(settings)):
+                    # LM Studio couldn't load the document reader since the first page: the rest isn't read slowly
+                    # the older way while the question waits.
+                    stopped = "failed"
+                    outcome["failed"] = reader_load_problem(first_model).rstrip(".") or f"{reader} stopped answering"
                 if stopped:
                     left = [(position, att, data, todo[index:]), *queue[number + 1 :]]
                     break
+                reader = vision.reader_name(now)
                 took = vision.duration(each) if each is not None else "the first page shows how long this computer takes"
-                yield {"type": "step", "text": f"Reading {att.filename}, page {page} ({index + 1} of {len(todo)}), with the document reader ({took})"}
+                outcome["ran"] = True
+                yield _reading_now(reader, att.filename, page, index + 1, len(todo), took)
+                yield {"type": "step", "text": f"Reading {att.filename}, page {page} ({index + 1} of {len(todo)}), with {reader} ({took})"}
                 try:
                     one = vision.read_pages(store, settings, current, att, data, [page])
                 except Exception as exc:  # the answer still comes, from what was read before
@@ -725,7 +785,8 @@ def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current
                 if one.failed:
                     stopped = "failed"
                     why = re.sub(r"^page \d+: ", "", one.failed[0])
-                    yield {"type": "step", "text": f"The document reader couldn't read {att.filename} page {page} ({why}); the answer uses what was read."}
+                    outcome["failed"] = f"{reader} couldn't read {att.filename} page {page} ({why})"
+                    yield {"type": "step", "text": f"{reader} couldn't read {att.filename} page {page} ({why}); the answer uses what was read."}
                     break
             if stopped:
                 break
@@ -740,22 +801,110 @@ def _vision_first(store: Store, settings: Settings, ws: agent.Workspace, current
         seconds = vision.estimate(store, settings, sum(len(todo) for *_rest, todo in files))
     elif settings.vision_mode == "auto" and seconds is not None and seconds <= vision.QUICK_SECONDS:
         for _position, att, data, todo in files:
-            yield {"type": "step", "text": f"Reading {att.filename} with the vision model ({vision.duration(vision.estimate(store, settings, len(todo)) or 0)})"}
+            took = vision.duration(vision.estimate(store, settings, len(todo)) or 0)
+            outcome["ran"] = True
+            yield _reading_now(reader, att.filename, todo[0], 1, len(todo), took)
+            yield {"type": "step", "text": f"Reading {att.filename} with {reader} ({took})"}
             try:
-                vision.read_pages(store, settings, current, att, data, todo)
-            except Exception:  # the answer still comes, from what was read before
+                one = vision.read_pages(store, settings, current, att, data, todo)
+            except Exception as exc:  # the answer still comes, from what was read before
                 log.warning("Reading %s with the vision model failed", att.filename, exc_info=True)
+                one = vision.Result(failed=[str(exc)[:160]])
+            if one.failed:
+                why = re.sub(r"^page \d+: ", "", one.failed[0])
+                outcome["failed"] = f"{reader} couldn't read {att.filename} ({why})"
         fresh = chats.chat_mail(store, chats.chat_id_of(current.id)) if chats.chat_id_of(current.id) else store.get_email(current.id)
         if fresh is not None:
             ws.sources[:] = [fresh if email.id == current.id else email for email in ws.sources]
         return None
     position, att, _data, todo = files[0]
     single = vision.estimate(store, settings, len(todo))
+    if settings.vision_mode == "ask":
+        how = "waits for you to ask"
+    elif single is not None:
+        how = f"would take {vision.duration(single)}"
+    else:
+        how = "is left for you to start, as this computer's reading speed isn't known yet"
+    outcome["offered"] = f"reading {len(todo)} page{'s' if len(todo) != 1 else ''} of {att.filename} with {reader} {how}"
     return {
         "type": "vision", "email_id": current.id, "n": position, "file": att.filename, "pages": len(todo),
         "estimate": round(single) if single is not None else None, "question": question,
         "text": f"{att.filename} has {len(todo)} page{'s' if len(todo) != 1 else ''} the vision model could read too, "
         f"beside {'OCR' if vision.looks_scanned(att) else 'the PDF text'}. {vision.offer_text(len(todo), single)}",
+    }
+
+
+def _reading_now(reader: str, filename: str, page: int, index: int, of: int, took: str) -> dict[str, Any]:
+    """The chat's indicator while the page reader works: the file and page, how far along, how long a page takes."""
+    return {
+        "type": "reading", "state": "running", "reader": reader, "file": filename, "page": page, "index": index, "of": of,
+        "text": f"{reader} is reading {filename}, page {page} ({index} of {of}) · {took}",
+    }
+
+
+def _pages_label(pages: list[int], total: int) -> str:
+    """" page 2", " pages 1 and 3"; "" for a one-page file."""
+    if total <= 1 or not pages:
+        return ""
+    if len(pages) == 1:
+        return f" page {pages[0]}"
+    return f" pages {', '.join(str(page) for page in pages[:-1])} and {pages[-1]}"
+
+
+def _reading_event(store: Store, settings: Settings, current: EmailRecord, question: str, outcome: dict) -> dict[str, Any] | None:
+    """Which reading of the email's scans and pictures the answer rests on, shown beside it: the page reader's
+    (OvisOCR2), or the older method (a general model's vision beside OCR, or OCR alone) with the reason. None when
+    the email has no scan or picture: its other files are read from their own text."""
+    try:
+        readings = vision.scan_readings(store, settings, current, question=question)
+    except Exception:  # the answer doesn't depend on saying which reading it used
+        log.warning("Couldn't tell which reading of %s's scans is shown", current.id, exc_info=True)
+        return None
+    if not readings:
+        return None
+    model = vision.reading_model(settings)
+    reader = vision.reader_name(model) if model and vision.trusted_reader(model) else "OvisOCR2"
+    older = [found for found in readings if found["model"] or found["ocr"]]
+    if not older:
+        files = ", ".join(found["file"] for found in readings)
+        names = " and ".join(dict.fromkeys(name for found in readings for name in found["models"])) or reader
+        return {"type": "reading", "state": "vision", "reader": names, "label": f"Read by {names}",
+                "text": f"This answer uses {names}'s reading of {files}."}
+    trusted = bool(model) and vision.trusted_reader(model)
+    # Why no document reader reads scans comes first; then what happened to these pages.
+    reasons = [] if trusted else [vision.why_not_reader(settings, model).rstrip(".")]
+    if outcome.get("failed"):
+        reasons.append(outcome["failed"])
+    elif outcome.get("offered"):
+        reasons.append(outcome["offered"] + " (use Read with the vision model below)")
+    elif outcome.get("busy"):
+        reasons.append(f"{reader} was reading other pages")
+    elif trusted and any(found["not_shown"] for found in older):
+        who = next(name for found in older for name in found["left_out_by"])
+        reasons.append(f"{who}'s reading left out much of the page, so OCR's reading is shown")
+    elif trusted:
+        reasons.append(f"{reader} hasn't read it yet")
+    reason = ". ".join(part[:1].upper() + part[1:] for part in reasons if part)
+    general = [name for found in older if found["model"] for name in found["models"] if name != reader]
+    method = f"{general[0]}'s own vision, side by side with OCR" if general else "OCR only"
+    sentences = []
+    for found in readings:
+        mine = sorted(found["model"] + found["ocr"])
+        total = len(found["pages"])
+        if found["reader"] and mine:
+            sentences.append(
+                f"{reader} read {found['file']}{_pages_label(found['reader'], total)};"
+                f"{_pages_label(mine, total) or ' the rest'} used the older method ({method})."
+            )
+        elif mine:
+            sentences.append(f"{found['file']}{_pages_label(mine, total)} was read with the older method ({method}).")
+        else:
+            sentences.append(f"{reader} read {found['file']}.")
+    return {
+        "type": "reading", "state": "fallback", "reader": reader, "method": method,
+        "label": f"{'Partly older' if any(found['reader'] for found in readings) else 'Older'} method: "
+        + (f"{general[0]} + OCR" if general else "OCR"),
+        "text": " ".join(sentences) + f" {reason}. Check figures against the page.",
     }
 
 
