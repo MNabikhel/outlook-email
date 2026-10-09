@@ -157,20 +157,22 @@ def glyphs_of(layout) -> list[Glyph]:
 
 def _page_turn(layout) -> int:
     """Which way a page printed sideways must be turned to read it: 0 for a page that reads upright, 90 when most
-    of its letters run up the page (it is turned a quarter clockwise), -90 when they run down it.
+    of its letters run up the page (it is turned a quarter clockwise), -90 when they run down it, 180 when they
+    are upside down.
 
     Many report writers print a wide sheet sideways on a portrait page instead of marking the page as turned,
     and read as drawn, its columns would come out as rows.
     """
     from pdfminer.layout import LTChar
 
-    counts = {0: 0, 90: 0, -90: 0}
+    counts = {0: 0, 90: 0, -90: 0, 180: 0}
 
     def walk(item) -> None:
         if isinstance(item, LTChar):
             if item.get_text().strip():
                 a, b, c, d = item.matrix[:4]
-                counts[0 if a * d > 0 and b * c <= 0 else 90 if b > 0 else -90] += 1
+                level = a * d > 0 and b * c <= 0
+                counts[(180 if a < 0 else 0) if level else 90 if b > 0 else -90] += 1
             return
         try:
             children = list(item)
@@ -181,7 +183,7 @@ def _page_turn(layout) -> int:
 
     walk(layout)
     total = sum(counts.values())
-    turn = max((90, -90), key=lambda way: counts[way])
+    turn = max((90, -90, 180), key=lambda way: counts[way])
     return turn if total and counts[turn] > 0.6 * total else 0
 
 
@@ -191,6 +193,8 @@ def _turn_box(layout, turn: int, x0: float, y0: float, x1: float, y1: float) -> 
     if turn == 90:
         # Text running up the page: its lines are stacked from left (first) to right.
         return y0 - bottom, right - x1, y1 - bottom, right - x0
+    if turn == 180:
+        return right - x1, top - y1, right - x0, top - y0
     return top - y1, x0 - left, top - y0, x1 - left
 
 
@@ -198,6 +202,8 @@ def _turn_matrix(turn: int, a: float, b: float, c: float, d: float) -> tuple[flo
     """A character's text matrix once the page is turned upright."""
     if turn == 90:
         return b, -a, d, -c
+    if turn == 180:
+        return -a, -b, -c, -d
     return -b, a, -d, c
 
 
@@ -717,7 +723,7 @@ def _region_edges(lines: list[Line], rules: list[Rule], region: list[int]) -> li
     # Words that line up row after row with only a space between them ("Mon" against "09/28", an entity
     # code against its name) are one cell unless the headings name a column on each side.
     for cut in narrow:
-        if heads and cut in edges and not _headed_both_sides(cut, edges, heads, lo, hi):
+        if cut in edges and (not heads or not _headed_both_sides(cut, edges, heads, lo, hi)):
             edges.remove(cut)
     return edges or None
 
@@ -2353,9 +2359,14 @@ def _join_wrapped(
 
 def _names_own_rows(grid: list[list[str]]) -> bool:
     """The first column names every row, each differently, in words: the table has its own row names, so it
-    is not the other columns of the table on the page before (a second table printed in the same place)."""
+    is not the other columns of the table on the page before (a second table printed in the same place).
+    Dates and IDs with letters in them ("DEP-88812") name rows too; plain figures don't."""
     names = [row[0].strip() for row in grid if row and any(cell.strip() for cell in row)]
-    return len(names) >= 2 and all(names) and len(set(names)) == len(names) and not any(map(tables.is_value, names))
+
+    def naming(name: str) -> bool:
+        return not tables.is_value(name) or bool(_DATE_CELL.fullmatch(name)) or (any(ch.isalpha() for ch in name) and any(ch.isdigit() for ch in name))
+
+    return len(names) >= 2 and all(names) and len(set(names)) == len(names) and all(map(naming, names))
 
 
 def _carried_over(
