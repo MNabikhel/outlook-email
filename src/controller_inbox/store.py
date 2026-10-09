@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from controller_inbox.fraud import FREEMAIL, domain_of
 from controller_inbox.models import (
     ActionItem,
     ActionStatus,
@@ -292,6 +293,8 @@ class Store:
         conn.row_factory = sqlite3.Row
         # SQLite's lower() and LIKE only fold A-Z; search compares fold(column) with a folded pattern instead.
         conn.create_function("fold", 1, _fold, deterministic=True)
+        conn.create_function("invoice_key", 1, _invoice_key, deterministic=True)
+        conn.create_function("sender_key", 1, _sender_key, deterministic=True)
         conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}")
         conn.execute("PRAGMA foreign_keys = ON")
         try:
@@ -676,31 +679,35 @@ class Store:
             rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
-    def find_duplicate_invoices(self, invoice_number: str, exclude_email_id: str) -> list[str]:
+    def find_duplicate_invoices(self, invoice_number: str, exclude_email_id: str, sender_email: str = "") -> list[str]:
+        """Earlier mail with the same invoice number; with ``sender_email``, only from the same vendor (its domain,
+        or its address on a free-mail domain): another vendor's invoice 1001 is not a repeat."""
         if not invoice_number:
             return []
+        sender = _sender_key(sender_email)
         with self.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT DISTINCT e.id
                 FROM emails e
                 WHERE e.id != ?
+                  AND (? = '' OR sender_key(e.sender_email) = ?)
                   AND (
                     EXISTS (
                         SELECT 1 FROM json_each(CASE WHEN json_valid(e.extracted) THEN e.extracted ELSE '{}' END,
                                                 '$.invoice_numbers') n
-                        WHERE fold(n.value) = ?
+                        WHERE invoice_key(n.value) = ?
                     )
                     OR EXISTS (
                         SELECT 1 FROM attachments a,
                             json_each(CASE WHEN json_valid(a.extracted_fields) THEN a.extracted_fields ELSE '{}' END,
                                       '$.invoice_numbers') n
-                        WHERE a.email_id = e.id AND fold(n.value) = ?
+                        WHERE a.email_id = e.id AND invoice_key(n.value) = ?
                     )
                   )
                 """,
                 # Only an invoice number counts: the same digits as a PO number or an account ending are not a repeat.
-                (exclude_email_id, _fold(invoice_number), _fold(invoice_number)),
+                (exclude_email_id, sender, sender, _invoice_key(invoice_number), _invoice_key(invoice_number)),
             ).fetchall()
         return [row["id"] for row in rows]
 
@@ -1651,6 +1658,21 @@ _MATCH_ANY = (
 def _fold(text: str | None) -> str | None:
     """Case-folded text for search, so "MÜLLER" finds "Müller" (SQLite folds only A-Z). Registered as fold()."""
     return text.casefold() if isinstance(text, str) else text
+
+
+def _invoice_key(text: str | None) -> str | None:
+    """An invoice number as the duplicate check compares it: case, separators and leading zeros don't count, so
+    "INV-01001", "INV1001" and "inv_1001" are one invoice. Registered as invoice_key()."""
+    if not isinstance(text, str):
+        return text
+    return re.sub(r"[\W_]", "", re.sub(r"(?<!\d)0+(?=\d)", "", text.casefold()))
+
+
+def _sender_key(address: str | None) -> str:
+    """Whose invoice it is: the sender's domain, or their address on a free-mail domain. Registered as sender_key()."""
+    address = (address or "").strip().lower()
+    domain = domain_of(address)
+    return address if domain in FREEMAIL else domain
 
 
 def _like_escape(text: str) -> str:

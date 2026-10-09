@@ -13,6 +13,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from email import policy
+from email.header import decode_header, make_header
 from email.parser import BytesParser
 from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
@@ -289,13 +290,25 @@ def _parse_eml(path: Path) -> RawMessage:
     data = path.read_bytes()
     parsed = BytesParser(policy=policy.default).parsebytes(data)
     subject = _header(parsed, "subject")
-    sender_name, sender_email = _split_address(_header(parsed, "from"))
+    sender_name, sender_email = _split_address(_address_header(parsed, "from"))
     received = _email_date(parsed.get("date"))
     body, attachments = _eml_content(parsed)
     message_id = _header(parsed, "message-id").strip()
     raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
-    raw.reply_to = _reply_address(str(parsed.get("reply-to") or ""))
+    raw.reply_to = _reply_address(_address_header(parsed, "reply-to"))
     return raw
+
+
+def _address_header(message, name: str) -> str:
+    """A From or Reply-To header as written, encoded words decoded. The parsed header keeps only the name when it
+    looks like an address ("ap@taz.com <ap@evil-pay.net>" reads as ap@taz.com), so ``_split_address`` reads this."""
+    for key, raw in message.raw_items():
+        if key.lower() == name and not any("\udc80" <= char <= "\udcff" for char in raw):
+            try:
+                return _tidy(str(make_header(decode_header(raw))))
+            except Exception:
+                break
+    return _header(message, name)
 
 
 def _header(message, name: str) -> str:
@@ -767,7 +780,9 @@ def _split_address(raw: str) -> tuple[str, str]:
         # A header the strict parser gives up on ("Chen, Maya <maya@x.com>"): the last <...> is the address.
         brackets = list(re.finditer(r"<([^<>]+)>", raw))
         if not brackets:
-            return (raw, raw) if "@" in raw else (raw, "")
+            # Several addresses ("a@evil.com, b@taz.com"): the first, so a trusted one listed after it isn't taken.
+            first = re.search(r"[^\s,;<>\"]+@[^\s,;<>\"]+", raw)
+            return (raw, first.group(0)) if first else (raw, "")
         email = brackets[-1].group(1).strip()
         name = raw[: brackets[-1].start()].strip().strip('"')
     return name.strip() or email, email

@@ -428,7 +428,7 @@ def _classify(
     """
     from controller_inbox.learn import apply_learned, match_correction
 
-    duplicate = bool(fields.primary_invoice and store.find_duplicate_invoices(fields.primary_invoice, email_id))
+    duplicate = bool(fields.primary_invoice and store.find_duplicate_invoices(fields.primary_invoice, email_id, sender_email))
     classified = classify_email(
         subject=subject,
         body=body,

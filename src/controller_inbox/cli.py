@@ -584,8 +584,10 @@ def _watch(settings: Settings, store: Store, *, once: bool) -> int:
 def _send_digest(settings: Settings, payload: dict, period: str) -> None:
     if not settings.digest_to:
         raise SystemExit("CONTROLLER_INBOX_DIGEST_TO is not set.")
+    from controller_inbox.graph import DIGEST_SUBJECT
+
     mailbox = _graph_mailbox(settings)
-    subject = f"CloseDesk daily digest — {period}: {payload['headline']}"
+    subject = f"{DIGEST_SUBJECT}{period}: {payload['headline']}"
     mailbox.send_mail(settings.digest_to, subject, payload["html"])
     print(f"Sent digest to {settings.digest_to}")
 

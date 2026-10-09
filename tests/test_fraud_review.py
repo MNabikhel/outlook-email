@@ -213,9 +213,10 @@ def test_trusted_colleague_forwarding_a_bank_change_gets_a_caution():
 
 # 6. Only someone you trust can say a quoted request was fake.
 def test_anyone_cannot_silence_the_quoted_thread_warning():
-    assert _check(FORGED).level == "caution"
+    # A sender you have mail from (from a stranger the quoted wording counts as theirs and blocks).
+    assert _check(FORGED, history=3).level == "caution"
     disowned = "It was not them, this is phishing.\n\nFrom: Acme AR\nSent: Monday\n\nOur bank details have changed."
-    assert _check(disowned, subject="RE: bank").level == "caution", "a stranger saying so does not count"
+    assert _check(disowned, subject="RE: bank", history=3).level == "caution", "an untrusted sender saying so does not count"
     assert _check(disowned, subject="RE: bank", sender="sam@ourco.example", ctx=COLLEAGUES).level == "none"
 
 
