@@ -170,6 +170,13 @@ def test_done_redirect_stays_inside_the_dashboard(loaded, settings):
     assert response.headers["location"] == "/actions"
 
 
+
+def test_digest_with_an_impossible_date_says_so(settings, monkeypatch, capsys):
+    monkeypatch.setenv("CONTROLLER_INBOX_DATA_DIR", str(settings.data_dir))
+    monkeypatch.setenv("CONTROLLER_INBOX_INBOX_DIR", str(settings.inbox_dir))
+    assert main(["digest", "--date", "2026-02-30"]) == 2
+    assert "2026-02-30" in capsys.readouterr().out
+
 def test_run_command_end_to_end(settings, monkeypatch, capsys):
     monkeypatch.setenv("CONTROLLER_INBOX_DATA_DIR", str(settings.data_dir))
     monkeypatch.setenv("CONTROLLER_INBOX_INBOX_DIR", str(settings.inbox_dir))

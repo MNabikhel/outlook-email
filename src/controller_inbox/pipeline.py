@@ -114,6 +114,7 @@ def process_message(
         history=store.sender_history(raw.sender_email, exclude=raw.id),
         flags=verdicts,
         domain_history=store.domain_history(domain_of(raw.sender_email), exclude=raw.id),
+        reply_domain_history=store.domain_history(domain_of(raw.reply_to), exclude=raw.id),
     )
     classified_email = _classify(
         store,

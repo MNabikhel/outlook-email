@@ -919,3 +919,49 @@ def test_a_form_of_fields_and_numbers_keeps_its_first_line_as_a_field():
     # Its numbers written as money, a field for an ID still says it's a form; a sheet of names over amounts is not.
     assert not has_header([["Vendor", "Northwind"], ["Invoice #", "58,213"], ["Subtotal", "1,200.00"], ["Tax", "96.00"], ["Total", "1,296.00"]])
     assert has_header([["Department", "Budget"], ["Finance", "88,000"], ["Marketing", "128,800"], ["Operations", "$142,800"], ["IT", "(1,250.00)"]])
+
+
+def test_a_marked_header_row_of_periods_names_the_columns():
+    from controller_inbox.documents import csv_text
+    from controller_inbox.tables import has_header
+
+    rows = [["Account", "Oct 2026", "Nov 2026"], ["Cash", "1,200.00", "1,350.00"], ["Receivables", "800.00", "760.00"]]
+    assert has_header(rows, marked=True)
+    assert has_header([["Account", "2026", "2025"], ["Cash", "1,200.00", "1,100.00"]], bold_first=True)
+    # A row of figures is still not a header, however it is marked.
+    assert not has_header([["Cash", "1,200.00", "1,350.00"], ["Receivables", "800.00", "760.00"]], marked=True)
+    text = csv_text(b"Account,Oct 2026,Nov 2026\nCash,1200.00,1350.00\nReceivables,800.00,760.00\n", "tb.csv")
+    assert "A2 (Account): Cash | B2 (Oct 2026): 1200.00" in text
+
+
+def test_a_word_table_label_with_a_blank_cell_after_it_takes_its_value():
+    from controller_inbox.tables import table_lines
+
+    assert table_lines([["Total due:", "", "$1,344.00"]], header=False) == ["Total due: $1,344.00"]
+    # A blank with nothing after it, or only another label, stays blank.
+    assert table_lines([["Approved by:", "", "Date:"]], header=False) == ["Approved by: not listed | Date:"]
+
+
+def test_the_looks_scanned_note_counts_only_the_pages_read(monkeypatch):
+    from pdffactory import Text, build_pdf
+
+    from controller_inbox import documents
+
+    monkeypatch.setattr(documents, "MAX_PDF_PAGES", 3)
+    data = build_pdf([[Text(40, 700, f"Invoice {n} for consulting services rendered")] for n in range(10)])
+    text = pdf_text(data)
+    assert "looks scanned" not in text and "[CloseDesk read the first 3 of 10 pages.]" in text
+
+
+def test_a_blank_page_is_not_reported_as_read_with_ocr(monkeypatch):
+    from pdffactory import Text, build_pdf
+
+    from controller_inbox import ocr
+
+    page = lambda n: [Text(40, 700 - 14 * k, f"Line {k} of the engagement letter on page {n}, terms and fees") for k in range(5)]
+    data = build_pdf([page(1), [], page(3)])
+    monkeypatch.setattr(ocr, "image_text", lambda data: "")
+    for engine in ("", "RapidOCR"):
+        monkeypatch.setattr(ocr, "engine_name", lambda: engine)
+        text = pdf_text(data)
+        assert text.startswith("[page 1]") and "[page 2]\n(no text on this page)" in text

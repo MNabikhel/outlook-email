@@ -554,3 +554,32 @@ def test_query_with_underscore_finds_the_row():
     tables = Tables([("book.xlsx", "Customer: Acme | Balance: 1,000\nCustomer: Straße GmbH | Balance: 2,150\n")])
     _names, rows, _more = tables.run("SELECT balance FROM t1 WHERE customer LIKE 'stra_e%'")
     assert rows == [(2150.0,)]
+
+
+def test_a_wide_sheet_loads_quickly():
+    # 36 month columns over 200 rows took 11 seconds looking for the columns one works out from the others.
+    months = [f"{m}-{y}" for y in (24, 25, 26) for m in "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()]
+    text = "\n".join(
+        " | ".join([f"Account: 6{i:03d} Expense line {i}"] + [f"{m}: {(i * 37 + k * 101) % 9900 + 100:,}" for k, m in enumerate(months)])
+        for i in range(200)
+    )
+    started = time.monotonic()
+    Tables([("Budget.xlsx", text)])
+    assert time.monotonic() - started < 3
+
+
+def test_a_plan_that_works_out_a_missing_column_is_an_answer():
+    tables = _text_tables(
+        "Account: Rent | Oct-26: 3,000 | Nov-26: 3,000 | Dec-26: 3,000\n"
+        "Account: Payroll | Oct-26: 40,000 | Nov-26: 41,000 | Dec-26: 42,000\n"
+        "Account: Travel | Oct-26: 1,200 | Nov-26: 800 | Dec-26: 2,000\n"
+    )
+
+    def reply(*_args, **_kwargs):
+        return (
+            "Table: t1; the sheet doesn't have a Q4 column, so Q4 is Oct-26 + Nov-26 + Dec-26.\nRows: the Payroll row.\n"
+            "Value: oct_26 + nov_26 + dec_26.\nSQL: SELECT account, oct_26 + nov_26 + dec_26 AS q4 FROM t1 WHERE account LIKE '%payroll%'"
+        )
+
+    found = table_query.ask(None, tables, "what is Q4 payroll", complete=reply)
+    assert found is not None and found.rows == [("Payroll", 123000.0)]

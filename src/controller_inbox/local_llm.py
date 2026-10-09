@@ -1255,6 +1255,12 @@ def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict],
     if model in _tools_rejected:
         raise ToolsUnsupported(model)
     reply = ToolReply(content="")
+    # Email and file text can't bring in a <tool_call> for the model to quote back as if it were its own.
+    messages = [
+        {**m, "content": _CALL_TAG_RE.sub(r"<\1tool call>", m["content"])}
+        if m.get("role") in {"user", "tool"} and isinstance(m.get("content"), str) else m
+        for m in messages
+    ]
     for _attempt in range(2):
         url, payload = _chat_request(settings, messages, budget, stream=False)
         payload["tools"] = tools
@@ -1284,6 +1290,22 @@ def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict],
 
 
 _TEXT_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*(?:</tool_call>|\Z)", re.S)
+_CALL_TAG_RE = re.compile(r"<(/?)tool_call>", re.I)
+
+
+def _arguments(text: str) -> dict:
+    """Tool arguments are JSON text, and some servers encode that text a second time, as a JSON string."""
+    value = text
+    for _attempt in range(2):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            break
+        if not isinstance(value, str):
+            break
+    if isinstance(value, dict):
+        return value
+    return parse_json_object(value if isinstance(value, str) else text) or {}
 
 
 def _tool_reply(data) -> ToolReply:
@@ -1297,7 +1319,7 @@ def _tool_reply(data) -> ToolReply:
             continue
         arguments = function.get("arguments")
         if isinstance(arguments, str):
-            arguments = parse_json_object(arguments) or {}
+            arguments = _arguments(arguments)
         calls.append({"id": str(item.get("id") or f"call_{index}"), "name": str(function["name"]), "arguments": arguments or {}})
     content = base.content
     if not calls and "<tool_call>" in content:
@@ -1307,7 +1329,7 @@ def _tool_reply(data) -> ToolReply:
             if parsed.get("name"):
                 arguments = parsed.get("arguments") or parsed.get("parameters") or {}
                 if isinstance(arguments, str):
-                    arguments = parse_json_object(arguments) or {}
+                    arguments = _arguments(arguments)
                 calls.append({"id": f"call_{index}", "name": str(parsed["name"]), "arguments": arguments})
         content = _TEXT_CALL_RE.sub("", content).strip() if calls else content
     return ToolReply(content=content, calls=calls, reasoning=base.reasoning, finish=base.finish)

@@ -154,6 +154,54 @@ def test_a_new_index_with_as_many_vectors_is_searched_not_the_old_one(store, set
     assert [email.id for email in semantic.search(store, settings, "team trip in Portugal")] == [budget.id]
 
 
+def test_a_model_swapped_in_under_the_same_name_is_indexed_again(store, settings, mail, server, monkeypatch):
+    budget, quote = mail["Q4 budget draft"], mail["FW: Acme quote"]
+    semantic.index_mail(store, settings)
+    rows = len(store.embedding_keys(MODEL))
+    # Another embedding model is loaded under the same name: its vectors have twice as many numbers.
+    original = semantic.httpx.post
+
+    def bigger(url, json=None, **kwargs):
+        response = original(url, json=json, **kwargs)
+        data = response.json()["data"]
+        for row in data:
+            row["embedding"] = row["embedding"] * 2
+        return httpx.Response(200, request=response.request, json={"data": data})
+
+    monkeypatch.setattr(semantic.httpx, "post", bigger)
+    quote.body_text += " Remittance advice to follow."
+    store.upsert_email(quote)
+    assert semantic.index_mail(store, settings) == rows, "the old model's vectors are made again"
+    assert semantic.index_mail(store, settings) == 0
+    assert [email.id for email in semantic.search(store, settings, "team trip in Portugal")] == [budget.id]
+
+
+def test_search_compares_only_vectors_the_size_of_the_question(store, settings, mail, server):
+    budget = mail["Q4 budget draft"]
+    semantic.index_mail(store, settings)
+    # One stray row from another model sorts first; it mustn't hide the rest.
+    store.save_embeddings(MODEL, [("email:stray", "stray", "x", semantic._unit([1.0] * 12).tobytes())])
+    with store.connect() as conn:
+        conn.execute("UPDATE embeddings SET rowid = -1 WHERE key = 'email:stray'")
+    assert [email.id for email in semantic.search(store, settings, "team trip in Portugal")] == [budget.id]
+
+
+def test_sections_a_file_no_longer_has_are_dropped_from_the_index(store, settings, mail, server):
+    budget = mail["Q4 budget draft"]
+    memo = next(att for att in budget.attachments if att.filename == "Offsite memo.docx")
+    memo.extracted_text = "[page 1]\nOpen item: confirm the deposit.\n\n[page 2]\nThe offsite moves to Lisbon on 14 November."
+    store.upsert_email(budget)
+    semantic.index_mail(store, settings)
+    assert [email.id for email in semantic.search(store, settings, "Porto Portugal")] == [budget.id]
+
+    # The file is read again and page 2 is gone: nothing in the mail mentions Lisbon now.
+    memo.extracted_text = "[page 1]\nOpen item: confirm the deposit."
+    store.upsert_email(budget)
+    semantic.index_mail(store, settings)
+    assert [key for key, _t, _b in store.embedding_rows(MODEL, prefix=f"file:{memo.id}:")] == [f"file:{memo.id}:page 1"]
+    assert semantic.search(store, settings, "Porto Portugal") == []
+
+
 def test_every_part_of_a_long_file_is_indexed(store, mail):
     budget = mail["Q4 budget draft"]
     memo = next(att for att in budget.attachments if att.filename == "Offsite memo.docx")

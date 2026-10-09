@@ -332,3 +332,18 @@ def test_lines_that_dont_line_up_in_columns_are_not_made_a_table():
     found += [box(0.8, 0.05 + 0.02 * i, value, 0.1) for i, value in enumerate(["NW-1", "10/30/2026", "4500-1"])]
     found += [box(0.08, 0.4 + 0.02 * i, "Thank you for your order, it ships next week as agreed.", 0.8) for i in range(6)]
     assert page_details.page_tables(found, "ocr", "", 1, None) == []
+
+
+def test_a_half_written_kept_page_is_drawn_again(settings):
+    """A kept page is written whole or not at all, and one cut short (a crash, a reader racing the writer) is
+    drawn again rather than served."""
+    data = _invoice()
+    name = f"{page_view.file_hash(data)}-1.png"
+    page_view.folder(settings).mkdir(parents=True, exist_ok=True)
+    (page_view.folder(settings) / name).write_bytes(b"\x89PNG\r\n\x1a\n")
+    png = page_view.page_png(settings, data, "invoice.pdf", 1)
+    assert page_view.png_size(png)[0] > 100
+    assert (page_view.folder(settings) / name).read_bytes() == png
+    assert [path.name for path in page_view.folder(settings).iterdir()] == [name], "no temporary file left behind"
+    (page_view.folder(settings) / name).write_bytes(png[: len(png) // 2])
+    assert page_view.page_png(settings, data, "invoice.pdf", 1) == png, "cut off halfway"

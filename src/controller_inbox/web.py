@@ -14,6 +14,7 @@ from email.utils import formataddr, format_datetime
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
+from urllib.parse import urlencode
 
 import anyio
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -119,6 +120,8 @@ DOWNLOADABLE = {
 LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 # Only mail files are handed to the OS; anything else dropped in the inbox could be a program.
 MAIL_FILES = {".msg", ".eml"}
+# Most rows a classic mail list shows at once; past that, search narrows it.
+MAX_PAGE_ROWS = 2000
 
 
 def original_downloads(path: Path | None) -> bool:
@@ -184,7 +187,8 @@ def is_loopback(bind_host: str) -> bool:
 
 
 def _bracketed(name: str) -> set[str]:
-    name = name.strip().lower()
+    # "http://closedesk.lan:8765/" and "closedesk.lan:8765" both mean the host closedesk.lan
+    name = _host_name(name.strip().lower().split("://", 1)[-1].split("/", 1)[0])
     if not name or name == "*":
         return set()
     if ":" in name and not name.startswith("["):
@@ -431,8 +435,16 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             payload=payload,
         )
 
+    def more_link(request: Request, shown: int, total: int, limit: int) -> dict:
+        """What the page says when a long list stops short, and the link that shows another 200."""
+        if total <= shown:
+            return {}
+        query = dict(request.query_params)
+        query["limit"] = str(limit + 200)
+        return {"total": total, "more_url": f"{request.url.path}?{urlencode(query)}" if limit < MAX_PAGE_ROWS else ""}
+
     @app.get("/folder/{name}", response_class=HTMLResponse)
-    def folder_page(request: Request, name: str, done: int = 0):
+    def folder_page(request: Request, name: str, done: int = 0, limit: int = 200):
         if name not in FOLDER_LABELS:
             raise HTTPException(status_code=404, detail="Unknown folder")
         blurbs = {
@@ -440,16 +452,19 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "informational": "Worth knowing. Nothing is waiting on you.",
             "reference": "Notifications, receipts, statements, and files to keep. Not a task.",
         }
+        limit = max(1, min(limit, MAX_PAGE_ROWS))
+        emails = store.list_emails(folder=name, order="score", done=bool(done), limit=limit)
         return render(
             request,
             "inbox.html",
             page=name,
-            emails=store.list_emails(folder=name, order="score", done=bool(done), limit=200),
+            emails=emails,
             heading=FOLDER_LABELS[name] + (" · done" if done else ""),
             blurb="Mail you marked done. Undo puts it back in the list." if done else blurbs[name],
             folder_name=name,
             showing_done=bool(done),
             done_count=store.done_count(name),
+            **more_link(request, len(emails), store.count_emails(folder=name, done=bool(done)), limit),
         )
 
     @app.post("/inbox/{email_id}/done")
@@ -466,15 +481,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         category: str = "",
         flag: str = "",
         q: str = "",
+        limit: int = 200,
     ):
         if q:
             cost_codes.refresh_if_changed(store, settings)
-        emails = store.list_emails(
-            importance=importance or None,
-            category=category or None,
-            flag=flag or None,
-            q=q or None,
-        )
+        limit = max(1, min(limit, MAX_PAGE_ROWS))
+        filters = dict(importance=importance or None, category=category or None, flag=flag or None, q=q or None)
+        emails = store.list_emails(**filters, limit=limit)
         return render(
             request,
             "inbox.html",
@@ -484,6 +497,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             filter_category=category,
             query=q,
             heading="Filtered mail" if any([importance, category, flag, q]) else "All mail",
+            **more_link(request, len(emails), store.count_emails(**filters), limit),
         )
 
     @app.get("/inbox/{email_id}", response_class=HTMLResponse)

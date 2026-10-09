@@ -293,7 +293,8 @@ def test_lookback_counts_working_days():
 
 def test_like_patterns_treat_wildcards_as_text(loaded: Store):
     a, b = loaded.list_emails(limit=2)
-    a.extracted.invoice_numbers = ["INV-0001"]
+    # Not INV-0001: separators don't count in an invoice number, so that one is the same invoice.
+    a.extracted.invoice_numbers = ["INVX0001"]
     b.extracted.invoice_numbers = ["INV_0001"]
     loaded.upsert_email(a)
     loaded.upsert_email(b)

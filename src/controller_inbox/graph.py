@@ -20,6 +20,8 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 # "openid" or "profile", so they are not listed here.
 DELEGATED_SCOPES = ["User.Read", "Mail.Read", "Mail.ReadWrite", "Mail.Send"]
 APP_SCOPES = ["https://graph.microsoft.com/.default"]
+# The digest CloseDesk mails (``cli._send_digest``); when it goes to this mailbox it is not read back as mail.
+DIGEST_SUBJECT = "CloseDesk daily digest — "
 
 
 class GraphError(RuntimeError):
@@ -118,6 +120,7 @@ class GraphClient:
 class GraphMailbox:
     def __init__(self, client: GraphClient):
         self.client = client
+        self._own_addresses: set[str] | None = None
 
     def list_messages(self, received_after: datetime | None = None) -> Iterable[RawMessage]:
         # Graph rejects a sort on a property unless the filter names it first ("InefficientFilter"),
@@ -139,8 +142,24 @@ class GraphMailbox:
             payload = self.client.get_json(url, params=params)
             params = None
             for item in payload.get("value", []):
-                yield self._to_raw(item)
+                raw = self._to_raw(item)
+                if not self._own_digest(raw):
+                    yield raw
             url = payload.get("@odata.nextLink")
+
+    def _own_digest(self, raw: RawMessage) -> bool:
+        """CloseDesk's digest sent to this mailbox: the digest's subject, from the mailbox's own address. Anyone can
+        write that subject, so mail from elsewhere under it is still read."""
+        if not raw.subject.startswith(DIGEST_SUBJECT):
+            return False
+        if self._own_addresses is None:
+            try:
+                user = self.client.signed_in_user()
+            except Exception:
+                user = {}
+            found = [user.get("mail"), user.get("userPrincipalName"), getattr(self.client, "mailbox", "")]
+            self._own_addresses = {str(address).lower() for address in found if address}
+        return raw.sender_email.lower() in self._own_addresses
 
     def get_attachments(self, message_id: str) -> list[RawAttachment]:
         from controller_inbox.folder_mail import _inline_picture

@@ -177,7 +177,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nFiles: {settings.digest_dir}")
             return 0
         now = datetime.now(settings.tz)
-        as_of = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else local_today(settings.tz, now)
+        try:
+            as_of = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else local_today(settings.tz, now)
+        except ValueError:
+            print(f"Not a real date: {args.date}. Use YYYY-MM-DD, for example 2026-02-28.")
+            return 2
         payload = make_digest(store, settings, as_of=as_of, now=now)
         md_path, html_path = write_digest_files(payload, settings.digest_dir, as_of.isoformat())
         if args.json:
@@ -601,8 +605,10 @@ def _watch(settings: Settings, store: Store, *, once: bool) -> int:
 def _send_digest(settings: Settings, payload: dict, period: str) -> None:
     if not settings.digest_to:
         raise SystemExit("CONTROLLER_INBOX_DIGEST_TO is not set.")
+    from controller_inbox.graph import DIGEST_SUBJECT
+
     mailbox = _graph_mailbox(settings)
-    subject = f"CloseDesk daily digest — {period}: {payload['headline']}"
+    subject = f"{DIGEST_SUBJECT}{period}: {payload['headline']}"
     mailbox.send_mail(settings.digest_to, subject, payload["html"])
     print(f"Sent digest to {settings.digest_to}")
 

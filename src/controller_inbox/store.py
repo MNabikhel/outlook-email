@@ -315,6 +315,7 @@ class Store:
         conn.row_factory = sqlite3.Row
         # SQLite's lower() and LIKE only fold A-Z; search compares fold(column) with a folded pattern instead.
         conn.create_function("fold", 1, _fold, deterministic=True)
+        conn.create_function("invoice_key", 1, _invoice_key, deterministic=True)
         conn.execute(f"PRAGMA busy_timeout = {int(BUSY_TIMEOUT_SECONDS * 1000)}")
         conn.execute("PRAGMA foreign_keys = ON")
         try:
@@ -509,13 +510,70 @@ class Store:
         received_before: str | None = None,
         order: str | None = None,
         limit: int = 200,
+        offset: int = 0,
     ) -> list[EmailRecord]:
         """List messages.
 
         ``order`` is ``newest`` (default), ``oldest``, ``score`` (most important
         first), or ``queue`` (the order the local model should read: Important
-        first, then by score, oldest first within a tie).
+        first, then by score, oldest first within a tie). ``offset`` skips that
+        many for the next page; ``count_emails`` gives the total.
         """
+        clauses, params = self._email_filters(
+            importance=importance, category=category, flag=flag, q=q, folder=folder, model_status=model_status,
+            done=done, received_from=received_from, received_before=received_before,
+        )
+        order = order or ("oldest" if oldest_first else "newest")
+        order_sql = {
+            "newest": "received_at DESC",
+            "oldest": "received_at ASC",
+            "score": "importance_score DESC, received_at DESC",
+            "queue": "CASE folder WHEN 'important' THEN 0 WHEN 'informational' THEN 1 ELSE 2 END, "
+            "importance_score DESC, received_at ASC",
+        }.get(order, "received_at DESC")
+        sql = f"SELECT * FROM emails WHERE {' AND '.join(clauses)} ORDER BY {order_sql} LIMIT ? OFFSET ?"
+        params.extend([limit, max(0, offset)])
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+            out: list[EmailRecord] = []
+            for row in rows:
+                # In the order get_email gives them: the overnight run compares an email listed here with the
+                # same email read again by get_email, and files in another order would never match.
+                attachments = conn.execute(
+                    "SELECT * FROM attachments WHERE email_id = ? ORDER BY filename",
+                    (row["id"],),
+                ).fetchall()
+                actions = conn.execute(
+                    "SELECT * FROM action_items WHERE email_id = ?",
+                    (row["id"],),
+                ).fetchall()
+                readings = _readings_for(conn, [item["id"] for item in attachments]) if attachments else {}
+                fixes = _fixes_for(conn, [item["id"] for item in attachments]) if attachments else {}
+                email = _email_from_rows(row, attachments, actions, readings, fixes)
+                if flag and flag not in email.flags:
+                    continue
+                out.append(email)
+        return out
+
+    def count_emails(self, **filters: Any) -> int:
+        """How many messages ``list_emails`` would give with the same filters and no limit."""
+        clauses, params = self._email_filters(**filters)
+        with self.connect() as conn:
+            return conn.execute(f"SELECT COUNT(*) AS n FROM emails WHERE {' AND '.join(clauses)}", params).fetchone()["n"]
+
+    @staticmethod
+    def _email_filters(
+        *,
+        importance: str | None = None,
+        category: str | None = None,
+        flag: str | None = None,
+        q: str | None = None,
+        folder: str | None = None,
+        model_status: str | None = None,
+        done: bool | None = None,
+        received_from: str | None = None,
+        received_before: str | None = None,
+    ) -> tuple[list[str], list[Any]]:
         clauses = ["1=1"]
         params: list[Any] = []
         if received_from:
@@ -545,37 +603,7 @@ class Store:
         for word in (q or "").split()[:8]:
             clauses.append(_MATCH_ANY)
             params.extend([_contains(_fold(word)[:_TERM_CHARS])] * _MATCH_ANY.count("?"))
-        order = order or ("oldest" if oldest_first else "newest")
-        order_sql = {
-            "newest": "received_at DESC",
-            "oldest": "received_at ASC",
-            "score": "importance_score DESC, received_at DESC",
-            "queue": "CASE folder WHEN 'important' THEN 0 WHEN 'informational' THEN 1 ELSE 2 END, "
-            "importance_score DESC, received_at ASC",
-        }.get(order, "received_at DESC")
-        sql = f"SELECT * FROM emails WHERE {' AND '.join(clauses)} ORDER BY {order_sql} LIMIT ?"
-        params.append(limit)
-        with self.connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
-            out: list[EmailRecord] = []
-            for row in rows:
-                # In the order get_email gives them: the overnight run compares an email listed here with the
-                # same email read again by get_email, and files in another order would never match.
-                attachments = conn.execute(
-                    "SELECT * FROM attachments WHERE email_id = ? ORDER BY filename",
-                    (row["id"],),
-                ).fetchall()
-                actions = conn.execute(
-                    "SELECT * FROM action_items WHERE email_id = ?",
-                    (row["id"],),
-                ).fetchall()
-                readings = _readings_for(conn, [item["id"] for item in attachments]) if attachments else {}
-                fixes = _fixes_for(conn, [item["id"] for item in attachments]) if attachments else {}
-                email = _email_from_rows(row, attachments, actions, readings, fixes)
-                if flag and flag not in email.flags:
-                    continue
-                out.append(email)
-        return out
+        return clauses, params
 
     def search_ranked(self, terms: list[str], *, limit: int = 6) -> list[EmailRecord]:
         """Emails that mention the most of ``terms``; subject and sender hits count more."""
@@ -715,18 +743,18 @@ class Store:
                     EXISTS (
                         SELECT 1 FROM json_each(CASE WHEN json_valid(e.extracted) THEN e.extracted ELSE '{}' END,
                                                 '$.invoice_numbers') n
-                        WHERE fold(n.value) = ?
+                        WHERE invoice_key(n.value) = ?
                     )
                     OR EXISTS (
                         SELECT 1 FROM attachments a,
                             json_each(CASE WHEN json_valid(a.extracted_fields) THEN a.extracted_fields ELSE '{}' END,
                                       '$.invoice_numbers') n
-                        WHERE a.email_id = e.id AND fold(n.value) = ?
+                        WHERE a.email_id = e.id AND invoice_key(n.value) = ?
                     )
                   )
                 """,
                 # Only an invoice number counts: the same digits as a PO number or an account ending are not a repeat.
-                (exclude_email_id, _fold(invoice_number), _fold(invoice_number)),
+                (exclude_email_id, _invoice_key(invoice_number), _invoice_key(invoice_number)),
             ).fetchall()
         return [row["id"] for row in rows]
 
@@ -822,9 +850,10 @@ class Store:
             clauses.append("c.status = ?")
             params.append(status)
         for word in (q or "").split()[:8]:
-            like = _contains(word)
+            like = _contains(_fold(word)[:_TERM_CHARS])
             clauses.append(
-                f"(c.codes {_LIKE} OR e.subject {_LIKE} OR e.sender_name {_LIKE} OR e.sender_email {_LIKE} OR e.extracted {_LIKE})"
+                f"(fold(c.codes) {_LIKE} OR fold(e.subject) {_LIKE} OR fold(e.sender_name) {_LIKE}"
+                f" OR fold(e.sender_email) {_LIKE} OR fold(e.extracted) {_LIKE})"
             )
             params.extend([like] * 5)
         with self.connect() as conn:
@@ -1263,7 +1292,7 @@ class Store:
     def list_chats(self, query: str = "", *, limit: int = 100) -> list[dict[str, Any]]:
         """Conversations with something in them, newest first; ``query`` matches titles and what was said."""
         query = query.strip()
-        like = _contains(query)
+        like = _contains(_fold(query)[:_TERM_CHARS])
         with self.connect() as conn:
             rows = conn.execute(
                 f"""
@@ -1271,7 +1300,7 @@ class Store:
                        (SELECT COUNT(*) FROM chat_files f WHERE f.chat_id = c.id) AS files
                 FROM chats c
                 WHERE (EXISTS (SELECT 1 FROM chat_turns t WHERE t.chat_id = c.id) OR EXISTS (SELECT 1 FROM chat_files f WHERE f.chat_id = c.id))
-                  AND (? = '' OR c.title {_LIKE} OR EXISTS (SELECT 1 FROM chat_turns t WHERE t.chat_id = c.id AND t.text {_LIKE}))
+                  AND (? = '' OR fold(c.title) {_LIKE} OR EXISTS (SELECT 1 FROM chat_turns t WHERE t.chat_id = c.id AND fold(t.text) {_LIKE}))
                 ORDER BY c.updated_at DESC, c.rowid DESC LIMIT ?
                 """,
                 (query, like, like, limit),
@@ -1439,6 +1468,16 @@ class Store:
                 (model, len(prefix), prefix),
             ).fetchall()
         return [(row["key"], row["text_key"], row["vector"]) for row in rows]
+
+    def embedding_owners(self, model: str) -> dict[str, tuple[str, int]]:
+        """key -> (email id, vector size in bytes)."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT key, email_id, length(vector) AS size FROM embeddings WHERE model = ?", (model,)).fetchall()
+        return {row["key"]: (row["email_id"], row["size"]) for row in rows}
+
+    def delete_embeddings(self, model: str, keys: list[str]) -> None:
+        with self.connect() as conn:
+            conn.executemany("DELETE FROM embeddings WHERE key = ? AND model = ?", [(key, model) for key in keys])
 
     def save_embeddings(self, model: str, rows: list[tuple[str, str, str, bytes]]) -> None:
         """``rows`` are (key, email id, text key, vector bytes)."""
@@ -1772,6 +1811,16 @@ _MATCH_ANY = (
 def _fold(text: str | None) -> str | None:
     """Case-folded text for search, so "MÜLLER" finds "Müller" (SQLite folds only A-Z). Registered as fold()."""
     return text.casefold() if isinstance(text, str) else text
+
+
+def _invoice_key(text: str | None) -> str | None:
+    """An invoice number as the duplicate check compares it: case, the separator after the letters and leading
+    zeros don't count, so "INV-01001", "INV1001" and "inv_1001" are one invoice. Separators between digits do:
+    "12-345" and "123-45" are different numbers. Registered as invoice_key()."""
+    if not isinstance(text, str):
+        return text
+    key = re.sub(r"^([^\W\d_]*)[\W_]*0*(?=\d)", r"\1", text.casefold().strip())
+    return re.sub(r"[\W_]+", "-", key).strip("-")
 
 
 def _like_escape(text: str) -> str:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from controller_inbox import agent, assistant, file_summaries
 from controller_inbox.assistant import answer_stream
+from controller_inbox.local_llm import ContextOverflow
 
 REPORT = "\n\n".join(
     f"[page {n}]\nSection {n}.1: The team reviewed supplier onboarding and payment runs and noted no exceptions."
@@ -89,3 +91,59 @@ def test_the_overnight_run_summarizes_after_reading(store, settings, report, mon
     result = run_overnight(store, settings, limit=1, sync_graph=False, reader=AgreeingReader())
     assert result["files_summarized"] == 1
     assert "Attachments summarized for Ask CloseDesk: 1" in open(result["log_path"], encoding="utf-8").read()
+
+
+@pytest.fixture
+def two_files(store, mail):
+    email = mail["Q4 budget draft"]
+    for att in email.attachments:
+        att.extracted_text = f"{att.filename} body. " + "The team reviewed onboarding and payment runs. " * 60
+    store.upsert_email(email)
+    return store.get_email(email.id)
+
+
+def _failing_on_first(monkeypatch, store, email, error):
+    # The most important file comes first in the queue every night.
+    first_id = store.files_to_summarize(min_chars=agent.SUMMARY_MIN_CHARS, limit=10)[0][1]
+    first = next(att.filename for att in email.attachments if att.id == first_id)
+    calls = []
+
+    def complete(settings, messages, **_kwargs):
+        calls.append(messages[1]["content"].split("\n")[0])
+        if first in calls[-1]:
+            raise error
+        return "- The team reviewed onboarding and payment runs."
+
+    monkeypatch.setattr(file_summaries, "complete_text", complete)
+    return calls
+
+
+def _status(code):
+    request = httpx.Request("POST", "http://127.0.0.1:11434/v1/chat/completions")
+    return httpx.HTTPStatusError(f"{code}", request=request, response=httpx.Response(code, request=request))
+
+
+@pytest.mark.parametrize("error", [ContextOverflow("exceeds the context"), _status(400)])
+def test_a_file_the_model_fails_on_is_remembered_and_the_others_still_get_summaries(store, settings, two_files, monkeypatch, error):
+    calls = _failing_on_first(monkeypatch, store, two_files, error)
+    assert file_summaries.summarize_files(store, settings, limit=10, model="m") == 1, "the other file is summarized"
+    assert len(calls) == 2
+    calls.clear()
+    assert file_summaries.summarize_files(store, settings, limit=1, model="m") == 0
+    assert calls == [], "the failed file isn't tried every night, holding the nightly slot"
+    assert store.files_to_summarize(min_chars=agent.SUMMARY_MIN_CHARS, limit=10, model="m") == []
+
+
+def test_a_file_that_times_out_is_tried_again_another_night(store, settings, two_files, monkeypatch):
+    calls = _failing_on_first(monkeypatch, store, two_files, httpx.ReadTimeout("timed out"))
+    assert file_summaries.summarize_files(store, settings, limit=10, model="m") == 1, "the other file is summarized"
+    assert len(calls) == 2
+    assert len(store.files_to_summarize(min_chars=agent.SUMMARY_MIN_CHARS, limit=10, model="m")) == 1, "not marked"
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError("refused"), _status(503)])
+def test_summaries_stop_when_the_model_server_is_down(store, settings, two_files, monkeypatch, error):
+    calls = _failing_on_first(monkeypatch, store, two_files, error)
+    assert file_summaries.summarize_files(store, settings, limit=10, model="m") == 0
+    assert len(calls) == 1, "no point asking for the next file"
+    assert len(store.files_to_summarize(min_chars=agent.SUMMARY_MIN_CHARS, limit=10, model="m")) == 2, "nothing saved"

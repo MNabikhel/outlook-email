@@ -155,24 +155,44 @@ def index_mail(
     if not model:
         return 0
     have = store.embedding_keys(model)
-    todo = []
+    owners = store.embedding_owners(model)
+    items: dict[str, tuple[str, str]] = {}
+    indexed = set()
     for email in emails if emails is not None else store.list_emails(order="newest", limit=limit):
+        indexed.add(email.id)
         for key, text in _items(email):
-            if have.get(key) != _key(text):
-                todo.append((key, email.id, text))
+            items[key] = (email.id, text)
+    # Sections a file no longer has (or files the email no longer has) would still be found by search.
+    stale = [key for key, (email_id, _size) in owners.items() if email_id in indexed and key not in items]
+    if stale:
+        store.delete_embeddings(model, stale)
+        _vector_cache.pop((str(store.path), model), None)
+    todo = [(key, email_id, text) for key, (email_id, text) in items.items() if have.get(key) != _key(text)]
     added = 0
-    for start in range(0, len(todo), BATCH):
+    size = 0
+    start = 0
+    while start < len(todo):
         batch = todo[start: start + BATCH]
         if on_progress:
             on_progress(min(start + BATCH, len(todo)), len(todo), "")
         vectors = embed(settings, [text for _key_, _id, text in batch])
         if vectors is None:
             return -1
+        if not size:
+            # Another model loaded under the same name makes vectors of another size, which search can't
+            # compare with the ones it has: those are made again with this model.
+            size = len(vectors[0].tobytes())
+            queued = {key for key, _id, _text in todo}
+            todo += [
+                (key, email_id, text) for key, (email_id, text) in items.items()
+                if key not in queued and owners.get(key, ("", size))[1] != size
+            ]
         store.save_embeddings(model, [(key, email_id, _key(text), v.tobytes()) for (key, email_id, text), v in zip(batch, vectors)])
         # The vectors kept for search are read again: after the mail was cleared, a new index can have as many rows
         # and the same last row number as the old one, which the version check alone takes for no change.
         _vector_cache.pop((str(store.path), model), None)
         added += len(batch)
+        start += len(batch)
     if emails is None:
         store.set_state(INDEXED_AT, datetime.now(settings.tz).isoformat(timespec="seconds"))
     return added
@@ -260,11 +280,13 @@ def search(store: Store, settings: Settings, query: str, *, limit: int = 5) -> l
     model = embedding_model(settings)
     if not model:
         return []
-    ids, vectors = _vectors(store, model)
-    if not ids:
+    if store.embedding_version(model).startswith("0:"):
         return []
     asked = embed(settings, [query], query=True)
     if not asked:
+        return []
+    ids, vectors = _vectors(store, model, len(asked[0]))
+    if not ids:
         return []
     scores = _scores(asked[0], vectors)
     mean = sum(scores) / len(scores)
@@ -363,9 +385,10 @@ def _has_all(email: EmailRecord, terms: list[str]) -> bool:
     return all(term in text for term in terms)
 
 
-def _vectors(store: Store, model: str) -> tuple[list[str], Any]:
-    """Email ids and their vectors: a numpy matrix when numpy is installed (the OCR add-on brings it), else arrays."""
-    version = store.embedding_version(model)
+def _vectors(store: Store, model: str, size: int) -> tuple[list[str], Any]:
+    """Email ids and their vectors of ``size`` numbers (the question's: vectors another model made under the same
+    name can't be compared): a numpy matrix when numpy is installed (the OCR add-on brings it), else arrays."""
+    version = f"{store.embedding_version(model)}:{size}"
     cache_key = (str(store.path), model)
     cached = _vector_cache.get(cache_key)
     if cached and cached[0] == version:
@@ -375,7 +398,7 @@ def _vectors(store: Store, model: str) -> tuple[list[str], Any]:
     for email_id, blob in store.embedding_vectors(model):
         vector = array("f")
         vector.frombytes(blob)
-        if vectors and len(vector) != len(vectors[0]):
+        if len(vector) != size:
             continue
         ids.append(email_id)
         vectors.append(vector)

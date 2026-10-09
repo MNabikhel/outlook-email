@@ -181,6 +181,15 @@ def test_search_finds_an_invoice_by_its_code_or_description(settings, store):
     assert [row["email_id"] for row in store.cost_codings(q="1200.6110")] == ["h"]
 
 
+def test_cost_code_search_ignores_case_of_accented_letters(settings, store):
+    _write_codes(settings, CODES)
+    email = _invoice("m", text="Your order of office supplies for the warehouse")
+    email.subject = "Rechnung MÜLLER GMBH"
+    store.upsert_email(email)
+    cost_codes.refresh(store, settings)
+    assert [row["email_id"] for row in store.cost_codings(q="müller")] == ["m"]
+
+
 def test_email_page_confirms_and_revises_the_code(settings, store):
     _write_codes(settings, CODES)
     store.upsert_email(_invoice("j", text="AP stamp: 1100.6420 approved"))

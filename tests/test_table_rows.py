@@ -234,3 +234,90 @@ Vendor: Blue Freight | Invoice: INV-4 | Due: 10/17/2026 | Amount: 300.00
 """
     assert [row.total for row in tables_in(text)[0].rows] == [False, False, False, False]
     assert Tables([("AP.pdf", text)]).run("SELECT COUNT(*), SUM(amount) FROM t1")[1] == [(4, 6850.0)]
+
+
+def test_european_figures_keep_their_decimals():
+    from decimal import Decimal
+
+    from controller_inbox.table_lookup import _number
+
+    # "€447,15" was read as 44715, "12,5%" as 125 and "€1.234,56" as no figure at all.
+    assert _number("€447,15") == Decimal("447.15")
+    assert _number("12,5%") == Decimal("12.5")
+    assert _number("€1.234,56") == Decimal("1234.56")
+    assert _number("1,250.00") == Decimal("1250.00")
+    assert _number("1,2345") is None
+    text = "Item: Consulting | Qty: 1 | Amount: €447,15\nItem: Travel | Qty: 2 | Amount: €82,40\nItem: Licence | Qty: 1 | Amount: €1.234,56\n"
+    assert "1,764.11" in lookup(text, "what is the total amount")
+    assert Tables([("Rechnung.pdf", text)]).run("SELECT ROUND(SUM(amount), 2) FROM t1")[1] == [(1764.11,)]
+
+
+def test_a_name_starting_with_total_and_no_total_below_is_a_row():
+    # No total row below says otherwise, so a vendor or description that starts "Total" is an ordinary row.
+    text = (
+        "Vendor: Harbor Steel LLC | Terms: Net 30 | Balance: $48,500.00\n"
+        "Vendor: Total Quality Logistics | Terms: Net 30 | Balance: $12,250.00\n"
+        "Vendor: Brightline Packaging | Terms: Net 45 | Balance: $9,800.00\n"
+        "Vendor: Cedar Valley Supply | Terms: Net 30 | Balance: $3,100.00\n"
+    )
+    assert [row.total for row in tables_in(text)[0].rows] == [False, False, False, False]
+    assert Tables([("AP open items.xlsx", text)]).run("SELECT COUNT(*), SUM(balance) FROM t1")[1] == [(4, 73650.0)]
+    fees = (
+        "Vendor: Acme | Description: Monthly hosting | Amount: 1,000.00\n"
+        "Vendor: Bolt | Description: Total rewards platform fee | Amount: 500.00\n"
+        "Vendor: Crest | Description: Office supplies | Amount: 250.00\n"
+    )
+    assert [row.total for row in tables_in(fees)[0].rows] == [False, False, False]
+
+
+def test_a_total_named_in_a_later_column_is_still_a_total():
+    # "Total" alone, or "Total Revenue" over rows of "Revenue", says total in whichever column it is.
+    lines = (
+        "Entity: TAZ US | Line: Revenue | Amount: 5,000\n"
+        "Entity: TAZ UK | Line: Revenue | Amount: 3,000\n"
+        "Entity: Consolidated | Line: Total Revenue | Amount: 8,000\n"
+    )
+    assert [row.total for row in tables_in(lines)[0].rows] == [False, False, True]
+    assert 'Total of "Amount" over 2 rows: 8,000' in lookup(lines, "what is the total amount")
+    customers = (
+        "Customer: Acme Corp | Invoice: INV-1 | Amount: 1,000.00\n"
+        "Customer: Beta LLC | Invoice: INV-2 | Amount: 500.00\n"
+        "Customer: All customers | Invoice: Total | Amount: 1,500.00\n"
+    )
+    assert [row.total for row in tables_in(customers)[0].rows] == [False, False, True]
+
+
+def test_a_credit_marked_cr_is_a_negative_figure():
+    from decimal import Decimal
+
+    from controller_inbox.table_lookup import _number
+
+    assert _number("1,250.00 CR") == Decimal("-1250.00")
+    assert _number("$300.00 Cr") == Decimal("-300.00")
+    assert _number("1,250.00 DR") == Decimal("1250.00")
+    text = (
+        "Customer: Acme Corp | Balance: 4,000.00\nCustomer: Beta LLC | Balance: 2,500.00\n"
+        "Customer: Gamma Inc | Balance: 1,250.00 CR\nCustomer: Delta Co | Balance: 800.00\n"
+    )
+    assert "6,050.00" in lookup(text, "total balance")
+
+
+def test_an_average_keeps_its_cents():
+    # The average of 10, 11, 11 and 13 days is 11.25, not "11".
+    days = "".join(f"Invoice: INV-{n} | Days Outstanding: {d}\n" for n, d in [(101, 10), (102, 11), (103, 11), (104, 13)])
+    assert "11.25" in lookup(days, "what is the average days outstanding")
+    assert "$1,000.50" in lookup("Vendor: Acme | Amount: $1,000\nVendor: Beta | Amount: $1,001\n", "average amount")
+    grouped = (
+        "Vendor: Acme | Category: Rent | Amount: $1,000\nVendor: Beta | Category: Rent | Amount: $1,001\n"
+        "Vendor: Crest | Category: Travel | Amount: $300\nVendor: Dune | Category: Travel | Amount: $400\n"
+    )
+    assert "$1,000.50" in lookup(grouped, "average amount by category")
+
+
+def test_columns_headed_alike_are_each_read():
+    text = (
+        "Customer: Acme | Date: 09/05/2026 | Amount: $1,000.00 | Date: 09/20/2026 | Amount: $250.00\n"
+        "Customer: Beta | Date: 09/07/2026 | Amount: $2,000.00 | Date: 09/22/2026 | Amount: $500.00\n"
+    )
+    row = tables_in(text)[0].rows[0]
+    assert (row.value("Amount"), row.value("Amount (2)"), row.value("Date (2)")) == ("$1,000.00", "$250.00", "09/20/2026")

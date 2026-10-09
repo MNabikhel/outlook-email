@@ -270,8 +270,12 @@ class TrustContext:
 
 def name_key(name: str) -> str:
     """A display name as the fraud check reads it: "José García" and "Jose Garcia", or "O’Brien" and
-    "O'Brien", are the same name."""
-    return " ".join(normalize_text(name or "").lower().split())
+    "O'Brien", are the same name. So are "Chen, Maya" and "Maya Chen"."""
+    name = normalize_text(name or "")
+    last, comma, first = name.partition(",")
+    if comma and first.strip() and "," not in first:
+        name = f"{first} {last}"
+    return " ".join(name.lower().split())
 
 
 def name_index(names: dict[str, str]) -> dict[str, str]:
@@ -498,8 +502,10 @@ def assess(
     history: int = 0,
     flags: list[str] | tuple[str, ...] = (),
     domain_history: int = 0,
+    reply_domain_history: int = 0,
 ) -> FraudCheck:
-    """``history`` counts earlier mail from this address, ``domain_history`` earlier mail from its domain."""
+    """``history`` counts earlier mail from this address, ``domain_history`` earlier mail from its domain and
+    ``reply_domain_history`` earlier mail from the Reply-To's domain."""
     sender = (sender_email or "").strip().lower()
     domain = domain_of(sender)
     signals: list[Signal] = []
@@ -526,11 +532,25 @@ def assess(
     mine_full = strip_notices(own_words(body, keep_disclaimers=True))
     own_full = mine_full if is_reply else f"{subject or ''}. {mine_full}"
 
+    trusted_domain = domain_matches(domain, ctx.domains) if domain else ""
+    # A ">" or "From:" line costs nothing to write: from a domain never seen before that you don't trust, wording
+    # below one is still theirs, unless their own words disown it ("we have not changed our bank details"). A
+    # reply's subject still belongs to the thread.
+    stranger = (
+        history == 0
+        and domain_history == 0
+        and not trusted_domain
+        and ctx.senders.get(sender) != "safe"
+        and not DISAVOW_RE.search(mine)
+    )
     text = own
     match = PAYMENT_CHANGE_RE.search(own)
     if not match:
         text = own_full
         match = PAYMENT_CHANGE_RE.search(own_full)
+    if not match and stranger:
+        text = strip_notices(body or "") if is_reply else everything
+        match = PAYMENT_CHANGE_RE.search(text)
     if match:
         add("bank_change", evidence.quote(text, match))
     else:
@@ -573,11 +593,19 @@ def assess(
     ):
         add("reply_to_mismatch", reply_to.lower())
 
-    trusted_domain = domain_matches(domain, ctx.domains) if domain else ""
-    if domain and not trusted_domain:
+    # A free-mail provider is a company of its own, not a lookalike of another ("mail.com", "gmail.com").
+    look = ""
+    if domain and not trusted_domain and domain not in FREEMAIL:
         look = _lookalike(domain, ctx, established=domain_history > 0)
         if look:
             add("lookalike_domain", f"{domain} looks like {look}")
+    # Answers go to the Reply-To, so it is checked as a sender would be. A domain you already get mail from
+    # ("taz-uk.com" for the London office) is a real one of its own; anyone can have an address at a free-mail one.
+    reply_known = bool(reply_domain) and reply_domain not in FREEMAIL and reply_domain_history > 0
+    if not look and any(item.key == "reply_to_mismatch" for item in signals) and reply_domain not in FREEMAIL and not reply_known:
+        look = _lookalike(reply_domain, ctx)
+        if look:
+            add("lookalike_domain", f"{reply_domain} looks like {look}")
     spoof = _display_name_spoof(sender_name, sender, domain, trusted_domain, ctx, shown=shown_name)
     if spoof:
         add("display_name_spoof", spoof)
@@ -597,7 +625,9 @@ def assess(
     elif verdict_for_sender == "safe":
         add("trusted_sender", sender)
         trust = "sender"
-    elif trusted_domain:
+    elif trusted_domain and ("reply_to_mismatch" not in keys or reply_known):
+        # Not when answers go to a domain you don't hear from: a trusted From is easily forged, the Reply-To is
+        # where money goes.
         add("trusted_domain", trusted_domain)
         trust = "domain"
 
@@ -639,6 +669,7 @@ def assess_email(store: "Store", ctx: TrustContext, email: "EmailRecord") -> Fra
         history=store.sender_history(email.sender_email, exclude=email.id),
         flags=email.flags,
         domain_history=store.domain_history(domain_of(email.sender_email), exclude=email.id),
+        reply_domain_history=store.domain_history(domain_of(email.reply_to), exclude=email.id),
     )
 
 

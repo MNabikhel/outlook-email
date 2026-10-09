@@ -94,5 +94,8 @@
       {% endfor %}
     </tbody>
   </table>
+  {% if total %}
+  <p class="muted list-more">Showing {{ emails | length }} of {{ total }}{% if more_url %} · <a href="{{ more_url }}">Show 200 more</a>{% endif %} · or search to narrow.</p>
+  {% endif %}
 </section>
 {% endblock %}

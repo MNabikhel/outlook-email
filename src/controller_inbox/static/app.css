@@ -84,6 +84,7 @@ button.ghost, .ghost { background: transparent; color: var(--navy); border: 1px 
 .tabs a.on, .chips a.on { background: var(--navy); color: #fff; border-color: var(--navy); text-decoration: none; }
 
 .table-wrap { overflow: auto; border: 1px solid var(--line); background: var(--card); border-radius: 12px; }
+.table-wrap .list-more { margin: 0; padding: 10px 12px; }
 table.mail { width: 100%; border-collapse: collapse; font-size: 14px; }
 table.mail th { text-align: left; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 10px; border-bottom: 1px solid var(--line); background: #f7f3ea; }
 table.mail td { padding: 10px; border-bottom: 1px solid #eee6d8; vertical-align: top; }

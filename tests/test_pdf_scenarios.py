@@ -718,3 +718,57 @@ def test_whole_numbers_that_look_like_years_are_a_row_not_headings():
     lines = _text(sheet_rows(columns, rows)).splitlines()
     assert lines[0] == "Item | On Hand | On Order | Committed"
     assert "Item: Hex Bolts | On Hand: 2000 | On Order: 1950 | Committed: 2010" in lines
+
+
+def test_a_next_page_table_named_by_dates_is_not_given_the_names_before():
+    # A vendor list, then a deposit list from the same report writer: same heading height, same row pitch.
+    first = sheet_rows(
+        [(40, "left"), (220, "left"), (420, "right")],
+        [["Vendor", "Terms", "Open balance"], ["Acme Supply", "Net 30", "12,400.00"], ["Beta Freight", "Net 45", "3,180.50"],
+         ["Gamma Office", "Net 15", "940.00"], ["Delta Utilities", "Due on receipt", "1,215.75"]],
+    )
+    second = sheet_rows(
+        [(40, "left"), (140, "left"), (420, "right")],
+        [["Deposit date", "Bank reference", "Amount"], ["10/01/26", "DEP-88812", "5,000.00"], ["10/03/26", "DEP-88840", "2,750.00"],
+         ["10/08/26", "DEP-88901", "18,300.00"], ["10/15/26", "DEP-89012", "640.25"]],
+    )
+    page_two = pdf_text(build_pdf([first, second])).split("[page 2]\n", 1)[1]
+    assert "Vendor:" not in page_two and "continue the table" not in page_two
+    assert "Deposit date: 10/01/26 | Bank reference: DEP-88812 | Amount: 5,000.00" in page_two
+
+
+def test_rows_without_headings_keep_a_two_word_cell_whole():
+    # "Invoice 1041" lines up row after row with one space inside it: one cell, not two columns.
+    names = ["Contoso Ltd", "Fabrikam Inc", "Northwind Traders", "Tailspin Toys", "Litware", "Adventure Works", "Wingtip Toys", "Proseware Inc"]
+    rows = [[f"10/{d:02d}/26", f"Invoice {1040 + d}", names[d % 8], f"{d * 137:,}.50"] for d in range(1, 9)]
+    headings = ["Date", "Description", "Customer", "Amount"]
+    printed = [t for t in sheet_rows([(40, "left"), (120, "left"), (250, "left"), (480, "right")], [headings] + rows) if t.text not in headings]
+    lines = _text(printed).splitlines()
+    assert "10/01/26 | Invoice 1041 | Fabrikam Inc | 137.50" in lines
+    assert "10/08/26 | Invoice 1048 | Contoso Ltd | 1,096.50" in lines
+
+
+def test_a_label_with_a_blank_cell_after_it_takes_the_value_further_along():
+    rows = [("Subtotal:", "", "1,200.00"), ("Freight:", "UPS Ground", "45.00"), ("Total due:", "", "1,344.00")]
+    items = []
+    for r, (label, note, amount) in enumerate(rows):
+        items += [Text(60, 700 - 16 * r, label), Text(450, 700 - 16 * r, amount, right=True)]
+        if note:
+            items.append(Text(180, 700 - 16 * r, note))
+    lines = _text(items).splitlines()
+    assert "Total due: 1,344.00" in lines and "Subtotal: 1,200.00" in lines
+    assert "Freight: UPS Ground | 45.00" in lines
+
+
+def test_a_page_turned_upside_down_reads_forwards():
+    import io
+
+    from pypdf import PdfReader, PdfWriter
+
+    rows = [["Account", "2026", "2025"], ["Cash", "1,055.00", "900.00"], ["Receivables", "2,410.75", "1,980.10"]]
+    plain = build_pdf([sheet_rows([(40, "left"), (250, "right"), (350, "right")], rows)])
+    writer = PdfWriter(clone_from=PdfReader(io.BytesIO(plain)))
+    writer.pages[0].rotate(180)
+    out = io.BytesIO()
+    writer.write(out)
+    assert pdf_text(out.getvalue()) == pdf_text(plain)

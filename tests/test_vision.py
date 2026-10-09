@@ -212,7 +212,7 @@ def test_figures_are_signed_and_leave_out_dates_years_and_row_numbers():
         vision.Decimal("1250.00"): ["1,250.00"],
         vision.Decimal("-2750"): ["(2,750)"],
         vision.Decimal("-45.50"): ["-45.50"],
-        vision.Decimal("15"): ["15%"],
+        vision.Percent("15"): ["15%"],  # a percentage, apart from 15.00
     }
 
 
@@ -1808,6 +1808,116 @@ def test_a_signature_line_or_dot_leader_is_not_a_loop(settings, monkeypatch):
     settings.llm = None
     _serve(monkeypatch, ByLine(page=SIGNED))
     assert "5,990.00\n\n| Total due" in vision.transcribe(settings, b"png"), "read to the end of the page"
+
+
+def test_an_account_number_under_its_column_heading_is_masked():
+    """A table with "Account Number" as a column heading kept the number in its row; page_text then wrote
+    "Account Number: 441700923381" into the text the chat reads."""
+    markdown = "| Bank | Account Number | Routing Number |\n|---|---|---|\n| First Harbor Bank | 4417 0092 3381 | 021000021 |\n"
+    html = "<table><tr><td>Bank</td><td>Account Number</td><td>Routing Number</td></tr><tr><td>First Harbor Bank</td><td>441700923381</td><td>021000021</td></tr></table>"
+    for raw in (markdown, html):
+        page = vision.page_text(vision.mask_secrets(raw))
+        assert "441700923381" not in page and "4417 0092 3381" not in page and "021000021" not in page
+        assert "****3381" in page and "First Harbor Bank" in page
+        cells = [cell for block in vision.markdown_blocks(vision.mask_secrets(raw)) if block["kind"] == "table" for row in block["rows"] for cell in row]
+        assert "441700923381" not in cells and "4417 0092 3381" not in cells and "021000021" not in cells
+        assert "First Harbor Bank" in cells
+
+
+def test_gl_codes_under_an_account_heading_are_kept():
+    """A trial balance's "Account" column of GL codes was masked as if it held bank account numbers."""
+    markdown = (
+        "| Account | Account Name | Debit | Credit |\n|---|---|---|---|\n| 1200-000 | Accounts Receivable | 48,500.00 | |\n"
+        "| 6000-10 | Salaries | 12,000.00 | |\n| 400100 | Product Revenue | | 60,500.00 |\n"
+    )
+    page = vision.page_text(vision.mask_secrets(markdown))
+    assert "Account: 1200-000" in page and "Account: 6000-10" in page and "Account: 400100" in page
+    rows = [block["rows"] for block in vision.markdown_blocks(vision.mask_secrets(markdown)) if block["kind"] == "table"][0]
+    assert [row[0] for row in rows] == ["1200-000", "6000-10", "400100"]
+
+
+def test_a_clean_second_reading_of_a_short_page_is_kept(settings, monkeypatch):
+    """A small receipt read cleanly on the retry was still refused as a loop for being under 200 characters."""
+
+    def stream(_settings, _messages, **kw):
+        if kw.get("temperature") == 0.0:
+            yield "Blue Fern Cafe\n"
+            for _ in range(40):
+                yield "| | |\n"
+        else:
+            kw["finished"].update(reason="stop", thought=False)
+            yield "Blue Fern Cafe\nReceipt 2291\n\n| Item | Amount |\n|---|---|\n| Latte | 4.50 |\n| Total | 4.50 |\n"
+
+    monkeypatch.setattr(vision, "stream_text", stream)
+    monkeypatch.setattr(vision, "reading_model", lambda _s: MODEL)
+    assert "| Total | 4.50 |" in vision.transcribe(settings, b"png")
+
+
+def _png(image: Image.Image) -> bytes:
+    out = io.BytesIO()
+    image.save(out, "PNG")
+    return out.getvalue()
+
+
+def test_a_transparent_or_sixteen_bit_picture_is_drawn_as_it_looks():
+    """A PNG with a transparent background came out all black, and a 16-bit grayscale scan all white."""
+    clear = Image.new("RGBA", (400, 120), (0, 0, 0, 0))
+    ImageDraw.Draw(clear).rectangle((40, 40, 200, 80), fill=(0, 0, 0, 255))
+    drawn = Image.open(io.BytesIO(vision.render(_png(clear), "invoice.png", 1))).convert("L")
+    assert drawn.getpixel((10, 10)) == 255 and drawn.getpixel((100, 60)) == 0, "black ink on white paper"
+
+    gray = Image.new("L", (400, 120), 235)
+    ImageDraw.Draw(gray).rectangle((40, 40, 200, 80), fill=30)
+    deep = Image.frombytes("I;16", gray.size, b"".join((p * 257).to_bytes(2, "little") for p in gray.tobytes()))
+    drawn = Image.open(io.BytesIO(vision.render(_png(deep), "scan.png", 1))).convert("L")
+    assert drawn.getpixel((10, 10)) == 235 and drawn.getpixel((100, 60)) == 30
+
+
+def test_an_en_dash_or_trailing_minus_is_a_negative_figure():
+    """"–1,250.00" and "3,400.00-" lost their sign, so a model's "-1,250.00" read as differing from them."""
+    assert dict(vision.figures("Net loss –1,250.00")) == {vision.Decimal("-1250.00"): ["–1,250.00"]}
+    assert dict(vision.figures("Adjustment 3,400.00- net")) == {vision.Decimal("-3400.00"): ["3,400.00-"]}
+    first = "Net loss –1,250.00\nAdjustment 3,400.00-\nCash 12,980.40"
+    model = "Net loss -1,250.00\n\nAdjustment -3,400.00\n\nCash 12,980.40"
+    assert vision.compare(first, vision.page_text(model), ocr=False).differ == []
+
+
+def test_a_spaced_percent_or_a_range_dash_reads_as_written():
+    # "6.25 %" is the same rate as "6.25%", and the dash of "$1,000-$2,000" is no minus.
+    first = "Rate 6.25 % Fixed\nMargin 1.75 % over SOFR\nPrincipal 250,000.00"
+    model = "Rate 6.25% Fixed\n\nMargin 1.75% over SOFR\n\nPrincipal 250,000.00"
+    assert vision.compare(first, vision.page_text(model), ocr=False).differ == []
+    assert dict(vision.figures("$1,000-$2,000 per month")) == {vision.Decimal("1000"): ["$1,000"], vision.Decimal("2000"): ["$2,000"]}
+
+
+def test_a_figure_glued_to_its_currency_code_is_read_whole():
+    """"USD1,234.00" was read as 234.00: the match started again after the thousands comma."""
+    assert list(vision.figures("USD1,234.00")) == [vision.Decimal("1234.00")]
+    assert list(vision.figures("CAD12,500.00")) == [vision.Decimal("12500.00")]
+    assert list(vision.figures("1,234.56CR")) == [vision.Decimal("1234.56")]
+    assert list(vision.figures("1,234.56DR")) == [vision.Decimal("1234.56")]
+    assert list(vision.figures("INV1042")) == [], "a code is no figure"
+
+
+def test_a_percentage_is_not_the_same_figure_as_the_number():
+    """"10%" and "10.00" were keyed alike, so a rate read as an amount counted as confirmed."""
+    assert set(vision.figures("Rate 10%")).isdisjoint(vision.figures("Fee 10.00"))
+    assert vision.compare("Rate 10%", vision.page_text("Rate 10.00"), ocr=False).confirmed == 0
+    assert vision.compare("Rate 10%", vision.page_text("Rate 10%"), ocr=False).confirmed == 1
+
+
+def test_a_label_word_after_account_is_not_masked():
+    """"Account Balance 125000.00" read "Account **** 125000.00": the word was taken for the number."""
+    assert vision.mask_secrets("Account Balance 125000.00") == "Account Balance 125000.00"
+    assert vision.mask_secrets("Account total 125000.00") == "Account total 125000.00"
+    assert vision.mask_secrets("Account ending 123456789") == "Account ****6789"
+
+
+def test_a_huge_merged_cell_does_not_blow_up_the_table():
+    """Large rowspans and colspans in the model's HTML turned 10KB into tens of millions of characters."""
+    html = "<table>" + "".join(f'<tr><td colspan="50" rowspan="200">r{i}</td></tr>' for i in range(200)) + "</table>"
+    page = vision.page_text(html)
+    assert len(page) < 50_000 and "r0" in page and "r199" in page
 
 
 # How sure the model was --------------------------------------------------------------------------------------

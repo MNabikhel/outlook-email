@@ -31,6 +31,15 @@ _VALUE_RE = re.compile(
     re.I,
 )
 
+# A year, a month or a date: a value in a row, but a column's name in a row of headings.
+_PERIOD_RE = re.compile(
+    r"(?:fy\s?)?(?:19|20)\d{2}"
+    r"|\d{1,4}[-/.]\d{1,2}(?:[-/.]\d{1,4})?"
+    r"|\d{1,2}(?:st|nd|rd|th)?\s+" + _MONTH + r"(?:,?\s+\d{2,4})?"
+    r"|" + _MONTH + r"(?:\s+\d{1,2}(?:st|nd|rd|th)?)?(?:,?\s+\d{2,4})?",
+    re.I,
+)
+
 
 def is_value(cell: str) -> bool:
     """A number, amount, percentage, date or yes/no, the kind of cell a header row doesn't have."""
@@ -52,7 +61,9 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
     filled = [cell for cell in first if cell]
     if len(filled) < 2 or len(set(filled)) != len(filled):
         return False
-    if any(is_value(cell) or cell.endswith(":") for cell in filled):
+    # A year or a month over each column ("2026", "Oct 2026") names it when the file marks the row as headings.
+    periods = marked or bold_first
+    if any((is_value(cell) and not (periods and _PERIOD_RE.fullmatch(cell))) or cell.endswith(":") for cell in filled):
         return False
     if marked or bold_first:
         return True
@@ -130,12 +141,20 @@ def _plain(row: list[str | None]) -> str:
     while cells and not cells[-1]:
         cells.pop()
     out: list[str] = []
-    for cell in cells:
+    for index, cell in enumerate(cells):
+        if not cell and out and out[-1].endswith(":") and _value_later(cells[index + 1 :]):
+            continue  # "Total due:", a blank, "$1,344.00": the label's value is further along
         if out and out[-1].endswith(":"):
             out[-1] = f"{out[-1]} {cell or BLANK}"
         else:
             out.append(cell or EMPTY)
     return " | ".join(out)
+
+
+def _value_later(cells: list[str]) -> bool:
+    """The next filled cell is a value, not another label."""
+    later = next((cell for cell in cells if cell), "")
+    return bool(later) and not later.endswith(":")
 
 
 def _clean(cell: str | None) -> str | None:

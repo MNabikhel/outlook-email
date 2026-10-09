@@ -13,6 +13,7 @@ now and then. After the answer is written:
 from __future__ import annotations
 
 import bisect
+import itertools
 import re
 from dataclasses import dataclass, field
 from itertools import permutations
@@ -246,6 +247,11 @@ _PLAIN_TOTAL = re.compile(
 _ITEM_LINE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+")
 _MAX_ITEMS = 8
 _CREDIT_SIGN = re.compile(r"[-−(][$€£]?$")
+# A line that may take away from the total though it has no minus ("Less payment received 10/2: $300.00"). A line
+# that merely names a payment ("Payment to Harbor Steel LLC: $48,500.00") adds up like any other.
+_CREDIT_WORD = re.compile(
+    r"^\s*(?:less|credits?|refunds?|discounts?|payments?\s+received)\b|\b(?:less|minus)\s", re.I
+)
 
 
 def _list_total(answer: str, at: int, target: Number, grounding: Grounding):
@@ -264,6 +270,7 @@ def _list_total(answer: str, at: int, target: Number, grounding: Grounding):
     while lines and not lines[-1].strip():
         lines.pop()
     rows: list[list[float]] = []
+    credits = False
     while lines and _ITEM_LINE.match(lines[-1]):
         line = lines.pop()
         body = line[_ITEM_LINE.match(line).end():]
@@ -273,6 +280,7 @@ def _list_total(answer: str, at: int, target: Number, grounding: Grounding):
         # A credit is listed as "-$300.00" or "($300.00)": it takes away from the total. A dash with a space after
         # it separates the name from the amount ("Harbor Steel LLC - $48,500.00").
         sign = -1 if _CREDIT_SIGN.search(body[: figures[0].start]) else 1
+        credits = credits or (sign > 0 and bool(_CREDIT_WORD.search(body[: figures[0].start])))
         rows.insert(0, [sign * figure.value for figure in figures])
     if not 2 <= len(rows) <= _MAX_ITEMS:
         return None
@@ -284,6 +292,14 @@ def _list_total(answer: str, at: int, target: Number, grounding: Grounding):
             if abs(sum(v for i, v in enumerate(values) if mask >> i & 1) - target.value) <= target.tolerance + 1e-9:
                 return "matches"
     if width > 1 or not _PLAIN_TOTAL.match(label):
+        return None
+    if credits:
+        # A payment or credit listed without a minus: the total may take it away. It is right when some lines added
+        # and the others taken away make it; otherwise it is flagged, never rewritten to the gross sum.
+        values = [row[0] for row in rows]
+        for signs in itertools.product((1, -1), repeat=len(values)):
+            if abs(sum(sign * value for sign, value in zip(signs, values)) - target.value) <= target.tolerance + 1e-9:
+                return "matches"
         return None
     values = [row[0] for row in rows]
     return sum(values), f"the sum of the {len(values)} amounts listed above it"
@@ -466,16 +482,27 @@ def _fix_cell(chunk: str, books: list[tuple[str, dict[tuple[str, str], str]]], o
     figures = [n for n in numbers_in(plain) if _is_claim(plain, n) and not (ref.start() <= n.start < ref.end())]
     if not figures:
         return None
+    sheets = list(dict.fromkeys(key[0] for key in cells))
+    # "Summary sheet, cell B3": the cell is on the sheet the sentence names.
+    said = [name for name in sheets if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", plain, re.I)] if sheet is None else []
+    cited = sheet or (said[0] if len(said) == 1 else None)
     in_scope = {key: value for key, value in cells.items() if sheet is None or key[0] == sheet}
-    current = [value for (_sheet, cell), value in in_scope.items() if cell == ref["cell"]]
+    current = [value for (on, cell), value in in_scope.items() if cell == ref["cell"] and (cited is None or on == cited)]
     if any(Grounding([value]).has(figure) for value in current for figure in figures):
         return None
     figure = min(figures, key=lambda n: min(abs(n.start - ref.end()), abs(ref.start() - n.end)))
     holders = [key for key, value in in_scope.items() if Grounding([value]).has(figure)]
+    if cited is not None and any(on == cited for on, _cell in holders):
+        holders = [key for key in holders if key[0] == cited]
     if len(holders) != 1:
         return None
     right_sheet, right_cell = holders[0]
     label = ref.group(0).replace(ref["cell"], right_cell)
+    on_sheets = {on for on, cell in cells if cell == ref["cell"]}
+    if not ref["sheet"] and ((cited or right_sheet) != right_sheet or (cited is None and on_sheets != {right_sheet})):
+        # The figure is on another sheet than the one cited, or the cell is on several: the sheet is written too.
+        shown = right_sheet if re.fullmatch(r"[A-Za-z]\w*", right_sheet) else "'" + right_sheet.replace("'", "''") + "'"
+        label = f"{shown}!{right_cell}"
     new = chunk[: ref.start()] + label + chunk[ref.end():]
     where = f"{right_sheet}!{right_cell}"
     return new, f"Corrected the cell for {figure.shown} in {name}: it is in {where}, not {ref['cell']}."
