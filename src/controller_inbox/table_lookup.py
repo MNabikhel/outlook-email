@@ -1291,7 +1291,16 @@ def _points(table: Table, chosen: list[Row], columns: dict[str, set[str]], budge
         return bool(value) and (table.kinds.get(label) == "figure" or not _cell_words(value) <= said)
 
     if asked and len(chosen) <= MAX_ROWS:
-        return [(f"{_title(row, table)}: {label}", row.value(label)) for row in chosen for label in asked[:8] if wanted(row, label)]
+        points = []
+        for row in chosen:
+            named = [label for label, value in row.cells if value and value != tables.BLANK and table.kinds.get(label) != "figure"]
+            words = [label for label in named if not any(ch.isdigit() for ch in row.value(label))]
+            if not any(_cell_words(row.value(label)) & said for label in words):
+                # Picked out by a number alone ("account code 160-5190", "employee 1651"): what the row is, its
+                # department and name, is part of the answer.
+                asked = list(dict.fromkeys(words[:3] + asked))
+            points += [(f"{_title(row, table)}: {label}", row.value(label)) for label in asked[:8] if wanted(row, label)]
+        return points
     figure = next((label for label in asked if table.kinds.get(label) == "figure"), "")
     return [(_title(row, table), row.value(figure) if figure else "") for row in chosen[:MAX_LISTED]]
 

@@ -226,3 +226,10 @@ def test_a_heading_over_aging_buckets_names_only_them():
         ]
     text = pdf_text(build_pdf([header + subs + rows]))
     assert "Customer | Current | Past due 1-30 | Past due 31-60 | Past due 61-90 | Past due 90+ | Total" in text, text
+
+
+def test_a_row_picked_by_its_number_is_named_too():
+    found = table_lookup.answer(BUDGET, "What is account code 160-5190, and how much is encumbered and still available on it?")
+    assert found is not None
+    values = [value for _point, value in found.points]
+    assert values[:2] == ["Library", "Training"]
