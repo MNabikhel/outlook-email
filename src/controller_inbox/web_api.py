@@ -23,7 +23,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from controller_inbox import agent, chats, cost_codes, documents, fraud, model_roles, page_details, page_view, semantic, table_lookup, vision
+from controller_inbox import agent, chats, cost_codes, documents, fixes, fraud, model_roles, page_details, page_view, semantic, table_lookup, vision
 from controller_inbox.digest import build_digest
 from controller_inbox.local_llm import check_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
@@ -469,12 +469,9 @@ def register_workspace(
             raise HTTPException(status_code=422, detail="This page couldn't be drawn.") from None
         return Response(png, media_type="image/png", headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "no-store"})
 
-    @api.get("/mail/{email_id}/files/{n}/pages/{p}/regions")
-    def mail_file_regions(email_id: str, n: int, p: int):
-        """Where each piece of the page's text was read, how sure the reading is, and what the vision model read
-        there (when it has read the page); the tables on the page and the invoice's key details, each tied to its
-        boxes."""
-        email, att, data = page_file(email_id, n)
+    def page_state(email, att, data: bytes, p: int) -> dict:
+        """What the Page tab shows of page ``p``: the boxes read there (with the vision model's reading and the
+        user's fixes), the tables and the key details."""
         try:
             pages = page_view.page_count(data, att.filename)
         except Exception:
@@ -492,7 +489,17 @@ def register_workspace(
         boxes = found["regions"]
         model_text = (reading.get("model_text") or "") if reading is not None else None
         if reading is not None:
-            boxes = page_view.with_model(boxes, model_text)
+            try:
+                sure = json.loads(reading.get("comparison") or "{}").get("sure")
+            except (ValueError, AttributeError):
+                sure = None
+            boxes = page_view.with_model(boxes, model_text, sure if isinstance(sure, dict) else None)
+        else:
+            boxes = [{**box, "model": None} for box in boxes]
+        own = store.page_fixes(att.id, att.sha256, page=p)
+        learnt = store.sender_fixes(email.sender_email, not_attachment=att.id)
+        # A PDF's own text is exact: a word fixed on a scan from the same sender isn't put on it.
+        boxes = fixes.apply(boxes, own, learnt if found["source"] == "ocr" else [])
         known_fields = [att.extracted_fields, email.extracted]
         extracted = {
             "invoices": [value for fields in known_fields for value in fields.invoice_numbers],
@@ -501,7 +508,9 @@ def register_workspace(
             "vendors": [*(value for fields in known_fields for value in fields.vendor_candidates), email.sender_name or ""],
         }
         try:
-            on_page = page_details.page_tables(boxes, found["source"], att.extracted_text or "", p, model_text)
+            seen = page_view.found_tables(settings, data, att.filename, p) if boxes else None
+            on_page = page_details.page_tables(boxes, found["source"], att.extracted_text or "", p, model_text, seen)
+            on_page = fixes.tables(boxes, on_page, own, learnt)
             details = page_details.key_details(boxes, found["source"], model_text, extracted)
         except Exception:
             # Tables and details only help to read the page; the page and its boxes still show without them.
@@ -514,11 +523,64 @@ def register_workspace(
             "height": height,
             "source": found["source"],
             "reason": found["reason"],
-            "regions": [box if reading is not None else {**box, "model": None} for box in boxes],
+            "regions": boxes,
             "model_name": (vision.reader_name(reading.get("model") or "") or "The vision model") if reading is not None else "",
             "tables": on_page,
             "fields": details,
+            "fixes": len(own),
         }
+
+    @api.get("/mail/{email_id}/files/{n}/pages/{p}/regions")
+    def mail_file_regions(email_id: str, n: int, p: int):
+        """Where each piece of the page's text was read, how sure the reading is, and what the vision model read
+        there (when it has read the page); the tables on the page and the invoice's key details, each tied to its
+        boxes; and what the user fixed on it."""
+        email, att, data = page_file(email_id, n)
+        return page_state(email, att, data, p)
+
+    @api.post("/mail/{email_id}/files/{n}/pages/{p}/fixes")
+    async def mail_file_fix(request: Request, email_id: str, n: int, p: int):
+        """Keep a fix made on the page: {kind: "text", region: index, now: "what the page says"}, or {kind: "table"
+        | "not_table", box: {x, y, w, h}}. It shows at once, and is learnt for the sender's later files."""
+        data_in = await _json_body(request)
+        email, att, data = page_file(email_id, n)
+        kind = str(data_in.get("kind") or "")
+        if kind not in fixes.KINDS:
+            raise HTTPException(status_code=400, detail="That isn't something that can be fixed on a page.")
+        state = page_state(email, att, data, p)
+        boxes = state["regions"]
+        if kind == "text":
+            index = data_in.get("region")
+            now = str(data_in.get("now") or "")
+            if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(boxes):
+                raise HTTPException(status_code=400, detail="That box isn't on this page any more. Open the page again.")
+            if not now.strip():
+                raise HTTPException(status_code=400, detail="Type what the page says there.")
+            fix = fixes.text_fix(boxes[index], now)
+            message = "Fixed. The file's text has it now, and the same word is put right on this sender's later files." if fixes.learnable(fix["was"], fix["now"]) else "Fixed. The file's text has it now."
+        else:
+            box = data_in.get("box")
+            try:
+                fix = fixes.table_fix(boxes, box, kind)
+            except (TypeError, KeyError, ValueError):
+                raise HTTPException(status_code=400, detail="Draw a box round the table.") from None
+            if kind == "table" and (fix["w"] < 0.02 or fix["h"] < 0.01):
+                raise HTTPException(status_code=400, detail="That box is too small to hold a table. Drag across the whole table.")
+            message = (
+                "Table added. CloseDesk looks for it in the same place on this sender's later pages."
+                if kind == "table"
+                else "Outline removed. It won't be shown here again, or where the same lines are on this sender's later pages."
+            )
+        fix_id = store.add_page_fix({**fix, "attachment_id": att.id, "sha256": att.sha256, "page": p, "sender": email.sender_email})
+        return {"ok": True, "id": fix_id, "message": message}
+
+    @api.post("/mail/{email_id}/files/{n}/pages/{p}/fixes/{fix_id}/undo")
+    def mail_file_fix_undo(email_id: str, n: int, p: int, fix_id: str):
+        """Take back a fix made on this file."""
+        _email, att, _data = page_file(email_id, n)
+        if not store.remove_page_fix(att.id, fix_id):
+            raise HTTPException(status_code=404, detail="That fix was already taken back.")
+        return {"ok": True, "message": "Fix taken back."}
 
     @api.post("/mail/{email_id}/files/{n}/vision")
     def mail_file_vision(email_id: str, n: int, again: int = 0):

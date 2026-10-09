@@ -66,7 +66,7 @@ A second view of the same mailbox that works like a mail app: nothing reloads as
 - **Side bar:** Today (the ranked focus list), Tasks, the Important / Informational / Reference folders and All mail with their counts, Fraud check, AP coding, the daily digest and Settings.
 - **List and reading pane:** pick an email to read it beside the list: why it was flagged, what was read from it (amounts, vendor, dates), its tasks (tick them off), its attachments, the fraud check and category correction. An email held as possible payment fraud never shows its files.
 - **Tables:** an attachment's **Tables** button shows each table CloseDesk read as a grid, with a badge saying whether its printed totals add up. A total that doesn't is highlighted, with the difference spelled out.
-- **Page view:** a PDF or picture attachment opens on its **Page** tab: the page itself, with a box over every piece of text CloseDesk read there. Point at a box (or tab to it) to see what was read. On a PDF made by a program the text is the file's own, so it is exact. On a scan or photo the box shows OCR's reading and how sure OCR was (for example *99% sure*), and, once the vision model has read the page, what OvisOCR2 read there and whether the two agree. Green means they agree or the text is exact, amber means OCR was less than 80% sure or the vision model's reading doesn't clearly cover it, and red means the vision model read a different figure. OvisOCR2 gives no confidence of its own, so agreement with OCR is what's shown for it. Above the page, **Key details** lists the invoice number, dates, PO, vendor, subtotal, tax and total; click one to jump to it on the page. Tables CloseDesk read are outlined; click one to see it as a table, and point at a cell to see where it sits on the page. **Next to check** steps through the amber and red boxes, and the page zooms to fit, 100% or 150%.
+- **Page view:** a PDF or picture attachment opens on its **Page** tab: the page itself, with a box over every piece of text CloseDesk read there. Point at a box (or tab to it) to see what was read. On a PDF made by a program the text is the file's own, so it is exact. On a scan or photo the box shows OCR's reading and how sure OCR was (for example *99% sure*), and, once the vision model has read the page, what OvisOCR2 read there, how sure it was, and whether the two agree. Green means they agree or the text is exact, amber means OCR was less than 80% sure, the vision model was less than 90% sure, or its reading doesn't clearly cover the box, and red means the vision model read a different figure. How sure the vision model was comes from the chance it gave each word as it wrote it (a figure is as sure as its least sure digit). CloseDesk asks the model server for those chances (`logprobs`); llama.cpp sends them, and a server that doesn't still reads the page, with agreement with OCR shown instead. Above the page, **Key details** lists the invoice number, dates, PO, vendor, subtotal, tax and total; click one to jump to it on the page. Tables CloseDesk read are outlined; click one to see it as a table, and point at a cell to see where it sits on the page. **Next to check** steps through the amber and red boxes, and the page zooms to fit, 100% or 150%. On a scan, tables are found by a small layout model (see *Finding tables on a page*), and anything read wrong can be fixed right there (see *Fixing what was read*).
 - **Ask CloseDesk:** the chat docks on the right and shows its sources, steps and checks as it answers; on an email it asks about that email.
 - **Keys:** `j`/`k` move, `Enter` opens, `e` marks done, `/` filters the list, `c` opens the chat, `Ctrl/Cmd+K` searches mail and jumps anywhere, `?` lists them all.
 - **Light or dark:** follows the computer, or pick one with the moon/sun button or in Settings.
@@ -187,6 +187,27 @@ By kind of document (figures in their right row, and figures read that aren't on
 | Schedules and reports | 5 | 38.8%, 1 wrong | 95.2%, 1 wrong | 98.9%, 0 wrong |
 
 On their own, before the comparison with OCR, OvisOCR2 read 0 figures that aren't on the page and Qwen3.5 9B 137, mostly on dense registers and ledgers in small print; that is why CloseDesk kept OCR's reading on 4 of the 29 pages for Qwen3.5 9B and on 0 for OvisOCR2. The choice rule and the heading handling were tuned on the close package; on the other two sets (14 documents), never used for tuning: 100% in the right row with OvisOCR2, 100% with Qwen3.5 9B, 24.7% with OCR alone. A graphics card or Apple silicon reads pages many times faster, and CloseDesk measures it on each computer.
+
+### Finding tables on a page
+
+On a scan, the Page tab outlines each table with a small layout model that looks at the page itself: RapidAI's YOLOv8n "general6" layout model (12 MB, Apache-2.0, about a quarter of a second a page on a laptop's processor). It runs with ONNX Runtime, which the OCR add-on installs, and is fetched once from its published address the first time a page is shown (checked against its SHA-256) into `data/models/`. Without it, a table is found only where OCR's boxes line up in columns, as before. A table the model sees is made from the OCR boxes inside it; a totals line printed just under it is taken in.
+
+Measured on 84 scanned pages none of this was tuned on, against the cells known to be in each table (the share of them inside a table found, and the share of what was inside found tables that is a table cell):
+
+| | Invoices, statements, schedules (18 pages) | Annual-report pages (66) |
+|---|---:|---:|
+| OCR's boxes lining up (before) | 46.8% found, 91.5% precise | 59.6% found, 92.6% precise |
+| **Layout model (CloseDesk)** | **99.9% found, 86.5% precise** | **98.0% found, 90.8% precise** |
+
+On 12 letters with no table it found none. Seven layout models from the same project were compared (7 MB to 214 MB); the larger ones were no better and up to 15 times slower. Most of what counts against precision is a table's own heading or a line printed beside it, taken in with the table.
+
+### Fixing what was read
+
+In the Page tab, click any box to fix what was read there: type what the page says and **Save fix**. **Mark a table** and drag across a table CloseDesk missed to make it one; open a table and click **Not a table** to remove an outline. **Undo** in the message after each fix takes it back, and so does **Undo my fix** on the box.
+
+- **On this file, at once:** the box shows your text (blue), and the file's text that answers, summaries, search and the chat read has it too.
+- **On the sender's later files:** a word or a name you fixed is put right where OCR reads it the same way (blue, *Fixed from what you taught it*; **It was right here** keeps the reading on that file). A figure never is: an amount, a date or a number is different on every invoice. A table you drew is found again on their next page where its first line's words are printed, and an outline you removed stays removed there.
+- **As training examples:** `closedesk export-fixes [folder]` writes every page you fixed as a picture, with its tables after your fixes (as JSON and in YOLO's label format) and each fixed box with what was read and what the page says. Those are what's needed to test a new table finder or reading model on your own files, or to train one once there are a few hundred. Nothing is trained on this computer: that needs a graphics card.
 
 ### Tables in real-world PDFs
 
@@ -392,6 +413,10 @@ src/controller_inbox/
   semantic.py    Search by meaning with a local embedding model
   ocr.py         Scanned pages and pictures to text (RapidOCR, else Tesseract)
   vision.py      Scanned pages read again by a model that can see, compared with OCR figure by figure
+  page_view.py   A page as a picture with a box over each piece of text read there, and how sure each reading is
+  page_details.py The tables and key details on a page, tied to the boxes they were read from
+  table_finder.py The layout model that finds tables on a page from its picture
+  fixes.py       What you fixed on a page: applied at once, learnt for the sender's later files, exported
   local_llm.py   LM Studio / Ollama client built for small models
   overnight.py   One pass: drop folder → model → digest (run, overnight, watch, dashboard)
   learn.py       Corrections that teach the classifier

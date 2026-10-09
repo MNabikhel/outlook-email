@@ -457,12 +457,18 @@ RETRY_SAMPLING = {"temperature": 0.7, "top_p": 0.8, "top_k": 20, "presence_penal
 
 
 def transcribe(
-    settings: Settings, png: bytes, *, on_piece: Callable[[int], None] | None = None, model: str | None = None
+    settings: Settings,
+    png: bytes,
+    *,
+    on_piece: Callable[[int], None] | None = None,
+    model: str | None = None,
+    confidence: dict | None = None,
 ) -> str:
     """The model's reading of the page: its text, with tables in markdown (or HTML). ``model``: the one that reads
-    pages (``reading_model``), asked its own way (``reader_for``). Raises ``Blank`` for a page with nothing on it,
-    ``EmptyReply`` when it wrote nothing, ``CutOff`` when it stopped at its length limit or got stuck repeating itself
-    (twice), and ``httpx.HTTPError`` when the server failed."""
+    pages (``reading_model``), asked its own way (``reader_for``). ``confidence``: given a dict, filled with how sure
+    the model was of what it wrote (``token_confidence``) when the server says. Raises ``Blank`` for a page with
+    nothing on it, ``EmptyReply`` when it wrote nothing, ``CutOff`` when it stopped at its length limit or got stuck
+    repeating itself (twice), and ``httpx.HTTPError`` when the server failed."""
     model = model or reading_model(settings) or None
     reader = reader_for(model or "")
     messages = [
@@ -475,22 +481,33 @@ def transcribe(
         }
     ]
     limit = reader.max_tokens or MAX_TOKENS
-    text, looped = _transcribe_once(settings, messages, on_piece, {"temperature": 0.0}, model=model, limit=limit)
+    probs: list = []
+    text, looped = _transcribe_once(settings, messages, on_piece, {"temperature": 0.0}, model=model, limit=limit, probs=probs)
     if not looped:
+        _fill_confidence(confidence, probs)
         return text
     log.info("The vision model looped on a page; reading it once more with sampling")
+    probs_again: list = []
     try:
-        again, looped_again = _transcribe_once(settings, messages, on_piece, RETRY_SAMPLING, model=model, limit=limit)
+        again, looped_again = _transcribe_once(settings, messages, on_piece, RETRY_SAMPLING, model=model, limit=limit, probs=probs_again)
     except (CutOff, EmptyReply, Blank):
         again, looped_again = "", True
-    best = again if not looped_again else max(text, again, key=len)
+    took_again = not looped_again or len(again) >= len(text)
+    best = again if took_again else text
     if len(best) < 200:
         raise CutOff("the model got stuck repeating itself near the top of the page")
+    _fill_confidence(confidence, probs_again if took_again else probs)
     return best
 
 
+def _fill_confidence(confidence: dict | None, probs: list) -> None:
+    if confidence is not None and probs:
+        confidence.update(token_confidence(probs))
+
+
 def _transcribe_once(
-    settings: Settings, messages: list[dict], on_piece, sampling: dict, *, model: str | None = None, limit: int = 0
+    settings: Settings, messages: list[dict], on_piece, sampling: dict, *, model: str | None = None, limit: int = 0,
+    probs: list | None = None,
 ) -> tuple[str, bool]:
     """One reading of the page, stopped early if it loops: (text without the loop, whether it looped)."""
     written = []
@@ -499,7 +516,7 @@ def _transcribe_once(
     settings_ = {key: value for key, value in sampling.items() if key != "temperature"}
     pieces = stream_text(
         settings, messages, max_tokens=limit or MAX_TOKENS, wait=WAIT_SECONDS, temperature=sampling.get("temperature"),
-        finished=finished, sampling=settings_ or None, model=model,
+        finished=finished, sampling=settings_ or None, model=model, token_probs=probs,
     )
     checked = 0
     try:
@@ -1048,6 +1065,42 @@ def figures(text: str) -> dict[Decimal, list[str]]:
     return found
 
 
+# Where a reading splits into cells: a new line, a markdown table's bar, an HTML tag.
+_CELL_BREAK = re.compile(r"\n|\||<[^>]*>")
+MAX_CONFIDENCE_ITEMS = 3000
+
+
+def token_confidence(tokens: list[tuple[str, float]]) -> dict:
+    """How sure the model was of what it wrote, from each token's log probability: {"figures": [[figure as
+    written, chance 0 to 1]], "cells": [[cell's text, chance]]}. A piece's chance is that of its least sure token: a
+    figure with one doubtful digit is a doubtful figure. Cells are the reading split at lines, table bars and HTML
+    tags, so a table cell from either kind of table is found by its text."""
+    text = "".join(token for token, _ in tokens)
+    owner: list[int] = []
+    for index, (token, _logprob) in enumerate(tokens):
+        owner.extend([index] * len(token))
+    chances = [math.exp(min(logprob, 0.0)) for _token, logprob in tokens]
+
+    def least(start: int, end: int) -> float:
+        picked = {owner[i] for i in range(max(start, 0), min(end, len(owner)))}
+        return round(min((chances[i] for i in picked), default=1.0), 4)
+
+    found = []
+    for match in _FIGURE.finditer(text):
+        if figures(match.group(0)):
+            found.append([match.group(0).strip(), least(match.start(2), match.end())])
+    cells = []
+    start = 0
+    for brk in [*_CELL_BREAK.finditer(text), None]:
+        end = brk.start() if brk else len(text)
+        piece = text[start:end]
+        if piece.strip():
+            lead = len(piece) - len(piece.lstrip())
+            cells.append([piece.strip(), least(start + lead, start + lead + len(piece.strip()))])
+        start = brk.end() if brk else end
+    return {"figures": found[:MAX_CONFIDENCE_ITEMS], "cells": cells[:MAX_CONFIDENCE_ITEMS]}
+
+
 @dataclass
 class Comparison:
     """How the model's reading of a page compares with the first one (OCR's, or the PDF's own text)."""
@@ -1442,9 +1495,10 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
         if on_progress:
             on_progress(index - 1, len(todo), f"{att.filename}, page {page}")
         started = time.monotonic()
+        sure: dict = {}
         try:
             png = render(data, att.filename, page, reader=reader)
-            markdown = mask_secrets(transcribe(settings, png, model=model))
+            markdown = mask_secrets(transcribe(settings, png, model=model, confidence=sure))
         except Blank:
             markdown = ""  # a blank page (the back of a sheet): nothing on it to read
         except Exception as exc:  # one page failing doesn't lose the others
@@ -1457,7 +1511,7 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
         comparison = compare(first, page_text(markdown), ocr=named == "OCR", trusted=trusted_reader(model))
         store.save_page_reading(
             att.id, page, first=first, model_text=markdown, model=model, seconds=seconds, sha256=att.sha256,
-            comparison=json.dumps({**comparison.to_dict(), "first_name": named, "kind": kind}),
+            comparison=json.dumps({**comparison.to_dict(), "first_name": named, "kind": kind, "sure": _masked_sure(sure, markdown)}),
         )
         result.pages += 1
         result.seconds += seconds
@@ -1465,6 +1519,19 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
         if on_progress:
             on_progress(index, len(todo), f"{att.filename}, page {page}")
     return result
+
+
+def _masked_sure(sure: dict, markdown: str) -> dict:
+    """How sure the model was, kept with its reading (``markdown``, account numbers already masked): a piece holding
+    a long run of digits the reading no longer shows (an account number, masked there) is left out."""
+    if not sure:
+        return {}
+    shown = set(re.findall(r"\d{6,}", re.sub(r"(?<=\d)[ ,-](?=\d)", "", markdown)))
+
+    def kept(text: str) -> bool:
+        return all(run in shown for run in re.findall(r"\d{6,}", re.sub(r"(?<=\d)[ ,-](?=\d)", "", text)))
+
+    return {kind: [[text, chance] for text, chance in sure.get(kind, []) if kept(text)] for kind in ("figures", "cells")}
 
 
 def same_file(att: AttachmentRecord, data: bytes) -> bool:
