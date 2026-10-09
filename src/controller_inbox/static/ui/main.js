@@ -749,6 +749,8 @@ const settings = createSettings({
     }
     S.cache.clear();
     S.files.clear();
+    // The list left open behind Settings was written with the old zone or profile: ask for it again.
+    if (S.list) ensureList(S.list.spec.key, { force: true, quiet: true });
     clearTimeout(S.poll);
     S.poll = setTimeout(poll, 300);
   },

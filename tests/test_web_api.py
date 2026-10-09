@@ -383,6 +383,26 @@ def test_settings_say_why_the_chat_model_and_the_index_cant_change_without_a_mod
     assert refused.status_code == 400 and refused.json()["detail"] == web.NOTICES["index-off"]
 
 
+def test_switching_the_chat_model_does_not_hold_up_other_requests(client, demo, monkeypatch):
+    # LM Studio can take minutes to load a model: that wait mustn't happen on the event loop, which every
+    # other request needs.
+    import asyncio
+
+    on_loop = []
+
+    def load(_settings, _key):
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return ""
+
+    monkeypatch.setattr(web, "use_chat_model", load)
+    assert post(client, "/api/settings/chat-model", {"model": "qwen/qwen3.5-9b"}).status_code == 200
+    assert on_loop == [False]
+
+
 def test_settings_wont_change_the_chat_model_or_load_the_sample_while_mail_is_processed(client, demo):
     job = client.app.state.job
     release = __import__("threading").Event()

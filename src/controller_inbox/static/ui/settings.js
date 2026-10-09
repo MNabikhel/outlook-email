@@ -107,8 +107,15 @@ export function createSettings(ctx) {
     } else {
       for (const [id, build] of Object.entries(BUILDERS)) {
         const old = $(`#set-${id}`, root);
-        if (!old || dirty.has(id)) continue;
+        if (!old) continue;
+        // The model section's only control is the chat-model choice: keep that as it is and draw the rest
+        // (the banner, Check again, the table) from what the server says now.
+        const kept = dirty.has(id) && id === "model" ? $("#set-chat-model", old) : null;
+        if (dirty.has(id) && !kept) continue;
         const fresh = build();
+        const slot = kept ? $("#set-chat-model", fresh) : null;
+        if (slot) slot.replaceWith(kept);
+        else if (kept) dirty.delete(id); // no choice to make any more
         old.replaceWith(fresh);
         if (observer) {
           observer.unobserve(old);

@@ -4,6 +4,7 @@ from the server into the page as HTML."""
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -258,6 +259,49 @@ def test_settings_save_each_change_and_keep_one_not_saved_yet(site, page, settin
     assert loaded.get_state("profile") == "finance"
     # Nothing on the page links back to the classic Setup page for a setting.
     assert page.locator('#reader a[href^="/settings"]').count() == 0
+
+
+def test_the_open_mail_list_shows_a_new_time_zone_saved_in_settings(site, page, settings):
+    # Saving a time zone asks again for the list left open behind Settings, so going back to it doesn't show
+    # its times in the old zone.
+    first_time = "() => { const el = document.querySelector('.item-when[title]'); return el && el.title; }"
+    page.goto(f"{site}/app/all")
+    page.wait_for_function(first_time)
+    before = page.evaluate(first_time)
+    page.click('a[href="/app/settings"]')
+    page.wait_for_selector("#set-tz")
+    page.select_option("#set-tz", "Asia/Tokyo")
+    page.click("#set-timezone button[type=submit]")
+    page.wait_for_selector('[data-status="timezone"].ok')
+    assert settings.timezone == "Asia/Tokyo"
+    page.click('a[href="/app/all"]')
+    page.wait_for_function(f"() => ({first_time})() !== {json.dumps(before)}")
+    fresh = page.context.new_page()
+    fresh.goto(f"{site}/app/all")
+    fresh.wait_for_function(first_time)
+    assert page.evaluate(first_time) == fresh.evaluate(first_time)
+
+
+def test_check_again_comes_back_with_a_chat_model_chosen_and_not_loaded_yet(site, page):
+    # Picking another chat model without loading it leaves that choice as it is, but Check again still
+    # finishes: its button comes back and the section says it checked.
+    def with_chat_models(route):
+        response = route.fetch()
+        data = response.json()
+        data["model"].update(mode="auto", active=True, reachable=True, describe="LM Studio: qwen", loaded=["qwen"], server="LM Studio")
+        data["chat"] = {"pinned": False, "env_model": "", "current": "qwen", "models": [{"key": "qwen", "loaded": True}, {"key": "gemma", "loaded": False}], "min_context_tokens": 16384}
+        route.fulfill(response=response, body=json.dumps(data), headers={**response.headers, "content-type": "application/json"})
+
+    page.route("**/api/settings*", lambda route: with_chat_models(route) if route.request.method == "GET" else route.continue_())
+    page.goto(f"{site}/app/settings")
+    page.wait_for_selector("#set-chat")
+    page.select_option("#set-chat", "gemma")
+    button = page.locator("#set-model .set-banner-row button")
+    button.click()
+    page.wait_for_selector('#set-model [data-status="model"].ok')
+    assert button.is_enabled() and "Check again" in button.inner_text()
+    assert page.input_value("#set-chat") == "gemma", "the choice not loaded yet kept its place"
+
 
 def test_the_page_tab_marks_where_text_was_read_and_says_what_on_hover(settings, store, page):
     # A PDF opens on its page, a box over each piece of text read there; pointing at one says what was read.
