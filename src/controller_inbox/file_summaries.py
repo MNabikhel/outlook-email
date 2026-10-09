@@ -19,7 +19,7 @@ from controller_inbox import answer_check, documents
 from controller_inbox.agent import SUMMARY_MIN_CHARS, clip, prompt_budget, prompt_size, summary_key
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
-from controller_inbox.local_llm import ContextOverflow, EmptyReply, complete_text, context_length
+from controller_inbox.local_llm import ContextOverflow, EmptyReply, complete_text, context_length, reply_budget
 from controller_inbox.models import AttachmentRecord
 from controller_inbox.store import Store
 
@@ -37,7 +37,8 @@ _NOT_FOUND = re.compile(r"^(.+?) isn't in the emails or files I read")
 def summarize_file(settings: Settings, att: AttachmentRecord) -> str:
     """A checked bullet summary of one file, or "" when the model gave nothing usable."""
     text = att.extracted_text or ""
-    room = prompt_budget(context_length(settings), MAX_TOKENS, tools=False) - len(PROMPT) - 300
+    # The reply room as the request will ask for it: a reasoning model is given room to think first.
+    room = prompt_budget(context_length(settings), reply_budget(settings, MAX_TOKENS), tools=False) - len(PROMPT) - 300
     parts = documents.split_parts(text)
     # Room is counted the way prompt_size counts it (figures cost more than words), not in characters.
     if prompt_size(text) <= room or len(parts) < 3:

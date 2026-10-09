@@ -1009,10 +1009,12 @@ def _keep_stated_figures(checked: str, draft: str, file_text: str) -> str:
     """
     if not draft.strip():
         return checked
-    wanted = _figures(draft) & _figures(file_text)
-    # Restore the draft only when the check kept none of those figures. A table that
-    # states them is the answer, even if it leaves out a number the draft also mentioned.
-    if wanted and not (wanted & _figures(checked)):
+    in_file = _figures(file_text)
+    wanted = _figures(draft) & in_file
+    # Restore the draft only when the check kept none of the file's figures. A table that states them is the
+    # answer, even if it leaves out a number the draft also mentioned, and so is a check that put another of the
+    # file's figures in place of the draft's (it corrected the row the draft read).
+    if wanted and not (_figures(checked) & in_file):
         return draft
     return checked
 

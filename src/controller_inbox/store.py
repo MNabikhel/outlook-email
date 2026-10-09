@@ -1371,6 +1371,10 @@ class Store:
     def add_chat_file(self, chat_id: str, row: dict[str, Any]) -> None:
         """Adds a file to the conversation, replacing one with the same name."""
         with self.connect() as conn:
+            before = conn.execute("SELECT sha256 FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, row["filename"])).fetchone()
+            if before is not None and before["sha256"] != row.get("sha256", ""):
+                # Notes written from the file it replaces would come back as "notes from earlier reading".
+                conn.execute("DELETE FROM findings WHERE email_id = ?", (f"chat-{chat_id}",))
             conn.execute("DELETE FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, row["filename"]))
             conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (f"chat-{chat_id}:{row['filename']}",))
             conn.execute("DELETE FROM page_failures WHERE attachment_id = ?", (f"chat-{chat_id}:{row['filename']}",))
@@ -1390,6 +1394,8 @@ class Store:
             conn.execute("DELETE FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, filename))
             conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (f"chat-{chat_id}:{filename}",))
             conn.execute("DELETE FROM page_failures WHERE attachment_id = ?", (f"chat-{chat_id}:{filename}",))
+            # The conversation's notes may quote the file that is gone.
+            conn.execute("DELETE FROM findings WHERE email_id = ?", (f"chat-{chat_id}",))
 
     # File summaries written by the overnight run ------------------------------------------------
 
