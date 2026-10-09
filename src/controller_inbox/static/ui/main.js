@@ -4,7 +4,7 @@
 
 import { $, h, icon, replace, toast, plural, isTyping, reducedMotion, skeletonList, skeletonReader } from "./dom.js";
 import { getJSON, postJSON } from "./api.js";
-import { listSpec, loadList, rowEl } from "./lists.js";
+import { MAIL_PAGE, listSpec, loadList, rowEl } from "./lists.js";
 import { emailView, fileView, errorView } from "./reader.js";
 import { todayView, fraudView, codingView, digestView, settingsView, emptyReader } from "./pages.js";
 import { createChat } from "./chat.js";
@@ -20,6 +20,7 @@ const S = {
   meta: null,
   route: null,
   cache: new Map(), // list key -> { data, items }
+  want: new Map(), // list key -> how many mail rows "Load more" has asked for
   files: new Map(), // "id:n" -> file JSON
   list: null, // { spec, data, items, error }
   headerKey: "",
@@ -382,9 +383,20 @@ function renderItems() {
       updateSelection();
     }
   });
+  const total = S.list.data && S.list.data.total;
+  const more =
+    total > items.length
+      ? h(
+          "div",
+          { class: "list-more" },
+          `Showing ${items.length} of ${total} · `,
+          h("button", { type: "button", class: "btn btn-sm", onclick: () => loadMore(spec) }, "Load more"),
+          " or search to narrow."
+        )
+      : null;
   const hadFocus = body.contains(document.activeElement);
   const scrolled = body.scrollTop;
-  replace(body, ul);
+  replace(body, ul, more);
   body.scrollTop = scrolled;
   if (hadFocus) ul.focus({ preventScroll: true });
   updateSelection(false);
@@ -432,7 +444,7 @@ async function ensureList(key, { force = false, quiet = false } = {}) {
     S.list.error = "";
   }
   try {
-    const data = await loadList(spec);
+    const data = await loadList(spec, undefined, S.want.get(spec.key));
     if (token !== S.listToken) return S.list;
     const items = spec.items(data);
     S.cache.set(spec.key, { data, items });
@@ -452,6 +464,12 @@ async function ensureList(key, { force = false, quiet = false } = {}) {
     }
   }
   return S.list;
+}
+
+function loadMore(spec) {
+  S.want.set(spec.key, S.list.items.length + MAIL_PAGE);
+  for (const button of listPane.querySelectorAll(".list-more button")) button.disabled = true;
+  return ensureList(spec.key, { force: true, quiet: true });
 }
 
 const navId = () => (S.route && !S.route.list && (S.route.view === "digest" || S.route.view === "settings") ? S.route.view : S.list ? listSpec(S.list.spec.key).nav : "");

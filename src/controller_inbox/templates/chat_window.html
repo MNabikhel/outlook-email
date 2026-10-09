@@ -6,7 +6,7 @@
   <title>Ask CloseDesk</title>
   <link rel="stylesheet" href="/static/app.css?v={{ static_version }}"/>
 </head>
-<body class="chat-window">
+<body class="chat-window"{% if display_tz %} data-tz="{{ display_tz.key }}"{% endif %}>
   {% include "_chat.html" %}
   <div class="toast" id="toast" role="status" hidden></div>
   <script src="/static/app.js?v={{ static_version }}" defer></script>

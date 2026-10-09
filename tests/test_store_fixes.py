@@ -30,6 +30,14 @@ def test_search_ranked_ignores_case_of_accented_letters(store):
     assert [e.id for e in store.search_ranked(["électricité"])] == ["e1"]
 
 
+def test_chat_search_ignores_case_of_accented_letters(store):
+    store.create_chat("c1")
+    store.touch_chat("c1", title="Müller invoice question")
+    store.add_chat_turn("c1", "user", "What does ÖKO GmbH owe?")
+    assert [c["id"] for c in store.list_chats("MÜLLER")] == ["c1"]
+    assert [c["id"] for c in store.list_chats("öko")] == ["c1"]
+
+
 # --- An invoice number matched any extracted field (a PO number, an account ending) as a duplicate ----------------
 
 
