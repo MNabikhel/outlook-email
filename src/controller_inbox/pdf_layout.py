@@ -1776,16 +1776,20 @@ def _spread_names(
         names = [anchor for anchor in anchors if blocks[anchor] == block]
         if not names:
             continue
-        # Each on the first row it covers: every name on a row of figures, the first on the block's first row.
-        if all(name in mine for name in names) and names[0] == mine[0]:
-            for index in mine:
-                covers[index] = max(name for name in names if name <= index)
-            continue
+        # Each on the first row it covers: every name on a row of figures, the first on the block's first row. A
+        # name drawn half a row down (two rows merged, read onto the first) is centred, not on its first row, so
+        # this is taken first only when no name is known to be drawn off its row's line.
+        top = all(name in mine for name in names) and names[0] == mine[0]
+        level = shifts is None or all(shifts[name] == 0 for name in names)
         # Each in the middle: a name on a line of its own between two rows is half a row above the next; one level
         # with a row was drawn within half a row of it (twelve rows put it between the sixth and seventh, and the
         # page reader puts it on one of them). Each covers as many rows below its place as above, from where the
         # name before it ended, and together they cover the block.
-        ends = _centered_ends(names, mine, shifts)
+        ends = None if top and level else _centered_ends(names, mine, shifts)
+        if ends is None and top:
+            for index in mine:
+                covers[index] = max(name for name in names if name <= index)
+            continue
         if ends is None:
             return {}
         start = 0
