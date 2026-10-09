@@ -921,6 +921,7 @@ def _columns_named(table: Table, asked: Question) -> dict[str, set[str]]:
     # A question asking for several things names each ("encumbered and still available"): a column named by a word
     # no column kept so far has ("Actual Encumbered", half its heading) is asked for too.
     covered = {word for hits in keep.values() for word in hits}
+    covered |= {_SHORT[word] for word in covered if word in _SHORT}
     several = re.search(r",|\band\b|&", asked.text) is not None
     for label in table.labels if several else ():
         if label in found and label not in keep and found[label] - covered and not any(found[label] < found[other] for other in found):
