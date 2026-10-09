@@ -100,17 +100,18 @@ def read(data: bytes, pages: list[int]) -> dict[int, list[list[list[str]]]]:
     return out
 
 
-_LEADER = re.compile(r"[.·…_\s]*[.·…_][.·…_\s]*")
-_TRAILING_LEADER = re.compile(r"(?:\s*[.·…_]){2,}\s*$")
+_LEADERS = ".·…_"
 # A row of running text caught in a table's area: one cell this long, nothing beside it.
 PROSE = 70
 
 
 def _cell(cell) -> str:
     text = " ".join(str(cell or "").split())
-    if _LEADER.fullmatch(text):
+    # Checked by its characters, not a regular expression: a long cell of leaders would make one slow.
+    if text and not text.strip(_LEADERS + " "):
         return ""  # dot leaders printed between a row's name and its figures
-    return _TRAILING_LEADER.sub("", text)
+    kept = text.rstrip(_LEADERS + " ")
+    return kept if sum(char in _LEADERS for char in text[len(kept):]) >= 2 else text
 
 
 def clean(grid: list[list]) -> list[list[str]]:

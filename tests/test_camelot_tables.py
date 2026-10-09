@@ -126,3 +126,13 @@ def test_a_list_by_date_read_with_two_cells_run_together_is_not_added():
     )
     grid = [["Date Day", "Maya Chen", "Sam Ortiz", "Li Wei"], *[[f"{d} {w}", a, b, c] for d, w, a, b, c in days]]
     assert camelot_tables.combine(ours, [grid]) == ours
+
+
+def test_dot_leaders_are_dropped_and_a_long_cell_of_them_is_quick():
+    import time
+
+    assert camelot_tables.clean([["Revenue . . . . . .", ". . . .", "1,200"]])[0] == ["Revenue", "1,200"]
+    assert camelot_tables.clean([["Acme Inc.", "", "1,200"]])[0] == ["Acme Inc.", "1,200"], "one dot ends a name"
+    start = time.monotonic()
+    camelot_tables.clean([[". " * 16000 + "x", "1,200"]])
+    assert time.monotonic() - start < 1
