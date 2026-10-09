@@ -292,22 +292,27 @@ def register_workspace(
         }
 
     @api.get("/mail")
-    def mail(folder: str = "", q: str = "", importance: str = "", category: str = "", flag: str = "", done: int = 0, limit: int = 200):
+    def mail(
+        folder: str = "", q: str = "", importance: str = "", category: str = "", flag: str = "", done: int = 0, limit: int = 200, offset: int = 0
+    ):
+        # ``total`` is how many match; the page asks again with ``offset`` for the next ones.
         limit = max(1, min(limit, 500))
+        offset = max(0, offset)
         today = board_date()
         if folder:
             if folder not in FOLDER_LABELS:
                 raise HTTPException(status_code=404, detail="Unknown folder")
-            emails = store.list_emails(folder=folder, order="score", done=bool(done), q=q or None, limit=limit)
+            filters = dict(folder=folder, done=bool(done), q=q or None)
+            emails = store.list_emails(**filters, order="score", limit=limit, offset=offset)
             items = [mail_card(email, settings.tz, today, done=bool(done)) for email in emails]
-            return {"items": items, "done_count": store.done_count(folder), "title": FOLDER_LABELS[folder]}
+            total = store.count_emails(**filters)
+            return {"items": items, "total": total, "done_count": store.done_count(folder), "title": FOLDER_LABELS[folder]}
         if q:
             cost_codes.refresh_if_changed(store, settings)
-        emails = store.list_emails(
-            importance=importance or None, category=category or None, flag=flag or None, q=q[:200] or None, limit=limit
-        )
+        filters = dict(importance=importance or None, category=category or None, flag=flag or None, q=q[:200] or None)
+        emails = store.list_emails(**filters, limit=limit, offset=offset)
         items = [mail_card(email, settings.tz, today, done=store.is_done(email.id)) for email in emails]
-        return {"items": items, "title": "Search results" if q else "All mail"}
+        return {"items": items, "total": store.count_emails(**filters), "title": "Search results" if q else "All mail"}
 
     @api.get("/mail/{email_id}")
     def mail_detail(email_id: str):

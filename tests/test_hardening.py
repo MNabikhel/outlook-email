@@ -83,6 +83,12 @@ def test_host_parsing_and_lan_mode():
     assert "closedesk.corp" in allowed_hosts("0.0.0.0", "closedesk.corp, *")
 
 
+def test_extra_allowed_hosts_may_carry_a_port_or_scheme():
+    extra = allowed_hosts("0.0.0.0", "closedesk.lan:8765 http://desk.lan:8765/ 192.168.1.20:8765 fe80::1 [fd00::2]:8765")
+    assert {"closedesk.lan", "desk.lan", "192.168.1.20", "[fe80::1]", "[fd00::2]"} <= extra
+    assert not any("closedesk.lan:" in name or "http" in name for name in extra)
+
+
 def test_rebuilt_eml_keeps_a_comma_in_the_sender_name(settings: Settings, loaded: Store):
     email = loaded.get_email("demo-question")
     email.sender_name = "Chen, Maya"

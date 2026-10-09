@@ -200,3 +200,9 @@ def test_casablanca_is_listed_with_its_windows_standard_offset():
     winter = datetime(2026, 1, 15, tzinfo=timezone.utc)
     assert zone_option("Africa/Casablanca", winter) == "(UTC+01:00) Casablanca"
     assert not on_daylight_time(ZoneInfo("Africa/Casablanca"), winter)
+
+
+def test_the_pop_out_chat_window_carries_the_setup_zone(settings, store):
+    client = TestClient(create_app(settings, store))
+    page = client.get("/chat/window").text
+    assert 'data-tz="America/New_York"' in page

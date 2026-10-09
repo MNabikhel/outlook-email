@@ -172,7 +172,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nFiles: {settings.digest_dir}")
             return 0
         now = datetime.now(settings.tz)
-        as_of = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else local_today(settings.tz, now)
+        try:
+            as_of = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else local_today(settings.tz, now)
+        except ValueError:
+            print(f"Not a real date: {args.date}. Use YYYY-MM-DD, for example 2026-02-28.")
+            return 2
         payload = make_digest(store, settings, as_of=as_of, now=now)
         md_path, html_path = write_digest_files(payload, settings.digest_dir, as_of.isoformat())
         if args.json:

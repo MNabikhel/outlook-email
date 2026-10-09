@@ -142,7 +142,23 @@ export function listSpec(key) {
   };
 }
 
-export const loadList = (spec, signal) => getJSON(spec.api, { signal });
+/** Mail lists come 200 at a time; ``want`` asks for more of them, a page at a time. */
+export const MAIL_PAGE = 200;
+
+export async function loadList(spec, signal, want = MAIL_PAGE) {
+  if (spec.kind !== "mail") return getJSON(spec.api, { signal });
+  const sep = spec.api.includes("?") ? "&" : "?";
+  const data = await getJSON(`${spec.api}${sep}limit=${Math.min(want, 500)}`, { signal });
+  const seen = new Set(data.items.map((d) => d.id));
+  while (data.items.length < Math.min(want, data.total)) {
+    const next = await getJSON(`${spec.api}${sep}limit=${Math.min(want - data.items.length, 500)}&offset=${data.items.length}`, { signal });
+    if (!next.items.length) break;
+    // Mail filed away between two pages shifts the rest by one; show each email once.
+    data.items.push(...next.items.filter((d) => !seen.has(d.id) && seen.add(d.id)));
+    data.total = next.total;
+  }
+  return data;
+}
 
 /* ---------- Rows ---------- */
 

@@ -173,6 +173,12 @@ class Settings(BaseSettings):
             path = re.sub(r"^/api/v\d+(/chat|/models)?$", "", path)
         return f"{scheme}://{host}{path or '/v1'}"
 
+    @field_validator("embedding_base_url", mode="before")
+    @classmethod
+    def _embedding_url(cls, value) -> str:
+        """Read like the chat URL; empty still means use the chat server's."""
+        return cls._base_url(value) if str(value or "").strip() else ""
+
     @field_validator("timezone", mode="before")
     @classmethod
     def _timezone(cls, value) -> str:
