@@ -309,3 +309,27 @@ def test_wrong_european_sum_is_corrected_to_the_right_figure_not_spliced():
     review = check_numbers(answer, Grounding(["Invoice A €444,23. Invoice B €149,40."]))
     # Either flagged or corrected to €593,63; never "€593,25" (the euros of the sum glued to the old cents).
     assert "€593,25" not in review.text, (review.text, review.checks)
+
+
+def test_a_payment_listed_without_a_minus_is_not_added_to_the_total():
+    # "Less payment received" takes away from the total: the right $1,200.00 was "corrected" to $1,800.00.
+    answer = (
+        "Here's what Ridgeview still owes:\n- Invoice 1042: $1,000.00\n- Invoice 1043: $500.00\n"
+        "- Less payment received 10/2: $300.00\nTotal due: $1,200.00"
+    )
+    material = ["Invoice 1042 for $1,000.00 dated 9/12. Invoice 1043 for $500.00 dated 9/19. We received your payment of $300.00 on 10/2."]
+    assert review(answer, material=material, files=[]).text == answer
+
+
+def test_a_cell_is_corrected_on_the_sheet_the_sentence_names_or_given_its_sheet():
+    book = (
+        '[sheet "Summary" rows 1-3]\nA1 (Item): Revenue | B1 (Amount): 12,400.00\nA2 (Item): Expenses | B2 (Amount): 7,400.00\n'
+        'A3 (Item): Net | B3 (Amount): 5,000.00\n[sheet "Detail" rows 1-3]\nA1 (Line): Rent | B1 (Amount): 3,200.00\n'
+        "A2 (Line): Payroll | B2 (Amount): 4,200.00\nA3 (Line): Marketing | B3 (Amount): 900.00"
+    )
+    files = [("Q3 P&L.xlsx", book)]
+    # B2 of the Summary sheet is Expenses: the corrected cell says which sheet it is on.
+    named = review("Payroll was $4,200.00 (Summary sheet, cell B3).", material=[], files=files)
+    assert named.text == "Payroll was $4,200.00 (Summary sheet, cell Detail!B2).", named.checks
+    bare = review("Payroll was $4,200.00 (cell B3).", material=[], files=files)
+    assert bare.text == "Payroll was $4,200.00 (cell Detail!B2).", bare.checks
