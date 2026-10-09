@@ -966,6 +966,16 @@ class Store:
                 "SELECT COUNT(*) AS n FROM emails WHERE COALESCE(source, '') != 'demo'"
             ).fetchone()["n"]
 
+    def email_with_message_id(self, message_id: str, source: str) -> str | None:
+        """The id of the email from ``source`` with this Internet message ID, or None."""
+        if not message_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM emails WHERE internet_message_id = ? AND source = ? LIMIT 1", (message_id, source)
+            ).fetchone()
+        return row["id"] if row else None
+
     def clear_sample(self) -> int:
         """Remove the sample mailbox (and its digests) so real mail starts on a clean board."""
         sample = "SELECT id FROM emails WHERE source = 'demo'"

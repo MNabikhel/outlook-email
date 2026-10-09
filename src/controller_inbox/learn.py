@@ -171,6 +171,9 @@ def record_correction(
     email.importance_reasons = [f"You corrected this to {DOCUMENT_LABELS[corrected]}: {reason}"] + [
         item for item in learned.importance_reasons if not item.startswith("You corrected")
     ]
+    from controller_inbox.pipeline import _keep_task_status
+
+    stored = list(email.actions)
     email.actions = extract_actions(
         email_id=email.id,
         subject=email.subject,
@@ -182,6 +185,8 @@ def record_correction(
         as_of=today,
         received_on=received_on,
     )
+    # The tasks are written again for the new category; one the user already snoozed or finished keeps that.
+    email.actions = _keep_task_status(email.actions, stored)
     from controller_inbox.reading import assign_script_draft
 
     assign_script_draft(email)
