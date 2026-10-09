@@ -246,6 +246,26 @@ def regions(settings: Settings, data: bytes, filename: str, page: int) -> dict:
     return result
 
 
+def found_tables(settings: Settings, data: bytes, filename: str, page: int) -> list[dict] | None:
+    """Where the layout model sees tables on the page (``table_finder``), kept like the page's boxes; None while
+    the model isn't here, so the tables are found as before."""
+    from controller_inbox import table_finder
+
+    name = f"{file_hash(data)}-{page}-tables.json"
+    kept = _kept(settings, name)
+    if kept is not None:
+        try:
+            saved = json.loads(kept)
+            if saved.get("model") == table_finder.VERSION:
+                return saved["tables"]
+        except (ValueError, KeyError, TypeError):
+            pass
+    found = table_finder.find(settings, page_png(settings, data, filename, page))
+    if found is not None:
+        _keep(settings, name, json.dumps({"model": table_finder.VERSION, "tables": found}).encode())
+    return found
+
+
 # What the vision model read there ------------------------------------------------------------
 
 
@@ -307,10 +327,43 @@ def _rows(found: list[dict]) -> list[str]:
     return out
 
 
-def with_model(found: list[dict], model_text: str) -> list[dict]:
-    """Each box with what the vision model read there: {text, agrees}. ``agrees`` is True when the model's reading
-    has the box's figures (or a line close to its words), False when it has a figure the box doesn't, None when
-    it can't be told."""
+def _sure_lookup(sure: dict | None) -> tuple[dict, dict]:
+    """How sure the model was of each figure (by its size) and each cell (by its plain text). A figure or a cell
+    written more than once takes its surest writing: the box is one of them, and a doubt about another place is
+    that place's."""
+    figures: dict = {}
+    cells: dict[str, float] = {}
+    for written, chance in (sure or {}).get("figures", []):
+        for value in vision.figures(written):
+            figures[abs(value)] = max(figures.get(abs(value), 0.0), float(chance))
+    for written, chance in (sure or {}).get("cells", []):
+        key = _plain(written)
+        if key:
+            cells[key] = max(cells.get(key, 0.0), float(chance))
+    return figures, cells
+
+
+def _sure_of(text: str | None, box_figures: set, agrees: bool | None, sure_figures: dict, sure_cells: dict) -> float | None:
+    """How sure the model was of what it read in this box (0 to 1), or None when it didn't say or read something
+    else there."""
+    if agrees is False or not text:
+        return None
+    if box_figures:
+        chances = [sure_figures[value] for value in box_figures if value in sure_figures]
+        return round(min(chances), 3) if len(chances) == len(box_figures) else None
+    parts = [_plain(part) for part in text.split(" | ")]
+    chances = [sure_cells[part] for part in parts if part in sure_cells]
+    if not chances and _plain(text) in sure_cells:
+        chances = [sure_cells[_plain(text)]]
+    return round(min(chances), 3) if chances else None
+
+
+def with_model(found: list[dict], model_text: str, sure: dict | None = None) -> list[dict]:
+    """Each box with what the vision model read there: {text, agrees, sure}. ``agrees`` is True when the model's
+    reading has the box's figures (or a line close to its words), False when it has a figure the box doesn't, None
+    when it can't be told. ``sure``: how sure the model was of what it wrote there (0 to 1), from ``sure`` as kept
+    with the reading (``vision.token_confidence``), or None when the server didn't say."""
+    sure_figures, sure_cells = _sure_lookup(sure)
     lines, cells = _model_lines(model_text)
     # By size only: a phone number's "(509)" reads as a negative figure where its closing bracket touches the digits.
     known = {abs(value) for value in vision.figures("\n".join(lines))}
@@ -331,5 +384,6 @@ def with_model(found: list[dict], model_text: str) -> list[dict]:
         else:
             text, likeness = _best(region["text"], cells + lines, NEAR)
             agrees = True if likeness >= AGREE else None
-        out.append({**region, "model": {"text": text, "agrees": agrees}})
+        chance = _sure_of(text, figures, agrees, sure_figures, sure_cells) if sure else None
+        out.append({**region, "model": {"text": text, "agrees": agrees, "sure": chance}})
     return out

@@ -693,6 +693,7 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 :is(.pv-box, .pv-swatch, .pv-tip-tag).ok { --tone: var(--ok); }
 :is(.pv-box, .pv-swatch, .pv-tip-tag).check { --tone: var(--imp-high); }
 :is(.pv-box, .pv-swatch, .pv-tip-tag).differs { --tone: var(--danger); }
+:is(.pv-box, .pv-swatch, .pv-tip-tag).fixed { --tone: var(--accent); }
 .pv-tip {
   position: fixed; z-index: 60;
   max-width: min(380px, calc(100vw - 16px));
@@ -704,6 +705,19 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
   pointer-events: none;
 }
 .pv-tip[hidden] { display: none; }
+.pv-tip.pinned { pointer-events: auto; width: min(360px, calc(100vw - 16px)); }
+.pv-tip-hint { margin: 6px 0 0; font-size: 11.5px; }
+.pv-fix { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); display: grid; gap: 8px; line-height: 1.4; }
+.pv-fix-h { display: grid; gap: 5px; font-weight: 650; color: var(--text-2); }
+.pv-fix-input { width: 100%; box-sizing: border-box; padding: 6px 8px; font: 13px/1.4 var(--mono); color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 6px; }
+.pv-fix-input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pv-fix-btns { display: flex; gap: 6px; flex-wrap: wrap; }
+.pv-fix-note { margin: 0; font-size: 11.5px; }
+.pv-panel-acts { display: inline-flex; align-items: center; gap: 4px; }
+.pv-mark[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.pv-sheet.drawing { cursor: crosshair; touch-action: none; }
+.pv-sheet.drawing .pv-box, .pv-sheet.drawing .pv-tbl { pointer-events: none; }
+.pv-rubber { position: absolute; z-index: 4; border: 2px dashed var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); pointer-events: none; }
 .pv-tip-row { display: flex; align-items: center; gap: 8px; }
 .pv-tip-row b { font-weight: 650; color: var(--text-2); }
 .pv-tip-model { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }

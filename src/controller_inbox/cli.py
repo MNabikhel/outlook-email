@@ -77,6 +77,11 @@ def main(argv: list[str] | None = None) -> int:
     export = sub.add_parser("export", help="Write open action items to CSV (stdout).")
     export.add_argument("--output", default=None)
 
+    export_fixes = sub.add_parser(
+        "export-fixes", help="Write the pages you fixed in the Page tab, with your fixes, as training examples for a model."
+    )
+    export_fixes.add_argument("folder", nargs="?", default="", help="Where to write them (default: a folder in the data folder).")
+
     status = sub.add_parser("status", help="Show local database counts and connection state.")
     status.add_argument("--json", action="store_true")
 
@@ -263,6 +268,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Wrote {args.output}")
         else:
             sys.stdout.write(text)
+        return 0
+
+    if args.cmd == "export-fixes":
+        from controller_inbox import fixes
+
+        folder = Path(args.folder) if args.folder else settings.data_dir / "fixes-export"
+        counts = fixes.export(store, settings, folder)
+        if not counts["pages"]:
+            print("No fixes to export yet. Fix a box or mark a table in an attachment's Page tab first.")
+            return 0
+        print(f"Wrote {counts['pages']} pages, {counts['tables']} tables and {counts['boxes']} fixed boxes to {folder}")
+        print("Its README says what each file is. Nothing was trained on this computer.")
         return 0
 
     if args.cmd == "status":

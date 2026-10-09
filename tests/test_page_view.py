@@ -200,11 +200,12 @@ def test_each_box_says_whether_the_vision_model_read_the_same(client, store, fil
     view = _regions(client, invoice, "invoice.pdf")
     assert view["model_name"] == "OvisOCR2"
     found = {region["text"]: region["model"] for region in view["regions"]}
-    assert found["1,250.00"] == {"text": "Steel beams | 4 | 1250.00", "agrees": True}
-    assert found["310.50"] == {"text": "Bolts M12 | 200 | 301.50", "agrees": False}
+    # The server didn't say how sure the model was: "sure" is None throughout.
+    assert found["1,250.00"] == {"text": "Steel beams | 4 | 1250.00", "agrees": True, "sure": None}
+    assert found["310.50"] == {"text": "Bolts M12 | 200 | 301.50", "agrees": False, "sure": None}
     assert found["1,560.50"]["agrees"] is True
-    assert found["Steel beams"] == {"text": "Steel beams", "agrees": True}
-    assert found["Harbor Steel LLC"] == {"text": None, "agrees": None}, "not in its reading"
+    assert found["Steel beams"] == {"text": "Steel beams", "agrees": True, "sure": None}
+    assert found["Harbor Steel LLC"] == {"text": None, "agrees": None, "sure": None}, "not in its reading"
     # The other page wasn't read by the model.
     assert _regions(client, invoice, "invoice.pdf", 2)["regions"][0]["model"] is None
 

@@ -403,6 +403,8 @@ _RETRYABLE = {400, 404, 415, 422, 500, 501}
 _REFUSES = {400, 415, 422, 501}
 _reasoning_seen: set[str] = set()
 _effort_rejected: set[str] = set()
+# Models whose server refused ``logprobs`` (how sure the model was of each word it wrote): asked without it from then on.
+_logprobs_rejected: set[str] = set()
 
 
 @dataclass
@@ -830,6 +832,7 @@ def stream_text(
     finished: dict | None = None,
     sampling: dict | None = None,
     model: str | None = None,
+    token_probs: list | None = None,
 ):
     """Yield the answer as it is written. Servers that ignore ``stream`` send it in one piece.
 
@@ -837,13 +840,18 @@ def stream_text(
     the model may go quiet (looking at a picture first can take minutes on a laptop); ``temperature``: other than
     the usual 0.2; ``finished``: given a dict, its "reason" is set to why the reply ended ("length": cut off) and
     "thought" to whether the model reasoned first; ``sampling``: more settings sent as they are (top_p, top_k,
-    presence_penalty); ``model``: another model than the chat one (LM Studio loads it when asked).
+    presence_penalty); ``model``: another model than the chat one (LM Studio loads it when asked); ``token_probs``:
+    given a list, filled with (piece of text, log probability) for each token of the answer, when the server sends
+    them (llama.cpp does; a server that doesn't leaves it empty).
     """
     model, effort, budget = _chat_plan(settings, max_tokens, model=model)
     for _attempt in range(2):
         reply = Reply(content="")
+        if token_probs is not None:
+            token_probs.clear()
         for piece in _stream_once(
-            settings, messages, budget, effort, reply, wait=wait, temperature=temperature, sampling=sampling, model=model
+            settings, messages, budget, effort, reply, wait=wait, temperature=temperature, sampling=sampling, model=model,
+            token_probs=token_probs,
         ):
             reply.content += piece
             yield piece
@@ -870,6 +878,7 @@ def _stream_once(
     temperature: float | None = None,
     sampling: dict | None = None,
     model: str | None = None,
+    token_probs: list | None = None,
 ):
     """``rejected_effort`` names the model whose ``reasoning_effort`` the last try sent; it is
     remembered as refusing it only if this try, without it, is accepted."""
@@ -880,11 +889,20 @@ def _stream_once(
         payload["temperature"] = temperature
     if sampling:
         payload.update(sampling)
+    asks_probs = token_probs is not None and str(payload.get("model")) not in _logprobs_rejected
+    if asks_probs:
+        # Each token's own chance; llama.cpp lists 20 runners-up for each unless told, which only makes the reply big.
+        payload["logprobs"], payload["top_logprobs"] = True, 1
     # Nothing comes until the model has read the whole prompt (and LM Studio has loaded it, if it wasn't), so a laptop
     # reading a long prompt isn't taken for a model that stopped.
     timeout = httpx.Timeout(max(settings.llm_timeout, CHAT_TIMEOUT, wait or 0.0), connect=5.0)
+    without_probs = False
     with httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
-        if effort and response.status_code in _RETRYABLE:
+        if asks_probs and response.status_code in _REFUSES:
+            # A server that doesn't know ``logprobs``: the reading matters, how sure it was is a nice-to-have.
+            rejected = False
+            without_probs = True
+        elif effort and response.status_code in _RETRYABLE:
             rejected = True
             refused = response.status_code in _REFUSES
         else:
@@ -894,17 +912,38 @@ def _stream_once(
             _raise_for(response)
             if rejected_effort:
                 _effort_rejected.add(rejected_effort)
-            yield from _stream_pieces(response, reply)
-    if rejected:
+            yield from _stream_pieces(response, reply, token_probs if asks_probs else None)
+    if without_probs:
+        _logprobs_rejected.add(str(payload.get("model")))
+        yield from _stream_once(
+            settings, messages, budget, effort, reply,
+            rejected_effort=rejected_effort, wait=wait, temperature=temperature, sampling=sampling, model=model,
+        )
+    elif rejected:
         # Only a refusal is remembered; a busy server (500) is just tried again without the effort.
         yield from _stream_once(
             settings, messages, budget, None, reply,
             rejected_effort=str(payload.get("model")) if refused else "", wait=wait, temperature=temperature, sampling=sampling,
-            model=model,
+            model=model, token_probs=token_probs,
         )
 
 
-def _stream_pieces(response: httpx.Response, reply: Reply):
+def _token_probs(choice: dict, into: list | None) -> None:
+    """Add the tokens a reply's choice carries with their log probabilities (OpenAI's ``logprobs.content``) to
+    ``into``; a choice without them adds nothing."""
+    if into is None:
+        return
+    found = choice.get("logprobs")
+    items = found.get("content") if isinstance(found, dict) else None
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        token, logprob = item.get("token"), item.get("logprob")
+        if isinstance(token, str) and isinstance(logprob, (int, float)) and not isinstance(logprob, bool):
+            into.append((token, float(logprob)))
+
+
+def _stream_pieces(response: httpx.Response, reply: Reply, token_probs: list | None = None):
     if "text/event-stream" not in response.headers.get("content-type", ""):
         try:
             data = json.loads(response.read() or b"{}")
@@ -913,6 +952,8 @@ def _stream_pieces(response: httpx.Response, reply: Reply):
         whole = _reply_from(data)
         reply.reasoning, reply.finish = whole.reasoning, whole.finish
         if whole.content:
+            if not whole.reasoning:
+                _token_probs(_first_choice(data), token_probs)
             yield whole.content
         return
     thinking = ThinkFilter()
@@ -942,6 +983,8 @@ def _stream_pieces(response: httpx.Response, reply: Reply):
         if thinking.saw and not reply.reasoning:
             reply.reasoning = "<think>"
         if piece:
+            # Only the answer's tokens: not its reasoning, which comes in its own field or between think tags.
+            _token_probs(choice, token_probs)
             yield piece
     rest = thinking.flush()
     if rest:
