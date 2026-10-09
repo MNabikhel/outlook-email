@@ -384,16 +384,144 @@ def _ocr_tables(found: list[dict]) -> list[dict]:
     return out
 
 
-def page_tables(found: list[dict], source: str, text: str, page: int, model_text: str | None) -> list[dict]:
+def _inside(region: dict, box: dict) -> bool:
+    cx, cy = region["x"] + region["w"] / 2, region["y"] + region["h"] / 2
+    return box["x"] <= cx <= box["x"] + box["w"] and box["y"] <= cy <= box["y"] + box["h"]
+
+
+def _overlap(a: dict, b: dict) -> float:
+    """How much two boxes cover the same place: shared area over their combined area, 0 to 1."""
+    x0, y0 = max(a["x"], b["x"]), max(a["y"], b["y"])
+    x1, y1 = min(a["x"] + a["w"], b["x"] + b["w"]), min(a["y"] + a["h"], b["y"] + b["h"])
+    shared = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    whole = a["w"] * a["h"] + b["w"] * b["h"] - shared
+    return shared / whole if whole > 0 else 0.0
+
+
+def _within(small: dict, big: dict) -> float:
+    """How much of ``small`` lies inside ``big``, 0 to 1."""
+    x0, y0 = max(small["x"], big["x"]), max(small["y"], big["y"])
+    x1, y1 = min(small["x"] + small["w"], big["x"] + big["w"]), min(small["y"] + small["h"], big["y"] + big["h"])
+    area = small["w"] * small["h"]
+    return max(0.0, x1 - x0) * max(0.0, y1 - y0) / area if area > 0 else 0.0
+
+
+def table_from_box(found: list[dict], box: dict, number: int, label: str = "") -> dict | None:
+    """A table made from the boxes inside ``box`` (a table the layout model saw, or one drawn by the user): lines
+    down the page, columns where the boxes line up across the lines, the first line its headings when it holds no
+    figures. Two boxes in one column of a line are one cell, pointing at the first. None when nothing was read
+    inside."""
+    inside = [index for index, region in enumerate(found) if _inside(region, box)]
+    if not inside:
+        return None
+    lines = [[inside[i] for i in line] for line in _lines([found[index] for index in inside])]
+    # Columns come from the fullest lines (the rows): a totals label printed across two columns would join them.
+    most = max(len(line) for line in lines)
+    core = [line for line in lines if len(line) == most]
+    if len(core) < 2:
+        core = [line for line in lines if len(line) >= most - 1]
+    spans = sorted((found[i]["x"], found[i]["x"] + found[i]["w"]) for line in core for i in line)
+    bands: list[list[float]] = []
+    for x0, x1 in spans:
+        if bands and x0 <= bands[-1][1]:
+            bands[-1][1] = max(bands[-1][1], x1)
+        else:
+            bands.append([x0, x1])
+
+    def band_of(index: int) -> int:
+        """The column a box is in: the one it overlaps most, else (between columns) the nearest one."""
+        region = found[index]
+        left, right = region["x"], region["x"] + region["w"]
+        return max(range(len(bands)), key=lambda b: min(right, bands[b][1]) - max(left, bands[b][0]))
+
+    grid: list[list[int | None]] = []
+    texts: list[list[str]] = []
+    for line in lines:
+        cells: list[int | None] = [None] * len(bands)
+        words = [""] * len(bands)
+        for index in line:
+            band = band_of(index)
+            cells[band] = index if cells[band] is None else cells[band]
+            words[band] = f"{words[band]} {found[index]['text']}".strip()
+        grid.append(cells)
+        texts.append(words)
+    columns, header = [""] * len(bands), [None] * len(bands)
+    if len(grid) > 1 and not any(_figures(cell) for cell in texts[0]):
+        columns, header = texts[0], grid[0]
+        texts, grid = texts[1:], grid[1:]
+    drawn = _box(found, [*header, *(i for row in grid for i in row)]) or {key: round(box[key], 5) for key in ("x", "y", "w", "h")}
+    return {
+        "id": f"t{number}",
+        "label": label or _label(columns, texts, "", number),
+        "box": drawn,
+        "columns": columns,
+        "column_regions": header,
+        "rows": [[{"text": text, "region": index} for text, index in zip(row, where)] for row, where in zip(texts, grid)],
+    }
+
+
+def _grown(found: list[dict], box: dict) -> dict:
+    """The layout model's box, taken down over the lines printed close under it inside its width that hold a figure:
+    a table's last total, which its box can stop just short of."""
+    inside = [region for region in found if _inside(region, box)]
+    if not inside:
+        return box
+    heights = sorted(region["h"] for region in inside)
+    step = 2.2 * heights[len(heights) // 2]
+    bottom = max(region["y"] + region["h"] for region in inside)
+    grown = dict(box)
+    below = sorted((region for region in found if not _inside(region, box) and region["y"] > bottom - 0.002), key=_middle)
+    while below:
+        first = below[0]
+        line = [region for region in below if _same_line(first, region)]
+        within = all(box["x"] - 0.01 <= region["x"] and region["x"] + region["w"] <= box["x"] + box["w"] + 0.01 for region in line)
+        if first["y"] - bottom > step or not within or not any(_figures(region["text"]) for region in line):
+            break
+        bottom = max(region["y"] + region["h"] for region in line)
+        grown["h"] = min(bottom + 0.004, 1.0) - grown["y"]
+        below = [region for region in below if region not in line]
+    return grown
+
+
+def _seen_tables(found: list[dict], seen: list[dict], already: list[dict]) -> list[dict]:
+    """Tables the layout model saw that aren't one of ``already``: each made from the boxes inside it, when it has
+    at least two lines of at least two cells (a heading or a paragraph it took for a table isn't shown)."""
+    out: list[dict] = []
+    for box in seen:
+        if any(table.get("box") and (_overlap(table["box"], box) >= 0.3 or _within(table["box"], box) >= 0.6 or _within(box, table["box"]) >= 0.6) for table in [*already, *out]):
+            continue
+        made = table_from_box(found, _grown(found, box), len(already) + len(out) + 1)
+        if made is None:
+            continue
+        full = [row for row in made["rows"] if sum(1 for cell in row if cell["text"]) >= 2]
+        if len(full) + (1 if any(made["columns"]) else 0) < 2 or len(made["columns"]) < 2:
+            continue
+        made["found_by"] = "layout"
+        out.append(made)
+        if len(already) + len(out) >= MAX_TABLES:
+            break
+    return out
+
+
+def page_tables(found: list[dict], source: str, text: str, page: int, model_text: str | None, seen: list[dict] | None = None) -> list[dict]:
     """The page's tables: [{id, label, box, columns, column_regions, rows: [[{text, region}]]}], ``region`` being the
-    index of the cell's box in ``found`` (or None), ``box`` the table's outline (fractions of the page)."""
+    index of the cell's box in ``found`` (or None), ``box`` the table's outline (fractions of the page). ``seen``:
+    where the layout model saw tables (``table_finder``), or None without it. A table read from the PDF's own text or
+    by the vision model comes first; one the layout model saw that none of those is added from the boxes inside it.
+    On a scan the vision model hasn't read, without the layout model, a table is only where OCR's boxes line up."""
     if not found:
         return []
     if source == "text":
-        return _text_tables(text, page, found)
-    if model_text:
-        return _model_tables(model_text, found)
-    return _ocr_tables(found)
+        tables_ = _text_tables(text, page, found)
+    elif model_text:
+        tables_ = _model_tables(model_text, found)
+    elif seen is None:
+        return _ocr_tables(found)
+    else:
+        tables_ = []
+    if seen:
+        tables_ += _seen_tables(found, seen, tables_)
+    return tables_
 
 
 # Key details ------------------------------------------------------------------------------------

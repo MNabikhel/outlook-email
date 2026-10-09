@@ -11,6 +11,8 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
+import re
 import time
 
 import httpx
@@ -1806,3 +1808,78 @@ def test_a_signature_line_or_dot_leader_is_not_a_loop(settings, monkeypatch):
     settings.llm = None
     _serve(monkeypatch, ByLine(page=SIGNED))
     assert "5,990.00\n\n| Total due" in vision.transcribe(settings, b"png"), "read to the end of the page"
+
+
+# How sure the model was --------------------------------------------------------------------------------------
+
+
+class SureVisionServer(FakeVisionServer):
+    """llama.cpp: each piece of the reading comes with its tokens' log probabilities when asked for them. The digit
+    "8" of 18,400 is a guess (a 40% chance); everything else is near certain. ``refuses`` plays an older server
+    that answers 400 to ``logprobs``."""
+
+    def __init__(self, page: str, *, refuses: bool = False):
+        super().__init__(page)
+        self.refuses = refuses
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/v1/chat/completions":
+            return super().__call__(request)
+        payload = json.loads(request.content)
+        self.calls.append(payload)
+        if payload.get("logprobs") and self.refuses:
+            return httpx.Response(400, json={"error": "unknown parameter: logprobs"})
+        tokens = re.findall(r"\d|[^\d]+", self.page)
+        events = []
+        for token in tokens:
+            chance = 0.4 if token == "8" else 0.999
+            event = {"choices": [{"delta": {"content": token}}]}
+            if payload.get("logprobs"):
+                event["choices"][0]["logprobs"] = {"content": [{"token": token, "logprob": math.log(chance)}]}
+            events.append(event)
+        events.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+
+SURE_PAGE = "# Balance sheet\n\n| Line | Amount |\n|---|---|\n| Cash | 12,500.00 |\n| Receivables | 18,400.00 |\n| Account no. | 123456789012 |\n"
+
+
+def test_how_sure_the_model_was_of_each_figure_is_kept_with_its_reading(store, settings, monkeypatch, scan):
+    server = SureVisionServer(SURE_PAGE)
+    settings.llm = None
+    _serve(monkeypatch, server)
+    result = _read(store, settings, scan.id)
+    assert result.pages == 1
+    assert server.calls[-1]["logprobs"] is True and server.calls[-1]["top_logprobs"] == 1
+    reading = store.page_readings(scan.attachments[0].id)[1]
+    sure = json.loads(reading["comparison"])["sure"]
+    figures = dict(sure["figures"])
+    assert figures["12,500.00"] > 0.99
+    assert figures["18,400.00"] == pytest.approx(0.4, abs=0.001), "a figure is as sure as its least sure digit"
+    assert dict(sure["cells"])["Receivables"] > 0.99
+    # The account number is masked in the reading, so how sure the model was of it isn't kept either.
+    assert "123456789012" not in reading["comparison"] and "123456789012" not in reading["model_text"]
+
+
+def test_a_server_that_refuses_logprobs_still_reads_the_page(store, settings, monkeypatch, scan):
+    server = SureVisionServer(SURE_PAGE, refuses=True)
+    settings.llm = None
+    _serve(monkeypatch, server)
+    local_llm._logprobs_rejected.clear()
+    assert _read(store, settings, scan.id).pages == 1
+    reading = store.page_readings(scan.attachments[0].id)[1]
+    assert "18,400.00" in reading["model_text"] and json.loads(reading["comparison"])["sure"] == {}
+    assert [call.get("logprobs") for call in server.calls if call.get("messages")][-2:] == [True, None]
+    # Not asked again: the next page goes straight to the server without it.
+    server.calls.clear()
+    _read(store, settings, scan.id)
+    assert all("logprobs" not in call for call in server.calls if call.get("messages"))
+    local_llm._logprobs_rejected.clear()
+
+
+def test_token_confidence_splits_html_and_markdown_tables_into_cells():
+    tokens = [("<table><tr><td>", 0.0), ("Fuel", -0.01), (" surcharge", -0.02), ("</td><td>", 0.0), ("2,1", -0.01), ("9", -1.2), ("9.48", -0.01), ("</td></tr></table>", 0.0)]
+    sure = vision.token_confidence(tokens)
+    assert dict(sure["cells"])["Fuel surcharge"] == pytest.approx(math.exp(-0.02), abs=1e-3)
+    assert dict(sure["figures"])["2,199.48"] == pytest.approx(math.exp(-1.2), abs=1e-3)

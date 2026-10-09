@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -222,6 +223,28 @@ CREATE TABLE IF NOT EXISTS page_readings (
     PRIMARY KEY (attachment_id, page)
 );
 
+-- What the user fixed on a file's page (the Page tab): a box read wrong, a table missed, an outline that isn't a
+-- table. Applied to that file at once, and learnt for later files from the same sender (fixes.py).
+CREATE TABLE IF NOT EXISTS page_fixes (
+    id TEXT PRIMARY KEY,
+    attachment_id TEXT NOT NULL,
+    sha256 TEXT NOT NULL DEFAULT '',
+    page INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    x REAL NOT NULL DEFAULT 0,
+    y REAL NOT NULL DEFAULT 0,
+    w REAL NOT NULL DEFAULT 0,
+    h REAL NOT NULL DEFAULT 0,
+    was TEXT NOT NULL DEFAULT '',
+    now TEXT NOT NULL DEFAULT '',
+    anchor TEXT NOT NULL DEFAULT '{}',
+    sender TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_page_fixes_attachment ON page_fixes(attachment_id);
+CREATE INDEX IF NOT EXISTS idx_page_fixes_sender ON page_fixes(sender);
+
 -- A page the vision model couldn't read (the server failed or timed out): after a second failure on the same
 -- file it is left for the user to ask for, so one bad page doesn't stop every overnight run.
 CREATE TABLE IF NOT EXISTS page_failures (
@@ -312,6 +335,7 @@ class Store:
             conn.execute(f"DELETE FROM file_summaries WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
             conn.execute(f"DELETE FROM page_readings WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
             conn.execute(f"DELETE FROM page_failures WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
+            conn.execute(f"DELETE FROM page_fixes WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
             conn.execute(f"DELETE FROM embeddings WHERE email_id IN ({mail})")
             conn.execute(f"DELETE FROM fraud_log WHERE email_id IN ({mail})")
             conn.execute(f"DELETE FROM findings WHERE email_id IN ({mail})")
@@ -467,7 +491,8 @@ class Store:
                 (email_id,),
             ).fetchall()
             readings = _readings_for(conn, [item["id"] for item in attachments])
-        return _email_from_rows(row, attachments, actions, readings)
+            fixes = _fixes_for(conn, [item["id"] for item in attachments])
+        return _email_from_rows(row, attachments, actions, readings, fixes)
 
     def list_emails(
         self,
@@ -545,7 +570,8 @@ class Store:
                     (row["id"],),
                 ).fetchall()
                 readings = _readings_for(conn, [item["id"] for item in attachments]) if attachments else {}
-                email = _email_from_rows(row, attachments, actions, readings)
+                fixes = _fixes_for(conn, [item["id"] for item in attachments]) if attachments else {}
+                email = _email_from_rows(row, attachments, actions, readings, fixes)
                 if flag and flag not in email.flags:
                     continue
                 out.append(email)
@@ -925,6 +951,7 @@ class Store:
             conn.execute(f"DELETE FROM fraud_log WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM page_readings WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({sample}))")
             conn.execute(f"DELETE FROM page_failures WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({sample}))")
+            conn.execute(f"DELETE FROM page_fixes WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({sample}))")
             conn.execute(f"DELETE FROM attachments WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM action_items WHERE email_id IN ({sample})")
             conn.execute(f"DELETE FROM corrections WHERE email_id IN ({sample})")
@@ -1006,6 +1033,71 @@ class Store:
             for row in rows
             if (not sha256 or row["sha256"] in {"", sha256}) and (model is None or row["model"] in {"", model})
         }
+
+    # What the user fixed on a file's page (fixes.py) ---------------------------------------------
+
+    def add_page_fix(self, row: dict[str, Any]) -> str:
+        """Keeps a fix: {attachment_id, sha256, page, kind, x, y, w, h, was, now, anchor, sender}. Fixing a box
+        again replaces the earlier fix of the same kind there. Returns its id."""
+        fix_id = uuid.uuid4().hex
+        with self.connect() as conn:
+            for old in conn.execute(
+                "SELECT id, x, y, w, h FROM page_fixes WHERE attachment_id = ? AND page = ? AND kind = ?",
+                (row["attachment_id"], int(row["page"]), row["kind"]),
+            ).fetchall():
+                if abs(old["x"] - row["x"]) < 1e-4 and abs(old["y"] - row["y"]) < 1e-4 and abs(old["w"] - row["w"]) < 1e-4 and abs(old["h"] - row["h"]) < 1e-4:
+                    conn.execute("DELETE FROM page_fixes WHERE id = ?", (old["id"],))
+            conn.execute(
+                """
+                INSERT INTO page_fixes (id, attachment_id, sha256, page, kind, x, y, w, h, was, now, anchor, sender, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    fix_id, row["attachment_id"], row.get("sha256") or "", int(row["page"]), row["kind"],
+                    float(row["x"]), float(row["y"]), float(row["w"]), float(row["h"]),
+                    _text(row.get("was") or ""), _text(row.get("now") or ""), json.dumps(row.get("anchor") or {}),
+                    (row.get("sender") or "").strip().lower(), _now(),
+                ),
+            )
+        return fix_id
+
+    def remove_page_fix(self, attachment_id: str, fix_id: str) -> bool:
+        with self.connect() as conn:
+            return conn.execute("DELETE FROM page_fixes WHERE id = ? AND attachment_id = ?", (fix_id, attachment_id)).rowcount > 0
+
+    def page_fixes(self, attachment_id: str, sha256: str = "", page: int | None = None) -> list[dict[str, Any]]:
+        """The fixes made on this file (the file with this SHA-256, when given), oldest first."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM page_fixes WHERE attachment_id = ? ORDER BY created_at, rowid", (attachment_id,)
+            ).fetchall()
+        return [
+            _fix_row(row)
+            for row in rows
+            if (not sha256 or row["sha256"] in {"", sha256}) and (page is None or int(row["page"]) == page)
+        ]
+
+    def sender_fixes(self, sender: str, *, not_attachment: str = "", limit: int = 500) -> list[dict[str, Any]]:
+        """The fixes made on other files from this sender, newest first: what CloseDesk learnt about their files."""
+        sender = (sender or "").strip().lower()
+        if not sender:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM page_fixes WHERE sender = ? AND attachment_id != ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                (sender, not_attachment, limit),
+            ).fetchall()
+        return [_fix_row(row) for row in rows]
+
+    def email_for_attachment(self, attachment_id: str) -> EmailRecord | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT email_id FROM attachments WHERE id = ?", (attachment_id,)).fetchone()
+        return self.get_email(row["email_id"]) if row else None
+
+    def all_page_fixes(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM page_fixes ORDER BY created_at, rowid").fetchall()
+        return [_fix_row(row) for row in rows]
 
     def stored_text(self, attachment_id: str) -> str | None:
         """The attachment's text as stored (an email's file, or a file added to a conversation: "chat-<id>:<name>"),
@@ -1317,9 +1409,10 @@ class Store:
                 (_json_contains("fraud_cleared"), _json_contains("fraud_risk")),
             ).fetchall()
             readings = _readings_for(conn, [row["id"] for row in seen])
+            fixes = _fixes_for(conn, [row["id"] for row in seen])
         found = [(row["importance_score"], row["received_at"] or "", row["email_id"], row["id"]) for row in rows]
         for row in seen:
-            text = shown_text(row["extracted_text"] or "", readings.get(row["id"]), row["sha256"] or "")
+            text = shown_text(row["extracted_text"] or "", readings.get(row["id"]), row["sha256"] or "", fixes.get(row["id"]))
             key = f"{row['sha256']}:{len(text)}"
             if len(text) >= min_chars and (row["text_key"] is None or row["text_key"] != key or (row["summary"] == "" and (row["model"] or "") != model)):
                 found.append((row["importance_score"], row["received_at"] or "", row["email_id"], row["id"]))
@@ -1560,6 +1653,26 @@ def _readings_for(conn: sqlite3.Connection, attachment_ids: list[str]) -> dict[s
     return out
 
 
+def _fixes_for(conn: sqlite3.Connection, attachment_ids: list[str]) -> dict[str, list[dict]]:
+    """Attachment id -> the fixes made on its pages, oldest first."""
+    if not attachment_ids:
+        return {}
+    marks = ", ".join("?" for _ in attachment_ids)
+    rows = conn.execute(
+        f"SELECT * FROM page_fixes WHERE attachment_id IN ({marks}) AND kind = 'text' ORDER BY created_at, rowid", attachment_ids
+    ).fetchall()
+    out: dict[str, list[dict]] = {}
+    for row in rows:
+        out.setdefault(row["attachment_id"], []).append(_fix_row(row))
+    return out
+
+
+def _fix_row(row: sqlite3.Row) -> dict[str, Any]:
+    out = {key: row[key] for key in row.keys()}
+    out["anchor"] = _loads(row["anchor"], {})
+    return out
+
+
 def _same_file(readings: dict[int, dict], sha256: str) -> dict[int, dict]:
     """The readings of the file with this SHA-256 (all of them when it isn't known)."""
     if not sha256:
@@ -1567,14 +1680,20 @@ def _same_file(readings: dict[int, dict], sha256: str) -> dict[int, dict]:
     return {page: row for page, row in readings.items() if not row.get("sha256") or row["sha256"] == sha256}
 
 
-def shown_text(text: str, readings: dict[int, dict] | None, sha256: str = "") -> str:
-    """The attachment's text with the pages the vision model read shown as vision.py writes them."""
+def shown_text(text: str, readings: dict[int, dict] | None, sha256: str = "", fixes: list[dict] | None = None) -> str:
+    """The attachment's text with the pages the vision model read shown as vision.py writes them, and the boxes the
+    user fixed on its pages put right (fixes.py)."""
     readings = _same_file(readings or {}, sha256)
-    if not readings:
-        return text
-    from controller_inbox import vision
+    fixes = [fix for fix in fixes or [] if not sha256 or fix.get("sha256") in {"", sha256}]
+    if readings:
+        from controller_inbox import vision
 
-    return vision.shown_text(text, readings)
+        text = vision.shown_text(text, readings)
+    if fixes:
+        from controller_inbox import fixes as page_fixes
+
+        text = page_fixes.apply_to_text(text, fixes)
+    return text
 
 
 def _email_from_rows(
@@ -1582,8 +1701,10 @@ def _email_from_rows(
     attachment_rows: list[sqlite3.Row],
     action_rows: list[sqlite3.Row],
     readings: dict[str, dict[int, dict]] | None = None,
+    fixes: dict[str, list[dict]] | None = None,
 ) -> EmailRecord:
     readings = readings or {}
+    fixes = fixes or {}
     attachments = [
         AttachmentRecord(
             id=item["id"],
@@ -1592,7 +1713,7 @@ def _email_from_rows(
             content_type=item["content_type"],
             size_bytes=item["size_bytes"] or 0,
             sha256=item["sha256"],
-            extracted_text=shown_text(item["extracted_text"] or "", readings.get(item["id"]), item["sha256"] or ""),
+            extracted_text=shown_text(item["extracted_text"] or "", readings.get(item["id"]), item["sha256"] or "", fixes.get(item["id"])),
             document_type=DocumentType(item["document_type"]),
             document_confidence=item["document_confidence"] or 0,
             extracted_fields=ExtractedFields.from_dict(_loads(item["extracted_fields"], {})),
