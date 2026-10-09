@@ -1125,6 +1125,8 @@ def _worked(
             ranked = sorted(values, key=lambda item: item[1], reverse=op == "max")
             what = "Largest" if op == "max" else "Smallest"
             lines.append(f'- {what} "{label}"{where}{reading}: {_short(ranked[0][0])} — {ranked[0][0].value(label)}')
+            # Its whole row, as the table has it: the row may be in a part of the file not shown.
+            lines.append(f"  row: {ranked[0][0].line}")
             points.append((f"{what} {label}: {_short(ranked[0][0])}", ranked[0][0].value(label)))
             if len(ranked) > 1:
                 lines.append("  next: " + "; ".join(f"{_short(row)}: {row.value(label)}" for row, _value in ranked[1:4]))
@@ -1430,6 +1432,11 @@ def _matches(word: str, words: list[str]) -> bool:
     "amortization"), or an acronym of the question's words ("NBV" for net book value)."""
     if word in words:
         return True
+    if _SHORT.get(word) in words or any(_SHORT.get(other) == word for other in words):
+        return True
+    # The same word in another form ("earned" for "Earnings").
+    if len(word) >= 5 and word.isalpha() and any(len(other) >= 5 and _stem(other) == _stem(word) for other in words):
+        return True
     if len(word) >= 3 and not _numeric(word):
         if any(len(other) >= 3 and not _numeric(other) and (other.startswith(word) or word.startswith(other)) for other in words):
             return True
@@ -1437,6 +1444,14 @@ def _matches(word: str, words: list[str]) -> bool:
             initials = "".join(other[0] for other in words if other[:1].isalpha())
             return word in initials
     return False
+
+
+def _stem(word: str) -> str:
+    return re.sub(r"(?:ings?|ed|es|s)$", "", word)
+
+
+# Short forms in headings that aren't the start of the word they stand for ("Hours OT" for overtime hours).
+_SHORT = {"ot": "overtime", "dt": "doubletime", "pto": "leave", "qty": "quantity", "amt": "amount", "acct": "account", "dept": "department"}
 
 
 def _numeric(word: str) -> bool:

@@ -161,3 +161,25 @@ def test_a_long_merge_named_left_of_its_heading_stays_in_the_table():
 def test_a_figure_inside_another_is_not_given():
     points = [("Hours OT", "0.00"), ("Gross", "2,766.40")]
     assert agent.missing_points(points, "Gross pay was 2,766.40 on 3,000.00 hours.") == [("Hours OT", "0.00")]
+
+
+PAYROLL = "\n".join(
+    [
+        "[page 1]",
+        "[table]",
+        "Employee | Hours Reg | Hours OT | Earnings Overtime | Net pay",
+        "Employee: Moreau, Grace | Hours Reg: 76.50 | Hours OT: 14.00 | Earnings Overtime: 422.10 | Net pay: 1,500.00",
+        "Employee: Johnson, Priya | Hours Reg: 76.50 | Hours OT: 13.50 | Earnings Overtime: 954.45 | Net pay: 3,139.64",
+        "Employee: Reyes, Hannah | Hours Reg: 80.00 | Hours OT: 0.00 | Earnings Overtime: 0.00 | Net pay: 2,125.98",
+    ]
+)
+
+
+def test_overtime_hours_is_the_ot_column_and_earned_is_earnings():
+    found = table_lookup.answer(PAYROLL, "For Hannah Reyes, what were the overtime hours and net pay?")
+    assert found is not None
+    assert [point.split(": ")[-1] for point, _value in found.points] == ["Hours OT", "Net pay"]
+    most = table_lookup.answer(PAYROLL, "Who earned the most overtime pay this period, and how much?")
+    assert most is not None and most.points == [("Largest Earnings Overtime: Johnson, Priya", "954.45")]
+    # The winner's whole row is shown: it may be in a part of the file the model isn't shown.
+    assert "row: Employee: Johnson, Priya |" in table_lookup.render(most)
