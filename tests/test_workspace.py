@@ -30,7 +30,7 @@ def test_the_workspace_page_loads_at_every_address_with_versioned_scripts(client
         assert page.headers["cache-control"] == "no-store"
     page = client.get("/app").text
     assert '"/static/ui/api.js": "/static/ui/api.js?v=' in page.replace("\\u002f", "/")
-    for name in ("main.js", "api.js", "dom.js", "lists.js", "reader.js", "chat.js", "format.js", "pages.js", "palette.js", "theme.js", "app.css"):
+    for name in ("main.js", "api.js", "dom.js", "lists.js", "reader.js", "chat.js", "format.js", "pages.js", "settings.js", "palette.js", "theme.js", "app.css"):
         assert client.get(f"/static/ui/{name}").status_code == 200, name
     # Nothing is fetched from outside this computer.
     assert not re.search(r"""(src|href)=["']?(https?:)?//""", page)
@@ -223,6 +223,41 @@ def test_ask_closedesk_reopened_on_load_says_so_on_its_button(site, page):
     assert page.get_attribute("#chat-btn", "aria-expanded") == "true"
     assert page.eval_on_selector("#chat-btn", "e => e.classList.contains('on')")
 
+
+
+def test_settings_save_each_change_and_keep_one_not_saved_yet(site, page, settings, loaded):
+    # The Setup page's settings work in the workspace: each Save says what happened under it, and drawing the
+    # page again after one change leaves another section's change that isn't saved yet as it was.
+    page.goto(f"{site}/app/settings")
+    page.wait_for_selector("#set-timezone select")
+    page.select_option("#set-tz", "Europe/London")
+    assert "London is UTC+" in page.text_content("#set-timezone .set-preview")
+    page.fill("#set-context-slider", "4")
+    assert "32,768 tokens" in page.text_content("#set-context label")
+    page.click("#set-timezone button[type=submit]")
+    page.wait_for_selector("#set-timezone .set-status.ok")
+    assert settings.timezone == "Europe/London" and page.evaluate("document.body.dataset.tz") == "Europe/London"
+    assert page.input_value("#set-context-slider") == "4", "the slider not saved yet kept its place"
+    page.click("#set-context button[type=submit]")
+    page.wait_for_selector("#set-context .set-status.ok")
+    assert settings.min_context_tokens == 32768
+    page.check("#set-profile input[value=finance]")
+    page.click("#set-profile button[type=submit]")
+    page.wait_for_selector("#set-profile .set-status.ok")
+    assert loaded.get_state("profile") == "finance"
+    page.check("#set-vision input[value=off]")
+    page.click("#set-vision button[type=submit]")
+    page.wait_for_selector("#set-vision .set-status.ok")
+    assert settings.vision_mode == "off"
+    # A change the server refuses says why under it, and stays as it was chosen.
+    page.check("#set-profile input[value=general]")
+    page.evaluate("document.querySelector('#set-profile input[value=general]').value = 'sales'")
+    page.click("#set-profile button[type=submit]")
+    page.wait_for_selector("#set-profile .set-status.error")
+    assert "General or Finance" in page.text_content("#set-profile .set-status") and page.is_checked("#set-profile input[value=sales]")
+    assert loaded.get_state("profile") == "finance"
+    # Nothing on the page links back to the classic Setup page for a setting.
+    assert page.locator('#reader a[href^="/settings"]').count() == 0
 
 def test_the_page_tab_marks_where_text_was_read_and_says_what_on_hover(settings, store, page):
     # A PDF opens on its page, a box over each piece of text read there; pointing at one says what was read.

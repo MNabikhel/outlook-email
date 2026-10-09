@@ -6,7 +6,8 @@ import { $, h, icon, replace, toast, plural, isTyping, reducedMotion, skeletonLi
 import { getJSON, postJSON } from "./api.js";
 import { MAIL_PAGE, listSpec, loadList, rowEl } from "./lists.js";
 import { emailView, fileView, errorView } from "./reader.js";
-import { todayView, fraudView, codingView, digestView, settingsView, emptyReader } from "./pages.js";
+import { todayView, fraudView, codingView, digestView, emptyReader } from "./pages.js";
+import { createSettings } from "./settings.js";
 import { createChat } from "./chat.js";
 import { createOverlays } from "./palette.js";
 
@@ -145,7 +146,7 @@ function toggleRail() {
   } catch (error) {
     /* not remembered */
   }
-  if (S.route && S.route.view === "settings") showSettings();
+  if (S.route && S.route.view === "settings") settings.redraw();
 }
 
 /* ---------- The top bar ---------- */
@@ -222,7 +223,7 @@ function setTheme(value) {
     /* not remembered */
   }
   themeButton();
-  if (S.route && S.route.view === "settings") showSettings();
+  if (S.route && S.route.view === "settings") settings.redraw();
 }
 
 function themeButton() {
@@ -726,9 +727,36 @@ function showDigest(date) {
     });
 }
 
+const settings = createSettings({
+  appearance: () => ({ theme: theme(), railCollapsed: root.dataset.rail === "collapsed" }),
+  setTheme,
+  toggleRail,
+  processMail: () => processMail(),
+  job: () => (S.meta ? S.meta.job : { state: "idle" }),
+  isShown: () => Boolean(S.route && S.route.view === "settings"),
+  show(node, { keepScroll = false } = {}) {
+    const top = reader.scrollTop;
+    setReader(node, "settings", { animate: !keepScroll && S.shown !== "settings" });
+    if (keepScroll) reader.scrollTop = top;
+  },
+  changed(reply) {
+    // A new time zone shows in every date the workspace writes; a new profile in the top bar and Today.
+    if (reply.tz) document.body.dataset.tz = reply.tz;
+    if (reply.job && S.meta) {
+      S.jobSeq += 1;
+      S.meta.job = { ...reply.job, stage_label: reply.job.state === "running" ? "Indexing for search" : "" };
+      renderTop();
+    }
+    S.cache.clear();
+    S.files.clear();
+    clearTimeout(S.poll);
+    S.poll = setTimeout(poll, 300);
+  },
+});
+
 function showSettings() {
   document.title = "Settings · CloseDesk";
-  setReader(settingsView(S.meta, { theme: theme(), setTheme, railCollapsed: root.dataset.rail === "collapsed", toggleRail }), "settings", { animate: S.shown !== "settings" });
+  settings.open();
 }
 
 /* ---------- Rendering what the address says ---------- */
@@ -945,6 +973,7 @@ async function poll() {
     $("#chat-btn").classList.toggle("live", meta.model.active);
     if (before && meta.job.state !== "running" && meta.job.finished_at && meta.job.finished_at !== before.job.finished_at) finished(meta.job);
     if (before && before.version !== meta.version) refreshData();
+    if (S.route && S.route.view === "settings") settings.job(meta.job);
   } catch (error) {
     /* offline for a moment: try again later */
   }

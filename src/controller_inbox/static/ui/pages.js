@@ -1,5 +1,5 @@
 /* What the reading pane shows when no email is open (the day's overview, the fraud and coding summaries),
-   and the two full-width pages: the daily digest and settings. */
+   and the daily digest. The Settings page is settings.js. */
 
 import { h, icon, plural, toast } from "./dom.js";
 
@@ -228,77 +228,6 @@ export function digestView(data) {
       data.markdown
         ? h("details", { class: "card" }, h("summary", { class: "rd-h" }, "Markdown copy"), h("div", { class: "row-actions" }, h("button", { type: "button", class: "btn btn-sm", onclick: copy }, icon("copy", 14), "Copy")), h("pre", { class: "md-copy" }, data.markdown))
         : null
-    )
-  );
-}
-
-/* ---------- Settings ---------- */
-
-export function settingsView(meta, { theme, setTheme, railCollapsed, toggleRail }) {
-  const segment = (value, label) =>
-    h("button", { type: "button", class: `seg${theme === value ? " on" : ""}`, "aria-pressed": String(theme === value), onclick: () => setTheme(value) }, label);
-  const shortcuts = [
-    ["j / k", "Next / previous in the list"],
-    ["Enter or o", "Open the selected email"],
-    ["e", "Mark done (Undo in the message that appears)"],
-    ["/", "Search"],
-    ["Ctrl K or ⌘ K", "Jump to a folder or email, or ask a question"],
-    ["c", "Show or hide Ask CloseDesk"],
-    ["u or Esc", "Back to the list"],
-    ["[", "Collapse the side bar"],
-    ["g then t, i, n, r, a, k, f, c, d, s", "Go to Today, Important, Informational, Reference, All mail, Tasks, Fraud, AP coding, Digest, Settings"],
-    ["?", "All shortcuts"],
-  ];
-  return h(
-    "div",
-    { class: "page" },
-    h(
-      "div",
-      { class: "page-inner narrow" },
-      h("p", { class: "kicker" }, "Settings"),
-      h("h1", { class: "page-title" }, "How the workspace looks and works"),
-      card(
-        "Appearance",
-        h("div", { class: "set-row" }, h("span", null, "Theme"), h("div", { class: "segs", role: "group", "aria-label": "Theme" }, segment("system", "Match the computer"), segment("light", "Light"), segment("dark", "Dark"))),
-        h("div", { class: "set-row" }, h("span", null, "Side bar"), h("button", { type: "button", class: "btn btn-sm", onclick: toggleRail }, railCollapsed ? "Show labels" : "Collapse to icons"))
-      ),
-      card(
-        "This computer",
-        h(
-          "dl",
-          { class: "rd-facts" },
-          h("dt", null, "Local model"),
-          h("dd", null, meta.model.describe),
-          h("dt", null, "Time zone"),
-          h("dd", null, meta.tz),
-          h("dt", null, "Profile"),
-          h("dd", null, meta.finance ? "Finance (month-end and close sections)" : "General"),
-          h("dt", null, "Mail"),
-          h("dd", null, `${plural(meta.counts.emails, "email")}${meta.is_sample ? " (the sample mailbox)" : ""}${meta.last_run ? ` · last processed ${meta.last_run}` : ""}`)
-        ),
-        h("p", { class: "small" }, "The model, time zone, profile, search index and sample mailbox are set on the ", h("a", { href: "/settings" }, "classic Setup page"), ".")
-      ),
-      card(
-        "Models CloseDesk uses",
-        h(
-          "dl",
-          { class: "rd-facts models-list" },
-          (meta.models || []).map((row) => [
-            h("dt", null, row.role),
-            h(
-              "dd",
-              null,
-              h("span", { class: `model-state ${row.state}` }, { on: "Ready", fallback: "Older method", off: "Off" }[row.state] || row.state),
-              row.model ? h("b", null, ` ${row.model}`) : null,
-              h("span", { class: "small" }, ` ${row.status}`),
-              row.note ? h("span", { class: "small muted model-note" }, row.note) : null
-            ),
-          ])
-        ),
-        h("p", { class: "small" }, "Which model answers, and which reads pages, are chosen on the ", h("a", { href: "/settings#models" }, "classic Setup page"), ".")
-      ),
-      card("Keyboard", h("dl", { class: "keys-list" }, shortcuts.map(([keys, what]) => [h("dt", null, h("kbd", null, keys)), h("dd", null, what)]))),
-      card("Classic view", h("p", null, "Every page of the classic dashboard still works, and links back here. ", h("a", { href: "/" }, "Open the classic view"), "."))
     )
   );
 }

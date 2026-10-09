@@ -1221,34 +1221,62 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             return RedirectResponse("/settings#vision", status_code=303)
         return RedirectResponse("/settings?notice=vision-saved#vision", status_code=303)
 
-    @app.post("/settings/chat-model")
-    def save_chat_model(model: str = Form(...)):
-        if job.snapshot()["state"] == "running":
-            return RedirectResponse("/settings?notice=chat-model-busy#chat-model", status_code=303)
-        chat_switch["problem"] = use_chat_model(settings, model)
-        notice = "chat-model-failed" if chat_switch["problem"] else "chat-model"
-        return RedirectResponse(f"/settings?notice={notice}#chat-model", status_code=303)
+    # What Setup's buttons do, shared by the classic forms and the workspace's Settings page. Each returns the
+    # key of the notice that says what happened (see NOTICES).
 
-    @app.post("/settings/index")
-    def index_all():
+    def switch_chat_model(model: str) -> str:
+        if job.snapshot()["state"] == "running":
+            return "chat-model-busy"
+        chat_switch["problem"] = use_chat_model(settings, model)
+        return "chat-model-failed" if chat_switch["problem"] else "chat-model"
+
+    def start_indexing() -> str:
         if not semantic.embedding_model(settings):
-            return RedirectResponse("/settings?notice=index-off#search", status_code=303)
+            return "index-off"
 
         def run(progress):
             progress("indexing", 0, 0, "")
             return {"kind": "index", "indexed": max(0, semantic.index_mail(store, settings, on_progress=lambda i, n, _name: progress("indexing", i, n, "")))}
 
-        started = job.start(run)
-        return RedirectResponse(f"/settings?notice={'indexing' if started else 'busy'}#search", status_code=303)
+        return "indexing" if job.start(run) else "busy"
 
-    @app.post("/settings/context")
-    def save_context(step: int = Form(...)):
+    def save_context_step(step: int) -> str:
         if not 0 <= step < len(agent.CONTEXT_STEPS):
-            raise HTTPException(status_code=400, detail="Unknown context size")
+            raise ValueError("Unknown context size")
         tokens = agent.CONTEXT_STEPS[step]
         store.set_state(MIN_CONTEXT_KEY, str(tokens))
         set_min_context(settings, tokens)
-        return RedirectResponse(f"/settings?notice={'context' if tokens else 'context-off'}#context", status_code=303)
+        return "context" if tokens else "context-off"
+
+    def load_sample_mailbox() -> str:
+        """Load the sample mailbox: "" when it was loaded, or the notice saying why it wasn't."""
+        from controller_inbox.overnight import RunBusy
+
+        if store.real_mail_count():
+            return "sample-blocked"
+        if job.snapshot()["state"] == "running":
+            return "sample-busy"
+        try:
+            load_sample(store, settings)
+        except RunBusy:
+            return "sample-busy"
+        return ""
+
+    @app.post("/settings/chat-model")
+    def save_chat_model(model: str = Form(...)):
+        return RedirectResponse(f"/settings?notice={switch_chat_model(model)}#chat-model", status_code=303)
+
+    @app.post("/settings/index")
+    def index_all():
+        return RedirectResponse(f"/settings?notice={start_indexing()}#search", status_code=303)
+
+    @app.post("/settings/context")
+    def save_context(step: int = Form(...)):
+        try:
+            notice = save_context_step(step)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return RedirectResponse(f"/settings?notice={notice}#context", status_code=303)
 
     @app.post("/settings/profile")
     def save_profile(profile: str = Form(...)):
@@ -1260,17 +1288,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/demo/reload")
     def demo_reload():
-        from controller_inbox.overnight import RunBusy
-
-        if store.real_mail_count():
-            return RedirectResponse("/settings?notice=sample-blocked", status_code=303)
-        if job.snapshot()["state"] == "running":
-            return RedirectResponse("/settings?notice=sample-busy", status_code=303)
-        try:
-            load_sample(store, settings)
-        except RunBusy:
-            return RedirectResponse("/settings?notice=sample-busy", status_code=303)
-        return RedirectResponse("/", status_code=303)
+        refused = load_sample_mailbox()
+        return RedirectResponse(f"/settings?notice={refused}" if refused else "/", status_code=303)
 
     @app.get("/export/actions.csv")
     def export_csv():
@@ -1296,6 +1315,15 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     register_workspace(
         app, store=store, settings=settings, job=job, board_date=board_date,
         fraud_view=fraud_view, file_cards=file_cards, original_path=original_path,
+        setup={
+            "timezone_options": _timezone_options,
+            "vision_setup": vision_setup,
+            "switch_chat_model": switch_chat_model,
+            "chat_problem": lambda: chat_switch["problem"],
+            "start_indexing": start_indexing,
+            "save_context_step": save_context_step,
+            "load_sample_mailbox": load_sample_mailbox,
+        },
     )
     return app
 

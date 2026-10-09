@@ -302,3 +302,126 @@ def test_files_of_a_suspected_fraud_email_are_never_shown(files_client, store, m
     opened = api(files_client, f"/api/mail/{scam.id}/files/1")
     assert any("Remit to account" in part["text"] for part in opened["parts"])
     assert "clip" in api(files_client, f"/api/mail/{scam.id}")["attachments"][0]
+
+
+# Settings: what the classic Setup page shows and changes, for the workspace's Settings page -------------
+
+
+def test_settings_say_everything_the_setup_page_does(client, settings):
+    data = api(client, "/api/settings")
+    assert [choice["value"] for choice in data["profile"]["choices"]] == ["general", "finance"] and data["profile"]["current"] == "general"
+    zones = data["timezone"]
+    assert zones["choice"] == "America/New_York" and zones["zone"] == "America/New_York"
+    assert zones["options"][0]["value"] == "auto" and zones["options"][0]["label"].startswith("This computer: ")
+    assert any(row["value"] == "Europe/London" for row in zones["options"])
+    assert zones["zone_name"] == "Eastern Time (US & Canada)" and zones["offset"] in {"UTC-4", "UTC-5"}
+    # The model is turned off in tests: Setup says so, and lists each job with what it uses instead.
+    assert data["model"]["mode"] == "off" and not data["model"]["active"] and "turned off" in data["model"]["describe"]
+    assert data["models"][0]["role"] == "Answers your questions" and data["chat"] is None
+    steps = data["context"]["steps"]
+    assert [step["tokens"] for step in steps] == [0, 4096, 8192, 16384, 32768, 65536, 131072]
+    assert data["context"]["step"] == 3 and steps[3]["tier"] == "ok" and not data["context"]["window"]["shown"]
+    assert data["vision"]["mode"] == "auto" and data["vision"]["minutes_per_run"] == 30 and data["vision"]["choices"] == []
+    assert data["search"]["model"] == "" and "ocr_engine" in data
+    assert data["folders"]["incoming"] == str(settings.inbox_incoming) and data["folders"]["failed"] == str(settings.inbox_failed)
+    assert data["runs"] == {"last_run": "", "last_folder": "", "last_sync": ""} and data["graph_configured"] is False
+    assert data["corrections"] == 0 and data["cost_codes"]["workbook"].endswith("AP cost codes.xlsx")
+    assert data["sample"] == {"emails": data["sample"]["emails"], "is_sample": True, "can_load": True} and data["sample"]["emails"] > 0
+    assert data["job"]["state"] == "idle"
+    assert client.get("/api/settings").status_code == 403, "only CloseDesk's own page"
+
+
+def test_settings_save_the_profile_and_time_zone_as_setup_does(client, demo, settings):
+    reply = post(client, "/api/settings/profile", {"profile": "finance"})
+    assert reply.status_code == 200 and reply.json()["message"] == web.NOTICES["profile"]
+    assert api(client, "/api/state")["finance"] is True and api(client, "/api/settings")["profile"]["current"] == "finance"
+    for bad in ({"profile": "sales"}, {}, {"profile": None}):
+        refused = post(client, "/api/settings/profile", bad)
+        assert refused.status_code == 400 and "General or Finance" in refused.json()["detail"]
+    assert api(client, "/api/settings")["profile"]["current"] == "finance", "a refused change leaves it as it was"
+
+    reply = post(client, "/api/settings/timezone", {"zone": "Europe/London"})
+    assert reply.status_code == 200 and reply.json()["tz"] == "Europe/London" and reply.json()["message"] == web.NOTICES["timezone"]
+    assert settings.timezone == "Europe/London" and api(client, "/api/state")["tz"] == "Europe/London"
+    assert api(client, "/api/settings")["timezone"]["zone_name"] == "Dublin, Edinburgh, Lisbon, London"
+    refused = post(client, "/api/settings/timezone", {"zone": "Mars/Olympus"})
+    assert refused.status_code == 400 and settings.timezone == "Europe/London"
+    reply = post(client, "/api/settings/timezone", {"zone": "auto"})
+    assert reply.status_code == 200 and settings.timezone == "auto"
+    # The classic page shows the same choice.
+    assert 'value="auto" data-zone=' in client.get("/settings").text
+
+
+def test_settings_save_the_context_minimum_and_vision_reading(client, demo, settings):
+    big = web.agent.CONTEXT_STEPS.index(32768)
+    reply = post(client, "/api/settings/context", {"step": big})
+    assert reply.status_code == 200 and reply.json()["message"] == web.NOTICES["context"]
+    assert settings.min_context_tokens == 32768 and demo.get_state(web.MIN_CONTEXT_KEY) == "32768"
+    assert api(client, "/api/settings")["context"]["step"] == big
+    for bad in ({"step": 99}, {"step": -1}, {"step": "4"}, {"step": True}, {}):
+        assert post(client, "/api/settings/context", bad).status_code == 400, bad
+    assert settings.min_context_tokens == 32768
+    off = post(client, "/api/settings/context", {"step": 0})
+    assert off.json()["message"] == web.NOTICES["context-off"] and settings.min_context_tokens == 0
+
+    reply = post(client, "/api/settings/vision", {"mode": "ask", "model": "auto"})
+    assert reply.status_code == 200 and reply.json()["message"] == web.NOTICES["vision-saved"]
+    assert settings.vision_mode == "ask" and settings.vision_model == ""
+    assert post(client, "/api/settings/vision", {"mode": "off", "model": "google/gemma-3-12b"}).status_code == 200
+    data = api(client, "/api/settings")["vision"]
+    assert data["mode"] == "off" and data["chosen"] == "google/gemma-3-12b"
+    refused = post(client, "/api/settings/vision", {"mode": "always"})
+    assert refused.status_code == 400 and settings.vision_mode == "off"
+
+
+def test_settings_say_why_the_chat_model_and_the_index_cant_change_without_a_model(client, demo):
+    refused = post(client, "/api/settings/chat-model", {"model": ""})
+    assert refused.status_code == 400 and refused.json()["detail"] == "Choose a model."
+    refused = post(client, "/api/settings/chat-model", {"model": "qwen/qwen3.5-9b"})
+    assert refused.status_code == 409 and refused.json()["detail"].startswith(web.NOTICES["chat-model-failed"])
+    refused = post(client, "/api/settings/index")
+    assert refused.status_code == 400 and refused.json()["detail"] == web.NOTICES["index-off"]
+
+
+def test_settings_wont_change_the_chat_model_or_load_the_sample_while_mail_is_processed(client, demo):
+    job = client.app.state.job
+    release = __import__("threading").Event()
+    assert job.start(lambda progress: release.wait(5))
+    try:
+        refused = post(client, "/api/settings/chat-model", {"model": "qwen/qwen3.5-9b"})
+        assert refused.status_code == 409 and refused.json()["detail"] == web.NOTICES["chat-model-busy"]
+        refused = post(client, "/api/settings/sample")
+        assert refused.status_code == 409 and refused.json()["detail"] == web.NOTICES["sample-busy"]
+        assert api(client, "/api/settings")["job"]["state"] == "running"
+    finally:
+        release.set()
+    deadline = time.monotonic() + 5
+    while job.snapshot()["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+
+
+def test_settings_load_the_sample_mailbox_again(client, demo):
+    demo.set_done("demo-payroll", True)
+    reply = post(client, "/api/settings/sample")
+    assert reply.status_code == 200 and reply.json()["counts"]["emails"] > 0
+    assert not demo.is_done("demo-payroll"), "the sample starts again from the beginning"
+
+
+def test_settings_never_load_the_sample_over_your_own_mail(files_client):
+    refused = post(files_client, "/api/settings/sample")
+    assert refused.status_code == 409 and refused.json()["detail"] == web.NOTICES["sample-blocked"]
+    sample = api(files_client, "/api/settings")["sample"]
+    assert sample["can_load"] is False and sample["is_sample"] is False
+
+
+def test_other_websites_cannot_change_settings(client, settings):
+    for path, body in (
+        ("/api/settings/profile", {"profile": "finance"}),
+        ("/api/settings/timezone", {"zone": "Europe/London"}),
+        ("/api/settings/context", {"step": 0}),
+        ("/api/settings/vision", {"mode": "off"}),
+        ("/api/settings/sample", {}),
+    ):
+        assert client.post(path, json=body, headers={**PAGE, "Origin": "https://evil.example"}).status_code == 403, path
+        assert client.post(path, json=body).status_code == 403, path
+    assert settings.timezone == "America/New_York" and settings.vision_mode == "auto" and settings.min_context_tokens == 16384

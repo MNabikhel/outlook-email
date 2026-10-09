@@ -23,14 +23,15 @@ from typing import Any, Callable
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from controller_inbox import agent, chats, cost_codes, documents, fixes, fraud, model_roles, page_details, page_view, semantic, table_lookup, vision
+from controller_inbox import agent, chats, cost_codes, documents, fixes, fraud, model_roles, ocr, page_details, page_view, semantic, table_lookup, vision
 from controller_inbox.digest import build_digest
-from controller_inbox.local_llm import check_model
+from controller_inbox.local_llm import check_model, context_target, needs_more_context
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
-from controller_inbox.profile import active_profile, is_finance
+from controller_inbox.profile import active_profile, is_finance, set_profile
 from controller_inbox.classify import month_end
-from controller_inbox.clock import format_when
-from controller_inbox.web import DOWNLOADABLE, _json_body, _require_page, _same_origin, templates
+from controller_inbox.clock import effective_timezone, format_when, offset_label, on_daylight_time, set_timezone, zone_name
+from controller_inbox.config import PROFILES
+from controller_inbox.web import DOWNLOADABLE, NOTICES, _json_body, _nearest_step, _require_page, _same_origin, templates
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,8 @@ LOCKED_MESSAGE = (
     "This email is flagged as possible payment fraud, so its files don't open. "
     "Verify it by phone, then mark it safe in its fraud check."
 )
+# When CloseDesk last ran overnight, read the drop folder and synced Outlook, as Setup shows them.
+RUN_STATES = {"last_run": "last_overnight_at", "last_folder": "last_folder_ingest", "last_sync": "last_sync_at"}
 STAGES = {
     "starting": "Starting",
     "importing": "Reading files",
@@ -198,8 +201,10 @@ def register_workspace(
     fraud_view: Callable[[EmailRecord], dict],
     file_cards: Callable[[EmailRecord], list[dict]],
     original_path: Callable[[EmailRecord], Path | None],
+    setup: dict[str, Callable],
 ) -> None:
-    """Add the workspace page (/app) and its JSON API (/api) to the dashboard."""
+    """Add the workspace page (/app) and its JSON API (/api) to the dashboard. ``setup`` holds what the classic
+    Setup page's buttons do (web.py), so the workspace's Settings page changes the same things the same way."""
     api = APIRouter(prefix="/api", dependencies=[Depends(page_only)])
 
     def known(email_id: str) -> EmailRecord:
@@ -813,6 +818,192 @@ def register_workspace(
     def process_stop():
         """A vision read stops before its next page."""
         return {"ok": True, "stopping": job.request_stop()}
+
+    # Settings: everything the classic Setup page shows and changes.
+
+    def context_note(model) -> dict[str, Any]:
+        """The line under the model saying whether its context window holds whole attachments, as Setup words it."""
+        window = model.context_length or settings.chat_context_tokens
+        target = context_target(settings, model)
+        recommended = agent.RECOMMENDED_CONTEXT
+        if needs_more_context(settings):
+            advice = (
+                f"The next time you ask something, CloseDesk reloads {model.key} in LM Studio with {target:,} tokens "
+                "(the minimum set below). If your computer runs short of memory, it goes back to the current size."
+            )
+        elif window >= recommended:
+            advice = "Enough to read whole attachments when you ask about them."
+        else:
+            advice = "Ask CloseDesk reads long attachments a section at a time with this."
+            if model.key and model.context_length and window < target:
+                advice += (
+                    f" LM Studio couldn't load {model.key} with {target:,} tokens. "
+                    "Close other apps or pick a smaller minimum below, then Save to try again."
+                )
+            elif model.key and model.max_context and model.max_context < recommended:
+                advice += f" {model.key} supports at most {model.max_context:,} tokens. For whole workbooks and PDFs, load a model with a longer context."
+            elif model.key:
+                advice += " For whole workbooks and PDFs, move the minimum below to 16k or more and Save."
+            else:
+                advice += (
+                    f" For whole workbooks and PDFs, reload the model in LM Studio with Context Length {recommended:,} or more "
+                    "(My Models → the model's settings → Context Length)."
+                )
+            if not window:
+                advice += " If your server doesn't report it, set CONTROLLER_INBOX_CHAT_CONTEXT_TOKENS."
+        return {
+            "shown": model.active,
+            "tokens": window,
+            "label": f"{window:,} tokens" if window else "not reported",
+            "tone": "ok" if window >= recommended else "short",
+            "advice": advice,
+        }
+
+    def settings_state(recheck: bool = False) -> dict[str, Any]:
+        model = check_model(settings, use_cache=not recheck)
+        choice = model_roles.chat_choices(settings, model)
+        search = semantic.coverage(store, settings)
+        counts = store.counts()
+        snapshot = job.snapshot()
+        return {
+            "profile": {"current": active_profile(settings, store), "choices": [{"value": key, "label": label} for key, label in PROFILES.items()]},
+            "timezone": {
+                "choice": settings.timezone,
+                "options": setup["timezone_options"](settings.timezone),
+                "zone": settings.tz.key,
+                "zone_name": zone_name(effective_timezone(settings.timezone)),
+                "offset": offset_label(settings.tz),
+                "daylight": on_daylight_time(settings.tz),
+                "now_local": datetime.now(settings.tz).strftime("%a, %b %d, %Y · %H:%M"),
+            },
+            "model": {
+                "mode": model.mode,
+                "active": model.active,
+                "reachable": model.reachable,
+                "describe": model.describe(),
+                "base_url": model.base_url,
+                "configured_url": settings.llm_base_url,
+                "error": model.error,
+                "loaded": list(model.loaded if model.lm_studio else model.models),
+                "server": "LM Studio" if model.lm_studio else "the model server",
+            },
+            "models": model_roles.models_in_use(settings, status=model),
+            "chat": None
+            if choice is None
+            else {
+                "pinned": choice["pinned"],
+                "env_model": settings.llm_model if choice["pinned"] else "",
+                "current": choice["current"],
+                "models": [{"key": key, "loaded": key in choice["loaded"]} for key in choice["models"]],
+                "min_context_tokens": settings.min_context_tokens,
+            },
+            "context": {
+                "steps": [agent.context_capacity(tokens, settings.chat_max_tokens) for tokens in agent.CONTEXT_STEPS],
+                "step": _nearest_step(settings.min_context_tokens),
+                "window": context_note(model),
+            },
+            "vision": {**setup["vision_setup"](model), "minutes_per_run": round(settings.vision_minutes_per_run)},
+            "search": {**search, "indexed_label": format_when(search.get("indexed_at") or "", settings.tz)},
+            "ocr_engine": ocr.engine_name(),
+            "folders": {
+                "incoming": str(settings.inbox_incoming),
+                "attachments": str(settings.inbox_attachments),
+                "processed": str(settings.inbox_processed),
+                "extracted": str(settings.inbox_extracted),
+                "failed": str(settings.inbox_failed),
+            },
+            "runs": {name: format_when(store.get_state(key) or "", settings.tz) for name, key in RUN_STATES.items()},
+            "graph_configured": settings.graph_configured,
+            "corrections": store.correction_count(),
+            "corrections_file": str(settings.training_path),
+            "cost_codes": {"workbook": str(cost_codes.workbook_path(settings)), "counts": store.coding_counts()},
+            "sample": {
+                "emails": counts["emails"],
+                "is_sample": bool(counts["emails"]) and not store.real_mail_count(),
+                # Loading the sample erases the mail there, so it is offered only when that is none of yours.
+                "can_load": not (counts["emails"] and store.real_mail_count()),
+            },
+            "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
+        }
+
+    def saved(notice: str, **extra) -> dict[str, Any]:
+        return {"ok": True, "notice": notice, "message": NOTICES.get(notice, "Saved."), **extra}
+
+    def refused(notice: str, status_code: int = 409) -> HTTPException:
+        return HTTPException(status_code=status_code, detail=NOTICES[notice])
+
+    @api.get("/settings")
+    def settings_get(recheck: int = 0):
+        return settings_state(recheck=bool(recheck))
+
+    @api.post("/settings/profile")
+    async def settings_profile(request: Request):
+        data = await _json_body(request)
+        try:
+            set_profile(store, str(data.get("profile") or ""))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Choose General or Finance & accounting.") from None
+        return saved("profile")
+
+    @api.post("/settings/timezone")
+    async def settings_timezone(request: Request):
+        data = await _json_body(request)
+        try:
+            set_timezone(store, settings, str(data.get("zone") or "")[:100])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="That time zone isn't on the list. Choose one from it.") from None
+        return saved("timezone", tz=settings.tz.key)
+
+    @api.post("/settings/chat-model")
+    async def settings_chat_model(request: Request):
+        data = await _json_body(request)
+        model = str(data.get("model") or "").strip()
+        if not model:
+            raise HTTPException(status_code=400, detail="Choose a model.")
+        notice = setup["switch_chat_model"](model)
+        if notice == "chat-model-busy":
+            raise refused(notice)
+        if notice == "chat-model-failed":
+            raise HTTPException(status_code=409, detail=f"{NOTICES[notice]} {setup['chat_problem']()}".strip())
+        return saved(notice)
+
+    @api.post("/settings/vision")
+    async def settings_vision(request: Request):
+        data = await _json_body(request)
+        model = data.get("model")
+        try:
+            vision.save_mode(settings, store, str(data.get("mode") or ""), None if model is None else str(model))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Choose Automatic, Only when I ask, or Off.") from None
+        return saved("vision-saved")
+
+    @api.post("/settings/context")
+    async def settings_context(request: Request):
+        data = await _json_body(request)
+        step = data.get("step")
+        if not isinstance(step, int) or isinstance(step, bool):
+            raise HTTPException(status_code=400, detail="Unknown context size")
+        try:
+            notice = setup["save_context_step"](step)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return saved(notice)
+
+    @api.post("/settings/index")
+    def settings_index():
+        notice = setup["start_indexing"]()
+        if notice == "index-off":
+            raise refused(notice, 400)
+        if notice == "busy":
+            raise HTTPException(status_code=409, detail="Already processing. Index again when it finishes.")
+        return saved(notice, job=job.snapshot())
+
+    @api.post("/settings/sample")
+    def settings_sample():
+        notice = setup["load_sample_mailbox"]()
+        if notice:
+            raise refused(notice)
+        return {"ok": True, "message": "The sample mailbox is loaded.", "counts": store.counts()}
 
     app.include_router(api)
 
