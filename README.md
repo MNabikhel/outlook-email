@@ -204,7 +204,7 @@ How it was measured: the rows of the tables on real pages, as the FinTabNet and 
 
 | Rows read | Annual reports, test (60 pages) | Annual reports, fresh (120) | Mixed set, test (30) | Mixed set, fresh (120) |
 |---|---:|---:|---:|---:|
-| CloseDesk before | 51.8% (all 120 tuning and test pages) | | 57.5% (all 120) | |
+| CloseDesk before (tuning and test pages together) | 51.8% | | 57.5% | |
 | Camelot alone | 74.6% | 77.1% | 75.1% | 64.9% |
 | **CloseDesk with Camelot** | **76.0%** | 75.1% | 72.7% | 63.1% |
 
