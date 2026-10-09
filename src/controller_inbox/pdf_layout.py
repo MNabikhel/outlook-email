@@ -1422,9 +1422,15 @@ def _is_table(rows: list[Line]) -> bool:
 
 
 def _label_row(row: list[str]) -> bool:
-    """A header row: several labels, and no amounts. Years count as labels."""
-    filled = [cell for cell in row if cell.strip()]
-    return len(filled) >= 2 and not any(_amount_cell(cell) for cell in filled)
+    """A header row: several labels, and no amounts. Years count as labels, and so do an aging's day ranges
+    ("1-30 | 31-60 | 61-90 | 90+") side by side."""
+    filled = [cell.strip() for cell in row if cell.strip()]
+    ranges = sum(1 for cell in filled if _DAY_RANGE.fullmatch(cell))
+    return len(filled) >= 2 and not any(_amount_cell(cell) and not (ranges >= 2 and _DAY_RANGE.fullmatch(cell)) for cell in filled)
+
+
+# A bucket of days on an aging ("1-30", "31 - 60", "91+", "> 90").
+_DAY_RANGE = re.compile(r"\d{1,3}\s*[-–]\s*\d{1,3}|\d{1,3}\s*\+|[<>]\s*\d{1,3}")
 
 
 def _span_labels(header_rows: list[list[tuple[float, float, str]]], columns: list[tuple[float, float]]) -> list[str]:
@@ -1459,6 +1465,31 @@ def _home(x0: float, x1: float, columns: list[tuple[float, float]]) -> int:
     return min(range(len(columns)), key=lambda i: abs((columns[i][0] + columns[i][1]) / 2 - mid))
 
 
+def _own_or_run(segs: list[tuple[float, float, str]], columns: list[tuple[float, float]], below: list[str]) -> list[list[int]] | None:
+    """Headings over a row of sub-headings that only some columns have ("Current | Past due | Total" over
+    "1-30 | 31-60 | 61-90 | 90+" under Past due alone): a heading with nothing under it names its own column, merged
+    down the heading rows; a heading over sub-headings names the whole unbroken run of them it sits in. None unless
+    every heading is one or the other, each run under exactly one heading, and every sub-heading under one."""
+    homes = [_home(x0, x1, columns) for x0, x1, _text in segs]
+    if len(set(homes)) != len(homes) or not any(below[home].strip() for home in homes) or all(below[home].strip() for home in homes):
+        return None
+    covers: list[list[int]] = []
+    for home in homes:
+        if not below[home].strip():
+            covers.append([home])
+            continue
+        left, right = home, home
+        while left - 1 >= 0 and below[left - 1].strip() and left - 1 not in homes:
+            left -= 1
+        while right + 1 < len(columns) and below[right + 1].strip() and right + 1 not in homes:
+            right += 1
+        covers.append(list(range(left, right + 1)))
+    claimed = [column for covered in covers for column in covered]
+    if len(claimed) != len(set(claimed)) or any(text.strip() and column not in claimed for column, text in enumerate(below)):
+        return None
+    return covers
+
+
 def _placed_texts(segs: list[tuple[float, float, str]], columns: list[tuple[float, float]]) -> list[str]:
     """Where each piece lands when it belongs to one column: the text under each column."""
     texts = [""] * len(columns)
@@ -1485,6 +1516,8 @@ def _covers(
                 under = [_home(x0, x1, columns)]
             covers.append(under)
         return covers
+    if (owned := _own_or_run(segs, columns, below)) is not None:
+        return owned
     covers: list[list[int] | None] = [None] * len(segs)
     stub = _stub_segment(segs, centers, below)
     if stub is None and below and not below[0].strip() and len(columns) > 2 and segs[0][1] <= columns[1][0] + 2:

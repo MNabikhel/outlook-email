@@ -121,6 +121,8 @@ _DATE_COND = re.compile(
     re.I,
 )
 _BUDGET = re.compile(r"\b(over|under|below|above|missed|beat|exceeded|within)\s+(?:\w+\s+){0,2}?budget\b", re.I)
+# "Over their credit limit", "under its minimum balance": a row's amount against another of its columns.
+_LIMIT = re.compile(r"\b(over|above|under|below|exceed(?:s|ed|ing)?)\s+(?:their|its|his|her|the)\s+([a-z][a-z ]{2,30}?)(?=[?.,;]|\s+(?:so far|now|this|in|on|for|at)\b|$)", re.I)
 _GROUP = re.compile(r"\b(?:by|per|for each|for every|each)\s+([a-z][a-z#&-]*)", re.I)
 _RANGE = re.compile(r"^\s*(?:through|thru|to|until|-|–)\s*$", re.I)
 _TOTAL = re.compile(r"^(?:grand\s+|sub-?)?totals?\b|^%", re.I)
@@ -212,6 +214,9 @@ class Question:
     conditions: list[Condition]
     budget: str = ""  # ">" over budget, "<" under budget
     group: str = ""  # the word after "by" / "per" / "for each"
+    # The column a row's amount is held against, in the question's words ("over their credit limit": credit,
+    # limit), with ``budget`` saying which way.
+    limit: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -772,6 +777,7 @@ def read_question(question: str) -> Question:
               "prior to": "<", "until": "<=", "till": "<=", "through": "<=", "by": "<=", "on or before": "<="}.get(word, "in")
         conditions.append(Condition("date", op, span, match.group(0).strip(), match.start()))
     budget = _BUDGET.search(text)
+    limit = None if budget else _LIMIT.search(text)
     group = _GROUP.search(text)
     words = [word for word in _words(text) if word not in _STOP]
     return Question(
@@ -779,8 +785,9 @@ def read_question(question: str) -> Question:
         list(dict.fromkeys(words + _dates(text))),
         _op_for(found_op, text),
         conditions,
-        budget=">" if budget and budget.group(1).lower() in {"over", "above", "exceeded"} else "<" if budget else "",
+        budget=">" if (budget or limit) and (budget or limit).group(1).lower()[:4] in {"over", "abov", "exce"} else "<" if (budget or limit) else "",
         group=group.group(1).lower() if group else "",
+        limit=[word for word in _words(limit.group(2)) if word not in _STOP] if limit else [],
     )
 
 
@@ -903,6 +910,11 @@ def _columns_named(table: Table, asked: Question) -> dict[str, set[str]]:
         score = len(hits) / max(1, len(named) + sum(1 for word in hits if _numeric(word)))
         if score >= 0.5:
             found[label], scores[label] = hits, score
+    asked_days = _day_buckets(asked.text)
+    for label in table.labels:
+        # "The 90+ bucket", "over 90 days", "31-60 days past due": the aging column of those days.
+        if asked_days & _day_buckets(label) and table.kinds.get(label) == "figure":
+            found[label], scores[label] = found.get(label, set()) | (asked_days & _day_buckets(label)), 1.0
     if _EVERY.search(asked.text):
         # "Each quarter of FY2024", "break down all the deductions": every column under that merged heading, the
         # heading's word first in each column's name.
@@ -985,7 +997,9 @@ def _dated_with_years(table: Table, label: str) -> bool:
 
 def _in_heading(condition: Condition, table: Table) -> bool:
     """The limit's words are a column's heading: "over 90" in "Over 90 Days" (its "over" too), "in 2026" in
-    "FY 2026 Forecast"."""
+    "FY 2026 Forecast", "over 90 days" in "Past due 90+"."""
+    if condition.kind == "number" and _day_buckets(condition.phrase + " days") & {bucket for label in table.labels for bucket in _day_buckets(label)}:
+        return True
     words = _words(condition.phrase) + _dates(condition.phrase)
     content = {word for word in words if word not in _CONNECTIVES}
     if not content:
@@ -1027,6 +1041,11 @@ def _meets(row: Row, condition: Condition, table: Table) -> bool:
 def _budget_pair(table: Table, asked: Question) -> tuple[str, str] | None:
     """The actual (or forecast) and budget columns the question compares, by the words they share with it."""
     figures = [label for label in table.labels if table.kinds.get(label) == "figure"]
+    if asked.limit:
+        # "Over their credit limit": the column the words name, against the row's amount (its total or balance).
+        held = [label for label in figures if all(_matches(word, _label_words(label)) for word in asked.limit)]
+        amount = _default_column(table)
+        return (amount, held[0]) if held and amount and amount != held[0] else None
     budgets = [label for label in figures if "budget" in label.lower()]
     actuals = [label for label in figures if re.search(r"actual|forecast|spent|spend", label, re.I)]
     best = None
@@ -1099,6 +1118,9 @@ def _worked(
         return Answer(4 + bool(columns), WORKED_HEAD, lines)
     if not figures:
         return None
+    if len(figures) > 1:
+        # A customer or account number is not a figure to add up or rank ("customer" names "Cust #" too).
+        figures = [label for label in figures if not _ID_LABEL.search(label)] or figures
     if op in {"sum", "average"} and len(body) == 1:
         # "How much is encumbered on 160-5190": one row's cells, not a total of them (the row is listed whole).
         return None
@@ -1447,8 +1469,24 @@ def _matches(word: str, words: list[str]) -> bool:
     return False
 
 
+def _day_buckets(text: str) -> set[str]:
+    """The aging buckets a heading or question names, written one way: "31-60", "90+" ("90+", "91+", "over 90 days",
+    "more than 90 days", "> 90")."""
+    found = {f"{int(a)}-{int(b)}" for a, b in re.findall(r"\b(\d{1,3})\s*[-–]\s*(\d{1,3})\b(?!\s*[-/]\d)", text)}
+    for number in re.findall(r"\b(\d{1,3})\s*\+", text):
+        found.add(f"{int(number) - (int(number) % 10 == 1)}+")
+    for number in re.findall(r"(?:\b(?:over|more than|older than|past|beyond)|>)\s*(\d{1,3})\s*days?\b", text, re.I):
+        found.add(f"{int(number)}+")
+    if re.search(r"\bover\s*(\d{1,3})\b", text, re.I) and re.search(r"\bover\s*\d{1,3}\s*$", text.strip(), re.I):
+        found.add(f"{int(re.search(r'over\s*(\d{1,3})', text, re.I).group(1))}+")
+    return found
+
+
 def _stem(word: str) -> str:
     return re.sub(r"(?:ings?|ed|es|s)$", "", word)
+
+
+_ID_LABEL = re.compile(r"#|\b(?:id|no\.?|number|code|acct|account)\s*$", re.I)
 
 
 # Short forms in headings that aren't the start of the word they stand for ("Hours OT" for overtime hours).

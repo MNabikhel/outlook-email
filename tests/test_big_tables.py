@@ -183,3 +183,46 @@ def test_overtime_hours_is_the_ot_column_and_earned_is_earnings():
     assert most is not None and most.points == [("Largest Earnings Overtime: Johnson, Priya", "954.45")]
     # The winner's whole row is shown: it may be in a part of the file the model isn't shown.
     assert "row: Employee: Johnson, Priya |" in table_lookup.render(most)
+
+
+AGING = "\n".join(
+    [
+        "[page 1]",
+        "[table]",
+        "Salesperson | Customer | Cust # | Current | Past due 1-30 | Past due 31-60 | Past due 61-90 | Past due 90+ | Total | Credit limit",
+        "Salesperson: Chen, M. | Customer: Granite Labs | Cust # : 40112 | Current: 9,706.75 | Past due 1-30: 1,704.20 | Past due 31-60: - | "
+        "Past due 61-90: - | Past due 90+: 70,000.00 | Total: 81,410.95 | Credit limit: 75,000",
+        "Salesperson: Chen, M. | Customer: Apex Supply | Cust # : 40147 | Current: 20,753.97 | Past due 1-30: - | Past due 31-60: 17,242.35 | "
+        "Past due 61-90: - | Past due 90+: 2,000.00 | Total: 39,996.32 | Credit limit: 100,000",
+        "Salesperson: Holt, K. | Customer: Delta Motors | Cust # : 42895 | Current: 3,000.00 | Past due 1-30: 492.86 | Past due 31-60: - | "
+        "Past due 61-90: - | Past due 90+: 9,000.00 | Total: 12,492.86 | Credit limit: 10,000",
+    ]
+).replace("Cust # :", "Cust #:")
+
+
+def test_an_aging_bucket_is_named_by_its_days():
+    found = table_lookup.answer(AGING, "What does Apex Supply owe in the 90+ bucket?")
+    assert found is not None and ("Chen, M. · Apex Supply: Past due 90+", "2,000.00") in found.points
+    most = table_lookup.answer(AGING, "Which customer has the largest balance over 90 days, and how much is it?")
+    assert most is not None and most.points == [("Largest Past due 90+: Granite Labs", "70,000.00")]
+
+
+def test_over_their_credit_limit_holds_the_total_against_it():
+    out = table_lookup.lookup(AGING, "Which of Chen's customers are over their credit limit?")
+    assert "Total over Credit limit" in out and "Granite Labs" in out
+    assert "Apex Supply" not in out and "Delta Motors" not in out
+
+
+def test_a_heading_over_aging_buckets_names_only_them():
+    # "Current" and "Total" have nothing under them; "Past due" sits over the four day ranges.
+    header = [Text(40, 720, "Customer", bold=True), Text(170, 720, "Current", bold=True, right=True),
+              Text(320, 720, "Past due", bold=True), Text(560, 720, "Total", bold=True, right=True)]
+    subs = [Text(x, 708, label, bold=True, right=True) for x, label in [(240, "1-30"), (310, "31-60"), (380, "61-90"), (450, "90+")]]
+    rows = []
+    for n, name in enumerate(["Apex", "Birch", "Cedar"]):
+        y = 694 - 14 * n
+        rows += [Text(40, y, name)] + [
+            Text(x, y, f"{(n + 1) * k},000.00", right=True) for k, x in enumerate([170, 240, 310, 380, 450, 560], start=1)
+        ]
+    text = pdf_text(build_pdf([header + subs + rows]))
+    assert "Customer | Current | Past due 1-30 | Past due 31-60 | Past due 61-90 | Past due 90+ | Total" in text, text
