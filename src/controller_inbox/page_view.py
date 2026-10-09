@@ -51,9 +51,9 @@ def file_hash(data: bytes) -> str:
 
 
 def page_count(data: bytes, filename: str) -> int:
-    """How many pages the file has: a picture is one."""
+    """How many pages the file has: a picture is one, a TIFF one for each of its frames."""
     if Path(filename or "").suffix.lower() != ".pdf":
-        return 1
+        return ocr.picture_pages(data)
     import pypdfium2 as pdfium
 
     with vision._PDFIUM:
@@ -93,7 +93,7 @@ def _keep(settings: Settings, name: str, data: bytes) -> None:
 
 def page_png(settings: Settings, data: bytes, filename: str, page: int) -> bytes:
     """The page as a PNG, drawn once and kept. ValueError when the file has no such page."""
-    if page != 1 and Path(filename or "").suffix.lower() != ".pdf":
+    if Path(filename or "").suffix.lower() != ".pdf" and not 1 <= page <= ocr.picture_pages(data):
         raise ValueError(f"a picture has no page {page}")
     name = f"{file_hash(data)}-{page}.png"
     png = _kept(settings, name)

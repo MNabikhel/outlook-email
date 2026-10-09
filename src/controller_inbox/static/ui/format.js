@@ -42,15 +42,16 @@ export function fileHref(source, file, context) {
   const page = context.match(PAGE_AT);
   if (file.view) return `${base}/view${/\.pdf$/i.test(file.name) && page ? `#page=${page[1]}` : ""}`;
   const slide = context.match(SLIDE_AT);
-  const sheet = context.match(SHEET_AT);
+  // A CSV's one sheet is named after the file, which was just blanked out: an empty name means "the sheet".
+  const sheet = ((context.match(SHEET_AT) || [])[1] || "").trim();
   const cell = SHEET_FILE.test(file.name) ? citedCell(context) : null;
   let at = "";
   if (page) at = `page ${page[1]}`;
   else if (slide) at = `slide ${slide[1]}`;
   else if (cell) {
-    const name = cell[1] || cell[2] || cell[3] || (sheet && sheet[1]);
+    const name = [cell[1], cell[2], cell[3], sheet].map((part) => (part || "").trim()).find(Boolean);
     at = name ? `${name}!${cell[4]}` : cell[4];
-  } else if (sheet) at = `sheet "${sheet[1]}"`;
+  } else if (sheet) at = `sheet "${sheet}"`;
   return at ? `${base}?at=${encodeURIComponent(at)}` : base;
 }
 

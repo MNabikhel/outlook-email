@@ -32,7 +32,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from controller_inbox import tables
+from controller_inbox import ocr, tables
 from controller_inbox.documents import MAX_PDF_PAGES
 from controller_inbox.local_llm import (
     EmptyReply,
@@ -337,7 +337,7 @@ def wanted_pages(data: bytes, filename: str, text: str) -> list[int]:
     pages whose table's printed totals don't add up as CloseDesk read them."""
     suffix = Path(filename or "").suffix.lower()
     if suffix in IMAGE_SUFFIXES:
-        return [1]
+        return list(range(1, ocr.picture_pages(data) + 1))
     if suffix != ".pdf":
         return []
     pages = set(scanned_pages(data))
@@ -440,8 +440,11 @@ def render(data: bytes, filename: str, page: int, *, reader: Reader = GENERAL) -
                 pdf.close()
     else:
         image = Image.open(io.BytesIO(data))
+        # A TIFF's pages are its frames (a fax, a scanner's batch); any other picture is drawn from its first.
+        if not 1 <= page <= ocr.picture_pages(data):
+            raise ValueError(f"the picture has no page {page}")
         if getattr(image, "n_frames", 1) > 1:
-            image.seek(0)
+            image.seek(page - 1)
         image = ImageOps.exif_transpose(image)
         image.thumbnail((max_side, max_side))
         if image.mode in {"I;16", "I;16B", "I;16L", "I"} and (image.getextrema()[1] or 0) > 255:
@@ -1625,7 +1628,7 @@ def unread_pages(
     if doubtful:
         wanted = wanted_pages(data, att.filename, att.extracted_text or "")
     elif Path(att.filename or "").suffix.lower() in IMAGE_SUFFIXES:
-        wanted = [1]
+        wanted = list(range(1, ocr.picture_pages(data) + 1))
     else:
         wanted = scanned_pages(data) if Path(att.filename or "").suffix.lower() == ".pdf" else []
     return [page for page in wanted if page not in done]

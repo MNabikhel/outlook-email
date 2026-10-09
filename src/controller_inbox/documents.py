@@ -427,9 +427,10 @@ _MC_FALLBACK = "{http://schemas.openxmlformats.org/markup-compatibility/2006}Fal
 
 def _docx_runs(element, parts: list[str]) -> None:
     """The text under ``element``. A text box is stored twice (a drawing, then an older VML copy as the
-    ``mc:Fallback``), so the copy is skipped; its paragraphs go on lines of their own."""
+    ``mc:Fallback``), so the copy is skipped; its paragraphs go on lines of their own. Text a tracked change
+    moved is kept at its old place too (``w:moveFrom``, as plain ``w:t``); it is read where it went (``w:moveTo``)."""
     for node in element:
-        if node.tag in (_MC_FALLBACK, f"{_W}pPr"):
+        if node.tag in (_MC_FALLBACK, f"{_W}pPr", f"{_W}moveFrom"):
             continue
         if node.tag == f"{_W}p":
             parts.append("\x00")
@@ -656,9 +657,9 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
                 continue
             first_col, last_col = min(first_col or column + 1, column + 1), max(last_col, column + 1)
             first_row, last_row = (first_row or index + 1), index + 1
-            if isinstance(raw, str) and raw.startswith("="):
+            if formula := _formula(raw):
                 formula_count += 1
-                shown = f"{_formatted(value, cell)} ({raw})" if value is not None else raw
+                shown = f"{_formatted(value, cell)} ({formula})" if value is not None else formula
             else:
                 shown = _formatted(value if value is not None else raw, cell)
             if shown:
@@ -671,6 +672,7 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
             continue
         number = next((cell.row for cell in frow if getattr(cell, "row", None)), index + 1)
         rows.append(SheetRow(number, cells, bold))
+    _fill_merged_down(rows, _merged_ranges(formula_sheet))
     rows_text = sheet_row_lines(rows)
     try:
         min_col, min_row, max_col, max_row = range_boundaries(declared)
@@ -689,6 +691,73 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
     if more:
         out.append(f"[{more} more rows not shown; ask for a range such as rows {MAX_ROWS + 1}–{MAX_ROWS + 200}.]")
     return out
+
+
+_MERGE_CELL = re.compile(rb'<(?:\w+:)?mergeCell\b[^>]*?\bref="([A-Z]{1,3})(\d+):([A-Z]{1,3})(\d+)"')
+
+
+def _merged_ranges(sheet) -> list[tuple[int, int, int, int]]:
+    """The sheet's merged ranges as (first column, first row, last column, last row). Read-only mode doesn't
+    load them; they are listed after the cells, so the sheet's file is scanned for them, not parsed again."""
+    from openpyxl.utils import column_index_from_string
+
+    found: list[tuple[int, int, int, int]] = []
+    try:
+        with sheet._get_source() as source:
+            tail = b""
+            while chunk := source.read(1 << 20):
+                text = tail + chunk
+                if b"mergeCell" in text:
+                    ends = 0
+                    for match in _MERGE_CELL.finditer(text):
+                        first, top, last, bottom = match.groups()
+                        found.append((column_index_from_string(first.decode()), int(top), column_index_from_string(last.decode()), int(bottom)))
+                        ends = match.end()
+                    tail = text[max(ends, len(text) - 200):]
+                else:
+                    tail = text[-200:]
+    except Exception:
+        return []
+    return found
+
+
+def _fill_merged_down(rows: list[SheetRow], merged: list[tuple[int, int, int, int]]) -> None:
+    """A value merged down a column (a department over its vendors' rows) is held only by its top cell; the
+    rows under it get it too, as Word's merged table cells do, so each row reads on its own. A figure merged
+    down is left on its top row. Only below the
+    header row: a merge across a heading, or over a title, stays as it is."""
+    tall = [area for area in merged if area[3] > area[1]]
+    if not tall or not rows:
+        return
+    header = _sheet_header(rows)
+    below = rows[header].number if header is not None else 0
+    by_number = {row.number: row for row in rows}
+    for column, top, _last, bottom in tall:
+        start = by_number.get(top)
+        value = start.cells.get(column) if start is not None and top > below else None
+        # Names only: an amount merged over two lines is one amount, and repeated it would be counted twice.
+        if not value or isinstance(value, (int, float)) or tables.is_value(str(value)):
+            continue
+        for number in range(top + 1, min(bottom, top + MAX_ROWS) + 1):
+            row = by_number.get(number)
+            if row is not None and column not in row.cells:
+                row.cells[column] = value
+
+
+def _formula(raw) -> str:
+    """A cell's formula as Excel writes it ("=SUM(B2:B3)"), or "" when the cell holds a value. An array formula
+    (entered with Ctrl+Shift+Enter, or a dynamic array) and a what-if data table come from openpyxl as objects,
+    not text."""
+    from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
+
+    if isinstance(raw, str):
+        return raw if raw.startswith("=") else ""
+    if isinstance(raw, ArrayFormula):
+        text = str(raw.text or "")
+        return text if text.startswith("=") else f"={text}"
+    if isinstance(raw, DataTableFormula):
+        return f"=TABLE({raw.r1 or ''},{raw.r2 or ''})"
+    return ""
 
 
 def xls_text(data: bytes) -> str:
@@ -756,18 +825,56 @@ def _excel_named_text(data: bytes, filename: str) -> str:
 
 def markup_table_text(data: bytes, filename: str) -> str:
     """The rows of the tables in a web page, as a sheet. "Export to Excel" in many web apps sends one
-    named .xls; an Excel 2003 XML workbook has the same shape (``Row`` and ``Cell``)."""
+    named .xls; an Excel 2003 XML workbook has the same shape (``Row`` and ``Cell``). Each table, or each
+    worksheet of an XML workbook, is a sheet of its own: its rows are under its own headers."""
     from html.parser import HTMLParser
 
-    rows: list[list[str]] = []
+    # (sheet name, rows) for each table; the rows of the one being read are ``state["rows"]``.
+    sections: list[tuple[str, list[list[str]]]] = []
     loose: list[str] = []
     cell: list[str] = []
-    state = {"in_cell": False, "span": 1, "skip": 0}
+    state: dict = {"in_cell": False, "span": 1, "down": 0, "start": 0, "skip": 0, "rows": [], "carry": {}}
+
+    def new_section(name: str = "") -> None:
+        # A table nested in a cell, or the Table inside a Worksheet, goes on in the section it opens in until
+        # that one has rows.
+        if sections and not any(any(row) for row in state["rows"]):
+            sections[-1] = (name or sections[-1][0], state["rows"])
+            return
+        state["rows"], state["carry"] = [], {}
+        sections.append((name, state["rows"]))
+
+    def pad_to(width: int) -> None:
+        """Fill the row up to ``width`` cells: with the value of a cell merged down from a row above (rowspan,
+        ss:MergeDown), which the rows under it leave out, else blank."""
+        row, carry = state["rows"][-1], state["carry"]
+        while len(row) < width:
+            held = carry.get(len(row))
+            row.append(held[1] if held else "")
+            if held:
+                held[0] -= 1
+                if held[0] <= 0:
+                    del carry[len(row) - 1]
+
+    def merged_here() -> None:
+        while len(state["rows"][-1]) in state["carry"]:
+            pad_to(len(state["rows"][-1]) + 1)
+
+    def end_row() -> None:
+        if state["rows"] and state["carry"]:
+            ahead = [column for column in state["carry"] if column >= len(state["rows"][-1])]
+            if ahead:
+                pad_to(max(ahead) + 1)
 
     def end_cell() -> None:
         if state["in_cell"]:
-            rows[-1].append(re.sub(r"\s+", " ", "".join(cell)).strip())
-            rows[-1].extend([""] * (state["span"] - 1))
+            row = state["rows"][-1]
+            text = re.sub(r"\s+", " ", "".join(cell)).strip()
+            row.append(text)
+            row.extend([""] * (state["span"] - 1))
+            if state["down"]:
+                for column in range(state["start"], state["start"] + state["span"]):
+                    state["carry"][column] = [state["down"], text if column == state["start"] else ""]
             cell.clear()
             state["in_cell"] = False
 
@@ -777,19 +884,34 @@ def markup_table_text(data: bytes, filename: str) -> str:
             found = {name.rsplit(":", 1)[-1]: value or "" for name, value in attrs}
             if tag in ("script", "style"):
                 state["skip"] += 1
+            elif tag in ("table", "worksheet"):
+                end_cell()
+                end_row()
+                new_section(found.get("name", "") if tag == "worksheet" else "")
             elif tag in ("tr", "row"):
                 end_cell()
-                rows.append([])
+                end_row()
+                if not sections:
+                    new_section()
+                state["rows"].append([])
             elif tag in ("td", "th", "cell"):
                 end_cell()
-                if not rows:
-                    rows.append([])
+                if not sections:
+                    new_section()
+                if not state["rows"]:
+                    state["rows"].append([])
+                merged_here()
                 # An XML workbook leaves out empty cells and gives the next one's column.
                 if found.get("index", "").isdigit():
-                    rows[-1].extend([""] * (min(int(found["index"]), MAX_COLUMNS) - 1 - len(rows[-1])))
+                    pad_to(min(int(found["index"]), MAX_COLUMNS) - 1)
+                    merged_here()
                 span, across = found.get("colspan", ""), found.get("mergeacross", "")
                 span = int(span) if span.isdigit() else int(across) + 1 if across.isdigit() else 1
                 state["span"] = max(1, min(span, MAX_COLUMNS))
+                down, below = found.get("rowspan", ""), found.get("mergedown", "")
+                down = int(down) - 1 if down.isdigit() and int(down) > 0 else int(below) if below.isdigit() else 0
+                state["down"] = max(0, min(down, MAX_ROWS))
+                state["start"] = len(state["rows"][-1])
                 state["in_cell"] = True
             elif tag in ("br", "p", "div") and state["in_cell"]:
                 cell.append(" ")
@@ -798,8 +920,11 @@ def markup_table_text(data: bytes, filename: str) -> str:
             tag = tag.rsplit(":", 1)[-1]
             if tag in ("script", "style"):
                 state["skip"] = max(0, state["skip"] - 1)
-            elif tag in ("td", "th", "cell", "tr", "row", "table"):
+            elif tag in ("td", "th", "cell"):
                 end_cell()
+            elif tag in ("tr", "row", "table"):
+                end_cell()
+                end_row()
 
         def handle_data(self, text):
             if state["skip"]:
@@ -810,15 +935,38 @@ def markup_table_text(data: bytes, filename: str) -> str:
     reader.feed(decode_text(data))
     reader.close()
     end_cell()
-    if not any(any(row) for row in rows):
+    filled = _joined_headers([(name, rows) for name, rows in sections if any(any(row) for row in rows)])
+    if not filled:
         return re.sub(r"\s+", " ", " ".join(loose)).strip()
-    return _rows_text(rows, filename)
+    if len(filled) == 1:
+        return _rows_text(filled[0][1], filename)
+    names = [(name or f"{filename} table {number}").replace('"', "'") for number, (name, _rows) in enumerate(filled, start=1)]
+    return "\n\n".join(_rows_text(rows, name) for name, (_name, rows) in zip(names, filled))
+
+
+def _joined_headers(sections: list[tuple[str, list[list[str]]]]) -> list[tuple[str, list[list[str]]]]:
+    """Many web apps' grids print their column names in a table of their own over the table of rows: a table of
+    one row of names, as wide as the table after it, is that table's header."""
+    out: list[tuple[str, list[list[str]]]] = []
+    for name, rows in sections:
+        if out:
+            head_name, head = out[-1]
+            filled = [cell for cell in head[0] if cell.strip()] if len(head) == 1 else []
+            width = max((len(row) for row in rows), default=0)
+            if filled and len(filled) >= 2 and not any(tables.is_value(cell) for cell in filled) and len(head[0]) == width:
+                out[-1] = (head_name or name, head + rows)
+                continue
+        out.append((name, rows))
+    return out
 
 
 def csv_text(data: bytes, filename: str) -> str:
     text = decode_text(data).replace("\x00", "")
     try:
         dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
+        # The sniffer turns doubled quotes off when its sample has none, and a quote written twice further down
+        # ('"Pipe 3"" PVC, schedule 40"') would then end the cell at its comma. Every spreadsheet writes them.
+        dialect.doublequote = True
     except csv.Error:
         dialect = csv.excel_tab if filename.lower().endswith(".tsv") else csv.excel
     quote = getattr(dialect, "quotechar", None) or '"'
@@ -902,7 +1050,8 @@ _DATE_PART = re.compile(r'(?i)"([^"]*)"|\\(.)|mmmm|mmm|mm|m|yyyy|yy|[^a-z]')
 def _formatted(value, cell) -> str:
     """A workbook value as the sheet shows it where that reads differently from the value itself: a
     percentage (0.15 formatted 0.0% is 15.0%) and a month (a date formatted mmm-yy is Mar-26, not the
-    first of the month). Other numbers, and dates with a day, keep the plain form ``_fmt`` gives them."""
+    first of the month), and a number whose format has no thousands separator ("0": invoice 100235, year 2026,
+    not 100,235). Other numbers, and dates with a day, keep the plain form ``_fmt`` gives them."""
     number_format = getattr(cell, "number_format", None)
     if not isinstance(number_format, str) or number_format == "General":
         return _fmt(value)
@@ -925,10 +1074,12 @@ def _formatted(value, cell) -> str:
                 literal = part.group(1) if part.group(1) is not None else part.group(2)
                 shown.append(literal if literal is not None else words.get(part.group(0).lower(), part.group(0)))
             return "".join(shown).strip()
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and "," not in bare:
+        return _fmt(value, grouped=False)
     return _fmt(value)
 
 
-def _fmt(value) -> str:
+def _fmt(value, *, grouped: bool = True) -> str:
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -941,10 +1092,10 @@ def _fmt(value) -> str:
         if math.isnan(value) or math.isinf(value):
             return str(value)
         if value.is_integer():
-            return f"{int(value):,}"
-        return f"{value:,.4f}".rstrip("0").rstrip(".")
+            return f"{int(value):,}" if grouped else str(int(value))
+        return (f"{value:,.4f}" if grouped else f"{value:.4f}").rstrip("0").rstrip(".")
     if isinstance(value, int):
-        return f"{value:,}"
+        return f"{value:,}" if grouped else str(value)
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
@@ -1288,8 +1439,8 @@ def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200) -> str:
                 if raw is None and value is None:
                     continue
                 ref = f"{get_column_letter(c)}{r}"
-                if isinstance(raw, str) and raw.startswith("="):
-                    row.append(f"{ref}: {_fmt(value)} ({raw})" if value is not None else f"{ref}: {raw}")
+                if formula := _formula(raw):
+                    row.append(f"{ref}: {_fmt(value)} ({formula})" if value is not None else f"{ref}: {formula}")
                 else:
                     row.append(f"{ref}: {_fmt(value if value is not None else raw)}")
             if row:
@@ -1435,7 +1586,7 @@ def _trace(formulas, values, sheet: str, ref: str, depth: int, level: int, lines
     if key in seen or len(lines) > 80:
         return
     seen.add(key)
-    raw = formulas[sheet][ref].value
+    raw = _formula(formulas[sheet][ref].value) or formulas[sheet][ref].value
     value = values[sheet][ref].value
     indent = "  " * level
     where = f"{sheet}!{ref}"

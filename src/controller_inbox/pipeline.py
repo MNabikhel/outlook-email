@@ -60,6 +60,10 @@ def process_message(
         return existing
     if existing is not None and raw.from_file:
         raw = _as_stored(raw, existing)
+    if existing is not None and existing.writeback_status == "written":
+        # CloseDesk marks the messages it flags high importance in Outlook: read again, that is its own mark, not
+        # the sender's. The importance the message came with is kept.
+        raw = replace(raw, outlook_importance=existing.outlook_importance)
     # Two dates. "By Friday" and "October 15" in the text are read against the day the mail was
     # sent (``anchor``); how urgent or overdue it is now is judged against today (``as_of``).
     as_of = as_of or now.astimezone(settings.tz).date()
@@ -371,10 +375,19 @@ def ingest_mailbox(
     read_before = datetime.fromisoformat(retry["until"]) if resumed else None
     failed: dict[str, int] = {}
     held: list[datetime] = []
+    sample_checked = cursor is None  # the sample mailbox itself is read without a cursor
     for raw in mailbox.list_messages(received_after=received_after):
         received = _utc(raw.received_at)
         if read_before and received < read_before and raw.id not in tries and store.get_email(raw.id) is not None:
             continue  # listed again only because the cursor waited for a message that failed
+        if store.get_email(raw.id) is None and store.email_with_message_id(raw.internet_message_id, raw.source):
+            # Outlook gives a message a new id when it is moved to another folder; it was read under the old one.
+            continue
+        if not sample_checked:
+            # The first real message from Outlook replaces the sample mailbox, as one from the drop folder does.
+            sample_checked = True
+            if not store.real_mail_count():
+                report["sample_cleared"] = store.clear_sample()
         try:
             processed.append(process_message(raw, store, settings, mailbox, now=now))
         except Exception as exc:

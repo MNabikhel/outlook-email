@@ -966,6 +966,16 @@ class Store:
                 "SELECT COUNT(*) AS n FROM emails WHERE COALESCE(source, '') != 'demo'"
             ).fetchone()["n"]
 
+    def email_with_message_id(self, message_id: str, source: str) -> str | None:
+        """The id of the email from ``source`` with this Internet message ID, or None."""
+        if not message_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM emails WHERE internet_message_id = ? AND source = ? LIMIT 1", (message_id, source)
+            ).fetchone()
+        return row["id"] if row else None
+
     def clear_sample(self) -> int:
         """Remove the sample mailbox (and its digests) so real mail starts on a clean board."""
         sample = "SELECT id FROM emails WHERE source = 'demo'"
@@ -1361,6 +1371,10 @@ class Store:
     def add_chat_file(self, chat_id: str, row: dict[str, Any]) -> None:
         """Adds a file to the conversation, replacing one with the same name."""
         with self.connect() as conn:
+            before = conn.execute("SELECT sha256 FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, row["filename"])).fetchone()
+            if before is not None and before["sha256"] != row.get("sha256", ""):
+                # Notes written from the file it replaces would come back as "notes from earlier reading".
+                _drop_file_notes(conn, chat_id, row["filename"])
             conn.execute("DELETE FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, row["filename"]))
             conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (f"chat-{chat_id}:{row['filename']}",))
             conn.execute("DELETE FROM page_failures WHERE attachment_id = ?", (f"chat-{chat_id}:{row['filename']}",))
@@ -1380,6 +1394,8 @@ class Store:
             conn.execute("DELETE FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, filename))
             conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (f"chat-{chat_id}:{filename}",))
             conn.execute("DELETE FROM page_failures WHERE attachment_id = ?", (f"chat-{chat_id}:{filename}",))
+            # The conversation's notes may quote the file that is gone.
+            _drop_file_notes(conn, chat_id, filename)
 
     # File summaries written by the overnight run ------------------------------------------------
 
@@ -1882,3 +1898,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('attachment_text_without_nul', '1')")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_model ON emails(model_status)")
+
+
+def _drop_file_notes(conn, chat_id: str, filename: str) -> None:
+    """Delete a conversation's notes written from ``filename``: those that name it, and those that name none of
+    its other files (a note says where it came from, but not always by the file's name). Notes on the other
+    files stay."""
+    others = [
+        row["filename"].lower()
+        for row in conn.execute("SELECT filename FROM chat_files WHERE chat_id = ? AND filename != ?", (chat_id, filename)).fetchall()
+    ]
+    for row in conn.execute("SELECT id, text FROM findings WHERE email_id = ?", (f"chat-{chat_id}",)).fetchall():
+        text = (row["text"] or "").lower()
+        if filename.lower() in text or not any(name in text for name in others):
+            conn.execute("DELETE FROM findings WHERE id = ?", (row["id"],))

@@ -571,6 +571,8 @@ const ctx = {
   fileUrl: (n, tab) => fileUrl(S.email.id, n, tab),
   emailUrl: () => mailUrl(S.email.id),
   reload: () => reloadEmail(),
+  // A fix saved on the Page tab changes the file's reading: its Text and Tables tabs fetch it again.
+  fileChanged: (emailId, n) => S.files.delete(`${emailId}:${n}`),
   categories: () => (S.meta ? S.meta.categories : []),
   visionRead,
   visionReading,
@@ -1167,7 +1169,8 @@ document.addEventListener("keydown", (event) => {
   // On a full page (the digest, Setup), the list behind it is hidden: its keys mustn't act on it.
   if (ws.classList.contains("doc") && ["j", "k", "ArrowDown", "ArrowUp", "Enter", "o", "e"].includes(event.key)) return;
   const inList = listPane.contains(document.activeElement) || document.activeElement === document.body;
-  const onControl = event.target.closest && event.target.closest("a, button, summary, [role=tab]");
+  // A control or a focusable box in the reader (the Page tab's boxes, a table) takes Enter itself; the list doesn't.
+  const onControl = event.target.closest && event.target.closest('a, button, summary, [role=tab], [role=button], [tabindex="0"]:not([role=listbox])');
   switch (event.key) {
     case "j":
       event.preventDefault();
@@ -1191,8 +1194,8 @@ document.addEventListener("keydown", (event) => {
       return doneSelected();
     case "/": {
       const search = $(".list-search", listPane);
-      if (!search || ws.classList.contains("doc")) return overlays.palette();
       event.preventDefault();
+      if (!search || ws.classList.contains("doc")) return overlays.palette();
       search.focus();
       search.select();
       return;

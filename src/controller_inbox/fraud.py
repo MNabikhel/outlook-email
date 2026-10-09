@@ -561,6 +561,11 @@ def assess(
             hit = PAYMENT_CHANGE_RE.search(strip_notices(normalize_text((text or "")[:60_000])))
             if hit:
                 add("bank_change_attachment", filename)
+                # A stranger's "RE: Updated bank details" over a quoted thread is still theirs when they attach the
+                # bank-change letter too: a forged thread is how such a request is dressed up.
+                said = PAYMENT_CHANGE_RE.search(subject or "") if stranger and is_reply else None
+                if said:
+                    add("bank_change", evidence.quote(subject or "", said))
                 break
     gift = _gift_ask(own) or _gift_ask(own_full)
     if gift:

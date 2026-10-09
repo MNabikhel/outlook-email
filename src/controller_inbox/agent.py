@@ -1023,6 +1023,8 @@ def _search_mail(ws: Workspace, query: str) -> str:
     found, by_meaning, _how = semantic.find_mail(ws.store, ws.settings, query, terms, limit=5)
     if not found:
         return f"No emails mention {query!r}."
+    from controller_inbox.assistant import is_fraud
+
     lines = [f"Emails matching {query!r}:"]
     for email in found:
         n = ws.number(email)
@@ -1031,6 +1033,7 @@ def _search_mail(ws: Workspace, query: str) -> str:
             f"[{n}] {email.received_at[:10]} · from {email.sender_name or email.sender_email} · “{email.subject}”"
             + (f" · files: {files}" if files else "")
             + (" · related in meaning, not by the same words" if email.id in by_meaning else "")
+            + (" · Warning: payment-detail change — verify by phone." if is_fraud(email) else "")
         )
     return "\n".join(lines)
 
@@ -1042,6 +1045,11 @@ def _open_email(ws: Workspace, email: EmailRecord) -> str:
         f"[{n}] {email.received_at[:10]} · from {email.sender_name or email.sender_email} <{email.sender_email}> · “{email.subject}”",
         body[:2500] + (" …" if len(body) > 2500 else ""),
     ]
+    from controller_inbox.assistant import is_fraud
+
+    if is_fraud(email):
+        # Marked as it is in the prompt's own list of emails: an email the model opens itself is no safer.
+        lines.insert(1, "Warning: payment-detail change — verify by phone.")
     if email.attachments:
         lines.append(files_line(email))
         if not attachments_locked(email):
