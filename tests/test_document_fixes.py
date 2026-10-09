@@ -9,6 +9,7 @@ from datetime import date, datetime, timezone
 import pytest
 from openpyxl import Workbook
 
+from controller_inbox import documents, table_lookup
 from controller_inbox.documents import read_part, xlsx_text
 from controller_inbox.extract import (
     explode_archives,
@@ -177,3 +178,134 @@ def test_bare_sheet_name_prefers_the_exact_sheet():
     text = _workbook()
     part = read_part(text, "Budget")
     assert part is not None and part.label.startswith('sheet "Budget" '), part
+
+
+# Workbooks, web-page and XML "Excel" files, CSVs and Word redlines --------------------------------------------
+
+
+def _saved(book: Workbook) -> bytes:
+    buf = io.BytesIO()
+    book.save(buf)
+    return buf.getvalue()
+
+
+def test_number_formatted_without_a_separator_reads_as_shown():
+    """A whole number in a cell formatted "0" (an invoice number, a year) is written as the sheet shows it, not
+    "100,235", so looking the invoice up by its number finds it."""
+    book = Workbook()
+    ws = book.active
+    ws.append(["Vendor", "Invoice No", "Fiscal Year", "Amount"])
+    for row in (("Acme", 100234, 2026, 1200.5), ("Globex", 100235, 2026, 800), ("Hooli", 100236, 2025, 300)):
+        ws.append(list(row))
+    for cell in [*ws["B"][1:], *ws["C"][1:]]:
+        cell.number_format = "0"
+    text = documents.extract_document("aging.xlsx", "", _saved(book))
+    assert "100,235" not in text and "2,026" not in text, text
+    out = table_lookup.lookup(text, "What is the amount on invoice 100235?")
+    assert "800" in out and "Globex" in out, out
+
+
+def test_array_formula_is_written_as_a_formula():
+    from openpyxl.worksheet.formula import ArrayFormula
+
+    book = Workbook()
+    ws = book.active
+    ws.append(["Item", "Amount"])
+    ws.append(["x", 5])
+    ws.append(["y", 6])
+    ws["B4"] = ArrayFormula("B4", "=SUM(B2:B3*2)")
+    text = documents.extract_document("calc.xlsx", "", _saved(book))
+    assert "object at 0x" not in text and "=SUM(B2:B3*2)" in text, text
+
+
+def test_value_merged_down_a_column_covers_its_rows():
+    """A department merged down its vendors' rows (A2:A4) is held by the top cell only; each row gets it, so
+    "total for Finance" adds all three."""
+    book = Workbook()
+    ws = book.active
+    ws.append(["Department", "Vendor", "Amount"])
+    ws.append(["Finance", "Acme", 1200])
+    ws.append([None, "Globex", 800])
+    ws.append([None, "Hooli", 300])
+    ws.append(["IT", "Initech", 450])
+    ws.append(["Ops", "Umbrella", 50])
+    ws.merge_cells("A2:A4")
+    text = documents.extract_document("spend.xlsx", "", _saved(book))
+    assert "A3 (Department): Finance" in text and "A4 (Department): Finance" in text, text
+    assert "A5 (Department): IT" in text
+    out = table_lookup.lookup(text, "What is the total amount for Finance?")
+    assert "2,300" in out, out
+
+
+MARKUP_XML = b"""<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+<Worksheet ss:Name="AP"><Table>
+<Row><Cell><Data ss:Type="String">Vendor</Data></Cell><Cell><Data ss:Type="String">Amount</Data></Cell><Cell><Data ss:Type="String">Due</Data></Cell></Row>
+<Row><Cell><Data ss:Type="String">Acme</Data></Cell><Cell><Data ss:Type="Number">1200</Data></Cell><Cell><Data ss:Type="String">10/30/2026</Data></Cell></Row>
+<Row><Cell><Data ss:Type="String">Globex</Data></Cell><Cell><Data ss:Type="Number">800</Data></Cell><Cell><Data ss:Type="String">11/15/2026</Data></Cell></Row>
+</Table></Worksheet>
+<Worksheet ss:Name="AR"><Table>
+<Row><Cell><Data ss:Type="String">Customer</Data></Cell><Cell><Data ss:Type="String">Balance</Data></Cell><Cell><Data ss:Type="String">Days</Data></Cell></Row>
+<Row><Cell><Data ss:Type="String">Initech</Data></Cell><Cell><Data ss:Type="Number">5000</Data></Cell><Cell><Data ss:Type="Number">45</Data></Cell></Row>
+</Table></Worksheet>
+</Workbook>"""
+
+MARKUP_HTML = b"""<html><body><h2>Open invoices</h2><table><tr><th>Vendor</th><th>Amount</th><th>Due</th></tr>
+<tr><td>Acme</td><td>1200</td><td>10/30/2026</td></tr><tr><td>Globex</td><td>800</td><td>11/15/2026</td></tr></table>
+<h2>Credits</h2><table><tr><th>Customer</th><th>Credit</th><th>Ref</th></tr><tr><td>Initech</td><td>50</td><td>CM-1</td></tr></table>
+</body></html>"""
+
+
+def test_each_xml_worksheet_is_a_sheet_of_its_own():
+    text = documents.extract_document("export.xls", "application/vnd.ms-excel", MARKUP_XML)
+    assert "(Vendor): Initech" not in text and "(Due): 45" not in text, text
+    assert '[sheet "AR" ' in text and "(Customer): Initech" in text, text
+
+
+def test_each_web_page_table_is_a_sheet_of_its_own():
+    text = documents.extract_document("export.xls", "application/vnd.ms-excel", MARKUP_HTML)
+    assert "(Vendor): Initech" not in text and "(Amount): 50" not in text, text
+    assert "(Customer): Initech | B2 (Credit): 50" in text, text
+
+
+def test_a_cell_merged_down_keeps_the_columns_under_it_in_place():
+    html = b"""<html><body><table>
+<tr><th>Department</th><th>Vendor</th><th>Amount</th></tr>
+<tr><td rowspan="2">Finance</td><td>Acme</td><td>1,200.00</td></tr>
+<tr><td>Globex</td><td>800.00</td></tr>
+<tr><td>IT</td><td>Initech</td><td>450.00</td></tr>
+</table></body></html>"""
+    text = documents.extract_document("report.xls", "application/vnd.ms-excel", html)
+    assert "(Vendor): 800.00" not in text, text
+    assert "A3 (Department): Finance | B3 (Vendor): Globex | C3 (Amount): 800.00" in text, text
+
+
+def test_csv_doubled_quote_past_the_sniffed_sample():
+    """The sniffer sees the first 4 KB only; a quote written twice further down still reads as one quote."""
+    lines = ["Item,Description,Amount"] + [f"{i},Widget number {i},{i}.00" for i in range(300)]
+    lines += ['301,"Pipe 3"" PVC, schedule 40",12.50', "302,Elbow,3.00"]
+    text = documents.extract_document("items.csv", "text/csv", ("\n".join(lines) + "\n").encode())
+    row = next(line for line in text.splitlines() if "Pipe" in line)
+    assert '(Description): Pipe 3" PVC, schedule 40' in row and "(Amount): 12.50" in row, row
+
+
+def test_text_a_tracked_change_moved_is_read_once():
+    from docx import Document
+    from docx.oxml import parse_xml
+
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    document = Document()
+    document.add_paragraph("Intro")
+    body = document.element.body
+    for xml in (
+        f'<w:p {w}><w:moveFrom w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:t>Payment terms are net 30.</w:t></w:r></w:moveFrom></w:p>',
+        f"<w:p {w}><w:r><w:t>Middle paragraph.</w:t></w:r></w:p>",
+        f'<w:p {w}><w:moveTo w:id="2" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:t>Payment terms are net 30.</w:t></w:r></w:moveTo></w:p>',
+    ):
+        body.insert(len(body) - 1, parse_xml(xml))
+    buf = io.BytesIO()
+    document.save(buf)
+    text = documents.extract_document("contract.docx", "", buf.getvalue())
+    assert text.count("Payment terms are net 30.") == 1, text
+    assert text.index("Middle paragraph.") < text.index("Payment terms")
