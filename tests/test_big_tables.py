@@ -233,3 +233,10 @@ def test_a_row_picked_by_its_number_is_named_too():
     assert found is not None
     values = [value for _point, value in found.points]
     assert values[:2] == ["Library", "Training"]
+
+
+def test_a_worked_out_figure_the_answer_misses_is_added():
+    points = [("Largest Earnings Overtime: Johnson, Priya", "954.45")]
+    answer = "Johnson, Thomas earned the most overtime pay this period with $269.88."
+    assert agent.missing_points(points, answer) == []
+    assert agent.missing_points(points, answer, exact=True) == points

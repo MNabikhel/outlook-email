@@ -321,8 +321,10 @@ class Workspace:
     # The query worked out over each email's tables for the question, by email id ("" when none fits).
     worked: dict[str, str] = field(default_factory=dict)
     # What the question asks of the open file's tables, one point each with the value the table gives (see
-    # ``table_lookup.Answer.points``): listed for the model, and checked for in its answer.
+    # ``table_lookup.Answer.points``): listed for the model, and checked for in its answer. ``exact``: they were
+    # worked out (a largest, a total, a change), not copied from rows the question picked out.
     points: list[tuple[str, str]] = field(default_factory=list)
+    exact: bool = False
 
     def __post_init__(self) -> None:
         # The emails in the prompt, plus those the model opens with a tool: the only ones it may write notes on.
@@ -555,8 +557,10 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         rows = table_lookup.render(found, table_lookup.MAX_CHARS) if found else ""
         if found and found.points and not ws.points:
             ws.points = list(found.points)
+        plan = answer_plan(found.points) if found is not None and found.points and ws.points == found.points else ""
         if worked and rows.startswith(table_lookup.WORKED_HEAD):
-            # Two workings of one question would leave the model to pick a figure; the query read it as asked.
+            # Two workings of one question would leave the model to pick a figure; the query read it as asked. What
+            # the question asks for is still listed.
             rows = ""
         spare = budget - size - 2 * len(parts) * 12
         space = spare if spare >= 0 else budget // 3
@@ -586,8 +590,8 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
                 read = f"Read {shown} of {len(parts)} sections of {att.filename}{', one cut short' if cut else ''} ({how})"
         piece = "\n".join(block)
         picked = (rows if len(readable) == 1 else f"From {att.filename}:\n{rows}") if rows else ""
-        if picked and found is not None and found.points and ws.points == found.points:
-            picked += "\n" + answer_plan(found.points)
+        if plan:
+            picked = f"{picked}\n{plan}".strip()
         if used + prompt_size(piece) + prompt_size(picked) > room and files_shown:
             ws.left_out.append(att.filename)
             ws.reads.append(f"Left out {att.filename}: no room (the assistant can still open it)")
@@ -619,6 +623,7 @@ def question_points(ws: Workspace, question: str) -> list[tuple[str, str]]:
         found = table_lookup.answer(att.extracted_text or "", question)
         if found and found.points:
             ws.points = list(found.points)
+            ws.exact = found.head == table_lookup.WORKED_HEAD
             return ws.points
     return []
 
@@ -628,9 +633,10 @@ def reply_tokens(points: list[tuple[str, str]], usual: int) -> int:
     return max(usual, min(MAX_REPLY_TOKENS, 150 + 50 * len(points)))
 
 
-def missing_points(points: list[tuple[str, str]], answer: str) -> list[tuple[str, str]]:
-    """The points an answer leaves out, when it gives at least one of them (so it is about those rows): a point
-    whose value is nowhere in it."""
+def missing_points(points: list[tuple[str, str]], answer: str, *, exact: bool = False) -> list[tuple[str, str]]:
+    """The points an answer leaves out, when it gives at least one of them (so it is about those rows), or when
+    they were worked out ``exact``ly (a largest or a total the answer should have given): a point whose value is
+    nowhere in it."""
     if not points or len(points) > 2 * MAX_PLAN:
         return []
     flat = _flat(answer)
@@ -640,7 +646,7 @@ def missing_points(points: list[tuple[str, str]], answer: str) -> list[tuple[str
         return re.search(rf"(?<![\w.]){re.escape(_flat(value))}(?![\w]|\.\d)", flat) is not None
 
     given = [(point, value) for point, value in points if value and said(value)]
-    if not given:
+    if not given and not exact:
         return []
     return [(point, value) for point, value in points if value and not said(value)]
 

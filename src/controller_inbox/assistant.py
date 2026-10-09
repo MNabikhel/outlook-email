@@ -689,9 +689,10 @@ def answer_stream(
             yield {"type": "mode", "mode": "lookup", "note": "The local model sent an empty answer."}
             yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True)}
         else:
-            if missing := agent.missing_points(ws.points, state["text"]):
+            if missing := agent.missing_points(ws.points, state["text"], exact=ws.exact):
                 # The answer left out figures the question asks for: they are added from the table, as read.
-                added = "\n\nAlso from the table:\n" + "\n".join(f"- {point}: {value}" for point, value in missing)
+                head = "Worked out exactly from the table" if ws.exact and len(missing) == len(ws.points) else "Also from the table"
+                added = f"\n\n{head}:\n" + "\n".join(f"- {point}: {value}" for point, value in missing)
                 state["text"] += added
                 yield {"type": "delta", "text": added}
                 yield {"type": "step", "text": f"Added {len(missing)} figure{'s' if len(missing) != 1 else ''} the answer left out"}
