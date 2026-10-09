@@ -38,8 +38,6 @@ SCHEMA_CHARS = 7000
 QUERY_SECONDS = 2.0
 # The longest text a query may build, so a query can't fill memory before the time limit stops it.
 MAX_VALUE_BYTES = 100_000
-# The most memory SQLite may hold, so a query's sort can't fill memory before the time limit stops it.
-HEAP_BYTES = 256 * 1024 * 1024
 # Rows checked for the columns a row works out from others.
 FORMULA_ROWS = 200
 # Goes at a query: one more when the first fails or finds nothing.
@@ -253,11 +251,6 @@ class Tables:
             self._db.execute("CREATE TABLE facts (file TEXT COLLATE NOCASE, name TEXT COLLATE NOCASE, value TEXT COLLATE NOCASE)")
             self._db.executemany("INSERT INTO facts VALUES (?, ?, ?)", self.facts)
             self._names |= {"facts", "file", "name", "value"}
-        # A sort or a temporary table too big for memory would spill to temp files on disk (hundreds of MB in a
-        # query's two seconds): it stays in memory, and SQLite's memory is capped (for the whole process, which
-        # holds nothing else near it), so such a query fails instead.
-        self._db.execute("PRAGMA temp_store = MEMORY")
-        self._db.execute(f"PRAGMA hard_heap_limit = {HEAP_BYTES}")
         self._db.execute("PRAGMA query_only = ON")
         self._db.set_authorizer(_authorize)
 

@@ -583,16 +583,3 @@ def test_a_plan_that_works_out_a_missing_column_is_an_answer():
 
     found = table_query.ask(None, tables, "what is Q4 payroll", complete=reply)
     assert found is not None and found.rows == [("Payroll", 123000.0)]
-
-
-@pytest.mark.skipif(not Path("/proc/self/io").exists(), reason="reads the bytes written from /proc")
-def test_a_query_writes_no_temporary_files():
-    # A sort too big for memory spilled hundreds of MB to SQLite's temp files in its two seconds.
-    def written() -> int:
-        return next(int(line.split()[1]) for line in open("/proc/self/io") if line.startswith("wchar"))
-
-    tables = _text_tables("Vendor: A | Amount: 1\nVendor: B | Amount: 2\nVendor: C | Amount: 3\n")
-    before = written()
-    with pytest.raises(sqlite3.Error):
-        tables.run("WITH RECURSIVE r(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM r) SELECT printf('%.*c', 90000, 'a') || x AS s FROM r ORDER BY s DESC")
-    assert written() - before < 20_000_000
