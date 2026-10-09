@@ -48,12 +48,15 @@ _MONTH = (
 )
 # "October 15" with no year: read against the date the mail was sent (see parse_due_date).
 _MONTH_DAY = _MONTH + r"\.?\s+\d{1,2}(?:st|nd|rd|th)?(?!\d)"
+# The year after "Oct 15,": four digits, or two not followed by a time or a word, so "Oct 15, 12pm",
+# "Oct 15, 10:00 AM" and "Oct 30, 30 days net" are not read as 2012, 2010 and 2030.
+YEAR_AFTER_DAY = r"(?:\d{4}|\d{2}(?!\s*(?:[:.]\d|[a-z])))(?!\d)"
 # A weekday before a date names the date's day ("Friday, October 16"): the date is read, not the next Friday.
 _WEEKDAY_BEFORE = r"(?:(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?\.?,?\s+)?"
 DUE_RE = re.compile(
     r"\b(?:due(?:\s+date)?|payment\s+due|remit\s+by|pay\s+by|respond\s+by|needed\s+by|"
     r"please\s+(?:complete|provide|respond|approve)\s+by|deadline|by)\s*[:\-]?\s*" + _WEEKDAY_BEFORE +
-    r"([A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{2,4}(?!\d)|" + _MONTH_DAY + r"|"
+    r"([A-Za-z]{3,9}\.?\s+\d{1,2}(?:st|nd|rd|th)?,?\s+" + YEAR_AFTER_DAY + "|" + _MONTH_DAY + r"|"
     # Day first, as UK and EU suppliers write it: "15 October 2026", "15-Oct-26", "15 October". A two-digit year
     # only follows directly ("15 Oct 26"): in "due 15 October, 10% late fee" and "by 2 June, 12 cases" the
     # figure is not a year, nor in "by 2 June 12 cases short".

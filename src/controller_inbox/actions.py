@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone, tzinfo
 from zoneinfo import ZoneInfo
 
 from controller_inbox.classify import own_words
-from controller_inbox.extract import parse_due_date
+from controller_inbox.extract import YEAR_AFTER_DAY, parse_due_date
 from controller_inbox.models import (
     ActionItem,
     ActionStatus,
@@ -169,7 +169,7 @@ def extract_actions(
                 continue
             sent_due = None
             due_match = re.search(
-                r"\b(?:by|before|due)\s+([A-Za-z]{3,9}\.?\s+\d{1,2},?\s+\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2}|EOD|COB|today|tomorrow|Monday|Tuesday|Wednesday|Thursday|Friday)",
+                r"\b(?:by|before|due)\s+([A-Za-z]{3,9}\.?\s+\d{1,2},?\s+" + YEAR_AFTER_DAY + r"|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2}|EOD|COB|today|tomorrow|Monday|Tuesday|Wednesday|Thursday|Friday)",
                 sentence,
                 re.I,
             )
