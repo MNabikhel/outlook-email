@@ -359,6 +359,10 @@ def _adds_named_rows(grid: list[list[str]], read: list[list[str]]) -> bool:
         key = _named_key(row)
         if key in seen:
             return False
+        # Its name is part of how the row was read: a category merged down the rows ("Northeast") was carried onto
+        # CloseDesk's rows and left blank on Camelot's.
+        if key[1] and any(key[1] in words for words in named.get(key[0], [])):
+            return False
         names = [cell for cell in row if _named(cell)]
         if len(names) < 2:
             return True

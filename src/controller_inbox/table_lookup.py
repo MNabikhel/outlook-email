@@ -81,10 +81,13 @@ _OPS = [
     ("min", re.compile(r"\b(?:smallest|lowest|least|fewest|minimum|min)\b", re.I)),
     ("first", re.compile(r"\b(?:first|earliest)\b", re.I)),
     ("last", re.compile(r"\b(?:last|latest|final)\b", re.I)),
+    # "How did it change from FY2024 to FY2025": the later figure less the earlier one.
+    ("change", re.compile(r"\b(?:chang\w*|increas\w*|decreas\w*|grow\w*|grew|growth|declin\w*|drop(?:s|ped)?|went (?:up|down))\b", re.I)),
     ("sum", re.compile(r"\b(?:total|sum|add(?:ed)? up|combined|altogether|in all)\b", re.I)),
     ("list", re.compile(r"\b(?:which|who|whose|list|what are|show)\b", re.I)),
 ]
 _HOW_MUCH = re.compile(r"\bhow much\b", re.I)
+_EVERY = re.compile(r"\b(?:each|every|all|break(?:s|ing)? (?:it |them )?down|breakdown|itemi[sz]e)\b", re.I)
 _NUM_COND = re.compile(
     r"(?:\b(more than|greater than|higher than|larger than|bigger than|over|above|exceed(?:s|ing)?|at least|no less than|"
     r"less than|lower than|smaller than|fewer than|under|below|at most|no more than|up to|equal to|exactly)|(>=|<=|>|<))"
@@ -118,6 +121,8 @@ _DATE_COND = re.compile(
     re.I,
 )
 _BUDGET = re.compile(r"\b(over|under|below|above|missed|beat|exceeded|within)\s+(?:\w+\s+){0,2}?budget\b", re.I)
+# "Over their credit limit", "under its minimum balance": a row's amount against another of its columns.
+_LIMIT = re.compile(r"\b(over|above|under|below|exceed(?:s|ed|ing)?)\s+(?:their|its|his|her|the)\s+([a-z][a-z ]{2,30}?)(?=[?.,;]|\s+(?:so far|now|this|in|on|for|at)\b|$)", re.I)
 _GROUP = re.compile(r"\b(?:by|per|for each|for every|each)\s+([a-z][a-z#&-]*)", re.I)
 _RANGE = re.compile(r"^\s*(?:through|thru|to|until|-|–)\s*$", re.I)
 _TOTAL = re.compile(r"^(?:grand\s+|sub-?)?totals?\b|^%", re.I)
@@ -209,6 +214,9 @@ class Question:
     conditions: list[Condition]
     budget: str = ""  # ">" over budget, "<" under budget
     group: str = ""  # the word after "by" / "per" / "for each"
+    # The column a row's amount is held against, in the question's words ("over their credit limit": credit,
+    # limit), with ``budget`` saying which way.
+    limit: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -216,6 +224,9 @@ class Answer:
     weight: float
     head: str
     lines: list[str]
+    # What the question asks for, one point each, with the value the table gives: ("Mountain > Iris sensor:
+    # FY2025 Q3", "105,949"). The answer is told to give each, and checked for them.
+    points: list[tuple[str, str]] = field(default_factory=list)
 
 
 def lookup(text: str, question: str, *, limit: int = MAX_CHARS) -> str:
@@ -766,6 +777,7 @@ def read_question(question: str) -> Question:
               "prior to": "<", "until": "<=", "till": "<=", "through": "<=", "by": "<=", "on or before": "<="}.get(word, "in")
         conditions.append(Condition("date", op, span, match.group(0).strip(), match.start()))
     budget = _BUDGET.search(text)
+    limit = None if budget else _LIMIT.search(text)
     group = _GROUP.search(text)
     words = [word for word in _words(text) if word not in _STOP]
     return Question(
@@ -773,8 +785,9 @@ def read_question(question: str) -> Question:
         list(dict.fromkeys(words + _dates(text))),
         _op_for(found_op, text),
         conditions,
-        budget=">" if budget and budget.group(1).lower() in {"over", "above", "exceeded"} else "<" if budget else "",
+        budget=">" if (budget or limit) and (budget or limit).group(1).lower()[:4] in {"over", "abov", "exce"} else "<" if (budget or limit) else "",
         group=group.group(1).lower() if group else "",
+        limit=[word for word in _words(limit.group(2)) if word not in _STOP] if limit else [],
     )
 
 
@@ -859,8 +872,8 @@ def _answer(table: Table, asked: Question) -> Answer | None:
         return None
     if op in {"sum", "average", "max", "min"} and not figures:
         figures = [label for label in [_default_column(table)] if label]
-    if op == "difference":
-        found = _difference(table, asked, columns, figures, chosen, rows, words)
+    if op in {"difference", "change"}:
+        found = _difference(table, asked, columns, figures, chosen, rows, words, change=op == "change")
         if found:
             return done(found)
         op = "find"
@@ -877,7 +890,7 @@ def _answer(table: Table, asked: Question) -> Answer | None:
         if columns and figures and (op == "list" or asked.op != "find"):
             return done(_column_view(table, figures, asked))
         return None
-    return done(_found(table, chosen, columns, scores, figures, reading, budget))
+    return done(_found(table, chosen, columns, scores, figures, reading, budget, asked.text))
 
 
 def _columns_named(table: Table, asked: Question) -> dict[str, set[str]]:
@@ -897,13 +910,37 @@ def _columns_named(table: Table, asked: Question) -> dict[str, set[str]]:
         score = len(hits) / max(1, len(named) + sum(1 for word in hits if _numeric(word)))
         if score >= 0.5:
             found[label], scores[label] = hits, score
+    asked_days = _day_buckets(asked.text)
+    for label in table.labels:
+        # "The 90+ bucket", "over 90 days", "31-60 days past due": the aging column of those days.
+        if asked_days & _day_buckets(label) and table.kinds.get(label) == "figure":
+            found[label], scores[label] = found.get(label, set()) | (asked_days & _day_buckets(label)), 1.0
+    if _EVERY.search(asked.text):
+        # "Each quarter of FY2024", "break down all the deductions": every column under that merged heading, the
+        # heading's word first in each column's name.
+        for label in table.labels:
+            own = _label_words(label)
+            if len(own) >= 2 and _matches(own[0], asked.words) and table.kinds.get(label) == "figure" and label not in found:
+                found[label], scores[label] = {own[0]}, 0.5
     if not found:
         return {}
     best = max(scores.values())
+    every = _EVERY.search(asked.text) is not None
     keep = {
         label: found[label] for label in table.labels
-        if label in found and scores[label] >= best - 0.34 and not any(found[label] < found[other] for other in found)
+        if label in found and (scores[label] >= best - 0.34 or every) and not any(found[label] < found[other] for other in found)
     }
+    # A question asking for several things names each ("encumbered and still available"): a column named by a word
+    # no column kept so far has ("Actual Encumbered", half its heading) is asked for too.
+    covered = {word for hits in keep.values() for word in hits}
+    covered |= {_SHORT[word] for word in covered if word in _SHORT}
+    several = re.search(r",|\band\b|&", asked.text) is not None
+    for label in table.labels if several else ():
+        if label in found and label not in keep and found[label] - covered and not any(found[label] < found[other] for other in found):
+            new = {word for word in found[label] - covered if not _numeric(word) and word not in _CONNECTIVES and word not in {"over", "under", "total", "totals", "sum"}}
+            if new:
+                keep[label] = found[label]
+    keep = {label: keep[label] for label in table.labels if label in keep}
     return _with_ranges(table, asked.text, keep)
 
 
@@ -960,7 +997,9 @@ def _dated_with_years(table: Table, label: str) -> bool:
 
 def _in_heading(condition: Condition, table: Table) -> bool:
     """The limit's words are a column's heading: "over 90" in "Over 90 Days" (its "over" too), "in 2026" in
-    "FY 2026 Forecast"."""
+    "FY 2026 Forecast", "over 90 days" in "Past due 90+"."""
+    if condition.kind == "number" and _day_buckets(condition.phrase + " days") & {bucket for label in table.labels for bucket in _day_buckets(label)}:
+        return True
     words = _words(condition.phrase) + _dates(condition.phrase)
     content = {word for word in words if word not in _CONNECTIVES}
     if not content:
@@ -1002,6 +1041,11 @@ def _meets(row: Row, condition: Condition, table: Table) -> bool:
 def _budget_pair(table: Table, asked: Question) -> tuple[str, str] | None:
     """The actual (or forecast) and budget columns the question compares, by the words they share with it."""
     figures = [label for label in table.labels if table.kinds.get(label) == "figure"]
+    if asked.limit:
+        # "Over their credit limit": the column the words name, against the row's amount (its total or balance).
+        held = [label for label in figures if all(_matches(word, _label_words(label)) for word in asked.limit)]
+        amount = _default_column(table)
+        return (amount, held[0]) if held and amount and amount != held[0] else None
     budgets = [label for label in figures if "budget" in label.lower()]
     actuals = [label for label in figures if re.search(r"actual|forecast|spent|spend", label, re.I)]
     best = None
@@ -1013,6 +1057,16 @@ def _budget_pair(table: Table, asked: Question) -> tuple[str, str] | None:
             score = len(rest & set(asked.words)) + (0.5 if "actual" in actual.lower() else 0)
             if best is None or score > best[0]:
                 best = (score, actual, budget)
+    if best is None and budgets and actuals:
+        # Headings that don't pair word for word ("Actual YTD" and "Budget Amended" under "Budget" and "Actual"):
+        # the budget the question names ("amended budget"), else the last one (the amended or revised budget); the
+        # first actual (to date, before what is committed).
+        def named(label: str) -> int:
+            return sum(1 for word in _label_words(label) if _matches(word, asked.words) and word != "budget")
+
+        budget = max(reversed(budgets), key=named)
+        actual = max(actuals, key=lambda label: (named(label), "actual" in label.lower(), -actuals.index(label)))
+        return actual, budget
     return (best[1], best[2]) if best else None
 
 
@@ -1064,7 +1118,14 @@ def _worked(
         return Answer(4 + bool(columns), WORKED_HEAD, lines)
     if not figures:
         return None
+    if len(figures) > 1:
+        # A customer or account number is not a figure to add up or rank ("customer" names "Cust #" too).
+        figures = [label for label in figures if not _ID_LABEL.search(label)] or figures
+    if op in {"sum", "average"} and len(body) == 1:
+        # "How much is encumbered on 160-5190": one row's cells, not a total of them (the row is listed whole).
+        return None
     lines: list[str] = []
+    points: list[tuple[str, str]] = []
     for label in figures[:3]:
         values = [(row, _number(row.value(label))) for row in body]
         values = [(row, value) for row, value in values if value is not None]
@@ -1077,6 +1138,7 @@ def _worked(
             what = "Average" if op == "average" else "Total"
             shown_as = _averaged(result, samples) if op == "average" else samples
             lines.append(f'- {what} of "{label}"{where} over {len(values)} row{"s" if len(values) != 1 else ""}{reading}: {_format(result, shown_as)}')
+            points.append((f"{what} of {label}", _format(result, shown_as)))
             shown = "; ".join(f"{_short(row)}: {row.value(label)}" for row, _value in values[:MAX_LISTED])
             lines.append(f"  rows: {shown}" + (f"; …{len(values) - MAX_LISTED} more" if len(values) > MAX_LISTED else ""))
             for row in totals[:2]:
@@ -1086,6 +1148,9 @@ def _worked(
             ranked = sorted(values, key=lambda item: item[1], reverse=op == "max")
             what = "Largest" if op == "max" else "Smallest"
             lines.append(f'- {what} "{label}"{where}{reading}: {_short(ranked[0][0])} — {ranked[0][0].value(label)}')
+            # Its whole row, as the table has it: the row may be in a part of the file not shown.
+            lines.append(f"  row: {ranked[0][0].line}")
+            points.append((f"{what} {label}: {_short(ranked[0][0])}", ranked[0][0].value(label)))
             if len(ranked) > 1:
                 lines.append("  next: " + "; ".join(f"{_short(row)}: {row.value(label)}" for row, _value in ranked[1:4]))
     if not lines:
@@ -1094,7 +1159,12 @@ def _worked(
         grand = sum((_number(row.value(label)) or Decimal(0) for row in body for label in figures), Decimal(0))
         samples = [row.value(label) for row in body for label in figures if row.value(label)]
         lines.append(f'- All of {figures[0]} through {figures[-1]} together: {_format(grand, samples)}')
-    return Answer(4 + len(figures), WORKED_HEAD, lines)
+        points.append((f"All of {figures[0]} through {figures[-1]} together", _format(grand, samples)))
+    if op in {"max", "min"} and len(points) > 1 and columns:
+        # "Who earned the most overtime pay": the column the question names most nearly, not every one it touches.
+        most = max(len(columns.get(label, ())) for label in figures[: len(points)])
+        points = [point for point, label in zip(points, figures) if len(columns.get(label, ())) == most][:1]
+    return Answer(4 + len(figures), WORKED_HEAD, lines, points)
 
 
 def _averaged(result: Decimal, samples: list[str]) -> list[str]:
@@ -1147,10 +1217,12 @@ def _per_group(table: Table, asked: Question, figures: list[str], rows: list[Row
 
 
 def _difference(
-    table: Table, asked: Question, columns: dict[str, set[str]], figures: list[str], chosen: list[Row], rows: list[Row], words: list[str]
+    table: Table, asked: Question, columns: dict[str, set[str]], figures: list[str], chosen: list[Row], rows: list[Row], words: list[str],
+    *, change: bool = False,
 ) -> Answer | None:
     """One column minus another on the same rows, or one row minus another in the same column, in the order
-    the question names them."""
+    the question names them; a ``change`` ("from FY2024 to FY2025") is the one named second less the first, with
+    the change as a percent of the first."""
     lower = asked.text.lower()
 
     def spot(words_: set[str]) -> int:
@@ -1159,15 +1231,22 @@ def _difference(
 
     if len(figures) >= 2 and 0 < len(chosen) <= MAX_ROWS:
         a, b = sorted(figures[:2], key=lambda label: spot(columns.get(label, set())))
+        if change:
+            a, b = b, a
         lines = []
+        points: list[tuple[str, str]] = []
         for row in chosen:
             x, y = _number(row.value(a)), _number(row.value(b))
             if x is None or y is None:
                 continue
             samples = [row.value(a), row.value(b)]
-            lines.append(f"- {_short(row)}: {a} {row.value(a)} − {b} {row.value(b)} = {_format(x - y, samples)}")
+            line = f"- {_short(row)}: {a} {row.value(a)} − {b} {row.value(b)} = {_format(x - y, samples)}"
+            lines.append(line + (_percent_of(x - y, y) if change else ""))
+            title = _title(row, table)
+            points += [(f"{title}: {b}", row.value(b)), (f"{title}: {a}", row.value(a)),
+                       (f"{title}: {'change' if change else 'difference'}", _format(x - y, samples))]
         if lines:
-            return Answer(5, WORKED_HEAD, lines)
+            return Answer(5, WORKED_HEAD, lines, points)
     figure = (figures or [_default_column(table)])[0] if (figures or _default_column(table)) else ""
     if not figure:
         return None
@@ -1180,16 +1259,63 @@ def _difference(
     if len(picked) != 2:
         return None
     first, second = sorted(picked, key=lambda row: spot(set(_cell_words(row.name))))
+    if change:
+        first, second = second, first
     x, y = _number(first.value(figure)), _number(second.value(figure))
     if x is None or y is None:
         return None
     samples = [first.value(figure), second.value(figure)]
     line = f"- {figure}: {_short(first)} {first.value(figure)} − {_short(second)} {second.value(figure)} = {_format(x - y, samples)}"
-    return Answer(5, WORKED_HEAD, [line])
+    points = [(f"{figure}: {_short(second)}", second.value(figure)), (f"{figure}: {_short(first)}", first.value(figure)),
+              (f"{figure}: {'change' if change else 'difference'}", _format(x - y, samples))]
+    return Answer(5, WORKED_HEAD, [line + (_percent_of(x - y, y) if change else "")], points)
+
+
+def _percent_of(change: Decimal, base: Decimal) -> str:
+    """A change as a percent of what it changed from: " (+2.5%)", or "" from zero."""
+    if not base:
+        return ""
+    percent = change / abs(base) * 100
+    return f" ({'+' if percent > 0 else ''}{percent:.1f}%)"
+
+
+def _points(table: Table, chosen: list[Row], columns: dict[str, set[str]], budget, question: str) -> list[tuple[str, str]]:
+    """What the question asks of the rows it picked: each column it names on each row (its figures, and any of its
+    words the question doesn't already give, "Account" for "what is account code 160-5190"), or, for many rows
+    picked by a limit ("over 500,000"), each row with the figure the limit is on."""
+    asked = list(dict.fromkeys([*(budget or ()), *(label for label in columns if label in table.labels)]))
+    said = set(_words(question)) | set(_dates(question))
+
+    def wanted(row: Row, label: str) -> bool:
+        value = row.value(label)
+        return bool(value) and (table.kinds.get(label) == "figure" or not _cell_words(value) <= said)
+
+    if asked and len(chosen) <= MAX_ROWS:
+        points = []
+        for row in chosen:
+            named = [label for label, value in row.cells if value and value != tables.BLANK and table.kinds.get(label) != "figure"]
+            words = [label for label in named if not any(ch.isdigit() for ch in row.value(label))]
+            if not any(_cell_words(row.value(label)) & said for label in words):
+                # Picked out by a number alone ("account code 160-5190", "employee 1651"): what the row is, its
+                # department and name, is part of the answer.
+                asked = list(dict.fromkeys(words[:3] + asked))
+            points += [(f"{_title(row, table)}: {label}", row.value(label)) for label in asked[:8] if wanted(row, label)]
+        return points
+    figure = next((label for label in asked if table.kinds.get(label) == "figure"), "")
+    return [(_title(row, table), row.value(figure) if figure else "") for row in chosen[:MAX_LISTED]]
+
+
+def _title(row: Row, table: Table) -> str:
+    """A row as a person names it: its words, not its figures ("Mountain · Iris sensor", "Water Utility · Vehicle
+    maintenance · 180-5160")."""
+    names = [value for label, value in row.cells if value and value != tables.BLANK and table.kinds.get(label) != "figure"]
+    names = [value for value in names if _number(value) is None][:3]
+    return " · ".join(names) or _short(row)
 
 
 def _found(
-    table: Table, chosen: list[Row], columns: dict[str, set[str]], scores: dict, figures: list[str], reading: str, budget
+    table: Table, chosen: list[Row], columns: dict[str, set[str]], scores: dict, figures: list[str], reading: str, budget,
+    question: str = "",
 ) -> Answer:
     shown = [label for label in columns]
     if budget:
@@ -1202,7 +1328,7 @@ def _found(
         lines.append(f"Matching{reading}:")
     lines += _listed(chosen, shown, full=len(chosen) <= MAX_ROWS)
     top = max((scores[id(row)][0] for row in chosen), default=0)
-    return Answer(top + (1 if columns else 0) + (1 if reading else 0), FOUND_HEAD, lines)
+    return Answer(top + (1 if columns else 0) + (1 if reading else 0), FOUND_HEAD, lines, _points(table, chosen, columns, budget, question))
 
 
 def _column_view(table: Table, figures: list[str], asked: Question) -> Answer | None:
@@ -1338,6 +1464,11 @@ def _matches(word: str, words: list[str]) -> bool:
     "amortization"), or an acronym of the question's words ("NBV" for net book value)."""
     if word in words:
         return True
+    if _SHORT.get(word) in words or any(_SHORT.get(other) == word for other in words):
+        return True
+    # The same word in another form ("earned" for "Earnings").
+    if len(word) >= 5 and word.isalpha() and any(len(other) >= 5 and _stem(other) == _stem(word) for other in words):
+        return True
     if len(word) >= 3 and not _numeric(word):
         if any(len(other) >= 3 and not _numeric(other) and (other.startswith(word) or word.startswith(other)) for other in words):
             return True
@@ -1345,6 +1476,30 @@ def _matches(word: str, words: list[str]) -> bool:
             initials = "".join(other[0] for other in words if other[:1].isalpha())
             return word in initials
     return False
+
+
+def _day_buckets(text: str) -> set[str]:
+    """The aging buckets a heading or question names, written one way: "31-60", "90+" ("90+", "91+", "over 90 days",
+    "more than 90 days", "> 90")."""
+    found = {f"{int(a)}-{int(b)}" for a, b in re.findall(r"\b(\d{1,3})\s*[-–]\s*(\d{1,3})\b(?!\s*[-/]\d)", text)}
+    for number in re.findall(r"\b(\d{1,3})\s*\+", text):
+        found.add(f"{int(number) - (int(number) % 10 == 1)}+")
+    for number in re.findall(r"(?:\b(?:over|more than|older than|past|beyond)|>)\s*(\d{1,3})\s*days?\b", text, re.I):
+        found.add(f"{int(number)}+")
+    if re.search(r"\bover\s*(\d{1,3})\b", text, re.I) and re.search(r"\bover\s*\d{1,3}\s*$", text.strip(), re.I):
+        found.add(f"{int(re.search(r'over\s*(\d{1,3})', text, re.I).group(1))}+")
+    return found
+
+
+def _stem(word: str) -> str:
+    return re.sub(r"(?:ings?|ed|es|s)$", "", word)
+
+
+_ID_LABEL = re.compile(r"#|\b(?:id|no\.?|number|code|acct|account)\s*$", re.I)
+
+
+# Short forms in headings that aren't the start of the word they stand for ("Hours OT" for overtime hours).
+_SHORT = {"ot": "overtime", "dt": "doubletime", "pto": "leave", "qty": "quantity", "amt": "amount", "acct": "account", "dept": "department"}
 
 
 def _numeric(word: str) -> bool:

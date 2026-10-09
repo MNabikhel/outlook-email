@@ -132,7 +132,10 @@ SYSTEM = (
     "If the page does not hold together, say what is wrong in one sentence. If the rest of the page shows what "
     "the mark was meant to be, use that reading and say you corrected a scan error. Do not invent an amount "
     "that is not written on the page.\n"
-    "- Answer briefly: one to five sentences or a short list, unless the user asks for a full summary or a table."
+    "- Answer every part of the question, and shape the answer to it: one figure in a sentence; several figures as a "
+    "short list, one line each, labelled as the question names them; rows picked out by a limit (\"which accounts are "
+    "over budget\") as a list of every one, with how many there are; a change or comparison with both figures and "
+    "the difference. Keep it brief: no more than the question asks, unless the user asks for a full summary or a table."
 )
 
 TOOLS_GUIDE = (
@@ -686,6 +689,13 @@ def answer_stream(
             yield {"type": "mode", "mode": "lookup", "note": "The local model sent an empty answer."}
             yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True)}
         else:
+            if missing := agent.missing_points(ws.points, state["text"], exact=ws.exact):
+                # The answer left out figures the question asks for: they are added from the table, as read.
+                head = "Worked out exactly from the table" if ws.exact and len(missing) == len(ws.points) else "Also from the table"
+                added = f"\n\n{head}:\n" + "\n".join(f"- {point}: {value}" for point, value in missing)
+                state["text"] += added
+                yield {"type": "delta", "text": added}
+                yield {"type": "step", "text": f"Added {len(missing)} figure{'s' if len(missing) != 1 else ''} the answer left out"}
             yield from _checked(ws, state["text"], history=history, today=today, focus=state.get("focus"))
     advice = agent.context_advice(context_length(settings), ws.left_out)
     if advice:
@@ -1100,6 +1110,10 @@ def without_echo(pieces: Iterator[str]) -> Iterator[str]:
 
 def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history, today, shrink: int) -> Iterator[dict[str, Any]]:
     """Read the files: passages up front, tools for the rest, then an answer checked against what was read."""
+    points = agent.question_points(ws, question)
+    if points:
+        # A question asking for many figures gets room to give each one.
+        ws.settings = ws.settings.model_copy(update={"chat_max_tokens": agent.reply_tokens(points, ws.settings.chat_max_tokens)})
     settings = ws.settings
     primary = ws.primary()
     notes = agent.earlier_findings(ws, primary) if primary is not None else ""
