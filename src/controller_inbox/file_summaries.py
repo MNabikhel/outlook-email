@@ -78,8 +78,8 @@ def summarize_files(
 ) -> int:
     """Summarize long attachments that have no summary yet, most important mail first. Returns how many were written.
 
-    When the model gives nothing usable for a file, that is remembered (as an empty summary), so the file isn't
-    tried again every night; it is tried again when its text changes or another model is loaded.
+    When the model gives nothing usable for a file, or fails on it (a timeout, a file too long for its context), that
+    is remembered (as an empty summary), so the file isn't tried again every night; it is tried again when its text changes or another model is loaded.
     """
     written = 0
     queue = store.files_to_summarize(min_chars=SUMMARY_MIN_CHARS, limit=limit, model=model)
@@ -92,12 +92,11 @@ def summarize_files(
             on_progress(index, len(queue), att.filename)
         try:
             summary = summarize_file(settings, att)
-        except ContextOverflow:
-            continue
-        except EmptyReply:
-            summary = ""
-        except httpx.HTTPError:
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError):
             break
+        except (ContextOverflow, EmptyReply, httpx.HTTPError):
+            # Remembered like an empty summary: this file mustn't be first in line, and fail, every night.
+            summary = ""
         store.save_file_summary(att.id, summary_key(att), summary, model=model, at=datetime.now(timezone.utc).isoformat())
         written += bool(summary)
     return written

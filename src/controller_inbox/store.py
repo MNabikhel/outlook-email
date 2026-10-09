@@ -1347,6 +1347,16 @@ class Store:
             ).fetchall()
         return [(row["key"], row["text_key"], row["vector"]) for row in rows]
 
+    def embedding_owners(self, model: str) -> dict[str, tuple[str, int]]:
+        """key -> (email id, vector size in bytes)."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT key, email_id, length(vector) AS size FROM embeddings WHERE model = ?", (model,)).fetchall()
+        return {row["key"]: (row["email_id"], row["size"]) for row in rows}
+
+    def delete_embeddings(self, model: str, keys: list[str]) -> None:
+        with self.connect() as conn:
+            conn.executemany("DELETE FROM embeddings WHERE key = ? AND model = ?", [(key, model) for key in keys])
+
     def save_embeddings(self, model: str, rows: list[tuple[str, str, str, bytes]]) -> None:
         """``rows`` are (key, email id, text key, vector bytes)."""
         with self.connect() as conn:
