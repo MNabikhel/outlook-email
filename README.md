@@ -209,6 +209,30 @@ In the Page tab, click any box to fix what was read there: type what the page sa
 - **On the sender's later files:** a word or a name you fixed is put right where OCR reads it the same way (blue, *Fixed from what you taught it*; **It was right here** keeps the reading on that file). A figure never is: an amount, a date or a number is different on every invoice. A table you drew is found again on their next page where its first line's words are printed, and an outline you removed stays removed there.
 - **As training examples:** `closedesk export-fixes [folder]` writes every page you fixed as a picture, with its tables after your fixes (as JSON and in YOLO's label format) and each fixed box with what was read and what the page says. Those are what's needed to test a new table finder or reading model on your own files, or to train one once there are a few hundred. Nothing is trained on this computer: that needs a graphics card.
 
+### Tables in real-world PDFs
+
+CloseDesk's own reader is built for the schedules accounting programs print (aging reports, registers, statements from Excel), and reads them well. Published PDFs (annual reports, filings, rate pages) are laid out differently: columns far apart, headings over several columns, a "$" set apart from its figure. There it missed many tables. So each page of a PDF with figures on it is now also read by **Camelot** (MIT licence, runs on this computer, about half a second a page), and Camelot's tables are added beside CloseDesk's own when they read something CloseDesk's didn't:
+
+- figures CloseDesk didn't read (a table it missed, or read in part);
+- rows without figures it didn't read (a table of contents, a list by date);
+- or rows whose figures CloseDesk read under the wrong names (a label run into the row above), unless CloseDesk's table of those figures adds up to its printed totals.
+
+CloseDesk's own tables are never taken away: every rule tried for replacing them made some of the schedules it reads well worse. A page of prose Camelot reads as a table is left out, and so are letters. Camelot's tables are written the way CloseDesk writes tables (`Label: value` rows), with their heading lines as printed.
+
+Camelot is installed by the launchers (`pip install -e ".[tables]"`). Where it can't be installed (an Intel Mac older than macOS 12 has no OpenCV build for it) or it fails on a file, PDFs are read exactly as before.
+
+How it was measured: the rows of the tables on real pages, as the FinTabNet and ParseBench benchmarks mark them, a row counting as read when its figures and its words both match. *Annual reports* are 240 FinTabNet pages from companies' annual reports; the *mixed set* is 180 ParseBench pages (insurance rate filings, fund reports, SEC filings, schedules, timetables). The rules were tuned on 60 and 30 of them; the *test* pages were used only to compare versions; the *fresh* pages were drawn last and looked at only to check the result.
+
+| Rows read | Annual reports, test (60 pages) | Annual reports, fresh (120) | Mixed set, test (30) | Mixed set, fresh (120) |
+|---|---:|---:|---:|---:|
+| CloseDesk before (tuning and test pages together) | 51.8% | | 57.5% | |
+| Camelot alone | 74.6% | 77.1% | 75.1% | 64.9% |
+| **CloseDesk with Camelot** | **76.0%** | 75.1% | 72.7% | 63.1% |
+
+So CloseDesk now reads about as many rows as Camelot alone, ahead of it on some pages and behind on others. Where it is behind, it is mostly because CloseDesk writes a group heading in front of each row under it (*MICHAEL BLOOMBERG FOR PRESIDENT \| Buy Line: 2 \| …*), which helps a question about a row but doesn't match how the benchmark writes the row; and because a table both read differently is kept as CloseDesk read it.
+
+On CloseDesk's own 27 test workbooks (schedules, registers and invoices, each printed to PDF several ways: Chrome, Google Sheets, LibreOffice, Word, matplotlib and ReportLab), no file reads worse, and the cells read right went from 88.7% to 89.6% on one set and from 57.5% to 67.4% on the other.
+
 ### Fraud check
 
 Each email gets a score. A bank-detail change or a request to buy gift cards **in the sender's own words** blocks it unless you trust the sender or their domain. That holds even when the request sits in a "this email is confidential" paragraph or follows "please be aware". A real anti-fraud notice ("we will never change our bank details by email", "if you receive such an email, call us") doesn't count, and neither does the model's opinion alone. Bank-change wording below a quote marker (`From:`, `>`), which is what a forged thread looks like, gets a *double-check before paying* note unless the sender's own words say it was fake. Weaker signals — a reply-to on another domain, a lookalike of a known domain, a borrowed display name, pressure, a first email from an address — add up to that same note, which doesn't block anything. Trusted domains and senders count against the score: from them a bank-change request gets a caution rather than a block. Replies are filed by what the sender wrote, so a colleague's "it wasn't them, I blocked the sender" above a quoted scam is neither flagged nor filed as an invoice.
