@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -79,5 +81,44 @@ def test_the_workspace_list_loads_more_than_200(settings, store):
         page.click(".list-more button")
         page.wait_for_function("() => document.querySelectorAll('.items li').length === 205")
         assert page.locator(".list-more").count() == 0
+        browser.close()
+        assert errors == []
+
+
+def test_load_more_does_not_loop_when_mail_arrives_between_pages(settings, store):
+    # Mail filed between two pages repeats a row on the next; the list pages on by the rows sent, not those kept.
+    pytest.importorskip("playwright")
+    from playwright.sync_api import sync_playwright
+
+    from liveserver import chromium_path, serving
+
+    path = chromium_path()
+    if path is None:
+        pytest.skip("no Chromium for Playwright on this machine")
+    _fill(store, 650)
+    late = replace(store.get_email("m000"), id="m999", subject="Statement late", received_at="2026-09-29T23:00:00+00:00")
+    asked = []
+
+    def on_offset(route):
+        asked.append(route.request.url)
+        if len(asked) == 1:
+            store.upsert_email(late)
+        route.continue_()
+
+    with serving(web.create_app(settings, store)) as base, sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=path)
+        page = browser.new_page()
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.route("**/api/mail?*offset=*", on_offset)
+        page.goto(f"{base}/app/folder/reference")
+        page.wait_for_selector(".items li")
+        page.click(".list-more button")
+        page.wait_for_function("() => document.querySelectorAll('.items li').length === 400")
+        page.click(".list-more button")
+        page.wait_for_function("() => document.querySelectorAll('.items li').length >= 600")
+        page.wait_for_timeout(1000)
+        assert len(asked) < 5, asked
+        assert len(set(asked)) == len(asked), "the same page was asked for twice"
         browser.close()
         assert errors == []
