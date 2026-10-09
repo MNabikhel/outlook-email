@@ -134,7 +134,14 @@ _WEEKDAY = re.compile(r"^(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*\.
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9&]*|#|%")
 _CELL_REF = re.compile(r"^([A-Z]{1,3}\d{1,7})(?: \((.+)\))?$")
 _DASHES = frozenset({"-", "–", "—", "$ -", "$-"})
-_LEADING_FIGURE = re.compile(r"\s*([(\-−–])?\s*([$€£¥])?\s*([(\-−–])?\s*(\d[\d,]*(?:\.\d+)?|\.\d+)")
+# Commas group the thousands ("1,250.00"); in European style dots do and a comma marks the decimals ("1.234,56",
+# "447,15").
+_EUROPEAN = re.compile(r"\d{1,3}(?:\.\d{3})+,\d+|\d{1,3},\d{1,2}(?![\d,])")
+_LEADING_FIGURE = re.compile(
+    r"\s*([(\-−–])?\s*([$€£¥])?\s*([(\-−–])?\s*"
+    r"(\d{1,3}(?:\.\d{3})+,\d+|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{1,3},\d{1,2}(?![\d,])|\d+(?:\.\d+)?|\.\d+)"
+)
+_CREDIT_DEBIT = re.compile(r"(CR|DR)\.?", re.I)
 
 When = tuple  # (year or None, month, day)
 
@@ -483,6 +490,7 @@ def _settle_totals(table: Table) -> bool:
         seen += not row.total
     as_rows: set[int] = set()
     held = _held_totals(rows, figures, as_rows)
+    key = _key_column(table)
     for index, row in enumerate(rows):
         if index not in held or held[index] or _TOTAL_WORD.match(row.name.strip()):
             continue
@@ -492,7 +500,10 @@ def _settle_totals(table: Table) -> bool:
         others = sum(count for at, count in held.items() if at != index)
         # With no total below to settle it, a row that has a record's own details ("Total Wine & More | INV-2 |
         # 10/15/2026") is a record, as long as counting it as one breaks no total.
-        if sum(trial.values()) > others or (sum(trial.values()) >= others and _record_details(row, table, figures)):
+        # With no total below at all, a row named in the key column ("Vendor: Total Quality Logistics") that ordinary
+        # rows follow is a record too: a table's own total comes last.
+        named = bool(key and row.value(key)) and not any(other.total for other in rows[index + 1:]) and index < len(rows) - 1
+        if sum(trial.values()) > others or (sum(trial.values()) >= others and (_record_details(row, table, figures) or named)):
             as_rows.add(index)
             held = trial
     for index in as_rows:
@@ -614,6 +625,7 @@ def _row(line: str, page: str) -> Row | None:
     group: list[str] = []
     cells: list[tuple[str, str]] = []
     refs: list[str] = []
+    seen: dict[str, int] = {}
     for part in parts:
         label, sep, value = part.partition(": ")
         label = label.strip()
@@ -625,7 +637,9 @@ def _row(line: str, page: str) -> Row | None:
                 if not cell.group(2):
                     return None
                 ref, label = cell.group(1), cell.group(2)
-            cells.append((label, value.strip()))
+            # Two columns headed alike ("Date | Amount | Date | Amount"): the second is "Amount (2)", so it is read too.
+            seen[label] = seen.get(label, 0) + 1
+            cells.append((f"{label} ({seen[label]})" if seen[label] > 1 else label, value.strip()))
             refs.append(ref)
         elif not cells:
             group.append(part)
@@ -640,14 +654,11 @@ def _name_rows(table: Table) -> None:
     """Name each row by its first text cell that no other row repeats (the asset or vendor, not the category
     merged down the rows), with the next one when that is a short code ("V-302 · Ford F-150 pickup"). A row
     named "Total ...", "Grand Total", "% of ..." or "... Subtotal" is a total (see ``_is_total``)."""
-    counts: dict[tuple[str, str], int] = {}
-    for row in table.rows:
-        for cell in row.cells:
-            counts[cell] = counts.get(cell, 0) + 1
+    counts = _cell_counts(table)
     key = _key_column(table)
     for row in table.rows:
         texts = [(label, value) for label, value in row.cells if value and value != tables.BLANK and not tables.is_value(value)]
-        row.total = _is_total(row)
+        row.total = _is_total(row, counts)
         first = row.cells[0]
         if first[1] and first[1] != tables.BLANK and counts[first] == 1 and tables.is_value(first[1]):
             # A row keyed by a date or a number ("Date: 10/14", "Pmt #: 24") is named by it.
@@ -663,17 +674,34 @@ def _name_rows(table: Table) -> None:
         row.name = name
 
 
-def _is_total(row: Row) -> bool:
-    """A total or subtotal row: a cell starts "Total", "Grand Total", "Subtotal" or "%", or the row's label
-    (its first text) ends with "Total" or "Subtotal"."""
-    texts = [value for _label, value in row.cells if value and value != tables.BLANK and not tables.is_value(value)]
-    return any(_TOTAL.match(value) for value in texts) or bool(texts and _TOTAL_LAST.search(texts[0]))
+def _is_total(row: Row, counts: dict[tuple[str, str], int]) -> bool:
+    """A total or subtotal row: the row's label starts "Total", "Grand Total", "Subtotal" or "%", or ends with
+    "Total" or "Subtotal". The label is its first text that no other row repeats, past a category merged down the
+    rows ("Buildings", then "Total Buildings"); a description after it ("Total rewards platform fee") doesn't say."""
+    for cell in row.cells:
+        value = cell[1]
+        if not value or value == tables.BLANK or tables.is_value(value):
+            continue
+        if _TOTAL.match(value) or _TOTAL_LAST.search(value):
+            return True
+        if counts.get(cell, 0) <= 1:
+            return False
+    return False
+
+
+def _cell_counts(table: Table) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for row in table.rows:
+        for cell in row.cells:
+            counts[cell] = counts.get(cell, 0) + 1
+    return counts
 
 
 def _key_column(table: Table) -> str:
     """The column that tells the rows apart (Asset ID, Vendor, Task): the first one of text whose values
     nearly every row has and no two rows share. A category merged down the rows repeats, so it is not."""
-    rows = [row for row in table.rows if not _is_total(row)]
+    counts = _cell_counts(table)
+    rows = [row for row in table.rows if not _is_total(row, counts)]
     for label in table.labels:
         values = [row.value(label) for row in rows if row.value(label)]
         if len(values) >= max(2, 0.8 * len(rows)) and len(set(values)) == len(values) and not all(tables.is_value(v) for v in values):
@@ -903,8 +931,21 @@ def _placed(table: Table, asked: Question, columns: dict[str, set[str]]) -> list
         if condition.kind == "date" and _whole_years(condition.value) and not _dated_with_years(table, column):
             # "In 2027" says nothing about dates written without a year ("10/14").
             continue
-        placed.append(Condition(condition.kind, condition.op, condition.value, condition.phrase, condition.at, column))
+        value = _with_year(condition.value, table, column) if condition.kind == "date" else condition.value
+        placed.append(Condition(condition.kind, condition.op, value, condition.phrase, condition.at, column))
     return placed
+
+
+def _with_year(span: tuple[When, When], table: Table, label: str) -> tuple[When, When]:
+    """A date the question gives without a year ("before 10/1"), in the latest year of the column's dates that
+    puts it on or before the column's last date: rows from two years are not compared by month and day alone."""
+    low, high = span
+    years = sorted({when for row in table.rows if (when := _when(row.value(label))) is not None and when[0] is not None})
+    if low[0] is not None or high[0] is not None or not years:
+        return span
+    year = next((when[0] for when in reversed(years) if (when[0], low[1], low[2]) <= years[-1]), years[0][0])
+    high_year = year + 1 if (high[1], high[2]) < (low[1], low[2]) else year
+    return (year, low[1], low[2]), (high_year, high[1], high[2])
 
 
 def _whole_years(span: tuple[When, When]) -> bool:
@@ -1033,7 +1074,8 @@ def _worked(
             total = sum((value for _row, value in values), Decimal(0))
             result = total / len(values) if op == "average" else total
             what = "Average" if op == "average" else "Total"
-            lines.append(f'- {what} of "{label}"{where} over {len(values)} row{"s" if len(values) != 1 else ""}{reading}: {_format(result, samples)}')
+            shown_as = _averaged(result, samples) if op == "average" else samples
+            lines.append(f'- {what} of "{label}"{where} over {len(values)} row{"s" if len(values) != 1 else ""}{reading}: {_format(result, shown_as)}')
             shown = "; ".join(f"{_short(row)}: {row.value(label)}" for row, _value in values[:MAX_LISTED])
             lines.append(f"  rows: {shown}" + (f"; …{len(values) - MAX_LISTED} more" if len(values) > MAX_LISTED else ""))
             for row in totals[:2]:
@@ -1052,6 +1094,15 @@ def _worked(
         samples = [row.value(label) for row in body for label in figures if row.value(label)]
         lines.append(f'- All of {figures[0]} through {figures[-1]} together: {_format(grand, samples)}')
     return Answer(4 + len(figures), WORKED_HEAD, lines)
+
+
+def _averaged(result: Decimal, samples: list[str]) -> list[str]:
+    """An average written with the column's decimals, two when it isn't whole and the column has fewer (11.25 days,
+    not "11"), as ``table_query`` shows one."""
+    if result == result.to_integral_value():
+        return samples
+    percent = bool(samples) and all("%" in sample for sample in samples)
+    return [*samples, "0.00%" if percent else "0.00"]
 
 
 def _all_ranged(figures: list[str], columns: dict[str, set[str]]) -> bool:
@@ -1087,7 +1138,8 @@ def _per_group(table: Table, asked: Question, figures: list[str], rows: list[Row
             if values:
                 total = sum(values, Decimal(0))
                 result = total / len(values) if op == "average" else total
-                parts.append(f"{figure} {_format(result, [row.value(figure) for row in members])}")
+                samples = [row.value(figure) for row in members]
+                parts.append(f"{figure} {_format(result, _averaged(result, samples) if op == 'average' else samples)}")
         lines.append(f"- {name} ({len(members)} rows): " + "; ".join(parts))
     what = {"sum": "Total", "average": "Average", "count": "Count"}[op]
     return Answer(5, WORKED_HEAD, [f"{what} for each {label}{_where(table)}{reading}:"] + lines)
@@ -1315,18 +1367,25 @@ def _number(value: str) -> Decimal | None:
     minus_last = rest[:1] in {"-", "−"} and not (match.group(1) or match.group(3))
     if minus_last:
         rest = rest[1:].strip()
+    # A ledger marks a credit "1,250.00 CR" and a debit "1,250.00 DR".
+    marked = _CREDIT_DEBIT.fullmatch(rest)
+    if marked:
+        rest = ""
     if rest not in {"", "%", ")", "%)"} and not rest.startswith("(="):
         return None
+    figure = match.group(4)
+    figure = figure.replace(".", "").replace(",", ".") if _EUROPEAN.fullmatch(figure) else figure.replace(",", "")
     try:
-        number = Decimal(match.group(4).replace(",", ""))
+        number = Decimal(figure)
     except InvalidOperation:
         return None
-    return -number if match.group(1) or match.group(3) or minus_last else number
+    credit = bool(marked) and marked.group(1).upper() == "CR"
+    return -number if match.group(1) or match.group(3) or minus_last or credit else number
 
 
 def _format(number: Decimal, samples: list[str]) -> str:
     """``number`` written the way the column writes its figures: "$" when they have one, their decimals, "%"."""
-    places = max((len(m.group(1)) for sample in samples for m in [re.search(r"\.(\d+)", sample)] if m), default=0)
+    places = max((_places(sample) for sample in samples), default=0)
     money = any("$" in sample for sample in samples)
     percent = bool(samples) and all("%" in sample for sample in samples)
     # Half up, as a spreadsheet rounds (1.505 is 1.51), not Python's half to even.
@@ -1334,6 +1393,15 @@ def _format(number: Decimal, samples: list[str]) -> str:
     text = f"${text}" if money else text
     text = f"{text}%" if percent else text
     return f"-{text}" if number < 0 else text
+
+
+def _places(sample: str) -> int:
+    """The decimals a cell writes: 2 for "1,250.00", "447,15" and "1.234,56"."""
+    figure = _LEADING_FIGURE.match(sample)
+    if figure and _EUROPEAN.fullmatch(figure.group(4)):
+        return len(figure.group(4).rsplit(",", 1)[1])
+    m = re.search(r"\.(\d+)", sample)
+    return len(m.group(1)) if m else 0
 
 
 def _when(value: str) -> When | None:

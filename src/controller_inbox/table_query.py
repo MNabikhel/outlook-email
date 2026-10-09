@@ -38,6 +38,8 @@ SCHEMA_CHARS = 7000
 QUERY_SECONDS = 2.0
 # The longest text a query may build, so a query can't fill memory before the time limit stops it.
 MAX_VALUE_BYTES = 100_000
+# The most memory SQLite may hold, so a query's sort can't fill memory before the time limit stops it.
+HEAP_BYTES = 256 * 1024 * 1024
 # Rows checked for the columns a row works out from others.
 FORMULA_ROWS = 200
 # Goes at a query: one more when the first fails or finds nothing.
@@ -152,6 +154,8 @@ _CANNOT = re.compile(
     r"\b(?:cannot|can't|can\s+not)\s+(?:be\s+)?answer",
     re.I,
 )
+# "The sheet doesn't have a Q4 column, so Q4 is Oct-26 + Nov-26 + Dec-26": what is asked, worked out from columns it has.
+_WORKED_FROM = re.compile(r"^\s*(?:so|but|instead)\b.*(?:\+|\bsum\s+of\b|\badd(?:ing|ed)?\b)", re.I)
 # "Totals are not in the table, so SUM them" is about the left-out total rows, not the question.
 _TOTAL_ROWS = re.compile(r"\b(?:sub)?total(?:s|\s+rows?)\b", re.I)
 _LITERAL = re.compile(r"'((?:[^']|'')*)'")
@@ -249,6 +253,11 @@ class Tables:
             self._db.execute("CREATE TABLE facts (file TEXT COLLATE NOCASE, name TEXT COLLATE NOCASE, value TEXT COLLATE NOCASE)")
             self._db.executemany("INSERT INTO facts VALUES (?, ?, ?)", self.facts)
             self._names |= {"facts", "file", "name", "value"}
+        # A sort or a temporary table too big for memory would spill to temp files on disk (hundreds of MB in a
+        # query's two seconds): it stays in memory, and SQLite's memory is capped (for the whole process, which
+        # holds nothing else near it), so such a query fails instead.
+        self._db.execute("PRAGMA temp_store = MEMORY")
+        self._db.execute(f"PRAGMA hard_heap_limit = {HEAP_BYTES}")
         self._db.execute("PRAGMA query_only = ON")
         self._db.set_authorizer(_authorize)
 
@@ -435,6 +444,8 @@ class Tables:
             cursor = self._db.execute(sql)
             names = [item[0] for item in cursor.description or []]
             rows = cursor.fetchmany(MAX_RESULT_ROWS + 1)
+        except MemoryError:
+            raise sqlite3.OperationalError("the query needs too much memory: add up or filter the rows instead") from None
         finally:
             self._db.set_progress_handler(None, 0)
         return names, rows[:MAX_RESULT_ROWS], len(rows) > MAX_RESULT_ROWS
@@ -607,7 +618,11 @@ def _cannot(plan: str) -> bool:
     """The plan says the sheet doesn't hold what was asked ("Q2 is not in the table", "Table: none")."""
     if re.search(r"(?i)\btable:\s*none\b", plan):
         return True
-    return any(_CANNOT.search(part) and not _TOTAL_ROWS.search(part) for part in re.split(r"[;,.()]", plan))
+    parts = re.split(r"[;,.()]", plan)
+    return any(
+        _CANNOT.search(part) and not _TOTAL_ROWS.search(part) and not _WORKED_FROM.search(" ".join(parts[at + 1 : at + 2]))
+        for at, part in enumerate(parts)
+    )
 
 
 def parse(reply: str) -> tuple[str, str]:
@@ -811,7 +826,10 @@ def _running_balances(columns: list[Column], values: list[list]) -> None:
     values = values[:FORMULA_ROWS]
     for target in figures:
         others = [index for index in figures if index != target]
-        options = [[(a, sign)] for a in others for sign in (1, -1)] + [[(a, 1), (b, -1)] for a in others for b in others if a != b]
+        # A pair of columns it moves by is looked for among the eight nearest it: on a sheet of many figure columns
+        # (36 months) every pair is a million rows read for each question.
+        near = sorted(sorted(others, key=lambda index: abs(index - target))[:8])
+        options = [[(a, sign)] for a in others for sign in (1, -1)] + [[(a, 1), (b, -1)] for a in near for b in near if a != b]
         for terms in options:
             if _runs(values, target, terms):
                 columns[target].running = " ".join(("+ " if sign > 0 else "- ") + columns[index].name for index, sign in terms)
@@ -822,6 +840,8 @@ def _runs(values: list[list], target: int, terms: list[tuple[int, int]]) -> bool
     """Whether ``target`` is the row above's plus the signed ``terms`` (a blank one adding nothing) on at least
     nine in ten of the rows after the first, three or more of them, with something added on most of them."""
     steps = good = moved = 0
+    # More rows off than one in ten of them all can't hold: a column that isn't a running balance stops early.
+    allowed = 0.1 * (len(values) - 1)
     for above, row in zip(values, values[1:]):
         if above[target] is None or row[target] is None:
             continue
@@ -829,6 +849,8 @@ def _runs(values: list[list], target: int, terms: list[tuple[int, int]]) -> bool
         steps += 1
         good += abs(above[target] + added - row[target]) <= 0.015
         moved += abs(added) > 0.005
+        if steps - good > allowed:
+            return False
     return steps >= 3 and good >= 0.9 * steps and moved >= 0.5 * steps
 
 
@@ -838,6 +860,8 @@ def _holds(values: list[list], target: int, terms: list[tuple[int, int]], share:
     copies = [0] * len(terms)
     # The columns in the sheet's order, to tell a straight-line schedule (each column the same step from the last).
     in_order = sorted([target, *(index for index, _sign in terms)])
+    # More rows off than ``share`` allows of them all can't hold: a formula that doesn't stops early.
+    allowed = (1 - share) * len(values)
     for row in values:
         # A blank part adds nothing, as in the sheet's SUM.
         parts = [row[index] or 0.0 for index, _sign in terms]
@@ -847,6 +871,8 @@ def _holds(values: list[list], target: int, terms: list[tuple[int, int]], share:
             continue
         used += 1
         good += abs(sum(sign * part for (_index, sign), part in zip(terms, parts)) - row[target]) <= 0.015 * len(terms)
+        if used - good > allowed:
+            return False
         for position, part in enumerate(parts):
             copies[position] += abs(part - row[target]) < 0.005
         cells = [row[index] or 0.0 for index in in_order]
