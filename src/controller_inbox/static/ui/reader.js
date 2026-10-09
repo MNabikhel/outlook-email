@@ -660,18 +660,39 @@ function visionBox(data, ctx, { brief = false } = {}) {
 // One hover card for every page view, kept on <body> so the reading pane's scrolling and animation can't clip it.
 let tip = null;
 let pageUrl = "";
+// A card opened to fix a box stays open while the pointer moves to it, until it is saved, cancelled or left.
+let pinned = false;
 
-function hideTip() {
-  if (tip) tip.hidden = true;
+function hideTip(force = false) {
+  if (!tip || (pinned && force !== true)) return;
+  pinned = false;
+  tip.hidden = true;
+  tip.classList.remove("pinned");
 }
 
-function showTip(box, children) {
+function showTip(box, children, { pin = false } = {}) {
   if (!tip) {
     tip = h("div", { class: "pv-tip", role: "tooltip", id: "pv-tip", hidden: true });
     document.body.append(tip);
-    document.addEventListener("scroll", hideTip, true);
-    window.addEventListener("resize", hideTip);
+    document.addEventListener("scroll", (event) => (!pinned || !tip.contains(event.target)) && hideTip(true), true);
+    window.addEventListener("resize", () => hideTip(true));
+    document.addEventListener("pointerdown", (event) => pinned && !tip.contains(event.target) && hideTip(true), true);
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key === "Escape" && pinned) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          hideTip(true);
+        }
+      },
+      true
+    );
   }
+  if (pinned && !pin) return;
+  pinned = pin;
+  tip.classList.toggle("pinned", pin);
+  tip.setAttribute("role", pin ? "dialog" : "tooltip");
   replace(tip, children);
   tip.hidden = false;
   // Below the box when it fits, else above it; never past the edges of the window.
@@ -686,19 +707,32 @@ function showTip(box, children) {
 }
 
 const sure = (value) => `${Math.round(value * 100)}% sure`;
+// Below this, how sure the vision model says it was makes a box worth checking even where OCR read the same.
+const MODEL_SURE = 0.9;
+const modelUnsure = (model) => Boolean(model) && model.sure !== null && model.sure !== undefined && model.sure < MODEL_SURE;
 
 /** "ok" (green), "check" (amber) or "differs" (red), as the legend above the page explains. */
 function tone(region, source) {
+  if (region.fixed) return "fixed";
   const model = region.model;
   if (model && model.agrees === false) return "differs";
-  if (model && model.agrees === true) return "ok";
   if (source === "text") return "ok";
+  if (modelUnsure(model)) return "check";
+  if (model && model.agrees === true) return "ok";
   if (region.confidence !== null && region.confidence < 0.8) return "check";
   return model ? "check" : "ok";
 }
 
 function tipFor(region, view) {
   const lines = [];
+  if (region.fixed) {
+    lines.push(
+      h("div", { class: "pv-tip-row" }, h("b", null, region.fixed.by === "you" ? "You fixed this" : "Fixed from what you taught it"), h("span", { class: "pv-tip-tag fixed" }, "fixed")),
+      h("p", { class: "pv-tip-text" }, region.text),
+      h("p", { class: "pv-tip-text muted" }, region.fixed.by === "you" ? `It was read as “${region.fixed.was}”.` : `Read as “${region.fixed.was}”, which you fixed on an earlier file from this sender.`)
+    );
+    return lines;
+  }
   if (view.source === "text") {
     lines.push(h("div", { class: "pv-tip-row" }, h("b", null, "From the file's own text"), h("span", { class: "pv-tip-tag ok" }, "exact")));
   } else {
@@ -710,8 +744,9 @@ function tipFor(region, view) {
   if (model) {
     const [shade, words] =
       model.agrees === true ? ["ok", "agrees"] : model.agrees === false ? ["differs", "differs"] : model.text ? ["check", "close, not the same"] : ["check", "not in its reading"];
+    const told = model.sure === null || model.sure === undefined ? null : h("span", { class: `pv-tip-tag ${modelUnsure(model) ? "check" : "ok"}` }, sure(model.sure));
     lines.push(
-      h("div", { class: "pv-tip-row pv-tip-model" }, h("b", null, `${view.model_name} read`), h("span", { class: `pv-tip-tag ${shade}` }, words)),
+      h("div", { class: "pv-tip-row pv-tip-model" }, h("b", null, `${view.model_name} read`), told, h("span", { class: `pv-tip-tag ${shade}` }, words)),
       model.text ? h("p", { class: "pv-tip-text" }, model.text) : h("p", { class: "pv-tip-text muted" }, "Nothing it read matches this.")
     );
   }
@@ -745,12 +780,20 @@ function saveZoom(value) {
   }
 }
 
-// Esc closes a table opened over the page before it leaves the file; one listener for every page view.
+// Esc stops drawing a table, then closes a table opened over the page, before it leaves the file; one listener for
+// every page view.
 let closeOpenTable = null;
+let stopOpenDrawing = null;
 window.addEventListener(
   "keydown",
   (event) => {
-    if (event.key !== "Escape" || !closeOpenTable || isTyping(event.target)) return;
+    if (event.key !== "Escape" || isTyping(event.target)) return;
+    if (stopOpenDrawing && stopOpenDrawing()) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      return;
+    }
+    if (!closeOpenTable) return;
     if (closeOpenTable()) {
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -826,6 +869,89 @@ function pageView(data) {
 
   const key = (shade, words) => h("span", { class: "pv-key" }, h("i", { class: `pv-swatch ${shade}` }), words);
 
+  // Fixes: saved, then the page is shown again with them.
+  async function send(body) {
+    const at = page;
+    try {
+      const reply = await postJSON(`${api}/${at}/fixes`, body);
+      hideTip(true);
+      toast(reply.message, { action: "Undo", onAction: () => undo(reply.id, at), ms: 8000 });
+      if (at === page) await show(at);
+    } catch (error) {
+      toast(error.message, { tone: "error" });
+    }
+  }
+
+  async function undo(id, at = page) {
+    try {
+      const reply = await postJSON(`${api}/${at}/fixes/${enc(id)}/undo`);
+      hideTip(true);
+      toast(reply.message);
+      if (at === page) await show(at);
+    } catch (error) {
+      toast(error.message, { tone: "error" });
+    }
+  }
+
+  // Marking a table CloseDesk missed: drag a box round it on the page.
+  let drawing = false;
+  let rubber = null;
+  let from = null;
+  const markLabel = h("span", null, "Mark a table");
+  const markTable = h(
+    "button",
+    { type: "button", class: "btn btn-sm pv-mark", "aria-pressed": "false", title: "Drag a box round a table CloseDesk didn't outline" },
+    icon("table", 14),
+    markLabel
+  );
+  markTable.addEventListener("click", () => (drawing ? stopDrawing() : startDrawing()));
+
+  function startDrawing() {
+    drawing = true;
+    hideTip(true);
+    sheet.classList.add("drawing");
+    markTable.setAttribute("aria-pressed", "true");
+    markLabel.textContent = "Drag across the table (Esc to stop)";
+    stopOpenDrawing = () => (drawing ? (stopDrawing(), true) : false);
+  }
+
+  function stopDrawing() {
+    drawing = false;
+    from = null;
+    if (rubber) rubber.remove();
+    rubber = null;
+    sheet.classList.remove("drawing");
+    markTable.setAttribute("aria-pressed", "false");
+    markLabel.textContent = "Mark a table";
+  }
+
+  const spot = (event) => {
+    const rect = sheet.getBoundingClientRect();
+    const clamp = (value) => Math.min(Math.max(value, 0), 1);
+    return { x: clamp((event.clientX - rect.left) / rect.width), y: clamp((event.clientY - rect.top) / rect.height) };
+  };
+  const boxFrom = (a, b) => ({ x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w: Math.abs(a.x - b.x), h: Math.abs(a.y - b.y) });
+  sheet.addEventListener("pointerdown", (event) => {
+    if (!drawing || event.button !== 0) return;
+    event.preventDefault();
+    from = spot(event);
+    rubber = h("div", { class: "pv-rubber" });
+    sheet.append(rubber);
+    sheet.setPointerCapture(event.pointerId);
+  });
+  sheet.addEventListener("pointermove", (event) => {
+    if (!drawing || !from || !rubber) return;
+    const box = boxFrom(from, spot(event));
+    Object.assign(rubber.style, { left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.w * 100}%`, height: `${box.h * 100}%` });
+  });
+  sheet.addEventListener("pointerup", (event) => {
+    if (!drawing || !from) return;
+    const box = boxFrom(from, spot(event));
+    stopDrawing();
+    if (box.w < 0.02 || box.h < 0.01) return toast("Drag across the whole table to mark it.");
+    send({ kind: "table", box });
+  });
+
   const zoomButtons = ZOOMS.map(([value, words]) =>
     h("button", { type: "button", class: `seg${value === zoom ? " on" : ""}`, "aria-pressed": String(value === zoom), dataset: { zoom: value }, onclick: () => setZoom(value) }, words)
   );
@@ -840,7 +966,7 @@ function pageView(data) {
   function setZoom(value) {
     zoom = value;
     saveZoom(value);
-    hideTip();
+    hideTip(true);
     for (const button of zoomButtons) {
       const on = button.dataset.zoom === value;
       button.classList.toggle("on", on);
@@ -851,8 +977,9 @@ function pageView(data) {
 
   async function show(number) {
     const mine = ++token;
-    hideTip();
+    hideTip(true);
     closeTable();
+    stopDrawing();
     page = number;
     where.textContent = pages ? `Page ${page} of ${pages}` : `Page ${page}`;
     prev.disabled = next.disabled = true;
@@ -883,7 +1010,7 @@ function pageView(data) {
 
   function draw(view) {
     const reading = Boolean(view.model_name);
-    const counts = { ok: 0, check: 0, differs: 0 };
+    const counts = { ok: 0, check: 0, differs: 0, fixed: 0 };
     const shades = view.regions.map((region) => tone(region, view.source));
     for (const shade of shades) counts[shade] += 1;
     // The cells of the open table that each box was read into, to point at them from the page.
@@ -898,15 +1025,54 @@ function pageView(data) {
         dataset: { region: String(index) },
         style: { left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.w * 100}%`, height: `${region.h * 100}%` },
       });
-      const open = () => showTip(box, tipFor(region, view));
+      const open = () => showTip(box, [...tipFor(region, view), h("p", { class: "pv-tip-hint muted" }, "Click to fix it if it's wrong.")]);
       const mark = (on) => (cellsOf.get(index) || []).forEach((cell) => cell.classList.toggle("pv-hl", on));
       box.addEventListener("pointerenter", () => (open(), mark(true)));
       box.addEventListener("focus", open);
-      box.addEventListener("click", open);
+      box.addEventListener("click", () => edit(index));
+      box.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          edit(index);
+        }
+      });
       box.addEventListener("pointerleave", () => (hideTip(), mark(false)));
       box.addEventListener("blur", hideTip);
       return box;
     });
+
+    // Fixing a box: what the page says there, typed over what was read.
+    function edit(index) {
+      const region = view.regions[index];
+      const box = boxes[index];
+      if (!region || !box) return;
+      const input = h("input", { type: "text", class: "pv-fix-input", value: region.text, maxlength: "500", "aria-label": "What the page says here" });
+      const save = h("button", { type: "submit", class: "btn btn-sm btn-primary" }, "Save fix");
+      const cancel = h("button", { type: "button", class: "btn btn-sm", onclick: () => hideTip(true) }, "Cancel");
+      let extra = null;
+      if (region.fixed && region.fixed.by === "you") {
+        extra = h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => undo(region.fixed.id) }, "Undo my fix");
+      } else if (region.fixed) {
+        // A word learnt from another file that is right as it was read here.
+        extra = h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => send({ kind: "text", region: index, now: region.fixed.was }) }, "It was right here");
+      }
+      const form = h(
+        "form",
+        { class: "pv-fix" },
+        h("label", { class: "pv-fix-h" }, "What does the page say here?", input),
+        h("div", { class: "pv-fix-btns" }, save, cancel, extra),
+        h("p", { class: "pv-fix-note muted" }, "The file's text gets your fix. A word or name fixed here is put right on this sender's later files too; a figure is fixed on this file only.")
+      );
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        if (input.value.trim() === region.text.trim()) return hideTip(true);
+        send({ kind: "text", region: index, now: input.value });
+      });
+      hideTip(true);
+      showTip(box, [...tipFor(region, view), form], { pin: true });
+      input.focus();
+      input.select();
+    }
 
     function reveal(index, { card = false } = {}) {
       const box = boxes[index];
@@ -1004,7 +1170,16 @@ function pageView(data) {
           "div",
           { class: "pv-panel-head" },
           h("div", null, h("b", null, table.label), h("small", null, `${plural(table.rows.length, "row")} · ${found} of ${plural(filled, "cell")} found on the page · point at a cell to see where it was read`)),
-          h("button", { type: "button", class: "icon-btn", title: "Close (Esc)", "aria-label": "Close the table", onclick: closeTable }, icon("x", 15))
+          h(
+            "div",
+            { class: "pv-panel-acts" },
+            table.fixed && table.fixed.by === "you"
+              ? h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => undo(table.fixed.id) }, "Remove my table")
+              : table.box
+                ? h("button", { type: "button", class: "btn btn-sm btn-quiet", title: "Stop outlining this here and on this sender's later pages", onclick: () => send({ kind: "not_table", box: table.box }) }, "Not a table")
+                : null,
+            h("button", { type: "button", class: "icon-btn", title: "Close (Esc)", "aria-label": "Close the table", onclick: closeTable }, icon("x", 15))
+          )
         ),
         h("div", { class: "grid-wrap" }, grid)
       );
@@ -1037,7 +1212,7 @@ function pageView(data) {
     // What to check: the amber and red boxes, in reading order.
     const toCheck = readingOrder(
       view.regions,
-      shades.flatMap((shade, index) => (shade === "ok" ? [] : [index]))
+      shades.flatMap((shade, index) => (shade === "check" || shade === "differs" ? [index] : []))
     );
     let at = -1;
     const count = h("span", { class: "pv-count-check", "aria-live": "polite" }, toCheck.length ? `${plural(toCheck.length, "box", "boxes")} to check` : "");
@@ -1061,7 +1236,7 @@ function pageView(data) {
     sheet.classList.remove("only-check");
     replace(
       tools,
-      h("div", { class: "pv-check" }, step, count, view.regions.length ? h("label", { class: "pv-only" }, only, "Only show what needs checking") : null),
+      h("div", { class: "pv-check" }, step, count, view.regions.length ? h("label", { class: "pv-only" }, only, "Only show what needs checking") : null, markTable),
       chips.length ? h("div", { class: "pv-chips" }, h("span", { class: "pv-chips-h" }, `${chips.length === 1 ? "Table" : "Tables"} on this page`), chips) : null
     );
     tools.hidden = !view.regions.length;
@@ -1104,14 +1279,23 @@ function pageView(data) {
     else if (view.source === "ocr") told.push("The vision model hasn't read this page.");
     if (view.regions.length) told.push("Point at a box, or tab to it, to see what was read.");
     if (outlines.length) told.push(`Dashed outlines are tables: click one to see it as a table.`);
+    if (view.regions.length) told.push("Click a box to fix what was read, or mark a table CloseDesk missed.");
     replace(about, told.join(" "));
     replace(
       legend,
       view.regions.length
         ? [
             key("ok", view.source === "text" ? (reading ? "Exact, and the vision model agrees" : "Exact") : reading ? "Both readings agree" : "Read clearly (80% sure or more)"),
-            view.source === "ocr" || counts.check ? key("check", reading ? "Check it: OCR less sure, or not clearly in the vision model's reading" : "Check it: OCR under 80% sure") : null,
+            view.source === "ocr" || counts.check
+              ? key(
+                  "check",
+                  reading
+                    ? `Check it: OCR less sure, ${view.regions.some((r) => r.model && r.model.sure != null) ? "the vision model under 90% sure, " : ""}or not clearly in the vision model's reading`
+                    : "Check it: OCR under 80% sure"
+                )
+              : null,
             reading ? key("differs", "The vision model read a different figure") : null,
+            counts.fixed ? key("fixed", "Fixed by you, or from what you fixed before") : null,
             h("span", { class: "pv-count muted" }, `${plural(view.regions.length, "box", "boxes")}${counts.differs ? ` · ${counts.differs} differ` : ""}${counts.check ? ` · ${counts.check} to check` : ""}`),
           ]
         : null

@@ -47,6 +47,19 @@ def _fresh_model_memory():
         cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_table_finder_download(monkeypatch):
+    """Tests never fetch the layout model from the internet: without it, tables are found as before."""
+    from controller_inbox import table_finder
+
+    def refuse(_target):
+        raise OSError("tests don't download the table finder")
+
+    monkeypatch.setattr(table_finder, "_download", refuse)
+    monkeypatch.setattr(table_finder, "_session", None)
+    monkeypatch.setattr(table_finder, "_last_try", 0.0)
+
+
 @pytest.fixture
 def as_of_now() -> datetime:
     return datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
