@@ -76,6 +76,41 @@ def test_a_file_name_with_a_bracketed_number_stays_one_link(tmp_path):
     assert 'title="Open Invoice [1].pdf">Invoice [1].pdf</a> for the total <a class="cite"' in html
 
 
+def test_a_cell_cited_in_a_csv_links_to_the_cell(settings, store, tmp_path):
+    # A CSV's one sheet is named after the file, blanked out of the sentence: the link asks for the cell alone.
+    import json
+    import shutil
+    import subprocess
+    from urllib.parse import parse_qs, urlparse
+
+    from controller_inbox.folder_mail import ingest_folder
+    from msgfactory import write_msg
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js isn't installed")
+    settings.trusted_domains = "taz.com"
+    settings.ensure_data_dir()
+    write_msg(settings.inbox_incoming / "q4.msg", "Q4 numbers", "Attached.", sender_name="Maya", sender_email="maya@taz.com",
+              attachments=[("q4.csv", b"Line,Q3,Q4\nAds,1000,1500\nTravel,250,300\nTotal,1250,1800\n", "text/csv")])
+    [email] = ingest_folder(store, settings)
+    source = {"n": 1, "id": email.id, "subject": email.subject, "files": [{"n": 1, "name": "q4.csv", "text": True}]}
+    script = tmp_path / "href.mjs"
+    script.write_text(
+        f"import {{ fileHref }} from {json.dumps((UI / 'format.js').as_uri())};\n"
+        f"const [source, file] = [{json.dumps(source)}, {json.dumps(source['files'][0])}];\n"
+        "console.log(fileHref(source, file, 'Travel in sheet \"q4.csv\", cell C3 is 300 [1].'));\n"
+        "console.log(fileHref(source, file, \"Travel in 'q4.csv'!C3 is 300 [1].\"));\n"
+    )
+    hrefs = subprocess.run([node, str(script)], capture_output=True, text=True, check=True).stdout.split()
+    assert len(hrefs) == 2
+    client = TestClient(web.create_app(settings, store))
+    for href in hrefs:
+        at = parse_qs(urlparse(href).query)["at"][0]
+        assert at == "C3", href
+        assert "file-part target" in client.get(f"/inbox/{email.id}/files/1", params={"at": at}).text, href
+
+
 # ---------- The workspace's own scripts in a real browser, one test per fixed bug ----------
 
 
@@ -453,3 +488,59 @@ def test_next_to_check_steps_through_a_scans_amber_and_red_boxes(settings, store
         # Only what needs checking: the green boxes hide.
         page.check(".pv-only input")
         assert page.locator(".pv-box.ok").first.is_hidden() and page.locator(".pv-box.differs").is_visible()
+
+
+def test_enter_on_a_page_box_opens_its_fix_card_and_stays_on_the_file(settings, store, page):
+    # The boxes are role=button: Enter is theirs, not the page-wide "open the selected email".
+    from liveserver import serving
+    from msgfactory import PDF
+    from test_page_view import _invoice
+
+    email = _harbor(settings, store, ("invoice.pdf", _invoice(pages=2), PDF))
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size({"width": 1440, "height": 900})
+        page.goto(f"{base}/app/folder/{email.folder}")
+        page.click(f".item[data-key='{email.id}'] .item-main")
+        page.click(".rd .file-actions a:has-text('Page')")
+        page.wait_for_function("() => { const i = document.querySelector('.pv-sheet img'); return i && i.naturalWidth > 0; }")
+        page.focus(".pv-box[aria-label='Amount']")
+        page.keyboard.press("Enter")
+        page.wait_for_selector(".pv-fix-input")
+        page.wait_for_timeout(300)
+        assert "/file/1" in page.url, page.url
+        assert page.locator(".pv-fix-input").count() == 1
+
+
+def test_a_fix_on_the_page_tab_shows_on_the_text_tab_and_its_undo_too(settings, store, page):
+    # The file's reading was kept from before the fix; a fix (and its undo) fetch it again.
+    from liveserver import serving
+    from msgfactory import PDF
+    from test_page_view import _invoice
+
+    email = _harbor(settings, store, ("invoice.pdf", _invoice(pages=2), PDF))
+    with serving(web.create_app(settings, store)) as base:
+        _open_page_tab(page, base, email)
+        page.click(".pv-box[aria-label='Amount']")
+        page.fill(".pv-fix-input", "ZEBRAWORD")
+        page.click(".pv-fix button[type=submit]")
+        page.wait_for_selector(".pv-box[aria-label='ZEBRAWORD']")
+        page.click(".tab:has-text('Text')")
+        page.wait_for_selector(".text-view .parts")
+        assert "ZEBRAWORD" in page.text_content(".text-view .parts")
+        # Undone from its note while on the Text tab: the tab fetches the reading again when next shown.
+        with page.expect_response(lambda response: response.url.endswith("/undo")):
+            page.click(".toast-action:has-text('Undo')")
+        page.click(".tab:has-text('Page')")
+        page.wait_for_selector(".pv-box[aria-label='Amount']")
+        page.click(".tab:has-text('Text')")
+        page.wait_for_selector(".text-view .parts")
+        assert "ZEBRAWORD" not in page.text_content(".text-view .parts")
+
+
+def test_slash_on_the_digest_opens_an_empty_palette(site, page):
+    page.goto(f"{site}/app/digest")
+    page.wait_for_selector("body.ready")
+    page.wait_for_selector(".doc-nav")
+    page.keyboard.press("/")
+    page.wait_for_selector(".palette input")
+    assert page.input_value(".palette input") == ""

@@ -150,12 +150,17 @@ export async function loadList(spec, signal, want = MAIL_PAGE) {
   const sep = spec.api.includes("?") ? "&" : "?";
   const data = await getJSON(`${spec.api}${sep}limit=${Math.min(want, 500)}`, { signal });
   const seen = new Set(data.items.map((d) => d.id));
+  // The server's offset moves by the rows it sent, not the rows kept: a page of repeats mustn't ask for itself again.
+  let offset = data.items.length;
   while (data.items.length < Math.min(want, data.total)) {
-    const next = await getJSON(`${spec.api}${sep}limit=${Math.min(want - data.items.length, 500)}&offset=${data.items.length}`, { signal });
+    const next = await getJSON(`${spec.api}${sep}limit=${Math.min(want - data.items.length, 500)}&offset=${offset}`, { signal });
     if (!next.items.length) break;
-    // Mail filed away between two pages shifts the rest by one; show each email once.
-    data.items.push(...next.items.filter((d) => !seen.has(d.id) && seen.add(d.id)));
+    offset += next.items.length;
+    // Mail arriving or filed away between two pages shifts the rest; show each email once.
+    const fresh = next.items.filter((d) => !seen.has(d.id) && seen.add(d.id));
+    data.items.push(...fresh);
     data.total = next.total;
+    if (!fresh.length) break;
   }
   return data;
 }

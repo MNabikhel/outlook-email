@@ -848,7 +848,7 @@ function barHeight() {
   return bar ? bar.offsetHeight : 0;
 }
 
-function pageView(data) {
+function pageView(data, ctx) {
   const { email, file } = data;
   const api = `/api/mail/${encodeURIComponent(email.id)}/files/${file.n}/pages`;
   const sheet = h("div", { class: "pv-sheet loading" });
@@ -874,6 +874,7 @@ function pageView(data) {
     const at = page;
     try {
       const reply = await postJSON(`${api}/${at}/fixes`, body);
+      ctx.fileChanged(email.id, file.n);
       hideTip(true);
       toast(reply.message, { action: "Undo", onAction: () => undo(reply.id, at), ms: 8000 });
       if (at === page) await show(at);
@@ -885,6 +886,7 @@ function pageView(data) {
   async function undo(id, at = page) {
     try {
       const reply = await postJSON(`${api}/${at}/fixes/${enc(id)}/undo`);
+      ctx.fileChanged(email.id, file.n);
       hideTip(true);
       toast(reply.message);
       if (at === page) await show(at);
@@ -1335,7 +1337,7 @@ export function fileView(data, tab, ctx) {
   );
   let content;
   if (tab === "page") {
-    content = pageView(data);
+    content = pageView(data, ctx);
   } else if (tab === "tables") {
     const off = data.tables.filter((t) => t.check.mismatched.length).length;
     const ok = data.tables.reduce((n, t) => n + t.check.matched, 0);
