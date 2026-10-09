@@ -321,3 +321,47 @@ def test_columns_headed_alike_are_each_read():
     )
     row = tables_in(text)[0].rows[0]
     assert (row.value("Amount"), row.value("Amount (2)"), row.value("Date (2)")) == ("$1,000.00", "$250.00", "09/20/2026")
+
+
+
+def test_rows_leaving_an_end_column_blank_stay_in_the_table():
+    """A workbook or CSV row is written from its first filled cell to its last, so a row with no note (or no
+    first cell) has fewer labels; it is still a row of the same table, and a total covers it."""
+    import io
+
+    from openpyxl import Workbook
+
+    from controller_inbox import documents
+
+    book = Workbook()
+    ws = book.active
+    ws.append(["Vendor", "Amount", "Notes"])
+    ws.append(["Acme", 1200, "disputed"])
+    ws.append(["Globex", 800, None])
+    ws.append(["Hooli", 300, None])
+    ws.append(["Initech", 450, "paid late"])
+    buf = io.BytesIO()
+    book.save(buf)
+    text = documents.extract_document("ap.xlsx", "", buf.getvalue())
+    found = tables_in(text)
+    assert len(found) == 1, [(t.labels, [r.name for r in t.rows]) for t in found]
+    assert found[0].rows[1].value("Notes") == "" and found[0].rows[1].cell("Amount") == "B3 (Amount): 800"
+    assert "2,750" in lookup(text, "What is the total amount across all vendors?")
+    # The first rows without the column: the table widens when a row has it.
+    csv = b"Date,Payee,Amount,Memo\n10/01/2026,Acme,100.00,\n10/02/2026,Globex,50.00,\n10/03/2026,Hooli,25.00,rent\n10/04/2026,Initech,10.00,fee\n"
+    found = tables_in(documents.extract_document("bank.csv", "text/csv", csv))
+    assert len(found) == 1 and found[0].labels == ("Date", "Payee", "Amount", "Memo"), [(t.labels, len(t.rows)) for t in found]
+    assert [row.value("Memo") for row in found[0].rows] == ["", "", "rent", "fee"]
+
+
+def test_formula_text_after_a_figure_is_not_counted_as_its_decimals():
+    """A workbook cell is written "33.3333 (=100/3)": the places are the figure's four, not the formula's."""
+    text = (
+        '[sheet "Sheet" A1:C5]\n'
+        "A2 (Department): Finance | B2 (Headcount): 3 | C2 (Allocated rent): 33.3333 (=100/3)\n"
+        "A3 (Department): Sales | B3 (Headcount): 4 | C3 (Allocated rent): 33.3333 (=100/3)\n"
+        "A4 (Department): Ops | B4 (Headcount): 2 | C4 (Allocated rent): 33.3333 (=100/3)\n"
+        "A5 (Department): Total | B5 (Headcount): 9 | C5 (Allocated rent): 100 (=SUM(C2:C4))\n"
+    )
+    verdicts = [verify(table) for table in tables_in(text)]
+    assert [m for v in verdicts for m in v.mismatched] == [] and sum(v.matched for v in verdicts) == 2, verdicts

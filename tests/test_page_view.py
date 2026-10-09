@@ -347,3 +347,40 @@ def test_a_half_written_kept_page_is_drawn_again(settings):
     assert [path.name for path in page_view.folder(settings).iterdir()] == [name], "no temporary file left behind"
     (page_view.folder(settings) / name).write_bytes(png[: len(png) // 2])
     assert page_view.page_png(settings, data, "invoice.pdf", 1) == png, "cut off halfway"
+
+
+
+def _tiff(*lines: str) -> bytes:
+    import io
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    pages = []
+    for line in lines:
+        image = Image.new("L", (1200, 400), 255)
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 48)
+        except OSError:
+            font = ImageFont.load_default(size=48)
+        ImageDraw.Draw(image).text((50, 150), line, fill=0, font=font)
+        pages.append(image)
+    buf = io.BytesIO()
+    pages[0].save(buf, "TIFF", save_all=True, append_images=pages[1:])
+    return buf.getvalue()
+
+
+def test_each_page_of_a_tiff_is_counted_drawn_and_read(settings):
+    """A fax or a scanner's batch is one TIFF of several pages: each is a page to show, to offer the vision model
+    and to read, not only the first."""
+    data = _tiff("Invoice 5521 page one", "Total due 9,876.54")
+    assert page_view.page_count(data, "fax.tif") == 2
+    assert vision.wanted_pages(data, "fax.tif", "") == [1, 2]
+    first, second = (page_view.page_png(settings, data, "fax.tif", page) for page in (1, 2))
+    assert first != second
+    with pytest.raises(ValueError):
+        page_view.page_png(settings, data, "fax.tif", 3)
+    assert page_view.page_count(_tiff("One page"), "scan.tif") == 1
+    if not ocr.engine_name():
+        pytest.skip("no OCR engine")
+    text = ocr.image_text(data)
+    assert text.startswith("[page 1]") and "Invoice 5521" in text and "[page 2]" in text and "9,876.54" in text, text

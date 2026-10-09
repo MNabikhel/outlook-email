@@ -30,8 +30,49 @@ def engine_name() -> str:
     return ""
 
 
+# Pages read from one TIFF; a fax or a scanner's batch is a few, past this it is not a document to read whole.
+MAX_PICTURE_PAGES = 200
+
+
+def picture_pages(data: bytes) -> int:
+    """How many pages a picture holds: a TIFF can hold several (a fax, a scanner's batch); any other picture,
+    an animated GIF's frames included, is one page."""
+    from PIL import Image
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            frames = getattr(image, "n_frames", 1) if image.format == "TIFF" else 1
+    except Exception:
+        return 1
+    return max(1, min(frames, MAX_PICTURE_PAGES))
+
+
+def picture_page(data: bytes, page: int) -> bytes:
+    """Page ``page`` (from 1) of a picture, as a picture of its own (a PNG)."""
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as image:
+        image.seek(page - 1)
+        frame = image.copy() if image.mode in {"1", "L", "RGB", "RGBA"} else image.convert("RGB")
+    out = io.BytesIO()
+    frame.save(out, "PNG")
+    return out.getvalue()
+
+
 def image_text(data: bytes) -> str:
-    """The text in a picture, top to bottom, or "" when it has none or no OCR engine is installed."""
+    """The text in a picture, top to bottom, or "" when it has none or no OCR engine is installed. A TIFF of
+    several pages is read page by page, each under its ``[page N]`` mark, as a PDF's pages are."""
+    pages = picture_pages(data) if engine_name() else 1
+    if pages > 1:
+        try:
+            read = [_page_text(picture_page(data, page)) for page in range(1, pages + 1)]
+        except Exception:
+            return ""
+        return "\n\n".join(f"[page {page}]\n{text or '(no text on this page)'}" for page, text in enumerate(read, start=1))
+    return _page_text(data)
+
+
+def _page_text(data: bytes) -> str:
     name = engine_name()
     try:
         if name and _pixels(data) > MAX_PIXELS:

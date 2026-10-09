@@ -290,6 +290,9 @@ def tables_in(text: str) -> list[Table]:
         # A PDF's table runs on over its pages; a workbook's sheets with the same columns are different tables.
         new_sheet = bool(found) and row.page.startswith("sheet") and row.page != found[-1].rows[-1].page
         new_list = bool(found) and row.at in headed and row.page == found[-1].rows[-1].page
+        if found and not new_sheet and not new_list and labels != found[-1].labels and _same_sheet_columns(found[-1], row):
+            found[-1].rows.append(row)
+            continue
         if not found or found[-1].labels != labels or new_sheet or new_list:
             found.append(Table(labels))
         found[-1].rows.append(row)
@@ -303,6 +306,41 @@ def tables_in(text: str) -> list[Table]:
         if _settle_totals(table):
             table.kinds = _kinds(table)
     return found
+
+
+def _same_sheet_columns(table: Table, row: Row) -> bool:
+    """Whether ``row`` is one more row of ``table`` on the same sheet, with a blank first or last cell. A sheet's
+    rows are named from its one header row, but a row is written from its first filled cell to its last, so one
+    that leaves an optional column at either end blank ("Notes", "Memo") has fewer labels. It takes the table's
+    columns, the missing ones blank; a row with more columns than the table's rows so far widens the table."""
+    last = table.rows[-1] if table.rows else None
+    if last is None or not row.page.startswith("sheet") or row.page != last.page:
+        return False
+    mine = [label for label, _value in row.cells]
+    if _in_order(mine, table.labels):
+        _pad(row, table.labels)
+        return True
+    if _in_order(table.labels, mine):
+        table.labels = tuple(mine)
+        for earlier in table.rows:
+            _pad(earlier, table.labels)
+        return True
+    return False
+
+
+def _in_order(some, labels) -> bool:
+    """Whether every one of ``some`` is in ``labels``, in the same order."""
+    rest = iter(labels)
+    return all(label in rest for label in some)
+
+
+def _pad(row: Row, labels: tuple[str, ...]) -> None:
+    """``row``'s cells under ``labels``, a column it leaves out written blank."""
+    values = dict(row.cells)
+    refs = dict(zip((label for label, _value in row.cells), row.refs)) if row.refs else {}
+    row.cells = [(label, values.get(label, tables.BLANK)) for label in labels]
+    if row.refs:
+        row.refs = [refs.get(label, "") for label in labels]
 
 
 @dataclass
@@ -376,8 +414,13 @@ class _Running:
     def add(self, value: Decimal | None, raw: str) -> None:
         if value is None:
             return
-        if "." in raw:
-            self.places = max(self.places, len(raw.split(".")[-1].rstrip(")%-− ")))
+        # The places printed in the figure itself, not in what follows it: a workbook cell is written with its
+        # formula ("33.3333 (=100/3)"), whose text would make the rounding allowance next to nothing.
+        figure = _LEADING_FIGURE.match(raw)
+        digits = figure.group(4) if figure else ""
+        point = "," if _EUROPEAN.fullmatch(digits) else "."
+        if point in digits:
+            self.places = max(self.places, len(digits.rsplit(point, 1)[-1]))
         self.group.append(value)
         self.group_total.add(value)
         self.body.add(value)
