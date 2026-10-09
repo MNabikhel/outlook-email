@@ -444,6 +444,14 @@ def render(data: bytes, filename: str, page: int, *, reader: Reader = GENERAL) -
             image.seek(0)
         image = ImageOps.exif_transpose(image)
         image.thumbnail((max_side, max_side))
+        if image.mode in {"I;16", "I;16B", "I;16L", "I"} and (image.getextrema()[1] or 0) > 255:
+            # 16-bit grayscale: scaled to 8 bits, as convert("RGB") clips it to white
+            image = image.point(lambda value: value / 257).convert("L")
+        if image.mode in {"RGBA", "LA", "PA"} or "transparency" in image.info:
+            # a transparent background is paper, not black
+            image = image.convert("RGBA")
+            paper = Image.new("RGBA", image.size, (255, 255, 255, 255))
+            image = Image.alpha_composite(paper, image)
     out = io.BytesIO()
     image.convert("RGB").save(out, "PNG", optimize=True)
     return out.getvalue()
@@ -483,7 +491,9 @@ def transcribe(
         again, looped_again = _transcribe_once(settings, messages, on_piece, RETRY_SAMPLING, model=model, limit=limit)
     except (CutOff, EmptyReply, Blank):
         again, looped_again = "", True
-    best = again if not looped_again else max(text, again, key=len)
+    if not looped_again:
+        return again
+    best = max(text, again, key=len)
     if len(best) < 200:
         raise CutOff("the model got stuck repeating itself near the top of the page")
     return best
@@ -549,6 +559,8 @@ def mask_secrets(markdown: str) -> str:
 
     def mask(match: re.Match[str]) -> str:
         digits = re.sub(r"\D", "", match.group(2))
+        if not digits:
+            return match.group(0)  # a word after the label ("Account Balance"), not a number
         return f"{match.group(1)}****{digits[-4:]}"
 
     return redact_financial_secrets(_SECRET.sub(mask, markdown or ""))
@@ -740,6 +752,9 @@ class _TableCells(HTMLParser):
         (self.cell[3] if self.cell is not None else self.outside).append(data)
 
 
+MAX_GRID_CELLS = 20_000  # a table's cells with its merged cells written out; past this the model's spans are nonsense
+
+
 def _html_grid(table: str) -> tuple[list[str], list[list[str]], int]:
     """The table's title lines, its cells on a grid, and how many rows at the top of the grid are column headings.
 
@@ -756,6 +771,10 @@ def _html_grid(table: str) -> tuple[list[str], list[list[str]], int]:
     parser.feed(table)
     parser.close()
     said = " ".join("".join(parser.outside).split())
+    if sum(colspan * rowspan for cells in parser.rows for _kind, colspan, rowspan, _parts in cells) > MAX_GRID_CELLS:
+        # Merged cells spanning more than any page holds: its rows as lines of text, not a grid of copies.
+        lines = [" ".join(" ".join("".join(parts).split()) for _kind, _c, _r, parts in cells).strip() for cells in parser.rows]
+        return [*([said] if said else []), *(line for line in lines if line)], [], 0
     grid: list[list[str]] = []
     marked: list[bool] = []  # every cell of the row a <th>
     grouping: list[bool] = []  # a cell merged across figure columns
@@ -897,7 +916,10 @@ def _form_label(cell: str) -> bool:
 def page_text(markdown: str) -> str:
     """The model's markdown written the way CloseDesk writes a page it read: each table row by row with every cell
     named by its column (``Label: value``) and section rows as ``Group:``, the rest as notes, so the table lookup,
-    the totals check and the chat read it like any other page. HTML tables are read too."""
+    the totals check and the chat read it like any other page. HTML tables are read too. A number named by its
+    column as an account or routing number is masked, as in every file's text."""
+    from controller_inbox.extract import redact_financial_secrets
+
     lines = _html_tables_as_markdown(strip_thinking(markdown or "")).splitlines()
     out: list[str] = []
     notes: list[str] = []
@@ -933,7 +955,7 @@ def page_text(markdown: str) -> str:
             notes.append(clean)
         index += 1
     flush()
-    return "\n\n".join(out)
+    return redact_financial_secrets("\n\n".join(out))
 
 
 def _cells(line: str) -> list[str]:
@@ -1026,7 +1048,25 @@ def _unique(labels: list[str]) -> list[str]:
 
 
 _DATE = re.compile(r"\b\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}\b")
-_FIGURE = re.compile(r"(?<![\w.])([-−(]?)\s?[$€£]?\s?(\d{1,3}(?:,\d{3})+|\d+)(\.\d+)?(\)?)(%?)(?![\w])")
+# A sign before ("-", "−", "–", "(") or a minus after ("3,400.00-", as SAP prints it); a currency code glued on
+# ("USD1,234.00") and a trailing CR/DR are part of the figure, and no match starts inside a digit group.
+_FIGURE = re.compile(
+    r"(?<![\w.])(?<!\d,)([-−–(]?)\s?(?:USD|CAD|EUR|GBP|AUD|NZD|CHF|JPY|MXN|INR|Rs\.?)?[$€£]?\s?(\d{1,3}(?:,\d{3})+|\d+)"
+    r"(\.\d+)?(\)?)(%?)([-−](?![\d.]))?(?:\s?(?:CR|DR)\b)?(?![\w])"
+)
+
+
+class Percent(Decimal):
+    """A percentage as a figure: "10%" is not the same figure as "10.00"."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Percent) and Decimal(self) == Decimal(other)
+
+    def __ne__(self, other: object) -> bool:
+        return not self == other
+
+    def __hash__(self) -> int:
+        return hash(("%", Decimal(self)))
 
 
 def figures(text: str) -> dict[Decimal, list[str]]:
@@ -1034,7 +1074,7 @@ def figures(text: str) -> dict[Decimal, list[str]]:
     whole numbers (a page or row number) and years are left out, and so are dates."""
     found: dict[Decimal, list[str]] = {}
     for match in _FIGURE.finditer(_DATE.sub(" ", text or "")):
-        sign, whole, decimals, close, percent = match.groups()
+        sign, whole, decimals, close, percent, minus = match.groups()
         digits = whole.replace(",", "")
         if not decimals and not percent and "," not in whole and (len(digits) < 3 or (len(digits) == 4 and 1900 <= int(digits) <= 2100)):
             continue
@@ -1042,8 +1082,10 @@ def figures(text: str) -> dict[Decimal, list[str]]:
             value = Decimal(digits + (decimals or ""))
         except InvalidOperation:
             continue
-        if sign in {"-", "−"} or (sign == "(" and close == ")"):
+        if sign in {"-", "−", "–"} or minus or (sign == "(" and close == ")"):
             value = -value
+        if percent:
+            value = Percent(value)
         found.setdefault(value, []).append(match.group(0).strip())
     return found
 
@@ -1809,7 +1851,19 @@ def readings_json(rows: dict[int, dict]) -> list[dict]:
 
 
 def markdown_blocks(markdown: str) -> list[dict]:
-    """The model's markdown as blocks: {"kind": "table", "header", "rows"} and {"kind": "text", "text"}."""
+    """The model's markdown as blocks: {"kind": "table", "header", "rows"} and {"kind": "text", "text"}. A number
+    under an account or routing number heading is masked, as ``page_text`` masks it."""
+    from controller_inbox.extract import redact_financial_secrets
+
+    def masked(header: list[str], row: list[str]) -> list[str]:
+        out = []
+        for column, cell in enumerate(row):
+            label = header[column] if column < len(header) else ""
+            if cell and label and redact_financial_secrets(f"{label}: {cell}") != f"{label}: {cell}":
+                cell = "****" + re.sub(r"\D", "", cell)[-4:]
+            out.append(redact_financial_secrets(cell))
+        return out
+
     lines = _html_tables_as_markdown(strip_thinking(markdown)).splitlines()
     out: list[dict] = []
     index = 0
@@ -1821,12 +1875,12 @@ def markdown_blocks(markdown: str) -> list[dict]:
             rows = []
             while index < len(lines) and _TABLE_ROW.match(lines[index]):
                 if not _RULE_ROW.match(lines[index]):
-                    rows.append(_cells(lines[index]))
+                    rows.append(masked(header, _cells(lines[index])))
                 index += 1
             out.append({"kind": "table", "header": header, "rows": rows})
             continue
         text = _FORMATTING.sub("", line).strip().lstrip("#").strip()
         if text:
-            out.append({"kind": "text", "text": text})
+            out.append({"kind": "text", "text": redact_financial_secrets(text)})
         index += 1
     return out
