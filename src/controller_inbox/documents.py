@@ -142,12 +142,15 @@ def pdf_text(data: bytes) -> str:
     words = 0
     scanned = []
     previous: list[pdf_layout.Table] = []
+    laid_pages: dict[int, str] = {}  # the pages read from their own text, by number
     for number, (page, mined) in enumerate(pairs, start=1):
         layout = miner.layout(mined) if miner is not None and mined is not None else None
         text = ""
         if layout is not None:
             laid_out = pdf_layout.page_text(pdf_layout.glyphs_of(layout), previous, pdf_layout.rules_of(layout))
             text, previous = laid_out.text, laid_out.tables
+            if text.strip():
+                laid_pages[number] = text.strip()
         if not text.strip() and page is not None:
             text = _pdf_page(page)
         if not text.strip() and page is not None and len(scanned) < MAX_OCR_PAGES:
@@ -155,6 +158,19 @@ def pdf_text(data: bytes) -> str:
             text = _ocr_page_images(page)
         words += len(text.split())
         pages.append(f"[page {number}]\n{text.strip() or '(no text on this page)'}")
+    from controller_inbox import camelot_tables  # here: it imports vision, which imports this module
+
+    if laid_pages and camelot_tables.available():
+        # A second reading of the tables, where the page has figures: kept where it read more (camelot_tables.py).
+        wanted = [
+            number for number, body in laid_pages.items()
+            if len(_FIGURES.findall(body)) >= camelot_tables.MIN_FIGURES or len(_LINE_ENDS_IN_NUMBER.findall(body)) >= camelot_tables.MIN_FIGURES
+        ]
+        found = camelot_tables.read(data, wanted) if wanted else {}
+        for number, grids in found.items():
+            if number in laid_pages:
+                at = number - 1
+                pages[at] = f"[page {number}]\n{camelot_tables.combine(laid_pages[number], grids)}"
     if total > MAX_PDF_PAGES:
         pages.append(f"[CloseDesk read the first {MAX_PDF_PAGES} of {total} pages.]")
     if heavy:
@@ -164,6 +180,12 @@ def pdf_text(data: bytes) -> str:
     elif scanned:
         pages.insert(0, f"[Scanned {'page' if len(scanned) == 1 else 'pages'} {_page_list(scanned)} read with OCR: check figures against the file.]")
     return "\n\n".join(pages)
+
+
+# A figure on a page: an amount with a thousands comma or decimals, or a number of three digits or more.
+_FIGURES = re.compile(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d{3,}")
+# A line ending in a number, as a table of contents' lines end in their page numbers.
+_LINE_ENDS_IN_NUMBER = re.compile(r"(?m)\b[A-Z]?-?\d{1,4}\s*$")
 
 
 def _page_list(numbers: list[int]) -> str:

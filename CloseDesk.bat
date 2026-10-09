@@ -17,6 +17,8 @@ if errorlevel 1 (
   if errorlevel 1 goto :fail
 )
 
+rem The second table reader (Camelot) is optional: installed when it can be, skipped when it can't.
+".venv\Scripts\python.exe" -c "import camelot" >nul 2>&1 || ".venv\Scripts\python.exe" -m pip install --quiet -e ".[tables]" >nul 2>&1
 ".venv\Scripts\python.exe" -m controller_inbox run %*
 if errorlevel 1 goto :fail
 exit /b 0

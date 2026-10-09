@@ -17,6 +17,6 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install -e ".[dev,ocr]"
+        run: pip install -e ".[dev,ocr,tables]"
       - name: Test
         run: pytest -q

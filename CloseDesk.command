@@ -29,4 +29,9 @@ if ! .venv/bin/python scripts/check_deps.py >/dev/null 2>&1; then
   fi
 fi
 
+# The second table reader (Camelot) is optional: installed when it can be, skipped when it can't.
+if ! .venv/bin/python -c "import camelot" >/dev/null 2>&1; then
+  .venv/bin/python -m pip install --quiet -e ".[tables]" >/dev/null 2>&1 || true
+fi
+
 exec .venv/bin/python -m controller_inbox run "$@"

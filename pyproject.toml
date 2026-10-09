@@ -37,6 +37,8 @@ dependencies = [
 dev = ["pytest>=8.0", "aspose-email-foss>=26.3,<27"]
 # Reads scanned PDFs and pictures on this computer. Not yet built for Python 3.13+, where Tesseract is used if installed.
 ocr = ["rapidocr-onnxruntime>=1.4,<2; python_version < '3.13'"]
+# A second reader for the tables in a PDF's text (camelot_tables.py). Optional: without it, PDFs are read as before.
+tables = ["camelot-py>=2.0,<3"]
 
 [project.scripts]
 controller-inbox = "controller_inbox.cli:main"
