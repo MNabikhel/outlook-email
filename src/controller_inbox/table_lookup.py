@@ -91,6 +91,15 @@ _HOW_MUCH = re.compile(r"\bhow much\b", re.I)
 # is a column's or a row's name ("Increase %", "Net change in cash"), or a total of one ("the total change").
 _PERIOD = re.compile(r"\b(?:fy\s?)?(?:19|20)\d{2}\b|\bfy\s?\d{2}\b|\b[qh][1-4]\b", re.I)
 _FROM_TO = re.compile(r"\bfrom\b.+\bto\b", re.I)
+# Two periods named in words: "between prior year and current year", "year over year", "YoY", "this month vs last".
+_COMPARED = re.compile(
+    r"\bbetween\b.+\band\b|\b(?:year|month|quarter|week|period)\s+(?:over|on|to)\s+(?:year|month|quarter|week|period)\b|"
+    r"\b(?:yoy|mom|qoq)\b|\b(?:prior|previous|last)\b.*\b(?:current|this)\b|\b(?:current|this)\b.*\b(?:prior|previous|last)\b",
+    re.I,
+)
+# A heading for the earlier or the later of two periods ("Prior Year", "Current Month", "Opening Balance").
+_EARLIER = re.compile(r"\b(?:prior|previous|last|old|opening|beginning)\b", re.I)
+_LATER = re.compile(r"\b(?:current|this|new|closing|ending)\b", re.I)
 _LATER_FIRST = re.compile(r"\b(?:over|than|vs\.?|versus|compared)\b", re.I)
 _EVERY = re.compile(r"\b(?:each|every|all|break(?:s|ing)? (?:it |them )?down|breakdown|itemi[sz]e)\b", re.I)
 _NUM_COND = re.compile(
@@ -769,7 +778,8 @@ def read_question(question: str) -> Question:
     text = (question or "").strip()
     found_op = next((name for name, pattern in _OPS if pattern.search(text)), "find")
     plain_op = next((name for name, pattern in _OPS if name != "change" and pattern.search(text)), "find")
-    if found_op == "change" and not _FROM_TO.search(text) and len({period.lower().replace(" ", "") for period in _PERIOD.findall(text)}) < 2:
+    periods = {period.lower().replace(" ", "") for period in _PERIOD.findall(text)}
+    if found_op == "change" and not _FROM_TO.search(text) and not _COMPARED.search(text) and len(periods) < 2:
         found_op = plain_op
     conditions: list[Condition] = []
     for match in _NUM_COND.finditer(text):
@@ -1268,6 +1278,12 @@ def _difference(
         if not change:
             return first, second
         if at[id(first)] == at[id(second)]:
+            # Neither named in the question ("year over year"): the headings say which is earlier.
+            names = {id(item): item if isinstance(item, str) else item.name for item in (one, other)}
+            later = [item for item in (one, other) if _LATER.search(names[id(item)]) and not _EARLIER.search(names[id(item)])]
+            earlier = [item for item in (one, other) if _EARLIER.search(names[id(item)]) and not _LATER.search(names[id(item)])]
+            if len(later) == 1 and len(earlier) == 1 and later[0] is not earlier[0]:
+                return later[0], earlier[0]
             return None
         if _LATER_FIRST.search(lower[at[id(first)]: at[id(second)]]):
             return first, second
