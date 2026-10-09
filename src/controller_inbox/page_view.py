@@ -18,7 +18,9 @@ import difflib
 import hashlib
 import io
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -74,7 +76,14 @@ def _keep(settings: Settings, name: str, data: bytes) -> None:
     place = folder(settings)
     try:
         place.mkdir(parents=True, exist_ok=True)
-        (place / name).write_bytes(data)
+        # Written whole under another name and then moved into place, so no one reads it half written.
+        with tempfile.NamedTemporaryFile(dir=place, prefix=f".{name}.", suffix=".part", delete=False) as part:
+            part.write(data)
+        try:
+            os.replace(part.name, place / name)
+        except OSError:
+            Path(part.name).unlink(missing_ok=True)
+            raise
         files = sorted(place.iterdir(), key=lambda path: path.stat().st_mtime)
         for old in files[: max(0, len(files) - KEEP_FILES)]:
             old.unlink(missing_ok=True)
@@ -88,6 +97,14 @@ def page_png(settings: Settings, data: bytes, filename: str, page: int) -> bytes
         raise ValueError(f"a picture has no page {page}")
     name = f"{file_hash(data)}-{page}.png"
     png = _kept(settings, name)
+    if png is not None:
+        from PIL import Image
+
+        try:
+            with Image.open(io.BytesIO(png)) as image:
+                image.verify()
+        except Exception:  # cut short (a crash while it was kept): drawn again
+            png = None
     if png is None:
         png = vision.render(data, filename, page, reader=VIEW)
         _keep(settings, name, png)
