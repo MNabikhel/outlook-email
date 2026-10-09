@@ -25,7 +25,18 @@ INVOICE_RE = re.compile(
     r"\b(?:invoice|inv(?![-_]?\d)\.?|bill)" + _NUMBER_WORD + r"[\s#:No.-]*((?:[A-Z]{1,6}[-_]?\d{2,12}|\d{3,12})" + _ID_TAIL + r")",
     re.IGNORECASE,
 )
-_ISO_DATE = re.compile(r"\d{4}-\d{2}(?:-\d{2})?")
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _is_date(value: str) -> bool:
+    """A real calendar date written year first ("2026-10-01"); "2025-47" and "4512-03" are invoice numbers."""
+    if not _ISO_DATE.fullmatch(value):
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
 INVOICE_BARE_RE = re.compile(r"\b(INV[-_]?\d{3,8}(?:[-_]\d{1,8})*|IN[-_]?\d{4,8}(?:[-_]\d{1,8})*)\b", re.IGNORECASE)
 PO_RE = re.compile(
     r"\b(?:purchase\s+order|p\.?o\.?)" + _NUMBER_WORD + r"[\s#:No.-]*([A-Z]{0,4}-?\d{3,10})\b",
@@ -512,7 +523,7 @@ def parse_due_date(raw: str, *, as_of: date) -> str | None:
 
 def extract_fields(text: str, *, as_of: date, extra_vendor: str | None = None) -> ExtractedFields:
     # "Your Adobe invoice - 2026-10-01": a date after the word is the billing date, not the invoice's number.
-    invoices = _unique(_normalize_id(m.group(1)) for m in INVOICE_RE.finditer(text) if not _ISO_DATE.fullmatch(m.group(1)))
+    invoices = _unique(_normalize_id(m.group(1)) for m in INVOICE_RE.finditer(text) if not _is_date(m.group(1)))
     invoices += [v for v in _unique(_normalize_id(m.group(1)) for m in INVOICE_BARE_RE.finditer(text)) if v not in invoices]
     pos = _unique(_normalize_id(m.group(1)) for m in PO_RE.finditer(text))
     amounts: list[float] = []

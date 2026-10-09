@@ -1374,7 +1374,7 @@ class Store:
             before = conn.execute("SELECT sha256 FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, row["filename"])).fetchone()
             if before is not None and before["sha256"] != row.get("sha256", ""):
                 # Notes written from the file it replaces would come back as "notes from earlier reading".
-                conn.execute("DELETE FROM findings WHERE email_id = ?", (f"chat-{chat_id}",))
+                _drop_file_notes(conn, chat_id, row["filename"])
             conn.execute("DELETE FROM chat_files WHERE chat_id = ? AND filename = ?", (chat_id, row["filename"]))
             conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (f"chat-{chat_id}:{row['filename']}",))
             conn.execute("DELETE FROM page_failures WHERE attachment_id = ?", (f"chat-{chat_id}:{row['filename']}",))
@@ -1395,7 +1395,7 @@ class Store:
             conn.execute("DELETE FROM page_readings WHERE attachment_id = ?", (f"chat-{chat_id}:{filename}",))
             conn.execute("DELETE FROM page_failures WHERE attachment_id = ?", (f"chat-{chat_id}:{filename}",))
             # The conversation's notes may quote the file that is gone.
-            conn.execute("DELETE FROM findings WHERE email_id = ?", (f"chat-{chat_id}",))
+            _drop_file_notes(conn, chat_id, filename)
 
     # File summaries written by the overnight run ------------------------------------------------
 
@@ -1898,3 +1898,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('attachment_text_without_nul', '1')")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_model ON emails(model_status)")
+
+
+def _drop_file_notes(conn, chat_id: str, filename: str) -> None:
+    """Delete a conversation's notes written from ``filename``: those that name it, and those that name none of
+    its other files (a note says where it came from, but not always by the file's name). Notes on the other
+    files stay."""
+    others = [
+        row["filename"].lower()
+        for row in conn.execute("SELECT filename FROM chat_files WHERE chat_id = ? AND filename != ?", (chat_id, filename)).fetchall()
+    ]
+    for row in conn.execute("SELECT id, text FROM findings WHERE email_id = ?", (f"chat-{chat_id}",)).fetchall():
+        text = (row["text"] or "").lower()
+        if filename.lower() in text or not any(name in text for name in others):
+            conn.execute("DELETE FROM findings WHERE id = ?", (row["id"],))

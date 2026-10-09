@@ -723,7 +723,8 @@ def _merged_ranges(sheet) -> list[tuple[int, int, int, int]]:
 
 def _fill_merged_down(rows: list[SheetRow], merged: list[tuple[int, int, int, int]]) -> None:
     """A value merged down a column (a department over its vendors' rows) is held only by its top cell; the
-    rows under it get it too, as Word's merged table cells do, so each row reads on its own. Only below the
+    rows under it get it too, as Word's merged table cells do, so each row reads on its own. A figure merged
+    down is left on its top row. Only below the
     header row: a merge across a heading, or over a title, stays as it is."""
     tall = [area for area in merged if area[3] > area[1]]
     if not tall or not rows:
@@ -734,7 +735,8 @@ def _fill_merged_down(rows: list[SheetRow], merged: list[tuple[int, int, int, in
     for column, top, _last, bottom in tall:
         start = by_number.get(top)
         value = start.cells.get(column) if start is not None and top > below else None
-        if not value:
+        # Names only: an amount merged over two lines is one amount, and repeated it would be counted twice.
+        if not value or isinstance(value, (int, float)) or tables.is_value(str(value)):
             continue
         for number in range(top + 1, min(bottom, top + MAX_ROWS) + 1):
             row = by_number.get(number)
@@ -933,13 +935,29 @@ def markup_table_text(data: bytes, filename: str) -> str:
     reader.feed(decode_text(data))
     reader.close()
     end_cell()
-    filled = [(name, rows) for name, rows in sections if any(any(row) for row in rows)]
+    filled = _joined_headers([(name, rows) for name, rows in sections if any(any(row) for row in rows)])
     if not filled:
         return re.sub(r"\s+", " ", " ".join(loose)).strip()
     if len(filled) == 1:
         return _rows_text(filled[0][1], filename)
     names = [(name or f"{filename} table {number}").replace('"', "'") for number, (name, _rows) in enumerate(filled, start=1)]
     return "\n\n".join(_rows_text(rows, name) for name, (_name, rows) in zip(names, filled))
+
+
+def _joined_headers(sections: list[tuple[str, list[list[str]]]]) -> list[tuple[str, list[list[str]]]]:
+    """Many web apps' grids print their column names in a table of their own over the table of rows: a table of
+    one row of names, as wide as the table after it, is that table's header."""
+    out: list[tuple[str, list[list[str]]]] = []
+    for name, rows in sections:
+        if out:
+            head_name, head = out[-1]
+            filled = [cell for cell in head[0] if cell.strip()] if len(head) == 1 else []
+            width = max((len(row) for row in rows), default=0)
+            if filled and len(filled) >= 2 and not any(tables.is_value(cell) for cell in filled) and len(head[0]) == width:
+                out[-1] = (head_name or name, head + rows)
+                continue
+        out.append((name, rows))
+    return out
 
 
 def csv_text(data: bytes, filename: str) -> str:

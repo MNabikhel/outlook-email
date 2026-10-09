@@ -268,9 +268,12 @@ PAYMENT_CHANGE_RE = re.compile(
     # the new account manager").
     r"\b(?:pay|paid|paying|payments?|remit\w*|wire[ds]?|wiring|transfer\w*|deposit\w*|funds)\b[^.\n]{0,60}?"
     r"\b(?:to|into)\s+(?:the|our|this|a|an)\s+(?:new|different|updated|alternate|alternative)\s+(?:bank\s+|beneficiary\s+)?account\b|"
-    # "Our usual account is on hold", "our previous account can no longer receive payments".
-    r"\b(?:our|the)\s+(?:usual|previous|old|current|existing)\s+(?:bank\s+)?account\s+(?:is\s+(?:now\s+)?(?:on\s+hold|closed|frozen|"
-    r"no\s+longer\s+(?:active|in\s+use|valid))|(?:can\s*no\s+longer|cannot|can'?t)\s+(?:receive|accept)\s+(?:any\s+)?(?:payments?|funds))\b|"
+    # "Our usual bank account is on hold", "our previous account can no longer receive payments". Not a credit
+    # notice's "the current account is on hold until the balance is paid": that account is the customer's.
+    r"\b(?:our|the)\s+(?:usual|previous|old|current|existing)\s+(?:bank|beneficiary)\s+account\s+is\s+(?:now\s+)?(?:on\s+hold|closed|"
+    r"frozen|no\s+longer\s+(?:active|in\s+use|valid))\b|"
+    r"\b(?:our|the)\s+(?:usual|previous|old|current|existing)\s+(?:bank\s+|beneficiary\s+)?account\s+"
+    r"(?:can\s*no\s+longer|cannot|can'?t)\s+(?:receive|accept)\s+(?:any\s+)?(?:payments?|funds)\b|"
     # "Please use the new account for all future payments", "use account ****9981 for all payments going forward".
     r"\b(?:use|pay|remit|wire|transfer|deposit)\b[^.\n]{0,30}?\b(?:new|different|other|following|bank)\s+account\s+"
     r"for\s+(?:all|any|future|upcoming|further)\b[^.\n]{0,25}?\bpayments?\b|"

@@ -327,6 +327,10 @@ def _same_sheet_columns(table: Table, row: Row) -> bool:
     if last is None or not row.page.startswith("sheet") or row.page != last.page:
         return False
     mine = [label for label, _value in row.cells]
+    # One or two optional columns left blank, and a figure of its own: a sign-off block under the table ("Prepared
+    # by | J. Smith") has its first two columns' labels too, but no figures and most of the columns missing.
+    if abs(len(mine) - len(table.labels)) > 2 or not any(tables.is_value(value) for _label, value in row.cells if value != tables.BLANK):
+        return False
     if _in_order(mine, table.labels):
         _pad(row, table.labels)
         return True
