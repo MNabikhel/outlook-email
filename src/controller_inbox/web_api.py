@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import agent, chats, cost_codes, documents, fixes, fraud, model_roles, ocr, page_details, page_view, semantic, table_lookup, vision
 from controller_inbox.digest import build_digest
@@ -960,7 +961,8 @@ def register_workspace(
         model = str(data.get("model") or "").strip()
         if not model:
             raise HTTPException(status_code=400, detail="Choose a model.")
-        notice = setup["switch_chat_model"](model)
+        # Loading a model in LM Studio can take minutes: off the event loop, so other requests carry on meanwhile.
+        notice = await run_in_threadpool(setup["switch_chat_model"], model)
         if notice == "chat-model-busy":
             raise refused(notice)
         if notice == "chat-model-failed":
