@@ -539,6 +539,14 @@ def test_a_tool_call_quoted_from_an_email_is_not_run(store, settings, mail, monk
     assert [call["name"] for call in thinking.calls] == ["search_mail"] and thinking.content == ""
 
 
+def test_a_text_tool_call_beside_other_words_is_still_run():
+    # A model that writes "I'll search your mail." before the call, or a note after it, still made the call.
+    call = '<tool_call>{"name": "search_mail", "arguments": {"query": "Harbor Steel invoice"}}</tool_call>'
+    for content in ["I'll search your mail for that. " + call, call + "\nI'll summarize once I have the results."]:
+        reply = local_llm._tool_reply({"choices": [{"message": {"content": content}}]})
+        assert [c["name"] for c in reply.calls] == ["search_mail"]
+
+
 class _FakeLMStudio:
     """LM Studio's REST API v1 as documented (lmstudio.ai/docs/developer/rest): list, unload and load.
 

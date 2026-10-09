@@ -78,8 +78,10 @@ def summarize_files(
 ) -> int:
     """Summarize long attachments that have no summary yet, most important mail first. Returns how many were written.
 
-    When the model gives nothing usable for a file, or fails on it (a timeout, a file too long for its context), that
-    is remembered (as an empty summary), so the file isn't tried again every night; it is tried again when its text changes or another model is loaded.
+    When the model gives nothing usable for a file, or refuses it (too long for its context, a 4xx error), that is
+    remembered (as an empty summary), so the file isn't tried again every night; it is tried again when its text
+    changes or another model is loaded. A file that times out is left for another night and the next one is tried.
+    When the server is down (no connection, a 5xx error) the night's run stops and nothing is saved.
     """
     written = 0
     queue = store.files_to_summarize(min_chars=SUMMARY_MIN_CHARS, limit=limit, model=model)
@@ -92,11 +94,17 @@ def summarize_files(
             on_progress(index, len(queue), att.filename)
         try:
             summary = summarize_file(settings, att)
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError):
-            break
-        except (ContextOverflow, EmptyReply, httpx.HTTPError):
+        except (ContextOverflow, EmptyReply):
             # Remembered like an empty summary: this file mustn't be first in line, and fail, every night.
             summary = ""
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code >= 500:
+                break  # the server is down or still loading: tomorrow night
+            summary = ""
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):
+            continue  # this file took too long tonight; the others still get their turn
+        except httpx.HTTPError:
+            break
         store.save_file_summary(att.id, summary_key(att), summary, model=model, at=datetime.now(timezone.utc).isoformat())
         written += bool(summary)
     return written

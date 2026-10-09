@@ -552,6 +552,20 @@ _SECRET = re.compile(
 )
 
 
+# A column heading naming a bank account or routing number; a plain "Account" column holds GL codes.
+_SECRET_HEADING = re.compile(
+    r"\b(?:bank\s+accounts?|account\s*(?:number|no\b|#)|acct\.?\s*(?:number|no\b|#)|a/c\s*(?:number|no\b|#)|"
+    r"routing|aba|iban|sort\s+code)(?![a-z])",
+    re.IGNORECASE,
+)
+
+
+def _masked_cell(heading: str, cell: str) -> str:
+    """A table cell masked to its last four digits when its column heading names a bank account or routing number."""
+    digits = re.sub(r"\D", "", cell or "")
+    return f"****{digits[-4:]}" if len(digits) >= 4 and _SECRET_HEADING.search(heading or "") else cell
+
+
 def mask_secrets(markdown: str) -> str:
     """The model's reading with bank account, routing and IBAN numbers masked to their last four digits, as
     CloseDesk masks every file's text."""
@@ -916,10 +930,8 @@ def _form_label(cell: str) -> bool:
 def page_text(markdown: str) -> str:
     """The model's markdown written the way CloseDesk writes a page it read: each table row by row with every cell
     named by its column (``Label: value``) and section rows as ``Group:``, the rest as notes, so the table lookup,
-    the totals check and the chat read it like any other page. HTML tables are read too. A number named by its
-    column as an account or routing number is masked, as in every file's text."""
-    from controller_inbox.extract import redact_financial_secrets
-
+    the totals check and the chat read it like any other page. HTML tables are read too. A number under a bank
+    account or routing number heading is masked."""
     lines = _html_tables_as_markdown(strip_thinking(markdown or "")).splitlines()
     out: list[str] = []
     notes: list[str] = []
@@ -955,7 +967,7 @@ def page_text(markdown: str) -> str:
             notes.append(clean)
         index += 1
     flush()
-    return redact_financial_secrets("\n\n".join(out))
+    return "\n\n".join(out)
 
 
 def _cells(line: str) -> list[str]:
@@ -1019,7 +1031,7 @@ def _table_lines(header: list[str], rows: list[list[str]]) -> list[str]:
     lines = [" | ".join(labels)]
     group = ""
     for row in rows:
-        row = [*row, *[""] * (width - len(row))][:width]
+        row = [_masked_cell(label, cell) for label, cell in zip(labels, [*row, *[""] * (width - len(row))][:width])]
         if [cell.casefold() for cell in row] == [label.casefold() for label in labels]:
             continue  # the column headings printed again
         filled = [cell for cell in row if cell]
@@ -1048,11 +1060,12 @@ def _unique(labels: list[str]) -> list[str]:
 
 
 _DATE = re.compile(r"\b\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}\b")
-# A sign before ("-", "−", "–", "(") or a minus after ("3,400.00-", as SAP prints it); a currency code glued on
-# ("USD1,234.00") and a trailing CR/DR are part of the figure, and no match starts inside a digit group.
+# A sign before ("-", "−", "–", "(") or a minus after ("3,400.00-", as SAP prints it, but not the dash of a range
+# "$1,000-$2,000"); a currency code glued on ("USD1,234.00"), a "%" after a space ("6.25 %") and a trailing CR/DR are
+# part of the figure, and no match starts inside a digit group.
 _FIGURE = re.compile(
     r"(?<![\w.])(?<!\d,)([-−–(]?)\s?(?:USD|CAD|EUR|GBP|AUD|NZD|CHF|JPY|MXN|INR|Rs\.?)?[$€£]?\s?(\d{1,3}(?:,\d{3})+|\d+)"
-    r"(\.\d+)?(\)?)(%?)([-−](?![\d.]))?(?:\s?(?:CR|DR)\b)?(?![\w])"
+    r"(\.\d+)?(\)?)(?:\s?(%))?([-−](?![\d.$€£]))?(?:\s?(?:CR|DR)\b)?(?![\w])"
 )
 
 
@@ -1852,18 +1865,7 @@ def readings_json(rows: dict[int, dict]) -> list[dict]:
 
 def markdown_blocks(markdown: str) -> list[dict]:
     """The model's markdown as blocks: {"kind": "table", "header", "rows"} and {"kind": "text", "text"}. A number
-    under an account or routing number heading is masked, as ``page_text`` masks it."""
-    from controller_inbox.extract import redact_financial_secrets
-
-    def masked(header: list[str], row: list[str]) -> list[str]:
-        out = []
-        for column, cell in enumerate(row):
-            label = header[column] if column < len(header) else ""
-            if cell and label and redact_financial_secrets(f"{label}: {cell}") != f"{label}: {cell}":
-                cell = "****" + re.sub(r"\D", "", cell)[-4:]
-            out.append(redact_financial_secrets(cell))
-        return out
-
+    under a bank account or routing number heading is masked, as ``page_text`` masks it."""
     lines = _html_tables_as_markdown(strip_thinking(markdown)).splitlines()
     out: list[dict] = []
     index = 0
@@ -1875,12 +1877,13 @@ def markdown_blocks(markdown: str) -> list[dict]:
             rows = []
             while index < len(lines) and _TABLE_ROW.match(lines[index]):
                 if not _RULE_ROW.match(lines[index]):
-                    rows.append(masked(header, _cells(lines[index])))
+                    cells = _cells(lines[index])
+                    rows.append([_masked_cell(header[column] if column < len(header) else "", cell) for column, cell in enumerate(cells)])
                 index += 1
             out.append({"kind": "table", "header": header, "rows": rows})
             continue
         text = _FORMATTING.sub("", line).strip().lstrip("#").strip()
         if text:
-            out.append({"kind": "text", "text": redact_financial_secrets(text)})
+            out.append({"kind": "text", "text": text})
         index += 1
     return out

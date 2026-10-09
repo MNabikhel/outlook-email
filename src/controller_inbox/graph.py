@@ -137,8 +137,7 @@ class GraphMailbox:
             ),
             "$filter": " and ".join(filters),
         }
-        # The inbox only: /messages also lists Sent Items, where CloseDesk's own digest is kept.
-        url = f"{self.client._user_root()}/mailFolders/inbox/messages"
+        url = f"{self.client._user_root()}/messages"
         while url:
             payload = self.client.get_json(url, params=params)
             params = None

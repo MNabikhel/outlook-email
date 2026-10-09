@@ -114,6 +114,7 @@ def process_message(
         history=store.sender_history(raw.sender_email, exclude=raw.id),
         flags=verdicts,
         domain_history=store.domain_history(domain_of(raw.sender_email), exclude=raw.id),
+        reply_domain_history=store.domain_history(domain_of(raw.reply_to), exclude=raw.id),
     )
     classified_email = _classify(
         store,
@@ -428,7 +429,7 @@ def _classify(
     """
     from controller_inbox.learn import apply_learned, match_correction
 
-    duplicate = bool(fields.primary_invoice and store.find_duplicate_invoices(fields.primary_invoice, email_id, sender_email))
+    duplicate = bool(fields.primary_invoice and store.find_duplicate_invoices(fields.primary_invoice, email_id))
     classified = classify_email(
         subject=subject,
         body=body,

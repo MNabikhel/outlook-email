@@ -118,10 +118,12 @@ def _failing_on_first(monkeypatch, store, email, error):
     return calls
 
 
-@pytest.mark.parametrize(
-    "error",
-    [httpx.ReadTimeout("timed out"), ContextOverflow("exceeds the context"), httpx.DecodingError("unexpected reply")],
-)
+def _status(code):
+    request = httpx.Request("POST", "http://127.0.0.1:11434/v1/chat/completions")
+    return httpx.HTTPStatusError(f"{code}", request=request, response=httpx.Response(code, request=request))
+
+
+@pytest.mark.parametrize("error", [ContextOverflow("exceeds the context"), _status(400)])
 def test_a_file_the_model_fails_on_is_remembered_and_the_others_still_get_summaries(store, settings, two_files, monkeypatch, error):
     calls = _failing_on_first(monkeypatch, store, two_files, error)
     assert file_summaries.summarize_files(store, settings, limit=10, model="m") == 1, "the other file is summarized"
@@ -132,8 +134,16 @@ def test_a_file_the_model_fails_on_is_remembered_and_the_others_still_get_summar
     assert store.files_to_summarize(min_chars=agent.SUMMARY_MIN_CHARS, limit=10, model="m") == []
 
 
-def test_summaries_stop_when_the_model_server_is_down(store, settings, two_files, monkeypatch):
-    calls = _failing_on_first(monkeypatch, store, two_files, httpx.ConnectError("refused"))
+def test_a_file_that_times_out_is_tried_again_another_night(store, settings, two_files, monkeypatch):
+    calls = _failing_on_first(monkeypatch, store, two_files, httpx.ReadTimeout("timed out"))
+    assert file_summaries.summarize_files(store, settings, limit=10, model="m") == 1, "the other file is summarized"
+    assert len(calls) == 2
+    assert len(store.files_to_summarize(min_chars=agent.SUMMARY_MIN_CHARS, limit=10, model="m")) == 1, "not marked"
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError("refused"), _status(503)])
+def test_summaries_stop_when_the_model_server_is_down(store, settings, two_files, monkeypatch, error):
+    calls = _failing_on_first(monkeypatch, store, two_files, error)
     assert file_summaries.summarize_files(store, settings, limit=10, model="m") == 0
     assert len(calls) == 1, "no point asking for the next file"
     assert len(store.files_to_summarize(min_chars=agent.SUMMARY_MIN_CHARS, limit=10, model="m")) == 2, "nothing saved"

@@ -321,6 +321,17 @@ def test_a_payment_listed_without_a_minus_is_not_added_to_the_total():
     assert review(answer, material=material, files=[]).text == answer
 
 
+def test_a_wrong_total_of_payments_made_is_still_corrected():
+    # Lines that name a payment out are amounts like any other, not credits that might be taken away.
+    answer = (
+        "This week's payment run:\n- Payment to Harbor Steel LLC: $48,500.00\n- Payment to Brightline Packaging: $9,800.00\n"
+        "- Payment to Cedar Valley Supply: $3,100.00\nTotal: $54,200.00"
+    )
+    material = ["Payment to Harbor Steel LLC $48,500.00 on 10/2. Payment to Brightline Packaging $9,800.00 on 10/2. "
+                "Payment to Cedar Valley Supply $3,100.00 on 10/2."]
+    assert review(answer, material=material, files=[]).text.endswith("Total: $61,400.00")
+
+
 def test_a_cell_is_corrected_on_the_sheet_the_sentence_names_or_given_its_sheet():
     book = (
         '[sheet "Summary" rows 1-3]\nA1 (Item): Revenue | B1 (Amount): 12,400.00\nA2 (Item): Expenses | B2 (Amount): 7,400.00\n'

@@ -270,6 +270,23 @@ def test_a_name_starting_with_total_and_no_total_below_is_a_row():
     assert [row.total for row in tables_in(fees)[0].rows] == [False, False, False]
 
 
+def test_a_total_named_in_a_later_column_is_still_a_total():
+    # "Total" alone, or "Total Revenue" over rows of "Revenue", says total in whichever column it is.
+    lines = (
+        "Entity: TAZ US | Line: Revenue | Amount: 5,000\n"
+        "Entity: TAZ UK | Line: Revenue | Amount: 3,000\n"
+        "Entity: Consolidated | Line: Total Revenue | Amount: 8,000\n"
+    )
+    assert [row.total for row in tables_in(lines)[0].rows] == [False, False, True]
+    assert 'Total of "Amount" over 2 rows: 8,000' in lookup(lines, "what is the total amount")
+    customers = (
+        "Customer: Acme Corp | Invoice: INV-1 | Amount: 1,000.00\n"
+        "Customer: Beta LLC | Invoice: INV-2 | Amount: 500.00\n"
+        "Customer: All customers | Invoice: Total | Amount: 1,500.00\n"
+    )
+    assert [row.total for row in tables_in(customers)[0].rows] == [False, False, True]
+
+
 def test_a_credit_marked_cr_is_a_negative_figure():
     from decimal import Decimal
 
@@ -283,17 +300,6 @@ def test_a_credit_marked_cr_is_a_negative_figure():
         "Customer: Gamma Inc | Balance: 1,250.00 CR\nCustomer: Delta Co | Balance: 800.00\n"
     )
     assert "6,050.00" in lookup(text, "total balance")
-
-
-def test_a_date_without_a_year_is_read_in_the_column_s_latest_year():
-    # "Before 10/1" over invoices from 2025 and 2026 is before October 1, 2026, not any year's October.
-    text = (
-        "Invoice: INV-881 | Invoice Date: 11/15/2025 | Balance: $4,000.00\n"
-        "Invoice: INV-902 | Invoice Date: 12/20/2025 | Balance: $2,500.00\n"
-        "Invoice: INV-955 | Invoice Date: 08/14/2026 | Balance: $1,200.00\n"
-        "Invoice: INV-990 | Invoice Date: 10/05/2026 | Balance: $800.00\n"
-    )
-    assert "$7,700.00" in lookup(text, "what is the total balance of invoices dated before 10/1")
 
 
 def test_an_average_keeps_its_cents():

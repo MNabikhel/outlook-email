@@ -247,8 +247,11 @@ _PLAIN_TOTAL = re.compile(
 _ITEM_LINE = re.compile(r"^\s*(?:[-*•]|\d{1,2}[.)])\s+")
 _MAX_ITEMS = 8
 _CREDIT_SIGN = re.compile(r"[-−(][$€£]?$")
-# A line that may take away from the total though it has no minus ("Less payment received 10/2: $300.00").
-_CREDIT_WORD = re.compile(r"\b(?:less|payments?|paid|received|credits?|refunds?|discounts?)\b", re.I)
+# A line that may take away from the total though it has no minus ("Less payment received 10/2: $300.00"). A line
+# that merely names a payment ("Payment to Harbor Steel LLC: $48,500.00") adds up like any other.
+_CREDIT_WORD = re.compile(
+    r"^\s*(?:less|credits?|refunds?|discounts?|payments?\s+received)\b|\b(?:less|minus)\s", re.I
+)
 
 
 def _list_total(answer: str, at: int, target: Number, grounding: Grounding):

@@ -1822,6 +1822,18 @@ def test_an_account_number_under_its_column_heading_is_masked():
         assert "First Harbor Bank" in cells
 
 
+def test_gl_codes_under_an_account_heading_are_kept():
+    """A trial balance's "Account" column of GL codes was masked as if it held bank account numbers."""
+    markdown = (
+        "| Account | Account Name | Debit | Credit |\n|---|---|---|---|\n| 1200-000 | Accounts Receivable | 48,500.00 | |\n"
+        "| 6000-10 | Salaries | 12,000.00 | |\n| 400100 | Product Revenue | | 60,500.00 |\n"
+    )
+    page = vision.page_text(vision.mask_secrets(markdown))
+    assert "Account: 1200-000" in page and "Account: 6000-10" in page and "Account: 400100" in page
+    rows = [block["rows"] for block in vision.markdown_blocks(vision.mask_secrets(markdown)) if block["kind"] == "table"][0]
+    assert [row[0] for row in rows] == ["1200-000", "6000-10", "400100"]
+
+
 def test_a_clean_second_reading_of_a_short_page_is_kept(settings, monkeypatch):
     """A small receipt read cleanly on the retry was still refused as a loop for being under 200 characters."""
 
@@ -1866,6 +1878,14 @@ def test_an_en_dash_or_trailing_minus_is_a_negative_figure():
     first = "Net loss –1,250.00\nAdjustment 3,400.00-\nCash 12,980.40"
     model = "Net loss -1,250.00\n\nAdjustment -3,400.00\n\nCash 12,980.40"
     assert vision.compare(first, vision.page_text(model), ocr=False).differ == []
+
+
+def test_a_spaced_percent_or_a_range_dash_reads_as_written():
+    # "6.25 %" is the same rate as "6.25%", and the dash of "$1,000-$2,000" is no minus.
+    first = "Rate 6.25 % Fixed\nMargin 1.75 % over SOFR\nPrincipal 250,000.00"
+    model = "Rate 6.25% Fixed\n\nMargin 1.75% over SOFR\n\nPrincipal 250,000.00"
+    assert vision.compare(first, vision.page_text(model), ocr=False).differ == []
+    assert dict(vision.figures("$1,000-$2,000 per month")) == {vision.Decimal("1000"): ["$1,000"], vision.Decimal("2000"): ["$2,000"]}
 
 
 def test_a_figure_glued_to_its_currency_code_is_read_whole():

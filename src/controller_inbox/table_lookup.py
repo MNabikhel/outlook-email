@@ -422,6 +422,8 @@ class _Running:
 
 # A label that is only the word for a total: such a row is a total whatever its figures.
 _TOTAL_WORD = re.compile(r"^(?:grand\s+|sub-?\s?)?totals?:?$|^%", re.I)
+# "Total Revenue": a total of what follows, when that is the column's name or another row's value in it.
+_TOTAL_OF = re.compile(r"^(?:grand\s+|sub-?)?totals?\s+(.+)$", re.I)
 
 
 def _figures_of(row: Row, figures: list[str]) -> dict[str, Decimal]:
@@ -677,7 +679,19 @@ def _name_rows(table: Table) -> None:
 def _is_total(row: Row, counts: dict[tuple[str, str], int]) -> bool:
     """A total or subtotal row: the row's label starts "Total", "Grand Total", "Subtotal" or "%", or ends with
     "Total" or "Subtotal". The label is its first text that no other row repeats, past a category merged down the
-    rows ("Buildings", then "Total Buildings"); a description after it ("Total rewards platform fee") doesn't say."""
+    rows ("Buildings", then "Total Buildings"); a description after it ("Total rewards platform fee") doesn't say.
+    A cell in any column that is just "Total" or "Grand Total", or totals what its column names ("Line: Total
+    Revenue" under rows of "Line: Revenue"), says so too."""
+    for label, value in row.cells:
+        if _TOTAL_WORD.match(value.strip()):
+            return True
+        named = _TOTAL_OF.match(value)
+        if named:
+            what = named.group(1).strip()
+            if what.casefold() == label.casefold() or any(
+                counts.get((label, form)) for form in {what, what.lower(), what.title(), what.capitalize()}
+            ):
+                return True
     for cell in row.cells:
         value = cell[1]
         if not value or value == tables.BLANK or tables.is_value(value):
@@ -931,21 +945,8 @@ def _placed(table: Table, asked: Question, columns: dict[str, set[str]]) -> list
         if condition.kind == "date" and _whole_years(condition.value) and not _dated_with_years(table, column):
             # "In 2027" says nothing about dates written without a year ("10/14").
             continue
-        value = _with_year(condition.value, table, column) if condition.kind == "date" else condition.value
-        placed.append(Condition(condition.kind, condition.op, value, condition.phrase, condition.at, column))
+        placed.append(Condition(condition.kind, condition.op, condition.value, condition.phrase, condition.at, column))
     return placed
-
-
-def _with_year(span: tuple[When, When], table: Table, label: str) -> tuple[When, When]:
-    """A date the question gives without a year ("before 10/1"), in the latest year of the column's dates that
-    puts it on or before the column's last date: rows from two years are not compared by month and day alone."""
-    low, high = span
-    years = sorted({when for row in table.rows if (when := _when(row.value(label))) is not None and when[0] is not None})
-    if low[0] is not None or high[0] is not None or not years:
-        return span
-    year = next((when[0] for when in reversed(years) if (when[0], low[1], low[2]) <= years[-1]), years[0][0])
-    high_year = year + 1 if (high[1], high[2]) < (low[1], low[2]) else year
-    return (year, low[1], low[2]), (high_year, high[1], high[2])
 
 
 def _whole_years(span: tuple[When, When]) -> bool:

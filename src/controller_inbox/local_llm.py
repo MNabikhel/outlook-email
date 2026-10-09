@@ -1265,13 +1265,6 @@ def _arguments(text: str) -> dict:
     return parse_json_object(value if isinstance(value, str) else text) or {}
 
 
-def _only_calls(content: str) -> bool:
-    """The reply is the call(s), maybe after a line of its own ("Let me look."), not an answer that quotes one."""
-    start = content.find("<tool_call>")
-    before = content[:start].rstrip(" \t")
-    return (not before or before.endswith("\n")) and not _TEXT_CALL_RE.sub("", content[start:]).strip()
-
-
 def _tool_reply(data) -> ToolReply:
     choice = _first_choice(data)
     message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
@@ -1286,7 +1279,7 @@ def _tool_reply(data) -> ToolReply:
             arguments = _arguments(arguments)
         calls.append({"id": str(item.get("id") or f"call_{index}"), "name": str(function["name"]), "arguments": arguments or {}})
     content = base.content
-    if not calls and "<tool_call>" in content and _only_calls(content):
+    if not calls and "<tool_call>" in content:
         # Some chat templates leave the call in the text instead of tool_calls.
         for index, raw in enumerate(_TEXT_CALL_RE.findall(content)):
             parsed = parse_json_object(raw) or {}
