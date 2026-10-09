@@ -298,3 +298,37 @@ def test_a_search_model_only_downloaded_is_not_said_to_be_loaded(settings, monke
     status = check_model(settings, use_cache=False)
     assert model_roles.search_row(settings, status)["status"] == "Loaded."
     assert EMBED not in status.instances and status.model == CHAT
+
+
+def test_the_workspace_settings_offer_the_chat_models_and_load_the_one_chosen(settings, store, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import web
+
+    settings.llm = None
+    server = LMStudio(loaded=[CODER])
+    _serve(monkeypatch, server)
+    client = TestClient(web.create_app(settings, store))
+    page = {"X-CloseDesk": "1"}
+    data = client.get("/api/settings", headers=page).json()
+    chat = data["chat"]
+    assert chat["current"] == CODER and not chat["pinned"]
+    assert {item["key"]: item["loaded"] for item in chat["models"]} == {CODER: True, CHAT: False}, "the page reader isn't offered"
+    assert data["model"]["active"] and data["model"]["server"] == "LM Studio" and data["model"]["loaded"] == [CODER]
+    assert OVIS in data["vision"]["choices"]
+    # The context window line: loaded with 16,384, which reads whole attachments.
+    window = data["context"]["window"]
+    assert window["shown"] and window["label"] == "16,384 tokens" and window["tone"] == "ok" and window["advice"].startswith("Enough")
+
+    reply = client.post("/api/settings/chat-model", json={"model": CHAT}, headers=page)
+    assert reply.status_code == 200 and reply.json()["message"] == "Loaded in LM Studio. It answers your questions now."
+    assert client.get("/api/settings", headers=page).json()["chat"]["current"] == CHAT
+    server.fails_to_load = {CODER}
+    refused = client.post("/api/settings/chat-model", json={"model": CODER}, headers=page)
+    assert refused.status_code == 409
+    assert refused.json()["detail"] == f"The model that answers wasn't changed. LM Studio couldn't load {CODER} (not enough memory to load the model). {CHAT} was loaded back."
+    # A model named in .env answers whatever is loaded: Settings say where it is set instead of offering a list.
+    settings.llm_model = CODER
+    local_llm._status_cache.clear()
+    chat = client.get("/api/settings", headers=page).json()["chat"]
+    assert chat["pinned"] and chat["env_model"] == CODER
