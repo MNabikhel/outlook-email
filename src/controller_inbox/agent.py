@@ -26,6 +26,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from itertools import zip_longest
 from pathlib import Path
 
@@ -322,9 +323,14 @@ class Workspace:
     worked: dict[str, str] = field(default_factory=dict)
     # What the question asks of the open file's tables, one point each with the value the table gives (see
     # ``table_lookup.Answer.points``): listed for the model, and checked for in its answer. ``exact``: they were
-    # worked out (a largest, a total, a change), not copied from rows the question picked out.
+    # worked out (a largest, a change), not copied from rows the question picked out, and shown worked out.
+    # ``shown``: they were in the prompt; the answer is checked for none that weren't.
     points: list[tuple[str, str]] = field(default_factory=list)
     exact: bool = False
+    shown: bool = False
+    # The table rows picked out and worked out for the question, as the prompt gave them: an answer copying a
+    # figure from them read it.
+    picked: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # The emails in the prompt, plus those the model opens with a tool: the only ones it may write notes on.
@@ -602,6 +608,11 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         lines.append(piece)
         if picked:
             for_question.append(picked)
+            ws.picked.append(picked)
+            if found is not None and found.points == ws.points:
+                ws.shown = True
+                # Exact only as the model saw it worked out, not when a query's working took its place.
+                ws.exact = ws.exact and rows.startswith(table_lookup.WORKED_HEAD)
         files_shown += 1
         used += prompt_size(piece) + prompt_size(picked)
     lines += [f"── File: {att.filename} ({file_kind(att)}; not asked about, read it with read_file)" for att in skipped]
@@ -623,14 +634,15 @@ def question_points(ws: Workspace, question: str) -> list[tuple[str, str]]:
         found = table_lookup.answer(att.extracted_text or "", question)
         if found and found.points:
             ws.points = list(found.points)
-            ws.exact = found.head == table_lookup.WORKED_HEAD
+            ws.exact, ws.shown = found.exact, False
             return ws.points
     return []
 
 
-def reply_tokens(points: list[tuple[str, str]], usual: int) -> int:
-    """Room for the answer: the usual reply, or more when the question asks for many figures (a line each)."""
-    return max(usual, min(MAX_REPLY_TOKENS, 150 + 50 * len(points)))
+def reply_tokens(points: list[tuple[str, str]], usual: int, spare: int = MAX_REPLY_TOKENS) -> int:
+    """Room for the answer: the usual reply, or more when the question asks for many figures (a line each), up to
+    the ``spare`` tokens the context leaves beside the prompt."""
+    return max(usual, min(MAX_REPLY_TOKENS, spare, 150 + 50 * len(points)))
 
 
 def missing_points(points: list[tuple[str, str]], answer: str, *, exact: bool = False) -> list[tuple[str, str]]:
@@ -640,15 +652,33 @@ def missing_points(points: list[tuple[str, str]], answer: str, *, exact: bool = 
     if not points or len(points) > 2 * MAX_PLAN:
         return []
     flat = _flat(answer)
+    # Figures by their amount ("$9,000" gives "9,000.00"), dates by their day ("October 9, 2026" gives "10/09/2026").
+    amounts = {_amount(figure) for figure in _FIGURE.findall(answer or "")}
+    days = set(table_lookup._dates(answer))
 
     def said(value: str) -> bool:
-        # A whole figure or phrase: "0.00" is not given by "3,000.00", nor "Fuel" by "Fuels".
+        if _FIGURE.fullmatch(value.strip()):
+            return _amount(value) in amounts
+        if table_lookup._when(value) is not None and table_lookup._dates(value):
+            return bool(set(table_lookup._dates(value)) & days)
+        # A whole phrase: "Fuel" is not given by "Fuels".
         return re.search(rf"(?<![\w.]){re.escape(_flat(value))}(?![\w]|\.\d)", flat) is not None
 
     given = [(point, value) for point, value in points if value and said(value)]
     if not given and not exact:
         return []
-    return [(point, value) for point, value in points if value and not said(value)]
+    # A date or a name the answer leaves out is added only when worked out: copied from the row, it may be a
+    # column the question only seemed to name ("Invoice Date" for "when is the invoice due").
+    return [(point, value) for point, value in points if value and not said(value) and (exact or _FIGURE.fullmatch(value.strip()))]
+
+
+# A figure as a table or an answer writes it: "$9,000", "(78,096.09)", "−14,789.53", "32.0%".
+_FIGURE = re.compile(r"[$€£]?\s?[(\u2212-]?[$€£]?\d[\d,]*(?:\.\d+)?\)?%?(?<!,)")
+
+
+def _amount(figure: str) -> Decimal:
+    """A figure's amount, without its sign (a negative is written many ways): 9,000 and 9,000.00 are one amount."""
+    return Decimal(re.sub(r"[^\d.]", "", figure).rstrip(".") or "0")
 
 
 def _flat(text: str) -> str:
