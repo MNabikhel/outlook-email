@@ -26,6 +26,7 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from itertools import zip_longest
 from pathlib import Path
 
@@ -320,6 +321,16 @@ class Workspace:
     opened: set[str] = field(default_factory=set)
     # The query worked out over each email's tables for the question, by email id ("" when none fits).
     worked: dict[str, str] = field(default_factory=dict)
+    # What the question asks of the open file's tables, one point each with the value the table gives (see
+    # ``table_lookup.Answer.points``): listed for the model, and checked for in its answer. ``exact``: they were
+    # worked out (a largest, a change), not copied from rows the question picked out, and shown worked out.
+    # ``shown``: they were in the prompt; the answer is checked for none that weren't.
+    points: list[tuple[str, str]] = field(default_factory=list)
+    exact: bool = False
+    shown: bool = False
+    # The table rows picked out and worked out for the question, as the prompt gave them: an answer copying a
+    # figure from them read it.
+    picked: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # The emails in the prompt, plus those the model opens with a tool: the only ones it may write notes on.
@@ -548,9 +559,14 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         # The table rows the question names, and anything worked out from them, so a small model goes to the right
         # cell. A file that fits whole is shown first; one too long to show gets this index whatever it costs,
         # since it points into the parts that are left out.
-        rows = "" if whole else table_lookup.lookup(text, question, limit=table_lookup.MAX_CHARS)
+        found = None if whole else table_lookup.answer(text, question)
+        rows = table_lookup.render(found, table_lookup.MAX_CHARS) if found else ""
+        if found and found.points and not ws.points:
+            ws.points = list(found.points)
+        plan = answer_plan(found.points) if found is not None and found.points and ws.points == found.points else ""
         if worked and rows.startswith(table_lookup.WORKED_HEAD):
-            # Two workings of one question would leave the model to pick a figure; the query read it as asked.
+            # Two workings of one question would leave the model to pick a figure; the query read it as asked. What
+            # the question asks for is still listed.
             rows = ""
         spare = budget - size - 2 * len(parts) * 12
         space = spare if spare >= 0 else budget // 3
@@ -580,6 +596,8 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
                 read = f"Read {shown} of {len(parts)} sections of {att.filename}{', one cut short' if cut else ''} ({how})"
         piece = "\n".join(block)
         picked = (rows if len(readable) == 1 else f"From {att.filename}:\n{rows}") if rows else ""
+        if plan:
+            picked = f"{picked}\n{plan}".strip()
         if used + prompt_size(piece) + prompt_size(picked) > room and files_shown:
             ws.left_out.append(att.filename)
             ws.reads.append(f"Left out {att.filename}: no room (the assistant can still open it)")
@@ -590,10 +608,101 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         lines.append(piece)
         if picked:
             for_question.append(picked)
+            ws.picked.append(picked)
+            if found is not None and found.points == ws.points:
+                ws.shown = True
+                # Exact only as the model saw it worked out, not when a query's working took its place.
+                ws.exact = ws.exact and rows.startswith(table_lookup.WORKED_HEAD)
         files_shown += 1
         used += prompt_size(piece) + prompt_size(picked)
     lines += [f"── File: {att.filename} ({file_kind(att)}; not asked about, read it with read_file)" for att in skipped]
     return "\n".join(lines + for_question + ([worked] if worked else []))
+
+
+MAX_PLAN = 12
+MAX_REPLY_TOKENS = 1600
+
+
+def question_points(ws: Workspace, question: str) -> list[tuple[str, str]]:
+    """What the question asks of the open email's file tables (``Workspace.points``), worked out before the prompt
+    is built so the reply can be given room for every point."""
+    primary = ws.primary()
+    if primary is None or attachments_locked(primary) or SUMMARY_RE.search(question):
+        return []
+    readable = [att for att in primary.attachments if (att.extracted_text or "").strip()]
+    for att in named_files(readable, question) or readable:
+        found = table_lookup.answer(att.extracted_text or "", question)
+        if found and found.points:
+            ws.points = list(found.points)
+            ws.exact, ws.shown = found.exact, False
+            return ws.points
+    return []
+
+
+def reply_tokens(points: list[tuple[str, str]], usual: int, spare: int = MAX_REPLY_TOKENS) -> int:
+    """Room for the answer: the usual reply, or more when the question asks for many figures (a line each), up to
+    the ``spare`` tokens the context leaves beside the prompt."""
+    return max(usual, min(MAX_REPLY_TOKENS, spare, 150 + 50 * len(points)))
+
+
+def missing_points(points: list[tuple[str, str]], answer: str, *, exact: bool = False) -> list[tuple[str, str]]:
+    """The points an answer leaves out, when it gives at least one of them (so it is about those rows), or when
+    they were worked out ``exact``ly (a largest or a total the answer should have given): a point whose value is
+    nowhere in it."""
+    if not points or len(points) > 2 * MAX_PLAN:
+        return []
+    flat = _flat(answer)
+    # Figures by their amount ("$9,000" gives "9,000.00"), dates by their day ("October 9, 2026" gives "10/09/2026").
+    amounts = {_amount(figure) for figure in _FIGURE.findall(answer or "")}
+    days = set(table_lookup._dates(answer))
+
+    def said(value: str) -> bool:
+        if _FIGURE.fullmatch(value.strip()):
+            return _amount(value) in amounts
+        if table_lookup._when(value) is not None and table_lookup._dates(value):
+            return bool(set(table_lookup._dates(value)) & days)
+        # A whole phrase: "Fuel" is not given by "Fuels".
+        return re.search(rf"(?<![\w.]){re.escape(_flat(value))}(?![\w]|\.\d)", flat) is not None
+
+    given = [(point, value) for point, value in points if value and said(value)]
+    if not given and not exact:
+        return []
+    # A date or a name the answer leaves out is added only when worked out: copied from the row, it may be a
+    # column the question only seemed to name ("Invoice Date" for "when is the invoice due").
+    return [(point, value) for point, value in points if value and not said(value) and (exact or _FIGURE.fullmatch(value.strip()))]
+
+
+# A figure as a table or an answer writes it: "$9,000", "(78,096.09)", "−14,789.53", "32.0%".
+_FIGURE = re.compile(r"[$€£]?\s?[(\u2212-]?[$€£]?\d[\d,]*(?:\.\d+)?\)?%?(?<!,)")
+
+
+def _amount(figure: str) -> Decimal:
+    """A figure's amount, without its sign (a negative is written many ways): 9,000 and 9,000.00 are one amount."""
+    return Decimal(re.sub(r"[^\d.]", "", figure).rstrip(".") or "0")
+
+
+def _flat(text: str) -> str:
+    """Text as compared for a value: lower case, no thousands commas, currency signs or minus signs (a negative
+    written "(78,096.09)" or "−78,096.09")."""
+    return re.sub(r"[,$€£()\u2212-]", "", (text or "").lower())
+
+
+def answer_plan(points: list[tuple[str, str]]) -> str:
+    """The points the question asks for, for the model to answer each one: a question about a large table asks
+    for several figures from rows deep inside it, and a small model answering from the first row it finds, or
+    stopping after one figure, leaves the rest out."""
+    named = list(dict.fromkeys(point for point, _value in points))
+    if len(named) == 1:
+        return f"The question asks for one thing: {named[0]}. Answer it in a sentence."
+    if len(named) > MAX_PLAN:
+        rows = list(dict.fromkeys(point.split(": ")[0] for point in named))
+        return (
+            f"The question picks out {len(rows)} rows: list every one of them, one line each, with the figure asked "
+            "for. Say how many there are."
+        )
+    lines = [f"The question asks for {len(named)} things. Answer every one, in this order, one line each:"]
+    lines += [f"{number}. {point}" for number, point in enumerate(named, start=1)]
+    return "\n".join(lines)
 
 
 def _tables_note(text: str) -> tuple[str, str]:

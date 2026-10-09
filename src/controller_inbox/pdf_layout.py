@@ -1105,6 +1105,10 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
     # A label may run a little into the empty cell beside it ("Operating Expenses" past a narrow column);
     # a title written across the table covers whole columns.
     under = [c for c in columns if x0 < c[1] and x1 > c[0] and (c[0] <= x0 or min(x1, c[1]) - c[0] >= 0.3 * (c[1] - c[0]))]
+    if not under and columns and x1 <= columns[0][0] and _under_first_heading(x0, x1, block, columns):
+        # A name merged down a first column that is blank on the rows read so far (the page starts partway into
+        # a department), under that column's own heading.
+        return gap <= 1.6 * usual + 1
     if not under and columns and _outdented(line, columns):
         # A section's name, unless a table of its own starts under it (a title over its column names).
         nxt = lines[index + 1] if index + 1 < len(lines) else None
@@ -1125,6 +1129,22 @@ def _continues(lines: list[Line], start: int, index: int) -> bool:
         and _fits_columns(nxt, columns)
         and any(_amount_cell(word.text) for segment in nxt.segments for word in segment)
     )
+
+
+def _under_first_heading(x0: float, x1: float, block: list[Line], columns: list[tuple[float, float]]) -> bool:
+    """Whether a label just left of the table's first column ("Fire", merged down the rows a little left of
+    where the rows read so far start) ends close to it, under a heading of that column ("Department")."""
+    lo, hi = columns[0]
+    if x1 < lo - 0.5 * (hi - lo):
+        return False
+    for line in block[:3]:
+        if not _new_header(line):
+            continue
+        for segment in line.segments:
+            a, b = segment[0].x0, segment[-1].x1
+            if a < hi and b > lo - 0.5 * (hi - lo) and min(b, hi) - max(a, x0) > 0:
+                return True
+    return False
 
 
 def _repeats_a_heading(line: Line, block: list[Line]) -> bool:
@@ -1402,9 +1422,15 @@ def _is_table(rows: list[Line]) -> bool:
 
 
 def _label_row(row: list[str]) -> bool:
-    """A header row: several labels, and no amounts. Years count as labels."""
-    filled = [cell for cell in row if cell.strip()]
-    return len(filled) >= 2 and not any(_amount_cell(cell) for cell in filled)
+    """A header row: several labels, and no amounts. Years count as labels, and so do an aging's day ranges
+    ("1-30 | 31-60 | 61-90 | 90+") side by side."""
+    filled = [cell.strip() for cell in row if cell.strip()]
+    ranges = sum(1 for cell in filled if _DAY_RANGE.fullmatch(cell))
+    return len(filled) >= 2 and not any(_amount_cell(cell) and not (ranges >= 2 and _DAY_RANGE.fullmatch(cell)) for cell in filled)
+
+
+# A bucket of days on an aging ("1-30", "31 - 60", "91+", "> 90").
+_DAY_RANGE = re.compile(r"\d{1,3}\s*[-–]\s*\d{1,3}|\d{1,3}\s*\+|[<>]\s*\d{1,3}")
 
 
 def _span_labels(header_rows: list[list[tuple[float, float, str]]], columns: list[tuple[float, float]]) -> list[str]:
@@ -1439,6 +1465,31 @@ def _home(x0: float, x1: float, columns: list[tuple[float, float]]) -> int:
     return min(range(len(columns)), key=lambda i: abs((columns[i][0] + columns[i][1]) / 2 - mid))
 
 
+def _own_or_run(segs: list[tuple[float, float, str]], columns: list[tuple[float, float]], below: list[str]) -> list[list[int]] | None:
+    """Headings over a row of sub-headings that only some columns have ("Current | Past due | Total" over
+    "1-30 | 31-60 | 61-90 | 90+" under Past due alone): a heading with nothing under it names its own column, merged
+    down the heading rows; a heading over sub-headings names the whole unbroken run of them it sits in. None unless
+    every heading is one or the other, each run under exactly one heading, and every sub-heading under one."""
+    homes = [_home(x0, x1, columns) for x0, x1, _text in segs]
+    if len(set(homes)) != len(homes) or not any(below[home].strip() for home in homes) or all(below[home].strip() for home in homes):
+        return None
+    covers: list[list[int]] = []
+    for home in homes:
+        if not below[home].strip():
+            covers.append([home])
+            continue
+        left, right = home, home
+        while left - 1 >= 0 and below[left - 1].strip() and left - 1 not in homes:
+            left -= 1
+        while right + 1 < len(columns) and below[right + 1].strip() and right + 1 not in homes:
+            right += 1
+        covers.append(list(range(left, right + 1)))
+    claimed = [column for covered in covers for column in covered]
+    if len(claimed) != len(set(claimed)) or any(text.strip() and column not in claimed for column, text in enumerate(below)):
+        return None
+    return covers
+
+
 def _placed_texts(segs: list[tuple[float, float, str]], columns: list[tuple[float, float]]) -> list[str]:
     """Where each piece lands when it belongs to one column: the text under each column."""
     texts = [""] * len(columns)
@@ -1465,6 +1516,8 @@ def _covers(
                 under = [_home(x0, x1, columns)]
             covers.append(under)
         return covers
+    if (owned := _own_or_run(segs, columns, below)) is not None:
+        return owned
     covers: list[list[int] | None] = [None] * len(segs)
     stub = _stub_segment(segs, centers, below)
     if stub is None and below and not below[0].strip() and len(columns) > 2 and segs[0][1] <= columns[1][0] + 2:
@@ -1660,11 +1713,13 @@ def _grouping_columns(rows: list[list[str]]) -> list[int]:
     return columns
 
 
-def _fill_grouping_columns(rows: list[list[str]], mids: list[float]) -> list[int]:
+def _fill_grouping_columns(rows: list[list[str]], mids: list[float], leads: list[float] | None = None) -> list[int]:
     """Copy a merged category onto the figure rows it covers.
 
     The name may sit on the first row, or be drawn once in the vertical middle of the rows.
-    Each blank figure row takes the name closest to it on the page. Returns those columns.
+    Each blank figure row takes the name closest to it on the page, or, when the names are all drawn the same
+    way, the rows that name covers (``_spread_names``; ``leads``: how high each row's first cell is drawn). Returns
+    those columns.
     """
     columns = _grouping_columns(rows)
     value_cols = _value_columns(rows)
@@ -1678,7 +1733,7 @@ def _fill_grouping_columns(rows: list[list[str]], mids: list[float]) -> list[int
     for column in columns:
         anchors = [
             index for index, row in enumerate(rows)
-            if column < len(row) and row[column].strip() and not _TOTAL.match(row[column].strip())
+            if column < len(row) and row[column].strip() and not _total_label(row[column].strip())
         ]
         if not anchors:
             continue
@@ -1687,14 +1742,112 @@ def _fill_grouping_columns(rows: list[list[str]], mids: list[float]) -> list[int
         if any(blocks[a] == blocks[b] and rows[a][column].strip() == rows[b][column].strip() for a, b in zip(anchors, anchors[1:])):
             marks.append(column)
             continue
+        spread = _spread_names(rows, column, anchors, value_cols, blocks, _half_rows(mids, leads))
         for index, row in enumerate(rows):
             if column >= len(row) or row[column].strip() or not _has_value(row, value_cols) or _total_row(row):
+                continue
+            if index in spread:
+                row[column] = rows[spread[index]][column]
                 continue
             near = [anchor for anchor in anchors if blocks[anchor] == blocks[index]] or anchors
             nearest = min(near, key=lambda anchor: (abs(mids[anchor] - mids[index]), anchor > index, anchor))
             row[column] = rows[nearest][column]
         _whole_names(rows, column, blocks)
     return [column for column in columns if column not in marks]
+
+
+def _spread_names(
+    rows: list[list[str]], column: int, anchors: list[int], value_cols: list[bool], blocks: list[int],
+    shifts: list[float] | None = None,
+) -> dict[int, int]:
+    """The rows each merged name covers, by row (to the name's row), when the names are all drawn the same way:
+    each on the first row it covers, or each in the vertical middle of its rows. A long merge ("Water Utility"
+    down twelve accounts) is drawn halfway down, often on a line of its own, so the rows nearest its edges are
+    nearer the next name than their own: the rows go by how many each name has above and below it instead.
+
+    A name with no rows above it in the middle (a fund's heading over the departments, "GENERAL FUND") starts a
+    run of names but covers none. {} when the names fit neither way: each row then takes the nearest name."""
+    figure = [index for index, row in enumerate(rows) if _has_value(row, value_cols) and not _total_row(row)]
+    if len(anchors) < 2 or not figure:
+        return {}
+    covers: dict[int, int] = {}
+    for block in sorted({blocks[index] for index in figure}):
+        mine = [index for index in figure if blocks[index] == block]
+        names = [anchor for anchor in anchors if blocks[anchor] == block]
+        if not names:
+            continue
+        # Each on the first row it covers: every name on a row of figures, the first on the block's first row. A
+        # name drawn half a row down (two rows merged, read onto the first) is centred, not on its first row, so
+        # this is taken first only when no name is known to be drawn off its row's line.
+        top = all(name in mine for name in names) and names[0] == mine[0]
+        level = shifts is None or all(shifts[name] == 0 for name in names)
+        # Each in the middle: a name on a line of its own between two rows is half a row above the next; one level
+        # with a row was drawn within half a row of it (twelve rows put it between the sixth and seventh, and the
+        # page reader puts it on one of them). Each covers as many rows below its place as above, from where the
+        # name before it ended, and together they cover the block.
+        ends = None if top and level else _centered_ends(names, mine, shifts)
+        if ends is None and top:
+            for index in mine:
+                covers[index] = max(name for name in names if name <= index)
+            continue
+        if ends is None:
+            return {}
+        start = 0
+        for name, end in zip(names, ends):
+            for index in mine[start:end]:
+                covers[index] = name
+            start = max(start, end)
+    return covers
+
+
+def _half_rows(mids: list[float], leads: list[float] | None) -> list[float] | None:
+    """How far below its row's line each row's first cell is drawn, in half rows (0, or 1 for a name drawn
+    halfway down to the next row), or None when that isn't known."""
+    if not leads or len(leads) != len(mids) or len(mids) < 2:
+        return None
+    gaps = [above - below for above, below in zip(mids, mids[1:]) if above - below > 0]
+    if not gaps:
+        return None
+    pitch = statistics.median(gaps)
+    return [round(2 * (mid - lead) / pitch) / 2 for mid, lead in zip(mids, leads)]
+
+
+def _centered_ends(names: list[int], mine: list[int], shifts: list[float] | None = None) -> list[int] | None:
+    """Where each centred name's rows end (in ``mine``, the block's rows of figures), so they cover the block
+    with none left over; a name covering none (a heading) ends where the one before it did. None when no
+    placing of the names within half a row does. ``shifts``: how far below its row each name is drawn, when
+    known; a name read onto a row's line was drawn up to half a row from it."""
+
+    def options(name: int) -> list[float]:
+        if name not in mine:
+            return [sum(1 for index in mine if index < name) - 0.5]
+        at = mine.index(name)
+        if shifts is not None and abs(shifts[name]) <= 0.5:
+            return [at + shifts[name]]
+        return [at, at - 0.5, at + 0.5]
+
+    places = [options(name) for name in names]
+    seen: set[tuple[int, int]] = set()
+
+    def fit(at: int, start: int) -> list[int] | None:
+        if at == len(names):
+            return [] if start == len(mine) else None
+        if (at, start) in seen:
+            return None
+        seen.add((at, start))
+        for place in places[at]:
+            end = round(2 * place + 1 - start)
+            if end <= start and place < start:
+                rest = fit(at + 1, start)  # a heading: no rows above it
+            elif start <= place < end <= len(mine):
+                rest = fit(at + 1, end)
+            else:
+                continue
+            if rest is not None:
+                return [max(start, end)] + rest
+        return None
+
+    return fit(0, 0)
 
 
 def _whole_names(rows: list[list[str]], column: int, blocks: list[int]) -> None:
@@ -1718,8 +1871,11 @@ _TOTAL_LAST = re.compile(r"\b(?:sub-?)?totals?$", re.I)
 
 def _total_row(row: list[str]) -> bool:
     """A subtotal or total row: its label starts "Total"/"Subtotal" or ends with it ("Finance Subtotal")."""
-    first = next((cell.strip() for cell in row if cell.strip()), "")
-    return bool(_TOTAL.match(first) or _TOTAL_LAST.search(first))
+    return _total_label(next((cell.strip() for cell in row if cell.strip()), ""))
+
+
+def _total_label(label: str) -> bool:
+    return bool(_TOTAL.match(label) or _TOTAL_LAST.search(label))
 
 
 def _join_label_lines(
@@ -1808,17 +1964,21 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
     row_x: list[float] = []
     cell_x: list[list[float]] = []
     cell_end: list[list[float]] = []
+    leads: list[float] = []  # how high on the page each line's first cell is drawn
     for line in block:
         row = [""] * len(columns)
         xs = [0.0] * len(columns)
         ends = [0.0] * len(columns)
         segs: list[tuple[float, float, str]] = []
         first_x = 0.0
+        lead = line.mid
         for segment in line.segments:
             text = " ".join(word.text for word in segment).strip()
             x0, x1 = segment[0].x0, segment[-1].x1
             if text and not segs:
                 first_x = x0
+                inside = [glyph.mid for glyph in line.glyphs if x0 - 0.5 <= glyph.x0 and glyph.x1 <= x1 + 0.5]
+                lead = statistics.fmean(inside) if inside else line.mid
             segs.append((x0, x1, text))
             column = _place(segment, columns)
             if text:
@@ -1831,6 +1991,7 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
         seg_rows.append(segs)
         row_x.append(first_x)
         bolds.append(line.bold)
+        leads.append(lead)
     mids = [line.mid for line in block]
     sizes = [line.size for line in block]
     groups = _wrapped_headings(grid, mids, [list(zip(xs, ends)) for xs, ends in zip(cell_x, cell_end)], sizes)
@@ -1880,9 +2041,13 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
     group_cols: list[int] = []
     if labels:
         spans = [list(zip(starts, ends)) for starts, ends in zip(cell_x, cell_end)]
-        grid, mids = _join_label_lines(grid, mids, spans, [row_x, bolds, cell_x, sizes])
-        grid, mids, row_x, bolds, sizes = _join_body(grid, mids, row_x, bolds, cell_x, sizes)
-        group_cols = _fill_grouping_columns(grid, mids)
+        if len(leads) != len(grid):
+            leads = list(mids)  # lines stacked into one row: their first cells' heights no longer line up
+        else:
+            leads = leads[len(leads) - len(grid):]
+        grid, mids = _join_label_lines(grid, mids, spans, [row_x, bolds, cell_x, sizes, leads])
+        grid, mids, row_x, bolds, sizes = _join_body(grid, mids, row_x, bolds, cell_x, sizes, leads)
+        group_cols = _fill_grouping_columns(grid, mids, leads)
         kept = [index for index in range(len(grid)) if not _absorbed(grid, index)]
         grid = [grid[index] for index in kept]
         mids = [mids[index] for index in kept]
@@ -2074,8 +2239,9 @@ def _join_body(
     bolds: list[bool],
     cell_x: list[list[float]],
     sizes: list[float],
+    leads: list[float],
 ) -> tuple[list[list[str]], list[float], list[float], list[bool], list[float]]:
-    rows, mids = _join_wrapped(rows, mids, first=0, extra=[xs, bolds, cell_x, sizes], sizes=sizes)
+    rows, mids = _join_wrapped(rows, mids, first=0, extra=[xs, bolds, cell_x, sizes], sizes=sizes, leads=leads)
     return rows, mids, xs, bolds, sizes
 
 
@@ -2315,11 +2481,14 @@ def _join_wrapped(
     first: int,
     extra: list[list] | None = None,
     sizes: list[float] | None = None,
+    leads: list[float] | None = None,
 ) -> tuple[list[list[str]], list[float]]:
     """Fold a cell's wrapped line into its row: a line with few cells filled that sits closer to a
     fuller neighbouring row than rows usually are to each other.
 
-    ``extra`` lists (row indents, bold flags) lose the same row, so they stay aligned with the grid.
+    ``extra`` lists (row indents, bold flags) lose the same row, so they stay aligned with the grid. ``leads``
+    (how high each row's first cell is drawn) does too, and a row whose first cell came from the folded line (a
+    name merged down the rows, drawn between two of them) takes that line's.
     """
     if len(grid) - first < 3:
         return grid, mids
@@ -2347,12 +2516,19 @@ def _join_wrapped(
             k += 1
             continue
         target = min(near)[1]
+        if leads is not None and leads is not row_mids:
+            mine = next((c for c, cell in enumerate(row) if cell), len(row))
+            theirs = next((c for c, cell in enumerate(rows[target]) if cell), len(row))
+            if mine < theirs:
+                leads[target] = leads[k]
         for c, cell in enumerate(row):
             if cell:
                 rows[target][c] = f"{rows[target][c]} {cell}".strip() if target < k else f"{cell} {rows[target][c]}".strip()
         del rows[k], row_mids[k]
         for sequence in extra or []:
             del sequence[k]
+        if leads is not None:
+            del leads[k]
         k = max(first, k - 1)
     return rows, row_mids
 
