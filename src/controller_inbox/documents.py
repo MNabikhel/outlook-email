@@ -141,6 +141,7 @@ def pdf_text(data: bytes) -> str:
     pages = []
     words = 0
     scanned = []
+    tried = 0
     previous: list[pdf_layout.Table] = []
     for number, (page, mined) in enumerate(pairs, start=1):
         layout = miner.layout(mined) if miner is not None and mined is not None else None
@@ -150,16 +151,18 @@ def pdf_text(data: bytes) -> str:
             text, previous = laid_out.text, laid_out.tables
         if not text.strip() and page is not None:
             text = _pdf_page(page)
-        if not text.strip() and page is not None and len(scanned) < MAX_OCR_PAGES:
-            scanned.append(number)
+        if not text.strip() and page is not None and tried < MAX_OCR_PAGES and _has_images(page):
+            tried += 1
             text = _ocr_page_images(page)
+            if text.strip() or ocr.engine_name():
+                scanned.append(number)
         words += len(text.split())
         pages.append(f"[page {number}]\n{text.strip() or '(no text on this page)'}")
     if total > MAX_PDF_PAGES:
         pages.append(f"[CloseDesk read the first {MAX_PDF_PAGES} of {total} pages.]")
     if heavy:
         pages.insert(0, _HEAVY_NOTE)
-    elif total and words < 5 * total:
+    elif total and words < 5 * len(pairs):
         pages.insert(0, _SCANNED_NOTE if ocr.engine_name() else _SCANNED_NOTE + _OCR_HINT)
     elif scanned:
         pages.insert(0, f"[Scanned {'page' if len(scanned) == 1 else 'pages'} {_page_list(scanned)} read with OCR: check figures against the file.]")
@@ -306,6 +309,13 @@ def _pdf_page(page) -> str:
         line = re.sub(r" {3,}", " | ", line.rstrip()).strip(" |")
         lines.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def _has_images(page) -> bool:
+    try:
+        return len(page.images) > 0
+    except Exception:
+        return False
 
 
 def _ocr_page_images(page) -> str:
