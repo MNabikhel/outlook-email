@@ -1171,12 +1171,17 @@ function pageView(data, ctx) {
         },
         h("span", { class: "pv-taught-tag" }, icon("check", 11), `${t.label}: ${t.value}`)
       );
+      // Pinned, so the pointer can go on to "Take it back" (a tip that only shows on hover lets clicks through).
       const open = () =>
-        showTip(mark, [
-          h("p", null, h("b", null, `${t.label}: ${t.value}`)),
-          h("p", { class: "muted small" }, t.printed ? `Taught by you. This sender's next files are read after “${t.printed}”.` : "Taught by you, for this file only (no label printed beside it)."),
-          h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => undo(t.id) }, "Take it back"),
-        ]);
+        showTip(
+          mark,
+          [
+            h("p", null, h("b", null, `${t.label}: ${t.value}`)),
+            h("p", { class: "muted small" }, t.printed ? `Taught by you. This sender's next files are read after “${t.printed}”.` : "Taught by you, for this file only (no label printed beside it)."),
+            h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => undo(t.id) }, "Take it back"),
+          ],
+          { pin: true }
+        );
       mark.addEventListener("click", open);
       mark.addEventListener("focus", open);
       return mark;

@@ -681,8 +681,16 @@ def register_workspace(
         if not store.remove_page_fix(att.id, fix_id):
             raise HTTPException(status_code=404, detail="That fix was already taken back.")
         if taken is not None and taken["kind"] == "field":
-            teach.untaught(store, settings, email, n, taken["now"], (taken.get("anchor") or {}).get("value") or "")
-            return {"ok": True, "message": f"Taken back. {teach.FIELDS.get(taken['now'], 'The field')} is read as before, and isn't learnt for this sender."}
+            field = taken["now"]
+            email = teach.untaught(store, settings, email, n, field, as_of=board_date())
+            name = teach.FIELDS.get(field, "The field")
+            still = (email.attachments[n - 1].extracted_fields.taught.get(field) or {}) if n <= len(email.attachments) else {}
+            if still.get("by") == "you":
+                # An earlier fix of the same field on this file is used again.
+                return {"ok": True, "message": f"Taken back. {name} is {teach.shown(field, str(still.get('value') or ''))} again, as you showed it before."}
+            if any(t["field"] == field for t in teach.templates(store, email.sender_email)):
+                return {"ok": True, "message": f"Taken back. {name} is read as the sender's other files taught it."}
+            return {"ok": True, "message": f"Taken back. {name} is read as before, and isn't learnt for this sender."}
         return {"ok": True, "message": "Fix taken back."}
 
     @api.post("/mail/{email_id}/files/{n}/vision")

@@ -49,7 +49,7 @@ function pagesPane(emailId, file) {
         holder.append(h("figure", null, img, h("figcaption", { class: "muted small" }, `Page ${p} of ${first.pages}`)));
         const blob = await getBlob(`${apiFile(emailId, file.n)}/pages/${p}.png`);
         if (!holder.isConnected) return;
-        img.src = URL.createObjectURL(blob);
+        showBlob(img, blob);
       }
       if (first.pages > count) holder.append(h("p", { class: "muted small" }, `${plural(first.pages - count, "more page")} not drawn here: see the Page tab.`));
     } catch (error) {
@@ -59,6 +59,16 @@ function pagesPane(emailId, file) {
   return h("div", { class: "pvw" }, holder);
 }
 
+/** Shows ``blob`` in ``img`` and lets the browser free it once the picture is drawn (or fails to be): the image
+    stays on the page, and a blob URL that is never revoked keeps its bytes in memory until the tab closes. */
+function showBlob(img, blob) {
+  const url = URL.createObjectURL(blob);
+  const done = () => URL.revokeObjectURL(url);
+  img.addEventListener("load", done, { once: true });
+  img.addEventListener("error", done, { once: true });
+  img.src = url;
+}
+
 /* ---------- Workbooks, CSV and Word ---------- */
 
 function sheetPane(emailId, file) {
@@ -66,6 +76,7 @@ function sheetPane(emailId, file) {
   getJSON(`${apiFile(emailId, file.n)}/sheet`)
     .then((got) => {
       if (!holder.isConnected) return;
+      if (got.note) return replace(holder, h("p", { class: "muted" }, got.note));
       replace(holder, got.kind === "doc" ? docView(got.blocks) : workbook(got.sheets));
     })
     .catch((error) => holder.isConnected && replace(holder, h("p", { class: "muted" }, error.message)));
@@ -109,28 +120,30 @@ function grid(sheet, formula) {
   if (!sheet.rows.length) return h("p", { class: "muted xl-empty" }, "This sheet is empty.");
   const colgroup = h("colgroup", null, h("col", { style: { width: "44px" } }), cols.map((col) => h("col", { style: { width: `${col.w}px` } })));
   const head = h("thead", null, h("tr", null, h("th", { class: "xl-corner" }), cols.map((col) => h("th", { scope: "col" }, col.letter))));
-  const shownCols = new Set(cols.map((col) => col.n));
   const letters = new Map(sheet.cols.map((col) => [col.n, col.letter]));
-  markMerged(sheet);
-  const rows = sheet.rows.map((row) => {
+  // Places under a merged cell, as "row index:column index" in the grid. The server counts a merge's rs and cs in
+  // the rows and columns it shows (hidden ones are left out), so they're counted here the same way.
+  const covered = new Set();
+  const rows = sheet.rows.map((row, ri) => {
     const byCol = new Map(row.cells.map((cell) => [cell.c, cell]));
     const tds = [];
-    const skip = new Set();
-    for (const col of cols) {
-      if (skip.has(col.n)) continue;
+    cols.forEach((col, ci) => {
+      if (covered.has(`${ri}:${ci}`)) return;
       const cell = byCol.get(col.n);
       if (!cell) {
-        if (!row.covered || !row.covered.includes(col.n)) tds.push(h("td", null));
-        continue;
+        tds.push(h("td", null));
+        return;
       }
       const cls = [cell.num ? "num" : "", cell.b ? "b" : "", cell.i ? "i" : "", cell.u ? "u" : "", cell.wrap ? "wrap" : "", cell.red ? "red" : "", cell.f ? "has-f" : "", cell.nocalc ? "nocalc" : "", ...(cell.bd || "").split("").map((side) => `edge-${side}`)].filter(Boolean).join(" ");
       const style = {};
       if (cell.bg) style.background = cell.bg;
-      if (cell.fg) style.color = cell.fg;
+      // A [Red] section of the number format wins over the font's colour, as in Excel.
+      if (cell.fg && !cell.red) style.color = cell.fg;
       if (cell.al) style.textAlign = cell.al;
       if (cell.ind) style.paddingLeft = `${6 + cell.ind * 9}px`;
-      const span = cell.cs && cell.cs > 1 ? cell.cs : 1;
-      for (let k = 1; k < span; k += 1) skip.add(col.n + k);
+      const cs = Math.max(1, Math.min(cell.cs || 1, cols.length - ci));
+      const rs = Math.max(1, cell.rs || 1);
+      for (let dr = 0; dr < rs; dr += 1) for (let dc = 0; dc < cs; dc += 1) if (dr || dc) covered.add(`${ri + dr}:${ci + dc}`);
       const ref = `${letters.get(col.n) || ""}${row.n}`;
       tds.push(
         h(
@@ -138,15 +151,15 @@ function grid(sheet, formula) {
           {
             class: cls || null,
             style,
-            colspan: span > 1 ? String(Math.min(span, cols.filter((c) => c.n >= col.n && c.n < col.n + span && shownCols.has(c.n)).length)) : null,
-            rowspan: cell.rs && cell.rs > 1 ? String(cell.rs) : null,
+            colspan: cs > 1 ? String(cs) : null,
+            rowspan: rs > 1 ? String(rs) : null,
             title: cell.nocalc ? "Saved without its result: the formula is shown" : cell.f ? cell.f : null,
             onclick: () => $fx(formula, ref, cell.f ? "f" : "", cell.f || cell.v),
           },
           cell.v
         )
       );
-    }
+    });
     return h("tr", null, h("th", { scope: "row" }, String(row.n)), tds);
   });
   const more = [sheet.more_rows ? plural(sheet.more_rows, "more row") : "", sheet.more_cols ? plural(sheet.more_cols, "more column") : ""].filter(Boolean).join(" and ");
@@ -158,35 +171,24 @@ function grid(sheet, formula) {
   );
 }
 
-/** Rows under a merged cell skip the columns it covers (the server sends only the merge's top-left cell). */
-function markMerged(sheet) {
-  const byRow = new Map(sheet.rows.map((row) => [row.n, row]));
-  for (const row of sheet.rows) row.covered = [];
-  for (const row of sheet.rows) {
-    for (const cell of row.cells) {
-      if (!cell.rs || cell.rs < 2) continue;
-      for (let r = row.n + 1; r < row.n + cell.rs; r += 1) {
-        const under = byRow.get(r);
-        if (!under) continue;
-        under.covered = under.covered || [];
-        for (let c = cell.c; c < cell.c + (cell.cs || 1); c += 1) under.covered.push(c);
-      }
-    }
-  }
-}
-
 function docView(blocks) {
   if (!blocks.length) return h("p", { class: "muted" }, "This document has no text to show.");
   return h(
     "div",
     { class: "doc-page" },
     blocks.map((block) => {
-      if (block.t === "table") return h("div", { class: "grid-wrap" }, h("table", { class: "grid doc-table" }, h("tbody", null, block.rows.map((row) => h("tr", null, row.map((cell) => h("td", null, cell)))))));
-      if (block.t === "li") return h("p", { class: "doc-li" }, "• ", block.text);
+      if (block.t === "table") return h("div", { class: "grid-wrap" }, h("table", { class: "grid doc-table" }, h("tbody", null, block.rows.map((row) => h("tr", null, row.map(docCell))))));
+      if (block.t === "li") return h("p", { class: "doc-li" }, h("span", { class: "doc-li-mark" }, block.num || "•"), block.text);
       if (/^h[1-4]$/.test(block.t)) return h(block.t, { class: "doc-h" }, block.text);
       return h("p", { class: block.b ? "doc-p b" : "doc-p" }, block.text);
     })
   );
+}
+
+/** A Word table cell: its text, or {v, cs} when it spans more than one column. */
+function docCell(cell) {
+  if (cell && typeof cell === "object") return h("td", { colspan: cell.cs > 1 ? String(cell.cs) : null }, cell.v);
+  return h("td", null, cell);
 }
 
 /* ---------- The small preview on an email's attachment ---------- */
@@ -196,8 +198,11 @@ function docView(blocks) {
 export function thumb(emailId, file, href) {
   if (!file.show) return null;
   const box = h("a", { class: `file-thumb ${file.show}`, href, dataset: { nav: "" }, title: `Preview ${file.name}`, "aria-label": `Preview ${file.name}` });
-  const fill = (...children) => box.isConnected !== undefined && replace(box, ...children, h("span", { class: "file-thumb-go" }, icon("eye", 13), "Preview"));
+  const fill = (...children) => replace(box, ...children, h("span", { class: "file-thumb-go" }, icon("eye", 13), "Preview"));
   fill(h("span", { class: "file-thumb-wait" }));
+  // Drawn once it's on the page; if the email is closed while the file loads, the answer is dropped.
+  let watched = false;
+  const gone = () => watched && !box.isConnected;
   const load = async () => {
     try {
       if (file.show === "image") {
@@ -206,11 +211,14 @@ export function thumb(emailId, file, href) {
         fill(img);
       } else if (file.show === "pdf" || file.show === "pages") {
         const blob = await getBlob(`${apiFile(emailId, file.n)}/pages/1.png`);
+        if (gone()) return;
         const img = h("img", { alt: "" });
-        img.src = URL.createObjectURL(blob);
+        showBlob(img, blob);
         fill(img);
       } else if (file.show === "sheet") {
-        const got = await getJSON(`${apiFile(emailId, file.n)}/sheet?rows=8&cols=6`);
+        const got = await getJSON(`${apiFile(emailId, file.n)}/sheet?rows=8&cols=12`);
+        if (gone()) return;
+        if (got.note) return fill(h("span", { class: "muted small" }, "No preview"));
         const sheet = (got.sheets || []).find((s) => !s.hidden) || (got.sheets || [])[0];
         if (!sheet) return fill(h("span", { class: "muted small" }, "Empty workbook"));
         fill(
@@ -219,7 +227,7 @@ export function thumb(emailId, file, href) {
             { class: "file-thumb-grid" },
             h("tbody", null, sheet.rows.slice(0, 8).map((row) => {
               const byCol = new Map(row.cells.map((cell) => [cell.c, cell]));
-              return h("tr", null, sheet.cols.slice(0, 6).map((col) => {
+              return h("tr", null, sheet.cols.filter((col) => !col.hidden).slice(0, 6).map((col) => {
                 const cell = byCol.get(col.n);
                 return h("td", { class: cell && cell.num ? "num" : cell && cell.b ? "b" : null }, cell ? cell.v : "");
               }));
@@ -229,10 +237,12 @@ export function thumb(emailId, file, href) {
         );
       } else if (file.show === "doc") {
         const got = await getJSON(`${apiFile(emailId, file.n)}/sheet`);
+        if (gone()) return;
+        if (got.note) return fill(h("span", { class: "muted small" }, "No preview"));
         fill(h("div", { class: "file-thumb-doc" }, (got.blocks || []).slice(0, 8).map((block) => h("p", { class: /^h/.test(block.t) ? "b" : null }, block.t === "table" ? "▦ table" : block.text))));
       }
     } catch (error) {
-      fill(h("span", { class: "muted small" }, "No preview"));
+      if (!gone()) fill(h("span", { class: "muted small" }, "No preview"));
     }
   };
   // Drawn when it scrolls into view, so an email with many files doesn't draw them all at once.
@@ -243,6 +253,7 @@ export function thumb(emailId, file, href) {
         load();
       }
     });
+    watched = true;
     queueMicrotask(() => seen.observe(box));
   } else load();
   return box;

@@ -322,6 +322,9 @@ def _add_files(
     if not attachments_raw:
         return email
     records = [_file_record(raw, raw_att, anchor)[0] for raw_att in attachments_raw]
+    for record in records:
+        # Read with what the sender's earlier files were taught, as a file on a new email is.
+        _read_as_taught(store, raw.sender_email, record, anchor)
     email = store.get_email(email.id) or email
     held = {att.id for att in email.attachments}
     for record in records:

@@ -101,6 +101,16 @@ def json_safe(value: Any) -> Any:
     return value
 
 
+# The list each taught field's value is put first in (teach.py).
+TAUGHT_LISTS = {
+    "invoice_number": "invoice_numbers",
+    "po_number": "po_numbers",
+    "total": "amounts",
+    "due_date": "due_dates",
+    "vendor": "vendor_candidates",
+}
+
+
 @dataclass
 class ExtractedFields:
     invoice_numbers: list[str] = field(default_factory=list)
@@ -114,6 +124,9 @@ class ExtractedFields:
     # Fields shown on the page (teach.py): {"total": {"value": "4210.0", "by": "you" | "learnt", "label": "Total due"}}.
     # A taught value is the one used over what the scripts guessed.
     taught: dict[str, dict] = field(default_factory=dict)
+    # A taught value is also put first in its list (``TAUGHT_LISTS``). The list as the scripts read it is kept here,
+    # by field, so taking the taught value back (Undo) puts the list back as it was read.
+    as_read: dict[str, list] = field(default_factory=dict)
 
     def _taught(self, key: str) -> str | None:
         value = (self.taught.get(key) or {}).get("value")
@@ -160,6 +173,11 @@ class ExtractedFields:
             mentions_attachment=self.mentions_attachment or other.mentions_attachment,
             # What you showed beats what was learnt; the first file's wins between two of the same kind.
             taught=_merge_taught(self.taught, other.taught),
+            as_read={
+                key: uniq(self.as_read.get(key, getattr(self, TAUGHT_LISTS[key])) + other.as_read.get(key, getattr(other, TAUGHT_LISTS[key])))
+                for key in {**self.as_read, **other.as_read}
+                if key in TAUGHT_LISTS
+            },
         )
 
     def to_dict(self) -> dict[str, Any]:
