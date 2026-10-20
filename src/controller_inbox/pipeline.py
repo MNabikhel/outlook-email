@@ -101,6 +101,7 @@ def process_message(
         merged_fields = merged_fields.merged_with(att.extracted_fields)
     for raw_att in attachments_raw:
         record, classified = _file_record(raw, raw_att, anchor)
+        _read_as_taught(store, raw.sender_email, record, anchor)
         att_records.append(record)
         att_classifications.append(classified)
         merged_fields = merged_fields.merged_with(record.extracted_fields)
@@ -204,6 +205,21 @@ def process_message(
 
     cost_codes.refresh(store, settings, email_ids=[record.id])
     return store.get_email(record.id) or record
+
+
+def _read_as_taught(store: Store, sender: str, record: AttachmentRecord, anchor) -> None:
+    """Fill the fields its sender's earlier files were taught (teach.py), read where those labels are printed."""
+    from controller_inbox import teach
+
+    if not sender:
+        return
+    learnt = teach.templates(store, sender, not_attachment=record.id)
+    if not learnt:
+        return
+    for field, got in teach.read_with(record.extracted_text or "", learnt, as_of=anchor).items():
+        if (record.extracted_fields.taught.get(field) or {}).get("by") == "you":
+            continue
+        record.extracted_fields = teach.with_taught(record.extracted_fields, field, got["value"], by="learnt", label=got["label"])
 
 
 def _as_stored(raw: RawMessage, stored: EmailRecord) -> RawMessage:

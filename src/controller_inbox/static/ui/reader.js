@@ -3,6 +3,7 @@
 
 import { h, icon, replace, toast, plural, isTyping, $ } from "./dom.js";
 import { getJSON, getBlob, postJSON, mailPath, filePath } from "./api.js";
+import { previewPane, thumb } from "./preview.js";
 
 const enc = encodeURIComponent;
 
@@ -94,18 +95,32 @@ function alertBox(d) {
 
 /* ---------- What was read from it ---------- */
 
+// Which row of "What was read from it" a taught field (teach.py) belongs to.
+const TAUGHT_ROW = { invoice_number: "Invoice", po_number: "PO", total: "Total", due_date: "Due", invoice_date: "Invoice date", vendor: "Vendor" };
+
 function facts(d) {
   const f = d.fields;
   const coding = d.coding;
+  const taught = f.taught || {};
+  const shown = (key, rest) => (taught[key] ? [taught[key].shown, ...rest.filter((v) => v !== taught[key].shown && v !== taught[key].value)].join(", ") : rest.join(", "));
   const rows = [
-    ["Invoice", f.invoices.join(", ")],
-    ["PO", f.pos.join(", ")],
+    ["Invoice", shown("invoice_number", f.invoices)],
+    ["PO", shown("po_number", f.pos)],
+    taught.total ? ["Total", taught.total.shown] : null,
     ["Amount", f.amounts.slice(0, 4).join(", ") + (f.amounts.length > 4 ? ` +${f.amounts.length - 4}` : "")],
-    ["Due", f.due_dates.join(", ")],
-    ["Vendor", f.vendors.slice(0, 3).join(", ")],
+    ["Invoice date", taught.invoice_date ? taught.invoice_date.shown : ""],
+    ["Due", shown("due_date", f.due_dates)],
+    ["Vendor", shown("vendor", f.vendors.slice(0, 3))],
     ["Account", f.accounts.join(", ")],
     ["Cost code", coding && coding.codes.length ? coding.codes.map((c) => c.code).join(", ") : ""],
-  ].filter(([, value]) => value);
+  ].filter((row) => row && row[1]);
+  const mark = (label) => {
+    const key = Object.keys(TAUGHT_ROW).find((k) => TAUGHT_ROW[k] === label && taught[k]);
+    if (!key) return null;
+    const entry = taught[key];
+    const tip = entry.by === "you" ? "You showed this on the file's page." : `Read after “${entry.label}”, as you showed on an earlier file from this sender.`;
+    return h("span", { class: `chip ${entry.by === "you" ? "chip-ok" : "faint"} taught-chip`, title: tip }, entry.by === "you" ? "taught" : "learnt");
+  };
   if (f.bank_details) rows.push(["Bank details", "Mentioned in the email"]);
   const reasons = d.reasons.length
     ? h("ul", { class: "rd-why" }, d.reasons.map((reason) => h("li", null, reason)))
@@ -119,7 +134,7 @@ function facts(d) {
       "What was read from it",
       {},
       rows.length
-        ? h("dl", { class: "rd-facts" }, rows.map(([label, value]) => [h("dt", null, label), h("dd", { class: label === "Amount" ? "num" : "" }, value)]))
+        ? h("dl", { class: "rd-facts" }, rows.map(([label, value]) => [h("dt", null, label), h("dd", { class: label === "Amount" || label === "Total" ? "num" : "" }, value, " ", mark(label))]))
         : h("p", { class: "muted" }, "No invoice numbers, amounts or dates found.")
     )
   );
@@ -178,7 +193,8 @@ function attachments(d, ctx) {
     const tables = file.tables || 0;
     return h(
       "div",
-      { class: `file${d.locked ? " locked" : ""}` },
+      { class: `file${d.locked ? " locked" : ""}${!d.locked && file.show ? " has-thumb" : ""}` },
+      d.locked ? null : thumb(d.id, file, ctx.fileUrl(file.n, "preview")),
       h(
         "div",
         { class: "file-top" },
@@ -203,8 +219,9 @@ function attachments(d, ctx) {
         : h(
             "div",
             { class: "file-actions" },
-            file.preview ? h("a", { class: "btn btn-sm", href: ctx.fileUrl(file.n, "page"), dataset: { nav: "" }, title: "The page itself, with where each piece of text was read" }, icon("eye", 14), "Page") : null,
-            tables ? h("a", { class: "btn btn-sm btn-primary", href: ctx.fileUrl(file.n, "tables"), dataset: { nav: "" } }, icon("table", 14), "Tables") : null,
+            file.show ? h("a", { class: "btn btn-sm btn-primary", href: ctx.fileUrl(file.n, "preview"), dataset: { nav: "" }, title: "The file as it came" }, icon("eye", 14), "Preview") : null,
+            file.preview ? h("a", { class: "btn btn-sm", href: ctx.fileUrl(file.n, "page"), dataset: { nav: "" }, title: "The page with where each piece of text was read: fix a reading or teach a field here" }, icon("pen", 14), "Page") : null,
+            tables ? h("a", { class: `btn btn-sm${file.show ? "" : " btn-primary"}`, href: ctx.fileUrl(file.n, "tables"), dataset: { nav: "" } }, icon("table", 14), "Tables") : null,
             file.has_text ? h("a", { class: "btn btn-sm", href: ctx.fileUrl(file.n, "text"), dataset: { nav: "" } }, icon("text", 14), "Text") : null,
             file.view ? h("a", { class: "btn btn-sm", href: `${base}/view`, target: "_blank", rel: "noopener" }, icon("external", 14), "Open") : null,
             file.download ? h("a", { class: "btn btn-sm", href: `${base}/download` }, icon("download", 14), "Download") : null,
@@ -874,7 +891,7 @@ function pageView(data, ctx) {
     const at = page;
     try {
       const reply = await postJSON(`${api}/${at}/fixes`, body);
-      ctx.fileChanged(email.id, file.n);
+      ctx.fileChanged(email.id, file.n, body.kind === "field");
       hideTip(true);
       toast(reply.message, { action: "Undo", onAction: () => undo(reply.id, at), ms: 8000 });
       if (at === page) await show(at);
@@ -886,7 +903,7 @@ function pageView(data, ctx) {
   async function undo(id, at = page) {
     try {
       const reply = await postJSON(`${api}/${at}/fixes/${enc(id)}/undo`);
-      ctx.fileChanged(email.id, file.n);
+      ctx.fileChanged(email.id, file.n, true);
       hideTip(true);
       toast(reply.message);
       if (at === page) await show(at);
@@ -895,10 +912,11 @@ function pageView(data, ctx) {
     }
   }
 
-  // Marking a table CloseDesk missed: drag a box round it on the page.
+  // Marking a table CloseDesk missed, or teaching a field: drag a box round it on the page.
   let drawing = false;
   let rubber = null;
   let from = null;
+  let teaching = ""; // the field being taught, or "" while marking a table
   const markLabel = h("span", null, "Mark a table");
   const markTable = h(
     "button",
@@ -906,25 +924,45 @@ function pageView(data, ctx) {
     icon("table", 14),
     markLabel
   );
-  markTable.addEventListener("click", () => (drawing ? stopDrawing() : startDrawing()));
+  markTable.addEventListener("click", () => (drawing && !teaching ? stopDrawing() : startDrawing("")));
+  const teachPick = h(
+    "select",
+    { class: "set-select pv-teach-pick", "aria-label": "Teach a field: which field" },
+    h("option", { value: "" }, "Teach a field…"),
+    TEACHABLE.map(([value, label]) => h("option", { value }, label))
+  );
+  teachPick.addEventListener("change", () => {
+    if (teachPick.value) startDrawing(teachPick.value);
+    else stopDrawing();
+  });
 
-  function startDrawing() {
+  function startDrawing(field) {
+    stopDrawing();
     drawing = true;
+    teaching = field;
     hideTip(true);
     sheet.classList.add("drawing");
-    markTable.setAttribute("aria-pressed", "true");
-    markLabel.textContent = "Drag across the table (Esc to stop)";
+    if (field) {
+      teachPick.value = field;
+      markLabel.textContent = "Mark a table";
+      toast(`Drag a box round the ${teachPick.selectedOptions[0].textContent.toLowerCase()} on the page (Esc to stop).`, { ms: 5000 });
+    } else {
+      markTable.setAttribute("aria-pressed", "true");
+      markLabel.textContent = "Drag across the table (Esc to stop)";
+    }
     stopOpenDrawing = () => (drawing ? (stopDrawing(), true) : false);
   }
 
   function stopDrawing() {
     drawing = false;
+    teaching = "";
     from = null;
     if (rubber) rubber.remove();
     rubber = null;
     sheet.classList.remove("drawing");
     markTable.setAttribute("aria-pressed", "false");
     markLabel.textContent = "Mark a table";
+    teachPick.value = "";
   }
 
   const spot = (event) => {
@@ -949,7 +987,12 @@ function pageView(data, ctx) {
   sheet.addEventListener("pointerup", (event) => {
     if (!drawing || !from) return;
     const box = boxFrom(from, spot(event));
+    const field = teaching;
     stopDrawing();
+    if (field) {
+      if (box.w < 0.005 || box.h < 0.004) return toast("Drag a box round the value to teach it.");
+      return send({ kind: "field", field, box });
+    }
     if (box.w < 0.02 || box.h < 0.01) return toast("Drag across the whole table to mark it.");
     send({ kind: "table", box });
   });
@@ -1115,7 +1158,30 @@ function pageView(data, ctx) {
     sheet.classList.remove("loading");
     const img = h("img", { alt: `Page ${page} of ${file.name}`, draggable: "false" });
     img.src = pageUrl; // a blob: address made just above, which h() only takes for links to this server
-    replace(sheet, img, outlines, boxes);
+    // Fields taught on this page: a labelled box where each was shown, with a way to take it back.
+    const taught = (view.taught || []).map((t) => {
+      const mark = h(
+        "div",
+        {
+          class: "pv-taught",
+          tabindex: "0",
+          role: "button",
+          "aria-label": `${t.label}: ${t.value}, taught by you`,
+          style: { left: `${t.box.x * 100}%`, top: `${t.box.y * 100}%`, width: `${t.box.w * 100}%`, height: `${t.box.h * 100}%` },
+        },
+        h("span", { class: "pv-taught-tag" }, icon("check", 11), `${t.label}: ${t.value}`)
+      );
+      const open = () =>
+        showTip(mark, [
+          h("p", null, h("b", null, `${t.label}: ${t.value}`)),
+          h("p", { class: "muted small" }, t.printed ? `Taught by you. This sender's next files are read after “${t.printed}”.` : "Taught by you, for this file only (no label printed beside it)."),
+          h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => undo(t.id) }, "Take it back"),
+        ]);
+      mark.addEventListener("click", open);
+      mark.addEventListener("focus", open);
+      return mark;
+    });
+    replace(sheet, img, outlines, boxes, taught);
 
     // A table shown as a grid above the page: pointing at a cell marks its box, and the other way round.
     let openId = "";
@@ -1238,7 +1304,7 @@ function pageView(data, ctx) {
     sheet.classList.remove("only-check");
     replace(
       tools,
-      h("div", { class: "pv-check" }, step, count, view.regions.length ? h("label", { class: "pv-only" }, only, "Only show what needs checking") : null, markTable),
+      h("div", { class: "pv-check" }, step, count, view.regions.length ? h("label", { class: "pv-only" }, only, "Only show what needs checking") : null, teachPick, markTable),
       chips.length ? h("div", { class: "pv-chips" }, h("span", { class: "pv-chips-h" }, `${chips.length === 1 ? "Table" : "Tables"} on this page`), chips) : null
     );
     tools.hidden = !view.regions.length;
@@ -1321,22 +1387,36 @@ function pageView(data, ctx) {
   );
 }
 
+// What can be taught on a page (teach.py FIELDS), in the order the picker lists them.
+const TEACHABLE = [
+  ["invoice_number", "Invoice number"],
+  ["total", "Total"],
+  ["due_date", "Due date"],
+  ["invoice_date", "Invoice date"],
+  ["po_number", "PO number"],
+  ["vendor", "Vendor"],
+];
+
 export function fileView(data, tab, ctx) {
   const { email, file } = data;
   const base = filePath(email.id, file.n);
   hideTip();
-  // A PDF or a picture opens on its page; any other file on its tables, or its text when it has none.
-  if (!tab || (tab === "page" && !file.preview)) tab = file.preview ? "page" : "tables";
-  if (tab !== "page") tab = tab === "text" || !data.tables.length ? "text" : "tables";
+  // A file opens on its preview, as it came; without one, on its page, its tables, or its text.
+  if (tab === "preview" && !file.show) tab = "";
+  if (!tab || (tab === "page" && !file.preview)) tab = file.show ? "preview" : file.preview ? "page" : "tables";
+  if (tab !== "page" && tab !== "preview") tab = tab === "text" || !data.tables.length ? "text" : "tables";
   const tabs = h(
     "div",
     { class: "tabs", role: "tablist" },
+    file.show ? h("a", { class: `tab${tab === "preview" ? " on" : ""}`, role: "tab", "aria-selected": String(tab === "preview"), href: ctx.fileUrl(file.n, "preview"), dataset: { nav: "", replace: "" } }, icon("file", 14), "Preview") : null,
     file.preview ? h("a", { class: `tab${tab === "page" ? " on" : ""}`, role: "tab", "aria-selected": String(tab === "page"), href: ctx.fileUrl(file.n, "page"), dataset: { nav: "", replace: "" } }, icon("eye", 14), "Page") : null,
     h("a", { class: `tab${tab === "tables" ? " on" : ""}`, role: "tab", "aria-selected": String(tab === "tables"), href: ctx.fileUrl(file.n, "tables"), dataset: { nav: "", replace: "" } }, icon("table", 14), `Tables (${data.tables.length})`),
     h("a", { class: `tab${tab === "text" ? " on" : ""}`, role: "tab", "aria-selected": String(tab === "text"), href: ctx.fileUrl(file.n, "text"), dataset: { nav: "", replace: "" } }, icon("text", 14), `Text (${data.parts.length})`)
   );
   let content;
-  if (tab === "page") {
+  if (tab === "preview") {
+    content = previewPane(data, ctx);
+  } else if (tab === "page") {
     content = pageView(data, ctx);
   } else if (tab === "tables") {
     const off = data.tables.filter((t) => t.check.mismatched.length).length;

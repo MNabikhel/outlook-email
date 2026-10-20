@@ -352,7 +352,7 @@ def test_the_page_tab_marks_where_text_was_read_and_says_what_on_hover(settings,
     [email] = ingest_folder(store, settings)
     with serving(web.create_app(settings, store)) as base:
         page.set_viewport_size({"width": 1440, "height": 900})
-        page.goto(f"{base}/app/mail/{email.id}/file/1")
+        page.goto(f"{base}/app/mail/{email.id}/file/1?tab=page")
         page.wait_for_selector(".tab.on:has-text('Page')")
         page.wait_for_selector(".pv-sheet img")
         page.wait_for_function("() => document.querySelector('.pv-sheet img').naturalWidth > 0")
@@ -383,9 +383,32 @@ def _harbor(settings, store, *attachments):
     return email
 
 
+def test_a_file_opens_on_its_preview_and_the_email_shows_a_picture_of_it(page, store, settings):
+    from controller_inbox.folder_mail import ingest_folder
+    from liveserver import serving
+    from msgfactory import PDF, write_msg
+    from test_page_view import _invoice
+
+    settings.trusted_domains = "taz.com"
+    settings.ensure_data_dir()
+    write_msg(settings.inbox_incoming / "invoice.msg", "Invoice INV-1042", "Our invoice is attached.", sender_name="Harbor Steel",
+              sender_email="ar@taz.com", attachments=[("invoice.pdf", _invoice(pages=2), PDF)])
+    [email] = ingest_folder(store, settings)
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size({"width": 1440, "height": 900})
+        page.goto(f"{base}/app/mail/{email.id}")
+        page.wait_for_function("() => { const img = document.querySelector('.file-thumb img'); return img && img.naturalWidth > 0; }")
+        page.click(".file-thumb")
+        page.wait_for_selector(".tab.on:has-text('Preview')")
+        frame = page.wait_for_selector("iframe.pvw-pdf")
+        assert frame.get_attribute("src").endswith("/files/1/view#view=FitH")
+        page.click(".tab:has-text('Page')")
+        page.wait_for_selector(".pv-teach-pick")
+
+
 def _open_page_tab(page, base, email):
     page.set_viewport_size({"width": 1440, "height": 900})
-    page.goto(f"{base}/app/mail/{email.id}/file/1")
+    page.goto(f"{base}/app/mail/{email.id}/file/1?tab=page")
     page.wait_for_selector(".tab.on:has-text('Page')")
     page.wait_for_function("() => { const i = document.querySelector('.pv-sheet img'); return i && i.naturalWidth > 0; }")
 

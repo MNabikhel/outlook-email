@@ -111,18 +111,31 @@ class ExtractedFields:
     account_last4: list[str] = field(default_factory=list)
     mentions_routing_or_account: bool = False
     mentions_attachment: bool = False
+    # Fields shown on the page (teach.py): {"total": {"value": "4210.0", "by": "you" | "learnt", "label": "Total due"}}.
+    # A taught value is the one used over what the scripts guessed.
+    taught: dict[str, dict] = field(default_factory=dict)
+
+    def _taught(self, key: str) -> str | None:
+        value = (self.taught.get(key) or {}).get("value")
+        return str(value) if value not in (None, "") else None
 
     @property
     def primary_amount(self) -> float | None:
+        taught = self._taught("total")
+        if taught is not None:
+            try:
+                return float(taught)
+            except ValueError:
+                pass
         return max(self.amounts) if self.amounts else None
 
     @property
     def primary_invoice(self) -> str | None:
-        return self.invoice_numbers[0] if self.invoice_numbers else None
+        return self._taught("invoice_number") or (self.invoice_numbers[0] if self.invoice_numbers else None)
 
     @property
     def primary_due(self) -> str | None:
-        return self.due_dates[0] if self.due_dates else None
+        return self._taught("due_date") or (self.due_dates[0] if self.due_dates else None)
 
     def merged_with(self, other: "ExtractedFields") -> "ExtractedFields":
         def uniq(items: list) -> list:
@@ -145,6 +158,8 @@ class ExtractedFields:
             mentions_routing_or_account=self.mentions_routing_or_account
             or other.mentions_routing_or_account,
             mentions_attachment=self.mentions_attachment or other.mentions_attachment,
+            # What you showed beats what was learnt; the first file's wins between two of the same kind.
+            taught=_merge_taught(self.taught, other.taught),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -156,6 +171,14 @@ class ExtractedFields:
             return cls()
         allowed = {item.name for item in fields(cls)}
         return cls(**{key: data[key] for key in allowed if key in data})
+
+
+def _merge_taught(first: dict, second: dict) -> dict:
+    out = dict(second or {})
+    for key, entry in (first or {}).items():
+        if key not in out or not (out[key].get("by") == "you" and entry.get("by") != "you"):
+            out[key] = entry
+    return out
 
 
 @dataclass
