@@ -31,6 +31,7 @@ from controller_inbox import (
     semantic, table_lookup, vision,
 )
 from controller_inbox.digest import build_digest
+from controller_inbox.extract import extraction_failed
 from controller_inbox.local_llm import check_model, context_target, needs_more_context
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
 from controller_inbox.profile import active_profile, is_finance, set_profile
@@ -53,6 +54,7 @@ OUTLOOK_TICK_SECONDS = 30
 MAX_TABLES = 40
 MAX_TABLE_ROWS = 1500
 CLIP_CHARS = 280
+UNREADABLE = "This file couldn't be read: it looks damaged or cut short. Download it to check, or ask the sender for it again."
 LOCKED_MESSAGE = (
     "This email is flagged as possible payment fraud, so its files don't open. "
     "Verify it by phone, then mark it safe in its fraud check."
@@ -268,6 +270,10 @@ def register_workspace(
             "is_sample": bool(counts["emails"]) and not store.real_mail_count(),
             "last_run": format_when(last_run, settings.tz) if last_run else "",
             "tz": settings.tz.key,
+            "drop_folder": str(settings.inbox_incoming),
+            "failed_folder": str(settings.inbox_failed),
+            # Classic Outlook can be read on this computer, or a Microsoft 365 connection is set up.
+            "outlook_ready": not outlook_desktop.available() or settings.graph_configured,
             "folders": [{"key": key, "label": label} for key, label in FOLDER_LABELS.items()],
             "categories": [{"value": key.value, "label": label} for key, label in DOCUMENT_LABELS.items()],
             # Changes whenever a count does, so the page knows when its lists are out of date.
@@ -346,6 +352,8 @@ def register_workspace(
         for card in file_cards(email):
             att = card["att"]
             suffix = Path(att.filename).suffix.lower()
+            # A damaged file has no text and no pages to show; it can still be downloaded to check it.
+            broken = extraction_failed(att.extracted_text)
             item = {
                 "n": card["n"],
                 "name": att.filename,
@@ -355,20 +363,20 @@ def register_workspace(
                 "confidence": round((att.document_confidence or 0) * 100),
                 "invoice": att.extracted_fields.primary_invoice or "",
                 "amount_label": _money(att.extracted_fields.primary_amount),
-                "has_text": bool(card["chars"]),
-                "sections": card["sections"],
+                "has_text": bool(card["chars"]) and not broken,
+                "sections": 0 if broken else card["sections"],
                 "search": card["search"],
                 "blocked_type": card["blocked_type"],
             }
             if not locked:
                 text = att.extracted_text or ""
                 item.update(
-                    clip=text[:CLIP_CHARS],
-                    tables=len(table_lookup.tables_in(text)) if text.strip() else 0,
+                    clip=UNREADABLE if broken else text[:CLIP_CHARS],
+                    tables=len(table_lookup.tables_in(text)) if text.strip() and not broken else 0,
                     download=bool(card["downloadable"]),
                     view=suffix in agent.VIEWABLE and agent.original_file(settings, email, att) is not None,
-                    preview=vision.readable_file(att.filename) and vision.can_render() and agent.original_file(settings, email, att) is not None,
-                    show=show_as(att, agent.original_file(settings, email, att)),
+                    preview=not broken and vision.readable_file(att.filename) and vision.can_render() and agent.original_file(settings, email, att) is not None,
+                    show="" if broken else show_as(att, agent.original_file(settings, email, att)),
                 )
             files.append(item)
         coding = store.cost_coding(email.id)
@@ -445,6 +453,9 @@ def register_workspace(
             raise HTTPException(status_code=403, detail=LOCKED_MESSAGE)
         att = email.attachments[n - 1]
         text = att.extracted_text or ""
+        broken = extraction_failed(text)
+        if broken:
+            text = ""
         found = table_lookup.tables_in(text) if text.strip() else []
         suffix = Path(att.filename).suffix.lower()
         original = agent.original_file(settings, email, att)
@@ -460,15 +471,17 @@ def register_workspace(
                 "view": suffix in agent.VIEWABLE and original is not None,
                 "download": suffix in DOWNLOADABLE and original is not None,
                 # Its pages can be shown as pictures, with where each piece of text was read (the Page tab).
-                "preview": vision.readable_file(att.filename) and original is not None and vision.can_render(),
+                "preview": not broken and vision.readable_file(att.filename) and original is not None and vision.can_render(),
                 # How the Preview tab shows the file as it came: "pdf", "image", "pages", "sheet", "doc" or "".
-                "show": show_as(att, original),
+                # A file that couldn't be read has none.
+                "show": "" if broken else show_as(att, original),
+                "unreadable": UNREADABLE if broken else "",
             },
             "parts": [{"label": part.label, "text": part.text} for part in documents.split_parts(text)] if text.strip() else [],
             "tables": [table_json(table, number) for number, table in enumerate(found[:MAX_TABLES], start=1)],
             "more_tables": max(0, len(found) - MAX_TABLES),
             "vision": {
-                "offer": vision.offer(store, settings, email, att) if vision.readable_file(att.filename) else None,
+                "offer": vision.offer(store, settings, email, att) if vision.readable_file(att.filename) and not broken else None,
                 "readings": vision.readings_json(store.page_readings(att.id, att.sha256)),
             },
         }

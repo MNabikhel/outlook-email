@@ -81,6 +81,8 @@ SOFT_BANK = {"bank_change_quoted", "bank_change_attachment", "model_said_bank_ch
 CONTEXT = CORE | SOFT_BANK | {"account_numbers", "payment_request", "lookalike_domain", "display_name_spoof", "reported"}
 LEARNABLE = {key for key, points in POINTS.items() if points > 0 and key != "reported"}
 
+CAUTION_FLAGS = {"payment_caution", "bank_change_caution"}
+
 HIGH_AT = 50
 CAUTION_AT = 20
 
@@ -248,7 +250,9 @@ class FraudCheck:
         if self.level == "high":
             return ["fraud_risk", "do_not_process"]
         if self.level == "caution":
-            return ["payment_caution"]
+            # "bank_change_caution" says the caution is about changed bank details, so the summary and tasks say so.
+            bank = {item.key for item in self.signals} & ({"bank_change"} | SOFT_BANK)
+            return ["payment_caution", "bank_change_caution"] if bank else ["payment_caution"]
         return []
 
     def signal_dicts(self) -> list[dict]:
@@ -642,7 +646,9 @@ def assess(
     if verdict == "fraud" or "reported" in keys:
         level = "high"
     elif verdict == "safe":
-        level = "none"
+        # "Not fraud" lifts the block, but a request to change bank details still gets a phone call before
+        # anyone pays, as it would from someone you trust.
+        level = "caution" if keys & ({"bank_change"} | SOFT_BANK) else "none"
     elif keys & CORE:
         # The sender asks, in their own words, to change bank details or buy gift cards: that blocks
         # unless you trust them. From someone trusted it is still worth a phone call.
@@ -721,7 +727,7 @@ def reassess_email(store: "Store", settings: "Settings", email: "EmailRecord", *
     if (check.level == "high") != was_high:
         email = rescore_stored(store, settings, email, check)
     elif (check.level == "caution") != was_caution:
-        email.flags = [flag for flag in email.flags if flag != "payment_caution"] + check.flags
+        email.flags = [flag for flag in email.flags if flag not in CAUTION_FLAGS] + check.flags
         store.upsert_email(email)
     save_check(store, email, check, now=now, event=event)
     return email, check

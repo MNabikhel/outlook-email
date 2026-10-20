@@ -60,7 +60,7 @@ function header(d) {
       "p",
       { class: "rd-from" },
       h("b", null, d.sender_name || d.sender_email),
-      d.sender_name ? h("span", { class: "muted" }, ` <${d.sender_email}>`) : null,
+      d.sender_name && d.sender_email ? h("span", { class: "muted" }, ` <${d.sender_email}>`) : null,
       h("span", { class: "muted" }, ` · ${d.when_full}`)
     ),
     differentReply ? h("p", { class: "rd-replyto" }, icon("alert", 13), " Replies go to ", h("b", null, d.reply_to)) : null
@@ -335,7 +335,7 @@ function fraudPanel(d, ctx) {
   if (f.can_trust_domain) choices.push(btn(`Trust @${f.sender_domain}`, { class: "btn-sm btn-quiet", onclick: () => verdict("safe:domain") }));
   if (f.verdict !== "fraud") choices.push(btn("This is fraud", { class: "btn-sm btn-danger", onclick: () => verdict("fraud:email") }));
   if (d.sender_email) choices.push(btn("Report this sender", { class: "btn-sm btn-danger-quiet", onclick: () => verdict("fraud:sender") }));
-  const label = level === "high" ? "Possible payment fraud" : level === "caution" ? "Double-check before paying" : "Nothing suspicious";
+  const label = level === "high" ? "Possible payment fraud" : level === "caution" ? "Double-check before paying" : f.verdict === "safe" ? "Marked not fraud" : "Nothing suspicious";
   const body = [
     f.verdict === "safe" ? h("p", { class: "note" }, "You marked this email as not fraud.") : f.verdict === "fraud" ? h("p", { class: "note" }, "You reported this email as fraud.") : null,
     f.signals && f.signals.length
@@ -1455,7 +1455,7 @@ export function fileView(data, tab, ctx) {
         parts,
         shown.length
           ? shown.map((part) => h("section", { class: "part" }, part.label ? h("h3", null, part.label) : null, h("pre", null, highlight(part.text, words))))
-          : h("p", { class: "muted" }, data.parts.length ? "No section mentions that." : "No readable text in this file. It is probably a scan or a picture.")
+          : h("p", { class: "muted" }, data.parts.length ? "No section mentions that." : file.unreadable || "No readable text in this file. It is probably a scan or a picture.")
       );
     };
     let timer = 0;

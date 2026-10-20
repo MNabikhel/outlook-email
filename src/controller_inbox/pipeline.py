@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 from controller_inbox.actions import extract_actions
-from controller_inbox.classify import Classification, classify_document, classify_email, outlook_categories
+from controller_inbox.classify import Classification, classify_document, classify_email, is_data_file, outlook_categories
 from controller_inbox.config import Settings
 from controller_inbox.documents import MAX_TEXT
 from controller_inbox.extract import (
@@ -17,7 +17,7 @@ from controller_inbox.extract import (
     redact_financial_secrets,
     sha256_bytes,
 )
-from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, EmailRecord, RawMessage
+from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, DocumentType, EmailRecord, ExtractedFields, RawMessage
 from controller_inbox.fraud import assess, domain_of, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
@@ -93,18 +93,18 @@ def process_message(
     merged_fields = extract_fields(
         f"{raw.subject}\n{raw.body_text}",
         as_of=anchor,
-        extra_vendor=raw.sender_name,
+        extra_vendor=_vendor_hint(raw),
     )
     for att in kept:
         att_records.append(att)
         att_classifications.append(_classify_file(raw, att.filename, att.content_type, att.extracted_text))
-        merged_fields = merged_fields.merged_with(att.extracted_fields)
+        merged_fields = merged_fields.merged_with(_email_fields(att, att_classifications[-1].document_type))
     for raw_att in attachments_raw:
         record, classified = _file_record(raw, raw_att, anchor)
         _read_as_taught(store, raw.sender_email, record, anchor)
         att_records.append(record)
         att_classifications.append(classified)
-        merged_fields = merged_fields.merged_with(record.extracted_fields)
+        merged_fields = merged_fields.merged_with(_email_fields(record, classified.document_type))
 
     body_text = clean.body_text
     verdicts = [flag for flag in (existing.flags if existing else []) if flag in VERDICT_FLAGS]
@@ -135,7 +135,7 @@ def process_message(
         has_attachments=bool(att_records) or raw.has_attachments,
         fraud=check.level,
     )
-    classified_email.flags.extend(verdicts)
+    classified_email.flags.extend(verdicts + _bank_caution(check))
 
     # If Graph said there were attachments but we still have none after fetch.
     has_files = bool(att_records)
@@ -259,11 +259,16 @@ def sent_date(received_at, settings: Settings, *, fallback):
         return fallback
 
 
+def _vendor_hint(raw: RawMessage) -> str:
+    """The sender's name as a vendor to look for, when there is a sender: a file dropped on its own has none."""
+    return raw.sender_name if raw.sender_email else ""
+
+
 def _file_record(raw: RawMessage, raw_att, anchor) -> tuple[AttachmentRecord, Classification]:
     """One attachment read, classified and its fields pulled, as stored."""
     unmasked = extract_text_from_bytes(raw_att.filename, raw_att.content_type, raw_att.content)
     text = redact_financial_secrets(unmasked)[:MAX_TEXT]
-    fields = extract_fields(f"{raw_att.filename}\n{text}", as_of=anchor, extra_vendor=raw.sender_name)
+    fields = extract_fields(f"{raw_att.filename}\n{text}", as_of=anchor, extra_vendor=_vendor_hint(raw))
     # The masked text holds no bank number to read, so a bank letter's account is read before masking. Only its
     # last four are kept; every other field comes from the masked text, so no whole number is stored.
     bank = extract_fields(unmasked[:MAX_TEXT], as_of=anchor)
@@ -287,6 +292,15 @@ def _file_record(raw: RawMessage, raw_att, anchor) -> tuple[AttachmentRecord, Cl
         classification_reasons=classified.reasons,
     )
     return record, classified
+
+
+def _email_fields(att: AttachmentRecord, document_type: DocumentType) -> ExtractedFields:
+    """What a file adds to its email's fields. A workbook or CSV that is no invoice of its own (a close workbook,
+    an AP export) lists invoice numbers that were already seen, so they don't make the email about that invoice."""
+    fields = att.extracted_fields
+    if document_type in {DocumentType.SPREADSHEET, DocumentType.OTHER} and is_data_file(att.filename, att.content_type):
+        return replace(fields, invoice_numbers=[])
+    return fields
 
 
 def _classify_file(raw: RawMessage, filename: str, content_type: str, text: str) -> Classification:
@@ -331,7 +345,7 @@ def _add_files(
         if record.id in held:
             continue
         email.attachments.append(record)
-        email.extracted = email.extracted.merged_with(record.extracted_fields)
+        email.extracted = email.extracted.merged_with(_email_fields(record, record.document_type))
     email.has_attachments = True
     email.flags = [flag for flag in email.flags if flag != "missing_attachment"]
     store.upsert_email(email)
@@ -481,6 +495,11 @@ def _classify(
     return apply_learned(classified, learned) if learned else classified
 
 
+def _bank_caution(check) -> list[str]:
+    """The flag that says a caution is about changed bank details (see ``FraudCheck.flags``)."""
+    return [flag for flag in getattr(check, "flags", []) if flag == "bank_change_caution"]
+
+
 def rescore_stored(
     store: Store, settings: Settings, email: EmailRecord, check, *, now: datetime | None = None
 ) -> EmailRecord:
@@ -525,7 +544,7 @@ def rescore_stored(
     email.importance = classified.importance
     email.importance_score = classified.importance_score
     email.importance_reasons = classified.importance_reasons
-    email.flags = list(dict.fromkeys(classified.flags + kept))
+    email.flags = list(dict.fromkeys(classified.flags + _bank_caution(check) + kept))
     def key(item: ActionItem) -> str:
         return item.title.strip().lower()
 

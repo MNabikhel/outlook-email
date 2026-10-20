@@ -91,6 +91,8 @@ def script_folder(category: DocumentType, importance: Importance, flags: list[st
 def script_summary(email: EmailRecord) -> str:
     if "fraud_risk" in email.flags or email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE:
         return "Payment instructions may have changed. Confirm by phone before any payment."
+    if "bank_change_caution" in email.flags:
+        return "Bank details may have changed. Confirm by phone with a number you already have before any payment."
     label = DOCUMENT_LABELS.get(email.category, email.category.value)
     lead = lead_sentence(email.body_text)
     has_facts = bool(email.extracted.primary_invoice or email.extracted.primary_amount is not None)
