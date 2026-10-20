@@ -31,7 +31,7 @@ export function previewPane(data, ctx) {
     return h("div", { class: "pvw" }, h("div", { class: "pvw-image" }, h("img", { src: `${base}/view`, alt: file.name })));
   }
   if (file.show === "pages") return pagesPane(email.id, file);
-  if (file.show === "sheet" || file.show === "doc") return sheetPane(email.id, file);
+  if (["sheet", "doc", "slides", "text", "zip"].includes(file.show)) return sheetPane(email.id, file);
   return h("div", { class: "pvw" }, h("p", { class: "muted" }, "There's no preview for this kind of file. Its Text tab has what CloseDesk read from it."));
 }
 
@@ -77,7 +77,8 @@ function sheetPane(emailId, file) {
     .then((got) => {
       if (!holder.isConnected) return;
       if (got.note) return replace(holder, h("p", { class: "muted" }, got.note));
-      replace(holder, got.kind === "doc" ? docView(got.blocks) : workbook(got.sheets));
+      const views = { doc: () => docView(got.blocks), slides: () => slidesView(got.slides), text: () => textView(got.text), zip: () => zipView(got) };
+      replace(holder, (views[got.kind] || (() => workbook(got.sheets)))());
     })
     .catch((error) => holder.isConnected && replace(holder, h("p", { class: "muted" }, error.message)));
   return h("div", { class: "pvw" }, holder);
@@ -185,6 +186,55 @@ function docView(blocks) {
   );
 }
 
+/** A PowerPoint deck, slide by slide: its title, its text as paragraphs and bullet points, its tables, how many
+    pictures and charts it has (they aren't drawn), and its speaker notes. */
+function slidesView(slides) {
+  if (!slides.length) return h("p", { class: "muted" }, "This presentation has no slides to show.");
+  return h(
+    "div",
+    { class: "slides" },
+    slides.map((slide) =>
+      h(
+        "section",
+        { class: `slide${slide.hidden ? " hidden-slide" : ""}`, "aria-label": `Slide ${slide.n}` },
+        h("span", { class: "slide-n" }, `Slide ${slide.n}${slide.hidden ? " · hidden" : ""}`),
+        slide.title ? h("h2", { class: "slide-title" }, slide.title) : null,
+        slide.blocks.map((block) => {
+          if (block.t === "table") return h("div", { class: "grid-wrap" }, h("table", { class: "grid doc-table" }, h("tbody", null, block.rows.map((row) => h("tr", null, row.map((cell) => h("td", null, cell)))))));
+          if (block.t === "li") return h("p", { class: "slide-li", style: { marginLeft: `${12 + 18 * (block.level || 0)}px` } }, "• ", block.text);
+          return h("p", { class: "slide-p" }, block.text);
+        }),
+        slide.pictures ? h("p", { class: "slide-pics muted small" }, `${plural(slide.pictures, "picture or chart", "pictures or charts")} on this slide (not drawn here)`) : null,
+        slide.notes ? h("details", { class: "slide-notes" }, h("summary", null, "Speaker notes"), h("p", null, slide.notes)) : null,
+        !slide.title && !slide.blocks.length && !slide.pictures ? h("p", { class: "muted small" }, "No text on this slide.") : null
+      )
+    )
+  );
+}
+
+/** A text, RTF, web page or calendar file as its text (a web page's markup is never rendered). */
+function textView(text) {
+  if (!(text || "").trim()) return h("p", { class: "muted" }, "This file has no text to show.");
+  return h("pre", { class: "text-file" }, text);
+}
+
+/** What's in a zip, with sizes. */
+function zipView(got) {
+  if (!got.files.length) return h("p", { class: "muted" }, "This zip is empty.");
+  const size = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
+  return h(
+    "div",
+    { class: "grid-wrap" },
+    h(
+      "table",
+      { class: "grid zip-list" },
+      h("thead", null, h("tr", null, h("th", { scope: "col" }, "File"), h("th", { scope: "col", class: "num" }, "Size"))),
+      h("tbody", null, got.files.map((f) => h("tr", null, h("td", null, f.name, f.encrypted ? h("span", { class: "chip faint" }, "password") : null), h("td", { class: "num" }, size(f.size)))))
+    ),
+    got.more ? h("p", { class: "muted small" }, `${plural(got.more, "more file")} not listed.`) : null
+  );
+}
+
 /** A Word table cell: its text, or {v, cs} when it spans more than one column. */
 function docCell(cell) {
   if (cell && typeof cell === "object") return h("td", { colspan: cell.cs > 1 ? String(cell.cs) : null }, cell.v);
@@ -235,6 +285,18 @@ export function thumb(emailId, file, href) {
           ),
           (got.sheets || []).length > 1 ? h("span", { class: "file-thumb-sheets" }, plural(got.sheets.length, "sheet")) : null
         );
+      } else if (file.show === "slides" || file.show === "text" || file.show === "zip") {
+        const got = await getJSON(`${apiFile(emailId, file.n)}/sheet`);
+        if (gone()) return;
+        if (got.note) return fill(h("span", { class: "muted small" }, "No preview"));
+        if (got.kind === "slides") {
+          const first = got.slides[0];
+          fill(h("div", { class: "file-thumb-slide" }, first ? [h("p", { class: "b" }, first.title || `Slide 1`), first.blocks.slice(0, 5).map((block) => h("p", null, block.t === "table" ? "▦ table" : block.text))] : null), h("span", { class: "file-thumb-sheets" }, plural(got.slides.length, "slide")));
+        } else if (got.kind === "zip") {
+          fill(h("div", { class: "file-thumb-doc" }, got.files.slice(0, 8).map((f) => h("p", null, f.name))), h("span", { class: "file-thumb-sheets" }, plural(got.files.length + (got.more || 0), "file")));
+        } else {
+          fill(h("div", { class: "file-thumb-doc mono" }, (got.text || "").split("\n").slice(0, 10).map((line) => h("p", null, line || "\u00a0"))));
+        }
       } else if (file.show === "doc") {
         const got = await getJSON(`${apiFile(emailId, file.n)}/sheet`);
         if (gone()) return;

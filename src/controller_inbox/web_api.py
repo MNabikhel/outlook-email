@@ -489,7 +489,9 @@ def register_workspace(
     def show_as(att, original: Path | None) -> str:
         """How the Preview tab shows a file as it came: the browser's own PDF viewer ("pdf"), the picture itself
         ("image"), its pages drawn as pictures ("pages": a TIFF or HEIC the browser can't show), a workbook or CSV as
-        a grid ("sheet"), a Word document's text and tables ("doc"); "" when it has no preview."""
+        a grid ("sheet"), a Word document's text and tables ("doc"), a PowerPoint deck slide by slide ("slides"), a text,
+        RTF, web page or calendar file as its text ("text"), a zip kept whole as its list of files ("zip"); "" when it
+        has no preview."""
         if original is None:
             return ""
         suffix = Path(att.filename).suffix.lower()

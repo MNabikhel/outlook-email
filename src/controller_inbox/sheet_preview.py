@@ -1,6 +1,8 @@
-"""A workbook, CSV or Word document as it looks, for the Preview tab: every sheet with its cells shown as Excel
-shows them (number formats, merged cells, bold, fills, column widths), or a Word document's headings, paragraphs
-and tables in order. Read from the file as it arrived; nothing here runs a macro or a formula.
+"""A file as it looks, for the Preview tab, when the browser can't show it itself: a workbook or CSV with every sheet
+and its cells shown as Excel shows them (number formats, merged cells, bold, fills, column widths); a Word document's
+headings, paragraphs and tables in order; a PowerPoint deck slide by slide; a text, RTF, web page or calendar file as
+its text; a zip as the list of what's in it. Read from the file as it arrived; nothing here runs a macro, a formula, a
+script or anything else in it.
 
 The JSON is small on purpose: a sheet sends at most ``MAX_ROWS`` rows of ``MAX_COLS`` columns, and says how many
 more there are.
@@ -27,15 +29,27 @@ TOO_BIG = "This file is too big to show here. Download it to open it."
 
 SHEET_SUFFIXES = {".xlsx", ".xlsm", ".xltx", ".xltm", ".xls", ".csv", ".tsv"}
 DOC_SUFFIXES = {".docx"}
+SLIDE_SUFFIXES = {".pptx", ".ppsx", ".potx"}
+TEXT_SUFFIXES = {".txt", ".md", ".log", ".json", ".xml", ".rtf", ".html", ".htm", ".ics"}
+ZIP_SUFFIXES = {".zip"}
+MAX_TEXT = 400_000  # characters of a text file shown
+MAX_SLIDES = 200
+MAX_ZIP_ENTRIES = 500
 
 
 def kind(filename: str) -> str:
-    """"sheet", "doc" or "" for a file this module shows."""
+    """"sheet", "doc", "slides", "text", "zip" or "" for a file this module shows."""
     suffix = Path(filename or "").suffix.lower()
     if suffix in SHEET_SUFFIXES:
         return "sheet"
     if suffix in DOC_SUFFIXES:
         return "doc"
+    if suffix in SLIDE_SUFFIXES:
+        return "slides"
+    if suffix in TEXT_SUFFIXES:
+        return "text"
+    if suffix in ZIP_SUFFIXES:
+        return "zip"
     return ""
 
 
@@ -43,6 +57,14 @@ def preview(data: bytes, filename: str, *, rows: int = MAX_ROWS, cols: int = MAX
     """{"kind": "sheet", "sheets": [...]} or {"kind": "doc", "blocks": [...]}. A workbook that can't be drawn says
     why in a sentence instead: {"kind": "sheet", "sheets": [], "note": "..."}."""
     which = kind(filename)
+    if which in ("slides", "text", "zip"):
+        if len(data) > MAX_BYTES or (which == "slides" and _unzipped_size(data) > MAX_UNZIPPED):
+            return {"kind": which, "note": TOO_BIG}
+        if which == "slides":
+            return {"kind": "slides", "slides": pptx_slides(data)}
+        if which == "zip":
+            return {"kind": "zip", **zip_listing(data)}
+        return {"kind": "text", "text": file_text(data, filename)}
     if which == "doc":
         if data[:2] == b"PK" and _unzipped_size(data) > MAX_UNZIPPED:
             return {"kind": "doc", "blocks": [], "note": TOO_BIG}
@@ -1017,3 +1039,100 @@ class _Numbering:
             return _count_text(counts.get(level, start), kind)
 
         return re.sub(r"%([1-9])", number, levels[ilvl][1]).strip()
+
+
+# PowerPoint ------------------------------------------------------------------------------------------
+
+
+def pptx_slides(data: bytes) -> list[dict]:
+    """Each slide's title, then its text boxes (top to bottom, left to right) as paragraphs and bullet points with
+    their level, its tables, how many pictures and charts it has, and its speaker notes: {"n", "title", "blocks",
+    "pictures", "notes", "hidden"}."""
+    from pptx import Presentation
+    from pptx.util import Emu
+
+    deck = Presentation(io.BytesIO(data))
+    slides = []
+    for number, slide in enumerate(deck.slides, start=1):
+        if number > MAX_SLIDES:
+            break
+        title_shape = slide.shapes.title
+        title = _shape_text(title_shape).strip() if title_shape is not None else ""
+        blocks: list[dict] = []
+        pictures = 0
+        for shape in sorted(_flat_shapes(slide.shapes), key=lambda sh: (int(sh.top or Emu(0)), int(sh.left or Emu(0)))):
+            if title_shape is not None and shape.shape_id == title_shape.shape_id:
+                continue
+            if getattr(shape, "has_table", False) and shape.has_table:
+                rows = [[cell.text.strip()[:MAX_CELL] for cell in row.cells] for row in shape.table.rows]
+                if rows:
+                    blocks.append({"t": "table", "rows": rows})
+            elif getattr(shape, "has_text_frame", False) and shape.has_text_frame:
+                for paragraph in shape.text_frame.paragraphs:
+                    text = paragraph.text.replace("\v", " ").strip()
+                    if not text:
+                        continue
+                    level = int(paragraph.level or 0)
+                    bulleted = level > 0 or len(shape.text_frame.paragraphs) > 1
+                    blocks.append({"t": "li" if bulleted else "p", "text": text[:MAX_CELL], "level": level})
+            elif shape.shape_type is not None and int(shape.shape_type) in (3, 13):  # chart, picture
+                pictures += 1
+            elif getattr(shape, "has_chart", False) and shape.has_chart:
+                pictures += 1
+        notes = ""
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame is not None:
+            notes = slide.notes_slide.notes_text_frame.text.strip()[:MAX_CELL]
+        hidden = slide._element.get("show") == "0"
+        slides.append({"n": number, "title": title, "blocks": blocks, "pictures": pictures, "notes": notes, "hidden": hidden})
+    return slides
+
+
+def _flat_shapes(shapes):
+    """The shapes on a slide, with those inside a group taken out of it."""
+    for shape in shapes:
+        if getattr(shape, "shape_type", None) is not None and int(shape.shape_type) == 6:  # a group
+            yield from _flat_shapes(shape.shapes)
+        else:
+            yield shape
+
+
+def _shape_text(shape) -> str:
+    return shape.text_frame.text if getattr(shape, "has_text_frame", False) and shape.has_text_frame else ""
+
+
+# Text, RTF, web pages, calendar files ----------------------------------------------------------------
+
+
+def file_text(data: bytes, filename: str) -> str:
+    """The file as text: a web page or RTF without its markup (never rendered), any other as written."""
+    from controller_inbox.documents import decode_text
+    from controller_inbox.extract import _rtf_text, html_to_text
+
+    suffix = Path(filename or "").suffix.lower()
+    if suffix == ".rtf":
+        text = _rtf_text(data)
+    elif suffix in (".html", ".htm"):
+        text = html_to_text(decode_text(data))
+    else:
+        text = decode_text(data)
+    text = text.replace("\r\n", "\n").replace("\x00", "")
+    if len(text) > MAX_TEXT:
+        text = text[:MAX_TEXT].rsplit("\n", 1)[0] + "\n\n[The rest of the file isn't shown here. Download it to see all of it.]"
+    return text
+
+
+# Zip ------------------------------------------------------------------------------------------------
+
+
+def zip_listing(data: bytes) -> dict:
+    """What's in a zip: each file's name and size, folders left out. {"files": [...], "more": n} or a note when it
+    can't be opened (damaged, or not a zip)."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            infos = [info for info in archive.infolist() if not info.is_dir()]
+    except (zipfile.BadZipFile, OSError, ValueError):
+        return {"files": [], "more": 0, "note": "This zip couldn't be opened. Download it to try it on this computer."}
+    files = [{"name": info.filename[:300], "size": info.file_size, "encrypted": bool(info.flag_bits & 0x1)} for info in infos[:MAX_ZIP_ENTRIES]]
+    return {"files": files, "more": max(0, len(infos) - MAX_ZIP_ENTRIES)}
