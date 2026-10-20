@@ -4,6 +4,7 @@ Outlook objects that refuse every write it lists folders, reads a folder's table
 from __future__ import annotations
 
 import ast
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -86,8 +87,12 @@ class Folder(ReadOnly):
         self.freeze()
 
     def GetTable(self, where, kind):
-        assert (where, kind) == ("", 0)
-        return Table(self.rows)
+        assert kind == 0
+        if not where:
+            return Table(self.rows)
+        # find_message's filter: the Message-ID column equal to one value.
+        wanted = re.search(r"= '(.*)'$", where).group(1).replace("''", "'")
+        return Table([row for row in self.rows if row[5] == wanted])
 
 
 class Columns(ReadOnly):
@@ -150,14 +155,20 @@ class ComError(Exception):
 
 
 class Store(ReadOnly):
-    def __init__(self, store_id, name, root):
+    def __init__(self, store_id, name, root, bins=None):
         self.StoreID = store_id
         self.DisplayName = name
         self._root = root
+        self._bins = bins or {}  # Outlook's number for Deleted Items (3) or Junk (23) → that folder in this store
         self.freeze()
 
     def GetRootFolder(self):
         return self._root
+
+    def GetDefaultFolder(self, kind):
+        if kind not in self._bins:
+            raise ComError(-2147352567, "Exception occurred.", (4096, "Microsoft Outlook", "No such folder.", None, 0, -2147221233), None)
+        return self._bins[kind]
 
 
 class Namespace(ReadOnly):
@@ -267,3 +278,28 @@ def test_not_windows_says_so():
     with pytest.raises(outlook_desktop.OutlookUnavailable):
         with outlook_desktop.connect():
             pass
+
+
+def test_find_message_looks_in_every_folder_by_message_id(outlook):
+    session, _ = outlook
+    assert [(s.entry_id, s.folder) for s in session.find_message("<new@x.com>")] == [("E-new", "Inbox")]
+    assert session.find_message("<nobody@x.com>") == [] and session.find_message("") == []
+
+
+def test_the_automatic_sync_never_starts_outlook(monkeypatch):
+    import sys
+    import types
+
+    calls = []
+    client = types.SimpleNamespace(
+        Dispatch=lambda name: calls.append(("Dispatch", name)),
+        GetActiveObject=lambda name: (_ for _ in ()).throw(OSError("not running")),
+    )
+    monkeypatch.setitem(sys.modules, "win32com", types.SimpleNamespace(client=client))
+    monkeypatch.setitem(sys.modules, "win32com.client", client)
+    monkeypatch.setitem(sys.modules, "pythoncom", types.SimpleNamespace(CoInitialize=lambda: None, CoUninitialize=lambda: None))
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    with pytest.raises(outlook_desktop.OutlookUnavailable, match="isn't open"):
+        with outlook_desktop.connect(start=False):
+            pass
+    assert calls == [], "Outlook wasn't started in the background"

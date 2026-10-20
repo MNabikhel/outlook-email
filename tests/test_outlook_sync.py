@@ -73,6 +73,13 @@ class FakeOutlook:
         write_msg(dest, m["subject"], f"Hello,\n\n{m['subject']}. Thanks.", sender_email=m["sender"], sender_name="Northwind AP",
                   sent=m["received"], message_id=m["message_id"], attachments=m["attachments"])
 
+    def find_message(self, message_id):
+        return [
+            Seen(entry, STORE, m["folder"], m["received"], m["unread"], m["flagged"], "normal", m["message_id"])
+            for entry, m in self.messages.items()
+            if message_id and m["message_id"] == message_id
+        ]
+
     def locate(self, entry_id, store_id):
         if entry_id in self.confused:
             raise OutlookError("Outlook didn't answer")
@@ -163,17 +170,17 @@ def test_folders_picked_with_and_without_subfolders(store, settings, outlook):
 
 
 def test_mail_dropped_in_by_hand_is_not_filed_again_and_stays_when_deleted_in_outlook(store, settings, outlook):
+    # The same message as the one in Outlook: its Message-ID, subject, sender and sent time.
     write_msg(settings.inbox_incoming / "invoice.msg", "Invoice INV-7741 from Northwind", "Hello", sender_email="ap@northwind.com",
-              message_id="<e1@northwind.com>")
+              message_id="<e1@northwind.com>", sent=NOW)
     ingest_folder(store, settings)
-    dropped = emails(store)["Invoice INV-7741 from Northwind"]
     outlook.add("e1", "Invoice INV-7741 from Northwind")
     report = sync(store, settings, outlook)
     assert report["new"] == 0 and report["already"] == 1
     assert len(store.list_emails(limit=50)) == 1 and emails(store)["Invoice INV-7741 from Northwind"].source == "folder"
     del outlook.messages["e1"]
     report = sync(store, settings, outlook)
-    assert report["removed"] == 1 and len(store.list_emails(limit=50)) == 1, "the user's own copy stays"
+    assert report["removed"] == 0 and len(store.list_emails(limit=50)) == 1, "the user's own copy stays, and isn't counted as deleted"
 
 
 # Following Outlook ---------------------------------------------------------------------------------------
@@ -330,7 +337,7 @@ def connected(monkeypatch, outlook):
     """Classic Outlook "installed": connect() hands out the fake."""
 
     @contextmanager
-    def connect():
+    def connect(**_options):
         yield outlook
 
     monkeypatch.setattr(outlook_desktop, "available", lambda: "")
@@ -360,7 +367,7 @@ def test_outlook_missing_is_said_and_the_rest_of_the_run_happens(store, settings
     monkeypatch.setattr(outlook_desktop, "available", lambda: "")
 
     @contextmanager
-    def connect():
+    def connect(**_options):
         raise outlook_desktop.OutlookUnavailable("Classic Outlook didn't answer.")
         yield
 
@@ -411,3 +418,45 @@ def test_settings_api_check_and_sync_now(store, settings, connected):
     data = client.get("/api/settings", headers=PAGE).json()["outlook"]
     assert data["copied"] == 1 and data["last_result"] == "1 new"
     assert json.loads(store.get_state(outlook_sync.LAST_RESULT_KEY))["new"] == 1
+
+
+def test_settings_say_no_when_the_page_sends_false(store, settings):
+    client = TestClient(web.create_app(settings, store))
+    reply = client.post("/api/settings/outlook", headers=PAGE, json={"auto": "false", "interval": 15, "days": 30, "folders": [], "subfolders": "false"})
+    assert reply.status_code == 200
+    assert outlook_sync.config(store)["auto"] is False and outlook_sync.config(store)["subfolders"] is False
+    assert client.post("/api/settings/outlook", headers=PAGE, json={"auto": True, "days": 0}).status_code == 400, "0 days isn't a choice"
+
+
+def test_the_automatic_sync_says_outlook_is_closed_once(store, settings, monkeypatch):
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+
+    @contextmanager
+    def connect(**options):
+        assert options == {"start": False}, "the automatic sync never starts Outlook"
+        raise outlook_desktop.OutlookUnavailable("Outlook isn't open, so it wasn't synced. It syncs once Outlook is open.")
+        yield
+
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    first = outlook_run(store, settings, now=NOW, auto=True)
+    again = outlook_run(store, settings, now=NOW + timedelta(minutes=15), auto=True)
+    assert first["quiet"] is False and again["quiet"] is True
+
+
+def test_a_first_message_that_cant_be_read_brings_the_sample_back(store, settings, outlook, as_of_now, monkeypatch):
+    from controller_inbox import pipeline
+
+    ingest_demo(store, settings, now=as_of_now)
+    sample = len(store.list_emails(limit=100))
+    outlook.add("e1", "Invoice INV-7741 from Northwind")
+
+    real = pipeline.process_message
+
+    def broken(raw, *args, **kwargs):
+        if raw.source == "outlook":
+            raise RuntimeError("unreadable")
+        return real(raw, *args, **kwargs)
+
+    monkeypatch.setattr(pipeline, "process_message", broken)
+    report = sync(store, settings, outlook)
+    assert report["failed"] and len(store.list_emails(limit=100)) == sample, "the board isn't left empty"

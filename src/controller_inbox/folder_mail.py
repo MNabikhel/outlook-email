@@ -84,6 +84,10 @@ def ingest_folder(
             if existing is not None:
                 # Another copy of a stored message: only files it doesn't hold yet are read and added.
                 raw.attachments = _new_files(settings, raw, existing)
+                if existing.source == "outlook":
+                    # Synced from Outlook first, and now dropped in by hand too: the user's own copy, which a deletion
+                    # in Outlook no longer removes.
+                    store.keep_outlook_copy(existing.id)
             # A copy that brings no new file is already read, however it was filed: reading it again would put
             # back the tasks the user snoozed, and a copy without a subject or date would rename and redate it.
             if not raw.attachments and (raw.id in seen or existing is not None):

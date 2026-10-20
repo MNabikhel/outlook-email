@@ -1063,6 +1063,11 @@ class Store:
                 ),
             )
 
+    def keep_outlook_copy(self, email_id: str) -> None:
+        """The user dropped this synced email in by hand too: a deletion in Outlook no longer removes it."""
+        with self.connect() as conn:
+            conn.execute("UPDATE outlook_items SET owned = 0 WHERE email_id = ?", (email_id,))
+
     def forget_outlook_item(self, entry_id: str) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM outlook_items WHERE entry_id = ?", (entry_id,))

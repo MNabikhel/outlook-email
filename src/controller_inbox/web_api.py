@@ -79,6 +79,13 @@ def page_only(request: Request) -> None:
     _require_page(request)
 
 
+def _yes(value) -> bool:
+    """A yes/no setting from the page: true, 1, "true", "on" or "yes"; anything else is no ("false" included)."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "on", "yes")
+    return value is True or value == 1
+
+
 def _money(value: float | None) -> str:
     return "" if value is None else f"${value:,.2f}"
 
@@ -1038,11 +1045,11 @@ def register_workspace(
         try:
             outlook_sync.save_config(
                 store,
-                auto=bool(data.get("auto")),
-                interval=int(data.get("interval") or outlook_sync.DEFAULT_INTERVAL),
-                days=int(data.get("days") or outlook_sync.DEFAULT_DAYS),
+                auto=_yes(data.get("auto")),
+                interval=int(data.get("interval", outlook_sync.DEFAULT_INTERVAL)),
+                days=int(data.get("days", outlook_sync.DEFAULT_DAYS)),
                 folders=[str(path)[:400] for path in folders][:200] if isinstance(folders, list) else [],
-                subfolders=bool(data.get("subfolders", True)),
+                subfolders=_yes(data.get("subfolders", True)),
             )
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc) or "Choose from the lists.") from None
@@ -1070,13 +1077,14 @@ def register_workspace(
         except Exception as exc:
             raise HTTPException(status_code=409, detail=f"Outlook didn't answer ({str(exc)[:200]}). Open Outlook and try again.") from None
 
-    def outlook_job(progress) -> dict:
+    def outlook_job(progress, *, auto: bool = False) -> dict:
         from controller_inbox.overnight import RunBusy, outlook_run
 
         try:
-            return outlook_run(store, settings, on_progress=progress)
+            return outlook_run(store, settings, on_progress=progress, auto=auto)
         except RunBusy:
-            return {"kind": "outlook", "message": "Another run was processing mail, so Outlook wasn't synced. It syncs next time.", "outlook": {}}
+            message = "Another run was processing mail, so Outlook wasn't synced. It syncs next time."
+            return {"kind": "outlook", "message": message, "outlook": {}, "quiet": auto}
 
     @api.post("/outlook/sync")
     def outlook_sync_now():
@@ -1091,17 +1099,17 @@ def register_workspace(
     def outlook_ticker() -> None:
         """While CloseDesk is open: sync when automatic sync is on and its interval has passed. A sync that couldn't
         run (Outlook closed, another run) is tried again after the interval, not every check."""
-        tried = 0.0
+        tried: float | None = None  # when this CloseDesk last tried; None: not yet, so the first check syncs
         while True:
             time.sleep(OUTLOOK_TICK_SECONDS)
             try:
                 if outlook_desktop.available() or not outlook_sync.due(store):
                     continue
                 interval = outlook_sync.config(store)["interval"] * 60
-                if time.monotonic() - tried < interval or job.snapshot()["state"] == "running":
+                if (tried is not None and time.monotonic() - tried < interval) or job.snapshot()["state"] == "running":
                     continue
                 tried = time.monotonic()
-                job.start(outlook_job, about={"kind": "outlook", "auto": True})
+                job.start(lambda progress: outlook_job(progress, auto=True), about={"kind": "outlook", "auto": True})
             except Exception:  # the next check tries again
                 log.warning("Automatic Outlook sync check failed", exc_info=True)
 

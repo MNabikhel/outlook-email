@@ -79,8 +79,8 @@ Every address is a link you can keep, such as `/app/mail/<id>` for an email or `
 
 - **Read only.** CloseDesk lists Outlook's folders, reads each folder's list of messages, and saves a `.msg` copy of each new one into `inbox/processed/outlook/`. It never moves, marks read, flags, categorizes, changes or deletes anything in Outlook (`tests/test_outlook_desktop.py` checks the code for any such call).
 - **What it follows.** Each sync copies new mail from the folders you pick (the Inbox by default, with subfolders if you like) received in the last 7, 30, 90 or 365 days. Read/unread, flags and moves between folders follow Outlook. Mail you delete in Outlook (in Deleted Items, Junk, or gone for good) is removed from CloseDesk; your corrections and the fraud log are kept. Mail moved to a folder that isn't synced stays.
-- **When.** **Sync automatically** syncs when CloseDesk starts and every 5, 15, 30 or 60 minutes while it's open. With it off, **Sync now** syncs whenever you click it. **Process new mail** also syncs when automatic sync is on.
-- **Safe on a bad day.** A folder Outlook can't read this time removes nothing, and only a message Outlook says it doesn't have any more counts as deleted.
+- **When.** **Sync automatically** syncs when CloseDesk starts and every 5, 15, 30 or 60 minutes while it's open; between starts it waits for Outlook to be open rather than starting Outlook in the background. With it off, **Sync now** syncs whenever you click it. **Process new mail** also syncs when automatic sync is on.
+- **Safe on a bad day.** A folder Outlook can't read this time removes nothing. A message counts as deleted only when it's in Deleted Items or Junk (in any language), or Outlook no longer has it anywhere: one archived or moved to another folder, even where Outlook gives it a new id, is found by its Message-ID and kept. A folder you picked that was renamed or deleted in Outlook is reported.
 - If Outlook asks whether to allow a program to access it, choose **Allow**. Outlook starts in the background if it isn't open. The New Outlook has no such interface: use the drop folder there.
 
 ## Laptop drop folder

@@ -165,19 +165,26 @@ def run_overnight(
         )
 
 
-def outlook_run(store: Store, settings: Settings, *, now: datetime | None = None, on_progress: Progress | None = None) -> dict:
+def outlook_run(
+    store: Store, settings: Settings, *, now: datetime | None = None, on_progress: Progress | None = None, auto: bool = False
+) -> dict:
     """Sync classic Outlook, then, when that brought or removed mail, let the model read what came in and write the
-    digest again. What Settings → Sync now and the automatic sync run. Raises ``RunBusy`` like ``run_overnight``."""
+    digest again. What Settings → Sync now and the automatic sync (``auto``) run. Raises ``RunBusy`` like
+    ``run_overnight``. The automatic sync doesn't start Outlook, and says why it couldn't sync only when that
+    changed since the last time, so a closed Outlook isn't announced every few minutes."""
     now = now or datetime.now(timezone.utc)
     with run_lock(settings) as locked:
         if not locked:
             raise RunBusy()
         from controller_inbox import outlook_sync
 
-        report = _sync_outlook(store, settings, True, now, on_progress)
+        report = _sync_outlook(store, settings, True, now, on_progress, start=not auto)
         result = {"kind": "outlook", "outlook": report, "message": _outlook_message(report)}
-        if report.get("note") or not outlook_sync.changed(report):
-            result["quiet"] = not report.get("note")
+        note = report.get("note") or ""
+        said_before = store.get_state(OUTLOOK_NOTE_KEY) or ""
+        store.set_state(OUTLOOK_NOTE_KEY, note)
+        if note or not outlook_sync.changed(report):
+            result["quiet"] = not note or (auto and note == said_before)
             return result
         reading = read_queue(store, settings, now=now, on_progress=on_progress)
         cost_codes.refresh(store, settings)
@@ -197,7 +204,12 @@ def outlook_run(store: Store, settings: Settings, *, now: datetime | None = None
         return result
 
 
-def _sync_outlook(store: Store, settings: Settings, wanted: bool | None, now: datetime, on_progress: Progress | None) -> dict:
+OUTLOOK_NOTE_KEY = "outlook_last_note"
+
+
+def _sync_outlook(
+    store: Store, settings: Settings, wanted: bool | None, now: datetime, on_progress: Progress | None, *, start: bool = True
+) -> dict:
     """Copy mail in from classic Outlook when ``wanted`` (None: when automatic sync is on). {} when not asked;
     ``note`` says why Outlook couldn't be read."""
     from controller_inbox import outlook_desktop, outlook_sync
@@ -207,7 +219,7 @@ def _sync_outlook(store: Store, settings: Settings, wanted: bool | None, now: da
     if not wanted:
         return {}
     try:
-        with outlook_desktop.connect() as session:
+        with outlook_desktop.connect(start=start) as session:
             return outlook_sync.sync(store, settings, session, now=now, on_progress=on_progress)
     except outlook_desktop.OutlookUnavailable as exc:
         return {"note": str(exc)}
@@ -241,6 +253,11 @@ def _run_overnight(
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     settings.ensure_data_dir()
+    # Files kept from before a new reader version are read again first, so the mail read below (with this version)
+    # isn't read twice.
+    reread = reread_attachments(
+        store, settings, on_progress=(lambda i, n, name: on_progress("rereading", i, n, name)) if on_progress else None
+    )
     outlook = _sync_outlook(store, settings, sync_outlook, now, on_progress)
     folder_report: dict = {}
     ingested = ingest_folder(
@@ -249,9 +266,6 @@ def _run_overnight(
         now=now,
         report=folder_report,
         on_progress=(lambda i, n, name: on_progress("importing", i, n, name)) if on_progress else None,
-    )
-    reread = reread_attachments(
-        store, settings, on_progress=(lambda i, n, name: on_progress("rereading", i, n, name)) if on_progress else None
     )
     graph_note = ""
     graph_count = 0

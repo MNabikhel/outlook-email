@@ -131,10 +131,17 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
     now = now or datetime.now(timezone.utc)
     cfg = config(store)
     infos = remember_folders(store, session)
-    trash = {f.path for f in infos if f.trash}
+    bins = [f.path for f in infos if f.trash]
+    # A folder deleted in Outlook is moved into Deleted Items with its mail: everything under a bin is in the bin.
+    trash = {f.path for f in infos if f.trash or any(f.path.startswith(b + "/") for b in bins)}
     paths = chosen_paths(cfg, infos)
+    known = {f.path for f in infos}
     since = now - timedelta(days=cfg["days"])
     report: dict = {"new": 0, "updated": 0, "moved": 0, "removed": 0, "already": 0, "failed": [], "folders": paths, "new_ids": []}
+    for path in cfg["folders"]:
+        if path not in known:
+            # Renamed or deleted in Outlook since it was picked: said, rather than syncing nothing in silence.
+            report["failed"].append({"folder": path, "error": f"The folder {path} isn't in Outlook any more. Pick it again in Settings → Outlook."})
     if on_progress:
         on_progress("outlook", 0, 0, "Reading Outlook's folders")
 
@@ -160,7 +167,9 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
             # Moved where Outlook gives it a new id (another mailbox or data file): the same message, so the copy
             # is kept and follows it, unless the old id is still in Outlook too (a copy of the message).
             old = by_message.get(item.message_id)
-            if old is not None and old["entry_id"] not in current:
+            # Received at the same time: a move keeps that, while another message reusing the Message-ID (a scanner
+            # gives every scan the same one) doesn't.
+            if old is not None and old["entry_id"] not in current and _same_time(old["received_at"], item.received):
                 store.forget_outlook_item(old["entry_id"])
                 tracked.pop(old["entry_id"], None)
                 row = {**old, "entry_id": item.entry_id, "store_id": item.store_id}
@@ -210,9 +219,10 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
     for row in list(tracked.values()):
         if row["entry_id"] in current:
             continue
-        if row["folder"] not in read:
+        if row["folder"] in known and row["folder"] not in read:
             # Its folder couldn't be read this time, or isn't synced (no longer picked, or the message was moved
-            # out of the synced folders before): left as it is.
+            # out of the synced folders before): left as it is. A folder that is gone from Outlook (deleted, so now
+            # inside Deleted Items, or renamed) is looked into below.
             continue
         if _before(row["received_at"], since):
             continue  # older than the sync looks back: no longer followed
@@ -222,13 +232,25 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
             where = None
         except Exception:
             continue  # Outlook couldn't say: ask again next sync
-        if where is not None and where not in trash:
+        if where is None:
+            # Gone under this id. A message moved to another folder can get a new id (Exchange, or another mailbox or
+            # data file, such as an archive): found by its Message-ID, it was moved, not deleted.
+            try:
+                moved = _moved_copy(session.find_message(row["message_id"]), row, trash)
+            except Exception:
+                continue  # Outlook couldn't say: ask again next sync
+            if moved is not None:
+                store.forget_outlook_item(row["entry_id"])
+                store.save_outlook_item({**row, "entry_id": moved.entry_id, "store_id": moved.store_id, "folder": moved.folder})
+                report["moved"] += 1
+                continue
+        elif where not in trash:
             if where != row["folder"]:
                 report["moved"] += 1
                 store.save_outlook_item({**row, "folder": where})
             continue
-        _remove(store, settings, row)
-        report["removed"] += 1
+        if _remove(store, settings, row):
+            report["removed"] += 1
 
     stamp = now.astimezone(timezone.utc).isoformat()
     store.set_state(LAST_SYNC_KEY, stamp)
@@ -237,6 +259,30 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
         json.dumps({key: report[key] for key in ("new", "updated", "moved", "removed", "already")} | {"failed": len(report["failed"]), "at": stamp}),
     )
     return report
+
+
+# A message keeps its received time when moved; two copies of one message saved apart can differ by a few seconds.
+SAME_TIME = timedelta(minutes=2)
+
+
+def _same_time(stamp: str, when: datetime) -> bool:
+    try:
+        then = datetime.fromisoformat(stamp)
+    except (TypeError, ValueError):
+        return False
+    then = then if then.tzinfo else then.replace(tzinfo=timezone.utc)
+    return abs(then - (when if when.tzinfo else when.replace(tzinfo=timezone.utc))) <= SAME_TIME
+
+
+def _moved_copy(found: list[Seen], row: dict, trash: set[str]) -> Seen | None:
+    """The message ``row`` follows, found by its Message-ID in a folder that isn't Deleted Items or Junk, and
+    received when it was: it was moved and given a new id. None when it was deleted."""
+    if not row.get("message_id"):
+        return None
+    for item in found:
+        if item.message_id == row["message_id"] and item.folder not in trash and _same_time(row["received_at"], item.received):
+            return item
+    return None
 
 
 def changed(report: dict) -> bool:
@@ -260,7 +306,7 @@ def describe(report: dict) -> str:
 def _copy_in(store: Store, settings: Settings, session, item: Seen, *, now: datetime, report: dict) -> tuple[str, bool, bool]:
     """Save a copy of the message, read it, and file it. Returns its email id, whether CloseDesk filed it from
     Outlook (``owned``: a deletion in Outlook removes it) and whether it is new here."""
-    from controller_inbox.folder_mail import _parse_msg, _write_extracted
+    from controller_inbox.folder_mail import _another_message, _parse_msg, _restore_sample, _stable_id, _write_extracted
     from controller_inbox.pipeline import process_message
 
     key = hashlib.sha256(f"{item.store_id}:{item.entry_id}".encode()).hexdigest()[:24]
@@ -271,17 +317,33 @@ def _copy_in(store: Store, settings: Settings, session, item: Seen, *, now: date
         raw.source = "outlook"
         raw.is_read = not item.unread
         raw.outlook_importance = item.importance
+        sent = raw.received_at.astimezone(timezone.utc).isoformat()
         if not raw.internet_message_id:
-            raw.id = "mail-" + hashlib.sha256(f"outlook:{key}".encode()).hexdigest()[:20]
+            # No Message-ID: named by what it says, so a copy of it in another synced folder (or the same message
+            # under a new Outlook id) is the same email, and two different messages are two.
+            said = "\n".join([raw.subject, raw.sender_email.lower(), sent, raw.body_text[:5000]])
+            raw.id = "mail-" + hashlib.sha256(f"outlook:{said}".encode()).hexdigest()[:20]
         existing = store.get_email(raw.id)
+        if existing is not None and raw.internet_message_id and _another_message(existing, raw):
+            # Another message with the same Message-ID (scanners and some mail tools reuse one), as the drop
+            # folder tells them apart.
+            raw.id = _stable_id("\n".join([raw.internet_message_id, raw.subject, raw.sender_email, sent]))
+            existing = store.get_email(raw.id)
         if existing is not None:
             # Already here: dropped in by hand, or the same message in two synced folders. Kept as it is, so the
             # tasks and corrections on it stay.
             return existing.id, existing.source == "outlook", False
+        cleared = 0
         if not store.real_mail_count():
-            report["sample_cleared"] = store.clear_sample()
-        _write_extracted(settings, raw)
-        record = process_message(raw, store, settings, now=now)
+            cleared = store.clear_sample()
+            report["sample_cleared"] = cleared
+        try:
+            _write_extracted(settings, raw)
+            record = process_message(raw, store, settings, now=now)
+        except Exception:
+            if cleared:
+                _restore_sample(store, settings, report, now)  # a message that couldn't be read never empties the board
+            raise
         dest = copy_path(settings, record.id)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(staging), dest)
@@ -296,15 +358,18 @@ def copy_path(settings: Settings, email_id: str) -> Path:
     return settings.inbox_processed / "outlook" / f"{email_id}.msg"
 
 
-def _remove(store: Store, settings: Settings, row: dict) -> None:
+def _remove(store: Store, settings: Settings, row: dict) -> bool:
+    """Stop following a message deleted in Outlook, and remove CloseDesk's copy. Returns whether the copy went: one
+    the user dropped in by hand stays, and so does one still in another synced folder."""
     store.forget_outlook_item(row["entry_id"])
     if not row["owned"]:
-        return  # dropped in by hand: the user's own copy stays
+        return False  # dropped in by hand: the user's own copy stays
     if any(other["email_id"] == row["email_id"] for other in store.outlook_items().values()):
-        return  # the same message is still in another synced folder
+        return False  # the same message is still in another synced folder
     store.delete_emails([row["email_id"]])
     copy_path(settings, row["email_id"]).unlink(missing_ok=True)
     shutil.rmtree(settings.inbox_extracted / row["email_id"], ignore_errors=True)
+    return True
 
 
 def _before(stamp: str, since: datetime) -> bool:

@@ -770,7 +770,7 @@ export function createSettings(ctx) {
         h(
           "div",
           null,
-          h("p", null, o.auto ? `Automatic: syncs when CloseDesk starts and every ${o.interval} minutes while it's open.` : "Manual: syncs when you click Sync now."),
+          h("p", null, o.auto ? `Automatic: syncs when CloseDesk starts, then every ${o.interval} minutes while CloseDesk and Outlook are both open.` : "Manual: syncs when you click Sync now."),
           h("p", { class: "set-help" }, o.last_sync ? `Last sync ${o.last_sync}: ${o.last_result}.` : "Not synced yet.")
         )
       ),
