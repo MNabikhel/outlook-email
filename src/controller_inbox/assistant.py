@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import httpx
+
 from controller_inbox import agent, answer_check, chats, semantic, table_lookup, vision
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
@@ -482,6 +484,8 @@ def _source_block(number: int, email: EmailRecord, limit: int, *, on_screen: boo
         )
     if is_fraud(email):
         bits.append("Warning: payment-detail change — verify by phone.")
+    if taught := _taught_line(email):
+        bits.append(taught)
     files = agent.files_line(email)
     if files:
         bits.append(files)
@@ -491,6 +495,28 @@ def _source_block(number: int, email: EmailRecord, limit: int, *, on_screen: boo
     elif body and limit >= 40:
         bits.append("Text: " + body[:limit].rsplit(" ", 1)[0] + " …")
     return "\n".join(bits)
+
+
+def _taught_line(email: EmailRecord) -> str:
+    """The fields shown on the email's pages (teach.py): the user's own, or learnt from the sender's earlier files.
+    They are the email's facts over what the scripts guessed. None from files held as possible fraud."""
+    taught = email.extracted.taught
+    if not taught or attachments_locked(email):
+        return ""
+    said = []
+    for key, entry in taught.items():
+        value = (entry or {}).get("value")
+        if value in (None, ""):
+            continue
+        if key == "total":
+            try:
+                value = f"{float(value):,.2f}"
+            except (TypeError, ValueError):
+                pass
+        name = entry.get("label") or key.replace("_", " ")
+        who = "shown by the user" if entry.get("by") == "you" else "learnt from the sender's earlier files"
+        said.append(f"{name}: {value} ({who})")
+    return "Fields shown on the page: " + "; ".join(said) if said else ""
 
 
 def source_cards(sources: list[EmailRecord], settings: Settings | None = None) -> list[dict[str, Any]]:
@@ -982,23 +1008,81 @@ def _budget(settings: Settings, *, tools: bool) -> int:
     return agent.prompt_budget(context_length(settings), reply_budget(settings, settings.chat_max_tokens), tools=tools)
 
 
+def _lone_close(text: str) -> bool:
+    return "</think>" in text and "<think>" not in text.split("</think>", 1)[0]
+
+
+class _Recorded:
+    """The model's reply as it streams, kept whole: the echo check stops reading where the reply starts repeating
+    the instructions, but reasoning that quotes them can still be followed by a "</think>" and the answer."""
+
+    # Reasoning read on past an echo, looking for its "</think>", before the reply is taken for an echo after all.
+    LOOK_AHEAD = 3_000
+
+    def __init__(self, pieces: Iterator[str]):
+        self.pieces = iter(pieces)
+        self.text = ""
+        self.whole = False  # read to its end, not stopped at an echo
+
+    def __iter__(self) -> Iterator[str]:
+        for piece in self.pieces:
+            self.text += piece
+            yield piece
+        self.whole = True
+
+    def read_on(self) -> None:
+        """Read the rest of a reply the echo check stopped: up to its lone "</think>" and the answer after it."""
+        start = len(self.text)
+        try:
+            for piece in self.pieces:
+                self.text += piece
+                if not _lone_close(self.text) and len(self.text) - start > self.LOOK_AHEAD:
+                    break
+        except (httpx.HTTPError, EmptyReply):
+            pass  # what was read so far stands
+        close = getattr(self.pieces, "close", None)
+        if close:
+            close()
+
+
 def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[dict[str, Any]]:
     before = len(state["text"])
     wrote = state["wrote"]
-    for piece in without_echo(stream_text(settings, messages, max_tokens=settings.chat_max_tokens)):
-        state["wrote"] = True
-        state["text"] += piece
-        yield {"type": "delta", "text": piece}
+    finished: dict[str, Any] = {}
+    raw = _Recorded(stream_text(settings, messages, max_tokens=settings.chat_max_tokens, finished=finished))
+    echoed = True
+    try:
+        for piece in without_echo(raw):
+            state["wrote"] = True
+            state["text"] += piece
+            yield {"type": "delta", "text": piece}
+    except EmptyReply:
+        raw.read_on()
+        if not _lone_close(raw.text):
+            raise
+    else:
+        echoed = not raw.whole
+        raw.read_on()
     # A model whose chat template opens <think> in the prompt, on a server that doesn't separate reasoning,
-    # writes its reasoning and then "</think>": what came before that tag is not the answer.
-    written = state["text"][before:]
-    if "</think>" in written and "<think>" not in written.split("</think>", 1)[0]:
-        state["text"] = state["text"][:before] + written.split("</think>")[-1].lstrip()
+    # writes its reasoning and then "</think>": what came before that tag is not the answer, even when it quoted
+    # the instructions (taken for an echo, it would have been shown as the answer).
+    if _lone_close(raw.text):
+        try:
+            answer = "".join(without_echo(iter([raw.text.split("</think>")[-1].lstrip()])))
+        except EmptyReply:
+            answer = ""
+        state["text"] = state["text"][:before] + answer
+        state["wrote"] = wrote or bool(answer)
         yield {"type": "revise", "text": state["text"]}
         if len(state["text"]) == before:
             # Only reasoning came back: no answer was written (the draft or the lookup answer takes its place).
             state["wrote"] = wrote
             raise EmptyReply("the model wrote only its reasoning")
+    if finished.get("reason") == "length" and len(state["text"]) > before and (not echoed or _lone_close(raw.text)):
+        # The model ran out of room partway: the user is told, rather than given half an answer as if it were whole.
+        cut = "\n\n(The answer was cut off here: the model ran out of room. Ask about one part at a time for the rest.)"
+        state["text"] += cut
+        yield {"type": "delta", "text": cut}
 
 
 def _keep_stated_figures(checked: str, draft: str, file_text: str) -> str:
@@ -1045,19 +1129,17 @@ _CITED = re.compile(r"\[\d+\]")
 
 
 def _read_material(ws: agent.Workspace, *, history, today: str, focus: list[dict] | None = None) -> dict[str, Any]:
-    """Everything the model was shown, for checking an answer against: the question, the focus list, each
-    email's header, summary, tasks and text, notes from earlier reading, earlier conversations, what the
-    tools returned, the queries worked out over the tables, and the files. Of the conversation, only what the user
-    said: the model's own earlier answers are not something it read, and a figure it made up then is still made up."""
-    material = [ws.question, today, ws.past, *ws.evidence, *ws.notes, *ws.worked.values(), *ws.picked]
+    """What was read, for checking an answer against: the question, the focus list, each email's header, summary,
+    tasks and text, what the tools returned, the queries worked out over the tables, and the files. Not what the
+    model wrote itself: its answers in this or earlier conversations, and the notes it made (now or on earlier
+    questions) are not something it read, and a figure it made up then is still made up. Of the conversation, only
+    what the user said counts."""
+    material = [ws.question, today, *ws.evidence, *ws.worked.values(), *ws.picked]
     if ws.shown:
         # What CloseDesk adds from the table when the answer leaves it out.
         material += [f"{point}: {value}" for point, value in ws.points]
     material += [str(turn.get("text") or "") for turn in history or [] if turn.get("role") == "user"]
     material += [" · ".join(str(value) for value in row.values() if isinstance(value, (str, int, float))) for row in focus or []]
-    primary = ws.primary()
-    if primary is not None:
-        material.append(agent.earlier_findings(ws, primary))
     files = []
     for email in ws.sources:
         material.append(f"{email.subject}\n{email.body_text}")
@@ -1215,6 +1297,19 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         state["text"] += draft
         yield {"type": "delta", "text": draft}
         return
+    except httpx.HTTPError:
+        # The model server stopped partway through the check pass: the finished draft is the answer, not half a
+        # sentence of its check, and the user is told it wasn't read over again.
+        if not draft:
+            raise
+        if state["text"][before:]:
+            state["text"] = state["text"][:before]
+            yield {"type": "revise", "text": state["text"]}
+        added = draft + "\n\n(The local model stopped while checking this answer, so it wasn't read over a second time.)"
+        state["wrote"] = True
+        state["text"] += added
+        yield {"type": "delta", "text": added}
+        return
     file_text = "\n".join(att.extracted_text or "" for email in ws.sources for att in email.attachments)
     kept = _keep_stated_figures(state["text"][before:], draft, file_text)
     if kept != state["text"][before:]:
@@ -1258,6 +1353,7 @@ def _whole_files(ws: agent.Workspace, question: str, room: int) -> dict[str, str
 def _tool_loop(ws: agent.Workspace, messages: list[dict], budget: int):
     """Let the model call tools until it answers. Returns its draft answer ("" if it ran out of steps or room)."""
     used = prompt_chars(messages)
+    asked: set[str] = set()  # the calls already run: a small model can ask for the same one again and again
     for _step in range(agent.MAX_STEPS):
         reply = chat_with_tools(ws.settings, messages, agent.TOOLS, max_tokens=ws.settings.chat_max_tokens)
         if not reply.calls:
@@ -1271,10 +1367,13 @@ def _tool_loop(ws: agent.Workspace, messages: list[dict], budget: int):
         full = False
         for index, call in enumerate(reply.calls):
             room = budget - used
+            same = json.dumps([call["name"], call["arguments"]], sort_keys=True, default=str)
             if full or index >= 3:
                 result = "Skipped: one step at a time." if not full else "No room left to read more. Answer with what you have."
             elif problems[index]:
                 result = problems[index]
+            elif same in asked:
+                result = f"Already done: {call['name']} with these arguments was called before, and its result is above. Answer with what you have, or call another tool."
             elif room < 900:
                 full = True
                 # The file is already in the prompt. Running out of room for another tool
@@ -1287,6 +1386,8 @@ def _tool_loop(ws: agent.Workspace, messages: list[dict], budget: int):
             else:
                 yield {"type": "step", "text": agent.step_label(call["name"], call["arguments"], ws)}
                 result = agent.run_tool(ws, call["name"], call["arguments"], limit=min(3000, room // 2))
+            if not problems[index] and not full and index < 3:
+                asked.add(same)
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": result})
             used += agent.prompt_size(result) + 120
         if full:

@@ -101,7 +101,7 @@ def test_the_model_reads_added_files_and_what_earlier_conversations_found(settin
 
     asked = []
 
-    def fake_stream(_settings, messages, *, max_tokens):
+    def fake_stream(_settings, messages, *, max_tokens, **_k):
         asked.append(messages[-1]["content"])
         yield "Jonathan Reyes has no department listed; his manager is Priya Raman (staff list.csv) [1]."
 

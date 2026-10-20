@@ -834,7 +834,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             chat_id = chats.new_id()
         store.create_chat(chat_id)
         saved = store.chat_turns(chat_id)
-        history = [{"role": turn["role"], "text": turn["text"]} for turn in saved][-6:]
+        history = chats.history_for_model(store, saved)
         if not saved:
             store.touch_chat(chat_id, title=chats.title_for(question))
         store.add_chat_turn(chat_id, "user", question)

@@ -204,7 +204,7 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
 
     checked = {}
 
-    def fake_stream(_settings, messages, *, max_tokens):
+    def fake_stream(_settings, messages, *, max_tokens, **_k):
         checked["messages"] = messages
         yield "The Q4 total change in D4 adds the Ads and Travel changes (Q4 budget.xlsx, sheet Budget, D4) [1]."
 
@@ -238,7 +238,7 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
 
     asked = []
 
-    def from_notes(_settings, messages, *, max_tokens):
+    def from_notes(_settings, messages, *, max_tokens, **_k):
         asked.append(messages[-1]["content"])
         yield "From my notes: D2+D3 [1]."
 
@@ -280,7 +280,7 @@ def test_files_that_fit_whole_are_answered_in_one_streamed_pass(store, settings,
     budget = mail["Q4 budget draft"]
     prompts = []
 
-    def stream(_settings, messages, *, max_tokens):
+    def stream(_settings, messages, *, max_tokens, **_k):
         prompts.append(messages)
         yield "The offsite is in Lisbon on 14 November [1]."
 
@@ -749,7 +749,7 @@ def test_asking_what_is_due_still_reads_the_open_pdf(store, settings, mail, monk
     store.upsert_email(budget)
     seen = []
 
-    def fake_stream(_settings, messages, *, max_tokens):
+    def fake_stream(_settings, messages, *, max_tokens, **_k):
         seen.append(messages[-1]["content"])
         yield "The Northwind amount due is $12,480.00 on 15 March 2026."
 
