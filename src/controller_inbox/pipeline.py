@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 from controller_inbox.actions import extract_actions
@@ -239,12 +239,25 @@ def _as_stored(raw: RawMessage, stored: EmailRecord) -> RawMessage:
 def _keep_task_status(fresh: list[ActionItem], stored: list[ActionItem]) -> list[ActionItem]:
     """When an email is read again, a task it still asks for keeps its id and what the user did with it:
     a snoozed task stays snoozed instead of coming back as a new open one. As in ``rescore_stored``, a task
-    the user snoozed or finished is kept even when the new reading doesn't ask for it."""
+    the user snoozed or finished is kept even when the new reading doesn't ask for it. A task's title carries the
+    invoice number and amount, so a file that arrives later can retitle it: as in ``teach._same_tasks``, the one
+    task of a kind left over is the same task as the one new task of that kind."""
     held = {item.title.strip().lower(): item for item in stored}
-    kept = []
-    for item in fresh:
+    pairs: dict[int, ActionItem] = {}
+    for n, item in enumerate(fresh):
         old = held.pop(item.title.strip().lower(), None)
-        kept.append(replace(item, id=old.id, status=old.status, created_at=old.created_at) if old else item)
+        if old is not None:
+            pairs[n] = old
+    for n, item in enumerate(fresh):
+        if n in pairs:
+            continue
+        same = [old for old in held.values() if old.source == item.source]
+        if len(same) == 1 and sum(1 for m, other in enumerate(fresh) if m not in pairs and other.source == item.source) == 1:
+            pairs[n] = held.pop(same[0].title.strip().lower())
+    kept = [
+        replace(item, id=pairs[n].id, status=pairs[n].status, created_at=pairs[n].created_at) if n in pairs else item
+        for n, item in enumerate(fresh)
+    ]
     return kept + [item for item in held.values() if item.status != ActionStatus.OPEN]
 
 
@@ -416,6 +429,8 @@ def ingest_mailbox(
         if store.get_email(raw.id) is None and store.email_with_message_id(raw.internet_message_id, raw.source):
             # Outlook gives a message a new id when it is moved to another folder; it was read under the old one.
             continue
+        if store.get_email(raw.id) is None and _filed_from_a_file(store, raw):
+            continue
         if not sample_checked:
             # The first real message from Outlook replaces the sample mailbox, as one from the drop folder does.
             sample_checked = True
@@ -430,15 +445,37 @@ def ingest_mailbox(
             if failed[raw.id] < MAX_SYNC_TRIES:
                 held.append(received)
     # A sync of a shorter window (``sync --hours 1``) didn't read all the mail since the cursor, or the message
-    # it waits for: the cursor and the messages to try again stay as they are.
+    # it waits for: the cursor and the messages to try again stay as they are. With no cursor yet, the next sync
+    # would look back ``lookback_hours``, so only a window reaching that far back covers it.
     previous = store.get_state(cursor) if cursor else None
-    covered = received_after is None or not previous or _utc(received_after) <= datetime.fromisoformat(previous)
+    since = (
+        datetime.fromisoformat(previous)
+        if previous
+        else started.astimezone(timezone.utc) - timedelta(hours=settings.lookback_hours)
+    )
+    covered = received_after is None or _utc(received_after) <= since
     if cursor and covered:
         started = started.astimezone(timezone.utc)
         mark = min([started, *held]).isoformat()
         store.set_state(cursor, mark)
         store.set_state(retry_key, json.dumps({"cursor": mark, "until": started.isoformat(), "tries": failed}) if failed else "")
     return processed
+
+
+def _filed_from_a_file(store: Store, raw: RawMessage) -> bool:
+    """Whether this message is already filed from the drop folder or classic Outlook (the same Message-ID, and
+    the same subject, sender and time, as the drop folder tells a reused Message-ID apart): it isn't filed twice,
+    with a second set of tasks and its own invoice flagged as a duplicate of itself."""
+    from controller_inbox.folder_mail import _another_message
+
+    for source in ("folder", "outlook"):
+        if source == raw.source:
+            continue
+        found = store.email_with_message_id(raw.internet_message_id, source)
+        stored = store.get_email(found) if found else None
+        if stored is not None and not _another_message(stored, raw):
+            return True
+    return False
 
 
 def _utc(when: datetime) -> datetime:
@@ -491,7 +528,7 @@ def _classify(
         finance=is_finance(settings, store),
         fraud=fraud,
     )
-    learned = match_correction(store, sender_email=sender_email, subject=subject)
+    learned = match_correction(store, sender_email=sender_email, subject=subject, email_id=email_id)
     return apply_learned(classified, learned) if learned else classified
 
 

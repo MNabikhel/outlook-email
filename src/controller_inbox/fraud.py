@@ -663,6 +663,10 @@ def assess(
         # Only someone you trust saying it was fake ("it was not them") keeps it quiet: anyone
         # can write "this is not phishing" above a forged thread.
         level = "caution"
+    elif "model_said_bank_change" in keys:
+        # The local model read a bank-detail change (reading.overlay_reading raised a caution for it). Its points
+        # alone don't reach CAUTION_AT, but nothing about the email changed, so a later recheck keeps the caution.
+        level = "caution"
     else:
         level = "none"
     return FraudCheck(score=score, level=level, signals=signals, trust=trust, verdict=verdict)

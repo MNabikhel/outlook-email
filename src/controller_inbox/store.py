@@ -1688,10 +1688,13 @@ class Store:
         return [{**dict(row), "signals": _loads(row["signals"], [])} for row in rows]
 
     def sender_history(self, sender_email: str, *, exclude: str = "") -> int:
+        """Emails from this address, other than ``exclude``, that the fraud check let through or the user said
+        weren't fraud. A fraudster's first blocked attempt doesn't make the second one mail from someone the
+        user already hears from."""
         with self.connect() as conn:
             return conn.execute(
-                "SELECT COUNT(*) AS n FROM emails WHERE lower(sender_email) = ? AND id != ?",
-                ((sender_email or "").lower(), exclude),
+                f"SELECT COUNT(*) AS n FROM emails WHERE lower(sender_email) = ? AND id != ? AND {_NOT_FLAGGED}",
+                ((sender_email or "").lower(), exclude, *_NOT_FLAGGED_ARGS),
             ).fetchone()["n"]
 
     def domain_history(self, domain: str, *, exclude: str = "") -> int:
@@ -1703,13 +1706,8 @@ class Store:
         with self.connect() as conn:
             return conn.execute(
                 f"""SELECT COUNT(*) AS n FROM emails WHERE instr(sender_email, '@') > 0
-                AND lower(substr(sender_email, instr(sender_email, '@') + 1)) = ? AND id != ?
-                AND (COALESCE(flags, '') {_LIKE} OR (COALESCE(flags, '') NOT {_LIKE} AND COALESCE(flags, '') NOT {_LIKE}
-                     AND COALESCE(flags, '') NOT {_LIKE}))""",
-                (
-                    domain.lower(), exclude, _json_contains("fraud_cleared"), _json_contains("fraud_risk"),
-                    _json_contains("payment_caution"), _json_contains("fraud_confirmed"),
-                ),
+                AND lower(substr(sender_email, instr(sender_email, '@') + 1)) = ? AND id != ? AND {_NOT_FLAGGED}""",
+                (domain.lower(), exclude, *_NOT_FLAGGED_ARGS),
             ).fetchone()["n"]
 
     def email_ids_from(self, *, sender: str = "", domain: str = "") -> list[str]:
@@ -1917,6 +1915,11 @@ def _email_from_rows(
 
 
 _LIKE = "LIKE ? ESCAPE '\\'"
+# Mail the fraud check let through, or that the user said wasn't fraud (for sender and domain history).
+_NOT_FLAGGED = (
+    f"(COALESCE(flags, '') {_LIKE} OR (COALESCE(flags, '') NOT {_LIKE} AND COALESCE(flags, '') NOT {_LIKE}"
+    f" AND COALESCE(flags, '') NOT {_LIKE}))"
+)
 # Most urgent first; the text values would sort alphabetically (critical, high, low, medium).
 _PRIORITY_ORDER = "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END"
 # Longest search word kept: SQLite refuses a LIKE pattern over 50,000 bytes (a pasted blob in the search box).
@@ -1959,6 +1962,9 @@ def _contains(word: str) -> str:
 def _json_contains(value: str) -> str:
     """A LIKE pattern for ``value`` as a whole JSON string inside a stored JSON document."""
     return "%" + _like_escape(_dumps(value)) + "%"
+
+
+_NOT_FLAGGED_ARGS = tuple(_json_contains(flag) for flag in ("fraud_cleared", "fraud_risk", "payment_caution", "fraud_confirmed"))
 
 
 def _col(row: sqlite3.Row, name: str, default: Any) -> Any:
