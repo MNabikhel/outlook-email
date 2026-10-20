@@ -1595,8 +1595,10 @@ def _day_buckets(text: str) -> set[str]:
         found.add(f"{int(number) - (int(number) % 10 == 1)}+")
     for number in re.findall(r"(?:\b(?:over|more than|older than|past|beyond)|>)\s*(\d{1,3})\s*days?\b", text, re.I):
         found.add(f"{int(number)}+")
-    if re.search(r"\bover\s*(\d{1,3})\b", text, re.I) and re.search(r"\bover\s*\d{1,3}\s*$", text.strip(), re.I):
-        found.add(f"{int(re.search(r'over\s*(\d{1,3})', text, re.I).group(1))}+")
+    over = re.search(r"\bover\s*(\d{1,3})\b", text, re.I)
+    if over and re.search(r"\bover\s*\d{1,3}\s*$", text.strip(), re.I):
+        # Worked out first: Python 3.11 refuses a backslash inside an f-string's braces.
+        found.add(f"{int(over.group(1))}+")
     return found
 
 

@@ -5,7 +5,6 @@ and moves, CSV quoting, and the thumbnail. Each test states the Excel or Word be
 from __future__ import annotations
 
 import io
-from datetime import time
 
 import pytest
 from docx import Document
