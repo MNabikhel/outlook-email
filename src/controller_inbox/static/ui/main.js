@@ -734,6 +734,7 @@ const settings = createSettings({
   setTheme,
   toggleRail,
   processMail: () => processMail(),
+  syncOutlook: () => syncOutlook(),
   job: () => (S.meta ? S.meta.job : { state: "idle" }),
   isShown: () => Boolean(S.route && S.route.view === "settings"),
   show(node, { keepScroll = false } = {}) {
@@ -999,8 +1000,29 @@ function finished(job) {
   const result = job.result || {};
   if (result.kind === "index") return toast(`Indexed for search: ${result.indexed} emails and file sections.`, { tone: "ok" });
   if (result.kind === "vision") return visionDone(result);
+  if (result.kind === "outlook") {
+    // An automatic sync that found nothing new says nothing.
+    if (!result.quiet || !(job.about && job.about.auto)) toast(result.message || "Outlook synced.", { tone: result.outlook && result.outlook.note ? "error" : "ok", ms: 7000 });
+    return;
+  }
   const read = typeof result.ingested === "number" ? `Read ${plural(result.ingested, "new file")}.` : "";
-  toast(`Processed. ${read}`, { tone: "ok", ms: 6000 });
+  toast(`Processed. ${read}${result.outlook_message ? ` ${result.outlook_message}` : ""}`, { tone: "ok", ms: 6000 });
+}
+
+async function syncOutlook() {
+  try {
+    const result = await postJSON("/api/outlook/sync");
+    toast(result.message);
+    if (S.meta && result.started) {
+      S.jobSeq += 1;
+      S.meta.job = { ...result.job, stage_label: "Copying mail from Outlook" };
+      renderTop();
+    }
+    clearTimeout(S.poll);
+    S.poll = setTimeout(poll, 600);
+  } catch (error) {
+    toast(error.message, { tone: "error" });
+  }
 }
 
 async function processMail() {

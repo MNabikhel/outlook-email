@@ -609,6 +609,7 @@ export function createSettings(ctx) {
         h("li", null, "Then click ", b("Process new mail"), " here or at the top of the page, or double-click ", code("CloseDesk"), " in the project folder.")
       ),
       h("p", { class: "set-help" }, "A desktop shortcut to the drop folder makes this a ten-second job. Dropping the same email twice is fine — it is recognized and not filed twice."),
+      data.outlook.available ? h("p", { class: "set-help" }, "Using classic Outlook on this computer? ", h("a", { href: "#set-outlook" }, "Outlook (classic)"), " below copies your mail in by itself, read only.") : null,
       facts([
         pathRow("Drop folder", f.incoming),
         pathRow("Read files move to", f.processed),
@@ -675,16 +676,117 @@ export function createSettings(ctx) {
   }
 
   function outlook() {
+    const o = data.outlook;
+    const graph = h(
+      "p",
+      { class: "set-help" },
+      "Microsoft 365 connection instead (needs IT): if IT approves a Microsoft Entra app with delegated ",
+      code("Mail.Read"),
+      ", set ",
+      code("AZURE_CLIENT_ID"),
+      ", then run ",
+      code("python -m controller_inbox auth"),
+      " and ",
+      code("sync"),
+      `. ${data.graph_configured ? "Configured" : "Not configured"}; last sync ${data.runs.last_sync || "never"}.`
+    );
+    if (!o.available) {
+      return section(
+        "outlook",
+        "Outlook (classic)",
+        "external",
+        "Copy mail straight from classic Outlook on this computer, without dragging it to the drop folder.",
+        h("div", { class: "set-banner off" }, h("span", { class: "dot", "aria-hidden": "true" }), h("div", null, h("p", null, o.why))),
+        graph
+      );
+    }
+    const now = ctx.job();
+    const running = now.state === "running";
+    const syncing = running && now.about && now.about.kind === "outlook";
+    const check = (event) => save("outlook", "/api/settings/outlook/check", {}, event.currentTarget, { busyText: "Checking…" });
+    const folders = o.folder_list.filter((f) => !f.trash);
+    const chosen = (f) => (o.folders.length ? o.folders.includes(f.path) : f.inbox);
+    const auto = h("input", { type: "checkbox", id: "set-outlook-auto", checked: o.auto });
+    const interval = h("select", { id: "set-outlook-interval", class: "set-select" }, o.intervals.map((m) => h("option", { value: m, selected: m === o.interval }, `Every ${m} minutes`)));
+    const days = h("select", { id: "set-outlook-days", class: "set-select" }, o.day_choices.map((d) => h("option", { value: d, selected: d === o.days }, d === 365 ? "The last year" : `The last ${d} days`)));
+    // A subfolder of a ticked folder is copied with it while subfolders are included: shown ticked and fixed.
+    const follow = () => {
+      const boxes = $$("input[name=outlook-folder]", form);
+      const ticked = boxes.filter((box) => box.checked && !box.disabled).map((box) => box.value);
+      for (const box of boxes) {
+        const under = subfolders.checked && ticked.some((path) => box.value.startsWith(`${path}/`));
+        if (under) box.checked = true;
+        else if (box.disabled) box.checked = false;
+        box.disabled = under;
+      }
+    };
+    const subfolders = h("input", { type: "checkbox", id: "set-outlook-sub", checked: o.subfolders, onchange: () => follow() });
+    let form;
+    form = h(
+      "form",
+      {
+        class: "set-form",
+        onsubmit: (event) => {
+          event.preventDefault();
+          const ticked = $$("input[name=outlook-folder]:checked:not(:disabled)", form).map((input) => input.value);
+          const body = { auto: auto.checked, interval: Number(interval.value), days: Number(days.value), folders: ticked, subfolders: subfolders.checked };
+          save("outlook", "/api/settings/outlook", body, $("button[type=submit]", form));
+        },
+      },
+      h("label", { class: "set-check" }, auto, h("span", { class: "set-check-text" }, b("Sync automatically"), h("span", null, "When CloseDesk starts, then on the schedule below while it's open. Off: only when you click Sync now."))),
+      h("div", { class: "set-inline" }, field("How often", "set-outlook-interval", interval), field("Copy mail received in", "set-outlook-days", days)),
+      h("div", { class: "set-label" }, "Folders to copy"),
+      folders.length
+        ? h(
+            "div",
+            { class: "set-folders", role: "group", "aria-label": "Folders to copy" },
+            folders.map((f) =>
+              h(
+                "label",
+                { class: "set-check", style: { paddingLeft: `${10 + Math.min(4, Math.max(0, f.depth - 1)) * 18}px` } },
+                h("input", { type: "checkbox", name: "outlook-folder", value: f.path, checked: chosen(f), onchange: () => follow() }),
+                h("span", { class: "set-check-text" }, f.path.split("/").pop(), f.depth > 1 ? h("span", null, f.path) : null)
+              )
+            )
+          )
+        : h("p", { class: "set-help" }, "Click ", b("Check Outlook"), " to list your folders. Until then the Inbox is copied."),
+      h("label", { class: "set-check" }, subfolders, h("span", { class: "set-check-text" }, "Include the subfolders of the folders picked")),
+      actions(
+        "outlook",
+        h("button", { type: "submit", class: "btn btn-primary btn-sm" }, "Save"),
+        h("button", { type: "button", class: "btn btn-sm", onclick: check }, icon("refresh", 14), folders.length ? "Check Outlook again" : "Check Outlook")
+      )
+    );
+    follow();
     return section(
       "outlook",
-      "Outlook direct connection",
+      "Outlook (classic)",
       "external",
-      "Optional, and needs IT. The drop folder keeps working either way.",
-      h("p", null, "If IT later approves a Microsoft Entra app with delegated ", code("Mail.Read"), ", set ", code("AZURE_CLIENT_ID"), ", then run ", code("python -m controller_inbox auth"), " and ", code("sync"), "."),
+      "Copies mail straight from classic Outlook on this computer: no dragging, no IT approval, nothing leaves the computer.",
+      h(
+        "div",
+        { class: `set-banner ${o.auto ? "on" : "off"}` },
+        h("span", { class: "dot", "aria-hidden": "true" }),
+        h(
+          "div",
+          null,
+          h("p", null, o.auto ? `Automatic: syncs when CloseDesk starts and every ${o.interval} minutes while it's open.` : "Manual: syncs when you click Sync now."),
+          h("p", { class: "set-help" }, o.last_sync ? `Last sync ${o.last_sync}: ${o.last_result}.` : "Not synced yet.")
+        )
+      ),
+      h("p", { class: "set-help" }, icon("ok", 14), " Read only: CloseDesk copies each email and its attachments into its own folder. Nothing in Outlook is moved, marked read, flagged, changed or deleted."),
       facts([
-        ["Status", data.graph_configured ? pill("on", "Ready to sign in") : pill("off", "Not configured")],
-        ["Last Outlook sync", data.runs.last_sync || "never"],
-      ])
+        ["Outlook", o.account || "Not checked yet"],
+        ["Copied so far", plural(o.copied, "email")],
+      ]),
+      h(
+        "p",
+        { class: "set-help" },
+        "Each sync copies new mail, follows what changed in Outlook (read, flagged, moved), and removes CloseDesk's copy of mail you deleted in Outlook. Mail moved to a folder that isn't copied stays here. Your corrections and the fraud log are kept either way."
+      ),
+      h("div", { class: "set-actions" }, h("button", { type: "button", class: "btn btn-primary btn-sm", disabled: running, onclick: () => ctx.syncOutlook() }, icon("refresh", 13), syncing ? "Syncing…" : "Sync now")),
+      form,
+      graph
     );
   }
 

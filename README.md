@@ -9,7 +9,7 @@ Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get
 1. **Install Python 3.11+** from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH**.
 2. **Get CloseDesk:** green **Code** button → **Download ZIP**, then unzip it somewhere permanent (for example `Documents`). The folder is called `outlook-email-main`; rename it `CloseDesk` if you like.
 3. **Double-click `CloseDesk.bat`** (Windows) or **`CloseDesk.command`** (Mac). The first run sets itself up in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around.
-4. **Add your mail:** drag emails from Outlook into the `inbox/incoming` folder and click **Process new mail**. ([New Outlook, web, and Mac](docs/SETUP.md#every-morning))
+4. **Add your mail:** on Windows with classic Outlook, open **Settings → Outlook (classic)**, click **Check Outlook**, pick your folders and click **Sync now** (or turn on **Sync automatically**). It copies your mail and attachments in and never changes anything in Outlook. Otherwise drag emails from Outlook into the `inbox/incoming` folder and click **Process new mail**. ([New Outlook, web, and Mac](docs/SETUP.md#every-morning))
 5. **Optional local AI:** in [LM Studio](https://lmstudio.ai/), load a small instruct model (3B–8B) and start the server (Developer tab → **Start server**). CloseDesk finds it on its own.
 
 **Using it:**
@@ -72,6 +72,16 @@ A second view of the same mailbox that works like a mail app: nothing reloads as
 - **Light or dark:** follows the computer, or pick one with the moon/sun button or in Settings.
 
 Every address is a link you can keep, such as `/app/mail/<id>` for an email or `/app/mail/<id>/file/1?tab=tables` for its first attachment's tables. Everything is served from this computer; nothing is loaded from the internet.
+
+## Classic Outlook sync (Windows)
+
+**Settings → Outlook (classic)** copies mail straight from classic Outlook on this computer, through Outlook's own programming interface: no Microsoft 365 app, no IT approval, nothing leaves the computer.
+
+- **Read only.** CloseDesk lists Outlook's folders, reads each folder's list of messages, and saves a `.msg` copy of each new one into `inbox/processed/outlook/`. It never moves, marks read, flags, categorizes, changes or deletes anything in Outlook (`tests/test_outlook_desktop.py` checks the code for any such call).
+- **What it follows.** Each sync copies new mail from the folders you pick (the Inbox by default, with subfolders if you like) received in the last 7, 30, 90 or 365 days. Read/unread, flags and moves between folders follow Outlook. Mail you delete in Outlook (in Deleted Items, Junk, or gone for good) is removed from CloseDesk; your corrections and the fraud log are kept. Mail moved to a folder that isn't synced stays.
+- **When.** **Sync automatically** syncs when CloseDesk starts and every 5, 15, 30 or 60 minutes while it's open. With it off, **Sync now** syncs whenever you click it. **Process new mail** also syncs when automatic sync is on.
+- **Safe on a bad day.** A folder Outlook can't read this time removes nothing, and only a message Outlook says it doesn't have any more counts as deleted.
+- If Outlook asks whether to allow a program to access it, choose **Allow**. Outlook starts in the background if it isn't open. The New Outlook has no such interface: use the drop folder there.
 
 ## Laptop drop folder
 

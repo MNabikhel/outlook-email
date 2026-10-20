@@ -15,7 +15,9 @@ That's it. The first double-click below finishes the setup by itself.
 
 ## Every morning
 
-1. **Get yesterday's mail out of Outlook** into the project's `inbox/incoming` folder:
+1. **Classic Outlook on Windows: let CloseDesk copy it.** Open **Settings → Outlook (classic)**, click **Check Outlook**, tick the folders to copy (the Inbox is ticked), and either turn on **Sync automatically** or click **Sync now** when you want. It copies mail and attachments and never changes anything in Outlook; mail you delete in Outlook disappears from CloseDesk on the next sync. If you use this, skip the dragging below.
+
+   **Otherwise, get yesterday's mail out of Outlook** into the project's `inbox/incoming` folder:
    - **Classic Outlook (Windows):** click the first message, Shift+click the last, and drag the selection onto `inbox\incoming` in File Explorer. Each becomes a `.msg` with its attachments inside.
    - **New Outlook / Outlook on the web:** open a message → **… → Save as** (or **Download**) → save the `.eml` into `inbox/incoming`.
    - **Outlook for Mac:** drag messages into `inbox/incoming` in Finder.
@@ -83,6 +85,8 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 | "The local model read 0" or "three messages in a row failed" | Update CloseDesk (download the ZIP again and copy your `data` and `inbox` folders across). Reasoning models such as Qwen3.5 used to come back empty; they now work, with thinking turned off for filing. The message ends with what the model actually sent, and `python -m controller_inbox llm-check` shows the same for one sample. |
 | Which LM Studio address? | CloseDesk uses the OpenAI-compatible one, `http://localhost:1234/v1`, and adds `/chat/completions` itself. Pasting `…/v1/chat/completions` or `…/api/v1/chat` into `CONTROLLER_INBOX_LLM_BASE_URL` works too. |
 | Summaries look generic | Those came from the fast scripts. Start the model and process again; the model reads everything that is still waiting. |
+| **Outlook (classic)** says it isn't available | It works on Windows with classic Outlook only. Double-click CloseDesk once more so it installs `pywin32`. On New Outlook, use the drop folder. |
+| Outlook asks "A program is trying to access…" | Choose **Allow**. If IT blocks programs from reading Outlook, the sync says so; use the drop folder instead. |
 | A file landed in `inbox/failed` | Open the `.why.txt` next to it. Usually re-saving the message from Outlook fixes it. |
 | A category is wrong | Open the message, use **Wrong category?**, and write one sentence on why. That sender is learned. |
 | **Ask CloseDesk** says the model isn't running | That's fine: it still finds emails. Start LM Studio's server for written answers. |

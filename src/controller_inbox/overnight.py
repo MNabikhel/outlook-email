@@ -146,6 +146,7 @@ def run_overnight(
     now: datetime | None = None,
     limit: int | None = None,
     sync_graph: bool = True,
+    sync_outlook: bool | None = None,
     reader: LocalReader | None = None,
     on_progress: Progress | None = None,
     vision_minutes: float | None = None,
@@ -153,14 +154,76 @@ def run_overnight(
 ) -> dict:
     """One full pass. Raises ``RunBusy`` instead of racing another run over the same drop folder. ``vision_minutes``:
     how long it may spend reading scanned pages with the vision model (default ``Settings.vision_minutes_per_run``);
-    ``should_stop``: the reading of scans ends after the page being read when it says so."""
+    ``should_stop``: the reading of scans ends after the page being read when it says so. ``sync_outlook``: copy new
+    mail from classic Outlook first; None does when automatic sync is on in Settings."""
     with run_lock(settings) as locked:
         if not locked:
             raise RunBusy()
         return _run_overnight(
-            store, settings, now=now, limit=limit, sync_graph=sync_graph, reader=reader, on_progress=on_progress,
-            vision_minutes=vision_minutes, should_stop=should_stop,
+            store, settings, now=now, limit=limit, sync_graph=sync_graph, sync_outlook=sync_outlook, reader=reader,
+            on_progress=on_progress, vision_minutes=vision_minutes, should_stop=should_stop,
         )
+
+
+def outlook_run(store: Store, settings: Settings, *, now: datetime | None = None, on_progress: Progress | None = None) -> dict:
+    """Sync classic Outlook, then, when that brought or removed mail, let the model read what came in and write the
+    digest again. What Settings → Sync now and the automatic sync run. Raises ``RunBusy`` like ``run_overnight``."""
+    now = now or datetime.now(timezone.utc)
+    with run_lock(settings) as locked:
+        if not locked:
+            raise RunBusy()
+        from controller_inbox import outlook_sync
+
+        report = _sync_outlook(store, settings, True, now, on_progress)
+        result = {"kind": "outlook", "outlook": report, "message": _outlook_message(report)}
+        if report.get("note") or not outlook_sync.changed(report):
+            result["quiet"] = not report.get("note")
+            return result
+        reading = read_queue(store, settings, now=now, on_progress=on_progress)
+        cost_codes.refresh(store, settings)
+        if on_progress:
+            on_progress("digest", 1, 1, "Writing the digest")
+        as_of = local_today(settings.tz, now)
+        payload = build_digest(
+            store,
+            as_of=as_of,
+            generated_at=now.astimezone(settings.tz),
+            tz=settings.tz,
+            lookback_days=settings.digest_lookback_days,
+            finance=is_finance(settings, store),
+        )
+        write_digest_files(payload, settings.digest_dir, as_of.isoformat())
+        result["read_by_bionic"] = len(reading["read_ids"])
+        return result
+
+
+def _sync_outlook(store: Store, settings: Settings, wanted: bool | None, now: datetime, on_progress: Progress | None) -> dict:
+    """Copy mail in from classic Outlook when ``wanted`` (None: when automatic sync is on). {} when not asked;
+    ``note`` says why Outlook couldn't be read."""
+    from controller_inbox import outlook_desktop, outlook_sync
+
+    if wanted is None:
+        wanted = outlook_sync.config(store)["auto"] and not outlook_desktop.available()
+    if not wanted:
+        return {}
+    try:
+        with outlook_desktop.connect() as session:
+            return outlook_sync.sync(store, settings, session, now=now, on_progress=on_progress)
+    except outlook_desktop.OutlookUnavailable as exc:
+        return {"note": str(exc)}
+    except Exception as exc:  # the drop folder and the digest still happen
+        log.warning("Syncing Outlook failed", exc_info=True)
+        return {"note": f"Outlook couldn't be read this time ({str(exc)[:200]})."}
+
+
+def _outlook_message(report: dict) -> str:
+    from controller_inbox import outlook_sync
+
+    if not report:
+        return ""
+    if report.get("note"):
+        return report["note"]
+    return f"Outlook synced: {outlook_sync.describe(report)}."
 
 
 def _run_overnight(
@@ -174,9 +237,11 @@ def _run_overnight(
     on_progress: Progress | None,
     vision_minutes: float | None = None,
     should_stop: Callable[[], bool] | None = None,
+    sync_outlook: bool | None = None,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     settings.ensure_data_dir()
+    outlook = _sync_outlook(store, settings, sync_outlook, now, on_progress)
     folder_report: dict = {}
     ingested = ingest_folder(
         store,
@@ -240,6 +305,8 @@ def _run_overnight(
         "failed_files": folder_report.get("failed", []),
         "graph_synced": graph_count,
         "graph_note": graph_note,
+        "outlook": outlook,
+        "outlook_message": _outlook_message(outlook),
         "read_by_bionic": len(reading["read_ids"]),
         "files_summarized": summarized,
         "pages_seen": looked.pages,
@@ -307,6 +374,8 @@ def _log(summary: dict, *, store: Store) -> str:
         lines.append(f"Could not read {row['file']}: {row['error']}")
     if summary["graph_note"]:
         lines += [f"Outlook sync note: {summary['graph_note']}", ""]
+    if summary.get("outlook_message"):
+        lines += [summary["outlook_message"], ""]
     if summary["model"]:
         lines.append(f"Model: {summary['model']}")
         if summary["model_note"]:
