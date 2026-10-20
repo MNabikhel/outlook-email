@@ -159,6 +159,9 @@ def pdf_text(data: bytes) -> str:
             text = _ocr_page_images(page)
             if text.strip() or ocr.engine_name():
                 scanned.append(number)
+        if page is not None and (filled := _pdf_form_values(page)):
+            # A filled form's values are its fields', not text on the page: read them too.
+            text = (text.strip() + "\n\n" if text.strip() else "") + "Filled-in form fields:\n" + "\n".join(filled)
         words += len(text.split())
         pages.append(f"[page {number}]\n{text.strip() or '(no text on this page)'}")
     from controller_inbox import camelot_tables  # here: it imports vision, which imports this module
@@ -333,6 +336,49 @@ def _pdf_page(page) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
+def _pdf_form_values(page) -> list[str]:
+    """The values filled in the page's form fields (its widgets), one "<field>: <value>" line each. A field's name is
+    its tooltip when it has one ("Amount due"), else its name with "_" read as spaces. An empty, hidden or unticked
+    field isn't listed."""
+    try:
+        annots = page.get("/Annots")
+        annots = annots.get_object() if annots is not None else []
+    except Exception:
+        return []
+    out: list[str] = []
+    for ref in list(annots or [])[:500]:
+        try:
+            widget = ref.get_object()
+            if widget.get("/Subtype") != "/Widget" or int(widget.get("/F", 0)) & 2:
+                continue
+            field, value, name = widget, None, None
+            for _depth in range(8):  # a widget's value and name can be its parent field's
+                if value is None and "/V" in field:
+                    value = field["/V"]
+                if name is None and ("/TU" in field or "/T" in field):
+                    name = str(field.get("/TU") or field.get("/T"))
+                if (value is not None and name is not None) or "/Parent" not in field:
+                    break
+                field = field["/Parent"].get_object()
+            if value is None:
+                continue
+            value = value.get_object()
+            if isinstance(value, list):
+                value = ", ".join(str(item) for item in value)
+            value = str(value).strip()
+            if value.startswith("/"):  # a tick box or radio button: its state's name
+                value = value[1:]
+                if value in ("Off", ""):
+                    continue
+            if not value:
+                continue
+            label = re.sub(r"[_\s]+", " ", name or "Field").strip()
+            out.append(f"{label[:1].upper()}{label[1:]}: {value}")
+        except Exception:
+            continue
+    return out
+
+
 def _has_images(page) -> bool:
     try:
         return len(page.images) > 0
@@ -408,6 +454,16 @@ def docx_text(data: bytes) -> str:
     if any("[deleted:" in line for line in lines):
         lines.insert(0, "[This draft has tracked changes: inserted text is shown, deletions are marked [deleted: …].]")
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+_DELETED = re.compile(r"\[deleted: [^\]\n]*\]")
+
+
+def without_deletions(text: str) -> str:
+    """``text`` without what a Word draft's tracked changes deleted (``[deleted: …]``, as docx_text marks it). The
+    note stays in the file's text for reading it, but a figure struck out is never a field: "Total due:
+    [deleted: $12,500.00]$10,250.00" is due $10,250.00."""
+    return _DELETED.sub("", text) if "[deleted: " in text else text
 
 
 def _docx_blocks(parent):

@@ -11,7 +11,7 @@ from typing import Iterable
 from dateutil import parser as date_parser
 
 from controller_inbox.classify import strip_html_comments
-from controller_inbox.documents import decode_text, extract_document
+from controller_inbox.documents import decode_text, extract_document, without_deletions
 from controller_inbox.models import ExtractedFields
 from controller_inbox.ocr import image_text
 
@@ -531,6 +531,7 @@ def parse_due_date(raw: str, *, as_of: date) -> str | None:
 
 
 def extract_fields(text: str, *, as_of: date, extra_vendor: str | None = None) -> ExtractedFields:
+    text = without_deletions(text)  # a figure struck out under Track Changes isn't the invoice's
     # "Your Adobe invoice - 2026-10-01": a date after the word is the billing date, not the invoice's number.
     invoices = _unique(_normalize_id(m.group(1)) for m in INVOICE_RE.finditer(text) if not _is_date(m.group(1)))
     invoices += [v for v in _unique(_normalize_id(m.group(1)) for m in INVOICE_BARE_RE.finditer(text)) if v not in invoices]

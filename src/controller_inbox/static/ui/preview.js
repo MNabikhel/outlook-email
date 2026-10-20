@@ -41,7 +41,8 @@ function pagesPane(emailId, file) {
   const holder = h("div", { class: "pvw-pages" }, h("p", { class: "muted" }, "Drawing the pages…"));
   (async () => {
     try {
-      const first = await getJSON(`${apiFile(emailId, file.n)}/pages/1/regions`);
+      // Counted with the file (file.pages), not from page 1's regions: those wait for its OCR.
+      const first = file.pages ? { pages: file.pages } : await getJSON(`${apiFile(emailId, file.n)}/pages/1/regions`);
       const count = Math.min(first.pages || 1, 30);
       replace(holder);
       for (let p = 1; p <= count; p += 1) {
@@ -167,6 +168,7 @@ function grid(sheet, formula) {
   return h(
     "div",
     { class: "xl-scroll" },
+    sheet.note ? h("p", { class: "muted small xl-more" }, sheet.note) : null,
     h("table", { class: "xl-grid" }, colgroup, head, h("tbody", null, rows)),
     more ? h("p", { class: "muted small xl-more" }, `${more} not shown here. Download the file, or ask CloseDesk about them.`) : null
   );

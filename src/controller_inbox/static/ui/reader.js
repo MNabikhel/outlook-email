@@ -891,7 +891,7 @@ function pageView(data, ctx) {
     const at = page;
     try {
       const reply = await postJSON(`${api}/${at}/fixes`, body);
-      ctx.fileChanged(email.id, file.n, body.kind === "field");
+      ctx.fileChanged(email.id, file.n, body.kind === "field" || body.kind === "text");
       hideTip(true);
       toast(reply.message, { action: "Undo", onAction: () => undo(reply.id, at), ms: 8000 });
       if (at === page) await show(at);

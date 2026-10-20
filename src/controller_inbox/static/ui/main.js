@@ -575,8 +575,15 @@ const ctx = {
   // A fix saved on the Page tab changes the file's reading: its Text and Tables tabs fetch it again.
   fileChanged: (emailId, n, fields = false) => {
     S.files.delete(`${emailId}:${n}`);
-    // A field taught on the page changes the email itself (its invoice number, total, due date, tasks).
-    if (fields) S.staleEmail = emailId;
+    // A field taught on the page, or a figure fixed there, changes the email itself (its invoice number, total,
+    // due date, tasks, the clip of its file's text).
+    if (!fields) return;
+    S.staleEmail = emailId;
+    // Undo from the note still showing after going back to the email: the email shown is redrawn now.
+    if (S.email && S.email.id === emailId && S.shown === `email:${emailId}`) {
+      S.staleEmail = "";
+      reloadEmail();
+    }
   },
   categories: () => (S.meta ? S.meta.categories : []),
   visionRead,

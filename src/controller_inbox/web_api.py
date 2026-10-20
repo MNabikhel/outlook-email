@@ -459,6 +459,7 @@ def register_workspace(
         found = table_lookup.tables_in(text) if text.strip() else []
         suffix = Path(att.filename).suffix.lower()
         original = agent.original_file(settings, email, att)
+        show = "" if broken else show_as(att, original)
         return {
             "email": {"id": email.id, "subject": email.subject, "sender": email.sender_name or email.sender_email},
             "file": {
@@ -474,7 +475,9 @@ def register_workspace(
                 "preview": not broken and vision.readable_file(att.filename) and original is not None and vision.can_render(),
                 # How the Preview tab shows the file as it came: "pdf", "image", "pages", "sheet", "doc" or "".
                 # A file that couldn't be read has none.
-                "show": "" if broken else show_as(att, original),
+                "show": show,
+                # How many pages the Preview tab draws a TIFF or HEIC as, counted without reading any of them.
+                "pages": page_count(email, att) if show == "pages" else 0,
                 "unreadable": UNREADABLE if broken else "",
             },
             "parts": [{"label": part.label, "text": part.text} for part in documents.split_parts(text)] if text.strip() else [],
@@ -485,6 +488,13 @@ def register_workspace(
                 "readings": vision.readings_json(store.page_readings(att.id, att.sha256)),
             },
         }
+
+    def page_count(email, att) -> int:
+        data = vision.original_bytes(settings, email, att)
+        try:
+            return page_view.page_count(data, att.filename) if data is not None else 0
+        except Exception:
+            return 0
 
     def show_as(att, original: Path | None) -> str:
         """How the Preview tab shows a file as it came: the browser's own PDF viewer ("pdf"), the picture itself
@@ -658,7 +668,11 @@ def register_workspace(
             if not now.strip():
                 raise HTTPException(status_code=400, detail="Type what the page says there.")
             fix = fixes.text_fix(boxes[index], now)
+            fix_id = store.add_page_fix({**fix, "attachment_id": att.id, "sha256": att.sha256, "page": p, "sender": email.sender_email})
             message = "Fixed. The file's text has it now, and the same word is put right on this sender's later files." if fixes.learnable(fix["was"], fix["now"]) else "Fixed. The file's text has it now."
+            # Filing the email again can take a moment: off the event loop.
+            message += await run_in_threadpool(read_fixed, email.id, n)
+            return {"ok": True, "id": fix_id, "message": message}
         elif kind == "field":
             from controller_inbox.pipeline import sent_date
 
@@ -703,6 +717,21 @@ def register_workspace(
         fix_id = store.add_page_fix({**fix, "attachment_id": att.id, "sha256": att.sha256, "page": p, "sender": email.sender_email})
         return {"ok": True, "id": fix_id, "message": message}
 
+    def read_fixed(email_id: str, n: int) -> str:
+        """The file read again after a figure on its page was fixed (or the fix taken back): its fields and the
+        email's follow the text. What to add to the message about it."""
+        email = store.get_email(email_id)
+        if email is None or not 1 <= n <= len(email.attachments):
+            return ""
+        before = email.extracted.primary_amount
+        email, changed = teach.read_fixed(store, settings, email, n, as_of=board_date())
+        if not changed:
+            return ""
+        after = email.extracted.primary_amount
+        if after != before and after is not None:
+            return f" The email was read again from it: its amount is {teach.shown('total', str(after))} now."
+        return " The email's details were read again from it."
+
     @api.post("/mail/{email_id}/files/{n}/pages/{p}/fixes/{fix_id}/undo")
     def mail_file_fix_undo(email_id: str, n: int, p: int, fix_id: str):
         """Take back a fix made on this file."""
@@ -721,6 +750,8 @@ def register_workspace(
             if any(t["field"] == field for t in teach.templates(store, email.sender_email)):
                 return {"ok": True, "message": f"Taken back. {name} is read as the sender's other files taught it."}
             return {"ok": True, "message": f"Taken back. {name} is read as before, and isn't learnt for this sender."}
+        if taken is not None and taken["kind"] == "text":
+            return {"ok": True, "message": "Fix taken back." + read_fixed(email.id, n)}
         return {"ok": True, "message": "Fix taken back."}
 
     @api.post("/mail/{email_id}/files/{n}/vision")

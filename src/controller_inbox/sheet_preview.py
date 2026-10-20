@@ -10,10 +10,14 @@ more there are.
 
 from __future__ import annotations
 
+import copy
 import csv
+import hashlib
 import io
 import math
 import re
+import threading
+from collections import OrderedDict
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -53,9 +57,30 @@ def kind(filename: str) -> str:
     return ""
 
 
+# The previews made last, by file (its SHA-256 and name) and size asked for: an email's thumbnail and its Preview
+# tab, opened again, don't read the workbook again.
+CACHED = 8
+_cache: OrderedDict[tuple, dict] = OrderedDict()
+_cache_lock = threading.Lock()
+
+
 def preview(data: bytes, filename: str, *, rows: int = MAX_ROWS, cols: int = MAX_COLS) -> dict:
     """{"kind": "sheet", "sheets": [...]} or {"kind": "doc", "blocks": [...]}. A workbook that can't be drawn says
     why in a sentence instead: {"kind": "sheet", "sheets": [], "note": "..."}."""
+    key = (hashlib.sha256(data).hexdigest(), filename, rows, cols)
+    with _cache_lock:
+        if key in _cache:
+            _cache.move_to_end(key)
+            return copy.deepcopy(_cache[key])
+    got = _preview(data, filename, rows=rows, cols=cols)
+    with _cache_lock:
+        _cache[key] = copy.deepcopy(got)
+        while len(_cache) > CACHED:
+            _cache.popitem(last=False)
+    return got
+
+
+def _preview(data: bytes, filename: str, *, rows: int, cols: int) -> dict:
     which = kind(filename)
     if which in ("slides", "text", "zip"):
         if len(data) > MAX_BYTES or (which == "slides" and _unzipped_size(data) > MAX_UNZIPPED):
@@ -105,9 +130,22 @@ def _unzipped_size(data: bytes) -> int:
 # Excel workbooks ---------------------------------------------------------------------------------------
 
 
+# A workbook that unzips to more than this is read streaming (openpyxl's read-only mode), only as far as the rows
+# shown: loading it whole, twice (values and formulas), takes seconds and a gigabyte for a 5 MB ledger export.
+# Streaming reads no merged cells, hidden rows or columns, widths or frozen panes, so a smaller workbook is loaded
+# whole and drawn as Excel shows it.
+FULL_UNZIPPED = 4_000_000
+STREAMED_NOTE = (
+    "A large workbook, so its cells are shown without merged cells, hidden rows and columns or column widths. "
+    "Download it to open it in Excel."
+)
+
+
 def _xlsx(data: bytes, max_rows: int, max_cols: int) -> list[dict]:
     from openpyxl import load_workbook
 
+    if _unzipped_size(data) > FULL_UNZIPPED:
+        return _xlsx_streamed(data, max_rows, max_cols)
     values = load_workbook(io.BytesIO(data), data_only=True)
     formulas = load_workbook(io.BytesIO(data), data_only=False)
     sheets = []
@@ -120,6 +158,81 @@ def _xlsx(data: bytes, max_rows: int, max_cols: int) -> list[dict]:
     return sheets
 
 
+def _xlsx_streamed(data: bytes, max_rows: int, max_cols: int) -> list[dict]:
+    """The first ``max_rows`` rows of each sheet of a large workbook, read streaming: values, formulas, number
+    formats and cell styles, as ``_sheet`` shows them, without what only a whole load reads (merges, hidden rows
+    and columns, widths, frozen panes)."""
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+
+    values = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    formulas = load_workbook(io.BytesIO(data), data_only=False, read_only=True)
+    sheets = []
+    try:
+        for ws in formulas.worksheets[:MAX_SHEETS]:
+            vs = values[ws.title]
+            out_rows: list[dict] = []
+            last_col = 0
+            rows = zip(ws.iter_rows(min_row=1, max_col=max_cols), vs.iter_rows(min_row=1, max_col=max_cols))
+            for r, (row, value_row) in enumerate(rows, start=1):
+                if len(out_rows) >= max_rows:
+                    break
+                cells = []
+                for cell, value_cell in zip(row, value_row):
+                    if getattr(cell, "value", None) is None:
+                        continue
+                    entry = _entry(cell, cell.value, value_cell.value)
+                    entry["c"] = cell.column
+                    entry.update(_style(cell))
+                    cells.append(entry)
+                    last_col = max(last_col, cell.column)
+                # An empty row still takes its place in the grid, so row numbers read as in Excel.
+                out_rows.append({"n": r, "cells": cells})
+            while out_rows and not out_rows[-1]["cells"]:
+                out_rows.pop()
+            shown_last = out_rows[-1]["n"] if out_rows else 0
+            try:
+                max_row, max_col = int(ws.max_row or 0), int(ws.max_column or 0)
+            except (TypeError, ValueError):
+                max_row, max_col = shown_last, last_col
+            shown_cols = min(max(last_col, min(max_col, max_cols)), max_cols)
+            sheets.append({
+                "name": ws.title,
+                "hidden": getattr(ws, "sheet_state", "visible") != "visible",
+                "cols": [{"n": c, "letter": get_column_letter(c), "w": _px(None), "hidden": False} for c in range(1, shown_cols + 1)],
+                "rows": out_rows,
+                "more_rows": max(0, max_row - shown_last),
+                "more_cols": max(0, max_col - shown_cols),
+                "freeze": "",
+                "note": STREAMED_NOTE,
+            })
+    finally:
+        values.close()
+        formulas.close()
+    return sheets
+
+
+def _entry(cell, raw, value) -> dict:
+    """A cell as the grid shows it: its value as Excel shows it ("v"), its formula ("f"), and whether it's a
+    number or date ("num") or shown red ("red"). ``raw`` is what the cell holds, ``value`` its saved result."""
+    formula = raw if isinstance(raw, str) and raw.startswith("=") else ""
+    if not formula and type(raw).__name__ == "ArrayFormula":
+        formula = str(getattr(raw, "text", "") or "")
+    shown_value = value if formula else raw
+    text, red = display(shown_value, cell.number_format)
+    entry: dict = {"v": text[:MAX_CELL]}
+    if formula:
+        entry["f"] = formula[:500]
+        if shown_value is None:
+            # Saved without its result (a file written by a program, not Excel): the formula, marked as such.
+            entry["v"], entry["nocalc"] = formula[:MAX_CELL], True
+    if isinstance(shown_value, (int, float, Decimal, datetime, date, time, timedelta)) and not isinstance(shown_value, bool):
+        entry["num"] = True  # numbers and dates sit at the right of the cell, as in Excel
+    if red:
+        entry["red"] = True
+    return entry
+
+
 def _sheet(ws, vs, max_rows: int, max_cols: int) -> dict:
     from openpyxl.utils import get_column_letter
 
@@ -127,15 +240,8 @@ def _sheet(ws, vs, max_rows: int, max_cols: int) -> dict:
     # formatted down to row 1,048,576 would make a million of them.
     held = {key: cell for key, cell in ws._cells.items() if cell.value is not None}
     values = vs._cells
-    merged: dict[tuple[int, int], tuple[int, int]] = {}
-    covered: set[tuple[int, int]] = set()
-    for rng in ws.merged_cells.ranges:
-        merged[(rng.min_row, rng.min_col)] = (rng.max_row, rng.max_col)
-        for r in range(rng.min_row, min(rng.max_row, rng.min_row + max_rows) + 1):
-            for c in range(rng.min_col, min(rng.max_col, max_cols) + 1):
-                if (r, c) != (rng.min_row, rng.min_col):
-                    covered.add((r, c))
-    used = set(held) | set(merged)
+    ranges = list(ws.merged_cells.ranges)
+    used = set(held) | {(rng.min_row, rng.min_col) for rng in ranges}
     last_row = max((r for r, _c in used), default=0)
     last_col = max((c for _r, c in used), default=0)
     shown_cols = min(last_col, max_cols)
@@ -143,6 +249,22 @@ def _sheet(ws, vs, max_rows: int, max_cols: int) -> dict:
     hidden_rows = {r for r, dim in ws.row_dimensions.items() if dim.hidden}
     columns = _columns(ws, shown_cols)
     hidden_cols = {c for c, (_width, hidden) in columns.items() if hidden}
+    # A merge is drawn from its first row and column the grid shows: its top-left cell (which holds its value) can
+    # be in a hidden row or column, and the merge would vanish with it.
+    merged: dict[tuple[int, int], tuple[int, int]] = {}
+    source: dict[tuple[int, int], tuple[int, int]] = {}
+    covered: set[tuple[int, int]] = set()
+    for rng in ranges:
+        top = next((r for r in range(rng.min_row, min(rng.max_row, rng.min_row + max_rows) + 1) if r not in hidden_rows), None)
+        left = next((c for c in range(rng.min_col, min(rng.max_col, max_cols) + 1) if c not in hidden_cols), None)
+        at = (top, left) if top is not None and left is not None else (rng.min_row, rng.min_col)
+        merged[at] = (rng.max_row, rng.max_col)
+        source[at] = (rng.min_row, rng.min_col)
+        for r in range(rng.min_row, min(rng.max_row, rng.min_row + max_rows) + 1):
+            for c in range(rng.min_col, min(rng.max_col, max_cols) + 1):
+                if (r, c) != at:
+                    covered.add((r, c))
+    last_row = max([last_row, *(r for r, _c in merged)])
     out_rows = []
     shown_last = 0
     for r in range(1, last_row + 1):
@@ -156,27 +278,12 @@ def _sheet(ws, vs, max_rows: int, max_cols: int) -> dict:
             if (r, c) in covered:
                 continue
             span = merged.get((r, c))
-            cell = held.get((r, c)) or (ws._cells.get((r, c)) if span else None)
+            at = source.get((r, c), (r, c)) if span else (r, c)
+            cell = held.get(at) or (ws._cells.get(at) if span else None)
             if cell is None:
                 continue
-            raw = cell.value
-            value_cell = values.get((r, c))
-            value = value_cell.value if value_cell is not None else None
-            formula = raw if isinstance(raw, str) and raw.startswith("=") else ""
-            if not formula and type(raw).__name__ == "ArrayFormula":
-                formula = str(getattr(raw, "text", "") or "")
-            shown_value = value if formula else raw
-            text, red = display(shown_value, cell.number_format)
-            entry: dict = {"c": c, "v": text[:MAX_CELL]}
-            if formula:
-                entry["f"] = formula[:500]
-                if shown_value is None:
-                    # Saved without its result (a file written by a program, not Excel): the formula, marked as such.
-                    entry["v"], entry["nocalc"] = formula[:MAX_CELL], True
-            if isinstance(shown_value, (int, float, Decimal, datetime, date, time, timedelta)) and not isinstance(shown_value, bool):
-                entry["num"] = True  # numbers and dates sit at the right of the cell, as in Excel
-            if red:
-                entry["red"] = True
+            value_cell = values.get(at)
+            entry = {"c": c, **_entry(cell, cell.value, value_cell.value if value_cell is not None else None)}
             if span:
                 # The grid leaves hidden rows and columns out, so a merge spans only the ones it shows.
                 entry["rs"] = _shown(r, span[0], hidden_rows, max_rows)

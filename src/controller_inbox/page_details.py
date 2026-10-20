@@ -588,6 +588,11 @@ def _beside(found: list[dict], label: int, kind: str) -> int | None:
 
 
 _TOTAL_HEADING = re.compile(r"(?i)^\s*(?:grand\s+)?total\b|^\s*balance\b|^\s*amount\s+due\b")
+# A heading that names what is owed ("Total", "Total due", "Balance", "Amount due"), over one that names a total of
+# something else ("Total Cost" on a prepaid schedule, whose row's balance is what is left at the period's end).
+_DUE_HEADING = re.compile(
+    r"(?i)^\s*(?:grand\s+)?total\s*(?:$|(?:due|amount|balance|payable)\b)|^\s*balance\b|^\s*amount\s+due\b"
+)
 
 
 def _grand_total(found: list[dict], label: int, chosen: int) -> int:
@@ -602,11 +607,18 @@ def _grand_total(found: list[dict], label: int, chosen: int) -> int:
     ]
     if len(row) < 2:
         return chosen
-    for heading in sorted((r for r in found if r["y"] + r["h"] <= me["y"] and _TOTAL_HEADING.search(r["text"])), key=lambda r: -r["y"]):
+    headings = (r for r in found if r["y"] + r["h"] <= me["y"] and _TOTAL_HEADING.search(r["text"]))
+    for heading in sorted(headings, key=lambda r: (not _DUE_HEADING.search(r["text"]), -r["y"])):
         under = [i for i in row if heading["x"] - 0.01 <= found[i]["x"] + found[i]["w"] / 2 <= heading["x"] + heading["w"] + 0.01]
         if len(under) == 1:
             return under[0]
     return max(row, key=lambda i: found[i]["x"])
+
+
+def _several_figures(text: str) -> bool:
+    """Whether a box holds more than one amount (a dash printed for zero counts as one)."""
+    written = sum(len(ways) for ways in vision.figures(text).values())
+    return written + len(re.findall(r"(?<![\w.,])[$€£]?\s*[-–](?![\w.,])", text)) > 1
 
 
 def _model_facts(model_text: str) -> dict[str, str]:
@@ -696,6 +708,10 @@ def key_details(found: list[dict], source: str, model_text: str | None, extracte
                 if beside is not None:
                     if name == "Total due":
                         beside = _grand_total(found, index, beside)
+                        if _several_figures(found[beside]["text"]):
+                            # One box holding a row's figures ("$ 7,185,625.98 $ 7,185,625.98 $ -"): no single
+                            # total to show, and showing them joined reads as one wrong figure.
+                            continue
                     region, value = beside, found[beside]["text"]
                     break
         if name in facts:

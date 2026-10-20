@@ -438,6 +438,7 @@ class Store:
                     email.reply_to,
                 ),
             )
+            stored = _first_readings(conn, email.id)
             conn.execute("DELETE FROM attachments WHERE email_id = ?", (email.id,))
             for att in email.attachments:
                 conn.execute(
@@ -455,7 +456,7 @@ class Store:
                         att.content_type,
                         att.size_bytes,
                         att.sha256,
-                        _text(att.extracted_text),
+                        _text(_kept_text(att, stored.get(att.id))),
                         att.document_type.value,
                         att.document_confidence,
                         _dumps(att.extracted_fields.to_dict()),
@@ -1157,13 +1158,16 @@ class Store:
 
     def add_page_fix(self, row: dict[str, Any]) -> str:
         """Keeps a fix: {attachment_id, sha256, page, kind, x, y, w, h, was, now, anchor, sender}. Fixing a box
-        again replaces the earlier fix of the same kind there. Returns its id."""
+        again replaces the earlier fix of the same kind there (for a taught field, of the same field: one box can be
+        taught as two fields, say the invoice date and the due date). Returns its id."""
         fix_id = uuid.uuid4().hex
         with self.connect() as conn:
             for old in conn.execute(
-                "SELECT id, x, y, w, h FROM page_fixes WHERE attachment_id = ? AND page = ? AND kind = ?",
+                "SELECT id, x, y, w, h, now FROM page_fixes WHERE attachment_id = ? AND page = ? AND kind = ?",
                 (row["attachment_id"], int(row["page"]), row["kind"]),
             ).fetchall():
+                if row["kind"] == "field" and old["now"] != (row.get("now") or ""):
+                    continue
                 if abs(old["x"] - row["x"]) < 1e-4 and abs(old["y"] - row["y"]) < 1e-4 and abs(old["w"] - row["w"]) < 1e-4 and abs(old["h"] - row["h"]) < 1e-4:
                     conn.execute("DELETE FROM page_fixes WHERE id = ?", (old["id"],))
             conn.execute(
@@ -1786,6 +1790,29 @@ def _readings_for(conn: sqlite3.Connection, attachment_ids: list[str]) -> dict[s
     for row in rows:
         out.setdefault(row["attachment_id"], {})[int(row["page"])] = {key: row[key] for key in row.keys()}
     return out
+
+
+def _first_readings(conn: sqlite3.Connection, email_id: str) -> dict[str, tuple[str, str, str]]:
+    """Attachment id -> (sha256, its text as stored, that text as get_email shows it) for the email's files."""
+    rows = conn.execute("SELECT id, sha256, extracted_text FROM attachments WHERE email_id = ?", (email_id,)).fetchall()
+    ids = [row["id"] for row in rows]
+    readings = _readings_for(conn, ids)
+    fixes = _fixes_for(conn, ids)
+    out = {}
+    for row in rows:
+        text, sha = row["extracted_text"] or "", row["sha256"] or ""
+        out[row["id"]] = (sha, text, shown_text(text, readings.get(row["id"]), sha, fixes.get(row["id"])))
+    return out
+
+
+def _kept_text(att: AttachmentRecord, stored: tuple[str, str, str] | None) -> str:
+    """The text to store for the file: its first reading, when the text handed back is only that reading as it was
+    shown (the vision model's pages and the user's fixes laid over it). Saving the shown text would make a fix
+    permanent: Undo couldn't take it back, and a vision reading read again would be laid over itself."""
+    text = att.extracted_text or ""
+    if stored is not None and stored[0] == (att.sha256 or "") and text == stored[2]:
+        return stored[1]
+    return text
 
 
 def _fixes_for(conn: sqlite3.Connection, attachment_ids: list[str]) -> dict[str, list[dict]]:

@@ -289,7 +289,9 @@ def templates(store: Store, sender: str, *, not_attachment: str = "") -> list[di
 
 def read_with(text: str, learnt: list[dict], *, as_of: date) -> dict[str, dict]:
     """The fields read from ``text`` with what was taught on the sender's other files: {field: {value, label}}."""
-    lines = (text or "").splitlines()
+    from controller_inbox.documents import without_deletions
+
+    lines = without_deletions(text or "").splitlines()
     out: dict[str, dict] = {}
     for template in learnt:
         pattern = _label_pattern(template["label"])
@@ -434,6 +436,53 @@ def _same_tasks(before: list[ActionItem], after: list[ActionItem], *, keep_dropp
         held = {item.id for item in out}
         out += [item for item in before if item.id not in held]
     return out
+
+
+def read_fixed(store: Store, settings, email: EmailRecord, n: int, *, as_of: date) -> tuple[EmailRecord, bool]:
+    """The email's file ``n`` read again from its text as now fixed (a figure put right on its page, or that fix
+    taken back), as it was read when it came: its fields, then the email's (its own text's and its files'), and
+    the email filed again from them (``refile``: done tasks and the model's reading stay). What you taught on the
+    file stays as you taught it, and what its sender's other files teach is read again from the new text. ``email``
+    is as loaded after the fix (or after Undo). The fields are read from the file's first reading with the user's fixes laid over
+    it, as they were read from the first reading when it came, never from a vision model's reading of its pages.
+    Returns the email and whether its file's fields changed."""
+    from controller_inbox import fixes
+    from controller_inbox.extract import extract_fields
+    from controller_inbox.pipeline import _email_fields, sent_date
+
+    att = email.attachments[n - 1]
+    anchor = sent_date(email.received_at, settings, fallback=as_of)
+    vendor = email.sender_name if email.sender_email else ""
+    old = att.extracted_fields
+    first = store.stored_text(att.id)
+    own = [fix for fix in store.page_fixes(att.id, att.sha256) if fix["kind"] == "text"]
+    text = fixes.apply_to_text(first, own) if first is not None else (att.extracted_text or "")
+    fresh = extract_fields(f"{att.filename}\n{text}", as_of=anchor, extra_vendor=vendor)
+    # The bank numbers were read from the file before its text was masked: the masked text has none to read again.
+    fresh = replace(fresh, account_last4=list(old.account_last4), mentions_routing_or_account=old.mentions_routing_or_account or fresh.mentions_routing_or_account)
+    for field, entry in old.taught.items():
+        if entry.get("by") == "you" and entry.get("value"):
+            fresh = with_taught(fresh, field, str(entry["value"]), by="you", label=entry.get("label", ""))
+    learnt = templates(store, email.sender_email, not_attachment=att.id) if email.sender_email else []
+    for field, got in read_with(text, learnt, as_of=anchor).items():
+        if (fresh.taught.get(field) or {}).get("by") != "you":
+            fresh = with_taught(fresh, field, got["value"], by="learnt", label=got["label"])
+    if fresh.to_dict() == old.to_dict():
+        return email, False
+    att.extracted_fields = fresh
+    before = email.extracted
+    merged = extract_fields(f"{email.subject}\n{email.body_text}", as_of=anchor, extra_vendor=vendor)
+    for other in email.attachments:
+        merged = merged.merged_with(_email_fields(other, other.document_type))
+    merged.account_last4 = list(dict.fromkeys([*before.account_last4, *merged.account_last4]))
+    merged.mentions_routing_or_account = before.mentions_routing_or_account or merged.mentions_routing_or_account
+    merged.mentions_attachment = before.mentions_attachment or merged.mentions_attachment
+    # The email's taught fields are its files' (what you showed beats what was learnt), put first in its lists.
+    for field, entry in dict(merged.taught).items():
+        if entry.get("value"):
+            merged = with_taught(merged, field, str(entry["value"]), by=entry.get("by", "you"), label=entry.get("label", ""))
+    email.extracted = merged
+    return refile(store, settings, email), True
 
 
 def teach_file(store: Store, settings, email: EmailRecord, n: int, field: str, value: str, *, label: str) -> EmailRecord:

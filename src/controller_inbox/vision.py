@@ -429,6 +429,10 @@ def render(data: bytes, filename: str, page: int, *, reader: Reader = GENERAL) -
             try:
                 if not 1 <= page <= len(pdf):
                     raise ValueError(f"the PDF has no page {page}")
+                try:
+                    pdf.init_forms()  # a filled form's values are drawn, as a PDF viewer shows them
+                except Exception:
+                    log.debug("Couldn't set up the PDF's form fields", exc_info=True)
                 sheet = pdf[page - 1]
                 try:
                     width, height = sheet.get_size()
