@@ -101,6 +101,7 @@ def process_message(
         merged_fields = merged_fields.merged_with(att.extracted_fields)
     for raw_att in attachments_raw:
         record, classified = _file_record(raw, raw_att, anchor)
+        _read_as_taught(store, raw.sender_email, record, anchor)
         att_records.append(record)
         att_classifications.append(classified)
         merged_fields = merged_fields.merged_with(record.extracted_fields)
@@ -206,6 +207,21 @@ def process_message(
     return store.get_email(record.id) or record
 
 
+def _read_as_taught(store: Store, sender: str, record: AttachmentRecord, anchor) -> None:
+    """Fill the fields its sender's earlier files were taught (teach.py), read where those labels are printed."""
+    from controller_inbox import teach
+
+    if not sender:
+        return
+    learnt = teach.templates(store, sender, not_attachment=record.id)
+    if not learnt:
+        return
+    for field, got in teach.read_with(record.extracted_text or "", learnt, as_of=anchor).items():
+        if (record.extracted_fields.taught.get(field) or {}).get("by") == "you":
+            continue
+        record.extracted_fields = teach.with_taught(record.extracted_fields, field, got["value"], by="learnt", label=got["label"])
+
+
 def _as_stored(raw: RawMessage, stored: EmailRecord) -> RawMessage:
     """Another copy of a stored email that has no subject or sent time of its own keeps the stored ones, so the
     email isn't renamed after the copy's file or dated the day that file was saved."""
@@ -306,6 +322,9 @@ def _add_files(
     if not attachments_raw:
         return email
     records = [_file_record(raw, raw_att, anchor)[0] for raw_att in attachments_raw]
+    for record in records:
+        # Read with what the sender's earlier files were taught, as a file on a new email is.
+        _read_as_taught(store, raw.sender_email, record, anchor)
     email = store.get_email(email.id) or email
     held = {att.id for att in email.attachments}
     for record in records:

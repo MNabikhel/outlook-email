@@ -572,7 +572,11 @@ const ctx = {
   emailUrl: () => mailUrl(S.email.id),
   reload: () => reloadEmail(),
   // A fix saved on the Page tab changes the file's reading: its Text and Tables tabs fetch it again.
-  fileChanged: (emailId, n) => S.files.delete(`${emailId}:${n}`),
+  fileChanged: (emailId, n, fields = false) => {
+    S.files.delete(`${emailId}:${n}`);
+    // A field taught on the page changes the email itself (its invoice number, total, due date, tasks).
+    if (fields) S.staleEmail = emailId;
+  },
   categories: () => (S.meta ? S.meta.categories : []),
   visionRead,
   visionReading,
@@ -643,7 +647,8 @@ function drawEmail({ keepScroll = false } = {}) {
 
 async function showEmail(id, file, tab) {
   const token = ++S.emailToken;
-  const have = S.email && S.email.id === id ? S.email : null;
+  const have = S.email && S.email.id === id && S.staleEmail !== id ? S.email : null;
+  if (S.staleEmail === id) S.staleEmail = "";
   let skeleton = 0;
   if (!have) {
     S.email = null;
