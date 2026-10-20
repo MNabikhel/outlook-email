@@ -44,7 +44,38 @@ export function emptyReader(text, hints = true) {
   );
 }
 
-export function todayView(data, meta) {
+/* With no mail at all, Today says how to get some in, as the classic "Get started" page does. */
+function getStarted(meta, actions) {
+  const running = meta.job && meta.job.state === "running";
+  return h(
+    "div",
+    { class: "page" },
+    h(
+      "div",
+      { class: "page-inner narrow get-started" },
+      h("p", { class: "kicker" }, meta.today_long),
+      h("h1", { class: "page-title" }, "Get started"),
+      h("p", { class: "lede" }, "No mail yet. Save messages from Outlook into the drop folder, then process them."),
+      h(
+        "ol",
+        { class: "set-steps" },
+        h("li", null, "Drag messages from Outlook into the drop folder: ", h("code", { class: "path" }, meta.drop_folder || "inbox/incoming"), ". Classic Outlook saves ", h("code", null, ".msg"), " files; the new Outlook and Outlook on the web save ", h("code", null, ".eml"), "."),
+        h("li", null, "Click ", h("b", null, "Process new mail"), ". Each message is sorted, summarized and searchable, with or without a local model."),
+        meta.outlook_ready ? h("li", null, "Or read Outlook directly: ", h("a", { href: "/app/settings", dataset: { nav: "" } }, "Settings → Outlook connection"), ".") : null
+      ),
+      h(
+        "div",
+        { class: "row-actions" },
+        h("button", { type: "button", class: "btn btn-primary", disabled: running, onclick: actions.processMail }, icon("play", 14), running ? "Processing…" : "Process new mail"),
+        h("button", { type: "button", class: "btn", onclick: actions.loadSample }, "Load sample mailbox")
+      ),
+      h("p", { class: "muted small" }, "The sample mailbox lets you try it first; it is removed the first time you process your own mail. ", h("a", { href: "/app/settings", dataset: { nav: "" } }, "More on getting mail in"), ".")
+    )
+  );
+}
+
+export function todayView(data, meta, actions) {
+  if (!meta.counts.emails && actions) return getStarted(meta, actions);
   const k = data.kpis;
   return h(
     "div",
@@ -160,6 +191,17 @@ export function codingView(data) {
 
 export function digestView(data) {
   const p = data.payload;
+  // The latest days are listed here; the classic page has every day with its numbers.
+  const history = data.history || [];
+  const past = history.length
+    ? h(
+        "section",
+        { class: "card", id: "past-digests" },
+        h("h2", { class: "rd-h" }, "Past digests"),
+        h("ul", { class: "plain-list" }, history.map((day) => h("li", null, day === data.date ? h("b", null, day) : h("a", { href: `/app/digest?date=${enc(day)}`, dataset: { nav: "" } }, day)))),
+        h("p", { class: "muted small" }, h("a", { href: "/digests" }, "Every past digest"), " (classic view).")
+      )
+    : null;
   const nav = h(
     "div",
     { class: "doc-nav" },
@@ -168,10 +210,10 @@ export function digestView(data) {
     data.newer ? h("a", { class: "btn btn-sm", href: `/app/digest?date=${enc(data.newer)}`, dataset: { nav: "" } }, data.newer, " →") : null,
     h("span", { class: "rd-bar-gap" }),
     data.printable ? h("a", { class: "btn btn-sm", href: data.printable, target: "_blank", rel: "noopener" }, icon("external", 14), "Printable page") : null,
-    h("a", { class: "btn btn-sm", href: "/digests" }, "All past digests")
+    past ? h("a", { class: "btn btn-sm", href: "#past-digests" }, "Past digests") : h("a", { class: "btn btn-sm", href: "/digests" }, "All past digests")
   );
   if (!p) {
-    return h("div", { class: "page" }, h("div", { class: "page-inner" }, nav, h("h1", { class: "page-title" }, "No digest yet."), h("p", { class: "lede" }, "Process new mail and a digest is saved for the day.")));
+    return h("div", { class: "page" }, h("div", { class: "page-inner" }, nav, h("h1", { class: "page-title" }, "No digest yet."), h("p", { class: "lede" }, "Process new mail and a digest is saved for the day."), past));
   }
   const list = (items, empty, summary = false) =>
     itemList(items || [], empty, (item) => [
@@ -227,7 +269,8 @@ export function digestView(data) {
       ),
       data.markdown
         ? h("details", { class: "card" }, h("summary", { class: "rd-h" }, "Markdown copy"), h("div", { class: "row-actions" }, h("button", { type: "button", class: "btn btn-sm", onclick: copy }, icon("copy", 14), "Copy")), h("pre", { class: "md-copy" }, data.markdown))
-        : null
+        : null,
+      past
     )
   );
 }

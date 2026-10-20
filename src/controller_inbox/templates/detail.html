@@ -8,7 +8,7 @@
     <div>
       <span class="pill {{ email.importance.value }}">{{ email.importance.value | label_imp }} · {{ email.importance_score }}</span>
       <h2>{{ email.subject }}</h2>
-      <p>{{ email.sender_name }} &lt;{{ email.sender_email }}&gt; · {{ email.received_at | shortdt }}</p>
+      <p>{{ email.sender_name or email.sender_email }}{% if email.sender_name and email.sender_email %} &lt;{{ email.sender_email }}&gt;{% endif %} · {{ email.received_at | shortdt }}</p>
       {% if email.summary %}<p class="summary">{{ email.summary }}</p>{% endif %}
       {% if email.model_status == 'script_draft' %}
       <p class="note">Sorted by the fast scripts. When a local model is running, it reads this and may refine the folder and summary.</p>

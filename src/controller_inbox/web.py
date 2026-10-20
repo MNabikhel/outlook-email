@@ -361,6 +361,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     app = FastAPI(title="CloseDesk", docs_url=None, redoc_url=None)
     app.add_middleware(LocalHostOnly, allowed=allowed_hosts(settings.host, settings.allowed_hosts))
     app.mount("/static", StaticFiles(directory=str(PACKAGE_DIR / "static")), name="static")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        # Browsers ask for this on every page; it is the same "CD" mark the pages name in their head.
+        return FileResponse(PACKAGE_DIR / "static" / "icon.svg", media_type="image/svg+xml")
+
     job = ProcessJob()
     app.state.job = job
 
@@ -777,9 +783,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             )
         try:
             open_file(path)
-        except OSError as exc:
+        except OSError:
             return JSONResponse(
-                {"ok": False, "download": download, "message": f"Couldn't open it directly ({exc}). Downloading a copy."}
+                {"ok": False, "download": download,
+                 "message": "Couldn't open it with a mail app on this computer, so a copy is downloading instead."}
             )
         return JSONResponse({"ok": True, "message": f"Opening {path.name} in your mail app."})
 
@@ -1025,8 +1032,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         path = cost_codes.ensure_workbook(settings)
         try:
             open_file(path if path.exists() else settings.cost_codes_folder)
-        except OSError as exc:
-            return JSONResponse({"ok": False, "message": f"Couldn't open it ({exc}). It is at {path}."})
+        except OSError:
+            return JSONResponse({"ok": False, "message": f"Couldn't open it with an app on this computer. It is at {path}."})
         return JSONResponse({"ok": True, "message": f"Opening {path.name}. Save it when you're done; CloseDesk reads it again by itself."})
 
     @app.post("/process")

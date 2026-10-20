@@ -4,6 +4,7 @@
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>{% block title %}CloseDesk{% endblock %}</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml"/>
   <link rel="stylesheet" href="/static/app.css?v={{ static_version }}"/>
 </head>
 <body{% if email is defined and email %} data-email-id="{{ email.id }}"{% endif %}{% if display_tz %} data-tz="{{ display_tz.key }}"{% endif %}>

@@ -2,7 +2,7 @@
 <section class="panel fraud-panel {{ check.level }}" id="fraud">
   <h3>Fraud check
     <small>
-      {% if check.level == 'high' %}possible payment fraud{% elif check.level == 'caution' %}double-check before paying{% else %}nothing suspicious{% endif %}
+      {% if check.level == 'high' %}possible payment fraud{% elif check.level == 'caution' %}double-check before paying{% elif check.verdict == 'safe' %}marked not fraud{% else %}nothing suspicious{% endif %}
       · score {{ check.score }}
     </small>
   </h3>

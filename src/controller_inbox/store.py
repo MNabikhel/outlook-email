@@ -750,6 +750,10 @@ class Store:
                             json_each(CASE WHEN json_valid(a.extracted_fields) THEN a.extracted_fields ELSE '{}' END,
                                       '$.invoice_numbers') n
                         WHERE a.email_id = e.id AND invoice_key(n.value) = ?
+                          -- A workbook or CSV that is no invoice of its own lists invoices; it holds no repeat of one.
+                          AND NOT (COALESCE(a.document_type, '') IN ('spreadsheet', 'other') AND (
+                            lower(a.filename) LIKE '%.xlsx' OR lower(a.filename) LIKE '%.xlsm' OR lower(a.filename) LIKE '%.xls'
+                            OR lower(a.filename) LIKE '%.csv' OR lower(a.filename) LIKE '%.tsv'))
                     )
                   )
                 """,
