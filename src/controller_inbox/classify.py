@@ -741,6 +741,9 @@ def score_rules(
     return scores
 
 
+# Categories that say little about what an email asks for: a clearer one found in its words replaces them.
+_LOOSE_TYPES = {DocumentType.OTHER, DocumentType.INTERNAL_FYI, DocumentType.REPLY_NEEDED, DocumentType.NOTIFICATION, DocumentType.MIXED}
+
 INVOICE_DOCUMENTS = {DocumentType.AP_INVOICE, DocumentType.AR_INVOICE, DocumentType.CREDIT_MEMO}
 DATA_FILE_EXTENSIONS = (".xlsx", ".xlsm", ".xls", ".csv", ".tsv")
 
@@ -866,6 +869,11 @@ def classify_email(
         category = DocumentType.PAYMENT_INSTRUCTION_CHANGE
     elif fraud == "caution":
         combined_flags.append("payment_caution")
+        # A request to pay new bank details that was cleared as not fraud (or comes from someone trusted) is still a
+        # request to send money: filed with wire requests, not as other mail. Only a "high" check blocks it.
+        if category in _LOOSE_TYPES and DocumentType.PAYMENT_INSTRUCTION_CHANGE in score_rules(subject=subject, body=body, sender=sender, payment_rule=True):
+            category = DocumentType.WIRE_ACH_REQUEST
+            reasons.append("Asks to pay changed bank details: confirm by phone before paying")
 
     scoring = dict(
         fields=fields,

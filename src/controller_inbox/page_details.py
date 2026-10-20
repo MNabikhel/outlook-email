@@ -587,6 +587,28 @@ def _beside(found: list[dict], label: int, kind: str) -> int | None:
     return None
 
 
+_TOTAL_HEADING = re.compile(r"(?i)^\s*(?:grand\s+)?total\b|^\s*balance\b|^\s*amount\s+due\b")
+
+
+def _grand_total(found: list[dict], label: int, chosen: int) -> int:
+    """A schedule's total row prints a figure in every column (Current, each aging bucket, Total): its total due is
+    the one under a "Total", "Balance" or "Amount due" column heading, else the last on the row. A row with one
+    figure, as on an invoice, keeps it."""
+    me = found[label]
+    row = [
+        index
+        for index, region in enumerate(found)
+        if index != label and _same_line(me, region) and region["x"] >= me["x"] + me["w"] - 0.005 and _value_ok("money", region["text"])
+    ]
+    if len(row) < 2:
+        return chosen
+    for heading in sorted((r for r in found if r["y"] + r["h"] <= me["y"] and _TOTAL_HEADING.search(r["text"])), key=lambda r: -r["y"]):
+        under = [i for i in row if heading["x"] - 0.01 <= found[i]["x"] + found[i]["w"] / 2 <= heading["x"] + heading["w"] + 0.01]
+        if len(under) == 1:
+            return under[0]
+    return max(row, key=lambda i: found[i]["x"])
+
+
 def _model_facts(model_text: str) -> dict[str, str]:
     """The details the vision model read: "Label: value" lines, and a table row's label and its last value."""
     pairs: list[tuple[str, str]] = []
@@ -672,6 +694,8 @@ def key_details(found: list[dict], source: str, model_text: str | None, extracte
                     continue
                 beside = _beside(found, index, kind)
                 if beside is not None:
+                    if name == "Total due":
+                        beside = _grand_total(found, index, beside)
                     region, value = beside, found[beside]["text"]
                     break
         if name in facts:

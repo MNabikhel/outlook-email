@@ -276,7 +276,7 @@ def test_words_that_dont_read_as_the_field_are_refused(client, mail):
 
 def test_value_of_each_field():
     assert teach.value_of("total", "Balance payable $2,118.40", as_of=AS_OF) == "2118.4"
-    assert teach.value_of("total", "(1,250.00)", as_of=AS_OF) == "1250.0"
+    assert teach.value_of("total", "(1,250.00)", as_of=AS_OF) == "-1250.0", "a credit, in brackets"
     assert teach.value_of("invoice_number", "Ref # KP-55120", as_of=AS_OF) == "KP-55120"
     assert teach.value_of("invoice_number", "Invoice date 10/01/2026", as_of=AS_OF) is None
     assert teach.value_of("due_date", "Pay by Nov 15, 2026", as_of=AS_OF) == "2026-11-15"

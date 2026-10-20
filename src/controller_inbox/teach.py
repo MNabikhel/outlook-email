@@ -79,15 +79,21 @@ _VALUE_AT = {
 
 
 def _amounts(text: str) -> list[tuple[float, bool]]:
-    """The amounts in ``text``, in order: (amount, printed as money: with a currency or a thousands mark or cents)."""
+    """The amounts in ``text``, in order: (amount, printed as money: with a currency or a thousands mark or cents).
+    A credit is negative: written in brackets ("(450.00)"), with a minus, or followed by "CR"."""
     out = []
-    for found in _MONEY.finditer(_DATE.sub(" ", text)):
+    text = _DATE.sub(" ", text)
+    for found in _MONEY.finditer(text):
         figure, thousands = found.group(2), found.group(3)
         if thousands:
             figure = figure.replace(thousands, "")
         amount = parse_amount(figure.replace(",", "."))
-        if amount is not None and amount > 0:
-            out.append((amount, bool(found.group(1) or thousands or re.search(r"[.,]\d{1,2}$", figure))))
+        if amount is None or amount == 0:
+            continue
+        whole = found.group(0).strip()
+        credit = (whole.startswith("(") and whole.endswith(")")) or "-" in whole[: whole.find(found.group(2))]
+        credit = credit or bool(re.match(r"\s*CR\b", text[found.end():], re.IGNORECASE))
+        out.append((-abs(amount) if credit else abs(amount), bool(found.group(1) or thousands or re.search(r"[.,]\d{1,2}$", figure))))
     return out
 
 
@@ -128,9 +134,10 @@ def shown(field: str, value: str) -> str:
     """The value as the page and messages show it."""
     if field == "total":
         try:
-            return f"${float(value):,.2f}"
+            amount = float(value)
         except ValueError:
             return value
+        return f"-${-amount:,.2f}" if amount < 0 else f"${amount:,.2f}"
     return value
 
 
