@@ -11,6 +11,7 @@ import httpx
 import msal
 
 from controller_inbox.classify import DOCUMENT_OUTLOOK
+from controller_inbox.clock import parse_stamp
 from controller_inbox.extract import html_to_text
 from controller_inbox.models import DocumentType, RawAttachment, RawMessage
 
@@ -162,7 +163,7 @@ class GraphMailbox:
         return raw.sender_email.lower() in self._own_addresses
 
     def get_attachments(self, message_id: str) -> list[RawAttachment]:
-        from controller_inbox.folder_mail import _inline_picture
+        from controller_inbox.folder_mail import inline_picture
 
         payload = self.client.get_json(f"{self.client._user_root()}/messages/{message_id}/attachments")
         attachments: list[RawAttachment] = []
@@ -172,7 +173,7 @@ class GraphMailbox:
                 content = base64.b64decode(item.get("contentBytes") or "")
                 name = item.get("name") or ""
                 ctype = item.get("contentType") or ""
-                if _inline_picture(ctype, name, len(content), bool(item.get("isInline"))):
+                if inline_picture(ctype, name, len(content), bool(item.get("isInline"))):
                     # A signature logo or pasted picture, dropped as the .msg/.eml readers drop it.
                     continue
                 attachments.append(
@@ -237,8 +238,7 @@ class GraphMailbox:
             text = html_to_text(content)
         else:
             text = content
-        received = item.get("receivedDateTime") or datetime.now(timezone.utc).isoformat()
-        received_dt = datetime.fromisoformat(received.replace("Z", "+00:00"))
+        received_dt = parse_stamp(item.get("receivedDateTime")) or datetime.now(timezone.utc)
         return RawMessage(
             id=item["id"],
             subject=item.get("subject") or "(no subject)",

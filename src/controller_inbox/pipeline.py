@@ -6,8 +6,9 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
-from controller_inbox.actions import extract_actions, keep_task_status
+from controller_inbox.actions import extract_actions, keep_task_status, received_day
 from controller_inbox.classify import Classification, classify_document, classify_email, is_data_file, outlook_categories
+from controller_inbox.clock import aware_utc, parse_stamp
 from controller_inbox.config import Settings
 from controller_inbox.documents import MAX_TEXT
 from controller_inbox.extract import (
@@ -82,10 +83,10 @@ def process_message(
     if mailbox is not None and existing is None and files:
         # Mail read from a mailbox (Microsoft 365, the sample) keeps its files as they came, as the drop folder and
         # classic Outlook keep theirs: the Preview tab, Download and the page view open them.
-        from controller_inbox.folder_mail import _write_extracted, unique_attachments
+        from controller_inbox.folder_mail import unique_attachments, write_extracted
 
         files = unique_attachments(files)
-        _write_extracted(settings, replace(raw, attachments=files))
+        write_extracted(settings, replace(raw, attachments=files))
     attachments_raw = explode_archives(files)
     # Another copy of a stored message: the files stored from earlier copies are kept, and this copy adds
     # only files they don't hold. A re-saved .eml often comes without the files dropped beside the first.
@@ -261,24 +262,15 @@ def _as_stored(raw: RawMessage, stored: EmailRecord) -> RawMessage:
     email isn't renamed after the copy's file or dated the day that file was saved."""
     received = raw.received_at
     if "sent" in raw.from_file:
-        try:
-            received = datetime.fromisoformat(str(stored.received_at))
-        except ValueError:
-            received = raw.received_at
-        received = received if received.tzinfo else received.replace(tzinfo=timezone.utc)
+        received = parse_stamp(stored.received_at) or aware_utc(raw.received_at)
     subject = stored.subject if "subject" in raw.from_file and stored.subject else raw.subject
     return replace(raw, subject=subject, received_at=received)
 
 
 def sent_date(received_at, settings: Settings, *, fallback):
-    """The day a message was sent, in the user's time zone: what "tomorrow" in its text means."""
-    try:
-        when = received_at if isinstance(received_at, datetime) else datetime.fromisoformat(str(received_at))
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        return when.astimezone(settings.tz).date()
-    except (TypeError, ValueError, OverflowError):
-        return fallback
+    """The day a message was sent, in the user's time zone: what "tomorrow" in its text means. Kept for the
+    modules that import it: it is ``actions.received_day``."""
+    return received_day(received_at, settings.tz, fallback=fallback)
 
 
 def _vendor_hint(raw: RawMessage) -> str:
@@ -428,19 +420,19 @@ def ingest_mailbox(
     retry = json.loads(store.get_state(retry_key) or "{}") if cursor else {}
     tries: dict[str, int] = retry.get("tries", {})
     # Resuming from a cursor held back for a failed message: the mail around it was read by the last sync.
-    resumed = bool(retry) and received_after is not None and _utc(received_after) == datetime.fromisoformat(retry["cursor"])
+    resumed = bool(retry) and received_after is not None and aware_utc(received_after) == datetime.fromisoformat(retry["cursor"])
     read_before = datetime.fromisoformat(retry["until"]) if resumed else None
     failed: dict[str, int] = {}
     held: list[datetime] = []
     sample_checked = cursor is None  # the sample mailbox itself is read without a cursor
     for raw in mailbox.list_messages(received_after=received_after):
-        received = _utc(raw.received_at)
-        if read_before and received < read_before and raw.id not in tries and store.get_email(raw.id) is not None:
+        received = aware_utc(raw.received_at)
+        if read_before and received < read_before and raw.id not in tries and store.has_email(raw.id):
             continue  # listed again only because the cursor waited for a message that failed
-        if store.get_email(raw.id) is None and store.email_with_message_id(raw.internet_message_id, raw.source):
+        if not store.has_email(raw.id) and store.email_with_message_id(raw.internet_message_id, raw.source):
             # Outlook gives a message a new id when it is moved to another folder; it was read under the old one.
             continue
-        if store.get_email(raw.id) is None and _filed_from_a_file(store, raw):
+        if not store.has_email(raw.id) and _filed_from_a_file(store, raw):
             continue
         if not sample_checked:
             # The first real message from Outlook replaces the sample mailbox, as one from the drop folder does.
@@ -459,12 +451,8 @@ def ingest_mailbox(
     # it waits for: the cursor and the messages to try again stay as they are. With no cursor yet, the next sync
     # would look back ``lookback_hours``, so only a window reaching that far back covers it.
     previous = store.get_state(cursor) if cursor else None
-    since = (
-        datetime.fromisoformat(previous)
-        if previous
-        else started.astimezone(timezone.utc) - timedelta(hours=settings.lookback_hours)
-    )
-    covered = received_after is None or _utc(received_after) <= since
+    since = parse_stamp(previous) or started.astimezone(timezone.utc) - timedelta(hours=settings.lookback_hours)
+    covered = received_after is None or aware_utc(received_after) <= since
     if cursor and covered:
         started = started.astimezone(timezone.utc)
         mark = min([started, *held]).isoformat()
@@ -477,13 +465,9 @@ def _filed_from_a_file(store: Store, raw: RawMessage) -> bool:
     """Whether this message is already filed from the drop folder or classic Outlook (the same Message-ID, and
     the same subject, sender and time, as the drop folder tells a reused Message-ID apart): it isn't filed twice,
     with a second set of tasks and its own invoice flagged as a duplicate of itself."""
-    from controller_inbox.folder_mail import stored_from
+    from controller_inbox.mail_identity import stored_from
 
     return stored_from(store, raw, ("folder", "outlook")) is not None
-
-
-def _utc(when: datetime) -> datetime:
-    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
 def ingest_demo(store: Store, settings: Settings, *, now: datetime | None = None) -> list[EmailRecord]:

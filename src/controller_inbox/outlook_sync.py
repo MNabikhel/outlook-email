@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from controller_inbox.config import Settings
+from controller_inbox.mail_identity import content_id, find_existing, same_time
 from controller_inbox.outlook_desktop import FolderInfo, NotInOutlook, OutlookError, Seen
 from controller_inbox.store import Store
 
@@ -261,17 +262,13 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
     return report
 
 
-# A message keeps its received time when moved; two copies of one message saved apart can differ by a few seconds.
-SAME_TIME = timedelta(minutes=2)
-
-
 def _same_time(stamp: str, when: datetime) -> bool:
+    """A message keeps its received time when moved (``mail_identity.SAME_MESSAGE_SLACK``)."""
     try:
         then = datetime.fromisoformat(stamp)
     except (TypeError, ValueError):
         return False
-    then = then if then.tzinfo else then.replace(tzinfo=timezone.utc)
-    return abs(then - (when if when.tzinfo else when.replace(tzinfo=timezone.utc))) <= SAME_TIME
+    return same_time(then, when)
 
 
 def _moved_copy(found: list[Seen], row: dict, trash: set[str]) -> Seen | None:
@@ -306,21 +303,14 @@ def describe(report: dict) -> str:
 def _copy_in(store: Store, settings: Settings, session, item: Seen, *, now: datetime, report: dict) -> tuple[str, bool, bool]:
     """Save a copy of the message, read it, and file it. Returns its email id, whether CloseDesk filed it from
     Outlook (``owned``: a deletion in Outlook removes it) and whether it is new here."""
-    from controller_inbox.folder_mail import (
-        _parse_msg,
-        _restore_sample,
-        _write_extracted,
-        content_id,
-        find_existing,
-        unique_attachments,
-    )
+    from controller_inbox.folder_mail import parse_msg, restore_sample, unique_attachments, write_extracted
     from controller_inbox.pipeline import process_message
 
     key = hashlib.sha256(f"{item.store_id}:{item.entry_id}".encode()).hexdigest()[:24]
     staging = settings.data_dir / "outlook-copying" / f"{key}.msg"
     session.save_copy(item.entry_id, item.store_id, staging)
     try:
-        raw = _parse_msg(staging)
+        raw = parse_msg(staging)
         raw.source = "outlook"
         raw.is_read = not item.unread
         raw.outlook_importance = item.importance
@@ -331,7 +321,7 @@ def _copy_in(store: Store, settings: Settings, session, item: Seen, *, now: date
         if not raw.internet_message_id:
             # No Message-ID: named by what it says, so a copy of it in another synced folder (or the same message
             # under a new Outlook id) is the same email, and two different messages are two.
-            # The drop folder names a copy of it saved there the same way (folder_mail.content_id).
+            # The drop folder names a copy of it saved there the same way (mail_identity.content_id).
             raw.id = content_id(raw)
         # Found as the drop folder finds it: under its id, the id a reused Message-ID gives it, or read from
         # Microsoft 365 under Microsoft's id.
@@ -347,11 +337,11 @@ def _copy_in(store: Store, settings: Settings, session, item: Seen, *, now: date
         try:
             # Two files with one name ("Invoice.pdf" twice) are kept apart, as the drop folder keeps them.
             raw.attachments = unique_attachments(raw.attachments)
-            _write_extracted(settings, raw)
+            write_extracted(settings, raw)
             record = process_message(raw, store, settings, now=now)
         except Exception:
             if cleared:
-                _restore_sample(store, settings, report, now)  # a message that couldn't be read never empties the board
+                restore_sample(store, settings, report, now)  # a message that couldn't be read never empties the board
             raise
         dest = copy_path(settings, record.id)
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -375,7 +365,7 @@ def _remove(store: Store, settings: Settings, row: dict) -> bool:
         store.forget_outlook_item(row["entry_id"], conn=conn)
         if not row["owned"]:
             return False  # dropped in by hand: the user's own copy stays
-        if any(other["email_id"] == row["email_id"] for other in store.outlook_items(conn=conn).values()):
+        if store.outlook_follows(row["email_id"], conn=conn):
             return False  # the same message is still in another synced folder
         store.delete_emails([row["email_id"]], conn=conn)
     copy_path(settings, row["email_id"]).unlink(missing_ok=True)

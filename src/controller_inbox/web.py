@@ -8,7 +8,8 @@ import socket
 import subprocess
 import sys
 import threading
-from collections.abc import AsyncIterator, Generator
+from collections.abc import AsyncIterator, Generator, Iterator
+from contextlib import contextmanager
 from email.message import EmailMessage
 from email.utils import formataddr, format_datetime
 from datetime import datetime, timezone
@@ -32,10 +33,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
-from controller_inbox import agent, chats, cost_codes, documents, fraud, model_roles, ocr, semantic, vision
+from controller_inbox import agent, chats, cost_codes, documents, fraud, model_roles, ocr, semantic, services, vision
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
-from controller_inbox.classify import month_end
 from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
 from controller_inbox.clock import (
     AUTO,
@@ -51,11 +51,25 @@ from controller_inbox.clock import (
     zone_option,
 )
 from controller_inbox.config import PROFILES, Settings
-from controller_inbox.digest import build_digest, write_digest_files
+from controller_inbox.digest import write_digest_files
 from controller_inbox.local_llm import check_model, context_target, needs_more_context, set_min_context, use_chat_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
-from controller_inbox.profile import active_profile, is_finance, set_profile
+from controller_inbox.profile import active_profile, set_profile
+from controller_inbox.services import Invalid, Missing
 from controller_inbox.store import Store
+from controller_inbox.web_api import register_workspace, ui_import_map
+from controller_inbox.web_common import (
+    DOWNLOADABLE,
+    MAIL_FILES,
+    NOTICES,
+    attachment_or_404,
+    host_name,
+    json_body,
+    nearest_step,
+    original_downloads,
+    require_page,
+    same_origin,
+)
 
 PACKAGE_DIR = Path(__file__).parent
 templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
@@ -72,6 +86,8 @@ def _shortdt(context, value) -> str:
 
 
 templates.env.filters["shortdt"] = _shortdt
+# The classic chat formats answers with the workspace's own module (static/ui/classic.js loads it).
+templates.env.globals["ui_import_map"] = ui_import_map()
 templates.env.globals["coding_choices"] = cost_codes.choices
 templates.env.filters["money"] = lambda value: "" if value is None else f"${value:,.2f}"
 templates.env.filters["label_doc"] = lambda value: DOCUMENT_LABELS.get(
@@ -83,59 +99,9 @@ templates.env.filters["label_imp"] = lambda value: IMPORTANCE_LABELS.get(
 
 MIN_CONTEXT_KEY = "min_context_tokens"
 
-NOTICES = {
-    "sample-blocked": "The sample mailbox was not loaded: it would erase your own mail. "
-    "Run the sample from a separate data folder instead (see README).",
-    "sample-busy": "The sample mailbox was not loaded: mail is being processed right now. Try again when it finishes.",
-    "processing": "Processing started. This page updates as it goes.",
-    "busy": "Already processing. This page updates as it goes.",
-    "busy-vision": "The vision model is reading pages of a scan. Stop it from the bar at the top, or try again when it's done.",
-    "stopping": "Stopping after the page being read now.",
-    "profile": "Saved. The digest and Today page now use this profile; new mail is sorted with it.",
-    "timezone": "Saved. Times and “today” now use this time zone.",
-    "context": "Saved. If the model in LM Studio is loaded with less, the next question reloads it with this context.",
-    "context-off": "Saved. CloseDesk now uses the model as LM Studio loaded it.",
-    "fraud-safe": "Saved as not fraud. Mail it covers was checked again, and the fraud check learns from it.",
-    "fraud-reported": "Reported as fraud. Its files stay locked, and the fraud check learns from it.",
-    "fraud-freemail": "That is a free email service anyone can sign up for, so it can't be trusted as a whole. "
-    "Trust the sender's address instead.",
-    "fraud-invalid": "That didn't save. Use the buttons in the email's fraud check.",
-    "domain-invalid": "That didn't save: enter a domain such as taz.com.",
-    "trust-added": "Domain saved. Its mail was checked again.",
-    "trust-reported": "Domain reported. Its mail was checked again.",
-    "trust-removed": "Removed. Its mail was checked again.",
-    "corrected": "Category corrected. Mail from this sender follows it, and the example is saved for the local model.",
-    "findings-cleared": "Notes cleared. Ask CloseDesk reads the files fresh next time.",
-    "indexing": "Indexing started. This page updates as it goes.",
-    "indexed": "Indexed for search. Ask CloseDesk can now find these files by meaning.",
-    "vision-saved": "Saved. Scans are read with the vision model as you chose.",
-    "chat-model": "Loaded in LM Studio. It answers your questions now.",
-    "chat-model-failed": "The model that answers wasn't changed.",
-    "chat-model-busy": "Mail is being processed or a scan read with the model right now. Change the model when it finishes.",
-    "index-failed": "The embedding model didn't answer, so nothing was indexed. Load one in LM Studio and try again.",
-    "index-off": "No embedding model found. Load one in LM Studio (for example nomic-embed-text) and try again.",
-    "coding-confirmed": "Cost code confirmed. The next invoice from this sender is suggested the same code.",
-    "coding-revised": "Cost code changed and confirmed. The next invoice from this sender is suggested this code.",
-    "coding-checked": "Every AP invoice was checked against the workbook again. Confirmed codes were left as they are.",
-}
-
-# Files that download from the email page. Programs, scripts, and macro-enabled Office files stay in Outlook.
-DOWNLOADABLE = {
-    ".pdf", ".docx", ".doc", ".rtf", ".xlsx", ".xls", ".csv", ".pptx", ".txt", ".png", ".jpg", ".jpeg",
-    ".gif", ".tif", ".tiff", ".bmp", ".msg", ".eml", ".ics",
-}
-
-
 LOCAL_CLIENTS = {"127.0.0.1", "::1", "localhost", "testclient"}
-# Only mail files are handed to the OS; anything else dropped in the inbox could be a program.
-MAIL_FILES = {".msg", ".eml"}
 # Most rows a classic mail list shows at once; past that, search narrows it.
 MAX_PAGE_ROWS = 2000
-
-
-def original_downloads(path: Path | None) -> bool:
-    """Whether an email's original downloads: a rebuilt .eml (no original), or a mail or downloadable file."""
-    return path is None or path.suffix.lower() in MAIL_FILES | DOWNLOADABLE
 
 
 def open_file(path: Path) -> None:
@@ -146,13 +112,6 @@ def open_file(path: Path) -> None:
         subprocess.Popen(["open", str(path)])
     else:
         subprocess.Popen(["xdg-open", str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def _host_name(header: str) -> str:
-    header = header.strip().lower()
-    if header.startswith("["):
-        return header[: header.find("]") + 1] if "]" in header else header
-    return header.rsplit(":", 1)[0] if header.count(":") == 1 else header
 
 
 class LocalHostOnly:
@@ -166,11 +125,11 @@ class LocalHostOnly:
         if scope["type"] == "http":
             headers = dict(scope.get("headers") or [])
             host = headers.get(b"host", b"").decode("latin-1")
-            if "*" not in self.allowed and _host_name(host) not in self.allowed:
+            if "*" not in self.allowed and host_name(host) not in self.allowed:
                 await PlainTextResponse("CloseDesk only answers on this computer's own address.", status_code=400)(scope, receive, send)
                 return
             send = _no_framing(send)
-            if scope.get("method") == "POST" and not _same_origin(headers, host, self.allowed):
+            if scope.get("method") == "POST" and not same_origin(headers, host, self.allowed):
                 await PlainTextResponse("Use the CloseDesk page for this.", status_code=403)(scope, receive, send)
                 return
         await self.app(scope, receive, send)
@@ -194,17 +153,6 @@ def _no_framing(send):
     return framed
 
 
-def _same_origin(headers: dict[bytes, bytes], host: str, allowed: set[str] | None = None) -> bool:
-    """A form another website submits to this server carries that site's Origin; refuse it."""
-    origin = headers.get(b"origin", b"").decode("latin-1").strip()
-    if origin:
-        origin_host = origin.lower().split("://", 1)[-1].rstrip("/")
-        if origin_host != host.strip().lower():
-            return False
-        return allowed is None or "*" in allowed or _host_name(origin_host) in allowed
-    return headers.get(b"sec-fetch-site", b"").decode("latin-1").lower() not in {"cross-site", "same-site"}
-
-
 LOOPBACK_NAMES = {"127.0.0.1", "localhost", "::1", "[::1]", "testserver"}
 WILDCARD_BINDS = {"", "0.0.0.0", "::", "[::]", "*"}
 
@@ -216,7 +164,7 @@ def is_loopback(bind_host: str) -> bool:
 
 def _bracketed(name: str) -> set[str]:
     # "http://closedesk.lan:8765/" and "closedesk.lan:8765" both mean the host closedesk.lan
-    name = _host_name(name.strip().lower().split("://", 1)[-1].split("/", 1)[0])
+    name = host_name(name.strip().lower().split("://", 1)[-1].split("/", 1)[0])
     if not name or name == "*":
         return set()
     if ":" in name and not name.startswith("["):
@@ -258,12 +206,6 @@ def allowed_hosts(bind_host: str, extra: str = "") -> set[str]:
     hosts.discard("*")
     hosts.discard("")
     return hosts
-
-
-def _require_page(request: Request) -> None:
-    """The page's own scripts send this header; other sites cannot without the browser blocking them."""
-    if request.headers.get("x-closedesk") != "1":
-        raise HTTPException(status_code=403, detail="Use the CloseDesk page for this.")
 
 
 class _AnswerLog:
@@ -373,10 +315,6 @@ class ProcessJob:
             self.finished_at = datetime.now(timezone.utc).isoformat()
 
 
-def _nearest_step(tokens: int) -> int:
-    return min(range(len(agent.CONTEXT_STEPS)), key=lambda i: abs(agent.CONTEXT_STEPS[i] - tokens))
-
-
 def create_app(settings: Settings | None = None, store: Store | None = None) -> FastAPI:
     settings = settings or Settings()
     settings.ensure_data_dir()
@@ -398,31 +336,28 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     job = ProcessJob()
     app.state.job = job
 
-    def board_date():
-        """Today, or the sample's date when only the sample mailbox is loaded."""
-        if store.counts()["emails"] and not store.real_mail_count():
+    def board_date(sample: bool | None = None):
+        """Today, or the sample's date when only the sample mailbox is loaded (``sample``: whether it is, when
+        already known)."""
+        if store.only_sample() if sample is None else sample:
             return local_today(settings.tz, DEMO_NOW)
         return local_today(settings.tz)
 
     def board_now() -> datetime | None:
         """The sample's moment when only the sample mailbox is loaded, so a verdict's new tasks are dated on its
         board; else None (now)."""
-        return DEMO_NOW if store.counts()["emails"] and not store.real_mail_count() else None
+        return DEMO_NOW if store.only_sample() else None
 
     def ctx(request: Request, **extra):
-        as_of = board_date()
+        sample = store.only_sample()
         counts = store.counts()
-        close = month_end(as_of)
         profile = active_profile(settings, store)
         base = {
             "request": request,
             "settings": settings,
             "display_tz": settings.tz,
             "counts": counts,
-            "today": as_of.isoformat(),
-            "today_long": f"{as_of.strftime('%A')}, {as_of.strftime('%B')} {as_of.day}, {as_of.year}",
-            "days_to_close": (close - as_of).days,
-            "close_date": close.isoformat(),
+            **services.today_fields(board_date(sample), sample=sample),
             "graph_configured": settings.graph_configured,
             "model": check_model(settings),
             "job": job.snapshot(),
@@ -438,7 +373,6 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "filter_category": "",
             "query": "",
             "notice": NOTICES.get(request.query_params.get("notice", ""), ""),
-            "is_sample": bool(counts["emails"]) and not store.real_mail_count(),
             "profile": profile,
             "profiles": PROFILES,
             "finance": profile == "finance",
@@ -455,17 +389,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     def home(request: Request):
         if not store.list_emails(limit=1):
             return render(request, "empty.html", page="home")
-        as_of = board_date()
-        now = datetime.now(settings.tz)
-        payload = build_digest(
-            store,
-            as_of=as_of,
-            generated_at=now,
-            tz=settings.tz,
-            lookback_days=settings.digest_lookback_days,
-            save=False,
-            finance=is_finance(settings, store),
-        )
+        payload = services.digest_now(store, settings, board_date())
         return render(
             request,
             "morning.html",
@@ -508,9 +432,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/inbox/{email_id}/done")
     def mark_done(email_id: str, undo: int = 0, next: str = Query("/")):
-        if store.get_email(email_id) is None:
-            raise HTTPException(status_code=404, detail="Message not found")
-        store.set_done(email_id, not undo)
+        with service_errors():
+            services.mark_done(store, email_id, not undo)
         return RedirectResponse(_local_path(next, "/"), status_code=303)
 
     @app.get("/inbox", response_class=HTMLResponse)
@@ -592,13 +515,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return cards
 
     def email_file(email_id: str, n: int):
-        chat_id = chats.chat_id_of(email_id)
-        email = chats.chat_mail(store, chat_id) if chat_id else store.get_email(email_id)
-        if not email:
-            raise HTTPException(status_code=404, detail="Message not found")
-        if not 1 <= n <= len(email.attachments):
-            raise HTTPException(status_code=404, detail="No such file on this email")
-        return email, email.attachments[n - 1]
+        # A held email's file page still answers (saying why its file isn't shown); its file never downloads.
+        return attachment_or_404(store, email_id, n, allow_locked=True)
 
     @app.get("/inbox/{email_id}/files/{n}", response_class=HTMLResponse)
     def file_page(request: Request, email_id: str, n: int, q: str = "", at: str = ""):
@@ -645,11 +563,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     def original_or_refuse(email, att, allowed) -> Path:
         if fraud.attachments_locked(email):
-            raise HTTPException(
-                status_code=403,
-                detail="This email is flagged as possible payment fraud, so its files don't open. "
-                "Verify it by phone, then mark it safe on the email page.",
-            )
+            raise HTTPException(status_code=403, detail=fraud.LOCKED_FILES)
         if Path(att.filename).suffix.lower() not in allowed:
             raise HTTPException(status_code=403, detail="This kind of file only opens from Outlook.")
         path = agent.original_file(settings, email, att)
@@ -679,7 +593,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.post("/inbox/{email_id}/files/{n}/vision")
     def file_vision_read(request: Request, email_id: str, n: int, again: int = 0):
         """Read the file's pages that need it (``again``: every one of them, a second time) in the background."""
-        _require_page(request)
+        require_page(request)
         email, att = email_file(email_id, n)
         reply, status = vision.start(store, settings, job, email, att, n, again=bool(again))
         return JSONResponse(reply, status_code=status)
@@ -697,20 +611,17 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/inbox/{email_id}/findings/clear")
     def findings_clear(email_id: str):
-        store.clear_findings(email_id)
-        return RedirectResponse(f"/inbox/{email_id}?notice=findings-cleared#notes", status_code=303)
+        with service_errors():
+            notice = services.clear_findings(store, email_id)
+        return RedirectResponse(f"/inbox/{email_id}?notice={notice}#notes", status_code=303)
 
     @app.post("/inbox/{email_id}/fraud")
     def fraud_verdict(email_id: str, choice: str = Form(...), note: str = Form("")):
-        verdict, _, scope = choice.partition(":")
         try:
-            fraud.record_fraud_verdict(store, settings, email_id, verdict=verdict, scope=scope or "email", note=note, now=board_now())
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Message not found") from None
-        except ValueError as exc:
-            notice = "fraud-freemail" if "free email" in str(exc) else "fraud-invalid"
-            return RedirectResponse(f"/inbox/{email_id}?notice={notice}#fraud", status_code=303)
-        notice = "fraud-safe" if verdict == "safe" else "fraud-reported"
+            with service_errors():
+                notice = services.fraud_verdict(store, settings, email_id, choice, note, now=board_now())
+        except Invalid as refused:
+            notice = refused.notice
         return RedirectResponse(f"/inbox/{email_id}?notice={notice}#fraud", status_code=303)
 
     @app.get("/fraud", response_class=HTMLResponse)
@@ -796,7 +707,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/inbox/{email_id}/open")
     def open_original(request: Request, email_id: str):
-        _require_page(request)
+        require_page(request)
         if request.client and request.client.host not in LOCAL_CLIENTS:
             raise HTTPException(status_code=403, detail="Files open on the computer running CloseDesk only.")
         email = store.get_email(email_id)
@@ -835,10 +746,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         path = original_path(email)
         if path is not None:
             if fraud.attachments_locked(email) and email.attachments:
-                raise HTTPException(
-                    status_code=403,
-                    detail="This email may be payment fraud, so its original (with its files) doesn't download. Open it in Outlook.",
-                )
+                raise HTTPException(status_code=403, detail=fraud.LOCKED_FILES)
             # A file dropped loose in the inbox is its own original; the attachment rule applies to it too.
             if not original_downloads(path):
                 raise HTTPException(
@@ -855,11 +763,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/inbox/{email_id}/draft")
     async def draft(request: Request, email_id: str):
-        _require_page(request)
+        require_page(request)
         email = store.get_email(email_id)
         if not email:
             raise HTTPException(status_code=404, detail="Message not found")
-        data = await _json_body(request)
+        data = await json_body(request)
         instructions = str(data.get("instructions") or "")[:300]
         return JSONResponse(await run_in_threadpool(draft_reply, settings, email, instructions=instructions))
 
@@ -878,15 +786,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         past = chats.past_context(store, question, exclude=chat_id)
         email_id = str(data.get("email_id") or "") or None
         as_of = board_date()
-        focus = build_digest(
-            store,
-            as_of=as_of,
-            generated_at=datetime.now(settings.tz),
-            tz=settings.tz,
-            lookback_days=settings.digest_lookback_days,
-            save=False,
-            finance=is_finance(settings, store),
-        )["focus"]
+        focus = services.digest_now(store, settings, as_of)["focus"]
 
         def lines():
             finished = False
@@ -931,8 +831,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/chat")
     async def chat(request: Request):
-        _require_page(request)
-        data = await _json_body(request)
+        require_page(request)
+        data = await json_body(request)
         question = str(data.get("message") or "").strip()
         if not question:
             raise HTTPException(status_code=400, detail="Ask a question first.")
@@ -946,7 +846,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/chats")
     def chat_new(request: Request):
-        _require_page(request)
+        require_page(request)
         chat_id = chats.new_id()
         store.create_chat(chat_id)
         return JSONResponse({"id": chat_id})
@@ -964,14 +864,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/chats/{chat_id}/delete")
     def chat_delete(request: Request, chat_id: str):
-        _require_page(request)
+        require_page(request)
         known_chat(chat_id)
         chats.delete(store, settings, chat_id)
         return JSONResponse({"ok": True})
 
     @app.post("/chats/{chat_id}/files")
     async def chat_add_files(request: Request, chat_id: str, files: list[UploadFile] = File(...)):
-        _require_page(request)
+        require_page(request)
         known_chat(chat_id)
         problems = []
         for upload in files[: chats.MAX_FILES]:
@@ -988,7 +888,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/chats/{chat_id}/files/{n}/delete")
     def chat_remove_file(request: Request, chat_id: str, n: int):
-        _require_page(request)
+        require_page(request)
         known_chat(chat_id)
         rows = store.chat_files(chat_id)
         if not 1 <= n <= len(rows):
@@ -1002,52 +902,31 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/inbox/{email_id}/correct")
     def correct_category(email_id: str, category: str = Form(...), reason: str = Form(...), next: str = Form("")):
-        from controller_inbox.learn import record_correction
-
-        try:
-            record_correction(
-                store,
-                settings,
-                email_id=email_id,
-                corrected_category=category,
-                reason=reason,
-            )
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Message not found") from None
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
+        with service_errors(invalid=400):
+            notice = services.correct_category(store, settings, email_id, category, reason)
         back = _local_path(next, f"/inbox/{email_id}")
-        return RedirectResponse(back + ("&" if "?" in back else "?") + "notice=corrected", status_code=303)
+        return RedirectResponse(back + ("&" if "?" in back else "?") + f"notice={notice}", status_code=303)
 
     @app.post("/inbox/{email_id}/coding/confirm")
     def confirm_coding(email_id: str, next: str = Form("")):
-        if store.get_email(email_id) is None:
-            raise HTTPException(status_code=404, detail="Message not found")
-        try:
-            cost_codes.confirm(store, settings, email_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-        return _back(next, f"/inbox/{email_id}", "coding-confirmed", "coding")
+        with service_errors(invalid=400):
+            notice = services.code_invoice(store, settings, email_id)
+        return _back(next, f"/inbox/{email_id}", notice, "coding")
 
     @app.post("/inbox/{email_id}/coding/revise")
     def revise_coding(email_id: str, codes: list[str] = Form(default=[]), next: str = Form("")):
-        if store.get_email(email_id) is None:
-            raise HTTPException(status_code=404, detail="Message not found")
-        try:
-            cost_codes.revise(store, settings, email_id, codes)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-        return _back(next, f"/inbox/{email_id}", "coding-revised", "coding")
+        with service_errors(invalid=400):
+            notice = services.code_invoice(store, settings, email_id, codes)
+        return _back(next, f"/inbox/{email_id}", notice, "coding")
 
     @app.get("/coding", response_class=HTMLResponse)
     def coding_page(request: Request, status: str = "review", q: str = ""):
-        cost_codes.refresh_if_changed(store, settings)
-        status = status if status in {"review", "suggested", "unmatched", "confirmed", "all"} else "review"
+        status, rows = services.coding_rows(store, settings, status, q)
         return render(
             request,
             "coding.html",
             page="coding",
-            rows=store.cost_codings(status=None if status == "all" else status, q=q or None),
+            rows=rows,
             status=status,
             coding_q=q,
             codebook=cost_codes.load(settings),
@@ -1063,7 +942,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/coding/open")
     def coding_open(request: Request):
-        _require_page(request)
+        require_page(request)
         if request.client and request.client.host not in LOCAL_CLIENTS:
             raise HTTPException(status_code=403, detail="Files open on the computer running CloseDesk only.")
         path = cost_codes.ensure_workbook(settings)
@@ -1075,16 +954,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/process")
     def process():
-        from controller_inbox.overnight import run_overnight
-
-        started = job.start(
-            lambda progress: run_overnight(
-                store, settings, sync_graph=False, on_progress=progress, vision_minutes=vision.process_minutes(settings),
-                should_stop=lambda: job.stopping,
-            )
-        )
-        busy = "busy-vision" if (job.snapshot()["about"] or {}).get("kind") == "vision" else "busy"
-        return RedirectResponse(f"/?notice={'processing' if started else busy}", status_code=303)
+        return RedirectResponse(f"/?notice={services.start_processing(store, settings, job)}", status_code=303)
 
     @app.get("/process/status")
     def process_status():
@@ -1092,7 +962,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/process/stop")
     def process_stop():
-        return RedirectResponse("/?notice=stopping" if job.request_stop() else "/", status_code=303)
+        notice = services.stop_processing(job)
+        return RedirectResponse(f"/?notice={notice}" if notice else "/", status_code=303)
 
     @app.post("/folder/ingest")
     def folder_ingest():
@@ -1114,12 +985,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/actions/{action_id}/complete")
     def complete_action(action_id: str, next: str = Query("/actions")):
-        store.set_action_status(action_id, "done")
+        with service_errors(missing="Task not found"):
+            services.set_task_status(store, action_id, "done")
         return RedirectResponse(_local_path(next, "/actions"), status_code=303)
 
     @app.post("/actions/{action_id}/reopen")
     def reopen_action(action_id: str, next: str = Query("/actions?status=done")):
-        store.set_action_status(action_id, "open")
+        with service_errors(missing="Task not found"):
+            services.set_task_status(store, action_id, "open")
         return RedirectResponse(_local_path(next, "/actions?status=done"), status_code=303)
 
     @app.get("/attachments", response_class=HTMLResponse)
@@ -1137,26 +1010,19 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.get("/digest", response_class=HTMLResponse)
     def digest_page(request: Request, date: str = ""):
-        row = store.get_digest(date) if date else (store.get_digest(board_date().isoformat()) or store.latest_digest())
-        if date and row is None:
-            raise HTTPException(status_code=404, detail=f"No digest saved for {date}")
-        payload = None
-        if row and row.get("payload"):
-            payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
-        history = store.list_digests(limit=30)
-        dates = [item["period_date"] for item in history]
-        current = row["period_date"] if row else ""
-        index = dates.index(current) if current in dates else -1
+        as_of = board_date()
+        with service_errors(missing=f"No digest saved for {date}"):
+            view = services.digest_view(store, as_of, date)
         return render(
             request,
             "digest.html",
             page="digest",
-            digest=row,
-            payload=payload,
-            history=history[:8],
-            newer=dates[index - 1] if index > 0 else "",
-            older=dates[index + 1] if 0 <= index < len(dates) - 1 else "",
-            as_of=board_date().isoformat(),
+            digest=view["row"],
+            payload=view["payload"],
+            history=view["saved"][:8],
+            newer=view["newer"],
+            older=view["older"],
+            as_of=as_of.isoformat(),
         )
 
     @app.get("/digest/{period}.html", response_class=HTMLResponse)
@@ -1192,7 +1058,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             llm_enabled=model.active,
             recommended_context=agent.RECOMMENDED_CONTEXT,
             context_steps=[agent.context_capacity(tokens, settings.chat_max_tokens) for tokens in agent.CONTEXT_STEPS],
-            context_step=_nearest_step(settings.min_context_tokens),
+            context_step=nearest_step(settings.min_context_tokens),
             context_target=context_target(settings, model),
             will_reload=needs_more_context(settings),
             ocr_engine=ocr.engine_name(),
@@ -1354,11 +1220,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "model": model.model if model.active else "",
         }
 
-    from controller_inbox.web_api import register_workspace
-
     register_workspace(
         app, store=store, settings=settings, job=job, board_date=board_date, board_now=board_now,
-        fraud_view=fraud_view, file_cards=file_cards, original_path=original_path,
+        fraud_view=fraud_view, file_cards=file_cards, original_path=original_path, templates=templates,
         setup={
             "timezone_options": _timezone_options,
             "vision_setup": vision_setup,
@@ -1370,6 +1234,20 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         },
     )
     return app
+
+
+@contextmanager
+def service_errors(*, missing: str = "Message not found", invalid: int | None = None) -> Iterator[None]:
+    """A service's ``Missing`` as a 404 saying ``missing``; its ``Invalid`` as an HTTP error with status ``invalid``
+    (its notice's text, or its message), or left to the route when ``invalid`` is None (a form redirects with it)."""
+    try:
+        yield
+    except Missing:
+        raise HTTPException(status_code=404, detail=missing) from None
+    except Invalid as exc:
+        if invalid is None:
+            raise
+        raise HTTPException(status_code=invalid, detail=NOTICES.get(exc.notice) or str(exc)) from None
 
 
 async def _closing(lines: Generator[str, None, None]) -> AsyncIterator[str]:
@@ -1384,14 +1262,6 @@ async def _closing(lines: Generator[str, None, None]) -> AsyncIterator[str]:
         # Shielded: the response is being cancelled, which would otherwise cancel this as well.
         with anyio.CancelScope(shield=True):
             await run_in_threadpool(lines.close)
-
-
-async def _json_body(request: Request) -> dict:
-    try:
-        data = await request.json()
-    except (ValueError, UnicodeDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _ascii_name(subject: str) -> str:

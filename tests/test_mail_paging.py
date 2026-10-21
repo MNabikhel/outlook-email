@@ -9,8 +9,7 @@ from fastapi.testclient import TestClient
 
 from controller_inbox import web
 from controller_inbox.models import DocumentType, EmailRecord, Importance
-
-PAGE = {"X-CloseDesk": "1"}
+from helpers import PAGE
 
 
 def _fill(store, n: int, folder: str = "reference") -> None:
@@ -59,6 +58,7 @@ def test_mail_api_gives_the_total_and_the_next_page(settings, store):
         assert len(rest["items"]) == 5 and rest["total"] == 205, query
 
 
+@pytest.mark.browser
 def test_the_workspace_list_loads_more_than_200(settings, store):
     pytest.importorskip("playwright")
     from playwright.sync_api import sync_playwright
@@ -85,6 +85,7 @@ def test_the_workspace_list_loads_more_than_200(settings, store):
         assert errors == []
 
 
+@pytest.mark.browser
 def test_load_more_does_not_loop_when_mail_arrives_between_pages(settings, store):
     # Mail filed between two pages repeats a row on the next; the list pages on by the rows sent, not those kept.
     pytest.importorskip("playwright")

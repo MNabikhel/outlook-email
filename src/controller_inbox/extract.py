@@ -10,10 +10,12 @@ from typing import Iterable
 
 from dateutil import parser as date_parser
 
+from controller_inbox import money
 from controller_inbox.classify import strip_html_comments
 from controller_inbox.documents import decode_text, extract_document, without_deletions
 from controller_inbox.models import ExtractedFields
 from controller_inbox.ocr import image_text
+from controller_inbox.totals import is_total_label
 
 
 # A further "-0457" segment belongs to the number ("INV-2024-0457"); a segment needs a digit, so
@@ -42,26 +44,31 @@ PO_RE = re.compile(
     r"\b(?:purchase\s+order|p\.?o\.?)" + _NUMBER_WORD + r"[\s#:No.-]*([A-Z]{0,4}-?\d{3,10})\b",
     re.IGNORECASE,
 )
+# An amount written European style ("4.210,50", "€48.000", "12,50"): thousands dots or decimal cents, so it
+# reads the same with a currency mark or without.
+_EU_FIGURE = r"[0-9]{1,3}(?:\.[0-9]{3})+(?:,[0-9]{2})?|[0-9]+,[0-9]{2}"
 # After a currency mark, cents are optional ("$48,000"). Not followed by a further digit group,
 # so "$1,2345" is not read as $1.
 AMOUNT_RE = re.compile(
-    r"(?<!\w)(?:USD|US\$|\$)\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?)(?![\w]|[.,]\d)"
+    r"(?<!\w)(?:USD|US\$|\$|EUR|€|GBP|£)\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+(?:\.[0-9]{2})?|"
+    + _EU_FIGURE
+    + r")(?![\w]|[.,]\d)"
 )
 # Without a currency mark a bare whole number ("total 3 items") is not an amount: it needs
 # thousands separators or cents.
+_BARE_FIGURE = r"[0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+\.[0-9]{2}|" + _EU_FIGURE
 AMOUNT_WORDS_RE = re.compile(
-    r"\b(?:amount(?:\s+due)?|total(?:\s+due)?|balance(?:\s+due)?|grand\s+total)\s*[:\-]?\s*\$?\s*"
-    r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+\.[0-9]{2})(?![\w]|[.,]\d)",
+    r"\b(?:amount(?:\s+due)?|total(?:\s+due)?|balance(?:\s+due)?|grand\s+total)\s*[:\-]?\s*(?:[$€£]|USD|EUR|GBP)?\s*"
+    r"(" + _BARE_FIGURE + r")(?![\w]|[.,]\d)",
     re.IGNORECASE,
 )
 # A table row read from a file ("Qty: Amount Due | Price: not listed | Ext: 250.00"): the label is one cell and
 # its amount the next filled one, as the Page tab reads it.
 AMOUNT_CELL_RE = re.compile(
     r":\s*((?:amount|total|balance)(?:\s+due)?|grand\s+total)\s*(?:\|[^|:\n]*:\s*not listed\s*)*\|[^|:\n]*:\s*\$?\s*"
-    r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+\.[0-9]{2})(?![\w]|[.,]\d)",
+    r"(" + _BARE_FIGURE + r")(?![\w]|[.,]\d)",
     re.IGNORECASE,
 )
-TOTAL_LABEL_RE = re.compile(r"(?:grand\s+)?total\b", re.IGNORECASE)
 _MONTH = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
     r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
@@ -483,11 +490,22 @@ def _basename(filename: str) -> str:
     return filename.replace("\\", "/").split("/")[-1]
 
 
+_MARK_BEFORE = re.compile(r"(?i)(US\$|\$|USD|EUR|€|GBP|£)\s*$")
+_MARK_AFTER = re.compile(r"(?i)\s*(USD|EUR|GBP|CAD)\b")
+
+
+def _marked(match: re.Match, group: int) -> str:
+    """The figure a pattern matched with the currency mark printed just before it ("$3.459") or the code just after
+    it ("12.500 USD"): the mark says whether "3.459" is three and a bit (dollars) or three thousand (euros)."""
+    before = _MARK_BEFORE.search(match.string, match.start(), match.start(group))
+    after = _MARK_AFTER.match(match.string, match.end(group))
+    return (before.group(1) if before else "") + match.group(group) + (" " + after.group(1) if after and not before else "")
+
+
 def parse_amount(raw: str) -> float | None:
-    try:
-        return round(float(raw.replace(",", "")), 2)
-    except ValueError:
-        return None
+    """An amount as ExtractedFields keeps it: a float, to the cent (see ``money.parse_amount``)."""
+    amount = money.parse_amount(raw)
+    return None if amount is None else round(float(amount), 2)
 
 
 def parse_due_date(raw: str, *, as_of: date) -> str | None:
@@ -544,9 +562,9 @@ def extract_fields(text: str, *, as_of: date, extra_vendor: str | None = None) -
     invoices += [v for v in _unique(_normalize_id(m.group(1)) for m in INVOICE_BARE_RE.finditer(text)) if v not in invoices]
     pos = _unique(_normalize_id(m.group(1)) for m in PO_RE.finditer(text))
     amounts: list[float] = []
-    cells = [(m.group(1), m.group(2)) for m in AMOUNT_CELL_RE.finditer(text)]
+    cells = [(m.group(1), _marked(m, 2)) for m in AMOUNT_CELL_RE.finditer(text)]
     for match in list(AMOUNT_RE.finditer(text)) + list(AMOUNT_WORDS_RE.finditer(text)):
-        amount = parse_amount(match.group(1))
+        amount = parse_amount(_marked(match, 1))
         if amount is not None and 0.01 <= amount <= 10_000_000:
             amounts.append(amount)
     for _label, raw in cells:
@@ -556,8 +574,11 @@ def extract_fields(text: str, *, as_of: date, extra_vendor: str | None = None) -
     amounts = _unique(amounts)
     # A long schedule (an aging, a statement) prints its grand total after the first eight amounts kept: the
     # largest amount labelled as a total is kept too, so the schedule's amount is its total, not its first row's.
-    totals = [parse_amount(m.group(1)) for m in AMOUNT_WORDS_RE.finditer(text) if TOTAL_LABEL_RE.match(m.group(0))]
-    totals += [parse_amount(raw) for label, raw in cells if TOTAL_LABEL_RE.match(label)]
+    # Only a label that says "Total" counts here, not "Amount due" or "Balance due" (``due=False``).
+    totals = [
+        parse_amount(_marked(m, 1)) for m in AMOUNT_WORDS_RE.finditer(text) if is_total_label(text[m.start() : m.start(1)], due=False)
+    ]
+    totals += [parse_amount(raw) for label, raw in cells if is_total_label(label, due=False)]
     total = max((amount for amount in totals if amount is not None and 0.01 <= amount <= 10_000_000), default=None)
     if total is not None and total not in amounts[:8]:
         amounts = [total, *[amount for amount in amounts if amount != total]]

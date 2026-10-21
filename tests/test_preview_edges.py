@@ -5,6 +5,7 @@ and moves, CSV quoting, and the thumbnail. Each test states the Excel or Word be
 from __future__ import annotations
 
 import io
+import json
 
 import pytest
 from docx import Document
@@ -208,22 +209,6 @@ def test_moved_text_reads_once_with_changes_accepted():
 # Front end (Playwright) ----------------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def browser():
-    pytest.importorskip("playwright")
-    from playwright.sync_api import sync_playwright
-
-    from liveserver import chromium_path
-
-    path = chromium_path()
-    if path is None:
-        pytest.skip("no Chromium for Playwright on this machine")
-    with sync_playwright() as p:
-        b = p.chromium.launch(executable_path=path)
-        yield b
-        b.close()
-
-
 def _review_book() -> bytes:
     book = Workbook()
     ws = book.active
@@ -295,3 +280,152 @@ def test_the_attachment_thumbnail_leaves_out_hidden_columns(served):
     page.wait_for_selector(".file-thumb-grid")
     text = page.text_content(".file-thumb-grid")
     assert "Cost" not in text and "900" not in text, text
+
+
+# Preview: a big export --------------------------------------------------------------------------------
+@pytest.mark.usefixtures("harbor_ocr")
+def test_the_thumbnail_of_a_5_mb_ledger_export_doesnt_load_the_whole_workbook_twice(monkeypatch):
+    """A 5 MB general-ledger export (200,000 rows) is well inside the preview's limits (25 MB, 150 MB unzipped).
+    The email's thumbnail asks for 8 rows: the workbook is streamed (read-only), never loaded in full, which took
+    about 25 seconds and 1 GB of memory twice over (values and formulas)."""
+    import io
+
+    import openpyxl
+    from openpyxl import Workbook
+
+    from controller_inbox import sheet_preview
+
+    book = Workbook(write_only=True)
+    ws = book.create_sheet("GL")
+    ws.append(["Date", "Account", "Description", "Debit", "Credit"])
+    for i in range(200_000):
+        ws.append(["2026-09-30", 4000 + i % 50, f"Journal line {i}", i * 1.01, 0])
+    out = io.BytesIO()
+    book.save(out)
+    data = out.getvalue()
+    assert len(data) < sheet_preview.MAX_BYTES and sheet_preview._unzipped_size(data) < sheet_preview.MAX_UNZIPPED
+    opened = []
+    real = openpyxl.load_workbook
+
+    def load_workbook(*args, **kwargs):
+        opened.append(bool(kwargs.get("read_only")))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(openpyxl, "load_workbook", load_workbook)
+    got = sheet_preview.preview(data, "GL detail.xlsx", rows=8, cols=12)
+    assert len(got["sheets"][0]["rows"]) == 8
+    assert opened and all(opened), "the whole workbook was loaded, not streamed"
+
+
+# Preview: a merge whose top-left cell is hidden ---------------------------------------------------------------------
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_merge_whose_first_row_is_hidden_still_shows():
+    import io
+
+    from openpyxl import Workbook
+
+    from controller_inbox import sheet_preview
+
+    book = Workbook()
+    ws = book.active
+    ws["A1"] = "Q3 accruals"
+    ws.merge_cells("A1:C2")
+    ws.row_dimensions[1].hidden = True
+    ws["A3"], ws["B3"], ws["C3"] = "Rent", 4200, 4200
+    out = io.BytesIO()
+    book.save(out)
+    sheet = sheet_preview.preview(out.getvalue(), "accruals.xlsx")["sheets"][0]
+    cells = {cell["v"]: (row["n"], cell) for row in sheet["rows"] for cell in row["cells"]}
+    assert "Q3 accruals" in cells, sheet["rows"]
+    n, cell = cells["Q3 accruals"]
+    assert n == 2 and cell["c"] == 1 and cell.get("cs") == 3 and cell.get("rs", 1) == 1
+
+
+# Spreadsheet previews keep merged cells: an .xls's, and the last row of an .xlsx merge at the bottom of a sheet.
+def test_xlsx_preview_keeps_the_last_row_of_a_merge_at_the_bottom(tmp_path):
+    """A merge A9:B10 with nothing below it keeps row 10 in the grid, so the merged cell spans two shown rows."""
+    from controller_inbox import sheet_preview
+
+    book = Workbook()
+    sheet = book.active
+    sheet["A1"] = "Item"
+    sheet["A9"] = "Approved by Dana"
+    sheet.merge_cells("A9:B10")
+    out = io.BytesIO()
+    book.save(out)
+    grid = sheet_preview.preview(out.getvalue(), "book.xlsx")["sheets"][0]
+    [merged] = [cell for row in grid["rows"] if row["n"] == 9 for cell in row["cells"]]
+    assert merged["rs"] == 2 and merged["cs"] == 2
+    assert [row["n"] for row in grid["rows"]][-1] == 10
+
+
+def test_xls_preview_keeps_merged_cells(monkeypatch):
+    """An .xls's merged title (A1:C1) spans three columns and the cells it covers aren't shown on their own."""
+    import xlrd
+    from xlrd.sheet import Cell
+
+    from controller_inbox import sheet_preview
+
+    values = {(0, 0): "Q3 Budget", (1, 0): "Line", (1, 1): "Q3", (1, 2): "Q4"}
+
+    class Sheet:
+        name, nrows, ncols, visibility = "Budget", 2, 3, 0
+        merged_cells = [(0, 1, 0, 3)]
+
+        def cell(self, r, c):
+            value = values.get((r, c))
+            return Cell(xlrd.XL_CELL_TEXT, value) if value else Cell(xlrd.XL_CELL_EMPTY, "")
+
+    class Book:
+        nsheets, datemode = 1, 0
+
+        def sheet_by_index(self, i):
+            return Sheet()
+
+        def release_resources(self):
+            pass
+
+    monkeypatch.setattr(xlrd, "open_workbook", lambda **kw: Book())
+    data = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 504
+    rows = sheet_preview.preview(data, "book.xls")["sheets"][0]["rows"]
+    [title] = rows[0]["cells"]
+    assert title["v"] == "Q3 Budget" and title["cs"] == 3 and title["rs"] == 1
+    assert [cell["v"] for cell in rows[1]["cells"]] == ["Line", "Q3", "Q4"]
+
+
+# A web page attachment's tables are shown as tables (text only); a calendar file as its events.
+def test_an_html_attachment_preview_keeps_its_tables_as_text_only():
+    """statement.html previews as a heading and a table of text cells; its script, hidden text and markup are gone."""
+    from controller_inbox import sheet_preview
+
+    page = (
+        b"<html><head><title>Statement</title><script>window.parent.__xss='html'</script></head><body><h1>Statement</h1>"
+        b"<p>Balance <b>due</b><span style='display:none'>zz</span></p><table><tr><th>Item</th><th>Amount</th></tr>"
+        b"<tr><td>Balance</td><td>1,234.00</td></tr><tr><td colspan=2><img src=x onerror=alert(5)>Thanks</td></tr></table></body></html>"
+    )
+    got = sheet_preview.preview(page, "statement.html")
+    assert got["kind"] == "doc"
+    assert got["blocks"] == [
+        {"t": "h2", "text": "Statement"},
+        {"t": "p", "text": "Balance due"},
+        {"t": "table", "rows": [["Item", "Amount"], ["Balance", "1,234.00"], [{"v": "Thanks", "cs": 2}]]},
+    ]
+    assert "xss" not in json.dumps(got) and "onerror" not in json.dumps(got)
+
+
+def test_an_ics_attachment_previews_as_its_event():
+    """meeting.ics shows its summary, start, end, place and organizer instead of the raw iCalendar lines."""
+    from controller_inbox import sheet_preview
+
+    ics = (
+        b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:1@x\r\nDTSTART:20261024T140000Z\r\nDTEND:20261024T150000Z\r\n"
+        b"SUMMARY:Q4 planning\r\nLOCATION:Room 4\\, 2nd floor\r\nORGANIZER;CN=Dana Cole:mailto:dana@taz.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+    got = sheet_preview.preview(ics, "meeting.ics")
+    assert got["kind"] == "doc"
+    assert got["blocks"][:2] == [
+        {"t": "h2", "text": "Q4 planning"},
+        {"t": "table", "rows": [["Starts", "Sat, Oct 24, 2026, 2:00 PM UTC"], ["Ends", "Sat, Oct 24, 2026, 3:00 PM UTC"],
+                                ["Where", "Room 4, 2nd floor"], ["Organizer", "Dana Cole dana@taz.com"]]},
+    ]
+    assert "BEGIN:VEVENT" not in json.dumps(got["blocks"]) and "SUMMARY:Q4 planning" in got["source"]

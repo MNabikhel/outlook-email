@@ -696,6 +696,13 @@ def assess_email(store: "Store", ctx: TrustContext, email: "EmailRecord") -> Fra
     )
 
 
+# What a page says when it won't open, show or download a held email's files (or its original, which has them).
+LOCKED_FILES = (
+    "This email is flagged as possible payment fraud, so its files don't open. "
+    "Verify it by phone, then mark it safe in its fraud check."
+)
+
+
 def attachments_locked(email: "EmailRecord") -> bool:
     """Files on a suspected-fraud email are not opened or given to the model until the user clears it."""
     from controller_inbox.models import DocumentType

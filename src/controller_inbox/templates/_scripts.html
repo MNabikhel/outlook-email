@@ -1,0 +1,4 @@
+  {# The classic pages' script, and the workspace modules its chat shares (static/ui/classic.js runs first). #}
+  <script type="importmap">{{ ui_import_map | tojson }}</script>
+  <script type="module" src="{{ ui_import_map.imports['/static/ui/classic.js'] }}"></script>
+  <script src="/static/app.js?v={{ static_version }}" defer></script>

@@ -16,10 +16,10 @@ from controller_inbox import sheet_preview, teach, web
 from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.models import ExtractedFields
 from controller_inbox.sheet_preview import display
-from msgfactory import PDF, XLSX, DOCX, write_msg
+from helpers import PAGE
+from msgfactory import DOCX, PDF, XLSX, write_msg
 from pdffactory import Text, build_pdf
 
-PAGE = {"X-CloseDesk": "1"}
 AS_OF = date(2026, 10, 20)
 
 

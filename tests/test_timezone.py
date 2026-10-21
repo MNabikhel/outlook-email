@@ -23,7 +23,7 @@ from controller_inbox.clock import (
     zone_option,
 )
 from controller_inbox.config import Settings
-from controller_inbox.reading import _as_of
+from controller_inbox.actions import received_day
 from controller_inbox.web import create_app
 
 STAMP = "2026-09-22T16:00:00+00:00"
@@ -168,8 +168,8 @@ def test_setup_lists_zones_like_windows_and_says_when_daylight_time_is_on(settin
 
 def test_an_evening_email_belongs_to_the_local_day():
     evening = SimpleNamespace(received_at="2026-10-02T01:30:00+00:00")
-    assert str(_as_of(evening, ZoneInfo("America/New_York"))) == "2026-10-01"
-    assert str(_as_of(evening)) == "2026-10-02"
+    assert str(received_day(evening.received_at, ZoneInfo("America/New_York"))) == "2026-10-01"
+    assert str(received_day(evening.received_at)) == "2026-10-02"
 
 
 def test_a_stamp_with_z_matches_the_offset_form():

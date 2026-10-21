@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from controller_inbox.models import DocumentType, ExtractedFields, Importance
+from controller_inbox.money import fmt_money
 
 
 @dataclass
@@ -1016,7 +1017,7 @@ def _importance(
     amount = fields.primary_amount
     if amount is not None and amount >= high_amount:
         score += 18
-        reasons.append(f"Amount ${amount:,.2f} is at or above the review threshold")
+        reasons.append(f"Amount {fmt_money(amount)} is at or above the review threshold")
     if amount is not None and amount >= high_amount * 5:
         score += 10
         reasons.append("Very large dollar amount")

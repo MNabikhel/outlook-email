@@ -159,22 +159,12 @@ def file_cards(store: Store, chat_id: str) -> list[dict[str, Any]]:
     ]
 
 
-_STOP = frozenset(
-    "a an and are about any be can could did do does for from have how i in is it me my of on or our please "
-    "show tell that the their them there this to us was we what when where which who why will with you your".split()
-)
+_STOP = documents.STOP_WORDS | {"us"}
 
 
 def _words(text: str) -> set[str]:
     """Words that carry meaning, with plurals and possessives folded ("Reyes's" and "Reyes" match)."""
-    words = set()
-    for term in documents.terms_of(text, _STOP):
-        term = re.sub(r"'s$", "", term)
-        if len(term) > 4 and term.endswith("s"):
-            term = term[:-1]
-        if len(term) > 1 and not term.isdigit():
-            words.add(term)
-    return words
+    return {term for term in documents.terms(text, stop=_STOP) if not term.isdigit()}
 
 
 def _cites_locked_mail(store: Store, pair: dict[str, Any], turns: dict[str, list[dict[str, Any]]]) -> bool:

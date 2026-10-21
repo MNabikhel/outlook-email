@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from controller_inbox import page_details, vision
+from controller_inbox.documents import MARKER_RE, PAGE_MARKER_RE
 from controller_inbox.page_details import _lines
 from controller_inbox.page_view import _plain
 
@@ -179,10 +180,6 @@ def tables(found: list[dict], on_page: list[dict], own: list[dict], learnt: list
 
 # The file's text ---------------------------------------------------------------------------------
 
-_PAGE = re.compile(r"^\[page (\d+)\]\s*$", re.M)
-_ANY_MARK = re.compile(r"^\[(?:page \d+|sheet \"[^\"\n]*\"[^\]\n]*|slide \d+|part \d+)\]\s*$", re.M)
-
-
 def _loose(was: str) -> re.Pattern:
     """The text as OCR may have it in the file's text: its words with any spacing between them."""
     words = [re.escape(word) for word in was.split()]
@@ -210,11 +207,11 @@ def apply_to_text(text: str, fixes: list[dict]) -> str:
 
 def _page_span(text: str, page: int) -> tuple[int, int]:
     """Where page ``page`` is in the file's text; the whole text when it has no page marks (a picture)."""
-    marks = list(_ANY_MARK.finditer(text))
+    marks = list(MARKER_RE.finditer(text))
     if not marks:
         return 0, len(text)
     for i, mark in enumerate(marks):
-        found = _PAGE.match(mark.group(0))
+        found = PAGE_MARKER_RE.match(mark.group(0))
         if found and int(found.group(1)) == page:
             return mark.end(), marks[i + 1].start() if i + 1 < len(marks) else len(text)
     return len(text), len(text)

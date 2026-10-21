@@ -8,12 +8,12 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from controller_inbox import ocr, page_details, page_view, vision, web
+from controller_inbox import fixes, ocr, page_details, page_view, vision, web
 from controller_inbox.folder_mail import ingest_folder
+from helpers import PAGE
 from msgfactory import PDF, write_msg
 from pdffactory import Stroke, Text, build_pdf, sheet_rows
 
-PAGE = {"X-CloseDesk": "1"}
 OVIS = "ovisocr2-0.85b"
 
 ROWS = [["Item", "Qty", "Amount"], ["Steel beams", "4", "1,250.00"], ["Bolts M12", "200", "310.50"], ["Total", "", "1,560.50"]]
@@ -349,7 +349,6 @@ def test_a_half_written_kept_page_is_drawn_again(settings):
     assert page_view.page_png(settings, data, "invoice.pdf", 1) == png, "cut off halfway"
 
 
-
 def _tiff(*lines: str) -> bytes:
     import io
 
@@ -384,3 +383,395 @@ def test_each_page_of_a_tiff_is_counted_drawn_and_read(settings):
         pytest.skip("no OCR engine")
     text = ocr.image_text(data)
     assert text.startswith("[page 1]") and "Invoice 5521" in text and "[page 2]" in text and "9,876.54" in text, text
+
+
+def _post(client, path: str, body: dict, status: int = 200):
+    response = client.post(path, json=body, headers=PAGE)
+    assert response.status_code == status, (path, response.status_code, response.text[:300])
+    return response.json()
+
+
+def _fixes_path(email, name: str, page: int = 1) -> str:
+    return f"/api/mail/{email.id}/files/{_n(email, name)}/pages/{page}/fixes"
+
+
+def _index(view: dict, text: str) -> int:
+    return next(i for i, region in enumerate(view["regions"]) if region["text"] == text)
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_box_fixed_shows_at_once_and_reaches_the_files_text(client, store, files):
+    email = files["Invoice INV-1042"]
+    att = email.attachments[_n(email, "delivery note.png") - 1]
+    store.set_attachment_text(att.id, "Harb0r Steel LLC\nDescription Amount\nSteel beams 1,250.00\nBolts M12 310.50")
+    view = _regions(client, email, "delivery note.png")
+    reply = _post(client, _fixes_path(email, "delivery note.png"), {"kind": "text", "region": _index(view, "Harb0r Steel LLC"), "now": "Harbor Steel LLC"})
+    assert "later files" in reply["message"]
+    view = _regions(client, email, "delivery note.png")
+    fixed = view["regions"][0]
+    assert fixed["text"] == "Harbor Steel LLC" and fixed["fixed"] == {"id": reply["id"], "was": "Harb0r Steel LLC", "by": "you"}
+    assert view["fixes"] == 1
+    # What the chat, summaries and search read: the file's text, with the fix.
+    text = store.get_email(email.id).attachments[_n(email, "delivery note.png") - 1].extracted_text
+    assert "Harbor Steel LLC" in text and "Harb0r" not in text
+
+    # A figure fixed is put right on this file only.
+    reply = _post(client, _fixes_path(email, "delivery note.png"), {"kind": "text", "region": _index(view, "310.50"), "now": "301.50"})
+    assert "later files" not in reply["message"]
+    assert "Bolts M12 301.50" in store.get_email(email.id).attachments[_n(email, "delivery note.png") - 1].extracted_text
+
+    # Taken back, the page and the text are as read.
+    _post(client, f"{_fixes_path(email, 'delivery note.png')}/{reply['id']}/undo", {})
+    assert _regions(client, email, "delivery note.png")["regions"][_index(view, "310.50")]["text"] == "310.50"
+    assert "Bolts M12 310.50" in store.get_email(email.id).attachments[_n(email, "delivery note.png") - 1].extracted_text
+    _post(client, f"{_fixes_path(email, 'delivery note.png')}/{reply['id']}/undo", {}, status=404)
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_word_fixed_is_put_right_on_the_senders_next_file_but_a_figure_is_not(client, files):
+    first, later = files["Invoice INV-1042"], files["Invoice HS-10482"]
+    view = _regions(client, first, "delivery note.png")
+    _post(client, _fixes_path(first, "delivery note.png"), {"kind": "text", "region": _index(view, "Harb0r Steel LLC"), "now": "Harbor Steel LLC"})
+    _post(client, _fixes_path(first, "delivery note.png"), {"kind": "text", "region": _index(view, "1,250.00"), "now": "1,205.00"})
+    next_view = _regions(client, later, "HS-10482 signed.png")
+    name = next_view["regions"][0]
+    assert name["text"] == "Harbor Steel LLC" and name["fixed"]["by"] == "learnt" and name["fixed"]["was"] == "Harb0r Steel LLC"
+    assert any(region["text"] == "1,250.00" and "fixed" not in region for region in next_view["regions"]), "an amount is never carried over"
+    # A PDF's own text is exact: nothing learnt is put on it.
+    assert all("fixed" not in region for region in _regions(client, later, "HS-10482.pdf")["regions"])
+
+    # Right as read on this file: kept as read here, and still learnt for others.
+    _post(client, _fixes_path(later, "HS-10482 signed.png"), {"kind": "text", "region": 0, "now": "Harb0r Steel LLC"})
+    assert _regions(client, later, "HS-10482 signed.png")["regions"][0]["text"] == "Harb0r Steel LLC"
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_table_drawn_on_the_page_is_made_from_what_was_read_inside_and_learnt(client, files):
+    first, later = files["Invoice INV-1042"], files["Invoice HS-10482"]
+    view = _regions(client, first, "delivery note.png")
+    assert view["tables"] == [], "two columns aren't enough to call it a table"
+    width, height = view["width"], view["height"]
+    box = {"x": 40 / width, "y": 110 / height, "w": 1020 / width, "h": 160 / height}
+    reply = _post(client, _fixes_path(first, "delivery note.png"), {"kind": "table", "box": box})
+    [table] = _regions(client, first, "delivery note.png")["tables"]
+    assert table["fixed"] == {"id": reply["id"], "by": "you"} and table["label"] == "Your table"
+    assert table["columns"] == ["Description", "Amount"]
+    assert [[cell["text"] for cell in row] for row in table["rows"]] == [["Steel beams", "1,250.00"], ["Bolts M12", "310.50"], ["Delivery", "185.00"]]
+    assert all(cell["region"] is not None for row in table["rows"] for cell in row)
+
+    # The sender's next scan has the same table where the same headings are printed.
+    [learnt] = _regions(client, later, "HS-10482 signed.png")["tables"]
+    assert learnt["fixed"]["by"] == "learnt" and learnt["columns"] == ["Description", "Amount"] and len(learnt["rows"]) == 3
+
+    # Not a table there after all: gone from that page.
+    _post(client, _fixes_path(later, "HS-10482 signed.png"), {"kind": "not_table", "box": learnt["box"]})
+    assert _regions(client, later, "HS-10482 signed.png")["tables"] == []
+    assert len(_regions(client, first, "delivery note.png")["tables"]) == 1, "the page it was drawn on keeps it"
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_fix_that_doesnt_make_sense_is_refused(client, files):
+    email = files["Invoice INV-1042"]
+    path = _fixes_path(email, "delivery note.png")
+    assert "box isn't on this page" in _post(client, path, {"kind": "text", "region": 999, "now": "x"}, status=400)["detail"]
+    assert "Type what the page says" in _post(client, path, {"kind": "text", "region": 0, "now": "  "}, status=400)["detail"]
+    assert _post(client, path, {"kind": "table", "box": {"x": 0.1, "y": 0.1, "w": 0.001, "h": 0.5}}, status=400)
+    assert _post(client, path, {"kind": "table", "box": "everything"}, status=400)
+    response = client.post(path, content=b'{"kind": "table", "box": {"x": NaN, "y": 0.1, "w": 0.5, "h": 0.5}}', headers={**PAGE, "Content-Type": "application/json"})
+    assert response.status_code == 400
+    assert _post(client, path, {"kind": "erase"}, status=400)
+    # Without the workspace's header, nothing is saved.
+    assert client.post(path, json={"kind": "text", "region": 0, "now": "x"}).status_code in {400, 403}
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_suspected_fraud_emails_pages_cant_be_fixed(client, files):
+    scam = files["Updated remittance details"]
+    response = client.post(f"/api/mail/{scam.id}/files/1/pages/1/fixes", json={"kind": "text", "region": 0, "now": "x"}, headers=PAGE)
+    assert response.status_code == 403
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_fixes_are_exported_as_training_examples(client, store, settings, files, tmp_path):
+    email = files["Invoice INV-1042"]
+    view = _regions(client, email, "delivery note.png")
+    _post(client, _fixes_path(email, "delivery note.png"), {"kind": "text", "region": _index(view, "Harb0r Steel LLC"), "now": "Harbor Steel LLC"})
+    _post(client, _fixes_path(email, "delivery note.png"), {"kind": "table", "box": {"x": 0.03, "y": 0.04, "w": 0.95, "h": 0.2}})
+    counts = fixes.export(store, settings, tmp_path / "out")
+    assert counts == {"pages": 1, "tables": 1, "boxes": 1}
+    [line] = (tmp_path / "out" / "tables.jsonl").read_text().splitlines()
+    page = json.loads(line)
+    assert (tmp_path / "out" / page["page"]).read_bytes().startswith(b"\x89PNG") and len(page["tables"]) == 1
+    [label] = list((tmp_path / "out" / "labels").iterdir())
+    assert label.read_text().startswith("0 ")
+    [text] = (tmp_path / "out" / "text.jsonl").read_text().splitlines()
+    assert json.loads(text)["read"] == "Harb0r Steel LLC" and json.loads(text)["says"] == "Harbor Steel LLC"
+    assert "Nothing here was used to train" in (tmp_path / "out" / "README.md").read_text()
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_fixes_in_the_files_text_land_on_their_own_page():
+    text = "[page 1]\nTotal 310.50\n\n[page 2]\nTotal 310.50\n"
+    fix = {"kind": "text", "page": 2, "was": "310.50", "now": "301.50", "anchor": {}}
+    assert fixes.apply_to_text(text, [fix]) == "[page 1]\nTotal 310.50\n\n[page 2]\nTotal 301.50\n"
+    # OCR's words run together in the text ("Harb0rSteel") are still found.
+    assert fixes.apply_to_text("Harb0r  Steel\nLLC", [{**fix, "page": 1, "was": "Harb0r Steel LLC", "now": "Harbor Steel LLC"}]) == "Harbor Steel LLC"
+    # The vision model's own misreading of a figure is fixed too, when that's what the text shows.
+    vision_fix = {**fix, "page": 1, "anchor": {"also": ["301.05"]}}
+    assert fixes.apply_to_text("[page 1]\nTotal 301.05\n", [vision_fix]) == "[page 1]\nTotal 301.50\n"
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_what_is_learnt_is_words_not_figures():
+    assert fixes.learnable("Harb0r Steel LLC", "Harbor Steel LLC")
+    assert not fixes.learnable("1,250.00", "1,205.00")
+    assert not fixes.learnable("Invoice 10482", "Invoice 10428"), "a number in words is still a number"
+    assert fixes.learnable("BilI to", "Bill to")
+    assert fixes.learnable("Steelplate 1/4in,4x8ft", "Steel plate 1/4 in, 4 x 8 ft"), "OCR's run-together words"
+    assert not fixes.learnable("Harbor Steel", " Harbor  Steel "), "nothing changed"
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_learnt_table_is_found_by_its_first_lines_words_not_its_numbers():
+    def region(x, y, text):
+        return {"x": x, "y": y, "w": 0.12, "h": 0.015, "text": text, "confidence": 0.9}
+
+    drawn_on = [region(0.6, 0.10, "Invoice no."), region(0.8, 0.10, "NW-20931"), region(0.6, 0.13, "Due date"), region(0.8, 0.13, "10/30/2026")]
+    box = {"x": 0.58, "y": 0.09, "w": 0.36, "h": 0.07}
+    fix = {"id": "f1", "kind": "table", **box, "anchor": fixes.anchor_for(drawn_on, box)}
+    later = [region(0.6, 0.12, "Invoice no."), region(0.8, 0.12, "NW-21077"), region(0.6, 0.15, "Due date"), region(0.8, 0.15, "11/04/2026")]
+    [table] = fixes.tables(later, [], [], [fix])
+    assert table["fixed"]["by"] == "learnt"
+    assert [[cell["text"] for cell in row] for row in table["rows"]] == [["Invoice no.", "NW-21077"], ["Due date", "11/04/2026"]]
+
+
+def _box(region: dict, pad: float = 0.004) -> dict:
+    return {"x": region["x"] - pad, "y": region["y"] - pad, "w": region["w"] + 2 * pad, "h": region["h"] + 2 * pad}
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_undoing_a_figure_fix_after_the_email_is_filed_again_puts_the_figure_back(client, store, files):
+    """A fix is applied to the text when the email is loaded; filing the email again (teaching a field) saves that
+    shown text as the stored text, so the fix can never be taken back."""
+    email = files["Invoice INV-1042"]
+    note = _n(email, "delivery note.png")
+    att = email.attachments[note - 1]
+    store.set_attachment_text(att.id, "Harb0r Steel LLC\nDescription Amount\nSteel beams 1,250.00\nBolts M12 310.50")
+    view = _regions(client, email, "delivery note.png")
+    reply = _post(client, _fixes_path(email, "delivery note.png"), {"kind": "text", "region": _index(view, "310.50"), "now": "301.50"})
+    # Teach a field on the invoice: the email is filed again.
+    pdf = _n(email, "invoice.pdf")
+    page = _get(client, f"/api/mail/{email.id}/files/{pdf}/pages/1/regions").json()
+    total = max((r for r in page["regions"] if r["text"] == "1,560.50"), key=lambda r: r["y"])
+    taught = client.post(f"/api/mail/{email.id}/files/{pdf}/pages/1/fixes", headers=PAGE, json={"kind": "field", "field": "total", "box": _box(total)})
+    assert taught.status_code == 200, taught.text
+    _post(client, f"{_fixes_path(email, 'delivery note.png')}/{reply['id']}/undo", {})
+    text = store.get_email(email.id).attachments[note - 1].extracted_text
+    assert "Bolts M12 310.50" in text, text
+
+
+# Pictures: a phone photo's orientation ---------------------------------------------------------------
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_phone_photo_turned_by_its_exif_tag_is_read_upright():
+    """A phone stores a photo's pixels as the sensor saw them and says in its EXIF tag how to turn them. The Page tab
+    turns them (vision.render), but the text read as the email arrives (ocr.image_text) is read from the pixels
+    sideways, so the line items lose their figures."""
+    import io
+
+    from PIL import Image
+
+    from controller_inbox import ocr, page_view, vision
+
+    if ocr.engine_name() != "RapidOCR":
+        pytest.skip("RapidOCR isn't installed")
+    upright = Image.open(io.BytesIO(vision.render(_invoice(), "invoice.pdf", 1, reader=page_view.VIEW))).convert("RGB")
+    exif = Image.Exif()
+    exif[0x0112] = 6  # turn 90 degrees clockwise to view
+    out = io.BytesIO()
+    upright.transpose(Image.Transpose.ROTATE_90).save(out, "JPEG", quality=92, exif=exif.tobytes())
+    text = ocr.image_text(out.getvalue())
+    assert "Bolts M12 200 310.50" in text and "Total 1,560.50" in text, text
+
+
+# A figure fixed on a scan never reaches the email's amount ------------------------------------------------
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_total_fixed_on_a_scan_is_the_emails_amount(store, settings, monkeypatch):
+    """OCR misreads a scanned invoice's total ($1,860.50 for $1,560.50). The user fixes the box on the Page tab; the
+    file's text has the fix, but the email's amount (and its task) stay the misread figure."""
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import ocr, page_view, vision, web
+    from controller_inbox.folder_mail import ingest_folder
+    from msgfactory import write_msg
+
+    read = [(60, 40, 330, 70, "Harbor Steel LLC"), (60, 120, 330, 140, "Invoice HS-2201"), (60, 400, 300, 420, "Total due"), (700, 400, 900, 420, "$1,860.50")]
+    monkeypatch.setattr(ocr, "engine_name", lambda: "RapidOCR")
+    from controller_inbox import extract
+
+    misread = lambda _data: "Harbor Steel LLC\nInvoice HS-2201\nTotal due $1,860.50"  # noqa: E731
+    monkeypatch.setattr(ocr, "image_text", misread)
+    monkeypatch.setattr(extract, "image_text", misread)
+    monkeypatch.setattr(
+        ocr, "line_boxes",
+        lambda _png: [{"left": float(l), "top": float(t), "right": float(r), "bottom": float(b), "text": x, "score": 0.9} for l, t, r, b, x in read],
+    )
+    settings.trusted_domains = "taz.com"
+    settings.ensure_data_dir()
+    scan = vision.render(_invoice(), "invoice.pdf", 1, reader=page_view.VIEW)
+    write_msg(settings.inbox_incoming / "scan.msg", "Invoice HS-2201", "Scan attached.", sender_name="Harbor Steel",
+              sender_email="ar@taz.com", attachments=[("HS-2201.png", scan, "image/png")])
+    [email] = ingest_folder(store, settings)
+    assert email.extracted.primary_amount == 1860.50
+    client = TestClient(web.create_app(settings, store))
+    view = client.get(f"/api/mail/{email.id}/files/1/pages/1/regions", headers=PAGE).json()
+    index = next(i for i, r in enumerate(view["regions"]) if r["text"] == "$1,860.50")
+    reply = client.post(f"/api/mail/{email.id}/files/1/pages/1/fixes", headers=PAGE, json={"kind": "text", "region": index, "now": "$1,560.50"})
+    assert reply.status_code == 200, reply.text
+    stored = store.get_email(email.id)
+    assert "$1,560.50" in stored.attachments[0].extracted_text
+    assert stored.extracted.primary_amount == 1560.50, stored.extracted.amounts
+
+
+# PDF forms -------------------------------------------------------------------------------------------
+def _filled_form_pdf() -> bytes:
+    """An invoice filled in as a PDF form: the amount due is a text field's value (with its appearance, as Acrobat
+    and every form filler save it), not text on the page."""
+    content = (
+        b"BT /F1 12 Tf 72 720 Td (Harbor Steel LLC - Invoice INV-5521) Tj ET\n"
+        b"BT /F1 11 Tf 72 680 Td (Amount due:) Tj ET\n"
+        b"BT /F1 11 Tf 72 660 Td (Please remit by the due date shown on this form.) Tj ET"
+    )
+    ap = b"/Tx BMC q BT /F1 11 Tf 2 5 Td ($4,210.00) Tj ET Q EMC"
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [6 0 R] /DR << /Font << /F1 5 0 R >> >> /DA (/F1 11 Tf 0 g) >> >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> /Annots [6 0 R] >>",
+        b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (amount_due) /V ($4,210.00) /Rect [160 674 300 692] /P 3 0 R /F 4 "
+        b"/DA (/F1 11 Tf 0 g) /AP << /N 7 0 R >> >>",
+        b"<< /Type /XObject /Subtype /Form /BBox [0 0 140 18] /Resources << /Font << /F1 5 0 R >> >> /Length %d >>\nstream\n" % len(ap)
+        + ap + b"\nendstream",
+    ]
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for number, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1) + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    out += b"trailer << /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return out
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_filled_pdf_forms_values_are_read():
+    from controller_inbox.documents import pdf_text
+
+    text = pdf_text(_filled_form_pdf())
+    assert "4,210.00" in text, text
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_filled_pdf_forms_values_are_drawn_on_the_page():
+    import io
+
+    from PIL import Image
+
+    from controller_inbox import page_view, vision
+
+    image = Image.open(io.BytesIO(vision.render(_filled_form_pdf(), "form.pdf", 1, reader=page_view.VIEW))).convert("L")
+    scale = image.width / 612
+    field = image.crop((int(160 * scale), int((792 - 692) * scale), int(300 * scale), int((792 - 674) * scale)))
+    assert field.getextrema()[0] < 128, "the field's value $4,210.00 isn't drawn: the page shows an empty box"
+
+
+# A page fix taken back after the model read the email (the same root cause as the first undo test) ------------------
+def _reader(settings, handler):
+    import httpx
+
+    from controller_inbox.local_llm import LocalReader
+
+    return LocalReader(settings, model="tiny-3b", client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def _reply(obj: dict):
+    import json
+
+    import httpx
+
+    return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(obj)}, "finish_reason": "stop"}]})
+
+
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_page_fix_taken_back_after_the_model_read_the_email_is_really_taken_back(loaded, settings):
+    from controller_inbox.overnight import read_queue
+
+    email = loaded.get_email("demo-inv-10482")
+    att = email.attachments[0]
+    assert "Horizon Goods LLC" in att.extracted_text
+    fix_id = loaded.add_page_fix({
+        "attachment_id": att.id, "sha256": att.sha256, "page": 1, "kind": "text",
+        "x": 0.1, "y": 0.1, "w": 0.2, "h": 0.05, "was": "Horizon Goods LLC", "now": "Horizon Foods LLC", "sender": email.sender_email,
+    })
+    assert "Horizon Foods LLC" in loaded.get_email(email.id).attachments[0].extracted_text
+
+    reading = {"category": "ap_invoice", "folder": "important", "importance": "high",
+               "summary": "Invoice INV-10482 to enter.", "why": "Vendor bill.", "actions": []}
+    read_queue(loaded, settings, limit=50, reader=_reader(settings, lambda _r: _reply(reading)))
+    assert loaded.get_email(email.id).model_status == "bionic"
+    # The stored (first) reading of the file must stay as it was read: the fix is laid over it when shown.
+    assert "Horizon Goods LLC" in loaded.stored_text(att.id), "the user's fix was written into the file's stored text"
+
+    assert loaded.remove_page_fix(att.id, fix_id)  # Undo on the Page tab
+    shown = loaded.get_email(email.id).attachments[0].extracted_text
+    assert "Horizon Goods LLC" in shown, "the fix was taken back but the chat and summaries still read the fixed text"
+
+
+# Undoing a figure fixed on a scan puts the email's amount back ----------------------------------------------------
+@pytest.mark.usefixtures("harbor_ocr")
+def test_undoing_a_total_fixed_on_a_scan_puts_the_emails_amount_back(store, settings, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import extract, page_view, vision, web
+    from controller_inbox.folder_mail import ingest_folder
+    from msgfactory import write_msg
+
+    read = [(60, 40, 330, 70, "Harbor Steel LLC"), (60, 120, 330, 140, "Invoice HS-2201"), (60, 400, 300, 420, "Total due"), (700, 400, 900, 420, "$1,860.50")]
+    misread = lambda _data: "Harbor Steel LLC\nInvoice HS-2201\nTotal due $1,860.50"  # noqa: E731
+    monkeypatch.setattr(ocr, "engine_name", lambda: "RapidOCR")
+    monkeypatch.setattr(ocr, "image_text", misread)
+    monkeypatch.setattr(extract, "image_text", misread)
+    monkeypatch.setattr(ocr, "line_boxes", lambda _png: [{"left": float(l), "top": float(t), "right": float(r), "bottom": float(b), "text": x, "score": 0.9} for l, t, r, b, x in read])
+    settings.trusted_domains = "taz.com"
+    settings.ensure_data_dir()
+    write_msg(settings.inbox_incoming / "scan.msg", "Invoice HS-2201", "Scan attached.", sender_name="Harbor Steel", sender_email="ar@taz.com",
+              attachments=[("HS-2201.png", vision.render(_invoice(), "invoice.pdf", 1, reader=page_view.VIEW), "image/png")])
+    [email] = ingest_folder(store, settings)
+    client = TestClient(web.create_app(settings, store))
+    view = client.get(f"/api/mail/{email.id}/files/1/pages/1/regions", headers=PAGE).json()
+    index = next(i for i, r in enumerate(view["regions"]) if r["text"] == "$1,860.50")
+    reply = client.post(f"/api/mail/{email.id}/files/1/pages/1/fixes", headers=PAGE, json={"kind": "text", "region": index, "now": "$1,560.50"}).json()
+    assert "$1,560.50" in reply["message"], reply
+    assert store.get_email(email.id).extracted.primary_amount == 1560.50
+    undone = client.post(f"/api/mail/{email.id}/files/1/pages/1/fixes/{reply['id']}/undo", headers=PAGE)
+    assert undone.status_code == 200, undone.text
+    assert store.get_email(email.id).extracted.primary_amount == 1860.50
+
+
+# Preview: a TIFF's pages are counted without waiting on page 1's OCR ------------------------------------------------
+@pytest.mark.usefixtures("harbor_ocr")
+def test_a_tiffs_page_count_comes_with_the_file(store, settings, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import web
+    from controller_inbox.folder_mail import ingest_folder
+    from msgfactory import write_msg
+
+    monkeypatch.setattr(ocr, "image_text", lambda _data: "")
+    settings.ensure_data_dir()
+    write_msg(settings.inbox_incoming / "fax.msg", "Faxed invoice", "Fax attached.", sender_name="Harbor Steel", sender_email="ar@taz.com",
+              attachments=[("fax.tif", _tiff("Invoice 5521 page one", "Total due 9,876.54"), "image/tiff")])
+    [email] = ingest_folder(store, settings)
+    got = TestClient(web.create_app(settings, store)).get(f"/api/mail/{email.id}/files/1", headers=PAGE).json()
+    assert got["file"]["show"] == "pages" and got["file"]["pages"] == 2, got["file"]

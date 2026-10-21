@@ -6,11 +6,14 @@ and checked against the figures the spreadsheet itself computed.
 
 from __future__ import annotations
 
+import io
 import re
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
+from controller_inbox import documents, table_lookup
 from controller_inbox.documents import extract_document
 from controller_inbox.table_lookup import lookup, read_question
 
@@ -127,3 +130,84 @@ def test_the_last_row_by_date_is_the_latest_dated_one():
 def test_a_half_cent_rounds_up_as_a_spreadsheet_does():
     # The average of 1.00 and 2.01 is 1.505: a spreadsheet shows 1.51, Python's half to even 1.50.
     assert "1.51" in lookup("Item: A | Amount: 1.00\nItem: B | Amount: 2.01\n", "what is the average amount")
+
+
+# read_question works out the change between comparative columns named in words ("Prior Year"/"Current Year", "Prior
+# Month"/"Current Month") asked about with "between ... and ...", "year over year" or "month over month", not only
+# between two period tokens.
+
+
+def _sheet(title, head, rows) -> str:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = title
+    ws.append(head)
+    for row in rows:
+        ws.append(row)
+    out = io.BytesIO()
+    wb.save(out)
+    return documents.extract_document(f"{title.lower()}.xlsx", "", out.getvalue())
+
+
+PL = ("PL", ["Line", "Prior Year", "Current Year"], [["Revenue", 1200000, 1350000], ["COGS", 700000, 760000], ["Opex", 300000, 310000]])
+
+
+EXP = ("Expenses", ["Account", "Prior Month", "Current Month"], [["Rent", 10000, 10500], ["Utilities", 2200, 1900], ["Payroll", 80000, 82000]])
+
+
+@pytest.mark.parametrize("sheet, question, point", [
+    (PL, "What is the year over year change in revenue?", ("Revenue: change", "150,000")),
+    (PL, "What was the change in opex between prior year and current year?", ("Opex: change", "10,000")),
+    (EXP, "What is the change in utilities month over month?", ("Utilities: change", "-300")),
+])
+def test_change_between_word_named_periods_is_worked_out(sheet, question, point):
+    found = table_lookup.answer(_sheet(*sheet), question)
+    assert found is not None and point in found.points, found and found.points
+
+
+# A sign-off block under an AP list ("Prepared by | J. Smith", "Approved by | K. Lee", "Batch | B-77"), below a
+# blank row, is not folded into the table as more invoices.
+
+
+def _ap() -> str:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "AP"
+    ws.append(["Vendor", "Invoice", "Amount", "Due"])
+    ws.append(["Northwind", "INV-1", 1200, "2026-10-30"])
+    ws.append(["Contoso", "INV-2", 800, "2026-11-02"])
+    ws.append(["Fabrikam", "INV-3", 300, "2026-11-05"])
+    ws.append([])
+    ws.append(["Prepared by", "J. Smith"])
+    ws.append(["Approved by", "K. Lee"])
+    ws.append(["Batch", "B-77"])
+    out = io.BytesIO()
+    wb.save(out)
+    return documents.extract_document("ap.xlsx", "", out.getvalue())
+
+
+def test_signoff_rows_are_not_table_rows():
+    tables = table_lookup.tables_in(_ap())
+    main = next(t for t in tables if "Amount" in t.labels)
+    assert len(main.rows) == 3, [r.cells for r in main.rows]
+
+
+def test_count_of_invoices():
+    found = table_lookup.answer(_ap(), "How many invoices are there?")
+    assert found is not None and any(": 3 rows." in line for line in found.lines), found and found.lines
+
+
+# compare_columns and three-letter headers ---------------------------------------------------
+def test_compare_columns_prefers_a_header_over_column_letters():
+    from openpyxl import Workbook
+
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "P"
+    for row in (["Account", "Jan", "Feb"], ["Rent", 100, 120], ["Fees", 50, 40]):
+        sheet.append(row)
+    buffer = io.BytesIO()
+    book.save(buffer)
+    out = documents.compare_columns(buffer.getvalue(), "P", "Jan", "Feb")
+    assert "Rent (row 2): 100 → 120" in out
+    assert "Rent (row 2): 100 → 120" in documents.compare_columns(buffer.getvalue(), "P", "B", "C")

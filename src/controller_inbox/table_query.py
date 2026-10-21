@@ -729,7 +729,7 @@ def _stored(raw: str, kind: str):
         number = table_lookup._number(raw)
         return float(number) if number is not None else None
     if kind == "date":
-        when = table_lookup._when(raw)
+        when = table_lookup.cell_date(raw)
         if when:
             year, month, day = when
             return f"{year:04d}-{month:02d}-{day:02d}" if year else f"{month:02d}-{day:02d}"
@@ -758,7 +758,7 @@ def _describe(column: Column, names: int = MAX_NAMES) -> str:
             return f"{note}, a running balance: each row's is the row above's {column.running}; the last row's is the balance, never add it up"
         return f"{note} = {column.formula} on {'most rows' if column.most else 'every row'}" if column.formula else note
     if column.kind == "date":
-        stored = next((_stored(s, "date") for s in column.samples if table_lookup._when(s)), "")
+        stored = next((_stored(s, "date") for s in column.samples if table_lookup.cell_date(s)), "")
         shape = "YYYY-MM-DD" if len(stored or "") == 10 else "MM-DD"
         return f'"{column.label}" date as text {shape}' + (f", e.g. {stored}" if stored else "")
     listed = list(dict.fromkeys(column.samples))

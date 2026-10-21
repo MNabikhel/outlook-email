@@ -13,9 +13,9 @@ from pptx.util import Inches
 
 from controller_inbox import sheet_preview, web
 from controller_inbox.folder_mail import ingest_folder
+from helpers import PAGE
 from msgfactory import write_msg
 
-PAGE = {"X-CloseDesk": "1"}
 PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 PNG_1PX = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082"

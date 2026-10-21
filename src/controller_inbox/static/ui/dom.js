@@ -44,8 +44,15 @@ export const escapeHtml = (text) =>
 
 export const plural = (n, word, many = word + "s") => `${n} ${n === 1 ? word : many}`;
 
-export function isTyping(target) {
-  return Boolean(target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)));
+/* Whether a key pressed in ``target`` goes into a field (an input, a list, a textarea, a contenteditable), so a
+   shortcut key leaves it alone. ``text``: only a field that holds typed text, not a checkbox, a button or a list,
+   which Esc leaves. The classic pages use this one too (classic.js). */
+const TEXT_INPUTS = new Set(["", "text", "search", "email", "number", "url", "tel", "password"]);
+export function isTyping(target, { text = false } = {}) {
+  if (!target) return false;
+  if (target.isContentEditable || target.tagName === "TEXTAREA") return true;
+  if (target.tagName === "INPUT") return !text || TEXT_INPUTS.has((target.getAttribute("type") || "").toLowerCase());
+  return !text && target.tagName === "SELECT";
 }
 
 export const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;

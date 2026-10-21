@@ -218,17 +218,29 @@ def offset_label(zone: ZoneInfo, when: datetime | None = None) -> str:
     return _offset_text(_moment(when).astimezone(zone).utcoffset() or timedelta(0))
 
 
+def aware_utc(when: datetime) -> datetime:
+    """``when`` in UTC. A time with no zone is UTC already, which is how mail is stored."""
+    return when.astimezone(timezone.utc) if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def parse_stamp(text) -> datetime | None:
+    """A stored time stamp ("2026-09-22T16:00:00+00:00", "...Z") as a time with its zone, kept as written; a
+    stamp with no offset is UTC. None when ``text`` is blank or not a stamp."""
+    try:
+        parsed = datetime.fromisoformat(str(text or "").strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
 def format_when(value: str, zone: ZoneInfo | None = None) -> str:
     """``Sep 22 · 16:00`` in ``zone``. A stamp with no offset is UTC, which is how mail is stored."""
     if not value:
         return ""
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    parsed = parse_stamp(value)
+    if parsed is None:
         return value
     if zone is not None:
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
         parsed = parsed.astimezone(zone)
     return parsed.strftime("%b %d · %H:%M")
 
@@ -279,8 +291,7 @@ def zone_choices(when: datetime | None = None, keep: str = "") -> tuple[tuple[st
 
 
 def _moment(when: datetime | None) -> datetime:
-    moment = when or datetime.now(timezone.utc)
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    return aware_utc(when or datetime.now(timezone.utc))
 
 
 def _long_offset(delta: timedelta) -> str:

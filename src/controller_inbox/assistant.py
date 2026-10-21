@@ -25,7 +25,7 @@ from urllib.parse import quote
 
 import httpx
 
-from controller_inbox import agent, answer_check, chats, semantic, table_lookup, vision
+from controller_inbox import agent, answer_check, chats, documents, memo, semantic, table_lookup, vision
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
@@ -45,7 +45,8 @@ from controller_inbox.local_llm import (
     stream_text,
 )
 from controller_inbox.models import DOCUMENT_LABELS, ActionStatus, DocumentType, EmailRecord
-from controller_inbox.reading import _ungrounded_amounts
+from controller_inbox.money import fmt_money
+from controller_inbox.reading import ungrounded_amounts
 from controller_inbox.store import Store
 
 log = logging.getLogger(__name__)
@@ -58,19 +59,17 @@ MIN_FILE_ROOM = 800
 # wording and citations; the model reads a prompt this size several times faster than a full context.
 WORKED_FILE_ROOM = 12_000
 
-_STOP = set(
+# A question's filler, past what every question has (``documents.STOP_WORDS``): what is left is searched for.
+_STOP = documents.STOP_WORDS | set(
     """
-    a about above after again all am an and any are as at be been before being below between both but by can
-    could did do does doing down during each email emails few for from further had has have having he her here
-    hers him his how i if in into is it its just me mail message messages more most my no nor not now of off on
-    once only or other our out over own please same she should show so some such tell than that the their them
-    then there these they this those through to too under until up very was we were what when where which while
-    who whom why will with would you your yours anything something everything find get give got let lets list
-    any anyone inbox need needs know see say said thanks thank hi hello hey look looking one want wants mean
-    means ask asks asking happen happened going think new last recent latest got gotten
+    above after again all am as at been before being below between both but by doing down during each email emails
+    few further had has having he her here hers him his if into its just mail message messages more most no nor not
+    now off once only other out over own same she should so some such than then these they those through too under
+    until up very were while whom would yours anything something everything find get give got let lets list anyone
+    inbox need needs know see say said thanks thank hi hello hey look looking one want wants mean means ask asks
+    asking happen happened going think new last recent latest gotten
     """.split()
 )
-_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9.@&'-]*[A-Za-z0-9]|[A-Za-z0-9]")
 _TODAY = re.compile(
     r"\b(today|focus|urgent|priorit\w*|first|overdue|to-?do|tasks?|what should|what do i|"
     # "What's due?", not a document's own "total due", "amount due", "past due" or "due date".
@@ -202,17 +201,8 @@ FRAUD_REPLY = (
 
 
 def keywords(text: str) -> list[str]:
-    words = []
-    for match in _WORD.findall(text or ""):
-        word = match.lower().strip(".'-").split("'")[0]
-        if len(word) < 3 and not word.isdigit():
-            continue
-        if word in _STOP:
-            continue
-        if len(word) > 4 and word.endswith("s") and not word.endswith("ss") and not word[-2].isdigit():
-            word = word[:-1]
-        words.append(word)
-    return list(dict.fromkeys(words))[:10]
+    """The words to search the mail for: a word as the passage search and past answers read it."""
+    return documents.terms(text, stop=_STOP)[:10]
 
 
 def is_fraud(email: EmailRecord) -> bool:
@@ -331,12 +321,17 @@ _DAYS = "monday tuesday wednesday thursday friday saturday sunday".split()
 
 def _found_in(email: EmailRecord, terms: list[str]) -> list[str]:
     """The terms in this email or its files; a month also as a sheet heads it ("August" as "Aug" or "Aug-26")."""
-    text = _spaced(" ".join([email.subject, email.body_text or ""] + [att.extracted_text or "" for att in email.attachments]))
+    pieces = (email.subject, email.body_text or "", *(att.extracted_text or "" for att in email.attachments))
+    text = _FOUND_TEXT.get_or(pieces, lambda: _spaced(" ".join(pieces)))
     return [
         term
         for term in terms
         if _spaced(term) in text or (term in _MONTHS and re.search(rf"\b{term[:3]}t?\b", text))
     ]
+
+
+# An email's text as ``_found_in`` looks in it, by the text itself: asked several times a question.
+_FOUND_TEXT = memo.LRU(16)
 
 
 def _spaced(text: str) -> str:
@@ -511,7 +506,7 @@ def _taught_line(email: EmailRecord) -> str:
             continue
         if key == "total":
             try:
-                value = f"{float(value):,.2f}"
+                value = fmt_money(float(value), symbol="")
             except (TypeError, ValueError):
                 pass
         name = entry.get("label") or key.replace("_", " ")
@@ -1474,7 +1469,7 @@ def draft_reply(settings: Settings, email: EmailRecord, *, instructions: str = "
             mode = "model"
         except Exception as exc:  # any model failure falls back to the template
             note = f"The local model didn't answer ({str(exc)[:100]}), so this is a starter template."
-        if text and _ungrounded_amounts(text, email):
+        if text and ungrounded_amounts(text, email):
             text, mode = "", "template"
             note = "The model's draft quoted an amount that isn't in the email, so this is a starter template."
     if not text:

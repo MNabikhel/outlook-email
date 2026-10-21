@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from controller_inbox import cost_codes
 from controller_inbox.actions import local_today
+from controller_inbox.clock import parse_stamp
 from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.file_summaries import summarize_files
@@ -355,7 +356,7 @@ def _sync_graph(store: Store, settings: Settings, now: datetime) -> tuple[int, s
 
         mailbox = _graph_mailbox(settings)
         last = store.get_state("last_sync_at")
-        after = datetime.fromisoformat(last) if last else now - timedelta(hours=settings.lookback_hours)
+        after = parse_stamp(last) or now - timedelta(hours=settings.lookback_hours)
         records = ingest_mailbox(mailbox, store, settings, received_after=after, now=now)
         return len(records), ""
     except Exception as exc:

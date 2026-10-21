@@ -178,7 +178,14 @@ function renderTop() {
           "div",
           { class: "job" },
           h("span", { class: "spin", "aria-hidden": "true" }),
-          h("span", null, h("b", null, job.stage_label || "Working"), job.total > 1 ? ` · ${job.done} of ${job.total}` : "", job.note ? h("span", { class: "muted" }, ` · ${job.note}`) : null),
+          // A long note (a file's name) is cut short, not the bar or Stop: the whole line is on hover.
+          h(
+            "span",
+            { class: "job-text", title: [job.stage_label || "Working", job.total > 1 ? `${job.done} of ${job.total}` : "", job.note || ""].filter(Boolean).join(" · ") },
+            h("b", null, job.stage_label || "Working"),
+            job.total > 1 ? ` · ${job.done} of ${job.total}` : "",
+            job.note ? h("span", { class: "muted" }, ` · ${job.note}`) : null
+          ),
           h("span", { class: "job-bar" }, h("span", { style: { width: job.total ? `${Math.round((100 * job.done) / job.total)}%` : "30%" }, class: job.total ? "" : "indeterminate" })),
           job.stage === "vision" && !job.stopping
             ? h("button", { type: "button", class: "btn btn-sm btn-quiet", title: "Stop reading pages with the vision model after the page being read now", onclick: stopJob }, "Stop")
@@ -1171,14 +1178,6 @@ document.addEventListener("click", (event) => {
 let goPending = 0;
 const GO = { t: "/app", i: "/app/folder/important", n: "/app/folder/informational", r: "/app/folder/reference", a: "/app/all", k: "/app/tasks", f: "/app/fraud", c: "/app/coding", d: "/app/digest", s: "/app/settings" };
 
-/* A field that takes typing: a textarea, a contenteditable, or a text-like input (not a checkbox or a button). */
-const TEXT_INPUTS = new Set(["", "text", "search", "email", "number", "url", "tel", "password"]);
-function isTextField(target) {
-  if (!target) return false;
-  if (target.isContentEditable || target.tagName === "TEXTAREA") return true;
-  return target.tagName === "INPUT" && TEXT_INPUTS.has((target.getAttribute("type") || "").toLowerCase());
-}
-
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
     event.preventDefault();
@@ -1204,7 +1203,7 @@ document.addEventListener("keydown", (event) => {
     }
     // In a text field of the reading pane (a reply draft, a note, find in file), Esc leaves the field, not the
     // email. A ticked checkbox or a chosen option keeps focus but holds nothing typed, so Esc closes as usual.
-    if (isTextField(event.target)) {
+    if (isTyping(event.target, { text: true })) {
       event.preventDefault();
       event.target.blur();
       return;
