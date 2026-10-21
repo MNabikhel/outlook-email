@@ -625,7 +625,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             media_type=agent.VIEWABLE[Path(att.filename).suffix.lower()],
             content_disposition_type="inline",
             filename=att.filename,
-            headers={"X-Content-Type-Options": "nosniff"},
+            # Shown inside CloseDesk's own Preview tab, and in no other site's page.
+            headers={"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "frame-ancestors 'self'", "X-Frame-Options": "SAMEORIGIN"},
         )
 
     @app.get("/inbox/{email_id}/files/{n}/vision")

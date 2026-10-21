@@ -37,7 +37,7 @@ if TYPE_CHECKING:
     from controller_inbox.config import Settings
     from controller_inbox.store import Store
 
-KINDS = ("text", "table", "not_table")
+KINDS = ("text", "table", "not_table", "field")  # "field": a value shown on the page (teach.py)
 # Two boxes are the same place on the page from this much overlap (shared area over their combined area).
 SAME = 0.5
 # A learnt table is only placed where its first line is printed at most this far from where it was (a fraction of the

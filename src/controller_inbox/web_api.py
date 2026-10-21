@@ -38,6 +38,7 @@ from controller_inbox.classify import month_end
 from controller_inbox.clock import effective_timezone, format_when, offset_label, on_daylight_time, set_timezone, zone_name
 from controller_inbox.config import PROFILES
 from controller_inbox.web import DOWNLOADABLE, NOTICES, _json_body, _nearest_step, _require_page, _same_origin, templates
+from controller_inbox import sheet_preview, teach  # noqa: E402 - the Preview tab and teaching a field
 
 log = logging.getLogger(__name__)
 
@@ -367,6 +368,7 @@ def register_workspace(
                     download=bool(card["downloadable"]),
                     view=suffix in agent.VIEWABLE and agent.original_file(settings, email, att) is not None,
                     preview=vision.readable_file(att.filename) and vision.can_render() and agent.original_file(settings, email, att) is not None,
+                    show=show_as(att, agent.original_file(settings, email, att)),
                 )
             files.append(item)
         coding = store.cost_coding(email.id)
@@ -396,6 +398,12 @@ def register_workspace(
                 "vendors": fields.vendor_candidates,
                 "accounts": [f"••{last4}" for last4 in fields.account_last4],
                 "bank_details": fields.mentions_routing_or_account,
+                # Fields shown on a file's page (teach.py): {field: {value, by: "you" | "learnt", label}}.
+                "taught": {
+                    key: {**entry, "shown": teach.shown(key, str(entry.get("value") or ""))}
+                    for key, entry in fields.taught.items()
+                    if entry.get("value")
+                },
             },
             "tasks": [
                 {
@@ -453,6 +461,8 @@ def register_workspace(
                 "download": suffix in DOWNLOADABLE and original is not None,
                 # Its pages can be shown as pictures, with where each piece of text was read (the Page tab).
                 "preview": vision.readable_file(att.filename) and original is not None and vision.can_render(),
+                # How the Preview tab shows the file as it came: "pdf", "image", "pages", "sheet", "doc" or "".
+                "show": show_as(att, original),
             },
             "parts": [{"label": part.label, "text": part.text} for part in documents.split_parts(text)] if text.strip() else [],
             "tables": [table_json(table, number) for number, table in enumerate(found[:MAX_TABLES], start=1)],
@@ -462,6 +472,42 @@ def register_workspace(
                 "readings": vision.readings_json(store.page_readings(att.id, att.sha256)),
             },
         }
+
+    def show_as(att, original: Path | None) -> str:
+        """How the Preview tab shows a file as it came: the browser's own PDF viewer ("pdf"), the picture itself
+        ("image"), its pages drawn as pictures ("pages": a TIFF or HEIC the browser can't show), a workbook or CSV as
+        a grid ("sheet"), a Word document's text and tables ("doc"); "" when it has no preview."""
+        if original is None:
+            return ""
+        suffix = Path(att.filename).suffix.lower()
+        if suffix == ".pdf":
+            return "pdf"
+        if suffix in agent.VIEWABLE:
+            return "image"
+        if vision.readable_file(att.filename):
+            return "pages" if vision.can_render() else ""
+        return sheet_preview.kind(att.filename)
+
+    @api.get("/mail/{email_id}/files/{n}/sheet")
+    def mail_file_sheet(email_id: str, n: int, rows: int = sheet_preview.MAX_ROWS, cols: int = sheet_preview.MAX_COLS):
+        """A workbook or CSV as a grid, every sheet as Excel shows it, or a Word document's text and tables, for the
+        Preview tab. Never a locked file's."""
+        email = known(email_id)
+        if not 1 <= n <= len(email.attachments):
+            raise HTTPException(status_code=404, detail="No such file on this email")
+        if fraud.attachments_locked(email):
+            raise HTTPException(status_code=403, detail=LOCKED_MESSAGE)
+        att = email.attachments[n - 1]
+        if not sheet_preview.kind(att.filename):
+            raise HTTPException(status_code=404, detail="Only a workbook, a CSV or a Word document is shown this way.")
+        original = agent.original_file(settings, email, att)
+        if original is None:
+            raise HTTPException(status_code=404, detail="The original file wasn't kept for this email.")
+        try:
+            return sheet_preview.preview(original.read_bytes(), att.filename, rows=rows, cols=cols)
+        except Exception as exc:
+            log.warning("Couldn't preview %s", att.filename, exc_info=True)
+            raise HTTPException(status_code=422, detail=f"This file couldn't be shown ({type(exc).__name__}). Its Text tab has what was read from it.") from None
 
     def page_file(email_id: str, n: int) -> tuple[Any, Any, bytes]:
         """The email, the attachment and its bytes as they arrived, for showing its pages; never a locked file's."""
@@ -554,6 +600,20 @@ def register_workspace(
             "tables": on_page,
             "fields": details,
             "fixes": len(own),
+            # Fields taught on this page (teach.py), drawn where they were shown.
+            "taught": [
+                {
+                    "id": fix["id"],
+                    "field": fix["now"],
+                    "label": teach.FIELDS.get(fix["now"], fix["now"]),
+                    "value": fix["was"],
+                    "printed": (fix.get("anchor") or {}).get("label") or "",
+                    "box": {key: fix[key] for key in ("x", "y", "w", "h")},
+                }
+                for fix in own
+                if fix["kind"] == "field"
+            ],
+            "teachable": [{"value": key, "label": label} for key, label in teach.FIELDS.items()],
         }
 
     @api.get("/mail/{email_id}/files/{n}/pages/{p}/regions")
@@ -584,6 +644,34 @@ def register_workspace(
                 raise HTTPException(status_code=400, detail="Type what the page says there.")
             fix = fixes.text_fix(boxes[index], now)
             message = "Fixed. The file's text has it now, and the same word is put right on this sender's later files." if fixes.learnable(fix["was"], fix["now"]) else "Fixed. The file's text has it now."
+        elif kind == "field":
+            from controller_inbox.pipeline import sent_date
+
+            field = str(data_in.get("field") or "")
+            anchor_day = sent_date(email.received_at, settings, fallback=board_date())
+            try:
+                fix = teach.field_fix(boxes, data_in.get("box") or {}, field, as_of=anchor_day)
+            except (TypeError, KeyError, ValueError) as exc:
+                detail = str(exc) if isinstance(exc, ValueError) and " " in str(exc) else "Drag a box round the value."
+                raise HTTPException(status_code=400, detail=detail) from None
+            fix_id = store.add_page_fix({**fix, "attachment_id": att.id, "sha256": att.sha256, "page": p, "sender": email.sender_email})
+            label = fix["anchor"]["label"]
+
+            def learn() -> tuple[Any, int]:
+                taught = teach.teach_file(store, settings, email, n, field, fix["anchor"]["value"], label=label)
+                return taught, teach.spread(store, settings, taught.sender_email, not_email=taught.id, as_of=board_date())
+
+            # Filing the sender's other emails again can take a moment: off the event loop.
+            email, others = await run_in_threadpool(learn)
+            who = email.sender_name or email.sender_email or "this sender"
+            message = f"{teach.FIELDS[field]} set to {fix['was']}."
+            if label:
+                message += f" Learned for {who}: their next files are read after “{label}”."
+            else:
+                message += " No label was printed beside it, so it's set for this file only."
+            if others:
+                message += f" Also read again on {others} other email{'s' if others != 1 else ''} from them."
+            return {"ok": True, "id": fix_id, "message": message, "field": field, "value": fix["was"]}
         else:
             box = data_in.get("box")
             try:
@@ -603,9 +691,21 @@ def register_workspace(
     @api.post("/mail/{email_id}/files/{n}/pages/{p}/fixes/{fix_id}/undo")
     def mail_file_fix_undo(email_id: str, n: int, p: int, fix_id: str):
         """Take back a fix made on this file."""
-        _email, att, _data = page_file(email_id, n)
+        email, att, _data = page_file(email_id, n)
+        taken = next((fix for fix in store.page_fixes(att.id) if fix["id"] == fix_id), None)
         if not store.remove_page_fix(att.id, fix_id):
             raise HTTPException(status_code=404, detail="That fix was already taken back.")
+        if taken is not None and taken["kind"] == "field":
+            field = taken["now"]
+            email = teach.untaught(store, settings, email, n, field, as_of=board_date())
+            name = teach.FIELDS.get(field, "The field")
+            still = (email.attachments[n - 1].extracted_fields.taught.get(field) or {}) if n <= len(email.attachments) else {}
+            if still.get("by") == "you":
+                # An earlier fix of the same field on this file is used again.
+                return {"ok": True, "message": f"Taken back. {name} is {teach.shown(field, str(still.get('value') or ''))} again, as you showed it before."}
+            if any(t["field"] == field for t in teach.templates(store, email.sender_email)):
+                return {"ok": True, "message": f"Taken back. {name} is read as the sender's other files taught it."}
+            return {"ok": True, "message": f"Taken back. {name} is read as before, and isn't learnt for this sender."}
         return {"ok": True, "message": "Fix taken back."}
 
     @api.post("/mail/{email_id}/files/{n}/vision")
