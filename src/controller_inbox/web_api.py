@@ -31,6 +31,7 @@ from controller_inbox import (
     semantic, table_lookup, vision,
 )
 from controller_inbox.digest import build_digest
+from controller_inbox.extract import extraction_failed
 from controller_inbox.local_llm import check_model, context_target, needs_more_context
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
 from controller_inbox.profile import active_profile, is_finance, set_profile
@@ -53,6 +54,7 @@ OUTLOOK_TICK_SECONDS = 30
 MAX_TABLES = 40
 MAX_TABLE_ROWS = 1500
 CLIP_CHARS = 280
+UNREADABLE = "This file couldn't be read: it looks damaged or cut short. Download it to check, or ask the sender for it again."
 LOCKED_MESSAGE = (
     "This email is flagged as possible payment fraud, so its files don't open. "
     "Verify it by phone, then mark it safe in its fraud check."
@@ -219,9 +221,11 @@ def register_workspace(
     file_cards: Callable[[EmailRecord], list[dict]],
     original_path: Callable[[EmailRecord], Path | None],
     setup: dict[str, Callable],
+    board_now: Callable[[], datetime | None] = lambda: None,
 ) -> None:
     """Add the workspace page (/app) and its JSON API (/api) to the dashboard. ``setup`` holds what the classic
-    Setup page's buttons do (web.py), so the workspace's Settings page changes the same things the same way."""
+    Setup page's buttons do (web.py), so the workspace's Settings page changes the same things the same way.
+    ``board_now`` is the sample's moment while only the sample is loaded (None: now), which a verdict refiles by."""
     api = APIRouter(prefix="/api", dependencies=[Depends(page_only)])
 
     def known(email_id: str) -> EmailRecord:
@@ -268,6 +272,10 @@ def register_workspace(
             "is_sample": bool(counts["emails"]) and not store.real_mail_count(),
             "last_run": format_when(last_run, settings.tz) if last_run else "",
             "tz": settings.tz.key,
+            "drop_folder": str(settings.inbox_incoming),
+            "failed_folder": str(settings.inbox_failed),
+            # Classic Outlook can be read on this computer, or a Microsoft 365 connection is set up.
+            "outlook_ready": not outlook_desktop.available() or settings.graph_configured,
             "folders": [{"key": key, "label": label} for key, label in FOLDER_LABELS.items()],
             "categories": [{"value": key.value, "label": label} for key, label in DOCUMENT_LABELS.items()],
             # Changes whenever a count does, so the page knows when its lists are out of date.
@@ -346,6 +354,8 @@ def register_workspace(
         for card in file_cards(email):
             att = card["att"]
             suffix = Path(att.filename).suffix.lower()
+            # A damaged file has no text and no pages to show; it can still be downloaded to check it.
+            broken = extraction_failed(att.extracted_text)
             item = {
                 "n": card["n"],
                 "name": att.filename,
@@ -355,20 +365,20 @@ def register_workspace(
                 "confidence": round((att.document_confidence or 0) * 100),
                 "invoice": att.extracted_fields.primary_invoice or "",
                 "amount_label": _money(att.extracted_fields.primary_amount),
-                "has_text": bool(card["chars"]),
-                "sections": card["sections"],
+                "has_text": bool(card["chars"]) and not broken,
+                "sections": 0 if broken else card["sections"],
                 "search": card["search"],
                 "blocked_type": card["blocked_type"],
             }
             if not locked:
                 text = att.extracted_text or ""
                 item.update(
-                    clip=text[:CLIP_CHARS],
-                    tables=len(table_lookup.tables_in(text)) if text.strip() else 0,
+                    clip=UNREADABLE if broken else text[:CLIP_CHARS],
+                    tables=len(table_lookup.tables_in(text)) if text.strip() and not broken else 0,
                     download=bool(card["downloadable"]),
                     view=suffix in agent.VIEWABLE and agent.original_file(settings, email, att) is not None,
-                    preview=vision.readable_file(att.filename) and vision.can_render() and agent.original_file(settings, email, att) is not None,
-                    show=show_as(att, agent.original_file(settings, email, att)),
+                    preview=not broken and vision.readable_file(att.filename) and vision.can_render() and agent.original_file(settings, email, att) is not None,
+                    show="" if broken else show_as(att, agent.original_file(settings, email, att)),
                 )
             files.append(item)
         coding = store.cost_coding(email.id)
@@ -445,9 +455,13 @@ def register_workspace(
             raise HTTPException(status_code=403, detail=LOCKED_MESSAGE)
         att = email.attachments[n - 1]
         text = att.extracted_text or ""
+        broken = extraction_failed(text)
+        if broken:
+            text = ""
         found = table_lookup.tables_in(text) if text.strip() else []
         suffix = Path(att.filename).suffix.lower()
         original = agent.original_file(settings, email, att)
+        show = "" if broken else show_as(att, original)
         return {
             "email": {"id": email.id, "subject": email.subject, "sender": email.sender_name or email.sender_email},
             "file": {
@@ -460,23 +474,36 @@ def register_workspace(
                 "view": suffix in agent.VIEWABLE and original is not None,
                 "download": suffix in DOWNLOADABLE and original is not None,
                 # Its pages can be shown as pictures, with where each piece of text was read (the Page tab).
-                "preview": vision.readable_file(att.filename) and original is not None and vision.can_render(),
+                "preview": not broken and vision.readable_file(att.filename) and original is not None and vision.can_render(),
                 # How the Preview tab shows the file as it came: "pdf", "image", "pages", "sheet", "doc" or "".
-                "show": show_as(att, original),
+                # A file that couldn't be read has none.
+                "show": show,
+                # How many pages the Preview tab draws a TIFF or HEIC as, counted without reading any of them.
+                "pages": page_count(email, att) if show == "pages" else 0,
+                "unreadable": UNREADABLE if broken else "",
             },
             "parts": [{"label": part.label, "text": part.text} for part in documents.split_parts(text)] if text.strip() else [],
             "tables": [table_json(table, number) for number, table in enumerate(found[:MAX_TABLES], start=1)],
             "more_tables": max(0, len(found) - MAX_TABLES),
             "vision": {
-                "offer": vision.offer(store, settings, email, att) if vision.readable_file(att.filename) else None,
+                "offer": vision.offer(store, settings, email, att) if vision.readable_file(att.filename) and not broken else None,
                 "readings": vision.readings_json(store.page_readings(att.id, att.sha256)),
             },
         }
 
+    def page_count(email, att) -> int:
+        data = vision.original_bytes(settings, email, att)
+        try:
+            return page_view.page_count(data, att.filename) if data is not None else 0
+        except Exception:
+            return 0
+
     def show_as(att, original: Path | None) -> str:
         """How the Preview tab shows a file as it came: the browser's own PDF viewer ("pdf"), the picture itself
         ("image"), its pages drawn as pictures ("pages": a TIFF or HEIC the browser can't show), a workbook or CSV as
-        a grid ("sheet"), a Word document's text and tables ("doc"); "" when it has no preview."""
+        a grid ("sheet"), a Word document's text and tables ("doc"), a PowerPoint deck slide by slide ("slides"), a text,
+        RTF, web page or calendar file as its text ("text"), a zip kept whole as its list of files ("zip"); "" when it
+        has no preview."""
         if original is None:
             return ""
         suffix = Path(att.filename).suffix.lower()
@@ -643,7 +670,11 @@ def register_workspace(
             if not now.strip():
                 raise HTTPException(status_code=400, detail="Type what the page says there.")
             fix = fixes.text_fix(boxes[index], now)
+            fix_id = store.add_page_fix({**fix, "attachment_id": att.id, "sha256": att.sha256, "page": p, "sender": email.sender_email})
             message = "Fixed. The file's text has it now, and the same word is put right on this sender's later files." if fixes.learnable(fix["was"], fix["now"]) else "Fixed. The file's text has it now."
+            # Filing the email again can take a moment: off the event loop.
+            message += await run_in_threadpool(read_fixed, email.id, n)
+            return {"ok": True, "id": fix_id, "message": message}
         elif kind == "field":
             from controller_inbox.pipeline import sent_date
 
@@ -688,6 +719,21 @@ def register_workspace(
         fix_id = store.add_page_fix({**fix, "attachment_id": att.id, "sha256": att.sha256, "page": p, "sender": email.sender_email})
         return {"ok": True, "id": fix_id, "message": message}
 
+    def read_fixed(email_id: str, n: int) -> str:
+        """The file read again after a figure on its page was fixed (or the fix taken back): its fields and the
+        email's follow the text. What to add to the message about it."""
+        email = store.get_email(email_id)
+        if email is None or not 1 <= n <= len(email.attachments):
+            return ""
+        before = email.extracted.primary_amount
+        email, changed = teach.read_fixed(store, settings, email, n, as_of=board_date())
+        if not changed:
+            return ""
+        after = email.extracted.primary_amount
+        if after != before and after is not None:
+            return f" The email was read again from it: its amount is {teach.shown('total', str(after))} now."
+        return " The email's details were read again from it."
+
     @api.post("/mail/{email_id}/files/{n}/pages/{p}/fixes/{fix_id}/undo")
     def mail_file_fix_undo(email_id: str, n: int, p: int, fix_id: str):
         """Take back a fix made on this file."""
@@ -706,6 +752,8 @@ def register_workspace(
             if any(t["field"] == field for t in teach.templates(store, email.sender_email)):
                 return {"ok": True, "message": f"Taken back. {name} is read as the sender's other files taught it."}
             return {"ok": True, "message": f"Taken back. {name} is read as before, and isn't learnt for this sender."}
+        if taken is not None and taken["kind"] == "text":
+            return {"ok": True, "message": "Fix taken back." + read_fixed(email.id, n)}
         return {"ok": True, "message": "Fix taken back."}
 
     @api.post("/mail/{email_id}/files/{n}/vision")
@@ -860,7 +908,8 @@ def register_workspace(
         verdict, _, scope = str(data.get("choice") or "").partition(":")
         try:
             fraud.record_fraud_verdict(
-                store, settings, email_id, verdict=verdict, scope=scope or "email", note=str(data.get("note") or "")[:300]
+                store, settings, email_id, verdict=verdict, scope=scope or "email", note=str(data.get("note") or "")[:300],
+                now=board_now(),
             )
         except KeyError:
             raise HTTPException(status_code=404, detail="That email isn't here any more.") from None

@@ -306,7 +306,15 @@ def describe(report: dict) -> str:
 def _copy_in(store: Store, settings: Settings, session, item: Seen, *, now: datetime, report: dict) -> tuple[str, bool, bool]:
     """Save a copy of the message, read it, and file it. Returns its email id, whether CloseDesk filed it from
     Outlook (``owned``: a deletion in Outlook removes it) and whether it is new here."""
-    from controller_inbox.folder_mail import _another_message, _parse_msg, _restore_sample, _stable_id, _write_extracted
+    from controller_inbox.folder_mail import (
+        _another_message,
+        _parse_msg,
+        _restore_sample,
+        _stable_id,
+        _write_extracted,
+        content_id,
+        unique_attachments,
+    )
     from controller_inbox.pipeline import process_message
 
     key = hashlib.sha256(f"{item.store_id}:{item.entry_id}".encode()).hexdigest()[:24]
@@ -321,8 +329,8 @@ def _copy_in(store: Store, settings: Settings, session, item: Seen, *, now: date
         if not raw.internet_message_id:
             # No Message-ID: named by what it says, so a copy of it in another synced folder (or the same message
             # under a new Outlook id) is the same email, and two different messages are two.
-            said = "\n".join([raw.subject, raw.sender_email.lower(), sent, raw.body_text[:5000]])
-            raw.id = "mail-" + hashlib.sha256(f"outlook:{said}".encode()).hexdigest()[:20]
+            # The drop folder names a copy of it saved there the same way (folder_mail.content_id).
+            raw.id = content_id(raw)
         existing = store.get_email(raw.id)
         if existing is not None and raw.internet_message_id and _another_message(existing, raw):
             # Another message with the same Message-ID (scanners and some mail tools reuse one), as the drop
@@ -338,6 +346,8 @@ def _copy_in(store: Store, settings: Settings, session, item: Seen, *, now: date
             cleared = store.clear_sample()
             report["sample_cleared"] = cleared
         try:
+            # Two files with one name ("Invoice.pdf" twice) are kept apart, as the drop folder keeps them.
+            raw.attachments = unique_attachments(raw.attachments)
             _write_extracted(settings, raw)
             record = process_message(raw, store, settings, now=now)
         except Exception:

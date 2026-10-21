@@ -95,7 +95,9 @@ def page_png(settings: Settings, data: bytes, filename: str, page: int) -> bytes
     """The page as a PNG, drawn once and kept. ValueError when the file has no such page."""
     if Path(filename or "").suffix.lower() != ".pdf" and not 1 <= page <= ocr.picture_pages(data):
         raise ValueError(f"a picture has no page {page}")
-    name = f"{file_hash(data)}-{page}.png"
+    # "-f": a PDF form's page drawn with its fields filled in (one kept before forms were drawn shows them empty).
+    form = Path(filename or "").suffix.lower() == ".pdf" and b"/AcroForm" in data
+    name = f"{file_hash(data)}-{page}{'-f' if form else ''}.png"
     png = _kept(settings, name)
     if png is not None:
         from PIL import Image

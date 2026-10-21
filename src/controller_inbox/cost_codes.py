@@ -453,15 +453,18 @@ def refresh(store, settings, *, email_ids: list[str] | None = None, force: bool 
     """Suggest codes for AP invoices that are new, changed, or checked against an older workbook.
 
     A coding you confirmed is never replaced. Mail that is no longer an AP invoice loses an
-    unconfirmed suggestion. Returns how many invoices were checked.
+    unconfirmed suggestion, as does one held as possible payment fraud until it is cleared. Returns how many
+    invoices were checked.
     """
+    from controller_inbox.fraud import attachments_locked
+
     book = load(settings)
     ids = store.ap_invoice_ids() if email_ids is None else email_ids
     checked = 0
     for email_id in ids:
         email = store.get_email(email_id)
         current = store.cost_coding(email_id)
-        if email is None or not is_ap_invoice(email):
+        if email is None or not is_ap_invoice(email) or attachments_locked(email):
             if current and current["status"] != "confirmed":
                 store.delete_cost_coding(email_id)
             continue

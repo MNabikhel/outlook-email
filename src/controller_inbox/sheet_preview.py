@@ -1,6 +1,8 @@
-"""A workbook, CSV or Word document as it looks, for the Preview tab: every sheet with its cells shown as Excel
-shows them (number formats, merged cells, bold, fills, column widths), or a Word document's headings, paragraphs
-and tables in order. Read from the file as it arrived; nothing here runs a macro or a formula.
+"""A file as it looks, for the Preview tab, when the browser can't show it itself: a workbook or CSV with every sheet
+and its cells shown as Excel shows them (number formats, merged cells, bold, fills, column widths); a Word document's
+headings, paragraphs and tables in order; a PowerPoint deck slide by slide; a text, RTF, web page or calendar file as
+its text; a zip as the list of what's in it. Read from the file as it arrived; nothing here runs a macro, a formula, a
+script or anything else in it.
 
 The JSON is small on purpose: a sheet sends at most ``MAX_ROWS`` rows of ``MAX_COLS`` columns, and says how many
 more there are.
@@ -8,10 +10,14 @@ more there are.
 
 from __future__ import annotations
 
+import copy
 import csv
+import hashlib
 import io
 import math
 import re
+import threading
+from collections import OrderedDict
 from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -27,22 +33,74 @@ TOO_BIG = "This file is too big to show here. Download it to open it."
 
 SHEET_SUFFIXES = {".xlsx", ".xlsm", ".xltx", ".xltm", ".xls", ".csv", ".tsv"}
 DOC_SUFFIXES = {".docx"}
+SLIDE_SUFFIXES = {".pptx", ".ppsx", ".potx"}
+TEXT_SUFFIXES = {".txt", ".md", ".log", ".json", ".xml", ".rtf", ".html", ".htm", ".ics"}
+ZIP_SUFFIXES = {".zip"}
+MAX_TEXT = 400_000  # characters of a text file shown
+MAX_SLIDES = 200
+MAX_ZIP_ENTRIES = 500
 
 
 def kind(filename: str) -> str:
-    """"sheet", "doc" or "" for a file this module shows."""
+    """"sheet", "doc", "slides", "text", "zip" or "" for a file this module shows."""
     suffix = Path(filename or "").suffix.lower()
     if suffix in SHEET_SUFFIXES:
         return "sheet"
     if suffix in DOC_SUFFIXES:
         return "doc"
+    if suffix in SLIDE_SUFFIXES:
+        return "slides"
+    if suffix in TEXT_SUFFIXES:
+        return "text"
+    if suffix in ZIP_SUFFIXES:
+        return "zip"
     return ""
+
+
+# The previews made last, by file (its SHA-256 and name) and size asked for: an email's thumbnail and its Preview
+# tab, opened again, don't read the workbook again.
+CACHED = 8
+_cache: OrderedDict[tuple, dict] = OrderedDict()
+_cache_lock = threading.Lock()
 
 
 def preview(data: bytes, filename: str, *, rows: int = MAX_ROWS, cols: int = MAX_COLS) -> dict:
     """{"kind": "sheet", "sheets": [...]} or {"kind": "doc", "blocks": [...]}. A workbook that can't be drawn says
     why in a sentence instead: {"kind": "sheet", "sheets": [], "note": "..."}."""
+    key = (hashlib.sha256(data).hexdigest(), filename, rows, cols)
+    with _cache_lock:
+        if key in _cache:
+            _cache.move_to_end(key)
+            return copy.deepcopy(_cache[key])
+    got = _preview(data, filename, rows=rows, cols=cols)
+    with _cache_lock:
+        _cache[key] = copy.deepcopy(got)
+        while len(_cache) > CACHED:
+            _cache.popitem(last=False)
+    return got
+
+
+def _preview(data: bytes, filename: str, *, rows: int, cols: int) -> dict:
     which = kind(filename)
+    if which in ("slides", "text", "zip"):
+        if len(data) > MAX_BYTES or (which == "slides" and _unzipped_size(data) > MAX_UNZIPPED):
+            return {"kind": which, "note": TOO_BIG}
+        if which == "slides":
+            return {"kind": "slides", "slides": pptx_slides(data)}
+        if which == "zip":
+            return {"kind": "zip", **zip_listing(data)}
+        suffix = Path(filename or "").suffix.lower()
+        if suffix in (".html", ".htm"):
+            from controller_inbox.documents import decode_text
+
+            return {"kind": "doc", "blocks": html_blocks(decode_text(data))}
+        if suffix == ".ics":
+            from controller_inbox.documents import decode_text
+
+            events = ics_blocks(decode_text(data))
+            if events:
+                return {"kind": "doc", "blocks": events, "source": file_text(data, filename)}
+        return {"kind": "text", "text": file_text(data, filename)}
     if which == "doc":
         if data[:2] == b"PK" and _unzipped_size(data) > MAX_UNZIPPED:
             return {"kind": "doc", "blocks": [], "note": TOO_BIG}
@@ -83,9 +141,22 @@ def _unzipped_size(data: bytes) -> int:
 # Excel workbooks ---------------------------------------------------------------------------------------
 
 
+# A workbook that unzips to more than this is read streaming (openpyxl's read-only mode), only as far as the rows
+# shown: loading it whole, twice (values and formulas), takes seconds and a gigabyte for a 5 MB ledger export.
+# Streaming reads no merged cells, hidden rows or columns, widths or frozen panes, so a smaller workbook is loaded
+# whole and drawn as Excel shows it.
+FULL_UNZIPPED = 4_000_000
+STREAMED_NOTE = (
+    "A large workbook, so its cells are shown without merged cells, hidden rows and columns or column widths. "
+    "Download it to open it in Excel."
+)
+
+
 def _xlsx(data: bytes, max_rows: int, max_cols: int) -> list[dict]:
     from openpyxl import load_workbook
 
+    if _unzipped_size(data) > FULL_UNZIPPED:
+        return _xlsx_streamed(data, max_rows, max_cols)
     values = load_workbook(io.BytesIO(data), data_only=True)
     formulas = load_workbook(io.BytesIO(data), data_only=False)
     sheets = []
@@ -98,6 +169,81 @@ def _xlsx(data: bytes, max_rows: int, max_cols: int) -> list[dict]:
     return sheets
 
 
+def _xlsx_streamed(data: bytes, max_rows: int, max_cols: int) -> list[dict]:
+    """The first ``max_rows`` rows of each sheet of a large workbook, read streaming: values, formulas, number
+    formats and cell styles, as ``_sheet`` shows them, without what only a whole load reads (merges, hidden rows
+    and columns, widths, frozen panes)."""
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+
+    values = load_workbook(io.BytesIO(data), data_only=True, read_only=True)
+    formulas = load_workbook(io.BytesIO(data), data_only=False, read_only=True)
+    sheets = []
+    try:
+        for ws in formulas.worksheets[:MAX_SHEETS]:
+            vs = values[ws.title]
+            out_rows: list[dict] = []
+            last_col = 0
+            rows = zip(ws.iter_rows(min_row=1, max_col=max_cols), vs.iter_rows(min_row=1, max_col=max_cols))
+            for r, (row, value_row) in enumerate(rows, start=1):
+                if len(out_rows) >= max_rows:
+                    break
+                cells = []
+                for cell, value_cell in zip(row, value_row):
+                    if getattr(cell, "value", None) is None:
+                        continue
+                    entry = _entry(cell, cell.value, value_cell.value)
+                    entry["c"] = cell.column
+                    entry.update(_style(cell))
+                    cells.append(entry)
+                    last_col = max(last_col, cell.column)
+                # An empty row still takes its place in the grid, so row numbers read as in Excel.
+                out_rows.append({"n": r, "cells": cells})
+            while out_rows and not out_rows[-1]["cells"]:
+                out_rows.pop()
+            shown_last = out_rows[-1]["n"] if out_rows else 0
+            try:
+                max_row, max_col = int(ws.max_row or 0), int(ws.max_column or 0)
+            except (TypeError, ValueError):
+                max_row, max_col = shown_last, last_col
+            shown_cols = min(max(last_col, min(max_col, max_cols)), max_cols)
+            sheets.append({
+                "name": ws.title,
+                "hidden": getattr(ws, "sheet_state", "visible") != "visible",
+                "cols": [{"n": c, "letter": get_column_letter(c), "w": _px(None), "hidden": False} for c in range(1, shown_cols + 1)],
+                "rows": out_rows,
+                "more_rows": max(0, max_row - shown_last),
+                "more_cols": max(0, max_col - shown_cols),
+                "freeze": "",
+                "note": STREAMED_NOTE,
+            })
+    finally:
+        values.close()
+        formulas.close()
+    return sheets
+
+
+def _entry(cell, raw, value) -> dict:
+    """A cell as the grid shows it: its value as Excel shows it ("v"), its formula ("f"), and whether it's a
+    number or date ("num") or shown red ("red"). ``raw`` is what the cell holds, ``value`` its saved result."""
+    formula = raw if isinstance(raw, str) and raw.startswith("=") else ""
+    if not formula and type(raw).__name__ == "ArrayFormula":
+        formula = str(getattr(raw, "text", "") or "")
+    shown_value = value if formula else raw
+    text, red = display(shown_value, cell.number_format)
+    entry: dict = {"v": text[:MAX_CELL]}
+    if formula:
+        entry["f"] = formula[:500]
+        if shown_value is None:
+            # Saved without its result (a file written by a program, not Excel): the formula, marked as such.
+            entry["v"], entry["nocalc"] = formula[:MAX_CELL], True
+    if isinstance(shown_value, (int, float, Decimal, datetime, date, time, timedelta)) and not isinstance(shown_value, bool):
+        entry["num"] = True  # numbers and dates sit at the right of the cell, as in Excel
+    if red:
+        entry["red"] = True
+    return entry
+
+
 def _sheet(ws, vs, max_rows: int, max_cols: int) -> dict:
     from openpyxl.utils import get_column_letter
 
@@ -105,22 +251,34 @@ def _sheet(ws, vs, max_rows: int, max_cols: int) -> dict:
     # formatted down to row 1,048,576 would make a million of them.
     held = {key: cell for key, cell in ws._cells.items() if cell.value is not None}
     values = vs._cells
-    merged: dict[tuple[int, int], tuple[int, int]] = {}
-    covered: set[tuple[int, int]] = set()
-    for rng in ws.merged_cells.ranges:
-        merged[(rng.min_row, rng.min_col)] = (rng.max_row, rng.max_col)
-        for r in range(rng.min_row, min(rng.max_row, rng.min_row + max_rows) + 1):
-            for c in range(rng.min_col, min(rng.max_col, max_cols) + 1):
-                if (r, c) != (rng.min_row, rng.min_col):
-                    covered.add((r, c))
-    used = set(held) | set(merged)
-    last_row = max((r for r, _c in used), default=0)
-    last_col = max((c for _r, c in used), default=0)
+    ranges = list(ws.merged_cells.ranges)
+    used = set(held) | {(rng.min_row, rng.min_col) for rng in ranges}
+    # A merge reaches its far corner, though the cells there are empty: "A9:B10" at the foot of a sheet is two
+    # rows and two columns.
+    ends = [(rng.max_row, rng.max_col) for rng in ranges]
+    last_row = max((r for r, _c in [*used, *ends]), default=0)
+    last_col = max((c for _r, c in [*used, *ends]), default=0)
     shown_cols = min(last_col, max_cols)
     data_rows = sorted({r for r, _c in used})
     hidden_rows = {r for r, dim in ws.row_dimensions.items() if dim.hidden}
     columns = _columns(ws, shown_cols)
     hidden_cols = {c for c, (_width, hidden) in columns.items() if hidden}
+    # A merge is drawn from its first row and column the grid shows: its top-left cell (which holds its value) can
+    # be in a hidden row or column, and the merge would vanish with it.
+    merged: dict[tuple[int, int], tuple[int, int]] = {}
+    source: dict[tuple[int, int], tuple[int, int]] = {}
+    covered: set[tuple[int, int]] = set()
+    for rng in ranges:
+        top = next((r for r in range(rng.min_row, min(rng.max_row, rng.min_row + max_rows) + 1) if r not in hidden_rows), None)
+        left = next((c for c in range(rng.min_col, min(rng.max_col, max_cols) + 1) if c not in hidden_cols), None)
+        at = (top, left) if top is not None and left is not None else (rng.min_row, rng.min_col)
+        merged[at] = (rng.max_row, rng.max_col)
+        source[at] = (rng.min_row, rng.min_col)
+        for r in range(rng.min_row, min(rng.max_row, rng.min_row + max_rows) + 1):
+            for c in range(rng.min_col, min(rng.max_col, max_cols) + 1):
+                if (r, c) != at:
+                    covered.add((r, c))
+    last_row = max([last_row, *(r for r, _c in merged)])
     out_rows = []
     shown_last = 0
     for r in range(1, last_row + 1):
@@ -134,27 +292,12 @@ def _sheet(ws, vs, max_rows: int, max_cols: int) -> dict:
             if (r, c) in covered:
                 continue
             span = merged.get((r, c))
-            cell = held.get((r, c)) or (ws._cells.get((r, c)) if span else None)
+            at = source.get((r, c), (r, c)) if span else (r, c)
+            cell = held.get(at) or (ws._cells.get(at) if span else None)
             if cell is None:
                 continue
-            raw = cell.value
-            value_cell = values.get((r, c))
-            value = value_cell.value if value_cell is not None else None
-            formula = raw if isinstance(raw, str) and raw.startswith("=") else ""
-            if not formula and type(raw).__name__ == "ArrayFormula":
-                formula = str(getattr(raw, "text", "") or "")
-            shown_value = value if formula else raw
-            text, red = display(shown_value, cell.number_format)
-            entry: dict = {"c": c, "v": text[:MAX_CELL]}
-            if formula:
-                entry["f"] = formula[:500]
-                if shown_value is None:
-                    # Saved without its result (a file written by a program, not Excel): the formula, marked as such.
-                    entry["v"], entry["nocalc"] = formula[:MAX_CELL], True
-            if isinstance(shown_value, (int, float, Decimal, datetime, date, time, timedelta)) and not isinstance(shown_value, bool):
-                entry["num"] = True  # numbers and dates sit at the right of the cell, as in Excel
-            if red:
-                entry["red"] = True
+            value_cell = values.get(at)
+            entry = {"c": c, **_entry(cell, cell.value, value_cell.value if value_cell is not None else None)}
             if span:
                 # The grid leaves hidden rows and columns out, so a merge spans only the ones it shows.
                 entry["rs"] = _shown(r, span[0], hidden_rows, max_rows)
@@ -163,7 +306,7 @@ def _sheet(ws, vs, max_rows: int, max_cols: int) -> dict:
             cells.append(entry)
         # An empty row still takes its place in the grid, so row numbers read as in Excel.
         out_rows.append({"n": r, "cells": cells})
-    while out_rows and not out_rows[-1]["cells"]:
+    while out_rows and not out_rows[-1]["cells"] and not any((out_rows[-1]["n"], c) in covered for c in range(1, shown_cols + 1)):
         out_rows.pop()
     widths = []
     for c in range(1, shown_cols + 1):
@@ -281,10 +424,18 @@ def _xls(data: bytes, max_rows: int, max_cols: int) -> list[dict]:
         for index in range(min(book.nsheets, MAX_SHEETS)):
             sheet = book.sheet_by_index(index)
             shown_cols = min(sheet.ncols, max_cols)
+            # Merged cells (read only with formats): the top-left cell spans the rest, which aren't shown.
+            spans, covered = {}, set()
+            for rlo, rhi, clo, chi in getattr(sheet, "merged_cells", None) or []:
+                spans[(rlo, clo)] = (min(rhi - rlo, max_rows), min(chi, shown_cols) - clo)
+                covered.update((r, c) for r in range(rlo, min(rhi, max_rows)) for c in range(clo, min(chi, shown_cols)))
             out_rows = []
-            for r in range(min(sheet.nrows, max_rows)):
+            nrows = max([sheet.nrows, *(r + 1 for r, _c in covered)])
+            for r in range(min(nrows, max_rows)):
                 cells = []
                 for c in range(shown_cols):
+                    if (r, c) in covered and (r, c) not in spans or r >= sheet.nrows:
+                        continue
                     cell = sheet.cell(r, c)
                     if cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
                         continue
@@ -306,9 +457,11 @@ def _xls(data: bytes, max_rows: int, max_cols: int) -> list[dict]:
                         entry["num"] = True
                     if red:
                         entry["red"] = True
+                    if (r, c) in spans:
+                        entry["rs"], entry["cs"] = (max(1, n) for n in spans[(r, c)])
                     cells.append(entry)
                 out_rows.append({"n": r + 1, "cells": cells})
-            while out_rows and not out_rows[-1]["cells"]:
+            while out_rows and not out_rows[-1]["cells"] and not any((out_rows[-1]["n"] - 1, c) in covered for c in range(shown_cols)):
                 out_rows.pop()
             sheets.append(_plain(sheet.name, out_rows, shown_cols, max(0, sheet.nrows - max_rows), max(0, sheet.ncols - shown_cols), hidden=bool(getattr(sheet, "visibility", 0))))
     finally:
@@ -1017,3 +1170,286 @@ class _Numbering:
             return _count_text(counts.get(level, start), kind)
 
         return re.sub(r"%([1-9])", number, levels[ilvl][1]).strip()
+
+
+# PowerPoint ------------------------------------------------------------------------------------------
+
+
+def pptx_slides(data: bytes) -> list[dict]:
+    """Each slide's title, then its text boxes (top to bottom, left to right) as paragraphs and bullet points with
+    their level, its tables, how many pictures and charts it has, and its speaker notes: {"n", "title", "blocks",
+    "pictures", "notes", "hidden"}."""
+    from pptx import Presentation
+    from pptx.util import Emu
+
+    deck = Presentation(io.BytesIO(data))
+    slides = []
+    for number, slide in enumerate(deck.slides, start=1):
+        if number > MAX_SLIDES:
+            break
+        title_shape = slide.shapes.title
+        title = _shape_text(title_shape).strip() if title_shape is not None else ""
+        blocks: list[dict] = []
+        pictures = 0
+        for shape in sorted(_flat_shapes(slide.shapes), key=lambda sh: (int(sh.top or Emu(0)), int(sh.left or Emu(0)))):
+            if title_shape is not None and shape.shape_id == title_shape.shape_id:
+                continue
+            if getattr(shape, "has_table", False) and shape.has_table:
+                rows = [[cell.text.strip()[:MAX_CELL] for cell in row.cells] for row in shape.table.rows]
+                if rows:
+                    blocks.append({"t": "table", "rows": rows})
+            elif getattr(shape, "has_text_frame", False) and shape.has_text_frame:
+                for paragraph in shape.text_frame.paragraphs:
+                    text = paragraph.text.replace("\v", " ").strip()
+                    if not text:
+                        continue
+                    level = int(paragraph.level or 0)
+                    bulleted = level > 0 or len(shape.text_frame.paragraphs) > 1
+                    blocks.append({"t": "li" if bulleted else "p", "text": text[:MAX_CELL], "level": level})
+            elif shape.shape_type is not None and int(shape.shape_type) in (3, 13):  # chart, picture
+                pictures += 1
+            elif getattr(shape, "has_chart", False) and shape.has_chart:
+                pictures += 1
+        notes = ""
+        if slide.has_notes_slide and slide.notes_slide.notes_text_frame is not None:
+            notes = slide.notes_slide.notes_text_frame.text.strip()[:MAX_CELL]
+        hidden = slide._element.get("show") == "0"
+        slides.append({"n": number, "title": title, "blocks": blocks, "pictures": pictures, "notes": notes, "hidden": hidden})
+    return slides
+
+
+def _flat_shapes(shapes):
+    """The shapes on a slide, with those inside a group taken out of it."""
+    for shape in shapes:
+        if getattr(shape, "shape_type", None) is not None and int(shape.shape_type) == 6:  # a group
+            yield from _flat_shapes(shape.shapes)
+        else:
+            yield shape
+
+
+def _shape_text(shape) -> str:
+    return shape.text_frame.text if getattr(shape, "has_text_frame", False) and shape.has_text_frame else ""
+
+
+# Text, RTF, web pages, calendar files ----------------------------------------------------------------
+
+
+def file_text(data: bytes, filename: str) -> str:
+    """The file as text: a web page or RTF without its markup (never rendered), any other as written."""
+    from controller_inbox.documents import decode_text
+    from controller_inbox.extract import _rtf_text, html_to_text
+
+    suffix = Path(filename or "").suffix.lower()
+    if suffix == ".rtf":
+        text = _rtf_text(data)
+    elif suffix in (".html", ".htm"):
+        text = html_to_text(decode_text(data))
+    else:
+        text = decode_text(data)
+    text = text.replace("\r\n", "\n").replace("\x00", "")
+    if len(text) > MAX_TEXT:
+        text = text[:MAX_TEXT].rsplit("\n", 1)[0] + "\n\n[The rest of the file isn't shown here. Download it to see all of it.]"
+    return text
+
+
+_HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all|font-size\s*:\s*0(?![.\d]*[1-9])", re.I)
+_SKIPPED_TAGS = {"script", "style", "head", "title", "template", "noscript", "svg", "object", "iframe"}
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+_BLOCK_TAGS = {"p", "div", "section", "article", "header", "footer", "blockquote", "pre", "address", "dd", "dt", "body"}
+
+
+def html_blocks(html: str) -> list[dict]:
+    """A web page as docx_blocks gives a Word document: its headings, paragraphs, list items and tables, as text
+    only. Nothing of the markup is kept (no links, pictures or scripts), and what the page hides is left out."""
+    from html.parser import HTMLParser
+
+    blocks: list[dict] = []
+
+    class Reader(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.skip: list[str] = []  # the open tags whose content isn't shown
+            self.words: list[str] = []
+            self.kind = "p"
+            self.tables: list[dict] = []  # open tables, innermost last: {"rows": [...], "cell": [...] or None}
+
+        def flush(self) -> None:
+            text = re.sub(r"\s+", " ", "".join(self.words)).strip()
+            self.words = []
+            if text and len(blocks) < MAX_DOC_BLOCKS:
+                blocks.append({"t": self.kind, "text": text[:MAX_CELL * 2]})
+            self.kind = "p"
+
+        def handle_starttag(self, tag, attrs) -> None:
+            if self.skip:
+                if tag not in _VOID_TAGS:
+                    self.skip.append(tag)
+                return
+            style = " ".join(value or "" for name, value in attrs if name == "style")
+            if tag in _SKIPPED_TAGS or (tag not in _VOID_TAGS and _HIDDEN_STYLE.search(style)) or any(name == "hidden" for name, _v in attrs):
+                if tag not in _VOID_TAGS:
+                    self.skip.append(tag)
+                return
+            if self.tables:
+                table = self.tables[-1]
+                if tag == "tr":
+                    table["rows"].append([])
+                elif tag in ("td", "th"):
+                    if not table["rows"]:
+                        table["rows"].append([])
+                    span = next((value for name, value in attrs if name == "colspan"), "")
+                    table["cell"] = {"words": [], "cs": int(span) if span and span.isdigit() else 1}
+                elif tag == "table":
+                    self.tables.append({"rows": [], "cell": None})
+                elif tag == "br" and table["cell"] is not None:
+                    table["cell"]["words"].append(" ")
+                return
+            if tag == "table":
+                self.flush()
+                self.tables.append({"rows": [], "cell": None})
+            elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+                self.flush()
+                self.kind = f"h{min(4, int(tag[1]) + 1)}"
+            elif tag == "li":
+                self.flush()
+                self.kind = "li"
+            elif tag == "br":
+                self.flush()
+            elif tag in _BLOCK_TAGS:
+                self.flush()
+
+        def handle_endtag(self, tag) -> None:
+            if self.skip:
+                if tag in self.skip:
+                    while self.skip and self.skip.pop() != tag:
+                        pass
+                return
+            if self.tables:
+                table = self.tables[-1]
+                if tag in ("td", "th") and table["cell"] is not None:
+                    self._close_cell(table)
+                elif tag == "table":
+                    if table["cell"] is not None:
+                        self._close_cell(table)
+                    self.tables.pop()
+                    rows = [row for row in table["rows"] if any((c["v"] if isinstance(c, dict) else c) for c in row)]
+                    if self.tables:
+                        # A table inside a cell reads as that cell's text.
+                        outer = self.tables[-1]
+                        text = " · ".join(" ".join(c["v"] if isinstance(c, dict) else c for c in row) for row in rows)
+                        if outer["cell"] is not None:
+                            outer["cell"]["words"].append(f" {text} ")
+                    elif rows and len(blocks) < MAX_DOC_BLOCKS:
+                        blocks.append({"t": "table", "rows": rows[:MAX_ROWS]})
+                return
+            if tag in ("h1", "h2", "h3", "h4", "h5", "h6", "li") or tag in _BLOCK_TAGS:
+                self.flush()
+
+        def _close_cell(self, table) -> None:
+            cell = table["cell"]
+            text = re.sub(r"\s+", " ", "".join(cell["words"])).strip()[:MAX_CELL]
+            table["rows"][-1].append({"v": text, "cs": cell["cs"]} if cell["cs"] > 1 else text)
+            table["cell"] = None
+
+        def handle_data(self, data) -> None:
+            if self.skip:
+                return
+            if self.tables:
+                cell = self.tables[-1]["cell"]
+                if cell is not None:
+                    cell["words"].append(data)
+                return
+            self.words.append(data)
+
+    reader = Reader()
+    reader.feed(html[:MAX_TEXT * 4])
+    reader.close()
+    while reader.tables:
+        reader.handle_endtag("table")
+    reader.flush()
+    return blocks
+
+
+def ics_blocks(text: str) -> list[dict]:
+    """A calendar file as each event's summary, when it starts and ends, where, and who organizes it (the preview
+    keeps the file as written under them). Nothing when it holds no event: then it is shown as written."""
+    # A long line is folded onto the next ones, each starting with a space or tab.
+    lines = re.sub(r"\r?\n[ \t]", "", text.replace("\r\n", "\n")).split("\n")
+    events: list[dict[str, tuple[dict, str]]] = []
+    current: dict | None = None
+    for line in lines:
+        name, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key, *params = name.split(";")
+        key = key.strip().upper()
+        if key == "BEGIN" and value.strip().upper() == "VEVENT":
+            current = {}
+        elif key == "END" and value.strip().upper() == "VEVENT":
+            if current is not None:
+                events.append(current)
+            current = None
+        elif current is not None and key not in current:
+            current[key] = (dict(p.split("=", 1) for p in params if "=" in p), value.strip())
+    blocks: list[dict] = []
+    for event in events[:50]:
+        title = _ics_text(event.get("SUMMARY", ({}, ""))[1]) or "Untitled event"
+        blocks.append({"t": "h2", "text": title})
+        rows = []
+        for key, label in (("DTSTART", "Starts"), ("DTEND", "Ends"), ("LOCATION", "Where"), ("ORGANIZER", "Organizer")):
+            if key not in event:
+                continue
+            params, value = event[key]
+            if key in ("DTSTART", "DTEND"):
+                shown = _ics_when(value, params)
+            elif key == "ORGANIZER":
+                shown = " ".join(part for part in (_ics_text(params.get("CN", "").strip('"')), re.sub(r"(?i)^mailto:", "", value)) if part)
+            else:
+                shown = _ics_text(value)
+            if shown:
+                rows.append([label, shown])
+        if rows:
+            blocks.append({"t": "table", "rows": rows})
+        description = _ics_text(event.get("DESCRIPTION", ({}, ""))[1])
+        if description:
+            blocks.append({"t": "p", "text": description[:MAX_CELL * 2]})
+    return blocks
+
+
+def _ics_text(value: str) -> str:
+    return re.sub(r"\\([\\,;nN])", lambda m: "\n" if m.group(1) in "nN" else m.group(1), value or "").strip()
+
+
+def _ics_when(value: str, params: dict) -> str:
+    """"20261024T140000Z" as "Sat, Oct 24, 2026, 2:00 PM UTC"; a date alone ("20261024") as the day."""
+    match = re.fullmatch(r"(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?", value.strip())
+    if not match:
+        return value
+    try:
+        day = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return value
+    shown = f"{day:%a}, {day:%b} {day.day}, {day.year}"
+    if match.group(4) is None:
+        return shown
+    hour, minute = int(match.group(4)), int(match.group(5))
+    clock = f"{(hour % 12) or 12}:{minute:02d} {'AM' if hour < 12 else 'PM'}"
+    zone = "UTC" if match.group(7) else params.get("TZID", "").strip('"')
+    return f"{shown}, {clock}" + (f" {zone}" if zone else "")
+
+
+# Zip ------------------------------------------------------------------------------------------------
+
+
+def zip_listing(data: bytes) -> dict:
+    """What's in a zip: each file's name and size, folders left out. {"files": [...], "more": n} or a note when it
+    can't be opened (damaged, or not a zip)."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            infos = [info for info in archive.infolist() if not info.is_dir()]
+    except (zipfile.BadZipFile, OSError, ValueError):
+        return {"files": [], "more": 0, "note": "This zip couldn't be opened. Download it to try it on this computer."}
+    files = [{"name": info.filename[:300], "size": info.file_size, "encrypted": bool(info.flag_bits & 0x1)} for info in infos[:MAX_ZIP_ENTRIES]]
+    return {"files": files, "more": max(0, len(infos) - MAX_ZIP_ENTRIES)}

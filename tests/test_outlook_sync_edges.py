@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -11,7 +10,7 @@ from controller_inbox import outlook_desktop, outlook_sync, web, web_api
 from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.outlook_desktop import FolderInfo, OutlookSession
 from test_outlook_desktop import Collection, ComError, Folder, Namespace, Store as FakeStore
-from test_outlook_sync import NOW, STORE, FakeOutlook, emails, sync
+from test_outlook_sync import STORE, FakeOutlook, emails, sync
 
 
 @pytest.fixture

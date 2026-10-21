@@ -29,6 +29,9 @@ ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A sentence about moving the money, which on an email with changed bank details waits for the phone call.
+PAYING_RE = re.compile(r"\b(?:wire|pay(?:ment|ing)?|process|remit\w*|transfer|ach|account|bank(?:ing)?)\b", re.IGNORECASE)
+
 # A sentence ends at ".", "!" or "?", but not at a month's short form: "by Oct. 15, 2026" is one date.
 SENTENCE_SPLIT = re.compile(
     r"(?<=[.!?])(?<!\b(?:jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\.)(?<!\bsept\.)\s+|\n+", re.IGNORECASE
@@ -88,6 +91,16 @@ def extract_actions(
             Importance.CRITICAL,
             "fraud_rule",
         )
+    elif "bank_change_caution" in flags:
+        # Cleared as not fraud, or from someone you trust: no block, but changed bank details still get a call,
+        # first, and as urgent as the email.
+        add(
+            "Confirm the bank-detail change by phone before paying",
+            "Bank details on this email changed. Call a number you already have before paying the new account.",
+            as_of.isoformat(),
+            max(importance, Importance.HIGH, key=_RANK.index),
+            "caution_rule",
+        )
 
     if "duplicate_invoice" in flags and fields.primary_invoice:
         add(
@@ -112,13 +125,13 @@ def extract_actions(
     invoice = fields.primary_invoice
     amount_txt = f"${amount:,.2f}" if amount is not None else "an amount"
     if category == DocumentType.AP_INVOICE:
-        title = f"Code and enter invoice {invoice or subject}"
+        title = _named("Code and enter", "invoice", invoice, subject)
         if amount is not None:
             title += f" ({amount_txt})"
         add(title, f"Vendor invoice ready for AP. Due {due or 'unspecified'}.", due, _due_priority(due, as_of, importance), "invoice")
     elif category == DocumentType.CREDIT_MEMO:
         add(
-            f"Enter credit memo {invoice or subject}",
+            _named("Enter", "credit memo", invoice, subject),
             "Apply the credit against the vendor account.",
             due,
             importance,
@@ -138,7 +151,7 @@ def extract_actions(
         add("Review payroll register and post payroll JE", subject, due or as_of.isoformat(), Importance.HIGH, "payroll")
     elif category == DocumentType.REMITTANCE_ADVICE:
         add(
-            f"Apply cash from remittance {invoice or subject}",
+            _named("Apply cash from", "remittance", invoice, subject),
             "Match the remittance to open AR and post cash.",
             due or as_of.isoformat(),
             Importance.HIGH,
@@ -166,6 +179,9 @@ def extract_actions(
             if not ACTION_RE.search(sentence):
                 continue
             if category == DocumentType.NEWSLETTER:
+                continue
+            if "bank_change_caution" in flags and PAYING_RE.search(sentence):
+                # "Process the wire today" waits for the phone call above; the payment is its own task after it.
                 continue
             sent_due = None
             due_match = re.search(
@@ -195,6 +211,16 @@ def extract_actions(
         add(f"Accept or decline: {subject}", "Meeting invitation waiting on your answer.", due, Importance.MEDIUM, "meeting")
 
     return items
+
+
+def _named(verb: str, noun: str, number: str | None, subject: str) -> str:
+    """A task named by its number ("Code and enter invoice INV-1"), or else by the subject. A subject that already
+    says "invoice" isn't given the word twice ("Code and enter: Invoice attached — Harbor Packaging")."""
+    if number:
+        return f"{verb} {noun} {number}"
+    if re.search(rf"\b{re.escape(noun)}", subject or "", re.IGNORECASE):
+        return f"{verb.removesuffix(' from')}: {subject}"
+    return f"{verb} {noun}: {subject}"
 
 
 def _sentences(text: str) -> list[str]:

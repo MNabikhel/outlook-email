@@ -156,7 +156,14 @@ def main(argv: list[str] | None = None) -> int:
         mailbox = _graph_mailbox(settings)
         hours = args.hours if args.hours is not None else settings.lookback_hours
         after = datetime.now(timezone.utc) - timedelta(hours=hours)
-        records = ingest_mailbox(mailbox, store, settings, received_after=after)
+        from controller_inbox.overnight import RunBusy, run_lock
+
+        # The scheduled run and the dashboard read the same mailbox and move the same cursor.
+        with run_lock(settings) as locked:
+            if not locked:
+                print(RunBusy())
+                return 0
+            records = ingest_mailbox(mailbox, store, settings, received_after=after)
         print(f"Classified {len(records)} message(s).")
         _print_run_summary(records, None)
         return 0

@@ -18,6 +18,7 @@ from email.parser import BytesParser
 from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 
+from controller_inbox import tnef
 from controller_inbox.config import Settings
 from controller_inbox.documents import decode_text
 from controller_inbox.extract import _rtf_text, explode_archives, html_to_text, redact_financial_secrets, sha256_bytes
@@ -81,6 +82,8 @@ def ingest_folder(
                 sent = "" if "sent" in raw.from_file else raw.received_at.astimezone(timezone.utc).isoformat()
                 raw.id = _stable_id("\n".join([raw.internet_message_id, subject, raw.sender_email, sent]))
                 existing = store.get_email(raw.id)
+            if existing is None and path.suffix.lower() in MESSAGE_SUFFIXES:
+                existing = _stored_elsewhere(store, raw)
             if existing is not None:
                 # Another copy of a stored message: only files it doesn't hold yet are read and added.
                 raw.attachments = _new_files(settings, raw, existing)
@@ -384,8 +387,21 @@ def _eml_content(message, prefix: str = "", depth: int = 0) -> tuple[str, list[R
     if calendar and not ics_attached:
         # An invitation can carry its calendar inline, with no file name; it is kept as the invite file it is.
         attachments.append(_attachment(f"{prefix}invite.ics", "text/calendar", calendar))
-    body = "\n".join(p for p in body_parts if p).strip() or html_fallback
+    body = fuller_body("\n".join(p for p in body_parts if p).strip(), html_fallback)
     return body, attachments
+
+
+def fuller_body(plain: str, html_text: str) -> str:
+    """The plain-text part, unless the HTML part (as text) says much more. Mail programs show the HTML, and a
+    plain alternative can be a stub ("View this message in HTML") or a cut-down copy: a bank-change request
+    written only in the HTML must still reach the fraud check and the fields. The plain part is kept when it
+    holds at least half the HTML's words, so a signature or a footer in the HTML alone doesn't swap it."""
+    if not plain:
+        return html_text
+    plain_words, html_words = len(plain.split()), len((html_text or "").split())
+    if html_words >= 12 and plain_words * 2 < html_words:
+        return html_text
+    return plain
 
 
 def _eml_leaves(part):
@@ -479,14 +495,14 @@ MAX_NESTING = 3
 
 
 def _msg_body(message) -> str:
-    """A .msg's text: its plain body, else its HTML body, else its RTF body (mail written in Outlook's Rich Text
-    format may keep only that). A body extract-msg fails to convert is left out, not the whole email."""
+    """A .msg's text: its plain body, else (or when the plain body is a stub, see ``fuller_body``) its HTML
+    body, else its RTF body (mail written in Outlook's Rich Text format may keep only that). A body extract-msg
+    fails to convert is left out, not the whole email."""
     body = _msg_property(message, "body")
-    if body:
-        return body if isinstance(body, str) else decode_text(body)
+    plain = (body if isinstance(body, str) else decode_text(body)) if body else ""
     html = _msg_html(message)
-    if html:
-        return html_to_text(html)
+    if plain or html:
+        return fuller_body(plain, html_to_text(html) if html else "")
     rtf = _msg_property(message, "rtfBody")
     return _rtf_text(rtf) if isinstance(rtf, (bytes, bytearray)) and rtf else ""
 
@@ -574,6 +590,7 @@ def _msg_attachments(message, prefix: str = "", depth: int = 0) -> list[RawAttac
 
 _OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 _SIGNATURE_TYPES = {"application/pkcs7-signature", "application/x-pkcs7-signature"}
+_TNEF_TYPES = {"application/ms-tnef", "application/vnd.ms-tnef"}
 
 
 def mail_file_attachments(
@@ -610,6 +627,16 @@ def mail_file_attachments(
             if parsed.get_content_type() == "multipart/signed":
                 _body, files = _eml_content(parsed, prefix, depth)
                 return [att for att in files if att.content_type not in _SIGNATURE_TYPES]
+        if (lower == "winmail.dat" or ctype in _TNEF_TYPES) and tnef.is_tnef(data):
+            # Outlook packs a Rich Text email's files into one winmail.dat; they are read from it, each as
+            # "winmail.dat › file" (an email among them is read as a forwarded one).
+            found = []
+            for name, payload in tnef.attachments(data):
+                inner_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+                inner_prefix = f"{prefix}{filename or 'winmail.dat'} › "
+                mail = mail_file_attachments(name, inner_type, payload, inner_prefix, depth + 1)
+                found.extend(mail if mail is not None else [_attachment(inner_prefix + name, inner_type, payload)])
+            return found or None
     except Exception:
         log.warning("Couldn't read the email %s attached as a file", filename, exc_info=True)
     return None
@@ -726,6 +753,39 @@ def _file_attachment(path: Path) -> RawAttachment:
         size_bytes=len(data),
         content=data,
     )
+
+
+def content_id(raw: RawMessage) -> str:
+    """The id of a message without a Message-ID, from what it says: its subject, sender, sent time and text. The
+    Outlook sync names such a message this way, so the same message saved into the drop folder meets it."""
+    sent = raw.received_at.astimezone(timezone.utc).isoformat()
+    said = "\n".join([raw.subject, raw.sender_email.lower(), sent, raw.body_text[:5000]])
+    return "mail-" + hashlib.sha256(f"outlook:{said}".encode()).hexdigest()[:20]
+
+
+def _stored_elsewhere(store: Store, raw: RawMessage):
+    """The stored email this dropped message already is, when it came in another way: from Microsoft 365 (same
+    Message-ID, under Microsoft's id) or synced from classic Outlook without a Message-ID (named by what it says).
+    ``raw`` takes that email's id, so the copy adds only its new files. None when it is new."""
+    if raw.internet_message_id:
+        found = store.email_with_message_id(raw.internet_message_id, "graph")
+        stored = store.get_email(found) if found else None
+        if stored is None or _another_message(stored, raw):
+            return None
+        # Still the Microsoft 365 email: the next sync reads it under that id, and writes its categories back.
+        raw.source = "graph"
+    elif raw.sender_email and not raw.from_file:
+        # Only for a message that names its own subject and sent time: one taken from its file differs between
+        # two copies. A new one is filed under this id too, so the Outlook sync meets it when it comes later; one
+        # filed earlier under its file's id was found by that id already.
+        stored = store.get_email(content_id(raw))
+        if stored is None:
+            raw.id = content_id(raw)
+            return None
+    else:
+        return None
+    raw.id = stored.id
+    return stored
 
 
 def _message_id(data: bytes) -> str:

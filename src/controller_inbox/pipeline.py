@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
 from controller_inbox.actions import extract_actions
-from controller_inbox.classify import Classification, classify_document, classify_email, outlook_categories
+from controller_inbox.classify import Classification, classify_document, classify_email, is_data_file, outlook_categories
 from controller_inbox.config import Settings
 from controller_inbox.documents import MAX_TEXT
 from controller_inbox.extract import (
@@ -17,8 +17,8 @@ from controller_inbox.extract import (
     redact_financial_secrets,
     sha256_bytes,
 )
-from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, EmailRecord, RawMessage
-from controller_inbox.fraud import assess, domain_of, reassess_email, save_check, trust_context
+from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, DocumentType, EmailRecord, ExtractedFields, RawMessage
+from controller_inbox.fraud import assess, domain_of, dropped_file_body, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
 
@@ -76,9 +76,17 @@ def process_message(
         body_text=redact_financial_secrets(raw.body_text),
         body_preview=redact_financial_secrets(raw.body_preview or raw.body_text[:240]),
     )
-    attachments_raw = explode_archives(list(raw.attachments))
-    if mailbox is not None and not attachments_raw and raw.has_attachments:
-        attachments_raw = list(mailbox.get_attachments(raw.id))
+    files = list(raw.attachments)
+    if mailbox is not None and not files and raw.has_attachments:
+        files = list(mailbox.get_attachments(raw.id))
+    if mailbox is not None and existing is None and files:
+        # Mail read from a mailbox (Microsoft 365, the sample) keeps its files as they came, as the drop folder and
+        # classic Outlook keep theirs: the Preview tab, Download and the page view open them.
+        from controller_inbox.folder_mail import _write_extracted, unique_attachments
+
+        files = unique_attachments(files)
+        _write_extracted(settings, replace(raw, attachments=files))
+    attachments_raw = explode_archives(files)
     # Another copy of a stored message: the files stored from earlier copies are kept, and this copy adds
     # only files they don't hold. A re-saved .eml often comes without the files dropped beside the first.
     kept = existing.attachments if existing is not None else []
@@ -93,29 +101,30 @@ def process_message(
     merged_fields = extract_fields(
         f"{raw.subject}\n{raw.body_text}",
         as_of=anchor,
-        extra_vendor=raw.sender_name,
+        extra_vendor=_vendor_hint(raw),
     )
     for att in kept:
         att_records.append(att)
         att_classifications.append(_classify_file(raw, att.filename, att.content_type, att.extracted_text))
-        merged_fields = merged_fields.merged_with(att.extracted_fields)
+        merged_fields = merged_fields.merged_with(_email_fields(att, att_classifications[-1].document_type))
     for raw_att in attachments_raw:
         record, classified = _file_record(raw, raw_att, anchor)
         _read_as_taught(store, raw.sender_email, record, anchor)
         att_records.append(record)
         att_classifications.append(classified)
-        merged_fields = merged_fields.merged_with(record.extracted_fields)
+        merged_fields = merged_fields.merged_with(_email_fields(record, classified.document_type))
 
     body_text = clean.body_text
     verdicts = [flag for flag in (existing.flags if existing else []) if flag in VERDICT_FLAGS]
+    files = [(att.filename, att.extracted_text) for att in att_records]
     check = assess(
         trust_context(store, settings),
         subject=clean.subject,
-        body=body_text,
+        body=dropped_file_body(raw.id, raw.sender_email, body_text, files),
         sender_name=raw.sender_name,
         sender_email=raw.sender_email,
         reply_to=raw.reply_to,
-        attachments=[(att.filename, att.extracted_text) for att in att_records],
+        attachments=files,
         history=store.sender_history(raw.sender_email, exclude=raw.id),
         flags=verdicts,
         domain_history=store.domain_history(domain_of(raw.sender_email), exclude=raw.id),
@@ -135,7 +144,7 @@ def process_message(
         has_attachments=bool(att_records) or raw.has_attachments,
         fraud=check.level,
     )
-    classified_email.flags.extend(verdicts)
+    classified_email.flags.extend(verdicts + _bank_caution(check))
 
     # If Graph said there were attachments but we still have none after fetch.
     has_files = bool(att_records)
@@ -239,12 +248,25 @@ def _as_stored(raw: RawMessage, stored: EmailRecord) -> RawMessage:
 def _keep_task_status(fresh: list[ActionItem], stored: list[ActionItem]) -> list[ActionItem]:
     """When an email is read again, a task it still asks for keeps its id and what the user did with it:
     a snoozed task stays snoozed instead of coming back as a new open one. As in ``rescore_stored``, a task
-    the user snoozed or finished is kept even when the new reading doesn't ask for it."""
+    the user snoozed or finished is kept even when the new reading doesn't ask for it. A task's title carries the
+    invoice number and amount, so a file that arrives later can retitle it: as in ``teach._same_tasks``, the one
+    task of a kind left over is the same task as the one new task of that kind."""
     held = {item.title.strip().lower(): item for item in stored}
-    kept = []
-    for item in fresh:
+    pairs: dict[int, ActionItem] = {}
+    for n, item in enumerate(fresh):
         old = held.pop(item.title.strip().lower(), None)
-        kept.append(replace(item, id=old.id, status=old.status, created_at=old.created_at) if old else item)
+        if old is not None:
+            pairs[n] = old
+    for n, item in enumerate(fresh):
+        if n in pairs:
+            continue
+        same = [old for old in held.values() if old.source == item.source]
+        if len(same) == 1 and sum(1 for m, other in enumerate(fresh) if m not in pairs and other.source == item.source) == 1:
+            pairs[n] = held.pop(same[0].title.strip().lower())
+    kept = [
+        replace(item, id=pairs[n].id, status=pairs[n].status, created_at=pairs[n].created_at) if n in pairs else item
+        for n, item in enumerate(fresh)
+    ]
     return kept + [item for item in held.values() if item.status != ActionStatus.OPEN]
 
 
@@ -259,11 +281,16 @@ def sent_date(received_at, settings: Settings, *, fallback):
         return fallback
 
 
+def _vendor_hint(raw: RawMessage) -> str:
+    """The sender's name as a vendor to look for, when there is a sender: a file dropped on its own has none."""
+    return raw.sender_name if raw.sender_email else ""
+
+
 def _file_record(raw: RawMessage, raw_att, anchor) -> tuple[AttachmentRecord, Classification]:
     """One attachment read, classified and its fields pulled, as stored."""
     unmasked = extract_text_from_bytes(raw_att.filename, raw_att.content_type, raw_att.content)
     text = redact_financial_secrets(unmasked)[:MAX_TEXT]
-    fields = extract_fields(f"{raw_att.filename}\n{text}", as_of=anchor, extra_vendor=raw.sender_name)
+    fields = extract_fields(f"{raw_att.filename}\n{text}", as_of=anchor, extra_vendor=_vendor_hint(raw))
     # The masked text holds no bank number to read, so a bank letter's account is read before masking. Only its
     # last four are kept; every other field comes from the masked text, so no whole number is stored.
     bank = extract_fields(unmasked[:MAX_TEXT], as_of=anchor)
@@ -287,6 +314,17 @@ def _file_record(raw: RawMessage, raw_att, anchor) -> tuple[AttachmentRecord, Cl
         classification_reasons=classified.reasons,
     )
     return record, classified
+
+
+def _email_fields(att: AttachmentRecord, document_type: DocumentType) -> ExtractedFields:
+    """What a file adds to its email's fields. A workbook or CSV that is no invoice of its own (a close workbook,
+    an AP export) lists invoice numbers that were already seen, so they don't make the email about that invoice. Nor
+    does one listing several invoices, whatever it was filed as: a subledger beside an invoice is still a list."""
+    fields = att.extracted_fields
+    listing = document_type in {DocumentType.SPREADSHEET, DocumentType.OTHER} or len(set(fields.invoice_numbers)) > 1
+    if listing and is_data_file(att.filename, att.content_type):
+        return replace(fields, invoice_numbers=[])
+    return fields
 
 
 def _classify_file(raw: RawMessage, filename: str, content_type: str, text: str) -> Classification:
@@ -331,7 +369,7 @@ def _add_files(
         if record.id in held:
             continue
         email.attachments.append(record)
-        email.extracted = email.extracted.merged_with(record.extracted_fields)
+        email.extracted = email.extracted.merged_with(_email_fields(record, record.document_type))
     email.has_attachments = True
     email.flags = [flag for flag in email.flags if flag != "missing_attachment"]
     store.upsert_email(email)
@@ -402,6 +440,8 @@ def ingest_mailbox(
         if store.get_email(raw.id) is None and store.email_with_message_id(raw.internet_message_id, raw.source):
             # Outlook gives a message a new id when it is moved to another folder; it was read under the old one.
             continue
+        if store.get_email(raw.id) is None and _filed_from_a_file(store, raw):
+            continue
         if not sample_checked:
             # The first real message from Outlook replaces the sample mailbox, as one from the drop folder does.
             sample_checked = True
@@ -416,15 +456,37 @@ def ingest_mailbox(
             if failed[raw.id] < MAX_SYNC_TRIES:
                 held.append(received)
     # A sync of a shorter window (``sync --hours 1``) didn't read all the mail since the cursor, or the message
-    # it waits for: the cursor and the messages to try again stay as they are.
+    # it waits for: the cursor and the messages to try again stay as they are. With no cursor yet, the next sync
+    # would look back ``lookback_hours``, so only a window reaching that far back covers it.
     previous = store.get_state(cursor) if cursor else None
-    covered = received_after is None or not previous or _utc(received_after) <= datetime.fromisoformat(previous)
+    since = (
+        datetime.fromisoformat(previous)
+        if previous
+        else started.astimezone(timezone.utc) - timedelta(hours=settings.lookback_hours)
+    )
+    covered = received_after is None or _utc(received_after) <= since
     if cursor and covered:
         started = started.astimezone(timezone.utc)
         mark = min([started, *held]).isoformat()
         store.set_state(cursor, mark)
         store.set_state(retry_key, json.dumps({"cursor": mark, "until": started.isoformat(), "tries": failed}) if failed else "")
     return processed
+
+
+def _filed_from_a_file(store: Store, raw: RawMessage) -> bool:
+    """Whether this message is already filed from the drop folder or classic Outlook (the same Message-ID, and
+    the same subject, sender and time, as the drop folder tells a reused Message-ID apart): it isn't filed twice,
+    with a second set of tasks and its own invoice flagged as a duplicate of itself."""
+    from controller_inbox.folder_mail import _another_message
+
+    for source in ("folder", "outlook"):
+        if source == raw.source:
+            continue
+        found = store.email_with_message_id(raw.internet_message_id, source)
+        stored = store.get_email(found) if found else None
+        if stored is not None and not _another_message(stored, raw):
+            return True
+    return False
 
 
 def _utc(when: datetime) -> datetime:
@@ -477,8 +539,13 @@ def _classify(
         finance=is_finance(settings, store),
         fraud=fraud,
     )
-    learned = match_correction(store, sender_email=sender_email, subject=subject)
+    learned = match_correction(store, sender_email=sender_email, subject=subject, email_id=email_id)
     return apply_learned(classified, learned) if learned else classified
+
+
+def _bank_caution(check) -> list[str]:
+    """The flag that says a caution is about changed bank details (see ``FraudCheck.flags``)."""
+    return [flag for flag in getattr(check, "flags", []) if flag == "bank_change_caution"]
 
 
 def rescore_stored(
@@ -525,7 +592,7 @@ def rescore_stored(
     email.importance = classified.importance
     email.importance_score = classified.importance_score
     email.importance_reasons = classified.importance_reasons
-    email.flags = list(dict.fromkeys(classified.flags + kept))
+    email.flags = list(dict.fromkeys(classified.flags + _bank_caution(check) + kept))
     def key(item: ActionItem) -> str:
         return item.title.strip().lower()
 

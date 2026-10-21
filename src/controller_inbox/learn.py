@@ -19,14 +19,20 @@ from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
 
 
-def match_correction(store: Store, *, sender_email: str, subject: str) -> dict | None:
-    """The correction for this sender, else one for the same subject from the same company.
+def match_correction(store: Store, *, sender_email: str, subject: str, email_id: str = "") -> dict | None:
+    """The correction saved for this email itself, else the latest for this sender, else one for the same subject
+    from the same company. An email you corrected keeps your correction when it is filed again, even after you
+    corrected another email from the sender differently.
 
     A subject match never crosses to another company's mail (or to another person's
     free-mail address): one vendor's "Invoice" correction must not refile everyone's invoices.
     """
     from controller_inbox.fraud import FREEMAIL, domain_of
 
+    if email_id:
+        own = next((row for row in store.list_corrections() if row.get("email_id") == email_id), None)
+        if own:
+            return own
     sender = (sender_email or "").strip().lower()
     if not sender:
         return None

@@ -75,7 +75,7 @@ def test_the_prompt_fits_a_4096_token_context_and_leaves_room_for_tools(store, s
 
     final = {}
 
-    def fake_stream(_settings, messages, *, max_tokens):
+    def fake_stream(_settings, messages, *, max_tokens, **_k):
         final["messages"] = messages
         yield "The memo covers venue, travel and catering [1]."
 
@@ -169,14 +169,16 @@ def test_summary_lines_go_by_their_own_figures():
 # 8. The answer check sees everything the model was shown -------------------------------------------
 
 
-def test_figures_from_the_focus_list_summaries_and_past_answers_are_not_flagged(store, settings, mail):
+def test_figures_from_the_focus_list_and_summaries_are_not_flagged_but_one_only_a_past_answer_has_is(store, settings, mail):
     budget = mail["Q4 budget draft"]
     budget.summary = "Maya asks for a check of the $1,234 travel line."
     ws = agent.Workspace(store, settings, [budget], question="what's due?", current_id=budget.id, past="Earlier: deposit was $7,777.")
     focus = [{"rank": 1, "label": "Overdue 12 days", "title": "Pay invoice 48,500", "email_id": budget.id}]
     answer = "Invoice 48,500 is overdue by 12 days; the travel line is $1,234 and the deposit was $7,777 [1]."
     events = list(assistant._checked(ws, answer, history=[], today="2026-10-06", focus=focus))
-    assert events == []
+    # A past answer is what the model wrote, not something it read (test_sweep_chat): only its figure is flagged.
+    checks = [item for event in events if event["type"] == "check" for item in event["items"]]
+    assert [event["type"] for event in events] == ["check"] and len(checks) == 1 and "$7,777" in checks[0], events
 
 
 # 9. Notes only on emails that were read, and labelled as data -------------------------------------

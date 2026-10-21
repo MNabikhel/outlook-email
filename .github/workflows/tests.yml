@@ -10,12 +10,17 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.12"]
+        include:
+          # The oldest Python CloseDesk supports (pyproject's requires-python), so code it can't run is caught here.
+          - os: ubuntu-latest
+            python: "3.11"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - name: Install
         run: pip install -e ".[dev,ocr,tables]"
       - name: Test

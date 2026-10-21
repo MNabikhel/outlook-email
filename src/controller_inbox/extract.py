@@ -11,7 +11,7 @@ from typing import Iterable
 from dateutil import parser as date_parser
 
 from controller_inbox.classify import strip_html_comments
-from controller_inbox.documents import decode_text, extract_document
+from controller_inbox.documents import decode_text, extract_document, without_deletions
 from controller_inbox.models import ExtractedFields
 from controller_inbox.ocr import image_text
 
@@ -54,6 +54,14 @@ AMOUNT_WORDS_RE = re.compile(
     r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+\.[0-9]{2})(?![\w]|[.,]\d)",
     re.IGNORECASE,
 )
+# A table row read from a file ("Qty: Amount Due | Price: not listed | Ext: 250.00"): the label is one cell and
+# its amount the next filled one, as the Page tab reads it.
+AMOUNT_CELL_RE = re.compile(
+    r":\s*((?:amount|total|balance)(?:\s+due)?|grand\s+total)\s*(?:\|[^|:\n]*:\s*not listed\s*)*\|[^|:\n]*:\s*\$?\s*"
+    r"([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?|[0-9]+\.[0-9]{2})(?![\w]|[.,]\d)",
+    re.IGNORECASE,
+)
+TOTAL_LABEL_RE = re.compile(r"(?:grand\s+)?total\b", re.IGNORECASE)
 _MONTH = (
     r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
     r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
@@ -229,6 +237,14 @@ def redact_financial_secrets(text: str) -> str:
     return BANK_SECRET_RE.sub(_mask, text)
 
 
+EXTRACTION_ERROR = "[extraction error:"
+
+
+def extraction_failed(text: str) -> bool:
+    """The file could not be read at all (a damaged or cut-off file): its text is only the error."""
+    return (text or "").lstrip().startswith(EXTRACTION_ERROR)
+
+
 def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> str:
     name = (filename or "").lower()
     ctype = (content_type or "").lower()
@@ -249,7 +265,7 @@ def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> st
         if name.endswith(".zip") or "zip" in ctype:
             return zip_text(data)
     except Exception as exc:  # extraction should never fail the pipeline
-        return f"[extraction error: {exc}]"
+        return f"{EXTRACTION_ERROR} {exc}]"
     # Last resort: if it looks like text, keep a sample. Cut on a character boundary, so a
     # UTF-8 character split at byte 2000 does not make a whole text file look binary.
     cut = min(len(data), 2000)
@@ -522,16 +538,29 @@ def parse_due_date(raw: str, *, as_of: date) -> str | None:
 
 
 def extract_fields(text: str, *, as_of: date, extra_vendor: str | None = None) -> ExtractedFields:
+    text = without_deletions(text)  # a figure struck out under Track Changes isn't the invoice's
     # "Your Adobe invoice - 2026-10-01": a date after the word is the billing date, not the invoice's number.
     invoices = _unique(_normalize_id(m.group(1)) for m in INVOICE_RE.finditer(text) if not _is_date(m.group(1)))
     invoices += [v for v in _unique(_normalize_id(m.group(1)) for m in INVOICE_BARE_RE.finditer(text)) if v not in invoices]
     pos = _unique(_normalize_id(m.group(1)) for m in PO_RE.finditer(text))
     amounts: list[float] = []
+    cells = [(m.group(1), m.group(2)) for m in AMOUNT_CELL_RE.finditer(text)]
     for match in list(AMOUNT_RE.finditer(text)) + list(AMOUNT_WORDS_RE.finditer(text)):
         amount = parse_amount(match.group(1))
         if amount is not None and 0.01 <= amount <= 10_000_000:
             amounts.append(amount)
+    for _label, raw in cells:
+        amount = parse_amount(raw)
+        if amount is not None and 0.01 <= amount <= 10_000_000:
+            amounts.append(amount)
     amounts = _unique(amounts)
+    # A long schedule (an aging, a statement) prints its grand total after the first eight amounts kept: the
+    # largest amount labelled as a total is kept too, so the schedule's amount is its total, not its first row's.
+    totals = [parse_amount(m.group(1)) for m in AMOUNT_WORDS_RE.finditer(text) if TOTAL_LABEL_RE.match(m.group(0))]
+    totals += [parse_amount(raw) for label, raw in cells if TOTAL_LABEL_RE.match(label)]
+    total = max((amount for amount in totals if amount is not None and 0.01 <= amount <= 10_000_000), default=None)
+    if total is not None and total not in amounts[:8]:
+        amounts = [total, *[amount for amount in amounts if amount != total]]
     due_dates: list[str] = []
     for match in DUE_RE.finditer(text):
         parsed = parse_due_date(match.group(1), as_of=as_of)

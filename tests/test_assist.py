@@ -86,7 +86,7 @@ def test_chat_uses_the_email_on_screen(settings: Settings, loaded: Store):
 def test_chat_streams_from_the_local_model_with_sources(settings, loaded, monkeypatch):
     seen = {}
 
-    def fake_stream(_settings, messages, *, max_tokens):
+    def fake_stream(_settings, messages, *, max_tokens, **_k):
         seen["messages"] = messages
         yield "Maya is waiting on you "
         yield "[1]."
@@ -109,7 +109,7 @@ def test_a_figure_only_in_the_focus_list_counts_only_when_the_model_was_given_it
     focus = [{"rank": 1, "label": "Pay", "title": "Pay Northwind INV-77 ($4,250.00)", "email_id": "elsewhere", "summary": "Northwind $4,250.00"}]
     seen = {}
 
-    def fake_stream(_settings, messages, *, max_tokens):
+    def fake_stream(_settings, messages, *, max_tokens, **_k):
         seen["prompt"] = messages[-1]["content"]
         yield "Maya asks for the Q4 headcount numbers; the plan comes to $4,250.00 [1]."
 

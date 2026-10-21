@@ -165,6 +165,7 @@ function renderTop() {
   const button = $("#process-btn");
   button.disabled = running;
   button.textContent = running ? "Processing…" : "Process new mail";
+  $("#top").toggleAttribute("data-busy", running);
   // Redrawn only when it changes, so a click on Stop isn't lost to a redraw between press and release.
   const shown = JSON.stringify(running ? [job.stage_label, job.done, job.total, job.note, Boolean(job.about), job.stopping] : null);
   if (shown === S.topJob) return;
@@ -532,7 +533,7 @@ function showOverview() {
   const key = `overview:${spec.key}:${data ? "data" : "none"}:${S.meta ? S.meta.version : ""}`;
   if (S.shown === key) return;
   if (!data) return setReader(skeletonReader(), key, { animate: false });
-  if (spec.kind === "focus") setReader(todayView(data, S.meta), key);
+  if (spec.kind === "focus") setReader(todayView(data, S.meta, { processMail, loadSample }), key);
   else if (spec.kind === "fraud") setReader(fraudView(data), key);
   else if (spec.kind === "coding") setReader(codingView(data), key);
   else setReader(emptyReader(spec.q ? `${plural(data.items.length, "email")} mention “${spec.q}”. Choose one to read it.` : "Choose an email to read it here."), key);
@@ -574,8 +575,15 @@ const ctx = {
   // A fix saved on the Page tab changes the file's reading: its Text and Tables tabs fetch it again.
   fileChanged: (emailId, n, fields = false) => {
     S.files.delete(`${emailId}:${n}`);
-    // A field taught on the page changes the email itself (its invoice number, total, due date, tasks).
-    if (fields) S.staleEmail = emailId;
+    // A field taught on the page, or a figure fixed there, changes the email itself (its invoice number, total,
+    // due date, tasks, the clip of its file's text).
+    if (!fields) return;
+    S.staleEmail = emailId;
+    // Undo from the note still showing after going back to the email: the email shown is redrawn now.
+    if (S.email && S.email.id === emailId && S.shown === `email:${emailId}`) {
+      S.staleEmail = "";
+      reloadEmail();
+    }
   },
   categories: () => (S.meta ? S.meta.categories : []),
   visionRead,
@@ -1011,7 +1019,12 @@ function finished(job) {
     return;
   }
   const read = typeof result.ingested === "number" ? `Read ${plural(result.ingested, "new file")}.` : "";
-  toast(`Processed. ${read}${result.outlook_message ? ` ${result.outlook_message}` : ""}`, { tone: "ok", ms: 6000 });
+  const synced = result.outlook_message ? ` ${result.outlook_message}` : "";
+  const failed = (result.failed_files || []).length;
+  if (!failed) return toast(`Processed. ${read}${synced}`, { tone: "ok", ms: 6000 });
+  // A file that can't be read is moved aside, not retried: say so, and where it went.
+  const where = (S.meta && S.meta.failed_folder) || "inbox/failed";
+  toast(`Processed. ${read}${synced} ${failed === 1 ? "1 file couldn't be read and was" : `${failed} files couldn't be read and were`} moved to ${where}.`, { tone: "error", ms: 12000 });
 }
 
 async function syncOutlook() {
@@ -1026,6 +1039,18 @@ async function syncOutlook() {
     clearTimeout(S.poll);
     S.poll = setTimeout(poll, 600);
   } catch (error) {
+    toast(error.message, { tone: "error" });
+  }
+}
+
+async function loadSample(event) {
+  event.currentTarget.disabled = true;
+  try {
+    await postJSON("/api/settings/sample");
+    // The whole mailbox changed: start again on Today, as Settings does.
+    location.assign("/app");
+  } catch (error) {
+    event.currentTarget.disabled = false;
     toast(error.message, { tone: "error" });
   }
 }

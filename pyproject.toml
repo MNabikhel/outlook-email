@@ -50,7 +50,7 @@ closedesk = "controller_inbox.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-controller_inbox = ["templates/*", "static/*"]
+controller_inbox = ["templates/*", "static/*", "static/ui/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -12,8 +12,8 @@
     </div>
   </header>
   {% if locked %}
-  <p class="warn-box">This email may be payment fraud. The text below is safe to read, but don't act on bank details in it, and don't pay until you have verified by phone. The file doesn't download and Ask CloseDesk won't read it until you <a href="/inbox/{{ email.id }}#fraud">mark the email safe</a>.</p>
-  {% endif %}
+  <p class="warn-box">This email may be payment fraud, so its files don't open: not their text, and not for Ask CloseDesk. Verify it by phone, then <a href="/inbox/{{ email.id }}#fraud">mark the email safe</a>.</p>
+  {% else %}
   <div class="mail-tools">
     <form method="get" action="/inbox/{{ email.id }}/files/{{ n }}" class="file-search" role="search">
       <input type="search" name="q" value="{{ q }}" placeholder="Find in this file" aria-label="Find in this file"/>
@@ -27,6 +27,7 @@
     <button type="button" class="ghost" data-action="ask-file" data-id="{{ email.id }}" data-file="{{ att.filename }}">Ask about this file</button>
     {% endif %}
   </div>
+  {% endif %}
   {% if vision_offer and (vision_offer.pages or readings or (vision_offer.reason and not parts)) %}
   <section class="panel vision-box" id="vision" data-reload>
     <h3>Read with the vision model too</h3>
@@ -57,7 +58,8 @@
     {% endfor %}
   </section>
   {% endif %}
-  {% if not parts %}
+  {% if locked %}
+  {% elif not parts %}
   <section class="panel"><p class="muted">No readable text in this file. It is probably a scan or a picture; open it from Outlook.</p></section>
   {% else %}
   {% if q %}

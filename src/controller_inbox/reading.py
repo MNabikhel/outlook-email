@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone, tzinfo
 
 from controller_inbox import documents
@@ -61,6 +62,9 @@ ACTION_CATEGORIES = {
 INFO_CATEGORIES = {DocumentType.NEWSLETTER, DocumentType.INTERNAL_FYI, DocumentType.MEETING}
 
 VERIFY_TITLE = "Verify payment-instruction change by phone before doing anything"
+# Script tasks that guard a payment ("call before paying", "check this isn't a double entry"): the model's
+# reading adds its own tasks but never takes these away.
+SAFEGUARD_SOURCES = {"caution_rule", "duplicate_rule"}
 
 FRAUD_SUMMARY = (
     "Possible payment-instruction fraud — verify by phone before anything else. "
@@ -91,6 +95,8 @@ def script_folder(category: DocumentType, importance: Importance, flags: list[st
 def script_summary(email: EmailRecord) -> str:
     if "fraud_risk" in email.flags or email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE:
         return "Payment instructions may have changed. Confirm by phone before any payment."
+    if "bank_change_caution" in email.flags:
+        return "Bank details may have changed. Confirm by phone with a number you already have before any payment."
     label = DOCUMENT_LABELS.get(email.category, email.category.value)
     lead = lead_sentence(email.body_text)
     has_facts = bool(email.extracted.primary_invoice or email.extracted.primary_amount is not None)
@@ -293,7 +299,9 @@ def overlay_reading(
     previous_actions = list(email.actions)
     provided = parsed.get("actions")
     if isinstance(provided, list) and provided:
-        email.actions = _actions_from_model(email.id, provided, as_of, now, known_dates=_known_dates(email))
+        email.actions = _with_user_tasks(
+            previous_actions, _actions_from_model(email.id, provided, as_of, now, known_dates=_known_dates(email))
+        )
         dropped = [item for item in email.actions if item.detail.startswith(_DATE_NOTE)]
         if dropped:
             guard_notes.append(
@@ -458,6 +466,41 @@ def _known_dates(email: EmailRecord) -> set[str]:
     for att in email.attachments:
         dates.update(att.extracted_fields.due_dates)
     return dates
+
+
+def _task_words(title: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9][a-z0-9$,.\-]*[a-z0-9]|[a-z0-9]", title.lower()))
+
+
+def _same_purpose(model: ActionItem, script: ActionItem) -> bool:
+    """The model's task is the script's under its own words: the same title, or nearly the same words with every
+    number in it (an invoice number, an amount) also in the script's title. "Pay invoice INV-7741" is not
+    "Code and enter invoice INV-7741", so a paid invoice's entry task isn't ticked by mistake."""
+    ours, theirs = _task_words(model.title), _task_words(script.title)
+    if ours == theirs:
+        return True
+    numbers = {word for word in ours if any(ch.isdigit() for ch in word)}
+    return bool(ours) and numbers <= theirs and len(ours & theirs) / len(ours | theirs) >= 0.6
+
+
+def _with_user_tasks(previous: list[ActionItem], model: list[ActionItem]) -> list[ActionItem]:
+    """The model's tasks, with what the user did with the ones they had kept. A model task for the same purpose
+    as an earlier one keeps its id and status (done stays done, snoozed stays snoozed), a snoozed or finished task
+    the model doesn't repeat is kept, and a payment safeguard ("Confirm the bank-detail change by phone before
+    paying") stays at the top."""
+    claimed: dict[str, ActionItem] = {}
+    out: list[ActionItem] = []
+    for item in model:
+        old = next((b for b in previous if b.id not in claimed and _same_purpose(item, b)), None)
+        if old is None:
+            out.append(item)
+            continue
+        claimed[old.id] = old
+        out.append(replace(item, id=old.id, status=old.status, created_at=old.created_at))
+    rest = [item for item in previous if item.id not in claimed]
+    guards = [item for item in rest if item.source in SAFEGUARD_SOURCES]
+    held = [item for item in rest if item.source not in SAFEGUARD_SOURCES and item.status != ActionStatus.OPEN]
+    return guards + out + held
 
 
 def _actions_from_model(

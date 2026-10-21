@@ -438,6 +438,7 @@ class Store:
                     email.reply_to,
                 ),
             )
+            stored = _first_readings(conn, email.id)
             conn.execute("DELETE FROM attachments WHERE email_id = ?", (email.id,))
             for att in email.attachments:
                 conn.execute(
@@ -455,7 +456,7 @@ class Store:
                         att.content_type,
                         att.size_bytes,
                         att.sha256,
-                        _text(att.extracted_text),
+                        _text(_kept_text(att, stored.get(att.id))),
                         att.document_type.value,
                         att.document_confidence,
                         _dumps(att.extracted_fields.to_dict()),
@@ -773,6 +774,11 @@ class Store:
                             json_each(CASE WHEN json_valid(a.extracted_fields) THEN a.extracted_fields ELSE '{}' END,
                                       '$.invoice_numbers') n
                         WHERE a.email_id = e.id AND invoice_key(n.value) = ?
+                          -- A workbook or CSV that is no invoice of its own, or lists several, holds no repeat of one.
+                          AND NOT ((COALESCE(a.document_type, '') IN ('spreadsheet', 'other')
+                                    OR json_array_length(a.extracted_fields, '$.invoice_numbers') > 1) AND (
+                            lower(a.filename) LIKE '%.xlsx' OR lower(a.filename) LIKE '%.xlsm' OR lower(a.filename) LIKE '%.xls'
+                            OR lower(a.filename) LIKE '%.csv' OR lower(a.filename) LIKE '%.tsv'))
                     )
                   )
                 """,
@@ -1153,13 +1159,16 @@ class Store:
 
     def add_page_fix(self, row: dict[str, Any]) -> str:
         """Keeps a fix: {attachment_id, sha256, page, kind, x, y, w, h, was, now, anchor, sender}. Fixing a box
-        again replaces the earlier fix of the same kind there. Returns its id."""
+        again replaces the earlier fix of the same kind there (for a taught field, of the same field: one box can be
+        taught as two fields, say the invoice date and the due date). Returns its id."""
         fix_id = uuid.uuid4().hex
         with self.connect() as conn:
             for old in conn.execute(
-                "SELECT id, x, y, w, h FROM page_fixes WHERE attachment_id = ? AND page = ? AND kind = ?",
+                "SELECT id, x, y, w, h, now FROM page_fixes WHERE attachment_id = ? AND page = ? AND kind = ?",
                 (row["attachment_id"], int(row["page"]), row["kind"]),
             ).fetchall():
+                if row["kind"] == "field" and old["now"] != (row.get("now") or ""):
+                    continue
                 if abs(old["x"] - row["x"]) < 1e-4 and abs(old["y"] - row["y"]) < 1e-4 and abs(old["w"] - row["w"]) < 1e-4 and abs(old["h"] - row["h"]) < 1e-4:
                     conn.execute("DELETE FROM page_fixes WHERE id = ?", (old["id"],))
             conn.execute(
@@ -1680,10 +1689,13 @@ class Store:
         return [{**dict(row), "signals": _loads(row["signals"], [])} for row in rows]
 
     def sender_history(self, sender_email: str, *, exclude: str = "") -> int:
+        """Emails from this address, other than ``exclude``, that the fraud check let through or the user said
+        weren't fraud. A fraudster's first blocked attempt doesn't make the second one mail from someone the
+        user already hears from."""
         with self.connect() as conn:
             return conn.execute(
-                "SELECT COUNT(*) AS n FROM emails WHERE lower(sender_email) = ? AND id != ?",
-                ((sender_email or "").lower(), exclude),
+                f"SELECT COUNT(*) AS n FROM emails WHERE lower(sender_email) = ? AND id != ? AND {_NOT_FLAGGED}",
+                ((sender_email or "").lower(), exclude, *_NOT_FLAGGED_ARGS),
             ).fetchone()["n"]
 
     def domain_history(self, domain: str, *, exclude: str = "") -> int:
@@ -1695,13 +1707,8 @@ class Store:
         with self.connect() as conn:
             return conn.execute(
                 f"""SELECT COUNT(*) AS n FROM emails WHERE instr(sender_email, '@') > 0
-                AND lower(substr(sender_email, instr(sender_email, '@') + 1)) = ? AND id != ?
-                AND (COALESCE(flags, '') {_LIKE} OR (COALESCE(flags, '') NOT {_LIKE} AND COALESCE(flags, '') NOT {_LIKE}
-                     AND COALESCE(flags, '') NOT {_LIKE}))""",
-                (
-                    domain.lower(), exclude, _json_contains("fraud_cleared"), _json_contains("fraud_risk"),
-                    _json_contains("payment_caution"), _json_contains("fraud_confirmed"),
-                ),
+                AND lower(substr(sender_email, instr(sender_email, '@') + 1)) = ? AND id != ? AND {_NOT_FLAGGED}""",
+                (domain.lower(), exclude, *_NOT_FLAGGED_ARGS),
             ).fetchone()["n"]
 
     def email_ids_from(self, *, sender: str = "", domain: str = "") -> list[str]:
@@ -1782,6 +1789,29 @@ def _readings_for(conn: sqlite3.Connection, attachment_ids: list[str]) -> dict[s
     for row in rows:
         out.setdefault(row["attachment_id"], {})[int(row["page"])] = {key: row[key] for key in row.keys()}
     return out
+
+
+def _first_readings(conn: sqlite3.Connection, email_id: str) -> dict[str, tuple[str, str, str]]:
+    """Attachment id -> (sha256, its text as stored, that text as get_email shows it) for the email's files."""
+    rows = conn.execute("SELECT id, sha256, extracted_text FROM attachments WHERE email_id = ?", (email_id,)).fetchall()
+    ids = [row["id"] for row in rows]
+    readings = _readings_for(conn, ids)
+    fixes = _fixes_for(conn, ids)
+    out = {}
+    for row in rows:
+        text, sha = row["extracted_text"] or "", row["sha256"] or ""
+        out[row["id"]] = (sha, text, shown_text(text, readings.get(row["id"]), sha, fixes.get(row["id"])))
+    return out
+
+
+def _kept_text(att: AttachmentRecord, stored: tuple[str, str, str] | None) -> str:
+    """The text to store for the file: its first reading, when the text handed back is only that reading as it was
+    shown (the vision model's pages and the user's fixes laid over it). Saving the shown text would make a fix
+    permanent: Undo couldn't take it back, and a vision reading read again would be laid over itself."""
+    text = att.extracted_text or ""
+    if stored is not None and stored[0] == (att.sha256 or "") and text == stored[2]:
+        return stored[1]
+    return text
 
 
 def _fixes_for(conn: sqlite3.Connection, attachment_ids: list[str]) -> dict[str, list[dict]]:
@@ -1886,6 +1916,11 @@ def _email_from_rows(
 
 
 _LIKE = "LIKE ? ESCAPE '\\'"
+# Mail the fraud check let through, or that the user said wasn't fraud (for sender and domain history).
+_NOT_FLAGGED = (
+    f"(COALESCE(flags, '') {_LIKE} OR (COALESCE(flags, '') NOT {_LIKE} AND COALESCE(flags, '') NOT {_LIKE}"
+    f" AND COALESCE(flags, '') NOT {_LIKE}))"
+)
 # Most urgent first; the text values would sort alphabetically (critical, high, low, medium).
 _PRIORITY_ORDER = "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END"
 # Longest search word kept: SQLite refuses a LIKE pattern over 50,000 bytes (a pasted blob in the search box).
@@ -1928,6 +1963,9 @@ def _contains(word: str) -> str:
 def _json_contains(value: str) -> str:
     """A LIKE pattern for ``value`` as a whole JSON string inside a stored JSON document."""
     return "%" + _like_escape(_dumps(value)) + "%"
+
+
+_NOT_FLAGGED_ARGS = tuple(_json_contains(flag) for flag in ("fraud_cleared", "fraud_risk", "payment_caution", "fraud_confirmed"))
 
 
 def _col(row: sqlite3.Row, name: str, default: Any) -> Any:

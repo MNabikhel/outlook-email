@@ -420,7 +420,7 @@ def _seconds_per_page(store, seconds: float) -> None:
 def _chat_model(monkeypatch, answer: str = "The receivable is 30,250 [1]."):
     asked = []
 
-    def stream(_settings, messages, *, max_tokens):
+    def stream(_settings, messages, *, max_tokens, **_k):
         asked.append(messages[-1]["content"])
         yield answer
 

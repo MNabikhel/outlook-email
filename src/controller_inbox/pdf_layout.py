@@ -1318,7 +1318,12 @@ def _columns(block: list[Line]) -> list[tuple[float, float]]:
         for index in range(len(merged) - 1):
             if centers[index + 1] - centers[index] >= 0.55 * typical:
                 continue
-            if not any(_crosses(seg, merged[index], merged[index + 1]) for line in block if line is not skeleton for seg in line.segments):
+            if not any(
+                _crosses(seg, merged[index], merged[index + 1]) and not _summary_label(seg)
+                for line in block
+                if line is not skeleton
+                for seg in line.segments
+            ):
                 continue
             merged[index][0] = min(merged[index][0], merged[index + 1][0])
             merged[index][1] = max(merged[index][1], merged[index + 1][1])
@@ -1326,6 +1331,14 @@ def _columns(block: list[Line]) -> list[tuple[float, float]]:
             changed = True
             break
     return [(a, b) for a, b in merged]
+
+
+# "Amount Due" or "Total" under the figures: a label written across the narrow columns beside the amount it names.
+_SUMMARY = re.compile(r"^(?:(?:grand\s+|sub-?)?total|amount|balance)(?:\s+(?:due|owing|payable))?:?$", re.I)
+
+
+def _summary_label(segment: list[Word]) -> bool:
+    return bool(_SUMMARY.match(" ".join(word.text for word in segment).strip()))
 
 
 def _absorb_column(columns: list[list[float]], x0: float, x1: float, text: str = "") -> None:
@@ -2014,6 +2027,9 @@ def _table(block: list[Line], previous: list[Table] | None) -> tuple[list[str], 
         cell_end = [row[2:] for row in cell_end]
         columns = columns[2:]
 
+    if _side_by_side(grid):
+        return [cell for column in zip(*grid) for cell in column if cell.strip()], None, facts
+
     if _prose(grid):
         width = len(grid[0]) if grid else 0
         return _dehyphenate([" ".join(row[c] for row in grid if c < len(row) and row[c]) for c in range(width)]), None, facts
@@ -2339,6 +2355,21 @@ def _peel_side_facts(grid: list[list[str]]) -> tuple[list[str], list[list[str]]]
     if max((len(row) for row in rest), default=0) < 2:
         return None
     return facts, rest
+
+
+def _side_by_side(grid: list[list[str]]) -> bool:
+    """A letterhead beside an invoice's details ("Bolt Fasteners Inc", its address | "INVOICE", "Invoice # BF-5001",
+    "Date 10/14/2026"): two blocks of lines next to each other, not a table. The left block's lines come first and
+    stop, and the right one's go on below them, so no row past the first has both."""
+    if len(grid) < 4 or any(len(row) != 2 for row in grid):
+        return False
+    left = [index for index, row in enumerate(grid) if row[0].strip()]
+    right = [index for index, row in enumerate(grid) if row[1].strip()]
+    both = set(left) & set(right)
+    if not left or both - {0} or left != list(range(len(left))):
+        return False
+    alone = [index for index in right if index >= len(left)]
+    return len(left) >= 2 and len(alone) >= 2 and not any(tables.is_value(grid[index][1]) for index in right)
 
 
 def _prose(grid: list[list[str]]) -> bool:

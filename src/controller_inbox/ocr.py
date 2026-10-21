@@ -48,12 +48,13 @@ def picture_pages(data: bytes) -> int:
 
 
 def picture_page(data: bytes, page: int) -> bytes:
-    """Page ``page`` (from 1) of a picture, as a picture of its own (a PNG)."""
-    from PIL import Image
+    """Page ``page`` (from 1) of a picture, as a picture of its own (a PNG), turned as its EXIF tag says."""
+    from PIL import Image, ImageOps
 
     with Image.open(io.BytesIO(data)) as image:
         image.seek(page - 1)
-        frame = image.copy() if image.mode in {"1", "L", "RGB", "RGBA"} else image.convert("RGB")
+        frame = ImageOps.exif_transpose(image)
+        frame = frame if frame.mode in {"1", "L", "RGB", "RGBA"} else frame.convert("RGB")
     out = io.BytesIO()
     frame.save(out, "PNG")
     return out.getvalue()
@@ -72,11 +73,29 @@ def image_text(data: bytes) -> str:
     return _page_text(data)
 
 
+def _upright(data: bytes) -> bytes:
+    """The picture turned as its EXIF tag says to view it (a phone stores the pixels as the sensor saw them), as
+    vision.render turns it for the Page tab; the picture itself when it needn't be turned."""
+    from PIL import Image, ImageOps
+
+    with Image.open(io.BytesIO(data)) as image:
+        if image.getexif().get(0x0112, 1) in (0, 1):
+            return data
+        turned = ImageOps.exif_transpose(image)
+        if turned.mode not in {"1", "L", "RGB", "RGBA"}:
+            turned = turned.convert("RGB")
+        out = io.BytesIO()
+        turned.save(out, "PNG")
+    return out.getvalue()
+
+
 def _page_text(data: bytes) -> str:
     name = engine_name()
     try:
         if name and _pixels(data) > MAX_PIXELS:
             return ""
+        if name:
+            data = _upright(data)
         if name == "RapidOCR":
             return _rapid(data)
         if name == "Tesseract":

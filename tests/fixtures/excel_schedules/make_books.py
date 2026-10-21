@@ -113,7 +113,6 @@ def prepaid() -> None:
             ws.cell(r, c, value).number_format = "mm/dd/yyyy"
         ws.cell(r, 6, total).number_format = ACCT
         ws.cell(r, 7, monthly).number_format = ACCT
-        amortized_before = 0.0
         for k, m in enumerate(months):
             active = start <= m <= end
             if m < date(2026, 1, 1):

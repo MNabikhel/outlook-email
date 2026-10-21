@@ -261,7 +261,7 @@ function codingRow(d) {
 const ROWS = { mail: mailRow, focus: focusRow, task: taskRow, fraud: fraudRow, coding: codingRow };
 
 /** Can this row be marked done from the list (e, or its check button)? */
-export function doneLabel(item, spec) {
+function doneLabel(item, spec) {
   if (item.kind === "task") return item.done ? "Reopen task" : "Mark task done";
   if (item.kind === "focus") return item.data.action_id ? "Mark task done" : "Mark email done";
   if (item.kind === "mail") return spec.done || item.done ? "Put back in the list" : "Mark done";

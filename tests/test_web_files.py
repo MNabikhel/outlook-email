@@ -71,7 +71,7 @@ def test_fraud_email_files_are_readable_but_locked_until_cleared(client, store, 
     assert "possible payment fraud" in page.text and "Asks to change bank or payment details" in page.text
 
     text = client.get(f"/inbox/{scam.id}/files/1")
-    assert text.status_code == 200 and "****8899" in text.text and "may be payment fraud" in text.text
+    assert text.status_code == 403 and "8899" not in text.text and "may be payment fraud" in text.text
     assert client.get(f"/inbox/{scam.id}/files/1/download").status_code == 403
     assert client.get(f"/inbox/{scam.id}/original").status_code == 403
 

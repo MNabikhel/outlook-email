@@ -741,6 +741,19 @@ def score_rules(
     return scores
 
 
+# Categories that say little about what an email asks for: a clearer one found in its words replaces them.
+_LOOSE_TYPES = {DocumentType.OTHER, DocumentType.INTERNAL_FYI, DocumentType.REPLY_NEEDED, DocumentType.NOTIFICATION, DocumentType.MIXED}
+
+INVOICE_DOCUMENTS = {DocumentType.AP_INVOICE, DocumentType.AR_INVOICE, DocumentType.CREDIT_MEMO}
+DATA_FILE_EXTENSIONS = (".xlsx", ".xlsm", ".xls", ".csv", ".tsv")
+
+
+def is_data_file(filename: str, content_type: str = "") -> bool:
+    """A spreadsheet or CSV: rows of data rather than a document someone wrote."""
+    ctype = (content_type or "").lower()
+    return (filename or "").lower().endswith(DATA_FILE_EXTENSIONS) or "spreadsheet" in ctype or ctype in {"text/csv", "application/csv"}
+
+
 def classify_document(
     *,
     subject: str = "",
@@ -773,6 +786,13 @@ def classify_document(
         return Classification(DocumentType.OTHER, 0.2, ["no stronger pattern matched"], importance=Importance.LOW, importance_score=20)
 
     best_type, (weight, reasons, flags) = max(scores.items(), key=lambda item: item[1][0])
+    if best_type in INVOICE_DOCUMENTS and is_data_file(filename, content_type) and "filename" not in reasons:
+        # A workbook or CSV with an "Invoice" column lists invoices; it is one only when its name or the email says so.
+        if best_type not in score_rules(subject=subject, body=body, sender=sender):
+            rest = {kind: score for kind, score in scores.items() if kind not in INVOICE_DOCUMENTS}
+            if not rest:
+                return Classification(DocumentType.SPREADSHEET, 0.4, ["a list of invoices, not an invoice"], importance=Importance.MEDIUM, importance_score=40)
+            best_type, (weight, reasons, flags) = max(rest.items(), key=lambda item: item[1][0])
     confidence = min(0.98, 0.35 + weight / 180)
     return Classification(
         document_type=best_type,
@@ -849,6 +869,11 @@ def classify_email(
         category = DocumentType.PAYMENT_INSTRUCTION_CHANGE
     elif fraud == "caution":
         combined_flags.append("payment_caution")
+        # A request to pay new bank details that was cleared as not fraud (or comes from someone trusted) is still a
+        # request to send money: filed with wire requests, not as other mail. Only a "high" check blocks it.
+        if category in _LOOSE_TYPES and DocumentType.PAYMENT_INSTRUCTION_CHANGE in score_rules(subject=subject, body=body, sender=sender, payment_rule=True):
+            category = DocumentType.WIRE_ACH_REQUEST
+            reasons.append("Asks to pay changed bank details: confirm by phone before paying")
 
     scoring = dict(
         fields=fields,

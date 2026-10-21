@@ -30,7 +30,7 @@ from decimal import Decimal
 from itertools import zip_longest
 from pathlib import Path
 
-from controller_inbox import documents, semantic, table_lookup, table_query
+from controller_inbox import answer_check, documents, semantic, table_lookup, table_query
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
@@ -817,9 +817,18 @@ def summary_key(att: AttachmentRecord) -> str:
 
 
 def overnight_summary(store: Store, att: AttachmentRecord) -> str:
-    if len(att.extracted_text or "") < SUMMARY_MIN_CHARS:
+    """The overnight summary of the file's text as shown, or "". The key goes by the text's length (the overnight
+    queue works it out the same way), and a figure the user fixed on the page leaves the text as long as it was: a
+    summary with a figure the file as shown no longer has was written for other text, and isn't used."""
+    text = att.extracted_text or ""
+    if len(text) < SUMMARY_MIN_CHARS:
         return ""
-    return store.file_summary(att.id, summary_key(att))
+    summary = store.file_summary(att.id, summary_key(att))
+    if summary:
+        checks = answer_check.review(summary, material=[], files=[(att.filename, text)]).checks
+        if any(" isn't in the emails or files I read" in check for check in checks):
+            return ""
+    return summary
 
 
 def summary_request(ws: Workspace, question: str) -> tuple[AttachmentRecord, str] | None:

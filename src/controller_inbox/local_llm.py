@@ -20,6 +20,7 @@ import re
 import threading
 import weakref
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import httpx
@@ -496,17 +497,18 @@ def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> 
     without it goes through. When that retry fails too, something else (``response_format``,
     ``tools``) was the problem: the first answer comes back and the payload keeps its effort.
     """
-    response = post(url, json=payload, headers=_headers(settings), **options)
-    if "reasoning_effort" in payload and response.status_code in _RETRYABLE:
-        effort = payload.pop("reasoning_effort")
-        retry = post(url, json=payload, headers=_headers(settings), **options)
-        if retry.status_code < 400:
-            # Remembered only when the server said no to the request itself, not when it was busy for a moment.
-            if response.status_code in _REFUSES:
-                _effort_rejected.add(str(payload.get("model")))
-            return retry
-        payload["reasoning_effort"] = effort
-    return response
+    with _using(str(payload.get("model"))):
+        response = post(url, json=payload, headers=_headers(settings), **options)
+        if "reasoning_effort" in payload and response.status_code in _RETRYABLE:
+            effort = payload.pop("reasoning_effort")
+            retry = post(url, json=payload, headers=_headers(settings), **options)
+            if retry.status_code < 400:
+                # Remembered only when the server said no to the request itself, not when it was busy for a moment.
+                if response.status_code in _REFUSES:
+                    _effort_rejected.add(str(payload.get("model")))
+                return retry
+            payload["reasoning_effort"] = effort
+        return response
 
 
 @dataclass
@@ -783,12 +785,14 @@ def reply_budget(settings: Settings, max_tokens: int) -> int:
 
 
 def _retry_plan(model: str, effort: str | None, budget: int, reply: Reply) -> tuple[str | None, int] | None:
-    """A reasoning model wrote no answer: turn thinking down and give it room, once."""
+    """A reasoning model wrote no answer: turn thinking down and give it room, once. One that ran out of room
+    thinking gets twice the room: a model that can't turn thinking off (DeepSeek-R1 allows only ``on``) thinks as long
+    with the effort turned down, so the same budget would only run out again."""
     if reply.content or not reply.reasoning:
         return None
     _reasoning_seen.add(model)
     new_effort = effort or (None if model in _effort_rejected else "none")
-    new_budget = max(budget, THINKING_ROOM)
+    new_budget = max(budget * 2 if reply.finish == "length" else budget, THINKING_ROOM)
     if (new_effort, new_budget) == (effort, budget):
         return None
     return new_effort, new_budget
@@ -897,7 +901,7 @@ def _stream_once(
     # reading a long prompt isn't taken for a model that stopped.
     timeout = httpx.Timeout(max(settings.llm_timeout, CHAT_TIMEOUT, wait or 0.0), connect=5.0)
     without_probs = False
-    with httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
+    with _using(str(payload.get("model"))), httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
         if asks_probs and response.status_code in _REFUSES:
             # A server that doesn't know ``logprobs``: the reading matters, how sure it was is a nice-to-have.
             rejected = False
@@ -1027,6 +1031,105 @@ _tools_rejected: set[str] = set()
 _context_raised: set[str] = set()
 _context_lock = threading.Lock()
 
+# Models answering a request right now (a chat answer, the overnight reading, a page read), by the name the request
+# gave, with when each request started: none of them is unloaded or reloaded under the request. A request older than
+# IN_USE_SECONDS no longer counts (a stream left unclosed must not keep the model "busy" for good).
+_in_use: dict[str, list[float]] = {}
+_in_use_lock = threading.Lock()
+IN_USE_SECONDS = 1800.0
+
+
+@contextmanager
+def _using(model: str):
+    started = time.monotonic()
+    with _in_use_lock:
+        _in_use.setdefault(model, []).append(started)
+    try:
+        yield
+    finally:
+        with _in_use_lock:
+            requests = _in_use.get(model, [])
+            if started in requests:
+                requests.remove(started)
+            if not requests:
+                _in_use.pop(model, None)
+
+
+def model_busy(*names: str) -> bool:
+    """A request is being answered by one of these models (instance ids or keys) right now."""
+    now = time.monotonic()
+    with _in_use_lock:
+        return any(now - started < IN_USE_SECONDS for name in names if name for started in _in_use.get(name, []))
+
+
+# A big model can take LM Studio longer to load than CloseDesk waits for the answer to its load request. The load goes
+# on, using the memory, so a load that timed out isn't taken for one that failed: LM Studio's list of loaded models is
+# watched for it for up to LOAD_WAIT_SECONDS, and no other model is loaded (or loaded back) while it may still be going.
+LOAD_WAIT_SECONDS = 600.0
+LOAD_POLL_SECONDS = 5.0
+_pending_loads: dict[str, float] = {}  # model key -> when CloseDesk stopped waiting for its load
+
+
+class StillLoading(RuntimeError):
+    """LM Studio may still be loading a model CloseDesk asked for: no other load may start until it is in."""
+
+    def __init__(self, key: str):
+        super().__init__(
+            f"LM Studio is still loading {key}: it took longer than CloseDesk waits ({LOAD_WAIT_SECONDS / 60:.0f} minutes). "
+            f"No other model is loaded until it is in, so two big models don't load at once. Check LM Studio, and try "
+            "again once it shows the model loaded."
+        )
+        self.key = key
+
+
+def _is_loaded(settings: Settings, key: str) -> bool:
+    status = check_model(settings, use_cache=False)
+    return any(key in (instance, model) for instance, (model, _size) in status.instances.items())
+
+
+def _gone(settings: Settings, root: str) -> bool:
+    """LM Studio refuses connections (it stopped). One too busy loading to answer in time is not gone."""
+    try:
+        httpx.get(root + "/api/v1/models", headers=_headers(settings), timeout=httpx.Timeout(10.0, connect=5.0))
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        return True
+    except httpx.HTTPError:
+        pass
+    return False
+
+
+def _no_load_pending(settings: Settings) -> None:
+    """Raise ``StillLoading`` while a load that timed out may still be going on in LM Studio."""
+    for key, since in list(_pending_loads.items()):
+        if time.monotonic() - since > LOAD_WAIT_SECONDS or _is_loaded(settings, key):
+            _pending_loads.pop(key, None)
+        else:
+            raise StillLoading(key)
+
+
+def _load(settings: Settings, root: str, key: str, context: int, timeout: httpx.Timeout) -> None:
+    """Have LM Studio load ``key`` (with ``context`` tokens, or its default when 0). Raises ``httpx.HTTPError`` when
+    LM Studio refused or never got the request, ``StillLoading`` when it may still be loading it."""
+    _no_load_pending(settings)
+    body = {"model": key, **({"context_length": context} if context else {})}
+    try:
+        httpx.post(root + "/api/v1/models/load", json=body, headers=_headers(settings), timeout=timeout).raise_for_status()
+        return
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+        raise  # the request never reached LM Studio: nothing is loading
+    except httpx.TransportError as exc:  # it took the request and didn't answer in time: the load may still be going
+        deadline = time.monotonic() + LOAD_WAIT_SECONDS
+        while True:
+            if _is_loaded(settings, key):
+                return
+            if _gone(settings, root):
+                raise  # LM Studio itself stopped, and its load with it
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(LOAD_POLL_SECONDS)
+        _pending_loads[key] = time.monotonic()
+        raise StillLoading(key) from exc
+
 
 def _raise_for(response: httpx.Response) -> None:
     if response.status_code >= 400:
@@ -1088,6 +1191,13 @@ def ensure_context(settings: Settings) -> str:
 def _reload_with_context(settings: Settings) -> str:
     status = check_model(settings)
     want = context_target(settings, status)
+    if model_busy(status.model, status.key):
+        # Unloading it would cut off the overnight reading, a page read or another chat partway; tried again later.
+        return f"Left {status.key} as it is for now: it is answering another request. The longer context is tried on a later question."
+    try:
+        _no_load_pending(settings)
+    except StillLoading as exc:
+        return str(exc)
     _context_raised.add(status.model)
     root = status.base_url[: -len("/v1")] if status.base_url.endswith("/v1") else status.base_url
     timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
@@ -1096,17 +1206,18 @@ def _reload_with_context(settings: Settings) -> str:
     except httpx.HTTPError as exc:
         return f"Couldn't reload {status.key} with a longer context ({_short_error(exc)})."
     errors = []
-    for size in (want, status.context_length):
-        try:
-            reply = httpx.post(
-                root + "/api/v1/models/load", json={"model": status.key, "context_length": size}, headers=_headers(settings), timeout=timeout
-            )
-            reply.raise_for_status()
-        except httpx.HTTPError as exc:
-            errors.append(_short_error(exc))
-            continue
-        break
-    _status_cache.clear()
+    try:
+        for size in (want, status.context_length):
+            try:
+                _load(settings, root, status.key, size, timeout)
+            except httpx.HTTPError as exc:
+                errors.append(_short_error(exc))
+                continue
+            break
+    except StillLoading as exc:  # not loaded again at the old size beside it
+        return str(exc)
+    finally:
+        _status_cache.clear()
     if not errors:
         most = " (the most it supports)" if want < settings.min_context_tokens else ""
         return f"Reloaded {status.key} in LM Studio with a {want:,}-token context{most} so whole attachments fit."
@@ -1144,9 +1255,9 @@ def load_for_reading(settings: Settings, model: str, context: int) -> str:
         timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
         key = status.instances[instance][0] if instance else model
         try:
-            httpx.post(
-                root + "/api/v1/models/load", json={"model": key, "context_length": context}, headers=_headers(settings), timeout=timeout
-            ).raise_for_status()
+            _load(settings, root, key, context, timeout)
+        except StillLoading as exc:  # the shorter one isn't unloaded either: it is the one that is surely in
+            return str(exc)
         except httpx.HTTPError as exc:
             problem = f"LM Studio couldn't load {key} with a {context:,}-token context ({_short_error(exc)})."
             _reader_failed[model] = (time.monotonic(), problem)
@@ -1206,8 +1317,7 @@ def use_chat_model(settings: Settings, key: str) -> str:
         reader = (settings.vision_model or "").strip() or None
 
         def load(model: str, size: int) -> None:
-            body = {"model": model, **({"context_length": size} if size else {})}
-            httpx.post(root + "/api/v1/models/load", json=body, headers=_headers(settings), timeout=timeout).raise_for_status()
+            _load(settings, root, model, size, timeout)
 
         def load_back(unloaded: list[tuple[str, int]]) -> str:
             back = []
@@ -1217,6 +1327,8 @@ def use_chat_model(settings: Settings, key: str) -> str:
                     back.append(model)
                 except httpx.HTTPError:
                     pass
+                except StillLoading as exc:  # the rest aren't loaded beside it
+                    return f" {exc}"
             if back:
                 return f" {', '.join(back)} was loaded back."
             return " Load a model in LM Studio." if unloaded else ""
@@ -1226,6 +1338,13 @@ def use_chat_model(settings: Settings, key: str) -> str:
             for instance, (model, size) in status.instances.items()
             if model != key and not document_reader(model) and not document_reader(instance) and reader not in (model, instance)
         ]
+        busy = [model for instance, model, _size in others if model_busy(instance, model)]
+        if busy:
+            return f"CloseDesk is using {', '.join(busy)} for an answer or a reading right now. Try again once it is done."
+        try:
+            _no_load_pending(settings)
+        except StillLoading as exc:
+            return str(exc)
         unloaded: list[tuple[str, int]] = []
         try:
             for instance, model, size in others:
@@ -1240,6 +1359,8 @@ def use_chat_model(settings: Settings, key: str) -> str:
                 want, most = settings.min_context_tokens, status.chat_models[key]
                 try:
                     load(key, min(want, most) if want and most else want)
+                except StillLoading as exc:  # nothing is loaded back beside it
+                    return str(exc)
                 except httpx.HTTPError as exc:
                     return f"LM Studio couldn't load {key} ({_lm_studio_said(exc)}).{load_back(unloaded)}"
         finally:
