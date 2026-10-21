@@ -8,7 +8,8 @@ from controller_inbox.models import RawAttachment, RawMessage
 
 
 def _pdf(text: str) -> bytes:
-    return make_pdf([[text[:1200]]])
+    """A one-page PDF of ``text``, each part (separated by two spaces) on a line of its own, as a document lays out."""
+    return make_pdf([[part.strip() for part in text[:1200].split("  ") if part.strip()]])
 
 
 def make_pdf(pages: list[list[str | list[str]]]) -> bytes:

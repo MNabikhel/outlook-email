@@ -76,9 +76,17 @@ def process_message(
         body_text=redact_financial_secrets(raw.body_text),
         body_preview=redact_financial_secrets(raw.body_preview or raw.body_text[:240]),
     )
-    attachments_raw = explode_archives(list(raw.attachments))
-    if mailbox is not None and not attachments_raw and raw.has_attachments:
-        attachments_raw = list(mailbox.get_attachments(raw.id))
+    files = list(raw.attachments)
+    if mailbox is not None and not files and raw.has_attachments:
+        files = list(mailbox.get_attachments(raw.id))
+    if mailbox is not None and existing is None and files:
+        # Mail read from a mailbox (Microsoft 365, the sample) keeps its files as they came, as the drop folder and
+        # classic Outlook keep theirs: the Preview tab, Download and the page view open them.
+        from controller_inbox.folder_mail import _write_extracted, unique_attachments
+
+        files = unique_attachments(files)
+        _write_extracted(settings, replace(raw, attachments=files))
+    attachments_raw = explode_archives(files)
     # Another copy of a stored message: the files stored from earlier copies are kept, and this copy adds
     # only files they don't hold. A re-saved .eml often comes without the files dropped beside the first.
     kept = existing.attachments if existing is not None else []
