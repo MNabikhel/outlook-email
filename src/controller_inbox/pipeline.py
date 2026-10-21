@@ -18,7 +18,7 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, DocumentType, EmailRecord, ExtractedFields, RawMessage
-from controller_inbox.fraud import assess, domain_of, reassess_email, save_check, trust_context
+from controller_inbox.fraud import assess, domain_of, dropped_file_body, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
 
@@ -108,14 +108,15 @@ def process_message(
 
     body_text = clean.body_text
     verdicts = [flag for flag in (existing.flags if existing else []) if flag in VERDICT_FLAGS]
+    files = [(att.filename, att.extracted_text) for att in att_records]
     check = assess(
         trust_context(store, settings),
         subject=clean.subject,
-        body=body_text,
+        body=dropped_file_body(raw.id, raw.sender_email, body_text, files),
         sender_name=raw.sender_name,
         sender_email=raw.sender_email,
         reply_to=raw.reply_to,
-        attachments=[(att.filename, att.extracted_text) for att in att_records],
+        attachments=files,
         history=store.sender_history(raw.sender_email, exclude=raw.id),
         flags=verdicts,
         domain_history=store.domain_history(domain_of(raw.sender_email), exclude=raw.id),
@@ -309,9 +310,11 @@ def _file_record(raw: RawMessage, raw_att, anchor) -> tuple[AttachmentRecord, Cl
 
 def _email_fields(att: AttachmentRecord, document_type: DocumentType) -> ExtractedFields:
     """What a file adds to its email's fields. A workbook or CSV that is no invoice of its own (a close workbook,
-    an AP export) lists invoice numbers that were already seen, so they don't make the email about that invoice."""
+    an AP export) lists invoice numbers that were already seen, so they don't make the email about that invoice. Nor
+    does one listing several invoices, whatever it was filed as: a subledger beside an invoice is still a list."""
     fields = att.extracted_fields
-    if document_type in {DocumentType.SPREADSHEET, DocumentType.OTHER} and is_data_file(att.filename, att.content_type):
+    listing = document_type in {DocumentType.SPREADSHEET, DocumentType.OTHER} or len(set(fields.invoice_numbers)) > 1
+    if listing and is_data_file(att.filename, att.content_type):
         return replace(fields, invoice_numbers=[])
     return fields
 

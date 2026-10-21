@@ -160,10 +160,29 @@ class LocalHostOnly:
             if "*" not in self.allowed and _host_name(host) not in self.allowed:
                 await PlainTextResponse("CloseDesk only answers on this computer's own address.", status_code=400)(scope, receive, send)
                 return
+            send = _no_framing(send)
             if scope.get("method") == "POST" and not _same_origin(headers, host, self.allowed):
                 await PlainTextResponse("Use the CloseDesk page for this.", status_code=403)(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+def _no_framing(send):
+    """No other site's page may frame CloseDesk (clickjacking). A response with a framing rule of its own (the
+    original PDF, shown in CloseDesk's own Preview tab) keeps it."""
+
+    async def framed(message) -> None:
+        if message["type"] == "http.response.start":
+            headers = list(message.get("headers") or [])
+            names = {name.lower() for name, _value in headers}
+            if b"x-frame-options" not in names:
+                headers.append((b"x-frame-options", b"DENY"))
+            if b"content-security-policy" not in names:
+                headers.append((b"content-security-policy", b"frame-ancestors 'none'"))
+            message = {**message, "headers": headers}
+        await send(message)
+
+    return framed
 
 
 def _same_origin(headers: dict[bytes, bytes], host: str, allowed: set[str] | None = None) -> bool:
@@ -376,6 +395,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             return local_today(settings.tz, DEMO_NOW)
         return local_today(settings.tz)
 
+    def board_now() -> datetime | None:
+        """The sample's moment when only the sample mailbox is loaded, so a verdict's new tasks are dated on its
+        board; else None (now)."""
+        return DEMO_NOW if store.counts()["emails"] and not store.real_mail_count() else None
+
     def ctx(request: Request, **extra):
         as_of = board_date()
         counts = store.counts()
@@ -415,8 +439,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         base.update(extra)
         return base
 
-    def render(request: Request, name: str, **extra):
-        return templates.TemplateResponse(request, name, ctx(request, **extra))
+    def render(request: Request, name: str, status_code: int = 200, **extra):
+        return templates.TemplateResponse(request, name, ctx(request, **extra), status_code=status_code)
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
@@ -570,7 +594,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.get("/inbox/{email_id}/files/{n}", response_class=HTMLResponse)
     def file_page(request: Request, email_id: str, n: int, q: str = "", at: str = ""):
         email, att = email_file(email_id, n)
-        text = att.extracted_text or ""
+        locked = fraud.attachments_locked(email)
+        # A held email's files are not shown, not even their text, as in the workspace.
+        text = "" if locked else att.extracted_text or ""
         parts = documents.split_parts(text) if text.strip() else []
         query = q.strip()[:120]
         matches = {part.label for part in documents.search_parts(text, query, limit=12)} if query else set()
@@ -588,12 +614,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             q=query,
             target=target,
             marked=marked,
-            locked=fraud.attachments_locked(email),
+            locked=locked,
             downloadable=Path(att.filename).suffix.lower() in DOWNLOADABLE and agent.original_file(settings, email, att) is not None,
             viewable=Path(att.filename).suffix.lower() in agent.VIEWABLE and agent.original_file(settings, email, att) is not None,
             search="" if email.source == "chat" else semantic.file_states(store, settings, email).get(att.id, "no_text"),
-            readings=vision.side_by_side(store.page_readings(att.id, att.sha256)),
-            vision_offer=vision.offer(store, settings, email, att) if vision.readable_file(att.filename) else None,
+            readings=[] if locked else vision.side_by_side(store.page_readings(att.id, att.sha256)),
+            vision_offer=vision.offer(store, settings, email, att) if vision.readable_file(att.filename) and not locked else None,
+            status_code=403 if locked else 200,
         )
 
     @app.post("/inbox/{email_id}/index")
@@ -668,7 +695,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     def fraud_verdict(email_id: str, choice: str = Form(...), note: str = Form("")):
         verdict, _, scope = choice.partition(":")
         try:
-            fraud.record_fraud_verdict(store, settings, email_id, verdict=verdict, scope=scope or "email", note=note)
+            fraud.record_fraud_verdict(store, settings, email_id, verdict=verdict, scope=scope or "email", note=note, now=board_now())
         except KeyError:
             raise HTTPException(status_code=404, detail="Message not found") from None
         except ValueError as exc:
@@ -702,7 +729,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.post("/fraud/domain")
     def fraud_domain(domain: str = Form(...), verdict: str = Form("safe"), note: str = Form("")):
         try:
-            fraud.set_domain_trust(store, settings, domain, verdict="fraud" if verdict == "fraud" else "safe", note=note)
+            fraud.set_domain_trust(store, settings, domain, verdict="fraud" if verdict == "fraud" else "safe", note=note, now=board_now())
         except ValueError as exc:
             notice = "fraud-freemail" if "free email" in str(exc) else "domain-invalid"
             return RedirectResponse(f"/fraud?notice={notice}", status_code=303)
@@ -711,14 +738,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.post("/fraud/domain/remove")
     def fraud_domain_remove(domain: str = Form(...)):
         try:
-            fraud.set_domain_trust(store, settings, domain, remove=True)
+            fraud.set_domain_trust(store, settings, domain, remove=True, now=board_now())
         except ValueError:
             return RedirectResponse("/fraud?notice=domain-invalid", status_code=303)
         return RedirectResponse("/fraud?notice=trust-removed", status_code=303)
 
     @app.post("/fraud/sender/remove")
     def fraud_sender_remove(sender: str = Form(...)):
-        fraud.remove_sender_trust(store, settings, sender)
+        fraud.remove_sender_trust(store, settings, sender, now=board_now())
         return RedirectResponse("/fraud?notice=trust-removed", status_code=303)
 
     @app.get("/fraud/log.csv")
@@ -1321,7 +1348,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     from controller_inbox.web_api import register_workspace
 
     register_workspace(
-        app, store=store, settings=settings, job=job, board_date=board_date,
+        app, store=store, settings=settings, job=job, board_date=board_date, board_now=board_now,
         fraud_view=fraud_view, file_cards=file_cards, original_path=original_path,
         setup={
             "timezone_options": _timezone_options,

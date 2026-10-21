@@ -672,15 +672,23 @@ def assess(
     return FraudCheck(score=score, level=level, signals=signals, trust=trust, verdict=verdict)
 
 
+def dropped_file_body(email_id: str, sender_email: str, body: str, files: list[tuple[str, str]]) -> str:
+    """A file dropped in the inbox folder on its own has no email around it: its text is the sender's own words."""
+    if sender_email or not email_id.startswith("file-"):
+        return body
+    return "\n\n".join([body, *(text or "" for _name, text in files)])
+
+
 def assess_email(store: "Store", ctx: TrustContext, email: "EmailRecord") -> FraudCheck:
+    files = [(att.filename, att.extracted_text) for att in email.attachments]
     return assess(
         ctx,
         subject=email.subject,
-        body=email.body_text,
+        body=dropped_file_body(email.id, email.sender_email, email.body_text, files),
         sender_name=email.sender_name,
         sender_email=email.sender_email,
         reply_to=email.reply_to,
-        attachments=[(att.filename, att.extracted_text) for att in email.attachments],
+        attachments=files,
         history=store.sender_history(email.sender_email, exclude=email.id),
         flags=email.flags,
         domain_history=store.domain_history(domain_of(email.sender_email), exclude=email.id),
@@ -729,7 +737,7 @@ def reassess_email(store: "Store", settings: "Settings", email: "EmailRecord", *
     was_high = "fraud_risk" in email.flags
     was_caution = "payment_caution" in email.flags
     if (check.level == "high") != was_high:
-        email = rescore_stored(store, settings, email, check)
+        email = rescore_stored(store, settings, email, check, now=now)
     elif (check.level == "caution") != was_caution:
         email.flags = [flag for flag in email.flags if flag not in CAUTION_FLAGS] + check.flags
         store.upsert_email(email)

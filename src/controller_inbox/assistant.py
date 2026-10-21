@@ -18,6 +18,7 @@ import logging
 import re
 import time
 from collections.abc import Iterator
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -546,6 +547,51 @@ def source_cards(sources: list[EmailRecord], settings: Settings | None = None) -
     ]
 
 
+# "Due this week", "due next week", "overdue": the days a lookup's matches must fall due in.
+_DUE_WHEN = re.compile(
+    r"\b(?:(?:due|payable)\s+(?:by\s+|on\s+|within\s+)?(?P<when>today|tomorrow|this\s+week|next\s+week|this\s+month)"
+    r"|(?P<late>overdue|past\s+due|late))\b",
+    re.IGNORECASE,
+)
+
+
+def due_window(question: str, today: str) -> tuple[date, date, str] | None:
+    """The first and last day (inclusive) a question's "due this week" asks about, and how to say it; None when
+    it names no such period or there is no today."""
+    match = _DUE_WHEN.search(question or "")
+    try:
+        day = date.fromisoformat(today)
+    except ValueError:
+        return None
+    if not match:
+        return None
+    if match.group("late"):
+        return date.min, day - timedelta(days=1), "overdue"
+    when = re.sub(r"\s+", " ", match.group("when").lower())
+    sunday = day + timedelta(days=6 - day.weekday())
+    if when == "today":
+        return day, day, "due today"
+    if when == "tomorrow":
+        return day + timedelta(days=1), day + timedelta(days=1), "due tomorrow"
+    if when == "this week":
+        return day, sunday, "due this week"
+    if when == "next week":
+        return sunday + timedelta(days=1), sunday + timedelta(days=7), "due next week"
+    nxt = date(day.year + day.month // 12, day.month % 12 + 1, 1)
+    return day, nxt - timedelta(days=1), "due this month"
+
+
+def _due_on(email: EmailRecord) -> date | None:
+    """When the email falls due: the date printed on it (an invoice's due date), else its earliest open task's."""
+    dates = [email.extracted.primary_due] if email.extracted.primary_due else sorted(
+        a.due_date for a in email.actions if a.status == ActionStatus.OPEN and a.due_date
+    )[:1]
+    try:
+        return date.fromisoformat(str(dates[0])[:10]) if dates else None
+    except ValueError:
+        return None
+
+
 def offline_answer(
     question: str,
     sources: list[EmailRecord],
@@ -555,6 +601,7 @@ def offline_answer(
     found: set[str] | None = None,
     current_id: str | None = None,
     model_failed: bool = False,
+    today: str = "",
 ) -> str:
     found = found or set()
     current = next((email for email in sources if email.id == current_id), None)
@@ -594,9 +641,16 @@ def offline_answer(
             lines.append(f"{row['rank']}. **{row['label']}** — {row['title']}{ref}")
         return "\n".join(lines)
     if found:
-        lines = [f"{note} These emails match:"]
+        window = due_window(question, today)
+        if window is not None:
+            # "Due this week" keeps the matches that fall due then; one with no due date isn't.
+            first, last, said = window
+            found = {email.id for email in sources if email.id in found and (due := _due_on(email)) and first <= due <= last}
+            if not found:
+                return f"{note} None of the emails that match is {said}."
+        lines = [f"{note} These emails match:" if window is None else f"{note} These emails match and are {window[2]}:"]
         for index, email in enumerate(sources, start=1):
-            if email.id not in found and email.id != current_id:
+            if email.id not in found and (email.id != current_id or window is not None):
                 continue
             summary = f" — {email.summary}" if email.summary else ""
             due = sorted(a.due_date for a in email.actions if a.status == ActionStatus.OPEN and a.due_date)
@@ -665,7 +719,7 @@ def answer_stream(
     if searched:
         yield {"type": "step", "text": semantic.search_step(searched["how"], settings, searched["meaning_hits"])}
     if not use_model:
-        yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id)}
+        yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, today=today)}
         yield {"type": "done"}
         return
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id, past=past)
@@ -709,11 +763,11 @@ def answer_stream(
                     context_length(settings), ["the emails and files"]
                 )
             yield {"type": "mode", "mode": "lookup", "note": note}
-            yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True)}
+            yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True, today=today)}
     else:
         if not state["wrote"]:
             yield {"type": "mode", "mode": "lookup", "note": "The local model sent an empty answer."}
-            yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True)}
+            yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True, today=today)}
         else:
             if ws.shown and (missing := agent.missing_points(ws.points, state["text"], exact=ws.exact)):
                 # The answer left out figures the question asks for: they are added from the table, as read.

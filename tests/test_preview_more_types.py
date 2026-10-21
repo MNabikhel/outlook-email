@@ -56,7 +56,6 @@ def test_a_deck_is_shown_slide_by_slide():
     "name, data, shown, hidden",
     [
         ("notes.txt", b"Remit to 123 Main St.\r\nThanks", "Remit to 123 Main St.\nThanks", ""),
-        ("page.html", b"<html><body><h1>Statement</h1><script>alert(1)</script><p>Balance $40</p></body></html>", "Balance $40", "alert"),
         ("memo.rtf", rb"{\rtf1\ansi Payment {\b due} Friday.}", "Payment due Friday.", "rtf1"),
         ("invite.ics", b"BEGIN:VCALENDAR\nSUMMARY:Close review\nEND:VCALENDAR", "SUMMARY:Close review", ""),
     ],

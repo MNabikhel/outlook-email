@@ -89,6 +89,17 @@ def _preview(data: bytes, filename: str, *, rows: int, cols: int) -> dict:
             return {"kind": "slides", "slides": pptx_slides(data)}
         if which == "zip":
             return {"kind": "zip", **zip_listing(data)}
+        suffix = Path(filename or "").suffix.lower()
+        if suffix in (".html", ".htm"):
+            from controller_inbox.documents import decode_text
+
+            return {"kind": "doc", "blocks": html_blocks(decode_text(data))}
+        if suffix == ".ics":
+            from controller_inbox.documents import decode_text
+
+            events = ics_blocks(decode_text(data))
+            if events:
+                return {"kind": "doc", "blocks": events, "source": file_text(data, filename)}
         return {"kind": "text", "text": file_text(data, filename)}
     if which == "doc":
         if data[:2] == b"PK" and _unzipped_size(data) > MAX_UNZIPPED:
@@ -242,8 +253,11 @@ def _sheet(ws, vs, max_rows: int, max_cols: int) -> dict:
     values = vs._cells
     ranges = list(ws.merged_cells.ranges)
     used = set(held) | {(rng.min_row, rng.min_col) for rng in ranges}
-    last_row = max((r for r, _c in used), default=0)
-    last_col = max((c for _r, c in used), default=0)
+    # A merge reaches its far corner, though the cells there are empty: "A9:B10" at the foot of a sheet is two
+    # rows and two columns.
+    ends = [(rng.max_row, rng.max_col) for rng in ranges]
+    last_row = max((r for r, _c in [*used, *ends]), default=0)
+    last_col = max((c for _r, c in [*used, *ends]), default=0)
     shown_cols = min(last_col, max_cols)
     data_rows = sorted({r for r, _c in used})
     hidden_rows = {r for r, dim in ws.row_dimensions.items() if dim.hidden}
@@ -292,7 +306,7 @@ def _sheet(ws, vs, max_rows: int, max_cols: int) -> dict:
             cells.append(entry)
         # An empty row still takes its place in the grid, so row numbers read as in Excel.
         out_rows.append({"n": r, "cells": cells})
-    while out_rows and not out_rows[-1]["cells"]:
+    while out_rows and not out_rows[-1]["cells"] and not any((out_rows[-1]["n"], c) in covered for c in range(1, shown_cols + 1)):
         out_rows.pop()
     widths = []
     for c in range(1, shown_cols + 1):
@@ -410,10 +424,18 @@ def _xls(data: bytes, max_rows: int, max_cols: int) -> list[dict]:
         for index in range(min(book.nsheets, MAX_SHEETS)):
             sheet = book.sheet_by_index(index)
             shown_cols = min(sheet.ncols, max_cols)
+            # Merged cells (read only with formats): the top-left cell spans the rest, which aren't shown.
+            spans, covered = {}, set()
+            for rlo, rhi, clo, chi in getattr(sheet, "merged_cells", None) or []:
+                spans[(rlo, clo)] = (min(rhi - rlo, max_rows), min(chi, shown_cols) - clo)
+                covered.update((r, c) for r in range(rlo, min(rhi, max_rows)) for c in range(clo, min(chi, shown_cols)))
             out_rows = []
-            for r in range(min(sheet.nrows, max_rows)):
+            nrows = max([sheet.nrows, *(r + 1 for r, _c in covered)])
+            for r in range(min(nrows, max_rows)):
                 cells = []
                 for c in range(shown_cols):
+                    if (r, c) in covered and (r, c) not in spans or r >= sheet.nrows:
+                        continue
                     cell = sheet.cell(r, c)
                     if cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
                         continue
@@ -435,9 +457,11 @@ def _xls(data: bytes, max_rows: int, max_cols: int) -> list[dict]:
                         entry["num"] = True
                     if red:
                         entry["red"] = True
+                    if (r, c) in spans:
+                        entry["rs"], entry["cs"] = (max(1, n) for n in spans[(r, c)])
                     cells.append(entry)
                 out_rows.append({"n": r + 1, "cells": cells})
-            while out_rows and not out_rows[-1]["cells"]:
+            while out_rows and not out_rows[-1]["cells"] and not any((out_rows[-1]["n"] - 1, c) in covered for c in range(shown_cols)):
                 out_rows.pop()
             sheets.append(_plain(sheet.name, out_rows, shown_cols, max(0, sheet.nrows - max_rows), max(0, sheet.ncols - shown_cols), hidden=bool(getattr(sheet, "visibility", 0))))
     finally:
@@ -1226,6 +1250,192 @@ def file_text(data: bytes, filename: str) -> str:
     if len(text) > MAX_TEXT:
         text = text[:MAX_TEXT].rsplit("\n", 1)[0] + "\n\n[The rest of the file isn't shown here. Download it to see all of it.]"
     return text
+
+
+_HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden|mso-hide\s*:\s*all|font-size\s*:\s*0(?![.\d]*[1-9])", re.I)
+_SKIPPED_TAGS = {"script", "style", "head", "title", "template", "noscript", "svg", "object", "iframe"}
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+_BLOCK_TAGS = {"p", "div", "section", "article", "header", "footer", "blockquote", "pre", "address", "dd", "dt", "body"}
+
+
+def html_blocks(html: str) -> list[dict]:
+    """A web page as docx_blocks gives a Word document: its headings, paragraphs, list items and tables, as text
+    only. Nothing of the markup is kept (no links, pictures or scripts), and what the page hides is left out."""
+    from html.parser import HTMLParser
+
+    blocks: list[dict] = []
+
+    class Reader(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.skip: list[str] = []  # the open tags whose content isn't shown
+            self.words: list[str] = []
+            self.kind = "p"
+            self.tables: list[dict] = []  # open tables, innermost last: {"rows": [...], "cell": [...] or None}
+
+        def flush(self) -> None:
+            text = re.sub(r"\s+", " ", "".join(self.words)).strip()
+            self.words = []
+            if text and len(blocks) < MAX_DOC_BLOCKS:
+                blocks.append({"t": self.kind, "text": text[:MAX_CELL * 2]})
+            self.kind = "p"
+
+        def handle_starttag(self, tag, attrs) -> None:
+            if self.skip:
+                if tag not in _VOID_TAGS:
+                    self.skip.append(tag)
+                return
+            style = " ".join(value or "" for name, value in attrs if name == "style")
+            if tag in _SKIPPED_TAGS or (tag not in _VOID_TAGS and _HIDDEN_STYLE.search(style)) or any(name == "hidden" for name, _v in attrs):
+                if tag not in _VOID_TAGS:
+                    self.skip.append(tag)
+                return
+            if self.tables:
+                table = self.tables[-1]
+                if tag == "tr":
+                    table["rows"].append([])
+                elif tag in ("td", "th"):
+                    if not table["rows"]:
+                        table["rows"].append([])
+                    span = next((value for name, value in attrs if name == "colspan"), "")
+                    table["cell"] = {"words": [], "cs": int(span) if span and span.isdigit() else 1}
+                elif tag == "table":
+                    self.tables.append({"rows": [], "cell": None})
+                elif tag == "br" and table["cell"] is not None:
+                    table["cell"]["words"].append(" ")
+                return
+            if tag == "table":
+                self.flush()
+                self.tables.append({"rows": [], "cell": None})
+            elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+                self.flush()
+                self.kind = f"h{min(4, int(tag[1]) + 1)}"
+            elif tag == "li":
+                self.flush()
+                self.kind = "li"
+            elif tag == "br":
+                self.flush()
+            elif tag in _BLOCK_TAGS:
+                self.flush()
+
+        def handle_endtag(self, tag) -> None:
+            if self.skip:
+                if tag in self.skip:
+                    while self.skip and self.skip.pop() != tag:
+                        pass
+                return
+            if self.tables:
+                table = self.tables[-1]
+                if tag in ("td", "th") and table["cell"] is not None:
+                    self._close_cell(table)
+                elif tag == "table":
+                    if table["cell"] is not None:
+                        self._close_cell(table)
+                    self.tables.pop()
+                    rows = [row for row in table["rows"] if any((c["v"] if isinstance(c, dict) else c) for c in row)]
+                    if self.tables:
+                        # A table inside a cell reads as that cell's text.
+                        outer = self.tables[-1]
+                        text = " · ".join(" ".join(c["v"] if isinstance(c, dict) else c for c in row) for row in rows)
+                        if outer["cell"] is not None:
+                            outer["cell"]["words"].append(f" {text} ")
+                    elif rows and len(blocks) < MAX_DOC_BLOCKS:
+                        blocks.append({"t": "table", "rows": rows[:MAX_ROWS]})
+                return
+            if tag in ("h1", "h2", "h3", "h4", "h5", "h6", "li") or tag in _BLOCK_TAGS:
+                self.flush()
+
+        def _close_cell(self, table) -> None:
+            cell = table["cell"]
+            text = re.sub(r"\s+", " ", "".join(cell["words"])).strip()[:MAX_CELL]
+            table["rows"][-1].append({"v": text, "cs": cell["cs"]} if cell["cs"] > 1 else text)
+            table["cell"] = None
+
+        def handle_data(self, data) -> None:
+            if self.skip:
+                return
+            if self.tables:
+                cell = self.tables[-1]["cell"]
+                if cell is not None:
+                    cell["words"].append(data)
+                return
+            self.words.append(data)
+
+    reader = Reader()
+    reader.feed(html[:MAX_TEXT * 4])
+    reader.close()
+    while reader.tables:
+        reader.handle_endtag("table")
+    reader.flush()
+    return blocks
+
+
+def ics_blocks(text: str) -> list[dict]:
+    """A calendar file as each event's summary, when it starts and ends, where, and who organizes it (the preview
+    keeps the file as written under them). Nothing when it holds no event: then it is shown as written."""
+    # A long line is folded onto the next ones, each starting with a space or tab.
+    lines = re.sub(r"\r?\n[ \t]", "", text.replace("\r\n", "\n")).split("\n")
+    events: list[dict[str, tuple[dict, str]]] = []
+    current: dict | None = None
+    for line in lines:
+        name, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key, *params = name.split(";")
+        key = key.strip().upper()
+        if key == "BEGIN" and value.strip().upper() == "VEVENT":
+            current = {}
+        elif key == "END" and value.strip().upper() == "VEVENT":
+            if current is not None:
+                events.append(current)
+            current = None
+        elif current is not None and key not in current:
+            current[key] = (dict(p.split("=", 1) for p in params if "=" in p), value.strip())
+    blocks: list[dict] = []
+    for event in events[:50]:
+        title = _ics_text(event.get("SUMMARY", ({}, ""))[1]) or "Untitled event"
+        blocks.append({"t": "h2", "text": title})
+        rows = []
+        for key, label in (("DTSTART", "Starts"), ("DTEND", "Ends"), ("LOCATION", "Where"), ("ORGANIZER", "Organizer")):
+            if key not in event:
+                continue
+            params, value = event[key]
+            if key in ("DTSTART", "DTEND"):
+                shown = _ics_when(value, params)
+            elif key == "ORGANIZER":
+                shown = " ".join(part for part in (_ics_text(params.get("CN", "").strip('"')), re.sub(r"(?i)^mailto:", "", value)) if part)
+            else:
+                shown = _ics_text(value)
+            if shown:
+                rows.append([label, shown])
+        if rows:
+            blocks.append({"t": "table", "rows": rows})
+        description = _ics_text(event.get("DESCRIPTION", ({}, ""))[1])
+        if description:
+            blocks.append({"t": "p", "text": description[:MAX_CELL * 2]})
+    return blocks
+
+
+def _ics_text(value: str) -> str:
+    return re.sub(r"\\([\\,;nN])", lambda m: "\n" if m.group(1) in "nN" else m.group(1), value or "").strip()
+
+
+def _ics_when(value: str, params: dict) -> str:
+    """"20261024T140000Z" as "Sat, Oct 24, 2026, 2:00 PM UTC"; a date alone ("20261024") as the day."""
+    match = re.fullmatch(r"(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})?(Z)?)?", value.strip())
+    if not match:
+        return value
+    try:
+        day = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    except ValueError:
+        return value
+    shown = f"{day:%a}, {day:%b} {day.day}, {day.year}"
+    if match.group(4) is None:
+        return shown
+    hour, minute = int(match.group(4)), int(match.group(5))
+    clock = f"{(hour % 12) or 12}:{minute:02d} {'AM' if hour < 12 else 'PM'}"
+    zone = "UTC" if match.group(7) else params.get("TZID", "").strip('"')
+    return f"{shown}, {clock}" + (f" {zone}" if zone else "")
 
 
 # Zip ------------------------------------------------------------------------------------------------

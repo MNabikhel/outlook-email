@@ -221,9 +221,11 @@ def register_workspace(
     file_cards: Callable[[EmailRecord], list[dict]],
     original_path: Callable[[EmailRecord], Path | None],
     setup: dict[str, Callable],
+    board_now: Callable[[], datetime | None] = lambda: None,
 ) -> None:
     """Add the workspace page (/app) and its JSON API (/api) to the dashboard. ``setup`` holds what the classic
-    Setup page's buttons do (web.py), so the workspace's Settings page changes the same things the same way."""
+    Setup page's buttons do (web.py), so the workspace's Settings page changes the same things the same way.
+    ``board_now`` is the sample's moment while only the sample is loaded (None: now), which a verdict refiles by."""
     api = APIRouter(prefix="/api", dependencies=[Depends(page_only)])
 
     def known(email_id: str) -> EmailRecord:
@@ -906,7 +908,8 @@ def register_workspace(
         verdict, _, scope = str(data.get("choice") or "").partition(":")
         try:
             fraud.record_fraud_verdict(
-                store, settings, email_id, verdict=verdict, scope=scope or "email", note=str(data.get("note") or "")[:300]
+                store, settings, email_id, verdict=verdict, scope=scope or "email", note=str(data.get("note") or "")[:300],
+                now=board_now(),
             )
         except KeyError:
             raise HTTPException(status_code=404, detail="That email isn't here any more.") from None

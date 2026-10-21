@@ -498,7 +498,8 @@ class _Running:
 
 
 # A label that is only the word for a total: such a row is a total whatever its figures.
-_TOTAL_WORD = re.compile(r"^(?:grand\s+|sub-?\s?)?totals?:?$|^%", re.I)
+# A cell that is just "Total", or an invoice's "Amount Due" under its lines.
+_TOTAL_WORD = re.compile(r"^(?:(?:grand\s+|sub-?\s?)?totals?(?:\s+due)?|(?:amount|balance)\s+due):?$|^%", re.I)
 # "Total Revenue": a total of what follows, when that is the column's name or another row's value in it.
 _TOTAL_OF = re.compile(r"^(?:grand\s+|sub-?)?totals?\s+(.+)$", re.I)
 

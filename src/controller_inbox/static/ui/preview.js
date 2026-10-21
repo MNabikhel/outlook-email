@@ -78,7 +78,7 @@ function sheetPane(emailId, file) {
     .then((got) => {
       if (!holder.isConnected) return;
       if (got.note) return replace(holder, h("p", { class: "muted" }, got.note));
-      const views = { doc: () => docView(got.blocks), slides: () => slidesView(got.slides), text: () => textView(got.text), zip: () => zipView(got) };
+      const views = { doc: () => docView(got.blocks, got.source), slides: () => slidesView(got.slides), text: () => textView(got.text), zip: () => zipView(got) };
       replace(holder, (views[got.kind] || (() => workbook(got.sheets)))());
     })
     .catch((error) => holder.isConnected && replace(holder, h("p", { class: "muted" }, error.message)));
@@ -174,7 +174,7 @@ function grid(sheet, formula) {
   );
 }
 
-function docView(blocks) {
+function docView(blocks, source) {
   if (!blocks.length) return h("p", { class: "muted" }, "This document has no text to show.");
   return h(
     "div",
@@ -184,7 +184,9 @@ function docView(blocks) {
       if (block.t === "li") return h("p", { class: "doc-li" }, h("span", { class: "doc-li-mark" }, block.num || "•"), block.text);
       if (/^h[1-4]$/.test(block.t)) return h(block.t, { class: "doc-h" }, block.text);
       return h("p", { class: block.b ? "doc-p b" : "doc-p" }, block.text);
-    })
+    }),
+    // A calendar file keeps its lines as written, folded away under its events.
+    source ? h("details", { class: "doc-source" }, h("summary", null, "The file as written"), h("pre", { class: "text-file" }, source)) : null
   );
 }
 
@@ -214,7 +216,7 @@ function slidesView(slides) {
   );
 }
 
-/** A text, RTF, web page or calendar file as its text (a web page's markup is never rendered). */
+/** A text or RTF file, or a calendar file with no event, as its text. */
 function textView(text) {
   if (!(text || "").trim()) return h("p", { class: "muted" }, "This file has no text to show.");
   return h("pre", { class: "text-file" }, text);
@@ -235,6 +237,10 @@ function zipView(got) {
     ),
     got.more ? h("p", { class: "muted small" }, `${plural(got.more, "more file")} not listed.`) : null
   );
+}
+
+function docThumb(blocks) {
+  return h("div", { class: "file-thumb-doc" }, (blocks || []).slice(0, 8).map((block) => h("p", { class: /^h/.test(block.t) ? "b" : null }, block.t === "table" ? "▦ table" : block.text)));
 }
 
 /** A Word table cell: its text, or {v, cs} when it spans more than one column. */
@@ -294,6 +300,9 @@ export function thumb(emailId, file, href) {
         if (got.kind === "slides") {
           const first = got.slides[0];
           fill(h("div", { class: "file-thumb-slide" }, first ? [h("p", { class: "b" }, first.title || `Slide 1`), first.blocks.slice(0, 5).map((block) => h("p", null, block.t === "table" ? "▦ table" : block.text))] : null), h("span", { class: "file-thumb-sheets" }, plural(got.slides.length, "slide")));
+        } else if (got.kind === "doc") {
+          // A web page or a calendar file, read as headings, paragraphs and tables.
+          fill(docThumb(got.blocks));
         } else if (got.kind === "zip") {
           fill(h("div", { class: "file-thumb-doc" }, got.files.slice(0, 8).map((f) => h("p", null, f.name))), h("span", { class: "file-thumb-sheets" }, plural(got.files.length + (got.more || 0), "file")));
         } else {
@@ -303,7 +312,7 @@ export function thumb(emailId, file, href) {
         const got = await getJSON(`${apiFile(emailId, file.n)}/sheet`);
         if (gone()) return;
         if (got.note) return fill(h("span", { class: "muted small" }, "No preview"));
-        fill(h("div", { class: "file-thumb-doc" }, (got.blocks || []).slice(0, 8).map((block) => h("p", { class: /^h/.test(block.t) ? "b" : null }, block.t === "table" ? "▦ table" : block.text))));
+        fill(docThumb(got.blocks));
       }
     } catch (error) {
       if (!gone()) fill(h("span", { class: "muted small" }, "No preview"));

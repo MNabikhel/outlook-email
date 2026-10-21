@@ -29,6 +29,9 @@ ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A sentence about moving the money, which on an email with changed bank details waits for the phone call.
+PAYING_RE = re.compile(r"\b(?:wire|pay(?:ment|ing)?|process|remit\w*|transfer|ach|account|bank(?:ing)?)\b", re.IGNORECASE)
+
 # A sentence ends at ".", "!" or "?", but not at a month's short form: "by Oct. 15, 2026" is one date.
 SENTENCE_SPLIT = re.compile(
     r"(?<=[.!?])(?<!\b(?:jan|feb|mar|apr|jun|jul|aug|sep|oct|nov|dec)\.)(?<!\bsept\.)\s+|\n+", re.IGNORECASE
@@ -89,12 +92,13 @@ def extract_actions(
             "fraud_rule",
         )
     elif "bank_change_caution" in flags:
-        # Cleared as not fraud, or from someone you trust: no block, but changed bank details still get a call.
+        # Cleared as not fraud, or from someone you trust: no block, but changed bank details still get a call,
+        # first, and as urgent as the email.
         add(
             "Confirm the bank-detail change by phone before paying",
             "Bank details on this email changed. Call a number you already have before paying the new account.",
             as_of.isoformat(),
-            Importance.HIGH,
+            max(importance, Importance.HIGH, key=_RANK.index),
             "caution_rule",
         )
 
@@ -175,6 +179,9 @@ def extract_actions(
             if not ACTION_RE.search(sentence):
                 continue
             if category == DocumentType.NEWSLETTER:
+                continue
+            if "bank_change_caution" in flags and PAYING_RE.search(sentence):
+                # "Process the wire today" waits for the phone call above; the payment is its own task after it.
                 continue
             sent_due = None
             due_match = re.search(

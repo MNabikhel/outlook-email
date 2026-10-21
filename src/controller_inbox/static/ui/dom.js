@@ -3,7 +3,9 @@
 export const $ = (selector, root = document) => root.querySelector(selector);
 export const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
-const SAFE_URL = /^(\/(?!\/)|#|mailto:)/i;
+// A same-site path, an anchor or mailto:. Not "//x" or "/\x" (both another site to a browser), nor a link with a tab
+// or line break in it, which the browser drops before reading it.
+const SAFE_URL = /^(?![^]*[\t\n\r])(\/(?![\/\\])|#|mailto:)/i;
 
 /** An element: h("a", { href: "/app", class: "x", onclick: fn }, "text", child, [more]). */
 export function h(tag, attrs, ...children) {
