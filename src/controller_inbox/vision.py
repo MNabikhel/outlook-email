@@ -32,7 +32,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from controller_inbox import ocr, tables
+from controller_inbox import memo, ocr, tables
 from controller_inbox.documents import MAX_PDF_PAGES
 from controller_inbox.local_llm import (
     EmptyReply,
@@ -248,7 +248,7 @@ def scan_readings(store: Store, settings: Settings, email: EmailRecord, *, quest
             pages = [1]
         else:
             data = original_bytes(settings, email, att)
-            pages = scanned_pages(data) if data is not None else []
+            pages = scanned_pages(data, sha256=att.sha256) if data is not None else []
             if not pages:  # the original isn't kept: the pages OCR read are taken for the scanned ones
                 pages = [number for number, _body in page_bodies(att.extracted_text or "")]
         rows = store.page_readings(att.id, att.sha256)
@@ -332,21 +332,35 @@ def readable_file(filename: str) -> bool:
 # Which pages ----------------------------------------------------------------------------------
 
 
-def wanted_pages(data: bytes, filename: str, text: str) -> list[int]:
+def wanted_pages(data: bytes, filename: str, text: str, *, sha256: str = "") -> list[int]:
     """The pages worth a second reading: every page of a picture, a PDF's scanned pages (no text layer), and PDF
-    pages whose table's printed totals don't add up as CloseDesk read them."""
+    pages whose table's printed totals don't add up as CloseDesk read them. ``sha256``: the bytes' (known to be
+    theirs), for ``scanned_pages``."""
     suffix = Path(filename or "").suffix.lower()
     if suffix in IMAGE_SUFFIXES:
         return list(range(1, ocr.picture_pages(data) + 1))
     if suffix != ".pdf":
         return []
-    pages = set(scanned_pages(data))
+    pages = set(scanned_pages(data, sha256=sha256))
     pages |= set(doubtful_pages(text))
     return sorted(pages)
 
 
-def scanned_pages(data: bytes) -> list[int]:
-    """The PDF's pages with no text layer to speak of: pictures of pages."""
+# Which pages are scans, by the file's SHA-256 and size; which tables don't add up, by the text. Each is asked for
+# several times a question or a page view (the pages to read, the offer, the scans' readings).
+_SCANNED = memo.LRU(64)
+_DOUBTFUL = memo.LRU(64)
+
+
+def scanned_pages(data: bytes, *, sha256: str = "") -> list[int]:
+    """The PDF's pages with no text layer to speak of: pictures of pages. ``sha256``: the bytes' SHA-256, when the
+    caller knows it is theirs (``original_bytes``): the answer is then kept for the file."""
+    if not sha256:
+        return _scanned_pages(data)
+    return list(_SCANNED.get_or((sha256, len(data)), lambda: _scanned_pages(data)))
+
+
+def _scanned_pages(data: bytes) -> list[int]:
     try:
         import pypdfium2 as pdfium
     except ImportError:
@@ -377,6 +391,11 @@ def scanned_pages(data: bytes) -> list[int]:
 
 def doubtful_pages(text: str) -> list[int]:
     """Pages whose tables, as read, have a printed total that doesn't add up the rows above it."""
+    text = text or ""
+    return list(_DOUBTFUL.get_or(text, lambda: _doubtful_pages(text)))
+
+
+def _doubtful_pages(text: str) -> list[int]:
     from controller_inbox.table_lookup import tables_in, verify
 
     found = []
@@ -1539,7 +1558,7 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
             result.failed.append(problem)  # LM Studio won't load it when asked either: nothing is counted against the pages
             return result
     suffix = Path(att.filename).suffix.lower()
-    scanned = set(scanned_pages(data)) if suffix == ".pdf" else set()
+    scanned = set(scanned_pages(data, sha256=att.sha256)) if suffix == ".pdf" else set()
     stored_text = store.stored_text(att.id)
     raw = (att.extracted_text or "") if stored_text is None else stored_text
     kind = "picture" if suffix in IMAGE_SUFFIXES else ("pdf" if _PAGE_MARK.search(raw) else "unmarked")
@@ -1613,28 +1632,32 @@ def original_bytes(settings: Settings, email: EmailRecord, att: AttachmentRecord
         data = path.read_bytes()
     except OSError:
         return None
+    if att.sha256 and agent.known_sha256(path, len(data)) == att.sha256:
+        return data  # ``original_file`` checked these bytes' hash, and the file hasn't changed since
     return data if same_file(att, data) else None
 
 
 def unread_pages(
     store: Store, att: AttachmentRecord, data: bytes, *, doubtful: bool = True, retry_failed: bool = False, upgrade: bool = False,
-    model: str | None = None,
+    model: str | None = None, verified: bool = False,
 ) -> list[int]:
     """The pages worth a second reading that haven't had one. ``doubtful``: also text pages whose totals don't add
     up (finding them reads every table, so the overnight run looks at scans and pictures only). A page the model
     (``model``, when given: another model's failures don't count) failed on ``TRIES`` times is left out unless
     ``retry_failed`` (the user asked). ``upgrade``: a document reader reads pages now, so a page read the older way
-    (by a general model) is read again by it."""
+    (by a general model) is read again by it. ``verified``: ``data`` is known to be the attachment's (its SHA-256 is
+    ``att.sha256``), as ``original_bytes`` gives it."""
+    sha256 = att.sha256 if verified else ""
     readings = store.page_readings(att.id, att.sha256)
     done = {page for page, row in readings.items() if not upgrade or trusted_reader(row.get("model") or "")}
     if not retry_failed:
         done |= {page for page, tries in store.page_failures(att.id, att.sha256, model).items() if tries >= TRIES}
     if doubtful:
-        wanted = wanted_pages(data, att.filename, att.extracted_text or "")
+        wanted = wanted_pages(data, att.filename, att.extracted_text or "", sha256=sha256)
     elif Path(att.filename or "").suffix.lower() in IMAGE_SUFFIXES:
         wanted = list(range(1, ocr.picture_pages(data) + 1))
     else:
-        wanted = scanned_pages(data) if Path(att.filename or "").suffix.lower() == ".pdf" else []
+        wanted = scanned_pages(data, sha256=sha256) if Path(att.filename or "").suffix.lower() == ".pdf" else []
     return [page for page in wanted if page not in done]
 
 
@@ -1661,7 +1684,7 @@ def files_to_read(
         data = original_bytes(settings, email, att)
         if data is None:
             continue
-        pages = unread_pages(store, att, data, doubtful=doubtful, upgrade=upgrade, model=model)
+        pages = unread_pages(store, att, data, doubtful=doubtful, upgrade=upgrade, model=model, verified=True)
         if pages:
             out.append((position, att, data, pages))
     return out
@@ -1869,7 +1892,7 @@ def offer(store: Store, settings: Settings, email: EmailRecord, att: AttachmentR
         if data is None:
             reason = "The original file wasn't kept, so its pages can't be looked at."
         else:
-            pages = unread_pages(store, att, data, retry_failed=True, upgrade=trusted_reader(reading_model(settings)))
+            pages = unread_pages(store, att, data, retry_failed=True, upgrade=trusted_reader(reading_model(settings)), verified=True)
     seconds = estimate(store, settings, len(pages)) if pages else None
     return {
         "available": not reason,
@@ -1891,7 +1914,7 @@ def start(store: Store, settings: Settings, job, email: EmailRecord, att: Attach
     data = original_bytes(settings, email, att) or b""
     pages = told["pages"]
     if again:
-        pages = sorted(set(wanted_pages(data, att.filename, att.extracted_text or "")) | set(told["read"]))
+        pages = sorted(set(wanted_pages(data, att.filename, att.extracted_text or "", sha256=att.sha256 if data else "")) | set(told["read"]))
     if not pages:
         return {"ok": True, "started": False, "message": "Every page that needs a second reading has had one."}, 200
     pages = pages[:MAX_PAGES]

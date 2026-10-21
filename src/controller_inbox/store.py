@@ -542,17 +542,24 @@ class Store:
             row = conn.execute("SELECT * FROM emails WHERE id = ?", (email_id,)).fetchone()
             if not row:
                 return None
-            attachments = conn.execute(
-                "SELECT * FROM attachments WHERE email_id = ? ORDER BY filename",
-                (email_id,),
-            ).fetchall()
-            actions = conn.execute(
-                f"SELECT * FROM action_items WHERE email_id = ? ORDER BY due_date IS NULL, due_date, {_PRIORITY_ORDER}",
-                (email_id,),
-            ).fetchall()
-            readings = _readings_for(conn, [item["id"] for item in attachments])
-            fixes = _fixes_for(conn, [item["id"] for item in attachments])
-        return _email_from_rows(row, attachments, actions, readings, fixes)
+            return _hydrate(conn, [row])[0]
+
+    def get_emails(self, email_ids: list[str], *, conn: sqlite3.Connection | None = None) -> dict[str, EmailRecord]:
+        """The stored emails among ``email_ids``, by id, each as ``get_email`` gives it (missing ones left out)."""
+        ids = list(dict.fromkeys(str(email_id) for email_id in email_ids))
+        if not ids:
+            return {}
+        with self._use(conn) as conn:
+            rows = []
+            for chunk in _chunks(ids):
+                marks = ", ".join("?" for _ in chunk)
+                rows.extend(conn.execute(f"SELECT * FROM emails WHERE id IN ({marks})", chunk).fetchall())
+            return {email.id: email for email in _hydrate(conn, rows)}
+
+    def has_email(self, email_id: str) -> bool:
+        """Whether an email with this id is stored (``get_email(email_id) is not None``, without reading it)."""
+        with self.connect() as conn:
+            return conn.execute("SELECT 1 FROM emails WHERE id = ?", (email_id,)).fetchone() is not None
 
     def list_emails(
         self,
@@ -594,25 +601,10 @@ class Store:
         params.extend([limit, max(0, offset)])
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
-            out: list[EmailRecord] = []
-            for row in rows:
-                # In the order get_email gives them: the overnight run compares an email listed here with the
-                # same email read again by get_email, and files in another order would never match.
-                attachments = conn.execute(
-                    "SELECT * FROM attachments WHERE email_id = ? ORDER BY filename",
-                    (row["id"],),
-                ).fetchall()
-                actions = conn.execute(
-                    "SELECT * FROM action_items WHERE email_id = ?",
-                    (row["id"],),
-                ).fetchall()
-                readings = _readings_for(conn, [item["id"] for item in attachments]) if attachments else {}
-                fixes = _fixes_for(conn, [item["id"] for item in attachments]) if attachments else {}
-                email = _email_from_rows(row, attachments, actions, readings, fixes)
-                if flag and flag not in email.flags:
-                    continue
-                out.append(email)
-        return out
+            # In the order get_email gives them (it reads them the same way): the overnight run compares an email
+            # listed here with the same email read again by get_email, and files in another order would never match.
+            emails = _hydrate(conn, rows)
+        return [email for email in emails if not flag or flag in email.flags]
 
     def count_emails(self, **filters: Any) -> int:
         """How many messages ``list_emails`` would give with the same filters and no limit."""
@@ -690,8 +682,9 @@ class Store:
         # LIKE finds "bill" inside "Billing"; whole words decide the order, and win outright when there are any.
         words = [re.compile(r"(?<![a-z0-9])" + re.escape(term) + r"(?:s|es)?(?![a-z0-9])") for term in terms]
         scored = []
+        found = self.get_emails([email_id for email_id, _hits in rows])
         for position, (email_id, hits) in enumerate(rows):
-            email = self.get_email(email_id)
+            email = found.get(email_id)
             if email is None:
                 continue
             head = _fold(f"{email.subject}\n{email.sender_name}\n{email.sender_email}")
@@ -823,52 +816,45 @@ class Store:
         return [row["id"] for row in rows]
 
     def counts(self) -> dict[str, int]:
+        # One pass over the emails; each sum counts what a COUNT(*) ... WHERE <condition> would.
+        def n(condition: str) -> str:
+            return f"COALESCE(SUM(CASE WHEN {condition} THEN 1 ELSE 0 END), 0)"
+
         with self.connect() as conn:
-            emails = conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]
-            critical = conn.execute(
-                "SELECT COUNT(*) AS n FROM emails WHERE importance IN ('critical','high')"
-            ).fetchone()["n"]
-            open_actions = conn.execute(
-                "SELECT COUNT(*) AS n FROM action_items WHERE status = 'open'"
-            ).fetchone()["n"]
-            attachments = conn.execute("SELECT COUNT(*) AS n FROM attachments").fetchone()["n"]
-            fraud = conn.execute(
-                "SELECT COUNT(*) AS n FROM emails WHERE flags LIKE '%fraud_risk%'"
-            ).fetchone()["n"]
-            folders = {
-                name: conn.execute(
-                    "SELECT COUNT(*) AS n FROM emails WHERE folder = ? AND COALESCE(done_at, '') = ''",
-                    (name,),
-                ).fetchone()["n"]
-                for name in ("important", "informational", "reference")
-            }
-            waiting = conn.execute(
-                "SELECT COUNT(*) AS n FROM emails WHERE model_status = 'script_draft'"
-            ).fetchone()["n"]
-            read_by_model = conn.execute(
-                "SELECT COUNT(*) AS n FROM emails WHERE model_status = 'bionic'"
-            ).fetchone()["n"]
+            row = conn.execute(
+                f"""
+                SELECT COUNT(*) AS emails,
+                    {n("importance IN ('critical','high')")} AS high_importance,
+                    {n("flags LIKE '%fraud_risk%'")} AS fraud_alerts,
+                    {n("folder = 'important' AND COALESCE(done_at, '') = ''")} AS important,
+                    {n("folder = 'informational' AND COALESCE(done_at, '') = ''")} AS informational,
+                    {n("folder = 'reference' AND COALESCE(done_at, '') = ''")} AS reference,
+                    {n("model_status = 'script_draft'")} AS waiting_on_bionic,
+                    {n("model_status = 'bionic'")} AS read_by_bionic,
+                    (SELECT COUNT(*) FROM action_items WHERE status = 'open') AS open_actions,
+                    (SELECT COUNT(*) FROM attachments) AS attachments
+                FROM emails
+                """
+            ).fetchone()
         return {
-            "emails": emails,
-            "high_importance": critical,
-            "open_actions": open_actions,
-            "attachments": attachments,
-            "fraud_alerts": fraud,
-            "important": folders["important"],
-            "informational": folders["informational"],
-            "reference": folders["reference"],
-            "waiting_on_bionic": waiting,
-            "read_by_bionic": read_by_model,
+            key: row[key]
+            for key in (
+                "emails", "high_importance", "open_actions", "attachments", "fraud_alerts", "important",
+                "informational", "reference", "waiting_on_bionic", "read_by_bionic",
+            )
         }
 
-    def ap_invoice_ids(self) -> list[str]:
-        """Emails filed as AP invoices or carrying an AP invoice, and any that were coded before."""
+    def ap_invoice_ids(self, *, unconfirmed: bool = False) -> list[str]:
+        """Emails filed as AP invoices or carrying an AP invoice, and any that were coded before. ``unconfirmed``
+        leaves out those whose coding the user confirmed."""
+        skip = " AND id NOT IN (SELECT email_id FROM cost_codings WHERE status = 'confirmed')" if unconfirmed else ""
         with self.connect() as conn:
             rows = conn.execute(
-                """
-                SELECT id FROM emails WHERE category = 'ap_invoice'
-                   OR EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id AND a.document_type = 'ap_invoice')
-                UNION SELECT email_id FROM cost_codings
+                f"""
+                SELECT id FROM emails WHERE (category = 'ap_invoice'
+                   OR EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id AND a.document_type = 'ap_invoice'))
+                   {skip}
+                UNION SELECT email_id FROM cost_codings{" WHERE status != 'confirmed'" if unconfirmed else ""}
                 """
             ).fetchall()
         return [row[0] for row in rows]
@@ -877,6 +863,17 @@ class Store:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM cost_codings WHERE email_id = ?", (email_id,)).fetchone()
         return _coding_from_row(row) if row else None
+
+    def cost_codings_for(self, email_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """The codings of these emails, by email id (``cost_coding`` for each, in one go)."""
+        ids = list(dict.fromkeys(email_ids))
+        out: dict[str, dict[str, Any]] = {}
+        with self.connect() as conn:
+            for chunk in _chunks(ids):
+                marks = ", ".join("?" for _ in chunk)
+                for row in conn.execute(f"SELECT * FROM cost_codings WHERE email_id IN ({marks})", chunk).fetchall():
+                    out[row["email_id"]] = _coding_from_row(row)
+        return out
 
     def save_cost_coding(
         self,
@@ -1030,6 +1027,16 @@ class Store:
                 "SELECT COUNT(*) AS n FROM emails WHERE COALESCE(source, '') != 'demo'"
             ).fetchone()["n"]
 
+    def only_sample(self) -> bool:
+        """Whether only the built-in sample mailbox is loaded: there is mail, and none of it is real
+        (``counts()["emails"] and not real_mail_count()``, in one query)."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM emails) AS mail,"
+                " EXISTS (SELECT 1 FROM emails WHERE COALESCE(source, '') != 'demo') AS real"
+            ).fetchone()
+        return bool(row["mail"]) and not row["real"]
+
     def email_with_message_id(self, message_id: str, source: str) -> str | None:
         """The id of the email from ``source`` with this Internet message ID, or None."""
         if not message_id:
@@ -1073,6 +1080,11 @@ class Store:
         with self._use(conn) as conn:
             rows = conn.execute("SELECT * FROM outlook_items").fetchall()
         return {row["entry_id"]: {key: row[key] for key in row.keys()} for row in rows}
+
+    def outlook_follows(self, email_id: str, *, conn: sqlite3.Connection | None = None) -> bool:
+        """Whether any message copied from Outlook became this email."""
+        with self._use(conn) as conn:
+            return conn.execute("SELECT 1 FROM outlook_items WHERE email_id = ? LIMIT 1", (email_id,)).fetchone() is not None
 
     def save_outlook_item(self, item: dict) -> None:
         with self.connect() as conn:
@@ -1325,6 +1337,14 @@ class Store:
                 "SELECT * FROM corrections ORDER BY created_at DESC"
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def email_correction(self, email_id: str) -> dict[str, Any] | None:
+        """The latest correction saved for this email: the first of ``list_corrections`` with its id."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM corrections WHERE email_id = ? ORDER BY created_at DESC, rowid LIMIT 1", (email_id,)
+            ).fetchone()
+        return dict(row) if row else None
 
     def latest_correction(self, *, sender_email: str) -> dict[str, Any] | None:
         with self.connect() as conn:
@@ -1806,12 +1826,51 @@ def _action_from_row(row: sqlite3.Row) -> ActionItem:
     )
 
 
+# Ids bound in one IN (...): well under SQLite's limit on variables in a statement (999 before 3.32).
+_IN_CHUNK = 500
+
+
+def _chunks(items: list) -> Iterator[list]:
+    for start in range(0, len(items), _IN_CHUNK):
+        yield items[start : start + _IN_CHUNK]
+
+
+def _hydrate(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[EmailRecord]:
+    """The emails for these ``emails`` rows, in their order, with their files (by name), tasks (soonest due, then
+    most urgent), page readings and fixes: a few queries for all of them, not a few for each."""
+    if not rows:
+        return []
+    ids = list(dict.fromkeys(row["id"] for row in rows))
+    attachments: dict[str, list[sqlite3.Row]] = {}
+    actions: dict[str, list[sqlite3.Row]] = {}
+    for chunk in _chunks(ids):
+        marks = ", ".join("?" for _ in chunk)
+        for item in conn.execute(
+            f"SELECT * FROM attachments WHERE email_id IN ({marks}) ORDER BY filename, rowid", chunk
+        ).fetchall():
+            attachments.setdefault(item["email_id"], []).append(item)
+        for item in conn.execute(
+            f"SELECT * FROM action_items WHERE email_id IN ({marks})"
+            f" ORDER BY due_date IS NULL, due_date, {_PRIORITY_ORDER}, rowid",
+            chunk,
+        ).fetchall():
+            actions.setdefault(item["email_id"], []).append(item)
+    file_ids = [item["id"] for items in attachments.values() for item in items]
+    readings = _readings_for(conn, file_ids)
+    fixes = _fixes_for(conn, file_ids)
+    return [
+        _email_from_rows(row, attachments.get(row["id"], []), actions.get(row["id"], []), readings, fixes) for row in rows
+    ]
+
+
 def _readings_for(conn: sqlite3.Connection, attachment_ids: list[str]) -> dict[str, dict[int, dict]]:
     """Attachment id -> page -> its stored vision reading."""
     if not attachment_ids:
         return {}
-    marks = ", ".join("?" for _ in attachment_ids)
-    rows = conn.execute(f"SELECT * FROM page_readings WHERE attachment_id IN ({marks}) ORDER BY page", attachment_ids).fetchall()
+    rows = []
+    for chunk in _chunks(attachment_ids):
+        marks = ", ".join("?" for _ in chunk)
+        rows.extend(conn.execute(f"SELECT * FROM page_readings WHERE attachment_id IN ({marks}) ORDER BY page", chunk).fetchall())
     out: dict[str, dict[int, dict]] = {}
     for row in rows:
         out.setdefault(row["attachment_id"], {})[int(row["page"])] = {key: row[key] for key in row.keys()}
@@ -1845,10 +1904,14 @@ def _fixes_for(conn: sqlite3.Connection, attachment_ids: list[str]) -> dict[str,
     """Attachment id -> the fixes made on its pages, oldest first."""
     if not attachment_ids:
         return {}
-    marks = ", ".join("?" for _ in attachment_ids)
-    rows = conn.execute(
-        f"SELECT * FROM page_fixes WHERE attachment_id IN ({marks}) AND kind = 'text' ORDER BY created_at, rowid", attachment_ids
-    ).fetchall()
+    rows = []
+    for chunk in _chunks(attachment_ids):
+        marks = ", ".join("?" for _ in chunk)
+        rows.extend(
+            conn.execute(
+                f"SELECT * FROM page_fixes WHERE attachment_id IN ({marks}) AND kind = 'text' ORDER BY created_at, rowid", chunk
+            ).fetchall()
+        )
     out: dict[str, list[dict]] = {}
     for row in rows:
         out.setdefault(row["attachment_id"], []).append(_fix_row(row))
@@ -2039,6 +2102,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('attachment_text_without_nul', '1')")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_folder ON emails(folder)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_emails_model ON emails(model_status)")
+    # Lookups by email (every email read loads its files and tasks), by Message-ID, and by sender (the fraud
+    # check's history and the corrections learnt): indexes, so they don't read every row of the table.
+    for sql in (
+        "CREATE INDEX IF NOT EXISTS idx_att_email ON attachments(email_id)",
+        "CREATE INDEX IF NOT EXISTS idx_actions_email ON action_items(email_id)",
+        "CREATE INDEX IF NOT EXISTS idx_emails_message_id ON emails(internet_message_id, source)",
+        "CREATE INDEX IF NOT EXISTS idx_emails_sender ON emails(lower(sender_email))",
+        "CREATE INDEX IF NOT EXISTS idx_emails_domain ON emails(lower(substr(sender_email, instr(sender_email, '@') + 1)))",
+        "CREATE INDEX IF NOT EXISTS idx_corrections_email ON corrections(email_id)",
+        "CREATE INDEX IF NOT EXISTS idx_corrections_sender ON corrections(lower(sender_email))",
+        "CREATE INDEX IF NOT EXISTS idx_fraud_log_email ON fraud_log(email_id)",
+        "CREATE INDEX IF NOT EXISTS idx_embeddings_email ON embeddings(model, email_id)",
+    ):
+        conn.execute(sql)
 
 
 def _drop_file_notes(conn, chat_id: str, filename: str) -> None:

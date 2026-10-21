@@ -24,6 +24,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
 
 from controller_inbox import ocr, pdf_layout, tables
 
@@ -1462,15 +1463,42 @@ _FORMULA_TEXT = re.compile(r'"(?:[^"]|"")*"')
 _FORMULA_LINK = re.compile(r"'?\[[^\[\]]+\][^\[\]!(),;+\-*/^&=<>]*!\$?[A-Za-z_]*\$?\d*(?::\$?[A-Z]{1,3}\$?\d+)?")
 
 
-def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200) -> str:
-    """Values and formulas for a range such as ``B2:D20`` on ``sheet`` (name or 1-based number)."""
-    from openpyxl import load_workbook
+class Books:
+    """A workbook's values and formulas, loaded once for the tool calls of one question. ``read_cells`` only reads
+    them; ``trace_cell`` and ``compare_columns`` make cells as they look (openpyxl does), so after one of them the
+    next call loads the workbook afresh, as each call did on its own."""
+
+    def __init__(self, data: bytes):
+        self.data = data
+        self._books: dict[bool, Any] = {}
+
+    def book(self, *, values: bool):
+        """The workbook with its saved values (``values``) or with its formulas."""
+        if values not in self._books:
+            from openpyxl import load_workbook
+
+            self._books[values] = load_workbook(io.BytesIO(self.data), data_only=values)
+        return self._books[values]
+
+    def pair(self):
+        return self.book(values=True), self.book(values=False)
+
+    def used(self) -> None:
+        """The workbooks were changed by looking: dropped."""
+        for book in self._books.values():
+            book.close()
+        self._books.clear()
+
+
+def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200, books: Books | None = None) -> str:
+    """Values and formulas for a range such as ``B2:D20`` on ``sheet`` (name or 1-based number). ``books``: the
+    workbook already loaded for ``data``."""
     from openpyxl.utils import get_column_letter, range_boundaries
 
     if refused := _office_refusal(data, workbook=True):
         return refused
-    values = load_workbook(io.BytesIO(data), data_only=True)
-    formulas = load_workbook(io.BytesIO(data), data_only=False)
+    held_books = books if books is not None else Books(data)
+    values, formulas = held_books.pair()
     try:
         ws = _find_sheet(formulas, sheet)
         if ws is None:
@@ -1509,8 +1537,8 @@ def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200) -> str:
             lines.append("(these cells are empty)")
         return "\n".join(lines)
     finally:
-        values.close()
-        formulas.close()
+        if books is None:
+            held_books.used()
 
 
 def _held(ws, min_col: int, min_row: int, max_col: int, max_row: int) -> dict:
@@ -1523,14 +1551,12 @@ def _held(ws, min_col: int, min_row: int, max_col: int, max_row: int) -> dict:
     }
 
 
-def trace_cell(data: bytes, sheet: str, cell: str, *, depth: int = 2) -> str:
-    """A cell's formula and the cells it depends on, ``depth`` levels down."""
-    from openpyxl import load_workbook
-
+def trace_cell(data: bytes, sheet: str, cell: str, *, depth: int = 2, books: Books | None = None) -> str:
+    """A cell's formula and the cells it depends on, ``depth`` levels down. ``books``: as for ``read_cells``."""
     if refused := _office_refusal(data, workbook=True):
         return refused
-    values = load_workbook(io.BytesIO(data), data_only=True)
-    formulas = load_workbook(io.BytesIO(data), data_only=False)
+    held_books = books if books is not None else Books(data)
+    values, formulas = held_books.pair()
     try:
         ws = _find_sheet(formulas, sheet)
         if ws is None:
@@ -1542,18 +1568,18 @@ def trace_cell(data: bytes, sheet: str, cell: str, *, depth: int = 2) -> str:
         _trace(formulas, values, ws.title, ref, depth, 0, lines, set())
         return "\n".join(lines)
     finally:
-        values.close()
-        formulas.close()
+        held_books.used()
 
 
-def compare_columns(data: bytes, sheet: str, first: str, second: str, *, limit: int = 40) -> str:
-    """How each row changes from column ``first`` to ``second`` (letters or header text), biggest increase first."""
+def compare_columns(data: bytes, sheet: str, first: str, second: str, *, limit: int = 40, books: Books | None = None) -> str:
+    """How each row changes from column ``first`` to ``second`` (letters or header text), biggest increase first.
+    ``books``: as for ``read_cells``."""
     from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
 
     if refused := _office_refusal(data, workbook=True):
         return refused
-    book = load_workbook(io.BytesIO(data), data_only=True)
+    book = books.book(values=True) if books is not None else load_workbook(io.BytesIO(data), data_only=True)
     try:
         ws = _find_sheet(book, sheet)
         if ws is None:
@@ -1592,7 +1618,10 @@ def compare_columns(data: bytes, sheet: str, first: str, second: str, *, limit: 
             lines += ["Total rows:"] + [_change_line(*row) for row in totals]
         return "\n".join(lines)
     finally:
-        book.close()
+        if books is not None:
+            books.used()
+        else:
+            book.close()
 
 
 def _columns(ws, first: str, second: str):

@@ -91,13 +91,14 @@ def _keep(settings: Settings, name: str, data: bytes) -> None:
         pass
 
 
-def page_png(settings: Settings, data: bytes, filename: str, page: int) -> bytes:
-    """The page as a PNG, drawn once and kept. ValueError when the file has no such page."""
+def page_png(settings: Settings, data: bytes, filename: str, page: int, *, sha256: str = "") -> bytes:
+    """The page as a PNG, drawn once and kept. ValueError when the file has no such page. ``sha256``: the bytes'
+    SHA-256 when the caller has it (an attachment's, its original checked against it), else worked out here."""
     if Path(filename or "").suffix.lower() != ".pdf" and not 1 <= page <= ocr.picture_pages(data):
         raise ValueError(f"a picture has no page {page}")
     # "-f": a PDF form's page drawn with its fields filled in (one kept before forms were drawn shows them empty).
     form = Path(filename or "").suffix.lower() == ".pdf" and b"/AcroForm" in data
-    name = f"{file_hash(data)}-{page}{'-f' if form else ''}.png"
+    name = f"{sha256 or file_hash(data)}-{page}{'-f' if form else ''}.png"
     png = _kept(settings, name)
     if png is not None:
         from PIL import Image
@@ -216,10 +217,11 @@ def _ocr_regions(png: bytes) -> list[dict] | None:
     ]
 
 
-def regions(settings: Settings, data: bytes, filename: str, page: int) -> dict:
+def regions(settings: Settings, data: bytes, filename: str, page: int, *, sha256: str = "") -> dict:
     """What was read where on the page: {source: "text" (the PDF's own text) or "ocr", regions, reason}. Kept, so
-    a page is only read once. ValueError when the file has no such page."""
-    name = f"{file_hash(data)}-{page}.json"
+    a page is only read once. ValueError when the file has no such page. ``sha256``: as for ``page_png``."""
+    sha256 = sha256 or file_hash(data)
+    name = f"{sha256}-{page}.json"
     kept = _kept(settings, name)
     if kept is not None:
         try:
@@ -232,7 +234,7 @@ def regions(settings: Settings, data: bytes, filename: str, page: int) -> dict:
     if found is not None:
         result = {"source": "text", "regions": found, "reason": ""}
     else:
-        boxes = _ocr_regions(page_png(settings, data, filename, page))
+        boxes = _ocr_regions(page_png(settings, data, filename, page, sha256=sha256))
         if boxes is None:
             # Not kept: once RapidOCR is installed, the page is read.
             return {
@@ -248,12 +250,13 @@ def regions(settings: Settings, data: bytes, filename: str, page: int) -> dict:
     return result
 
 
-def found_tables(settings: Settings, data: bytes, filename: str, page: int) -> list[dict] | None:
+def found_tables(settings: Settings, data: bytes, filename: str, page: int, *, sha256: str = "") -> list[dict] | None:
     """Where the layout model sees tables on the page (``table_finder``), kept like the page's boxes; None while
-    the model isn't here, so the tables are found as before."""
+    the model isn't here, so the tables are found as before. ``sha256``: as for ``page_png``."""
     from controller_inbox import table_finder
 
-    name = f"{file_hash(data)}-{page}-tables.json"
+    sha256 = sha256 or file_hash(data)
+    name = f"{sha256}-{page}-tables.json"
     kept = _kept(settings, name)
     if kept is not None:
         try:
@@ -262,7 +265,7 @@ def found_tables(settings: Settings, data: bytes, filename: str, page: int) -> l
                 return saved["tables"]
         except (ValueError, KeyError, TypeError):
             pass
-    found = table_finder.find(settings, page_png(settings, data, filename, page))
+    found = table_finder.find(settings, page_png(settings, data, filename, page, sha256=sha256))
     if found is not None:
         _keep(settings, name, json.dumps({"model": table_finder.VERSION, "tables": found}).encode())
     return found

@@ -83,6 +83,8 @@ def build_digest(
     undated = [(a, e) for a, e in open_actions if not a.due_date]
 
     emails_by_id: dict[str, EmailRecord] = {e.id: e for e in window_emails}
+    # The emails of open tasks from before the window, read together rather than one at a time below.
+    emails_by_id.update(store.get_emails([stub.id for _action, stub in open_actions if stub.id not in emails_by_id]))
 
     def full(email_id: str) -> EmailRecord | None:
         if email_id not in emails_by_id:

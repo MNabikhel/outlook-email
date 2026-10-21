@@ -398,19 +398,21 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     job = ProcessJob()
     app.state.job = job
 
-    def board_date():
-        """Today, or the sample's date when only the sample mailbox is loaded."""
-        if store.counts()["emails"] and not store.real_mail_count():
+    def board_date(sample: bool | None = None):
+        """Today, or the sample's date when only the sample mailbox is loaded (``sample``: whether it is, when
+        already known)."""
+        if store.only_sample() if sample is None else sample:
             return local_today(settings.tz, DEMO_NOW)
         return local_today(settings.tz)
 
     def board_now() -> datetime | None:
         """The sample's moment when only the sample mailbox is loaded, so a verdict's new tasks are dated on its
         board; else None (now)."""
-        return DEMO_NOW if store.counts()["emails"] and not store.real_mail_count() else None
+        return DEMO_NOW if store.only_sample() else None
 
     def ctx(request: Request, **extra):
-        as_of = board_date()
+        sample = store.only_sample()
+        as_of = board_date(sample)
         counts = store.counts()
         close = month_end(as_of)
         profile = active_profile(settings, store)
@@ -438,7 +440,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "filter_category": "",
             "query": "",
             "notice": NOTICES.get(request.query_params.get("notice", ""), ""),
-            "is_sample": bool(counts["emails"]) and not store.real_mail_count(),
+            "is_sample": sample,
             "profile": profile,
             "profiles": PROFILES,
             "finance": profile == "finance",
@@ -508,7 +510,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/inbox/{email_id}/done")
     def mark_done(email_id: str, undo: int = 0, next: str = Query("/")):
-        if store.get_email(email_id) is None:
+        if not store.has_email(email_id):
             raise HTTPException(status_code=404, detail="Message not found")
         store.set_done(email_id, not undo)
         return RedirectResponse(_local_path(next, "/"), status_code=303)
@@ -1021,7 +1023,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/inbox/{email_id}/coding/confirm")
     def confirm_coding(email_id: str, next: str = Form("")):
-        if store.get_email(email_id) is None:
+        if not store.has_email(email_id):
             raise HTTPException(status_code=404, detail="Message not found")
         try:
             cost_codes.confirm(store, settings, email_id)
@@ -1031,7 +1033,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/inbox/{email_id}/coding/revise")
     def revise_coding(email_id: str, codes: list[str] = Form(default=[]), next: str = Form("")):
-        if store.get_email(email_id) is None:
+        if not store.has_email(email_id):
             raise HTTPException(status_code=404, detail="Message not found")
         try:
             cost_codes.revise(store, settings, email_id, codes)

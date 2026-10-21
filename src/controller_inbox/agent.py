@@ -30,7 +30,7 @@ from decimal import Decimal
 from itertools import zip_longest
 from pathlib import Path
 
-from controller_inbox import answer_check, documents, semantic, table_lookup, table_query
+from controller_inbox import answer_check, documents, memo, semantic, table_lookup, table_query
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
@@ -210,12 +210,35 @@ def prompt_size(text: str) -> int:
     a tenth to spare) and written as three characters each.
     """
     text = text or ""
+    if len(text) < _SIZE_KEPT_FROM:
+        return _prompt_size(text)
+    return _SIZES.get_or(text, lambda: _prompt_size(text))
+
+
+# A file's text and its sections are sized again for each prompt built for a question: long ones are kept, by the text.
+_SIZES = memo.LRU(128)
+_SIZE_KEPT_FROM = 2_000
+
+
+_DIGIT_CHARS = "0123456789"
+# What str.isspace takes for a space among ASCII characters.
+_SPACE_CHARS = " \t\n\r\x0b\x0c\x1c\x1d\x1e\x1f"
+
+
+def _prompt_size(text: str) -> int:
     words = _LETTERS.findall(text)
-    digits = sum(ch.isdigit() for ch in text)
-    marks = sum(1 for ch in text if not ch.isalnum() and not ch.isspace())
+    letters = sum(map(len, words))
+    if text.isascii():
+        # Counted in C: in ASCII the letters are the words' (A-Z, a-z), the digits 0-9, and a mark is anything else
+        # that isn't a space; the same counts as character by character below.
+        digits = sum(text.count(ch) for ch in _DIGIT_CHARS)
+        marks = len(text) - letters - digits - sum(text.count(ch) for ch in _SPACE_CHARS)
+    else:
+        digits = sum(ch.isdigit() for ch in text)
+        marks = sum(1 for ch in text if not ch.isalnum() and not ch.isspace())
     # A run of letters far longer than a word is split into many tokens.
     long = sum(max(0, len(word) - 15) for word in words) / 3
-    tokens = 0.8 * len(words) + 0.07 * sum(map(len, words)) + long + 1.3 * digits + 1.2 * marks
+    tokens = 0.8 * len(words) + 0.07 * letters + long + 1.3 * digits + 1.2 * marks
     return int(tokens * CHARS_PER_TOKEN) + 1
 
 
@@ -331,6 +354,15 @@ class Workspace:
     # The table rows picked out and worked out for the question, as the prompt gave them: an answer copying a
     # figure from them read it.
     picked: list[str] = field(default_factory=list)
+    # What was worked out from a file for this question, by what it was worked out from (the file's text itself and
+    # the question): the files are laid out for the prompt two or three times a question.
+    _memo: dict = field(default_factory=dict, repr=False, compare=False)
+
+    def memo(self, key: tuple, make):
+        """``make()``'s result, worked out once for this question for ``key``."""
+        if key not in self._memo:
+            self._memo[key] = make()
+        return self._memo[key]
 
     def __post_init__(self) -> None:
         # The emails in the prompt, plus those the model opens with a tool: the only ones it may write notes on.
@@ -417,6 +449,18 @@ def original_file(settings: Settings, email: EmailRecord, att: AttachmentRecord)
 
 # A file's hash by (path, size, mtime): the pages ask for every attachment's original on every render.
 _HASHES: dict[tuple[str, int, int], str] = {}
+
+
+def known_sha256(path: Path, size: int) -> str:
+    """The file's SHA-256 as ``original_file`` worked it out, while the file is as it was then (same size and
+    modification time) and ``size`` bytes long; "" when it wasn't worked out or the file changed since."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return ""
+    if stat.st_size != size:
+        return ""
+    return _HASHES.get((str(path), stat.st_size, stat.st_mtime_ns), "")
 
 
 def _file_sha256(path: Path) -> str:
@@ -541,12 +585,12 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
     per_file = max(600, (room - used) // len(readable))
     for att in readable:
         text = att.extracted_text
-        parts = documents.split_parts(text)
+        parts = ws.memo(("parts", text), lambda: documents.split_parts(text))
         head = (
             f"── File: {att.filename} ({file_kind(att)}) · {len(parts)} section{'s' if len(parts) != 1 else ''}"
             f" · {len(text):,} characters"
         )
-        matches = [] if whole else documents.search_parts(text, question, limit=4, stop=_STOP)
+        matches = [] if whole else list(ws.memo(("search", text, question), lambda: documents.search_parts(text, question, limit=4, stop=_STOP)))
         block = [head]
         if len(parts) > 1:
             labels = [p.label for p in parts[:12]] + ([f"… {len(parts) - 12} more"] if len(parts) > 12 else [])
@@ -559,7 +603,7 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         # The table rows the question names, and anything worked out from them, so a small model goes to the right
         # cell. A file that fits whole is shown first; one too long to show gets this index whatever it costs,
         # since it points into the parts that are left out.
-        found = None if whole else table_lookup.answer(text, question)
+        found = None if whole else _table_answer(ws, text, question)
         rows = table_lookup.render(found, table_lookup.MAX_CHARS) if found else ""
         if found and found.points and not ws.points:
             ws.points = list(found.points)
@@ -584,7 +628,7 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         else:
             how = "picked by words" if matches else "from the start: no words matched"
             if not whole and size > budget:
-                by_meaning = semantic.rank_sections(ws.store, ws.settings, att, question)
+                by_meaning = ws.memo(("meaning", att.id, text, question), lambda: semantic.rank_sections(ws.store, ws.settings, att, question))
                 if by_meaning:
                     how = "picked by words and meaning" if matches else "picked by meaning"
                     matches = _interleave(matches, [part for label in by_meaning for part in parts if part.label == label])
@@ -631,12 +675,17 @@ def question_points(ws: Workspace, question: str) -> list[tuple[str, str]]:
         return []
     readable = [att for att in primary.attachments if (att.extracted_text or "").strip()]
     for att in named_files(readable, question) or readable:
-        found = table_lookup.answer(att.extracted_text or "", question)
+        found = _table_answer(ws, att.extracted_text or "", question)
         if found and found.points:
             ws.points = list(found.points)
             ws.exact, ws.shown = found.exact, False
             return ws.points
     return []
+
+
+def _table_answer(ws: Workspace, text: str, question: str) -> table_lookup.Answer | None:
+    """``table_lookup.answer`` once a question for each file (it is read, never changed)."""
+    return ws.memo(("answer", text, question), lambda: table_lookup.answer(text, question))
 
 
 def reply_tokens(points: list[tuple[str, str]], usual: int, spare: int = MAX_REPLY_TOKENS) -> int:
@@ -706,6 +755,14 @@ def answer_plan(points: list[tuple[str, str]]) -> str:
 
 
 def _tables_note(text: str) -> tuple[str, str]:
+    return _NOTES.get_or(text, lambda: _work_out_tables_note(text))
+
+
+# By the file's text: the note is the same for every prompt built from it.
+_NOTES = memo.LRU(64)
+
+
+def _work_out_tables_note(text: str) -> tuple[str, str]:
     """For the prompt: how many rows each table has, and whether its printed totals add up as it was read; and
     for the chat's reading steps, a few words on that check.
 
@@ -1015,12 +1072,24 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
                 f"The original {att.filename} isn't saved on this computer, so exact cells can't be read. "
                 "Use read_file: the workbook text lists each cell with its value and formula."
             )
+        books = _books(ws, att, data)
         if name == "read_cells":
-            return documents.read_cells(data, str(args.get("sheet") or ""), str(args.get("cells") or "A1:J40"))
+            return documents.read_cells(data, str(args.get("sheet") or ""), str(args.get("cells") or "A1:J40"), books=books)
         if name == "compare_columns":
-            return documents.compare_columns(data, str(args.get("sheet") or ""), str(args.get("from") or ""), str(args.get("to") or ""))
-        return documents.trace_cell(data, str(args.get("sheet") or ""), str(args.get("cell") or ""))
+            return documents.compare_columns(data, str(args.get("sheet") or ""), str(args.get("from") or ""), str(args.get("to") or ""), books=books)
+        return documents.trace_cell(data, str(args.get("sheet") or ""), str(args.get("cell") or ""), books=books)
     return f"There is no tool called {name}."
+
+
+# Workbooks kept loaded for one question's tool calls: a large one takes a lot of memory loaded.
+MAX_BOOKS = 2
+
+
+def _books(ws: Workspace, att: AttachmentRecord, data: bytes) -> documents.Books:
+    """The workbook loaded for this question's tool calls, by its SHA-256 (the bytes themselves, when it has none)."""
+    held = ws.memo(("books",), lambda: memo.LRU(MAX_BOOKS))
+    key = (att.sha256, len(data)) if att.sha256 else data
+    return held.get_or(key, lambda: documents.Books(data))
 
 
 def _search_mail(ws: Workspace, query: str) -> str:

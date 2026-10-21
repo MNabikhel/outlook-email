@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass, field
 from itertools import permutations
 
+from controller_inbox import memo
+
 # "€1.234,56" is European style: dots group the thousands and a comma marks the decimals.
 _EUROPEAN = r"\d{1,3}(?:\.\d{3})+,\d{1,2}(?!\d)"
 # Under a thousand only the comma shows it, so only beside a euro sign: "€447,15", "447,15 €" (a plain "3,12" is a list).
@@ -103,10 +105,9 @@ class Grounding:
     """Every number in the material the model was given, for quick "is this figure there?" checks."""
 
     def __init__(self, texts: list[str]):
-        values = set()
+        values: set[float] = set()
         for text in texts:
-            for number in numbers_in(text or ""):
-                values.add(number.value)
+            values |= _values_in(text or "")
         self.values = sorted(values)
 
     def has(self, number: Number) -> bool:
@@ -118,6 +119,17 @@ class Grounding:
     def _any(self, low: float, high: float) -> bool:
         index = bisect.bisect_left(self.values, low - 1e-9)
         return index < len(self.values) and self.values[index] <= high + 1e-9
+
+
+# The figures of a long text (a file, what a tool read), by the text: an answer is checked against the same files
+# more than once for a question (the draft, then the answer), and each page of a file again for a citation.
+_VALUES = memo.LRU(256)
+
+
+def _values_in(text: str) -> frozenset[float]:
+    if len(text) < 1_000:
+        return frozenset(number.value for number in numbers_in(text))
+    return _VALUES.get_or(text, lambda: frozenset(number.value for number in numbers_in(text)))
 
 
 def _is_claim(text: str, number: Number) -> bool:

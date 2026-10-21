@@ -375,7 +375,7 @@ def _remove(store: Store, settings: Settings, row: dict) -> bool:
         store.forget_outlook_item(row["entry_id"], conn=conn)
         if not row["owned"]:
             return False  # dropped in by hand: the user's own copy stays
-        if any(other["email_id"] == row["email_id"] for other in store.outlook_items(conn=conn).values()):
+        if store.outlook_follows(row["email_id"], conn=conn):
             return False  # the same message is still in another synced folder
         store.delete_emails([row["email_id"]], conn=conn)
     copy_path(settings, row["email_id"]).unlink(missing_ok=True)

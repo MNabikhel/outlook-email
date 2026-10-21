@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from controller_inbox import tables
+from controller_inbox import memo, tables
 from controller_inbox.documents import MARKER_RE
 
 MAX_ROWS = 6
@@ -277,8 +277,25 @@ def render(found: Answer, limit: int = MAX_CHARS) -> str:
 # Tables ----------------------------------------------------------------------------------------
 
 
+# The tables read from a text, by the text: the chat, the page view and the checks each read the same file's tables
+# several times over for one question or page.
+_TABLES = memo.LRU(48)
+# Longer texts are read each time rather than kept.
+_KEEP_CHARS = 4_000_000
+
+
 def tables_in(text: str) -> list[Table]:
-    """Every run of rows written as ``Label: value | Label: value`` with the same columns, with each row's page."""
+    """Every run of rows written as ``Label: value | Label: value`` with the same columns, with each row's page.
+
+    Kept by the text itself, so the tables (and their rows) are shared by every caller: they are read, never
+    changed, once made."""
+    text = text or ""
+    if len(text) > _KEEP_CHARS:
+        return _tables_in(text)
+    return list(_TABLES.get_or(text, lambda: _tables_in(text)))
+
+
+def _tables_in(text: str) -> list[Table]:
     parsed: list[Row] = []
     # The rows that come after a heading on their page: a list under its own heading is its own table, even
     # with the same columns as the one above ("Outstanding checks - Operating", then "... - Payroll").

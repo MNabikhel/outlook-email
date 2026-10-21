@@ -26,10 +26,10 @@ try:
 except ImportError:
     np = None
 
-from controller_inbox import documents
+from controller_inbox import documents, memo
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
-from controller_inbox.local_llm import _headers
+from controller_inbox.local_llm import _headers, _http
 from controller_inbox.models import AttachmentRecord, EmailRecord
 from controller_inbox.store import Store
 
@@ -70,7 +70,7 @@ def embedding_model(settings: Settings) -> str:
 def _find_model(settings: Settings, base: str) -> str:
     root = base[: -len("/v1")] if base.endswith("/v1") else base
     try:
-        data = httpx.get(root + "/api/v1/models", headers=_headers(settings), timeout=2.0).json()
+        data = _http("get")(root + "/api/v1/models", headers=_headers(settings), timeout=2.0).json()
         models = [m for m in data.get("models", []) if isinstance(m, dict) and "embed" in str(m.get("type", "")).lower()]
         models.sort(key=lambda m: not m.get("loaded_instances"))
         if models and models[0].get("key"):
@@ -78,7 +78,7 @@ def _find_model(settings: Settings, base: str) -> str:
     except (httpx.HTTPError, ValueError, AttributeError, TypeError):
         pass
     try:
-        data = httpx.get(base + "/models", headers=_headers(settings), timeout=2.0).json()
+        data = _http("get")(base + "/models", headers=_headers(settings), timeout=2.0).json()
         ids = [str(m.get("id")) for m in data.get("data", []) if isinstance(m, dict) and "embed" in str(m.get("id", "")).lower()]
         return ids[0] if ids else ""
     except (httpx.HTTPError, ValueError, AttributeError, TypeError):
@@ -93,7 +93,7 @@ def embed(settings: Settings, texts: list[str], *, query: bool = False) -> list[
     if "nomic" in model.lower():
         texts = [("search_query: " if query else "search_document: ") + text for text in texts]
     try:
-        response = httpx.post(
+        response = _http("post")(
             base_url(settings) + "/embeddings",
             json={"model": model, "input": texts},
             headers=_headers(settings),
@@ -113,10 +113,14 @@ def _unit(values) -> array:
     return array("f", (x / norm for x in vector))
 
 
+def _items_head(email: EmailRecord) -> list[tuple[str, str]]:
+    head = f"{email.subject}\nFrom {email.sender_name or email.sender_email}"
+    return [(f"email:{email.id}", f"{head}\n{(email.body_text or '')[:EMBED_CHARS]}")]
+
+
 def _items(email: EmailRecord) -> list[tuple[str, str]]:
     """(key, text) for the email and each section of its files. Files on flagged mail are left out."""
-    head = f"{email.subject}\nFrom {email.sender_name or email.sender_email}"
-    items = [(f"email:{email.id}", f"{head}\n{(email.body_text or '')[:EMBED_CHARS]}")]
+    items = _items_head(email)
     if attachments_locked(email):
         return items
     for att in email.attachments:
@@ -139,6 +143,30 @@ def _file_items(att: AttachmentRecord) -> list[tuple[str, str]]:
 
 def _key(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+# Each file's (key, ``_key`` of its text) pairs, by the file's id, name and a digest of its text: Setup's count of
+# what is indexed goes over every file of the mail on each load, and splitting them into sections is most of it.
+_FILE_KEYS = memo.LRU(12_000)
+
+
+def _file_keys(att: AttachmentRecord) -> list[tuple[str, str]]:
+    """``_file_items`` as (key, ``_key(text)``)."""
+    text = att.extracted_text or ""
+    if not text.strip():
+        return []
+    digest = hashlib.blake2b(text.encode("utf-8", "replace"), digest_size=16).digest()
+    return _FILE_KEYS.get_or((att.id, att.filename, digest), lambda: [(key, _key(piece)) for key, piece in _file_items(att)])
+
+
+def _item_keys(email: EmailRecord) -> list[tuple[str, str]]:
+    """``_items`` as (key, ``_key(text)``)."""
+    out = [(key, _key(text)) for key, text in _items_head(email)]
+    if attachments_locked(email):
+        return out
+    for att in email.attachments:
+        out += _file_keys(att)
+    return out
 
 
 def index_mail(
@@ -207,7 +235,7 @@ def coverage(store: Store, settings: Settings, *, limit: int = 5_000) -> dict[st
         return out
     have = store.embedding_keys(model)
     for email in store.list_emails(order="newest", limit=limit):
-        current = [(key, have.get(key) == _key(text)) for key, text in _items(email)]
+        current = [(key, have.get(key) == text_key) for key, text_key in _item_keys(email)]
         out["emails"] += 1
         out["emails_done"] += all(done for _key_, done in current)
         files = [done for key, done in current if key.startswith("file:")]
@@ -225,14 +253,14 @@ def file_states(store: Store, settings: Settings, email: EmailRecord) -> dict[st
     have = store.embedding_keys(model, email_id=email.id) if model else {}
     states = {}
     for att in email.attachments:
-        items = _file_items(att)
+        items = _file_keys(att)
         if not items:
             states[att.id] = "no_text"
         elif attachments_locked(email):
             states[att.id] = "locked"
         elif not model:
             states[att.id] = "off"
-        elif all(have.get(key) == _key(text) for key, text in items):
+        elif all(have.get(key) == text_key for key, text_key in items):
             states[att.id] = "indexed"
         else:
             prefix = f"file:{att.id}:"
@@ -249,7 +277,7 @@ def rank_sections(store: Store, settings: Settings, att: AttachmentRecord, quest
     model = embedding_model(settings)
     if not model or not question.strip() or _locked(store, att.email_id):
         return []
-    current = {key: _key(text) for key, text in _file_items(att)}
+    current = dict(_file_keys(att))
     rows = [(key, blob) for key, text_key, blob in store.embedding_rows(model, prefix=f"file:{att.id}:") if current.get(key) == text_key]
     if not rows:
         return []

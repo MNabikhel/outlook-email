@@ -269,7 +269,7 @@ def register_workspace(
             },
             "models": model_roles.models_in_use(settings, status=model),
             "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
-            "is_sample": bool(counts["emails"]) and not store.real_mail_count(),
+            "is_sample": store.only_sample(),
             "last_run": format_when(last_run, settings.tz) if last_run else "",
             "tz": settings.tz.key,
             "drop_folder": str(settings.inbox_incoming),
@@ -341,7 +341,8 @@ def register_workspace(
             cost_codes.refresh_if_changed(store, settings)
         filters = dict(importance=importance or None, category=category or None, flag=flag or None, q=q[:200] or None)
         emails = store.list_emails(**filters, limit=limit, offset=offset)
-        items = [mail_card(email, settings.tz, today, done=store.is_done(email.id)) for email in emails]
+        done_ids = store.done_ids() if emails else set()
+        items = [mail_card(email, settings.tz, today, done=email.id in done_ids) for email in emails]
         return {"items": items, "total": store.count_emails(**filters), "title": "Search results" if q else "All mail"}
 
     @api.get("/mail/{email_id}")
@@ -561,7 +562,7 @@ def register_workspace(
         """The page drawn as a picture (a picture file is its page 1)."""
         _email, att, data = page_file(email_id, n)
         try:
-            png = page_view.page_png(settings, data, att.filename, p)
+            png = page_view.page_png(settings, data, att.filename, p, sha256=att.sha256)
         except ValueError:
             raise no_page(p) from None
         except Exception:
@@ -578,8 +579,9 @@ def register_workspace(
         if not 1 <= p <= pages:
             raise no_page(p)
         try:
-            found = page_view.regions(settings, data, att.filename, p)
-            width, height = page_view.png_size(page_view.page_png(settings, data, att.filename, p))
+            # The bytes are the attachment's (``page_file``): its SHA-256 names the page's kept drawings.
+            found = page_view.regions(settings, data, att.filename, p, sha256=att.sha256)
+            width, height = page_view.png_size(page_view.page_png(settings, data, att.filename, p, sha256=att.sha256))
         except ValueError:
             raise no_page(p) from None
         except Exception:
@@ -607,7 +609,7 @@ def register_workspace(
             "vendors": [*(value for fields in known_fields for value in fields.vendor_candidates), email.sender_name or ""],
         }
         try:
-            seen = page_view.found_tables(settings, data, att.filename, p) if boxes else None
+            seen = page_view.found_tables(settings, data, att.filename, p, sha256=att.sha256) if boxes else None
             on_page = page_details.page_tables(boxes, found["source"], att.extracted_text or "", p, model_text, seen)
             on_page = fixes.tables(boxes, on_page, own, learnt)
             details = page_details.key_details(boxes, found["source"], model_text, extracted)
@@ -790,7 +792,8 @@ def register_workspace(
                     **_category(email.category),
                 }
             )
-        return {"items": items, "status": status}
+        # Plain strings and booleans already: sent as they are, without FastAPI encoding every one of thousands of rows.
+        return JSONResponse({"items": items, "status": status})
 
     @api.get("/fraud")
     def fraud_overview():

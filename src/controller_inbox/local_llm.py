@@ -22,6 +22,7 @@ import weakref
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from http.cookiejar import CookieJar
 
 import httpx
 
@@ -47,6 +48,50 @@ REPLY_SHAPE = (
     '"actions":[{"title":"<task>","due":"YYYY-MM-DD or null","priority":"high"}],'
     '"why":"<one sentence>"}'
 )
+
+# httpx's own one-off calls, each of which sets up a client of its own (about 50 ms of SSL setup, and a new
+# connection): the calls here go through one client kept for the app's life instead, with the same timeouts and
+# headers per request. A replaced function (a test's fake server) is called as before.
+_ONE_OFF = {"get": httpx.get, "post": httpx.post, "stream": httpx.stream}
+_shared: httpx.Client | None = None
+_shared_lock = threading.Lock()
+
+
+class _NoCookies(CookieJar):
+    """A cookie jar that keeps none, as a one-off call's client throws its away."""
+
+    def extract_cookies(self, response, request) -> None:
+        pass
+
+    def set_cookie(self, cookie) -> None:
+        pass
+
+
+def _no_cookies() -> CookieJar:
+    return _NoCookies()
+
+
+def shared_client() -> httpx.Client:
+    """The client every model-server call goes through (thread-safe)."""
+    global _shared
+    if _shared is None:
+        with _shared_lock:
+            if _shared is None:
+                # An idle connection is dropped well before LM Studio's own 5-second keep-alive closes it, so a
+                # request never goes out on a connection the server is closing; a failed connect is tried once more.
+                _shared = httpx.Client(
+                    cookies=_no_cookies(),
+                    limits=httpx.Limits(keepalive_expiry=2.0),
+                    transport=httpx.HTTPTransport(retries=1),
+                )
+    return _shared
+
+
+def _http(name: str):
+    """``httpx.get``/``post``/``stream`` through the shared client."""
+    call = getattr(httpx, name)
+    return call if call is not _ONE_OFF[name] else getattr(shared_client(), name)
+
 
 _STATUS_TTL_SECONDS = 30.0
 # How long a server that answered stays answering when a check then times out: it is busy (loading a model, reading
@@ -127,7 +172,7 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         return ModelStatus(**{**cached[1].__dict__, "mode": mode})
     status = ModelStatus(mode=mode, reachable=False, base_url=base)
     try:
-        response = httpx.get(base + "/models", headers=_headers(settings), timeout=timeout)
+        response = _http("get")(base + "/models", headers=_headers(settings), timeout=timeout)
         response.raise_for_status()
         payload = response.json()
         listed = payload.get("data", []) if isinstance(payload, dict) else []
@@ -221,7 +266,7 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
     busy = False
     for path in ("/api/v1/models", "/api/v0/models"):
         try:
-            response = httpx.get(root + path, headers=_headers(settings), timeout=timeout)
+            response = _http("get")(root + path, headers=_headers(settings), timeout=timeout)
             data = response.json() if response.status_code == 200 else None
         except httpx.TimeoutException:
             busy = True
@@ -289,7 +334,7 @@ def _llama_cpp_props(settings: Settings, base: str, timeout: float) -> dict:
     ``modalities``) and the context each request gets (``default_generation_settings.n_ctx``). {} from other servers."""
     root = base[: -len("/v1")] if base.endswith("/v1") else base
     try:
-        response = httpx.get(root + "/props", headers=_headers(settings), timeout=timeout)
+        response = _http("get")(root + "/props", headers=_headers(settings), timeout=timeout)
         data = response.json() if response.status_code == 200 else None
     except (httpx.HTTPError, ValueError):
         return {}
@@ -815,7 +860,7 @@ def complete_text(
             payload["temperature"] = temperature
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(httpx.post, url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
+        response = _post_chat(_http("post"), url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
         _raise_for(response)
         try:
             data = response.json()
@@ -907,7 +952,7 @@ def _stream_once(
     # reading a long prompt isn't taken for a model that stopped.
     timeout = httpx.Timeout(max(settings.llm_timeout, CHAT_TIMEOUT, wait or 0.0), connect=5.0)
     without_probs = False
-    with _using(str(payload.get("model"))), httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
+    with _using(str(payload.get("model"))), _http("stream")("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
         if response.status_code >= 400:
             response.read()
             if _OVERFLOW_RE.search(response.text[:600]):
@@ -1104,7 +1149,7 @@ def _is_loaded(settings: Settings, key: str) -> bool:
 def _gone(settings: Settings, root: str) -> bool:
     """LM Studio refuses connections (it stopped). One too busy loading to answer in time is not gone."""
     try:
-        httpx.get(root + "/api/v1/models", headers=_headers(settings), timeout=httpx.Timeout(10.0, connect=5.0))
+        _http("get")(root + "/api/v1/models", headers=_headers(settings), timeout=httpx.Timeout(10.0, connect=5.0))
     except (httpx.ConnectError, httpx.ConnectTimeout):
         return True
     except httpx.HTTPError:
@@ -1127,7 +1172,7 @@ def _load(settings: Settings, root: str, key: str, context: int, timeout: httpx.
     _no_load_pending(settings)
     body = {"model": key, **({"context_length": context} if context else {})}
     try:
-        httpx.post(root + "/api/v1/models/load", json=body, headers=_headers(settings), timeout=timeout).raise_for_status()
+        _http("post")(root + "/api/v1/models/load", json=body, headers=_headers(settings), timeout=timeout).raise_for_status()
         return
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
         raise  # the request never reached LM Studio: nothing is loading
@@ -1225,7 +1270,7 @@ def _reload_with_context(settings: Settings) -> str:
     root = status.base_url[: -len("/v1")] if status.base_url.endswith("/v1") else status.base_url
     timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
     try:
-        httpx.post(root + "/api/v1/models/unload", json={"instance_id": status.model}, headers=_headers(settings), timeout=timeout).raise_for_status()
+        _http("post")(root + "/api/v1/models/unload", json={"instance_id": status.model}, headers=_headers(settings), timeout=timeout).raise_for_status()
     except httpx.HTTPError as exc:
         return f"Couldn't reload {status.key} with a longer context ({_short_error(exc)})."
     errors = []
@@ -1290,7 +1335,7 @@ def load_for_reading(settings: Settings, model: str, context: int) -> str:
         _reader_failed.pop(model, None)
         if instance:  # the shorter one, now that the longer one is loaded
             try:
-                httpx.post(root + "/api/v1/models/unload", json={"instance_id": instance}, headers=_headers(settings), timeout=timeout)
+                _http("post")(root + "/api/v1/models/unload", json={"instance_id": instance}, headers=_headers(settings), timeout=timeout)
             except httpx.HTTPError:
                 pass
         return ""
@@ -1372,7 +1417,7 @@ def use_chat_model(settings: Settings, key: str) -> str:
         try:
             for instance, model, size in others:
                 try:
-                    httpx.post(
+                    _http("post")(
                         root + "/api/v1/models/unload", json={"instance_id": instance}, headers=_headers(settings), timeout=timeout
                     ).raise_for_status()
                 except httpx.HTTPError as exc:
@@ -1410,7 +1455,7 @@ def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict],
         payload["tools"] = tools
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(httpx.post, url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
+        response = _post_chat(_http("post"), url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
         text = response.text[:600]
         if response.status_code in _RETRYABLE and re.search(r"\btools?\b|function", text, re.I) and not _OVERFLOW_RE.search(text):
             # This question goes on without tools. The model is only remembered as having none when the server

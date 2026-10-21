@@ -25,7 +25,7 @@ from urllib.parse import quote
 
 import httpx
 
-from controller_inbox import agent, answer_check, chats, semantic, table_lookup, vision
+from controller_inbox import agent, answer_check, chats, memo, semantic, table_lookup, vision
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
@@ -331,12 +331,17 @@ _DAYS = "monday tuesday wednesday thursday friday saturday sunday".split()
 
 def _found_in(email: EmailRecord, terms: list[str]) -> list[str]:
     """The terms in this email or its files; a month also as a sheet heads it ("August" as "Aug" or "Aug-26")."""
-    text = _spaced(" ".join([email.subject, email.body_text or ""] + [att.extracted_text or "" for att in email.attachments]))
+    pieces = (email.subject, email.body_text or "", *(att.extracted_text or "" for att in email.attachments))
+    text = _FOUND_TEXT.get_or(pieces, lambda: _spaced(" ".join(pieces)))
     return [
         term
         for term in terms
         if _spaced(term) in text or (term in _MONTHS and re.search(rf"\b{term[:3]}t?\b", text))
     ]
+
+
+# An email's text as ``_found_in`` looks in it, by the text itself: asked several times a question.
+_FOUND_TEXT = memo.LRU(16)
 
 
 def _spaced(text: str) -> str:
