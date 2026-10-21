@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Protocol
 
-from controller_inbox.actions import extract_actions
+from controller_inbox.actions import extract_actions, keep_task_status
 from controller_inbox.classify import Classification, classify_document, classify_email, is_data_file, outlook_categories
 from controller_inbox.config import Settings
 from controller_inbox.documents import MAX_TEXT
@@ -17,7 +17,7 @@ from controller_inbox.extract import (
     redact_financial_secrets,
     sha256_bytes,
 )
-from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, DocumentType, EmailRecord, ExtractedFields, RawMessage
+from controller_inbox.models import AttachmentRecord, DocumentType, EmailRecord, ExtractedFields, RawMessage
 from controller_inbox.fraud import assess, domain_of, dropped_file_body, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
@@ -166,7 +166,7 @@ def process_message(
         received_on=anchor,
     )
     if existing is not None:
-        actions = _keep_task_status(actions, existing.actions)
+        actions = keep_task_status(actions, existing.actions)
 
     writeback_status = "skipped"
     do_write = settings.writeback if writeback is None else writeback
@@ -208,12 +208,37 @@ def process_message(
     from controller_inbox.reading import assign_script_draft
 
     assign_script_draft(record)
-    store.upsert_email(record)
-    save_check(store, record, check, now=now)
+    # Reading the files takes a while (a scan is read with OCR), and meanwhile the user may give a fraud verdict on
+    # the email or snooze or finish its tasks. That is read again with the write lock held, so it is kept rather than
+    # overwritten from the copy read at the start. (Done is never written here: upsert_email leaves it alone.)
+    with store.transaction() as conn:
+        latest = store.get_email(raw.id, conn=conn)
+        verdict_changed = latest is not None and _keep_user_state(record, latest)
+        store.upsert_email(record, conn=conn)
     from controller_inbox import cost_codes
 
-    cost_codes.refresh(store, settings, email_ids=[record.id])
+    try:
+        if verdict_changed:
+            # Checked again under the verdict given meanwhile, as it would have been from the start.
+            reassess_email(store, settings, store.get_email(record.id) or record, now=now)
+        else:
+            save_check(store, record, check, now=now)
+        cost_codes.refresh(store, settings, email_ids=[record.id])
+    except Exception:
+        # The email is stored and on the board: a fraud check or cost code that couldn't be saved is logged, and the
+        # message isn't reported as one that couldn't be read.
+        log.warning("Stored %s, but couldn't finish filing it", record.id, exc_info=True)
     return store.get_email(record.id) or record
+
+
+def _keep_user_state(record: EmailRecord, latest: EmailRecord) -> bool:
+    """Give ``record`` what the user did to the stored email ``latest``: its fraud verdict and what they did with
+    each task. Returns whether the verdict differs from the one ``record`` was read with."""
+    verdicts = [flag for flag in latest.flags if flag in VERDICT_FLAGS]
+    changed = verdicts != [flag for flag in record.flags if flag in VERDICT_FLAGS]
+    record.flags = [flag for flag in record.flags if flag not in VERDICT_FLAGS] + verdicts
+    record.actions = keep_task_status(record.actions, latest.actions)
+    return changed
 
 
 def _read_as_taught(store: Store, sender: str, record: AttachmentRecord, anchor) -> None:
@@ -243,31 +268,6 @@ def _as_stored(raw: RawMessage, stored: EmailRecord) -> RawMessage:
         received = received if received.tzinfo else received.replace(tzinfo=timezone.utc)
     subject = stored.subject if "subject" in raw.from_file and stored.subject else raw.subject
     return replace(raw, subject=subject, received_at=received)
-
-
-def _keep_task_status(fresh: list[ActionItem], stored: list[ActionItem]) -> list[ActionItem]:
-    """When an email is read again, a task it still asks for keeps its id and what the user did with it:
-    a snoozed task stays snoozed instead of coming back as a new open one. As in ``rescore_stored``, a task
-    the user snoozed or finished is kept even when the new reading doesn't ask for it. A task's title carries the
-    invoice number and amount, so a file that arrives later can retitle it: as in ``teach._same_tasks``, the one
-    task of a kind left over is the same task as the one new task of that kind."""
-    held = {item.title.strip().lower(): item for item in stored}
-    pairs: dict[int, ActionItem] = {}
-    for n, item in enumerate(fresh):
-        old = held.pop(item.title.strip().lower(), None)
-        if old is not None:
-            pairs[n] = old
-    for n, item in enumerate(fresh):
-        if n in pairs:
-            continue
-        same = [old for old in held.values() if old.source == item.source]
-        if len(same) == 1 and sum(1 for m, other in enumerate(fresh) if m not in pairs and other.source == item.source) == 1:
-            pairs[n] = held.pop(same[0].title.strip().lower())
-    kept = [
-        replace(item, id=pairs[n].id, status=pairs[n].status, created_at=pairs[n].created_at) if n in pairs else item
-        for n, item in enumerate(fresh)
-    ]
-    return kept + [item for item in held.values() if item.status != ActionStatus.OPEN]
 
 
 def sent_date(received_at, settings: Settings, *, fallback):
@@ -477,16 +477,9 @@ def _filed_from_a_file(store: Store, raw: RawMessage) -> bool:
     """Whether this message is already filed from the drop folder or classic Outlook (the same Message-ID, and
     the same subject, sender and time, as the drop folder tells a reused Message-ID apart): it isn't filed twice,
     with a second set of tasks and its own invoice flagged as a duplicate of itself."""
-    from controller_inbox.folder_mail import _another_message
+    from controller_inbox.folder_mail import stored_from
 
-    for source in ("folder", "outlook"):
-        if source == raw.source:
-            continue
-        found = store.email_with_message_id(raw.internet_message_id, source)
-        stored = store.get_email(found) if found else None
-        if stored is not None and not _another_message(stored, raw):
-            return True
-    return False
+    return stored_from(store, raw, ("folder", "outlook")) is not None
 
 
 def _utc(when: datetime) -> datetime:
@@ -554,7 +547,7 @@ def rescore_stored(
     """Refile a stored email after its fraud level changed (a verdict, a trusted domain, a report).
 
     The script draft is rebuilt from the stored text, so an overnight reading made
-    under the old level is read again. Tasks already done or dismissed are kept.
+    under the old level is read again. Tasks keep what the user did with them (``keep_task_status``).
     As in ``process_message``, urgency is judged against today; the stored fields were
     already read against the day the mail was sent.
     """
@@ -593,10 +586,6 @@ def rescore_stored(
     email.importance_score = classified.importance_score
     email.importance_reasons = classified.importance_reasons
     email.flags = list(dict.fromkeys(classified.flags + _bank_caution(check) + kept))
-    def key(item: ActionItem) -> str:
-        return item.title.strip().lower()
-
-    old = {key(item): item for item in email.actions}
     fresh = extract_actions(
         email_id=email.id,
         subject=email.subject,
@@ -606,13 +595,13 @@ def rescore_stored(
         fields=email.extracted,
         flags=email.flags,
         as_of=as_of,
+        now=now,
         sender=email.sender_name or email.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in email.attachments),
         received_on=sent_date(email.received_at, settings, fallback=as_of),
     )
-    fresh_keys = {key(item) for item in fresh}
-    finished = [item for item in email.actions if item.status != ActionStatus.OPEN and key(item) not in fresh_keys]
-    email.actions = [old.get(key(item), item) for item in fresh] + finished
+    # As when the email is read again: the new reading's tasks, keeping what the user did with each.
+    email.actions = keep_task_status(fresh, email.actions)
     from controller_inbox.reading import assign_script_draft
 
     assign_script_draft(email)

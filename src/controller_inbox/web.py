@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import anyio
+from jinja2 import pass_context
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import (
     FileResponse,
@@ -62,7 +63,15 @@ templates = Jinja2Templates(directory=str(PACKAGE_DIR / "templates"))
 templates.env.globals["static_version"] = hashlib.sha256(
     b"".join((PACKAGE_DIR / "static" / name).read_bytes() for name in ("app.css", "app.js"))
 ).hexdigest()[:10]
-templates.env.filters["shortdt"] = lambda value: format_when(value or "", templates.env.globals.get("display_tz"))
+
+
+@pass_context
+def _shortdt(context, value) -> str:
+    """A stamp in the zone of the app rendering this page, which ``ctx`` passes as ``display_tz``."""
+    return format_when(value or "", context.get("display_tz"))
+
+
+templates.env.filters["shortdt"] = _shortdt
 templates.env.globals["coding_choices"] = cost_codes.choices
 templates.env.filters["money"] = lambda value: "" if value is None else f"${value:,.2f}"
 templates.env.filters["label_doc"] = lambda value: DOCUMENT_LABELS.get(
@@ -405,10 +414,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         counts = store.counts()
         close = month_end(as_of)
         profile = active_profile(settings, store)
-        templates.env.globals["display_tz"] = settings.tz
         base = {
             "request": request,
             "settings": settings,
+            "display_tz": settings.tz,
             "counts": counts,
             "today": as_of.isoformat(),
             "today_long": f"{as_of.strftime('%A')}, {as_of.strftime('%B')} {as_of.day}, {as_of.year}",

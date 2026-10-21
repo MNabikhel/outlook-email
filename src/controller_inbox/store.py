@@ -294,6 +294,28 @@ SETTING_KEYS = frozenset(
 
 BUSY_TIMEOUT_SECONDS = 30.0
 
+# Every table with rows about one email, and the column that names it: what was read from its files by
+# attachment_id (removed before the attachments themselves), the rest by email_id. Removing mail goes through this
+# list, so a table added here is cleared by clear_mail, clear_sample and delete_emails alike.
+EMAIL_ROWS = (
+    ("file_summaries", "attachment_id"),
+    ("page_readings", "attachment_id"),
+    ("page_failures", "attachment_id"),
+    ("page_fixes", "attachment_id"),
+    ("embeddings", "email_id"),
+    ("findings", "email_id"),
+    ("action_items", "email_id"),
+    ("fraud_checks", "email_id"),
+    ("cost_codings", "email_id"),
+    ("outlook_items", "email_id"),
+    ("corrections", "email_id"),
+    ("fraud_log", "email_id"),
+    ("attachments", "email_id"),
+)
+# Kept when an email deleted in Outlook is removed: what corrections taught stays learned, and the fraud log
+# stays the record of what was flagged.
+HISTORY_TABLES = frozenset({"corrections", "fraud_log"})
+
 
 def _dumps(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
@@ -346,24 +368,37 @@ class Store:
         finally:
             conn.close()
 
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """One connection for writes that land together or not at all. The write lock is taken first (BEGIN
+        IMMEDIATE), so what is read inside is still current when it is written. Store methods that take ``conn``
+        run inside it."""
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+            except BaseException:
+                conn.rollback()
+                raise
+
+    @contextmanager
+    def _use(self, conn: sqlite3.Connection | None) -> Iterator[sqlite3.Connection]:
+        """``conn`` when called inside ``transaction``, else a connection of its own."""
+        if conn is not None:
+            yield conn
+        else:
+            with self.connect() as own:
+                yield own
+
     def clear_mail(self) -> int:
         """Remove every email and what was worked out from it, for loading the sample mailbox.
 
         Kept: Setup choices (time zone, profile, context size), the fraud trust list, and Ask CloseDesk
         conversations with their files. Mail bookkeeping (sync cursors, last run) starts over.
         """
-        mail = "SELECT id FROM emails"
         with self.connect() as conn:
             removed = conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]
-            conn.execute(f"DELETE FROM file_summaries WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
-            conn.execute(f"DELETE FROM page_readings WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
-            conn.execute(f"DELETE FROM page_failures WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
-            conn.execute(f"DELETE FROM page_fixes WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({mail}))")
-            conn.execute(f"DELETE FROM embeddings WHERE email_id IN ({mail})")
-            conn.execute(f"DELETE FROM fraud_log WHERE email_id IN ({mail})")
-            conn.execute(f"DELETE FROM findings WHERE email_id IN ({mail})")
-            for table in ("attachments", "action_items", "corrections", "fraud_checks", "cost_codings"):
-                conn.execute(f"DELETE FROM {table} WHERE email_id IN ({mail})")
+            _delete_email_rows(conn, "SELECT id FROM emails")
             conn.execute("DELETE FROM emails")
             conn.execute("DELETE FROM digests")
             conn.execute("DELETE FROM outlook_items")
@@ -371,8 +406,8 @@ class Store:
             conn.execute(f"DELETE FROM sync_state WHERE key NOT IN ({keep})", sorted(SETTING_KEYS))
         return removed
 
-    def upsert_email(self, email: EmailRecord) -> None:
-        with self.connect() as conn:
+    def upsert_email(self, email: EmailRecord, *, conn: sqlite3.Connection | None = None) -> None:
+        with self._use(conn) as conn:
             conn.execute(
                 """
                 INSERT INTO emails (
@@ -502,8 +537,8 @@ class Store:
                     ),
                 )
 
-    def get_email(self, email_id: str) -> EmailRecord | None:
-        with self.connect() as conn:
+    def get_email(self, email_id: str, *, conn: sqlite3.Connection | None = None) -> EmailRecord | None:
+        with self._use(conn) as conn:
             row = conn.execute("SELECT * FROM emails WHERE id = ?", (email_id,)).fetchone()
             if not row:
                 return None
@@ -1012,47 +1047,30 @@ class Store:
             removed = conn.execute("SELECT COUNT(*) AS n FROM emails WHERE source = 'demo'").fetchone()["n"]
             if not removed:
                 return 0
-            conn.execute(
-                f"DELETE FROM file_summaries WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({sample}))"
-            )
-            conn.execute(f"DELETE FROM embeddings WHERE email_id IN ({sample})")
-            conn.execute(f"DELETE FROM fraud_log WHERE email_id IN ({sample})")
-            conn.execute(f"DELETE FROM page_readings WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({sample}))")
-            conn.execute(f"DELETE FROM page_failures WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({sample}))")
-            conn.execute(f"DELETE FROM page_fixes WHERE attachment_id IN (SELECT id FROM attachments WHERE email_id IN ({sample}))")
-            conn.execute(f"DELETE FROM attachments WHERE email_id IN ({sample})")
-            conn.execute(f"DELETE FROM action_items WHERE email_id IN ({sample})")
-            conn.execute(f"DELETE FROM corrections WHERE email_id IN ({sample})")
-            conn.execute(f"DELETE FROM fraud_checks WHERE email_id IN ({sample})")
-            conn.execute(f"DELETE FROM findings WHERE email_id IN ({sample})")
-            conn.execute(f"DELETE FROM cost_codings WHERE email_id IN ({sample})")
+            _delete_email_rows(conn, sample)
             conn.execute("DELETE FROM emails WHERE source = 'demo'")
             if not conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]:
                 conn.execute("DELETE FROM digests")
         return removed
 
-    def delete_emails(self, email_ids: list[str]) -> int:
+    def delete_emails(self, email_ids: list[str], *, conn: sqlite3.Connection | None = None) -> int:
         """Remove these emails and what was worked out from them (an email deleted in Outlook). Kept: corrections
-        (what they taught stays learned) and the fraud log (the record of what was flagged)."""
+        (what they taught stays learned) and the fraud log (the record of what was flagged), ``HISTORY_TABLES``."""
         ids = [str(email_id) for email_id in email_ids if email_id]
         if not ids:
             return 0
         marks = ", ".join("?" for _ in ids)
-        files = f"SELECT id FROM attachments WHERE email_id IN ({marks})"
-        with self.connect() as conn:
-            for table in ("file_summaries", "page_readings", "page_failures", "page_fixes"):
-                conn.execute(f"DELETE FROM {table} WHERE attachment_id IN ({files})", ids)
-            for table in ("embeddings", "findings", "attachments", "action_items", "fraud_checks", "cost_codings", "outlook_items"):
-                conn.execute(f"DELETE FROM {table} WHERE email_id IN ({marks})", ids)
+        with self._use(conn) as conn:
+            _delete_email_rows(conn, marks, ids, keep=HISTORY_TABLES)
             return conn.execute(f"DELETE FROM emails WHERE id IN ({marks})", ids).rowcount
 
     def set_read(self, email_id: str, is_read: bool) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE emails SET is_read = ? WHERE id = ?", (int(is_read), email_id))
 
-    def outlook_items(self) -> dict[str, dict]:
+    def outlook_items(self, *, conn: sqlite3.Connection | None = None) -> dict[str, dict]:
         """Every message copied from Outlook, by Outlook's id for it."""
-        with self.connect() as conn:
+        with self._use(conn) as conn:
             rows = conn.execute("SELECT * FROM outlook_items").fetchall()
         return {row["entry_id"]: {key: row[key] for key in row.keys()} for row in rows}
 
@@ -1074,8 +1092,8 @@ class Store:
         with self.connect() as conn:
             conn.execute("UPDATE outlook_items SET owned = 0 WHERE email_id = ?", (email_id,))
 
-    def forget_outlook_item(self, entry_id: str) -> None:
-        with self.connect() as conn:
+    def forget_outlook_item(self, entry_id: str, *, conn: sqlite3.Connection | None = None) -> None:
+        with self._use(conn) as conn:
             conn.execute("DELETE FROM outlook_items WHERE entry_id = ?", (entry_id,))
 
     def outlook_folder_of(self, email_id: str) -> str:
@@ -1750,6 +1768,15 @@ class Store:
             if address.rsplit("@", 1)[-1] in domains:
                 out[(row["sender_name"] or "").strip().lower()] = address
         return out
+
+
+def _delete_email_rows(conn: sqlite3.Connection, emails: str, params: list | tuple = (), *, keep=frozenset()) -> None:
+    """Delete every ``EMAIL_ROWS`` row about the emails ``emails`` names (a SELECT of ids, or "?" marks for
+    ``params``), except the tables in ``keep``."""
+    files = f"SELECT id FROM attachments WHERE email_id IN ({emails})"
+    for table, key in EMAIL_ROWS:
+        if table not in keep:
+            conn.execute(f"DELETE FROM {table} WHERE {key} IN ({files if key == 'attachment_id' else emails})", params)
 
 
 def _coding_from_row(row: sqlite3.Row) -> dict[str, Any]:

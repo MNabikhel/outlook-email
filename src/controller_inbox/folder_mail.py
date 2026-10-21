@@ -72,18 +72,7 @@ def ingest_folder(
         cleared = 0
         try:
             raw = _read_batch(path, sidecars)
-            existing = store.get_email(raw.id)
-            if existing is not None and raw.internet_message_id and _another_message(existing, raw):
-                # Some scanners and mail tools give every message the same Message-ID. A stored email with
-                # another subject, sender or date is a different message, so this one gets an id from those
-                # too, which a copy of it saved again later shares.
-                # What the message doesn't say itself (a subject or date taken from its file) is left out of it.
-                subject = "" if "subject" in raw.from_file else raw.subject
-                sent = "" if "sent" in raw.from_file else raw.received_at.astimezone(timezone.utc).isoformat()
-                raw.id = _stable_id("\n".join([raw.internet_message_id, subject, raw.sender_email, sent]))
-                existing = store.get_email(raw.id)
-            if existing is None and path.suffix.lower() in MESSAGE_SUFFIXES:
-                existing = _stored_elsewhere(store, raw)
+            existing = find_existing(store, raw)
             if existing is not None:
                 # Another copy of a stored message: only files it doesn't hold yet are read and added.
                 raw.attachments = _new_files(settings, raw, existing)
@@ -95,9 +84,7 @@ def ingest_folder(
             # back the tasks the user snoozed, and a copy without a subject or date would rename and redate it.
             if not raw.attachments and (raw.id in seen or existing is not None):
                 report["already_read"] += 1
-                archived = _archive(settings, owned)
-                if existing is not None and not existing.source_path and archived and archived[0]:
-                    store.set_source_path(raw.id, str(archived[0]))
+                _file_away(store, settings, path, owned, raw.id if existing is not None and not existing.source_path else "")
                 continue
             if raw.id in seen:
                 records = [item for item in records if item.id != raw.id]
@@ -111,26 +98,29 @@ def ingest_folder(
             # The files are saved first: an email is only stored once everything that came with it is.
             _write_extracted(settings, raw)
             record = process_message(raw, store, settings, now=now)
-            archived = _archive(settings, owned)
-            if archived and archived[0]:
-                store.set_source_path(record.id, str(archived[0]))
-                record.source_path = str(archived[0])
-            records.append(record)
-            if existing is None:
-                report["read"] += 1
-            else:
-                report["already_read"] += 1
         except PermissionError:
             # Windows: another program (Outlook, Explorer's copy) still holds the file open.
             log.info("%s is in use; it will be read on the next run", path)
             report["waiting"].append(path.name)
             if cleared:
                 sample_checked = _restore_sample(store, settings, report, now)
+            continue
         except Exception as exc:
+            log.warning("Couldn't read %s", path.name, exc_info=True)
             report["failed"].append({"file": path.name, "error": str(exc)[:300]})
             _quarantine(settings, owned, exc)
             if cleared:
                 sample_checked = _restore_sample(store, settings, report, now)
+            continue
+        # Stored, so on the board: what goes wrong from here is logged, and the file isn't reported unreadable.
+        archived = _file_away(store, settings, path, owned, record.id)
+        if archived:
+            record.source_path = str(archived)
+        records.append(record)
+        if existing is None:
+            report["read"] += 1
+        else:
+            report["already_read"] += 1
     if records:
         stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
         # Not ``last_sync_at``: that is the Graph cursor, and a folder import must not move it.
@@ -763,14 +753,50 @@ def content_id(raw: RawMessage) -> str:
     return "mail-" + hashlib.sha256(f"outlook:{said}".encode()).hexdigest()[:20]
 
 
+def find_existing(store: Store, raw: RawMessage):
+    """The stored email this message already is, however it was filed: under its own id, under the id a reused
+    Message-ID gives it (``alternative_id``), or from another source (``_stored_elsewhere``). ``raw`` takes the id
+    it is filed under. None when it is new. The drop folder and the Outlook sync both file mail through this."""
+    existing = store.get_email(raw.id)
+    if existing is not None and raw.internet_message_id and _another_message(existing, raw):
+        # Some scanners and mail tools give every message the same Message-ID. A stored email with another subject,
+        # sender or date is a different message, so this one gets an id from those too, which a copy of it saved
+        # again later shares.
+        raw.id = alternative_id(raw)
+        existing = store.get_email(raw.id)
+    if existing is None:
+        existing = _stored_elsewhere(store, raw)
+    return existing
+
+
+def alternative_id(raw: RawMessage) -> str:
+    """The id of a message whose Message-ID another message already has: from its Message-ID, subject, sender and
+    sent time. What the message doesn't say itself (a subject or date taken from its file) is left out of it."""
+    subject = "" if "subject" in raw.from_file else raw.subject
+    sent = "" if "sent" in raw.from_file else raw.received_at.astimezone(timezone.utc).isoformat()
+    return _stable_id("\n".join([raw.internet_message_id, subject, raw.sender_email, sent]))
+
+
+def stored_from(store: Store, raw: RawMessage, sources: tuple[str, ...]):
+    """The stored email from one of ``sources`` (other than the message's own) that has this message's Message-ID
+    and is this message, not another reusing the Message-ID. None when there is none."""
+    for source in sources:
+        if source == raw.source:
+            continue
+        found = store.email_with_message_id(raw.internet_message_id, source)
+        stored = store.get_email(found) if found else None
+        if stored is not None and not _another_message(stored, raw):
+            return stored
+    return None
+
+
 def _stored_elsewhere(store: Store, raw: RawMessage):
     """The stored email this dropped message already is, when it came in another way: from Microsoft 365 (same
     Message-ID, under Microsoft's id) or synced from classic Outlook without a Message-ID (named by what it says).
     ``raw`` takes that email's id, so the copy adds only its new files. None when it is new."""
     if raw.internet_message_id:
-        found = store.email_with_message_id(raw.internet_message_id, "graph")
-        stored = store.get_email(found) if found else None
-        if stored is None or _another_message(stored, raw):
+        stored = stored_from(store, raw, ("graph",))
+        if stored is None:
             return None
         # Still the Microsoft 365 email: the next sync reads it under that id, and writes its categories back.
         raw.source = "graph"
@@ -1055,6 +1081,20 @@ def _quarantine(settings: Settings, paths: list[Path], exc: Exception) -> None:
             )
     except OSError:
         log.warning("Couldn't move %s to the failed folder", paths[0] if paths else dest_root, exc_info=True)
+
+
+def _file_away(store: Store, settings: Settings, path: Path, owned: list[Path], email_id: str) -> Path | None:
+    """Archive a read message's files, noting where it went on ``email_id`` (when given). Returns where it went.
+    Its email is on the board by now, so a failure here is logged rather than reported as an unreadable file."""
+    try:
+        archived = _archive(settings, owned)
+        if archived and archived[0]:
+            if email_id:
+                store.set_source_path(email_id, str(archived[0]))
+            return archived[0]
+    except Exception:
+        log.warning("Read %s, but couldn't move it to the processed folder", path.name, exc_info=True)
+    return None
 
 
 def _archive(settings: Settings, paths: list[Path]) -> list[Path | None]:

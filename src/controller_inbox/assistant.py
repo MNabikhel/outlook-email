@@ -1364,7 +1364,10 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         state["text"] += added
         yield {"type": "delta", "text": added}
         return
-    file_text = "\n".join(att.extracted_text or "" for email in ws.sources for att in email.attachments)
+    # Only the files that may be read: a fraud-held email's are not, as in _read_material.
+    file_text = "\n".join(
+        att.extracted_text or "" for email in ws.sources if not agent.attachments_locked(email) for att in email.attachments
+    )
     kept = _keep_stated_figures(state["text"][before:], draft, file_text)
     if kept != state["text"][before:]:
         state["text"] = state["text"][:before] + kept

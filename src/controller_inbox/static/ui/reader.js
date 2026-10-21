@@ -401,12 +401,12 @@ function correction(d, ctx) {
 
 async function openOriginal(d) {
   try {
-    const response = await fetch(`${mailPath(d.id)}/open`, { method: "POST", headers: { "X-CloseDesk": "1" } });
-    const data = await response.json();
-    if (!response.ok) return toast(data.detail || data.message || "CloseDesk couldn't open it.", { tone: "error" });
+    const data = await postJSON(`${mailPath(d.id)}/open`);
     toast(data.message || "Opening…");
     if (!data.ok && data.download) location.href = `${mailPath(d.id)}/original`;
   } catch (error) {
+    // The server answered with a refusal (it carries a status): say so. No answer at all: download the copy.
+    if (error.status) return toast(error.message, { tone: "error" });
     location.href = `${mailPath(d.id)}/original`;
   }
 }

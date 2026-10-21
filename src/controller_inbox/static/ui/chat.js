@@ -209,7 +209,7 @@ export function createChat({ root, onToggle, visionRead }) {
       stepsEl(turn),
       answer,
       turn.checks && turn.checks.length ? h("ul", { class: "msg-check" }, turn.checks.map((item) => h("li", null, icon("ok", 13), h("span", null, item)))) : null,
-      turn.context ? h("p", { class: "msg-context" }, turn.context, " ", h("a", { href: "/settings" }, "Setup")) : null,
+      turn.context ? h("p", { class: "msg-context" }, turn.context, " ", h("a", { href: "/app/settings", dataset: { nav: "" } }, "Settings")) : null,
       visionEl(turn),
       cited.length
         ? h(
