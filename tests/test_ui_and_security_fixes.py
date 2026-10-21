@@ -16,8 +16,6 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
 
 from controller_inbox import cost_codes, web
 from controller_inbox.folder_mail import ingest_folder
@@ -28,10 +26,49 @@ PAGE = {"X-CloseDesk": "1"}
 SENT = datetime(2026, 10, 19, 13, 0, tzinfo=timezone.utc)
 
 
+class _Canvas:
+    """Text placed on a letter-size page, written as a PDF (the few reportlab canvas calls these tests use)."""
+
+    def __init__(self, out: io.BytesIO):
+        self.out, self.font, self.ops = out, ("F1", 12), []
+
+    def setFont(self, name: str, size: float) -> None:
+        self.font = ("F2" if name.endswith("Bold") else "F1", size)
+
+    def drawString(self, x: float, y: float, text: str) -> None:
+        escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        self.ops.append(f"BT /{self.font[0]} {self.font[1]} Tf {x} {y} Td ({escaped}) Tj ET")
+
+    def showPage(self) -> None:
+        pass
+
+    def save(self) -> None:
+        stream = "\n".join(self.ops).encode("latin-1")
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+            b"/Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> >>",
+            b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
+        ]
+        pdf = bytearray(b"%PDF-1.4\n")
+        offsets = []
+        for number, body in enumerate(objects, 1):
+            offsets.append(len(pdf))
+            pdf += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+        xref = len(pdf)
+        pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+        pdf += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+        pdf += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+        self.out.write(bytes(pdf))
+
+
 def _bolt_invoice(number: str, amount: str) -> bytes:
     """A letterhead, a block of details on the right, a parts table and "Amount Due" with no currency mark."""
     out = io.BytesIO()
-    c = canvas.Canvas(out, pagesize=letter)
+    c = _Canvas(out)
     c.setFont("Helvetica-Bold", 20)
     c.drawString(72, 720, "Bolt Fasteners Inc")
     c.setFont("Helvetica", 10)
@@ -74,7 +111,7 @@ def _subledger() -> bytes:
 
 def _simple_pdf(lines: list[str]) -> bytes:
     out = io.BytesIO()
-    c = canvas.Canvas(out, pagesize=letter)
+    c = _Canvas(out)
     c.setFont("Helvetica", 12)
     for i, line in enumerate(lines):
         c.drawString(72, 720 - 20 * i, line)
