@@ -178,7 +178,14 @@ function renderTop() {
           "div",
           { class: "job" },
           h("span", { class: "spin", "aria-hidden": "true" }),
-          h("span", null, h("b", null, job.stage_label || "Working"), job.total > 1 ? ` · ${job.done} of ${job.total}` : "", job.note ? h("span", { class: "muted" }, ` · ${job.note}`) : null),
+          // A long note (a file's name) is cut short, not the bar or Stop: the whole line is on hover.
+          h(
+            "span",
+            { class: "job-text", title: [job.stage_label || "Working", job.total > 1 ? `${job.done} of ${job.total}` : "", job.note || ""].filter(Boolean).join(" · ") },
+            h("b", null, job.stage_label || "Working"),
+            job.total > 1 ? ` · ${job.done} of ${job.total}` : "",
+            job.note ? h("span", { class: "muted" }, ` · ${job.note}`) : null
+          ),
           h("span", { class: "job-bar" }, h("span", { style: { width: job.total ? `${Math.round((100 * job.done) / job.total)}%` : "30%" }, class: job.total ? "" : "indeterminate" })),
           job.stage === "vision" && !job.stopping
             ? h("button", { type: "button", class: "btn btn-sm btn-quiet", title: "Stop reading pages with the vision model after the page being read now", onclick: stopJob }, "Stop")

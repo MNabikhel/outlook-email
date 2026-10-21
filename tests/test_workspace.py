@@ -569,9 +569,25 @@ def serve(settings, store):
         yield lambda: stack.enter_context(serving(web.create_app(settings, store)))
 
 
+_OPEN: list = []
+
+
+@pytest.fixture(autouse=True)
+def _close_pages():
+    """Every tab a test opened is closed, even when the test fails: a tab left open keeps its routes and timers
+    running against a server that has stopped, and breaks the next test."""
+    yield
+    while _OPEN:
+        try:
+            _OPEN.pop().close()
+        except Exception:
+            pass
+
+
 def _page(browser, *, width=1280, height=900, dark=False):
     context = browser.new_context(viewport={"width": width, "height": height}, color_scheme="dark" if dark else "light")
     context.set_default_timeout(15000)
+    _OPEN.append(context)
     return context.new_page()
 
 
@@ -657,6 +673,8 @@ def test_the_top_bar_shows_the_date_and_the_progress_whole_at_1280(browser, serv
     page = _page(browser, width=1280)
     page.goto(f"{base}/app")
     page.wait_for_selector("body.ready")
+    # A wide fallback font, as on a computer without the system font the page asks for (CI's Linux has DejaVu).
+    page.add_style_tag(content="* { font-family: 'DejaVu Sans', sans-serif !important; }")
     page.wait_for_timeout(300)
     assert page.evaluate(CUT, ".top-date") is False
 
@@ -671,6 +689,9 @@ def test_the_top_bar_shows_the_date_and_the_progress_whole_at_1280(browser, serv
     page.wait_for_selector(".top-job .job")
     page.wait_for_timeout(300)
     assert page.evaluate(CUT, ".top-job .job") is False
+    # What is cut short is the note, with the whole line on hover; the stage and the count are always shown.
+    assert page.evaluate(CUT, ".top-job .job-text b") is False
+    assert "Close workbook.xlsx" in page.get_attribute(".top-job .job-text", "title")
     page.context.close()
 
 
