@@ -257,6 +257,7 @@ a.rail-chip:hover { background: var(--surface-3); text-decoration: none; }
 .top-date .sample { margin-left: 8px; }
 .top-job { flex: 0 0 auto; min-width: 0; max-width: 45%; }
 .job { display: flex; align-items: center; gap: 8px; font-size: 12.5px; white-space: nowrap; overflow: hidden; }
+.job-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .job-bar { width: 90px; height: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; flex: none; }
 .job-bar span { display: block; height: 100%; background: var(--accent); transition: width 400ms var(--ease); }
 .job-bar .indeterminate { animation: slide 1.2s ease-in-out infinite; }

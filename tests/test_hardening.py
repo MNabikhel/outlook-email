@@ -17,9 +17,9 @@ from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.local_llm import EmptyReply, ThinkFilter, complete_text, stream_text, strip_thinking
 from controller_inbox.profile import active_profile
 from controller_inbox.store import Store
-from controller_inbox.web import _host_name, allowed_hosts, create_app
-
-PAGE = {"X-CloseDesk": "1"}
+from controller_inbox.web import allowed_hosts, create_app
+from controller_inbox.web_common import host_name
+from helpers import PAGE
 
 
 def _events(text: str) -> list[dict]:
@@ -73,9 +73,9 @@ def test_requests_for_another_hostname_are_refused(settings: Settings, loaded: S
 
 
 def test_host_parsing_and_lan_mode():
-    assert _host_name("[::1]:8765") == "[::1]"
-    assert _host_name("LocalHost:8765") == "localhost"
-    assert _host_name("127.0.0.1") == "127.0.0.1"
+    assert host_name("[::1]:8765") == "[::1]"
+    assert host_name("LocalHost:8765") == "localhost"
+    assert host_name("127.0.0.1") == "127.0.0.1"
     lan = allowed_hosts("0.0.0.0")
     assert "*" not in lan, "binding to every address must not let any hostname in (DNS rebinding)"
     assert {"127.0.0.1", "localhost"} <= lan

@@ -30,7 +30,7 @@ def match_correction(store: Store, *, sender_email: str, subject: str, email_id:
     from controller_inbox.fraud import FREEMAIL, domain_of
 
     if email_id:
-        own = next((row for row in store.list_corrections() if row.get("email_id") == email_id), None)
+        own = store.email_correction(email_id)
         if own:
             return own
     sender = (sender_email or "").strip().lower()

@@ -188,6 +188,7 @@ def _box(found: list[dict], indices: Iterable[int | None]) -> dict | None:
 
 
 _ITEMS = re.compile(r"\b(description|items?|qty|quantity|unit|price|rate|amount|hours|product|service|sku|part)\b", re.I)
+# A table of totals counts its tax, shipping and discount lines among them: not the total-row rule of totals.py.
 _TOTALS = re.compile(r"^\s*(sub-?\s?total|total|(sales\s*)?tax|vat|gst|hst|amount\s*due|balance(\s*due)?|shipping|freight|discount|grand\s*total)", re.I)
 
 
@@ -545,9 +546,9 @@ def _value_ok(kind: str, value: str) -> bool:
     if not value or len(value) > 60:
         return False
     if kind == "id":
-        return bool(re.search(r"\d", value)) and len(value) <= 30 and not table_lookup._dates(value)
+        return bool(re.search(r"\d", value)) and len(value) <= 30 and not table_lookup.date_keys(value)
     if kind == "date":
-        return bool(table_lookup._dates(value))
+        return bool(table_lookup.date_keys(value))
     if kind == "money":
         return bool(re.match(r"[-(]?\s*[$€£]?\s*\d", value)) and bool(_figures(value)) and "%" not in value
     return True
@@ -656,8 +657,8 @@ def _find_value(found: list[dict], value: str, kind: str) -> int | None:
         wanted = _figures(value)
         return next((i for i in order if wanted and wanted <= _figures(found[i]["text"])), None)
     if kind == "date":
-        wanted = set(table_lookup._dates(value))
-        return next((i for i in order if wanted & set(table_lookup._dates(found[i]["text"]))), None)
+        wanted = set(table_lookup.date_keys(value))
+        return next((i for i in order if wanted & set(table_lookup.date_keys(found[i]["text"]))), None)
     same = next((i for i in order if key == _plain(found[i]["text"])), None)
     return same if same is not None else next((i for i in order if len(key) >= 4 and key in _plain(found[i]["text"])), None)
 

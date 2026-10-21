@@ -14,9 +14,8 @@ from openpyxl import Workbook
 from controller_inbox import web
 from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.pipeline import ingest_demo
+from helpers import PAGE
 from msgfactory import XLSX, write_msg
-
-PAGE = {"X-CloseDesk": "1"}
 
 
 @pytest.fixture

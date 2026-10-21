@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import json
 from email import message_from_bytes
 from email.message import EmailMessage
 from pathlib import Path
 
 import httpx
-import pytest
 from fastapi.testclient import TestClient
 
 from controller_inbox import assistant, web
@@ -15,12 +13,8 @@ from controller_inbox.config import Settings
 from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.store import Store
 from controller_inbox.web import create_app
-
-PAGE = {"X-CloseDesk": "1"}
-
-
-def _events(response) -> list[dict]:
-    return [json.loads(line) for line in response.text.splitlines() if line.strip()]
+from helpers import PAGE
+from helpers import ndjson_events as _events
 
 
 def _answer(events: list[dict]) -> str:
@@ -37,11 +31,6 @@ def _drop_eml(settings: Settings, name: str = "Maya question.eml") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(message.as_bytes())
     return path
-
-
-@pytest.fixture
-def client(settings: Settings, loaded: Store) -> TestClient:
-    return TestClient(create_app(settings, loaded))
 
 
 def test_keywords_drop_filler_and_fold_plurals():

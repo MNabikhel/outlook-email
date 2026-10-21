@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from controller_inbox.actions import local_today
-from controller_inbox.clock import apply_saved_timezone
+from controller_inbox.clock import apply_saved_timezone, parse_stamp
 from controller_inbox.vision import apply_saved_mode
 from controller_inbox.config import Settings, load_settings
 from controller_inbox.digest import build_digest, write_digest_files
@@ -550,7 +550,7 @@ def watch_tick(settings: Settings, store: Store, *, force_digest: bool = False, 
             if settings.graph_configured:
                 try:
                     last = store.get_state("last_sync_at")
-                    after = datetime.fromisoformat(last) if last else datetime.now(timezone.utc) - timedelta(hours=settings.lookback_hours)
+                    after = parse_stamp(last) or datetime.now(timezone.utc) - timedelta(hours=settings.lookback_hours)
                     records = ingest_mailbox(_graph_mailbox(settings), store, settings, received_after=after)
                 except Exception as exc:  # Outlook being down must not stop the drop folder or the digest
                     log.warning("Outlook sync failed", exc_info=True)

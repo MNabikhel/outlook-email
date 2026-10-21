@@ -9,19 +9,31 @@ if not exist ".venv\Scripts\python.exe" (
   if errorlevel 1 goto :fail
 )
 
-rem An update can add a package; install it before starting.
+rem An update can add or raise a package (the add-ons' too); install it before starting. The add-ons are
+rem kept where they install, and left out where they can't.
 ".venv\Scripts\python.exe" scripts\check_deps.py >nul 2>&1
 if errorlevel 1 (
-  echo Installing what this update needs...
-  ".venv\Scripts\python.exe" -m pip install --quiet -e .
+  call :update
   if errorlevel 1 goto :fail
 )
 
-rem The second table reader (Camelot) is optional: installed when it can be, skipped when it can't.
-".venv\Scripts\python.exe" -c "import camelot" >nul 2>&1 || ".venv\Scripts\python.exe" -m pip install --quiet -e ".[tables]" >nul 2>&1
+rem The second table reader (Camelot) is optional: installed when it can be, skipped when it can't. It is tried
+rem once; .venv\.tables-tried remembers that, so a computer that can't install it doesn't try on every start.
+if not exist ".venv\.tables-tried" (
+  ".venv\Scripts\python.exe" -c "import camelot" >nul 2>&1 || ".venv\Scripts\python.exe" -m pip install --quiet -e ".[tables]" >nul 2>&1
+  type nul > ".venv\.tables-tried"
+)
 ".venv\Scripts\python.exe" -m controller_inbox run %*
 if errorlevel 1 goto :fail
 exit /b 0
+
+:update
+rem Reinstall with both add-ons, else with OCR only, else without them; errorlevel says if the last try failed.
+echo Installing what this update needs...
+".venv\Scripts\python.exe" -m pip install --quiet -e ".[ocr,tables]" >nul 2>&1 && exit /b 0
+".venv\Scripts\python.exe" -m pip install --quiet -e ".[ocr]" >nul 2>&1 && exit /b 0
+".venv\Scripts\python.exe" -m pip install --quiet -e .
+exit /b
 
 :setup
 echo First run: setting up CloseDesk. This takes a minute or two.

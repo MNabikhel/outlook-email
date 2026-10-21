@@ -15,7 +15,14 @@ import pytest
 from controller_inbox import local_llm
 from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.config import Settings
-from controller_inbox.local_llm import EmptyReply, LocalReader, check_model, complete_text, reasoning_effort, stream_text
+from controller_inbox.local_llm import (
+    EmptyReply,
+    LocalReader,
+    check_model,
+    complete_text,
+    reasoning_effort,
+    stream_text,
+)
 from controller_inbox.overnight import read_queue
 
 READING = {
@@ -396,3 +403,40 @@ def test_a_busy_server_does_not_turn_the_readers_thinking_back_on_for_the_run(se
     packet = {"subject": "Invoice", "body": "Please pay", "attachments": []}
     assert reader.read(packet) is not None and reader.read(packet) is not None
     assert sent == [("none", True), (None, True), ("none", True)]
+
+
+# A reasoning model's thinking that quotes the prompt is taken for an echo: its reasoning is shown as the answer --
+def test_reasoning_that_quotes_the_instructions_before_a_lone_closing_think_tag_is_not_the_answer(store, settings, mail, monkeypatch):
+    from controller_inbox import assistant
+
+    # A chat template that opens <think> in the prompt leaves only "</think>" in the reply (as in test_chat_review).
+    reply = (
+        "Okay, the user wants where the offsite is. The instructions say: Check your draft answer against the text "
+        "above before the user sees it. Maybe it costs $9,999? The memo says Lisbon.\n</think>\n\n"
+        "The offsite is in Lisbon on 14 November [1]."
+    )
+    budget = mail["Q4 budget draft"]
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "SQL: NONE")
+    monkeypatch.setattr(assistant, "stream_text", lambda *_a, **_k: iter([reply[i : i + 7] for i in range(0, len(reply), 7)]))
+    events = list(assistant.answer_stream(store, settings, "Where is the offsite in this memo?", email_id=budget.id))
+    shown = "".join(e["text"] for e in events if e["type"] == "delta")
+    revised = [e["text"] for e in events if e["type"] == "revise"]
+    final = revised[-1] if revised else shown
+    assert "Lisbon on 14 November [1]" in final and "$9,999" not in final, f"the answer shown was the model's reasoning: {final!r}"
+
+
+# A model that can't stop thinking runs out of room, and is asked again with the same room ----------------------
+def test_a_model_that_always_thinks_and_ran_out_of_room_is_asked_again_with_more(settings, monkeypatch):
+    from test_reasoning_models import FakeLMStudio
+    from test_reasoning_models import _serve as serve_reasoning
+
+    settings.llm = None
+    server = FakeLMStudio(options=["on"], think_tokens=2500)  # DeepSeek-R1 style: thinking can't be turned off
+    serve_reasoning(monkeypatch, server)
+    try:
+        text = "".join(local_llm.stream_text(settings, [{"role": "system", "content": "chat"}, {"role": "user", "content": "hi"}], max_tokens=500))
+    except local_llm.EmptyReply:
+        text = ""
+    budgets = [(call["max_tokens"], call.get("reasoning_effort")) for call in server.calls]
+    assert text, f"no answer: the retry was the same request that ran out of room ({budgets})"

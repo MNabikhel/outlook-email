@@ -449,6 +449,10 @@ def _stamp(book: Codebook, email: EmailRecord) -> str:
     return hashlib.sha256(f"{book.signature}\n{email.sender_email}\n{text}".encode()).hexdigest()[:16]
 
 
+# Invoices read together by ``refresh``.
+_BATCH = 200
+
+
 def refresh(store, settings, *, email_ids: list[str] | None = None, force: bool = False) -> int:
     """Suggest codes for AP invoices that are new, changed, or checked against an older workbook.
 
@@ -459,30 +463,39 @@ def refresh(store, settings, *, email_ids: list[str] | None = None, force: bool 
     from controller_inbox.fraud import attachments_locked
 
     book = load(settings)
-    ids = store.ap_invoice_ids() if email_ids is None else email_ids
+    # A confirmed coding is never touched below, so a full check doesn't read those invoices at all.
+    ids = store.ap_invoice_ids(unconfirmed=True) if email_ids is None else list(email_ids)
     checked = 0
-    for email_id in ids:
-        email = store.get_email(email_id)
-        current = store.cost_coding(email_id)
-        if email is None or not is_ap_invoice(email) or attachments_locked(email):
-            if current and current["status"] != "confirmed":
-                store.delete_cost_coding(email_id)
-            continue
-        if current and current["status"] == "confirmed":
-            continue
-        stamp = _stamp(book, email)
-        if current and current["signature"] == stamp and not force:
-            continue
-        suggestion = suggest(store, email, book)
-        store.save_cost_coding(
-            email_id,
-            status=suggestion.status,
-            codes=suggestion.codes,
-            others=suggestion.others,
-            unlisted=suggestion.unlisted,
-            signature=stamp,
-        )
-        checked += 1
+    for start in range(0, len(ids), _BATCH):
+        batch = ids[start : start + _BATCH]
+        # Read a batch at a time; ``codings`` follows what is saved and deleted here, so an id listed twice is
+        # seen as it is by then.
+        codings = store.cost_codings_for(batch)
+        emails = store.get_emails(batch)
+        for email_id in batch:
+            current = codings.get(email_id)
+            if current and current["status"] == "confirmed":
+                continue
+            email = emails.get(email_id)
+            if email is None or not is_ap_invoice(email) or attachments_locked(email):
+                if current:
+                    store.delete_cost_coding(email_id)
+                    codings.pop(email_id, None)
+                continue
+            stamp = _stamp(book, email)
+            if current and current["signature"] == stamp and not force:
+                continue
+            suggestion = suggest(store, email, book)
+            store.save_cost_coding(
+                email_id,
+                status=suggestion.status,
+                codes=suggestion.codes,
+                others=suggestion.others,
+                unlisted=suggestion.unlisted,
+                signature=stamp,
+            )
+            codings[email_id] = {"status": suggestion.status, "signature": stamp}
+            checked += 1
     if email_ids is None:
         store.set_state(SIGNATURE_KEY, book.signature)
     return checked

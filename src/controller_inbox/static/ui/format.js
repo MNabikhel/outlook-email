@@ -1,7 +1,8 @@
 /* An answer from Ask CloseDesk as HTML: the text is escaped first, then a little markdown (bold, italics,
    code, lists, pipe tables) and the [n] citations are added. A citation opens the email it cites in the
    workspace, or the file the sentence is about (PDFs at the cited page, other files in the text view at the
-   cited page, slide, sheet or cell), the same way the classic chat links them. */
+   cited page, slide, sheet or cell). The classic chat (app.js) formats its answers with this too, through
+   classic.js, and links a cited email to its classic page instead. */
 
 import { escapeHtml } from "./dom.js";
 import { filePath } from "./api.js";
@@ -78,7 +79,7 @@ function citeTarget(source, context, whole) {
   return { file: named[0], href: fileHref(source, named[0], where) };
 }
 
-function inline(sentence, context, sources, names, whole) {
+function inline(sentence, context, sources, names, whole, links) {
   let html = escapeHtml(sentence)
     .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[\s(])\*(?!\s)([^*\n]+?)\*(?=[\s).,!?:;]|$)/g, "$1<em>$2</em>")
@@ -95,8 +96,8 @@ function inline(sentence, context, sources, names, whole) {
       if (!source) return match;
       const target = citeTarget(source, context, whole);
       if (target) return fileLink(target.href, target.file.name, `[${n}]`, "cite");
-      const external = source.chat ? ' target="_blank" rel="noopener"' : " data-nav";
-      return `<a class="cite" href="${escapeHtml(mailHref(source))}"${external} title="${escapeHtml(source.subject)}">[${n}]</a>`;
+      const external = source.chat ? ' target="_blank" rel="noopener"' : links.nav ? " data-nav" : "";
+      return `<a class="cite" href="${escapeHtml(links.mailHref(source))}"${external} title="${escapeHtml(source.subject)}">[${n}]</a>`;
     })
   );
 }
@@ -136,7 +137,7 @@ function fileNames(sources) {
 }
 
 /** One line of the answer: its sentences, each with the citations it carries. */
-function formatLine(line, previous, sources, names, whole) {
+function formatLine(line, previous, sources, names, whole, links) {
   const parts = sentences(line);
   return parts
     .map((sentence, index) => {
@@ -144,7 +145,7 @@ function formatLine(line, previous, sources, names, whole) {
       const lead = sentence.split(/\[\d{1,2}\]/)[0];
       const before = index ? parts[index - 1] : previous;
       const context = !lead.trim() && before ? before + sentence : sentence;
-      return inline(sentence, context, sources, names, whole);
+      return inline(sentence, context, sources, names, whole, links);
     })
     .join("");
 }
@@ -155,7 +156,9 @@ const PIPE_ROW = /^\s*\|.*\|\s*$/;
 const PIPE_RULE = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
 const HEADING = /^\s*#{1,4}\s+(.*)$/;
 
-export function formatAnswer(text, sources = []) {
+/** ``links``: where a citation of an email goes (``mailHref``), and whether the workspace opens it in place
+ * (``nav``: a data-nav link). The classic chat passes its own pages' and no nav. */
+export function formatAnswer(text, sources = [], links = { mailHref, nav: true }) {
   text = String(text || "");
   const names = fileNames(sources);
   const lines = text.split("\n");
@@ -164,7 +167,7 @@ export function formatAnswer(text, sources = []) {
   let table = null;
   let previous = "";
   const fmt = (line) => {
-    const html = formatLine(line, previous, sources, names, text);
+    const html = formatLine(line, previous, sources, names, text, links);
     previous = line;
     return html;
   };

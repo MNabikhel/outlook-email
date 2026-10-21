@@ -36,7 +36,7 @@ import re
 import statistics
 from dataclasses import dataclass, field
 
-from controller_inbox import tables
+from controller_inbox import tables, totals
 
 _CID = re.compile(r"\(cid:\d+\)")
 
@@ -1334,6 +1334,7 @@ def _columns(block: list[Line]) -> list[tuple[float, float]]:
 
 
 # "Amount Due" or "Total" under the figures: a label written across the narrow columns beside the amount it names.
+# A bare "Amount" or "Balance" is one here too, which a row's label isn't (``totals.is_total_label``).
 _SUMMARY = re.compile(r"^(?:(?:grand\s+|sub-?)?total|amount|balance)(?:\s+(?:due|owing|payable))?:?$", re.I)
 
 
@@ -1870,7 +1871,7 @@ def _whole_names(rows: list[list[str]], column: int, blocks: list[int]) -> None:
     for index, row in enumerate(rows):
         if not _total_row(row):
             continue
-        name = _TOTAL.sub("", next(cell.strip() for cell in row if cell.strip())).strip()
+        name = totals.PREFIX.sub("", next(cell.strip() for cell in row if cell.strip())).strip()
         members = [k for k in range(index) if blocks[k] == blocks[index] and column < len(rows[k]) and not _total_row(rows[k])]
         pieces = list(dict.fromkeys(rows[k][column].strip() for k in members if rows[k][column].strip()))
         if len(pieces) >= 2 and " ".join(" ".join(pieces).split()).lower() == " ".join(name.split()).lower():
@@ -1878,17 +1879,14 @@ def _whole_names(rows: list[list[str]], column: int, blocks: list[int]) -> None:
                 rows[k][column] = name
 
 
-_TOTAL = re.compile(r"^(?:grand\s+|sub-?)?totals?\b", re.I)
-_TOTAL_LAST = re.compile(r"\b(?:sub-?)?totals?$", re.I)
-
-
 def _total_row(row: list[str]) -> bool:
-    """A subtotal or total row: its label starts "Total"/"Subtotal" or ends with it ("Finance Subtotal")."""
+    """A subtotal or total row: its label starts "Total"/"Subtotal" or ends with it ("Finance Subtotal"), or it is
+    what is owed ("Amount Due") under the lines (``totals.is_total_label``)."""
     return _total_label(next((cell.strip() for cell in row if cell.strip()), ""))
 
 
 def _total_label(label: str) -> bool:
-    return bool(_TOTAL.match(label) or _TOTAL_LAST.search(label))
+    return totals.is_total_label(label)
 
 
 def _join_label_lines(

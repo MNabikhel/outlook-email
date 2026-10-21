@@ -18,6 +18,9 @@ import re
 from dataclasses import dataclass, field
 from itertools import permutations
 
+from controller_inbox import memo
+from controller_inbox.documents import PAGE_MARKER_RE
+
 # "€1.234,56" is European style: dots group the thousands and a comma marks the decimals.
 _EUROPEAN = r"\d{1,3}(?:\.\d{3})+,\d{1,2}(?!\d)"
 # Under a thousand only the comma shows it, so only beside a euro sign: "€447,15", "447,15 €" (a plain "3,12" is a list).
@@ -32,7 +35,6 @@ _REFERENCE_BEFORE = re.compile(r"(?:\bpages?|\bp\.|\bsections?|\brows?|\bsheets?
 _SENTENCE_RE = re.compile(r"(?:[^\n.!?]|[.!?](?!\s|$))+(?:[.!?]+|\n|$)")
 PAGE_RE = re.compile(r"\b(?P<word>pages?|p\.)\s?(?P<page>\d{1,4})\b", re.I)
 CELL_RE = re.compile(r"(?:(?P<sheet>'[^'\n]+'|\"[^\"\n]+\"|[A-Za-z][\w]*)!)?\b(?P<cell>[A-Z]{1,3}\d{1,6})\b")
-_PAGE_SPLIT = re.compile(r"^\[page (\d+)\]\s*$", re.M)
 _SHEET_SPLIT = re.compile(r'^\[sheet "([^"]+)"[^\]]*\]\s*$', re.M)
 _CELL_VALUE = re.compile(r"(?:^|\| )([A-Z]{1,3}\d{1,6})(?: \((?:[^()\n]|\([^()\n]*\))*\))?: ([^|\n]*)")
 _WORKED_OUT_BEFORE = re.compile(
@@ -103,10 +105,9 @@ class Grounding:
     """Every number in the material the model was given, for quick "is this figure there?" checks."""
 
     def __init__(self, texts: list[str]):
-        values = set()
+        values: set[float] = set()
         for text in texts:
-            for number in numbers_in(text or ""):
-                values.add(number.value)
+            values |= _values_in(text or "")
         self.values = sorted(values)
 
     def has(self, number: Number) -> bool:
@@ -118,6 +119,17 @@ class Grounding:
     def _any(self, low: float, high: float) -> bool:
         index = bisect.bisect_left(self.values, low - 1e-9)
         return index < len(self.values) and self.values[index] <= high + 1e-9
+
+
+# The figures of a long text (a file, what a tool read), by the text: an answer is checked against the same files
+# more than once for a question (the draft, then the answer), and each page of a file again for a citation.
+_VALUES = memo.LRU(256)
+
+
+def _values_in(text: str) -> frozenset[float]:
+    if len(text) < 1_000:
+        return frozenset(number.value for number in numbers_in(text))
+    return _VALUES.get_or(text, lambda: frozenset(number.value for number in numbers_in(text)))
 
 
 def _is_claim(text: str, number: Number) -> bool:
@@ -238,6 +250,7 @@ def check_numbers(answer: str, grounding: Grounding) -> Review:
     return Review(text=text, checks=checks)
 
 
+# A line of an answer that starts "Total", whatever follows; a table's total row is totals.py's.
 _TOTAL_LINE = re.compile(r"^[\s*_#>|-]*(?:grand\s+)?total\b[^\n]*$", re.I)
 # "Total:", "**Total Due:**", "Grand total owed:": a total of the list itself. "Total owed to all four vendors:" can be
 # a total of more than the lines listed (the top three of four), so a sum that differs is flagged, not rewritten.
@@ -336,7 +349,7 @@ def _sentences(text: str):
 
 
 def pages_of(text: str) -> dict[int, str]:
-    pieces = _PAGE_SPLIT.split(text or "")
+    pieces = PAGE_MARKER_RE.split(text or "")
     return {int(pieces[i]): pieces[i + 1] for i in range(1, len(pieces) - 1, 2)}
 
 

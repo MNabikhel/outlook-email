@@ -1,9 +1,25 @@
-from datetime import date
+from __future__ import annotations
 
+import io
+import os
+import time
+from datetime import date, datetime, timedelta, timezone
+from email.message import EmailMessage
+from email.utils import format_datetime
+from pathlib import Path
+
+import pytest
+from openpyxl import Workbook
+
+from controller_inbox.actions import received_day
 from controller_inbox.classify import classify_document, classify_email
 from controller_inbox.extract import extract_fields
-from controller_inbox.models import DocumentType, ExtractedFields, Importance
-
+from controller_inbox.folder_mail import ingest_folder
+from controller_inbox.learn import match_correction, record_correction
+from controller_inbox.models import DocumentType, ExtractedFields, Importance, RawMessage
+from controller_inbox.pipeline import process_message
+from controller_inbox.reading import ReadingRefused, apply_bionic_reading
+from msgfactory import XLSX, write_msg
 
 AS_OF = date(2026, 9, 22)
 
@@ -255,3 +271,145 @@ def test_a_learned_category_is_scored_as_that_category():
     assert "Automated notification" not in learned.importance_reasons, learned.importance_reasons
     expected = score_importance(category=DocumentType.AP_INVOICE, flags=[], high_amount=10_000, vip_senders=[], **kw)
     assert (learned.importance, learned.importance_score) == expected[:2]
+
+
+# A corrected message is not overwritten by a reading.
+def test_corrected_message_refuses_a_model_reading(loaded, settings):
+    record_correction(loaded, settings, email_id="demo-expense", corrected_category="internal_fyi", reason="Just FYI from HR")
+    with pytest.raises(ReadingRefused):
+        apply_bionic_reading(loaded, "demo-expense", {"category": "ap_invoice", "folder": "important"})
+    assert loaded.get_email("demo-expense").category == DocumentType.INTERNAL_FYI
+
+
+# Dates: blank or naive timestamps, and today vs. arrival day.
+def test_received_day_handles_blank_and_naive_timestamps():
+    fallback = date(2026, 1, 1)
+    assert received_day("", fallback=fallback) == fallback
+    assert received_day("garbage", fallback=fallback) == fallback
+    from zoneinfo import ZoneInfo
+
+    assert received_day("2026-09-30T02:00:00", ZoneInfo("America/New_York")) == date(2026, 9, 29), "naive is UTC"
+
+
+def test_correction_survives_a_blank_received_at(loaded, settings):
+    email = loaded.get_email("demo-expense")
+    email.received_at = ""
+    loaded.upsert_email(email)
+    record_correction(loaded, settings, email_id="demo-expense", corrected_category="internal_fyi", reason="Just FYI")
+    assert loaded.get_email("demo-expense").category == DocumentType.INTERNAL_FYI
+
+
+# Subject-only corrections stay within the sender's company.
+def test_subject_correction_does_not_cross_senders(loaded, settings):
+    email = loaded.get_email("demo-expense")
+    record_correction(loaded, settings, email_id=email.id, corrected_category="newsletter", reason="Bulk mail")
+    domain = email.sender_email.split("@")[1]
+    assert match_correction(loaded, sender_email="someone@else.example", subject=email.subject) is None
+    assert match_correction(loaded, sender_email=f"colleague@{domain}", subject=email.subject) is not None
+    assert match_correction(loaded, sender_email="", subject=email.subject) is None
+
+
+NOW = datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc)
+
+
+def _raw(id_, subject, body, *, sender="ap@northwind-supply.com", when=NOW, **kw):
+    return RawMessage(
+        id=id_, subject=subject, sender_name="Northwind AP", sender_email=sender, received_at=when,
+        body_text=body, body_preview=body[:240], has_attachments=False, source="folder", **kw,
+    )
+
+
+def test_refiling_an_email_you_corrected_takes_another_emails_correction(store, settings):
+    """pipeline._classify applies the *latest* correction for the sender (learn.match_correction), even to an email
+    that carries its own correction. Correct email A to "AP invoice", later correct B from the same sender to
+    "Newsletter": the next time A is filed again (teaching a field on it -> teach.refile -> rescore_stored, or a fraud
+    recheck) A silently becomes a newsletter and its invoice task goes."""
+    from controller_inbox import teach
+    from controller_inbox.learn import record_correction
+    from controller_inbox.models import DocumentType
+
+    a = process_message(_raw("a1", "October statement of account", "Attached is your statement. Invoice INV-4410 $2,300.00 open."),
+                        store, settings, now=NOW)
+    b = process_message(_raw("b1", "Northwind news: fall catalog", "Our fall catalog is out.", when=NOW + timedelta(minutes=5)),
+                        store, settings, now=NOW)
+    record_correction(store, settings, email_id=a.id, corrected_category="ap_invoice", reason="this is an invoice to enter")
+    record_correction(store, settings, email_id=b.id, corrected_category="newsletter", reason="marketing mail")
+    assert store.get_email("a1").category == DocumentType.AP_INVOICE
+
+    teach.refile(store, settings, store.get_email("a1"))
+    assert store.get_email("a1").category == DocumentType.AP_INVOICE, store.get_email("a1").category
+
+
+NOW_1PM = datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc)
+
+
+def _age(path: Path) -> None:
+    """Files written just now look like they are still being copied; date them a minute back."""
+    old = time.time() - 60
+    os.utime(path, (old, old))
+
+
+# A close pack with a workbook is not an AP invoice --------------------------------------------------
+def _invoice_eml(settings) -> Path:
+    message = EmailMessage()
+    message["From"] = "Acme AR <ar@acme-industrial.example>"
+    message["To"] = "ap@horizongoods.example"
+    message["Subject"] = "Invoice INV-88123 from Acme Industrial Supply"
+    message["Date"] = format_datetime(NOW_1PM)
+    message["Message-ID"] = "<acme-inv-1@acme-industrial.example>"
+    message.set_content("Hello,\n\nPlease find attached invoice INV-88123 for PO-4410. Total due $4,319.50 by 11/11/2026.\n\nThanks,\nAcme AR")
+    path = settings.inbox_incoming / "acme-inv-1.eml"
+    path.write_bytes(bytes(message))
+    _age(path)
+    return path
+
+
+def _close_pack(settings) -> Path:
+    book = Workbook()
+    summary = book.active
+    summary.title = "Summary"
+    summary.append(["Account", "Sep", "Oct", "Var"])
+    summary.append(["Revenue", 120000, 131000, "=C2-B2"])
+    detail = book.create_sheet("Detail")
+    detail.append(["Vendor", "Invoice", "Amount"])
+    detail.append(["Acme", "INV-88123", 4319.5])
+    detail.append(["Northwind", "INV-10482", 12850])
+    data = io.BytesIO()
+    book.save(data)
+    csv = b"date,vendor,amount\n2026-09-01,Acme,4319.50\n2026-09-03,Northwind,12850.00\n"
+    path = write_msg(
+        settings.inbox_incoming / "maya-close.msg",
+        "September close pack",
+        "Hi,\n\nAttached are the close workbook, the AP export and a receipt photo.\n\nMaya",
+        attachments=[("Close workbook.xlsx", data.getvalue(), XLSX), ("AP export.csv", csv, "text/csv")],
+        sent=NOW_1PM + timedelta(minutes=10),
+    )
+    _age(path)
+    return path
+
+
+def test_a_close_pack_workbook_listing_an_invoice_is_not_filed_as_that_invoice(store, settings):
+    settings.ensure_data_dir()
+    _invoice_eml(settings)
+    _close_pack(settings)
+    records = {record.subject: record for record in ingest_folder(store, settings, now=NOW_1PM)}
+    pack = store.get_email(records["September close pack"].id)
+    invoice = store.get_email(records["Invoice INV-88123 from Acme Industrial Supply"].id)
+    assert pack.category not in {DocumentType.AP_INVOICE, DocumentType.AR_INVOICE}
+    assert "INV-88123" not in pack.extracted.invoice_numbers
+    assert "duplicate_invoice" not in pack.flags and not any("duplicate" in a.title.lower() for a in pack.actions)
+    # The real invoice is not taken for a repeat of the workbook's row either.
+    assert store.find_duplicate_invoices("INV-88123", invoice.id) == []
+    # The workbook's text is still there to search and ask about.
+    workbook = next(att for att in pack.attachments if att.filename == "Close workbook.xlsx")
+    assert "INV-88123" in workbook.extracted_text
+
+
+def test_a_workbook_named_as_an_invoice_is_still_an_invoice(store, settings):
+    from controller_inbox.classify import classify_document
+
+    named = classify_document(subject="Files", body="See attached.", filename="Invoice 4410.xlsx",
+                              extracted_text="Invoice INV-4410 amount due 1,200.00", content_type=XLSX)
+    said = classify_document(subject="Invoice INV-4410", body="Our invoice is attached.", filename="book.xlsx",
+                             extracted_text="Invoice INV-4410 amount due 1,200.00", content_type=XLSX)
+    assert named.document_type == DocumentType.AP_INVOICE and said.document_type == DocumentType.AP_INVOICE

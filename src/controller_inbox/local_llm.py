@@ -22,11 +22,13 @@ import weakref
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from http.cookiejar import CookieJar
 
 import httpx
 
 from controller_inbox.config import Settings
 from controller_inbox.models import FOLDERS, DocumentType, Importance
+from controller_inbox.money import fmt_money
 
 SYSTEM = (
     "You are the reader for CloseDesk, a local inbox assistant for a busy manager. "
@@ -47,6 +49,56 @@ REPLY_SHAPE = (
     '"actions":[{"title":"<task>","due":"YYYY-MM-DD or null","priority":"high"}],'
     '"why":"<one sentence>"}'
 )
+
+# httpx's own one-off calls, each of which sets up a client of its own (about 50 ms of SSL setup, and a new
+# connection): the calls here go through one client kept for the app's life instead, with the same timeouts and
+# headers per request. A replaced function (a test's fake server) is called as before.
+_ONE_OFF = {"get": httpx.get, "post": httpx.post, "stream": httpx.stream}
+_shared: httpx.Client | None = None
+_shared_lock = threading.Lock()
+
+
+class _NoCookies(CookieJar):
+    """A cookie jar that keeps none, as a one-off call's client throws its away."""
+
+    def extract_cookies(self, response, request) -> None:
+        pass
+
+    def set_cookie(self, cookie) -> None:
+        pass
+
+
+def _no_cookies() -> CookieJar:
+    return _NoCookies()
+
+
+def shared_client() -> httpx.Client:
+    """The client every model-server call goes through (thread-safe)."""
+    global _shared
+    if _shared is None:
+        with _shared_lock:
+            if _shared is None:
+                # An idle connection is dropped well before LM Studio's own 5-second keep-alive closes it, so a
+                # request never goes out on a connection the server is closing; a failed connect is tried once more.
+                _shared = httpx.Client(
+                    cookies=_no_cookies(),
+                    limits=httpx.Limits(keepalive_expiry=2.0),
+                    transport=httpx.HTTPTransport(retries=1),
+                )
+    return _shared
+
+
+def http_method(name: str):
+    """``httpx.get``/``post``/``stream`` through the shared client."""
+    call = getattr(httpx, name)
+    return call if call is not _ONE_OFF[name] else getattr(shared_client(), name)
+
+
+def lm_studio_root(base: str) -> str:
+    """The server's root from its OpenAI-style base ("http://127.0.0.1:1234/v1" is "http://127.0.0.1:1234"): LM
+    Studio's own API, which lists, loads and unloads models, is under ``/api/v1`` there."""
+    return base[: -len("/v1")] if base.endswith("/v1") else base
+
 
 _STATUS_TTL_SECONDS = 30.0
 # How long a server that answered stays answering when a check then times out: it is busy (loading a model, reading
@@ -127,7 +179,7 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         return ModelStatus(**{**cached[1].__dict__, "mode": mode})
     status = ModelStatus(mode=mode, reachable=False, base_url=base)
     try:
-        response = httpx.get(base + "/models", headers=_headers(settings), timeout=timeout)
+        response = http_method("get")(base + "/models", headers=auth_headers(settings), timeout=timeout)
         response.raise_for_status()
         payload = response.json()
         listed = payload.get("data", []) if isinstance(payload, dict) else []
@@ -217,11 +269,11 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
     picking from it can make LM Studio load a second, bigger model. Other servers
     don't have these routes; they get empty results.
     """
-    root = base[: -len("/v1")] if base.endswith("/v1") else base
+    root = lm_studio_root(base)
     busy = False
     for path in ("/api/v1/models", "/api/v0/models"):
         try:
-            response = httpx.get(root + path, headers=_headers(settings), timeout=timeout)
+            response = http_method("get")(root + path, headers=auth_headers(settings), timeout=timeout)
             data = response.json() if response.status_code == 200 else None
         except httpx.TimeoutException:
             busy = True
@@ -287,9 +339,9 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
 def _llama_cpp_props(settings: Settings, base: str, timeout: float) -> dict:
     """llama.cpp's server ``/props``: whether it was started with a vision projector (``--mmproj``, in
     ``modalities``) and the context each request gets (``default_generation_settings.n_ctx``). {} from other servers."""
-    root = base[: -len("/v1")] if base.endswith("/v1") else base
+    root = lm_studio_root(base)
     try:
-        response = httpx.get(root + "/props", headers=_headers(settings), timeout=timeout)
+        response = http_method("get")(root + "/props", headers=auth_headers(settings), timeout=timeout)
         data = response.json() if response.status_code == 200 else None
     except (httpx.HTTPError, ValueError):
         return {}
@@ -318,14 +370,12 @@ def resolve_model(settings: Settings) -> str:
     return status.model or settings.llm_model
 
 
-# Models made only for reading document pages (vision.READERS): LM Studio loads one beside the chat model to read
-# scans, and it is never taken for the chat model.
-DOCUMENT_READERS = ("ovisocr",)
-
-
 def document_reader(model: str) -> bool:
-    plain = re.sub(r"[^a-z0-9]", "", (model or "").lower())
-    return any(name in plain for name in DOCUMENT_READERS)
+    """A model made only for reading document pages (``vision.READERS``, the one list of them): LM Studio loads one
+    beside the chat model to read scans, and it is never taken for the chat model."""
+    from controller_inbox import vision  # vision reads pages through this module
+
+    return vision.reader_for(model) is not vision.GENERAL
 
 
 def _pick_model(
@@ -498,13 +548,13 @@ def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> 
     ``tools``) was the problem: the first answer comes back and the payload keeps its effort.
     """
     with _using(str(payload.get("model"))):
-        response = post(url, json=payload, headers=_headers(settings), **options)
+        response = post(url, json=payload, headers=auth_headers(settings), **options)
         if response.status_code >= 400 and _OVERFLOW_RE.search(response.text[:600]):
             # A prompt too long for the context is no shorter without the effort (or the schema): not sent again.
             _raise_for(response)
         if "reasoning_effort" in payload and response.status_code in _RETRYABLE:
             effort = payload.pop("reasoning_effort")
-            retry = post(url, json=payload, headers=_headers(settings), **options)
+            retry = post(url, json=payload, headers=auth_headers(settings), **options)
             if retry.status_code < 400:
                 # Remembered only when the server said no to the request itself, not when it was busy for a moment.
                 if response.status_code in _REFUSES:
@@ -815,7 +865,7 @@ def complete_text(
             payload["temperature"] = temperature
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(httpx.post, url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
+        response = _post_chat(http_method("post"), url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
         _raise_for(response)
         try:
             data = response.json()
@@ -907,7 +957,7 @@ def _stream_once(
     # reading a long prompt isn't taken for a model that stopped.
     timeout = httpx.Timeout(max(settings.llm_timeout, CHAT_TIMEOUT, wait or 0.0), connect=5.0)
     without_probs = False
-    with _using(str(payload.get("model"))), httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
+    with _using(str(payload.get("model"))), http_method("stream")("POST", url, json=payload, headers=auth_headers(settings), timeout=timeout) as response:
         if response.status_code >= 400:
             response.read()
             if _OVERFLOW_RE.search(response.text[:600]):
@@ -1104,7 +1154,7 @@ def _is_loaded(settings: Settings, key: str) -> bool:
 def _gone(settings: Settings, root: str) -> bool:
     """LM Studio refuses connections (it stopped). One too busy loading to answer in time is not gone."""
     try:
-        httpx.get(root + "/api/v1/models", headers=_headers(settings), timeout=httpx.Timeout(10.0, connect=5.0))
+        http_method("get")(root + "/api/v1/models", headers=auth_headers(settings), timeout=httpx.Timeout(10.0, connect=5.0))
     except (httpx.ConnectError, httpx.ConnectTimeout):
         return True
     except httpx.HTTPError:
@@ -1127,7 +1177,7 @@ def _load(settings: Settings, root: str, key: str, context: int, timeout: httpx.
     _no_load_pending(settings)
     body = {"model": key, **({"context_length": context} if context else {})}
     try:
-        httpx.post(root + "/api/v1/models/load", json=body, headers=_headers(settings), timeout=timeout).raise_for_status()
+        http_method("post")(root + "/api/v1/models/load", json=body, headers=auth_headers(settings), timeout=timeout).raise_for_status()
         return
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
         raise  # the request never reached LM Studio: nothing is loading
@@ -1222,10 +1272,10 @@ def _reload_with_context(settings: Settings) -> str:
     except StillLoading as exc:
         return str(exc)
     _context_raised.add(status.model)
-    root = status.base_url[: -len("/v1")] if status.base_url.endswith("/v1") else status.base_url
+    root = lm_studio_root(status.base_url)
     timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
     try:
-        httpx.post(root + "/api/v1/models/unload", json={"instance_id": status.model}, headers=_headers(settings), timeout=timeout).raise_for_status()
+        http_method("post")(root + "/api/v1/models/unload", json={"instance_id": status.model}, headers=auth_headers(settings), timeout=timeout).raise_for_status()
     except httpx.HTTPError as exc:
         return f"Couldn't reload {status.key} with a longer context ({_short_error(exc)})."
     errors = []
@@ -1274,7 +1324,7 @@ def load_for_reading(settings: Settings, model: str, context: int) -> str:
         failed = _reader_failed.get(model)
         if failed and time.monotonic() - failed[0] < READER_RETRY_SECONDS:
             return failed[1]
-        root = status.base_url[: -len("/v1")] if status.base_url.endswith("/v1") else status.base_url
+        root = lm_studio_root(status.base_url)
         timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
         key = status.instances[instance][0] if instance else model
         try:
@@ -1290,7 +1340,7 @@ def load_for_reading(settings: Settings, model: str, context: int) -> str:
         _reader_failed.pop(model, None)
         if instance:  # the shorter one, now that the longer one is loaded
             try:
-                httpx.post(root + "/api/v1/models/unload", json={"instance_id": instance}, headers=_headers(settings), timeout=timeout)
+                http_method("post")(root + "/api/v1/models/unload", json={"instance_id": instance}, headers=auth_headers(settings), timeout=timeout)
             except httpx.HTTPError:
                 pass
         return ""
@@ -1334,7 +1384,7 @@ def use_chat_model(settings: Settings, key: str) -> str:
             return "Only LM Studio loads models when CloseDesk asks. Load the model in your model server instead."
         if key not in status.chat_models:
             return f"LM Studio doesn't have {key} downloaded."
-        root = status.base_url[: -len("/v1")] if status.base_url.endswith("/v1") else status.base_url
+        root = lm_studio_root(status.base_url)
         timeout = httpx.Timeout(max(settings.llm_timeout, CHAT_TIMEOUT), connect=5.0)
         # The page reader chosen in Setup (a general vision model, not only a document reader) stays loaded too.
         reader = (settings.vision_model or "").strip() or None
@@ -1372,8 +1422,8 @@ def use_chat_model(settings: Settings, key: str) -> str:
         try:
             for instance, model, size in others:
                 try:
-                    httpx.post(
-                        root + "/api/v1/models/unload", json={"instance_id": instance}, headers=_headers(settings), timeout=timeout
+                    http_method("post")(
+                        root + "/api/v1/models/unload", json={"instance_id": instance}, headers=auth_headers(settings), timeout=timeout
                     ).raise_for_status()
                 except httpx.HTTPError as exc:
                     return f"LM Studio couldn't unload {model} to make room ({_lm_studio_said(exc)}).{load_back(unloaded)}"
@@ -1410,7 +1460,7 @@ def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict],
         payload["tools"] = tools
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(httpx.post, url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
+        response = _post_chat(http_method("post"), url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
         text = response.text[:600]
         if response.status_code in _RETRYABLE and re.search(r"\btools?\b|function", text, re.I) and not _OVERFLOW_RE.search(text):
             # This question goes on without tools. The model is only remembered as having none when the server
@@ -1559,7 +1609,7 @@ def _facts_line(extracted: dict) -> str:
     if extracted.get("po_numbers"):
         bits.append("POs " + ", ".join(map(str, extracted["po_numbers"][:4])))
     if extracted.get("amounts"):
-        bits.append("amounts " + ", ".join(f"${float(a):,.2f}" for a in extracted["amounts"][:5]))
+        bits.append("amounts " + ", ".join(fmt_money(float(a)) for a in extracted["amounts"][:5]))
     if extracted.get("due_dates"):
         bits.append("dates " + ", ".join(map(str, extracted["due_dates"][:4])))
     if extracted.get("account_last4"):
@@ -1609,7 +1659,8 @@ def _schema() -> dict:
     }
 
 
-def _headers(settings: Settings) -> dict[str, str]:
+def auth_headers(settings: Settings) -> dict[str, str]:
+    """The headers every request to the model server sends: its API key, when it has one."""
     headers = {"Content-Type": "application/json"}
     key = settings.llm_api_key
     if not key and settings.openai_api_key and "openai.com" in settings.llm_base_url:

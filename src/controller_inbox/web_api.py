@@ -18,27 +18,29 @@ import json
 import logging
 import threading
 import time
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, chats, cost_codes, documents, fixes, fraud, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
-    semantic, table_lookup, vision,
+    agent, cost_codes, documents, fixes, fraud, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
+    semantic, services, table_lookup, vision,
 )
-from controller_inbox.digest import build_digest
 from controller_inbox.extract import extraction_failed
 from controller_inbox.local_llm import check_model, context_target, needs_more_context
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
-from controller_inbox.profile import active_profile, is_finance, set_profile
-from controller_inbox.classify import month_end
+from controller_inbox.profile import active_profile, set_profile
 from controller_inbox.clock import effective_timezone, format_when, offset_label, on_daylight_time, set_timezone, zone_name
 from controller_inbox.config import PROFILES
-from controller_inbox.web import DOWNLOADABLE, NOTICES, _json_body, _nearest_step, _require_page, _same_origin, templates
+from controller_inbox.services import Invalid, Missing
+from controller_inbox.web_common import (
+    DOWNLOADABLE, NOTICES, attachment_or_404, json_body, nearest_step, original_downloads, require_page, same_origin,
+)
 from controller_inbox import sheet_preview, teach  # noqa: E402 - the Preview tab and teaching a field
 
 log = logging.getLogger(__name__)
@@ -49,16 +51,19 @@ UI_VERSION = hashlib.sha256(
     b"".join(path.name.encode() + path.read_bytes() for path in sorted(UI_DIR.glob("*")) if path.is_file())
 ).hexdigest()[:10]
 
+
+def ui_import_map() -> dict[str, dict[str, str]]:
+    """Each workspace script by its versioned URL, for the page's import map. The classic pages load the same map,
+    for the chat's formatting (classic.js)."""
+    return {"imports": {f"/static/ui/{path.name}": f"/static/ui/{path.name}?v={UI_VERSION}" for path in sorted(UI_DIR.glob("*.js"))}}
+
+
 # How often the automatic Outlook sync checks whether its interval has passed.
 OUTLOOK_TICK_SECONDS = 30
 MAX_TABLES = 40
 MAX_TABLE_ROWS = 1500
 CLIP_CHARS = 280
 UNREADABLE = "This file couldn't be read: it looks damaged or cut short. Download it to check, or ask the sender for it again."
-LOCKED_MESSAGE = (
-    "This email is flagged as possible payment fraud, so its files don't open. "
-    "Verify it by phone, then mark it safe in its fraud check."
-)
 # When CloseDesk last ran overnight, read the drop folder and synced Outlook, as Setup shows them.
 RUN_STATES = {"last_run": "last_overnight_at", "last_folder": "last_folder_ingest", "last_sync": "last_sync_at"}
 STAGES = {
@@ -77,9 +82,9 @@ STAGES = {
 def page_only(request: Request) -> None:
     """The workspace's own scripts, and nothing a page on another site can send."""
     headers = dict(request.scope.get("headers") or [])
-    if not _same_origin(headers, headers.get(b"host", b"").decode("latin-1")):
+    if not same_origin(headers, headers.get(b"host", b"").decode("latin-1")):
         raise HTTPException(status_code=403, detail="Use the CloseDesk page for this.")
-    _require_page(request)
+    require_page(request)
 
 
 def _yes(value) -> bool:
@@ -210,22 +215,36 @@ def table_json(table: table_lookup.Table, number: int) -> dict[str, Any]:
     }
 
 
+@contextmanager
+def service_errors(*, missing: str = "That email isn't here any more.") -> Iterator[None]:
+    """A service's ``Missing`` as a 404 saying ``missing``, and its ``Invalid`` as a 400 saying why (its notice's
+    text, or its message)."""
+    try:
+        yield
+    except Missing:
+        raise HTTPException(status_code=404, detail=missing) from None
+    except Invalid as exc:
+        raise HTTPException(status_code=400, detail=NOTICES.get(exc.notice) or str(exc)) from None
+
+
 def register_workspace(
     app: FastAPI,
     *,
     store,
     settings,
     job,
-    board_date: Callable[[], date],
+    board_date: Callable[..., date],
     fraud_view: Callable[[EmailRecord], dict],
     file_cards: Callable[[EmailRecord], list[dict]],
     original_path: Callable[[EmailRecord], Path | None],
     setup: dict[str, Callable],
+    templates,
     board_now: Callable[[], datetime | None] = lambda: None,
 ) -> None:
     """Add the workspace page (/app) and its JSON API (/api) to the dashboard. ``setup`` holds what the classic
     Setup page's buttons do (web.py), so the workspace's Settings page changes the same things the same way.
-    ``board_now`` is the sample's moment while only the sample is loaded (None: now), which a verdict refiles by."""
+    ``board_now`` is the sample's moment while only the sample is loaded (None: now), which a verdict refiles by.
+    ``templates`` are the classic pages' (web.py), which also render the page hosting the workspace."""
     api = APIRouter(prefix="/api", dependencies=[Depends(page_only)])
 
     def known(email_id: str) -> EmailRecord:
@@ -234,30 +253,24 @@ def register_workspace(
             raise HTTPException(status_code=404, detail="That email isn't here any more.")
         return email
 
-    def digest_now() -> dict:
-        return build_digest(
-            store,
-            as_of=board_date(),
-            generated_at=datetime.now(settings.tz),
-            tz=settings.tz,
-            lookback_days=settings.digest_lookback_days,
-            save=False,
-            finance=is_finance(settings, store),
+    def file_of(email_id: str, n: int, *, allow_locked: bool = False, allow_chat: bool = False):
+        """(email, attachment) for file ``n``, or the 404 (403 for a held email's) saying why there is none."""
+        return attachment_or_404(
+            store, email_id, n, allow_locked=allow_locked, allow_chat=allow_chat, missing="That email isn't here any more."
         )
 
+    def answer(notice: str) -> dict[str, Any]:
+        return {"ok": True, "message": NOTICES[notice]}
+
     def meta() -> dict[str, Any]:
-        as_of = board_date()
+        sample = store.only_sample()
         counts = store.counts()
         model = check_model(settings)
         snapshot = job.snapshot()
-        close = month_end(as_of)
         coding = store.coding_counts()
         last_run = store.get_state("last_overnight_at") or ""
         return {
-            "today": as_of.isoformat(),
-            "today_long": f"{as_of.strftime('%A')}, {as_of.strftime('%B')} {as_of.day}, {as_of.year}",
-            "days_to_close": (close - as_of).days,
-            "close_date": close.isoformat(),
+            **services.today_fields(board_date(sample), sample=sample),
             "finance": active_profile(settings, store) == "finance",
             "counts": counts,
             "coding": coding,
@@ -269,7 +282,6 @@ def register_workspace(
             },
             "models": model_roles.models_in_use(settings, status=model),
             "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
-            "is_sample": bool(counts["emails"]) and not store.real_mail_count(),
             "last_run": format_when(last_run, settings.tz) if last_run else "",
             "tz": settings.tz.key,
             "drop_folder": str(settings.inbox_incoming),
@@ -290,7 +302,7 @@ def register_workspace(
 
     @api.get("/focus")
     def focus():
-        payload = digest_now()
+        payload = services.digest_now(store, settings, board_date())
         today = board_date()
         rows = []
         for row in payload["focus"]:
@@ -341,7 +353,8 @@ def register_workspace(
             cost_codes.refresh_if_changed(store, settings)
         filters = dict(importance=importance or None, category=category or None, flag=flag or None, q=q[:200] or None)
         emails = store.list_emails(**filters, limit=limit, offset=offset)
-        items = [mail_card(email, settings.tz, today, done=store.is_done(email.id)) for email in emails]
+        done_ids = store.done_ids() if emails else set()
+        items = [mail_card(email, settings.tz, today, done=email.id in done_ids) for email in emails]
         return {"items": items, "total": store.count_emails(**filters), "title": "Search results" if q else "All mail"}
 
     @api.get("/mail/{email_id}")
@@ -431,7 +444,7 @@ def register_workspace(
             ],
             "attachments": files,
             "has_original": original_path(email) is not None,
-            "original_downloads": _original_downloads(original_path(email)),
+            "original_downloads": original_downloads(original_path(email)),
             "fraud": {
                 **check,
                 "sender_domain": sender_domain,
@@ -448,12 +461,7 @@ def register_workspace(
 
     @api.get("/mail/{email_id}/files/{n}")
     def mail_file(email_id: str, n: int):
-        email = known(email_id)
-        if not 1 <= n <= len(email.attachments):
-            raise HTTPException(status_code=404, detail="No such file on this email")
-        if fraud.attachments_locked(email):
-            raise HTTPException(status_code=403, detail=LOCKED_MESSAGE)
-        att = email.attachments[n - 1]
+        email, att = file_of(email_id, n)
         text = att.extracted_text or ""
         broken = extraction_failed(text)
         if broken:
@@ -519,12 +527,7 @@ def register_workspace(
     def mail_file_sheet(email_id: str, n: int, rows: int = sheet_preview.MAX_ROWS, cols: int = sheet_preview.MAX_COLS):
         """A workbook or CSV as a grid, every sheet as Excel shows it, or a Word document's text and tables, for the
         Preview tab. Never a locked file's."""
-        email = known(email_id)
-        if not 1 <= n <= len(email.attachments):
-            raise HTTPException(status_code=404, detail="No such file on this email")
-        if fraud.attachments_locked(email):
-            raise HTTPException(status_code=403, detail=LOCKED_MESSAGE)
-        att = email.attachments[n - 1]
+        email, att = file_of(email_id, n)
         if not sheet_preview.kind(att.filename):
             raise HTTPException(status_code=404, detail="Only a workbook, a CSV or a Word document is shown this way.")
         original = agent.original_file(settings, email, att)
@@ -538,12 +541,7 @@ def register_workspace(
 
     def page_file(email_id: str, n: int) -> tuple[Any, Any, bytes]:
         """The email, the attachment and its bytes as they arrived, for showing its pages; never a locked file's."""
-        email = known(email_id)
-        if not 1 <= n <= len(email.attachments):
-            raise HTTPException(status_code=404, detail="No such file on this email")
-        if fraud.attachments_locked(email):
-            raise HTTPException(status_code=403, detail=LOCKED_MESSAGE)
-        att = email.attachments[n - 1]
+        email, att = file_of(email_id, n)
         if not vision.readable_file(att.filename):
             raise HTTPException(status_code=404, detail="Only a PDF or a picture has pages to show.")
         if not vision.can_render():
@@ -561,7 +559,7 @@ def register_workspace(
         """The page drawn as a picture (a picture file is its page 1)."""
         _email, att, data = page_file(email_id, n)
         try:
-            png = page_view.page_png(settings, data, att.filename, p)
+            png = page_view.page_png(settings, data, att.filename, p, sha256=att.sha256)
         except ValueError:
             raise no_page(p) from None
         except Exception:
@@ -578,8 +576,9 @@ def register_workspace(
         if not 1 <= p <= pages:
             raise no_page(p)
         try:
-            found = page_view.regions(settings, data, att.filename, p)
-            width, height = page_view.png_size(page_view.page_png(settings, data, att.filename, p))
+            # The bytes are the attachment's (``page_file``): its SHA-256 names the page's kept drawings.
+            found = page_view.regions(settings, data, att.filename, p, sha256=att.sha256)
+            width, height = page_view.png_size(page_view.page_png(settings, data, att.filename, p, sha256=att.sha256))
         except ValueError:
             raise no_page(p) from None
         except Exception:
@@ -607,7 +606,7 @@ def register_workspace(
             "vendors": [*(value for fields in known_fields for value in fields.vendor_candidates), email.sender_name or ""],
         }
         try:
-            seen = page_view.found_tables(settings, data, att.filename, p) if boxes else None
+            seen = page_view.found_tables(settings, data, att.filename, p, sha256=att.sha256) if boxes else None
             on_page = page_details.page_tables(boxes, found["source"], att.extracted_text or "", p, model_text, seen)
             on_page = fixes.tables(boxes, on_page, own, learnt)
             details = page_details.key_details(boxes, found["source"], model_text, extracted)
@@ -655,7 +654,7 @@ def register_workspace(
     async def mail_file_fix(request: Request, email_id: str, n: int, p: int):
         """Keep a fix made on the page: {kind: "text", region: index, now: "what the page says"}, or {kind: "table"
         | "not_table", box: {x, y, w, h}}. It shows at once, and is learnt for the sender's later files."""
-        data_in = await _json_body(request)
+        data_in = await json_body(request)
         email, att, data = page_file(email_id, n)
         kind = str(data_in.get("kind") or "")
         if kind not in fixes.KINDS:
@@ -760,11 +759,9 @@ def register_workspace(
     def mail_file_vision(email_id: str, n: int, again: int = 0):
         """Read the file's pages with the vision model too, in the background (the process job). A file added to a
         conversation can be read too: the chat offers it like any other."""
-        chat_id = chats.chat_id_of(email_id)
-        email = chats.chat_mail(store, chat_id) if chat_id else known(email_id)
-        if email is None or not 1 <= n <= len(email.attachments):
-            raise HTTPException(status_code=404, detail="No such file on this email")
-        reply, status = vision.start(store, settings, job, email, email.attachments[n - 1], n, again=bool(again))
+        # A held email's file is refused by vision.start, which says why in its own reply.
+        email, att = file_of(email_id, n, allow_locked=True, allow_chat=True)
+        reply, status = vision.start(store, settings, job, email, att, n, again=bool(again))
         return JSONResponse(reply, status_code=status)
 
     @api.get("/tasks")
@@ -790,7 +787,8 @@ def register_workspace(
                     **_category(email.category),
                 }
             )
-        return {"items": items, "status": status}
+        # Plain strings and booleans already: sent as they are, without FastAPI encoding every one of thousands of rows.
+        return JSONResponse({"items": items, "status": status})
 
     @api.get("/fraud")
     def fraud_overview():
@@ -835,10 +833,8 @@ def register_workspace(
 
     @api.get("/coding")
     def coding(status: str = "review", q: str = ""):
-        cost_codes.refresh_if_changed(store, settings)
-        status = status if status in {"review", "suggested", "unmatched", "confirmed", "all"} else "review"
+        status, rows = services.coding_rows(store, settings, status, q[:200])
         today = board_date()
-        rows = store.cost_codings(status=None if status == "all" else status, q=q[:200] or None)
         book = cost_codes.load(settings)
         return {
             "status": status,
@@ -862,23 +858,18 @@ def register_workspace(
 
     @api.get("/digest")
     def digest(date: str = ""):
-        as_of = board_date().isoformat()
-        row = store.get_digest(date) if date else (store.get_digest(as_of) or store.latest_digest())
-        if date and row is None:
-            raise HTTPException(status_code=404, detail=f"No digest saved for {date}")
-        history = [item["period_date"] for item in store.list_digests(limit=30)]
-        payload = None
-        if row and row.get("payload"):
-            payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
-        current = row["period_date"] if row else ""
-        index = history.index(current) if current in history else -1
+        try:
+            view = services.digest_view(store, board_date(), date)
+        except Missing:
+            raise HTTPException(status_code=404, detail=f"No digest saved for {date}") from None
+        current = view["current"]
         return {
             "date": current,
-            "payload": payload,
-            "markdown": (row or {}).get("markdown", ""),
-            "history": history[:12],
-            "newer": history[index - 1] if index > 0 else "",
-            "older": history[index + 1] if 0 <= index < len(history) - 1 else "",
+            "payload": view["payload"],
+            "markdown": (view["row"] or {}).get("markdown", ""),
+            "history": view["dates"][:12],
+            "newer": view["newer"],
+            "older": view["older"],
             "printable": f"/digest/{current}.html" if current else "",
         }
 
@@ -886,103 +877,61 @@ def register_workspace(
 
     @api.post("/mail/{email_id}/done")
     async def mail_done(request: Request, email_id: str):
-        known(email_id)
-        data = await _json_body(request)
+        data = await json_body(request)
         done = bool(data.get("done", True))
-        store.set_done(email_id, done)
+        with service_errors():
+            services.mark_done(store, email_id, done)
         return {"ok": True, "done": done, "counts": store.counts()}
 
     @api.post("/tasks/{action_id}")
     async def task_status(request: Request, action_id: str):
-        data = await _json_body(request)
+        data = await json_body(request)
         status = str(data.get("status") or "")
-        if status not in {"open", "done"}:
-            raise HTTPException(status_code=400, detail="A task is either open or done.")
-        if not store.set_action_status(action_id, status):
-            raise HTTPException(status_code=404, detail="That task isn't here any more.")
+        with service_errors(missing="That task isn't here any more."):
+            services.set_task_status(store, action_id, status)
         return {"ok": True, "status": status, "counts": store.counts()}
 
     @api.post("/mail/{email_id}/fraud")
     async def mail_fraud(request: Request, email_id: str):
-        data = await _json_body(request)
-        verdict, _, scope = str(data.get("choice") or "").partition(":")
-        try:
-            fraud.record_fraud_verdict(
-                store, settings, email_id, verdict=verdict, scope=scope or "email", note=str(data.get("note") or "")[:300],
-                now=board_now(),
+        data = await json_body(request)
+        with service_errors():
+            notice = services.fraud_verdict(
+                store, settings, email_id, str(data.get("choice") or ""), str(data.get("note") or "")[:300], now=board_now()
             )
-        except KeyError:
-            raise HTTPException(status_code=404, detail="That email isn't here any more.") from None
-        except ValueError as exc:
-            if "free email" in str(exc):
-                detail = "That is a free email service anyone can sign up for, so it can't be trusted as a whole. Trust the sender's address instead."
-            else:
-                detail = "That didn't save. Use the buttons in the email's fraud check."
-            raise HTTPException(status_code=400, detail=detail) from None
-        message = (
-            "Saved as not fraud. Mail it covers was checked again, and the fraud check learns from it."
-            if verdict == "safe"
-            else "Reported as fraud. Its files stay locked, and the fraud check learns from it."
-        )
-        return {"ok": True, "message": message}
+        return answer(notice)
 
     @api.post("/mail/{email_id}/category")
     async def mail_category(request: Request, email_id: str):
-        from controller_inbox.learn import record_correction
-
-        data = await _json_body(request)
-        try:
-            record_correction(
-                store,
-                settings,
-                email_id=email_id,
-                corrected_category=str(data.get("category") or ""),
-                reason=str(data.get("reason") or "")[:500],
+        data = await json_body(request)
+        with service_errors():
+            notice = services.correct_category(
+                store, settings, email_id, str(data.get("category") or ""), str(data.get("reason") or "")[:500]
             )
-        except KeyError:
-            raise HTTPException(status_code=404, detail="That email isn't here any more.") from None
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-        return {"ok": True, "message": "Category corrected. Mail from this sender follows it, and the example is saved for the local model."}
+        return answer(notice)
 
     @api.post("/mail/{email_id}/coding")
     async def mail_coding(request: Request, email_id: str):
-        known(email_id)
-        data = await _json_body(request)
+        data = await json_body(request)
         codes = data.get("codes")
-        try:
-            if isinstance(codes, list):
-                cost_codes.revise(store, settings, email_id, [str(code) for code in codes][:20])
-                message = "Cost code changed and confirmed. The next invoice from this sender is suggested this code."
-            else:
-                cost_codes.confirm(store, settings, email_id)
-                message = "Cost code confirmed. The next invoice from this sender is suggested the same code."
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-        return {"ok": True, "message": message}
+        with service_errors():
+            notice = services.code_invoice(store, settings, email_id, [str(code) for code in codes][:20] if isinstance(codes, list) else None)
+        return answer(notice)
 
     @api.post("/mail/{email_id}/findings/clear")
     def mail_findings_clear(email_id: str):
-        known(email_id)
-        store.clear_findings(email_id)
-        return {"ok": True, "message": "Notes cleared. Ask CloseDesk reads the files fresh next time."}
+        with service_errors():
+            notice = services.clear_findings(store, email_id)
+        return answer(notice)
 
     @api.post("/process")
     def process():
-        from controller_inbox.overnight import run_overnight
-
-        started = job.start(
-            lambda progress: run_overnight(
-                store, settings, sync_graph=False, on_progress=progress, vision_minutes=vision.process_minutes(settings),
-                should_stop=lambda: job.stopping,
-            )
-        )
+        started = services.start_processing(store, settings, job) == "processing"
         return {"ok": True, "started": started, "job": job.snapshot()}
 
     @api.post("/process/stop")
     def process_stop():
         """A vision read stops before its next page."""
-        return {"ok": True, "stopping": job.request_stop()}
+        return {"ok": True, "stopping": bool(services.stop_processing(job))}
 
     # Settings: everything the classic Setup page shows and changes.
 
@@ -1064,7 +1013,7 @@ def register_workspace(
             },
             "context": {
                 "steps": [agent.context_capacity(tokens, settings.chat_max_tokens) for tokens in agent.CONTEXT_STEPS],
-                "step": _nearest_step(settings.min_context_tokens),
+                "step": nearest_step(settings.min_context_tokens),
                 "window": context_note(model),
             },
             "vision": {**setup["vision_setup"](model), "minutes_per_run": round(settings.vision_minutes_per_run)},
@@ -1104,7 +1053,7 @@ def register_workspace(
 
     @api.post("/settings/profile")
     async def settings_profile(request: Request):
-        data = await _json_body(request)
+        data = await json_body(request)
         try:
             set_profile(store, str(data.get("profile") or ""))
         except ValueError:
@@ -1113,7 +1062,7 @@ def register_workspace(
 
     @api.post("/settings/timezone")
     async def settings_timezone(request: Request):
-        data = await _json_body(request)
+        data = await json_body(request)
         try:
             set_timezone(store, settings, str(data.get("zone") or "")[:100])
         except ValueError:
@@ -1122,7 +1071,7 @@ def register_workspace(
 
     @api.post("/settings/chat-model")
     async def settings_chat_model(request: Request):
-        data = await _json_body(request)
+        data = await json_body(request)
         model = str(data.get("model") or "").strip()
         if not model:
             raise HTTPException(status_code=400, detail="Choose a model.")
@@ -1136,7 +1085,7 @@ def register_workspace(
 
     @api.post("/settings/vision")
     async def settings_vision(request: Request):
-        data = await _json_body(request)
+        data = await json_body(request)
         model = data.get("model")
         try:
             vision.save_mode(settings, store, str(data.get("mode") or ""), None if model is None else str(model))
@@ -1146,7 +1095,7 @@ def register_workspace(
 
     @api.post("/settings/context")
     async def settings_context(request: Request):
-        data = await _json_body(request)
+        data = await json_body(request)
         step = data.get("step")
         if not isinstance(step, int) or isinstance(step, bool):
             raise HTTPException(status_code=400, detail="Unknown context size")
@@ -1189,7 +1138,7 @@ def register_workspace(
 
     @api.post("/settings/outlook")
     async def settings_outlook(request: Request):
-        data = await _json_body(request)
+        data = await json_body(request)
         folders = data.get("folders")
         try:
             outlook_sync.save_config(
@@ -1278,14 +1227,11 @@ def register_workspace(
 
     app.include_router(api)
 
-    def ui_scripts() -> dict[str, str]:
-        return {f"/static/ui/{path.name}": f"/static/ui/{path.name}?v={UI_VERSION}" for path in sorted(UI_DIR.glob("*.js"))}
-
     def workspace(request: Request) -> HTMLResponse:
         return templates.TemplateResponse(
             request,
             "app.html",
-            {"ui_version": UI_VERSION, "import_map": {"imports": ui_scripts()}, "tz": settings.tz.key},
+            {"ui_version": UI_VERSION, "import_map": ui_import_map(), "tz": settings.tz.key},
             headers={"Cache-Control": "no-store"},
         )
 
@@ -1297,8 +1243,3 @@ def register_workspace(
     def workspace_page(request: Request, rest: str):
         return workspace(request)
 
-
-def _original_downloads(path: Path | None) -> bool:
-    from controller_inbox.web import original_downloads  # web imports this module
-
-    return original_downloads(path)

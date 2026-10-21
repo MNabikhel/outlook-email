@@ -141,21 +141,6 @@ def test_tab_stops_are_not_read_as_tabs():
 
 # Front end (Playwright) ----------------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
-def browser():
-    pytest.importorskip("playwright")
-    from liveserver import chromium_path
-    from playwright.sync_api import sync_playwright
-
-    path = chromium_path()
-    if path is None:
-        pytest.skip("no Chromium for Playwright on this machine")
-    with sync_playwright() as p:
-        b = p.chromium.launch(executable_path=path)
-        yield b
-        b.close()
-
-
 @pytest.fixture
 def page(browser):
     context = browser.new_context()
