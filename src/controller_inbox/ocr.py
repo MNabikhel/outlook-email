@@ -499,7 +499,8 @@ def _engine_lines(engine, image) -> list[tuple[float, str]]:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     try:
-        result, _elapsed = engine(buffer.getvalue(), text_score=0.2, box_thresh=0.2)
+        with _engine_lock:  # the engine another scan may be reading with: one read at a time, as in _read
+            result, _elapsed = engine(buffer.getvalue(), text_score=0.2, box_thresh=0.2)
     except Exception:
         return []
     return [

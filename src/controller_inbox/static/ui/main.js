@@ -33,6 +33,7 @@ const S = {
   listToken: 0,
   emailToken: 0,
   poll: 0,
+  polling: false, // a status check is on its way
   jobSeq: 0, // bumped when this page starts a job, so a status fetched before that doesn't undo it
   topJob: "", // what the job bar shows
 };
@@ -979,6 +980,9 @@ function doneSelected() {
 
 async function poll() {
   clearTimeout(S.poll);
+  // One loop: a call while a check is still on its way (the tab shown again, a job started) leaves it to that one.
+  if (S.polling) return;
+  S.polling = true;
   const seq = S.jobSeq;
   try {
     const meta = await getJSON("/api/state");
@@ -994,8 +998,11 @@ async function poll() {
     if (S.route && S.route.view === "settings") settings.job(meta.job);
   } catch (error) {
     /* offline for a moment: try again later */
+  } finally {
+    S.polling = false;
   }
   const running = S.meta && S.meta.job.state === "running";
+  clearTimeout(S.poll);
   S.poll = setTimeout(poll, document.hidden ? 60000 : running ? 1500 : 15000);
 }
 

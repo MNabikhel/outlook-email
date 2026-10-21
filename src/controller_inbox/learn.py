@@ -11,7 +11,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-from controller_inbox.actions import extract_actions, local_today, received_day
+from controller_inbox.actions import extract_actions, keep_task_status, local_today, received_day
 from controller_inbox.classify import Classification, score_importance
 from controller_inbox.config import Settings
 from controller_inbox.models import DOCUMENT_LABELS, ActionStatus, DocumentType, Importance
@@ -177,8 +177,6 @@ def record_correction(
     email.importance_reasons = [f"You corrected this to {DOCUMENT_LABELS[corrected]}: {reason}"] + [
         item for item in learned.importance_reasons if not item.startswith("You corrected")
     ]
-    from controller_inbox.pipeline import _keep_task_status
-
     stored = list(email.actions)
     email.actions = extract_actions(
         email_id=email.id,
@@ -195,7 +193,7 @@ def record_correction(
     # A snoozed task it no longer asks for goes (it would come back when the snooze ends); a finished one stays.
     asked = {item.title.strip().lower() for item in email.actions}
     email.actions = [
-        item for item in _keep_task_status(email.actions, stored)
+        item for item in keep_task_status(email.actions, stored)
         if item.title.strip().lower() in asked or item.status == ActionStatus.DONE
     ]
     from controller_inbox.reading import assign_script_draft

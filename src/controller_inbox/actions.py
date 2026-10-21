@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import replace
 from datetime import date, datetime, timezone, tzinfo
 from zoneinfo import ZoneInfo
 
@@ -211,6 +212,31 @@ def extract_actions(
         add(f"Accept or decline: {subject}", "Meeting invitation waiting on your answer.", due, Importance.MEDIUM, "meeting")
 
     return items
+
+
+def keep_task_status(fresh: list[ActionItem], stored: list[ActionItem]) -> list[ActionItem]:
+    """When an email is read again, a task it still asks for keeps its id and what the user did with it:
+    a snoozed task stays snoozed instead of coming back as a new open one. A task
+    the user snoozed or finished is kept even when the new reading doesn't ask for it. A task's title carries the
+    invoice number and amount, so a file that arrives later can retitle it: as in ``teach._same_tasks``, the one
+    task of a kind left over is the same task as the one new task of that kind."""
+    held = {item.title.strip().lower(): item for item in stored}
+    pairs: dict[int, ActionItem] = {}
+    for n, item in enumerate(fresh):
+        old = held.pop(item.title.strip().lower(), None)
+        if old is not None:
+            pairs[n] = old
+    for n, item in enumerate(fresh):
+        if n in pairs:
+            continue
+        same = [old for old in held.values() if old.source == item.source]
+        if len(same) == 1 and sum(1 for m, other in enumerate(fresh) if m not in pairs and other.source == item.source) == 1:
+            pairs[n] = held.pop(same[0].title.strip().lower())
+    kept = [
+        replace(item, id=pairs[n].id, status=pairs[n].status, created_at=pairs[n].created_at) if n in pairs else item
+        for n, item in enumerate(fresh)
+    ]
+    return kept + [item for item in held.values() if item.status != ActionStatus.OPEN]
 
 
 def _named(verb: str, noun: str, number: str | None, subject: str) -> str:

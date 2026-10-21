@@ -499,6 +499,9 @@ def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> 
     """
     with _using(str(payload.get("model"))):
         response = post(url, json=payload, headers=_headers(settings), **options)
+        if response.status_code >= 400 and _OVERFLOW_RE.search(response.text[:600]):
+            # A prompt too long for the context is no shorter without the effort (or the schema): not sent again.
+            _raise_for(response)
         if "reasoning_effort" in payload and response.status_code in _RETRYABLE:
             effort = payload.pop("reasoning_effort")
             retry = post(url, json=payload, headers=_headers(settings), **options)
@@ -571,6 +574,8 @@ class LocalReader:
             return None
         except httpx.HTTPError as exc:
             return self._failed(_short_error(exc))
+        except ContextOverflow as exc:
+            return self._failed(str(exc))
         if parsed is None:
             return self._failed(reply.why_unusable())
         self._consecutive_failures = 0
@@ -878,6 +883,7 @@ def _stream_once(
     reply: Reply,
     *,
     rejected_effort: str = "",
+    rejected_probs: str = "",
     wait: float | None = None,
     temperature: float | None = None,
     sampling: dict | None = None,
@@ -885,7 +891,7 @@ def _stream_once(
     token_probs: list | None = None,
 ):
     """``rejected_effort`` names the model whose ``reasoning_effort`` the last try sent; it is
-    remembered as refusing it only if this try, without it, is accepted."""
+    remembered as refusing it only if this try, without it, is accepted. ``rejected_probs``: the same for ``logprobs``."""
     url, payload = _chat_request(settings, messages, budget, stream=True, model=model)
     if effort:
         payload["reasoning_effort"] = effort
@@ -902,6 +908,11 @@ def _stream_once(
     timeout = httpx.Timeout(max(settings.llm_timeout, CHAT_TIMEOUT, wait or 0.0), connect=5.0)
     without_probs = False
     with _using(str(payload.get("model"))), httpx.stream("POST", url, json=payload, headers=_headers(settings), timeout=timeout) as response:
+        if response.status_code >= 400:
+            response.read()
+            if _OVERFLOW_RE.search(response.text[:600]):
+                # A prompt too long for the context: not a refusal of logprobs or the effort, and no shorter without them.
+                _raise_for(response)
         if asks_probs and response.status_code in _REFUSES:
             # A server that doesn't know ``logprobs``: the reading matters, how sure it was is a nice-to-have.
             rejected = False
@@ -911,24 +922,25 @@ def _stream_once(
             refused = response.status_code in _REFUSES
         else:
             rejected = False
-            if response.status_code >= 400:
-                response.read()
             _raise_for(response)
             if rejected_effort:
                 _effort_rejected.add(rejected_effort)
+            if rejected_probs:
+                _logprobs_rejected.add(rejected_probs)
             yield from _stream_pieces(response, reply, token_probs if asks_probs else None)
     if without_probs:
-        _logprobs_rejected.add(str(payload.get("model")))
+        # Remembered only when the request without logprobs goes through, as the effort is.
         yield from _stream_once(
             settings, messages, budget, effort, reply,
-            rejected_effort=rejected_effort, wait=wait, temperature=temperature, sampling=sampling, model=model,
+            rejected_effort=rejected_effort, rejected_probs=str(payload.get("model")), wait=wait, temperature=temperature,
+            sampling=sampling, model=model,
         )
     elif rejected:
         # Only a refusal is remembered; a busy server (500) is just tried again without the effort.
         yield from _stream_once(
             settings, messages, budget, None, reply,
-            rejected_effort=str(payload.get("model")) if refused else "", wait=wait, temperature=temperature, sampling=sampling,
-            model=model, token_probs=token_probs,
+            rejected_effort=str(payload.get("model")) if refused else "", rejected_probs=rejected_probs, wait=wait,
+            temperature=temperature, sampling=sampling, model=model, token_probs=token_probs,
         )
 
 
@@ -1068,6 +1080,8 @@ def model_busy(*names: str) -> bool:
 LOAD_WAIT_SECONDS = 600.0
 LOAD_POLL_SECONDS = 5.0
 _pending_loads: dict[str, float] = {}  # model key -> when CloseDesk stopped waiting for its load
+# How long a chat question waits for another load to finish before it goes on without the longer context.
+CONTEXT_WAIT_SECONDS = 5.0
 
 
 class StillLoading(RuntimeError):
@@ -1182,10 +1196,19 @@ def ensure_context(settings: Settings) -> str:
     Tried once per loaded instance, so a machine without the memory for it isn't asked again and again.
     If the longer load fails, the model is loaded back as it was. Returns what happened ("" when nothing did).
     """
-    with _context_lock:
+    # Another model's load (a page reader's, a model chosen in Setup) can hold the lock for minutes while LM Studio is
+    # watched for it: the question goes on with the context as it is rather than wait with no word.
+    if not _context_lock.acquire(timeout=CONTEXT_WAIT_SECONDS):
+        return (
+            f"Left {check_model(settings).key} as it is for now: LM Studio is loading another model. "
+            "The longer context is tried on a later question."
+        )
+    try:
         if not needs_more_context(settings):
             return ""
         return _reload_with_context(settings)
+    finally:
+        _context_lock.release()
 
 
 def _reload_with_context(settings: Settings) -> str:

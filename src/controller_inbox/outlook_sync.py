@@ -307,12 +307,11 @@ def _copy_in(store: Store, settings: Settings, session, item: Seen, *, now: date
     """Save a copy of the message, read it, and file it. Returns its email id, whether CloseDesk filed it from
     Outlook (``owned``: a deletion in Outlook removes it) and whether it is new here."""
     from controller_inbox.folder_mail import (
-        _another_message,
         _parse_msg,
         _restore_sample,
-        _stable_id,
         _write_extracted,
         content_id,
+        find_existing,
         unique_attachments,
     )
     from controller_inbox.pipeline import process_message
@@ -325,21 +324,21 @@ def _copy_in(store: Store, settings: Settings, session, item: Seen, *, now: date
         raw.source = "outlook"
         raw.is_read = not item.unread
         raw.outlook_importance = item.importance
-        sent = raw.received_at.astimezone(timezone.utc).isoformat()
+        if "subject" in raw.from_file:
+            # No subject of its own: the staging copy's name stands in for one, and that name is no subject (nor
+            # the same for two copies), so it is left empty, as the drop folder leaves such a subject out of its ids.
+            raw.subject = ""
         if not raw.internet_message_id:
             # No Message-ID: named by what it says, so a copy of it in another synced folder (or the same message
             # under a new Outlook id) is the same email, and two different messages are two.
             # The drop folder names a copy of it saved there the same way (folder_mail.content_id).
             raw.id = content_id(raw)
-        existing = store.get_email(raw.id)
-        if existing is not None and raw.internet_message_id and _another_message(existing, raw):
-            # Another message with the same Message-ID (scanners and some mail tools reuse one), as the drop
-            # folder tells them apart.
-            raw.id = _stable_id("\n".join([raw.internet_message_id, raw.subject, raw.sender_email, sent]))
-            existing = store.get_email(raw.id)
+        # Found as the drop folder finds it: under its id, the id a reused Message-ID gives it, or read from
+        # Microsoft 365 under Microsoft's id.
+        existing = find_existing(store, raw)
         if existing is not None:
-            # Already here: dropped in by hand, or the same message in two synced folders. Kept as it is, so the
-            # tasks and corrections on it stay.
+            # Already here: dropped in by hand, read from Microsoft 365, or the same message in two synced folders.
+            # Kept as it is, so the tasks and corrections on it stay.
             return existing.id, existing.source == "outlook", False
         cleared = 0
         if not store.real_mail_count():
@@ -371,12 +370,14 @@ def copy_path(settings: Settings, email_id: str) -> Path:
 def _remove(store: Store, settings: Settings, row: dict) -> bool:
     """Stop following a message deleted in Outlook, and remove CloseDesk's copy. Returns whether the copy went: one
     the user dropped in by hand stays, and so does one still in another synced folder."""
-    store.forget_outlook_item(row["entry_id"])
-    if not row["owned"]:
-        return False  # dropped in by hand: the user's own copy stays
-    if any(other["email_id"] == row["email_id"] for other in store.outlook_items().values()):
-        return False  # the same message is still in another synced folder
-    store.delete_emails([row["email_id"]])
+    # Forgotten and removed together: a removal that fails leaves the message followed, so the next sync tries again.
+    with store.transaction() as conn:
+        store.forget_outlook_item(row["entry_id"], conn=conn)
+        if not row["owned"]:
+            return False  # dropped in by hand: the user's own copy stays
+        if any(other["email_id"] == row["email_id"] for other in store.outlook_items(conn=conn).values()):
+            return False  # the same message is still in another synced folder
+        store.delete_emails([row["email_id"]], conn=conn)
     copy_path(settings, row["email_id"]).unlink(missing_ok=True)
     shutil.rmtree(settings.inbox_extracted / row["email_id"], ignore_errors=True)
     return True
