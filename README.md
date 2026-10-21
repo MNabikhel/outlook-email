@@ -231,7 +231,7 @@ CloseDesk's own reader is built for the schedules accounting programs print (agi
 
 CloseDesk's own tables are never taken away: every rule tried for replacing them made some of the schedules it reads well worse. A page of prose Camelot reads as a table is left out, and so are letters. Camelot's tables are written the way CloseDesk writes tables (`Label: value` rows), with their heading lines as printed.
 
-Camelot is installed by the launchers (`pip install -e ".[tables]"`). Where it can't be installed (an Intel Mac older than macOS 12 has no OpenCV build for it) or it fails on a file, PDFs are read exactly as before.
+Camelot is installed by the launchers (`pip install -e ".[tables]"`), tried once: where it can't be installed (an Intel Mac older than macOS 12 has no OpenCV build for it) the launcher leaves a `.venv/.tables-tried` file and doesn't try again on each start (delete the file to try again). Where it isn't installed or it fails on a file, PDFs are read exactly as before.
 
 How it was measured: the rows of the tables on real pages, as the FinTabNet and ParseBench benchmarks mark them, a row counting as read when its figures and its words both match. *Annual reports* are 240 FinTabNet pages from companies' annual reports; the *mixed set* is 180 ParseBench pages (insurance rate filings, fund reports, SEC filings, schedules, timetables). The rules were tuned on 60 and 30 of them; the *test* pages were used only to compare versions; the *fresh* pages were drawn last and looked at only to check the result.
 
@@ -405,44 +405,61 @@ Importance is a 0–100 score, not a single keyword: a $400 newsletter stays low
 
 ```
 src/controller_inbox/
-  graph.py       Microsoft Graph client (device code or client secret)
-  demo.py        Sample mailbox
-  extract.py     Attachment text + invoice/amount/due-date parsing
-  classify.py    Finance document rules + importance
-  actions.py     Action-item extraction
-  pipeline.py    Ingest → classify → store (scripts only, fast)
-  folder_mail.py Drop folder: .msg / .eml / loose files, Message-ID dedupe, inbox/failed
-  reading.py     Script drafts, model packets, and the guard rails on a model reading
-  documents.py   Attachments to navigable text (pages, sheets, slides), search, exact cells, formula tracing
-  pdf_layout.py  PDF characters by position back into words, lines and table rows
-  tables.py      Table rows as text: header-named cells, empty cells written out
-  table_lookup.py The rows a question names, and totals, counts and filters worked out from them
-  table_query.py A file's tables as a read-only database the model writes one query over
-  fraud.py       Fraud score, trusted domains and senders, verdicts that teach, the fraud log
-  agent.py       Ask CloseDesk's read-only tools, notepad, and context budget
-  answer_check.py Checks a finished answer's figures and citations against what was read
+  cli.py            controller-inbox / closedesk commands (python -m controller_inbox runs __main__.py)
+  config.py         Settings from .env and Setup, with their checks
+  clock.py          The time zone in use: this computer's, unless Setup pins another
+  models.py         The records kept for an email, its files and its tasks
+  store.py          The SQLite database: mail, files, tasks, corrections, chats, fixes
+  memo.py           Small caches for work that depends only on its inputs (a file's text or hash)
+  profile.py        General / finance inbox profile
+  graph.py          Microsoft Graph client (device code or client secret)
+  outlook_desktop.py Classic Outlook on this Windows computer, read only (COM)
+  outlook_sync.py   Copies mail from classic Outlook in, and keeps the copies in step with it
+  folder_mail.py    Drop folder: .msg / .eml / loose files, Message-ID dedupe, inbox/failed
+  tnef.py           The files inside a winmail.dat
+  demo.py           Sample mailbox
+  pipeline.py       Ingest → classify → store (scripts only, fast)
+  extract.py        Attachment text + invoice/amount/due-date parsing
+  classify.py       Finance document rules + importance
+  actions.py        Action-item extraction
+  learn.py          Corrections that teach the classifier
+  reading.py        Script drafts, model packets, and the guard rails on a model reading
+  fraud.py          Fraud score, trusted domains and senders, verdicts that teach, the fraud log
+  cost_codes.py     AP invoice cost coding against your own workbook of JDE codes
+  documents.py      Attachments to navigable text (pages, sheets, slides), search, exact cells, formula tracing
+  pdf_layout.py     PDF characters by position back into words, lines and table rows
+  camelot_tables.py Camelot as a second reader of a PDF's tables (the tables extra)
+  tables.py         Table rows as text: header-named cells, empty cells written out
+  table_lookup.py   The rows a question names, and totals, counts and filters worked out from them
+  table_query.py    A file's tables as a read-only database the model writes one query over
+  sheet_preview.py  A file as it looks, for the Preview tab: sheets, Word, slides, text, zips
+  ocr.py            Scanned pages and pictures to text (RapidOCR, else Tesseract)
+  vision.py         Scanned pages read again by a model that can see, compared with OCR figure by figure
+  page_view.py      A page as a picture with a box over each piece of text read there, and how sure each reading is
+  page_details.py   The tables and key details on a page, tied to the boxes they were read from
+  table_finder.py   The layout model that finds tables on a page from its picture
+  fixes.py          What you fixed on a page: applied at once, learnt for the sender's later files, exported
+  teach.py          Teach a field: a box drawn round a value on a page, remembered for the sender
+  local_llm.py      LM Studio / Ollama client built for small models
+  model_roles.py    Which model does which job (answers, scanned pages, search by meaning, OCR)
+  agent.py          Ask CloseDesk's read-only tools, notepad, and context budget
+  assistant.py      Ask CloseDesk chat and reply drafts (local model, or lookups without one)
+  answer_check.py   Checks a finished answer's figures and citations against what was read
+  chats.py          Ask CloseDesk conversations kept with their files, to reopen and to inform later answers
   file_summaries.py Overnight summaries of long attachments, checked against the file
-  semantic.py    Search by meaning with a local embedding model
-  ocr.py         Scanned pages and pictures to text (RapidOCR, else Tesseract)
-  vision.py      Scanned pages read again by a model that can see, compared with OCR figure by figure
-  page_view.py   A page as a picture with a box over each piece of text read there, and how sure each reading is
-  page_details.py The tables and key details on a page, tied to the boxes they were read from
-  table_finder.py The layout model that finds tables on a page from its picture
-  fixes.py       What you fixed on a page: applied at once, learnt for the sender's later files, exported
-  local_llm.py   LM Studio / Ollama client built for small models
-  overnight.py   One pass: drop folder → model → digest (run, overnight, watch, dashboard)
-  learn.py       Corrections that teach the classifier
-  tools.py       JSON tools for the Bionic agent
-  digest.py      Daily focus digest
-  assistant.py   Ask CloseDesk chat and reply drafts (local model, or lookups without one)
-  profile.py     General / finance inbox profile
-  web.py         Local dashboard
-  web_api.py     The workspace page (/app) and the JSON it is built from (/api)
-  static/app.js  Open-in-place preview, chat box, search shortcut
-  static/ui/     The workspace's scripts and styles (no build step, no CDN)
-  cli.py         controller-inbox / closedesk commands
+  semantic.py       Search by meaning with a local embedding model
+  overnight.py      One pass: drop folder → model → digest (run, overnight, watch, dashboard)
+  digest.py         Daily focus digest
+  tools.py          JSON tools for the Bionic agent
+  web.py            Local dashboard
+  web_api.py        The workspace page (/app) and the JSON it is built from (/api)
+  templates/        The classic pages
+  static/app.js     Open-in-place preview, chat box, search shortcut
+  static/ui/        The workspace's scripts and styles (no build step, no CDN)
 CloseDesk.bat / CloseDesk.command   Double-click launchers (first run sets up .venv)
+scripts/check_deps.py               What the launchers run to see if an update needs a reinstall
 scripts/overnight.bat / .sh         For Task Scheduler / cron
+tests/                              pytest suite (conftest.py holds the shared fixtures, helpers.py the helpers)
 ```
 
 Data lives in `data/closedesk.db` (gitignored). Tokens live in `data/msal_token_cache.bin`.
@@ -450,8 +467,23 @@ Data lives in `data/closedesk.db` (gitignored). Tokens live in `data/msal_token_
 ## Tests
 
 ```bash
-pytest
+pip install -e ".[dev,ocr,tables]"   # the dev extra brings pytest and the .msg builder the tests use
+pytest                                # everything; tests that need what isn't installed are skipped
+pytest -m "not browser"               # all but the browser tests (what CI's main jobs run)
+ruff check src tests scripts          # lint (pyflakes and syntax errors), as CI runs it
 ```
+
+Some 47 tests drive the pages in a real Chromium through Playwright. They are marked `browser`, and need the
+`browser` extra and Playwright's Chromium:
+
+```bash
+pip install -e ".[dev,browser]"
+python -m playwright install chromium   # on Linux CI: python -m playwright install --with-deps chromium
+pytest -m browser
+```
+
+They use Playwright's own Chromium, or the one `CLOSEDESK_CHROMIUM` points to, and are skipped when there is none.
+Without the dev extra, the tests that build Outlook `.msg` files are skipped and the rest still run.
 
 The suite classifies the demo mailbox end-to-end (including the fraud wire and duplicate invoice), drops real `.eml` files through the folder, exercises the small-model reader against a fake server (structured-output fallback, dead server, chatty replies, invented amounts and dates), checks the focus ranking and digest window, and hits the dashboard routes including background processing. Real `.msg` files (built in `tests/msgfactory.py`) cover Exchange senders, nested forwarded emails, workbooks with formulas, and the fraud lock on their files; the chat's tool loop, verify pass, and context-overflow retry run against a fake model server.
 

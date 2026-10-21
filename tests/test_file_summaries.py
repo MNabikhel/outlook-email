@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import httpx
 import pytest
 
 from controller_inbox import agent, assistant, file_summaries
 from controller_inbox.assistant import answer_stream
+from controller_inbox.config import Settings
 from controller_inbox.local_llm import ContextOverflow
+from controller_inbox.models import AttachmentRecord, DocumentType, RawAttachment, RawMessage
+from controller_inbox.pipeline import process_message
+from controller_inbox.store import Store
+from test_reasoning_models import FakeLMStudio, _serve
 
 REPORT = "\n\n".join(
     f"[page {n}]\nSection {n}.1: The team reviewed supplier onboarding and payment runs and noted no exceptions."
@@ -147,3 +154,115 @@ def test_summaries_stop_when_the_model_server_is_down(store, settings, two_files
     assert file_summaries.summarize_files(store, settings, limit=10, model="m") == 0
     assert len(calls) == 1, "no point asking for the next file"
     assert len(store.files_to_summarize(min_chars=agent.SUMMARY_MIN_CHARS, limit=10, model="m")) == 2, "nothing saved"
+
+
+# Guards against: Overnight summaries size the prompt for a 450-token reply (prompt_budget(ctx, MAX_TOKENS)), but
+# complete_text asks a reasoning model for THINKING_ROOM (2,048) tokens. The chat sizes its prompts with
+# reply_budget(); the summaries don't, so on a 4,096-token model the request is ~1,600 tokens past the context and
+# the model's thinking runs out of room (EmptyReply -> the file is remembered with an empty summary and never
+# retried).
+def test_summary_prompt_plus_requested_reply_fits_the_context(settings, monkeypatch):
+    settings.llm = None
+    server = FakeLMStudio()
+    _serve(monkeypatch, server)
+    rows = "\n".join(f"Vendor {r} owes {10000 + r * 37:,}.00 for invoice INV-{r:05d}, due in thirty days." for r in range(2, 92))
+    att = AttachmentRecord(
+        id="a1", email_id="e1", filename="ap notes.txt", content_type="", size_bytes=1, sha256="x",
+        extracted_text=rows, document_type=DocumentType.OTHER, document_confidence=1.0,
+    )
+    monkeypatch.setattr(file_summaries, "context_length", lambda _s: 4096)
+    file_summaries.summarize_file(settings, att)
+    chats = [call for call in server.calls if "messages" in call]
+    assert chats
+    first = chats[0]
+    prompt_tokens = sum(agent.prompt_size(m["content"]) for m in first["messages"]) / agent.CHARS_PER_TOKEN
+    total = prompt_tokens + 250 + first["max_tokens"]
+    assert total <= 4096, f"prompt {prompt_tokens:.0f} + 250 + max_tokens {first['max_tokens']} = {total:.0f} > 4096"
+
+
+NOW = datetime(2026, 10, 6, 14, 0, tzinfo=timezone.utc)
+
+
+def _raw(body: str, *, received: datetime, attachments=None, preview: str = "") -> RawMessage:
+    return RawMessage(
+        id="raw-1",
+        subject="Docs",
+        sender_name="A Vendor",
+        sender_email="a@vendor.com",
+        received_at=received,
+        body_text=body,
+        body_preview=preview,
+        has_attachments=bool(attachments),
+        source="folder",
+        attachments=attachments or [],
+    )
+
+
+# Overnight file summaries: flagged mail doesn't use up the night, empty ones aren't retried -----
+LONG_FILE = ("Line item freight services rendered in September per contract. " * 60).encode()
+
+
+def _mail_with_long_file(store: Store, settings: Settings, n: int, *, scam: bool):
+    raw = _raw(
+        "Our bank details have changed. Please use the new account for all payments from today."
+        if scam else "Please find the monthly report attached.",
+        received=NOW,
+        attachments=[RawAttachment(id="f.txt", filename=f"file{n}.txt", content_type="text/plain", size_bytes=len(LONG_FILE), content=LONG_FILE)],
+    )
+    raw.id, raw.subject = f"m{n}", "Updated remittance details" if scam else f"Monthly report {n}"
+    raw.sender_email = f"billing@acme-pay{n}.net" if scam else "maya@taz.com"
+    return process_message(raw, store, settings, now=NOW)
+
+
+def test_files_on_flagged_mail_do_not_use_up_the_nights_summaries(store: Store, settings: Settings, monkeypatch):
+    from controller_inbox import file_summaries
+
+    # Flagged mail scores highest, so it would fill a night's quota of 3 and nothing else would ever be summarized.
+    assert all("fraud_risk" in _mail_with_long_file(store, settings, n, scam=True).flags for n in range(3))
+    _mail_with_long_file(store, settings, 9, scam=False)
+    calls: list[str] = []
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.filename) or "- Freight for September")
+    assert file_summaries.summarize_files(store, settings, limit=3, model="m") == 1
+    assert calls == ["file9.txt"]
+
+
+def test_a_file_the_model_cannot_summarize_is_not_tried_every_night(store: Store, settings: Settings, monkeypatch):
+    from controller_inbox import file_summaries
+
+    _mail_with_long_file(store, settings, 1, scam=False)
+    calls: list[str] = []
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.id) or "")
+    for _night in range(3):
+        assert file_summaries.summarize_files(store, settings, limit=5, model="small") == 0
+    assert calls == ["m1:f.txt"]
+    file_summaries.summarize_files(store, settings, limit=5, model="bigger")
+    assert len(calls) == 2, "another model gets a try"
+
+
+# A NUL character in a file's text is not stored -------------------------------------------
+NUL_EXPORT = b"2026-09-01  Wire to Alpha Freight   1,250.00\n" * 80 + b"END\x00\x00\n"
+
+
+def test_a_file_with_a_nul_in_its_text_is_summarized_once(store: Store, settings: Settings, monkeypatch):
+    from controller_inbox import file_summaries
+
+    # SQLite's length() stops at a NUL and Python's len() doesn't, so the summary never matched its text.
+    export = RawAttachment(id="export.txt", filename="export.txt", content_type="text/plain", size_bytes=len(NUL_EXPORT), content=NUL_EXPORT)
+    record = process_message(_raw("Export attached", received=NOW, attachments=[export]), store, settings, now=NOW)
+    assert "\x00" not in record.attachments[0].extracted_text
+    calls: list[str] = []
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.id) or "- Wires to Alpha Freight")
+    for _night in range(3):
+        file_summaries.summarize_files(store, settings, limit=20, model="m")
+    assert calls == ["raw-1:export.txt"]
+
+
+def test_text_stored_with_a_nul_before_is_cleaned_once(store: Store, settings: Settings):
+    import sqlite3
+
+    export = RawAttachment(id="export.txt", filename="export.txt", content_type="text/plain", size_bytes=3, content=b"abc")
+    process_message(_raw("Export attached", received=NOW, attachments=[export]), store, settings, now=NOW)
+    with sqlite3.connect(settings.db_path) as conn:  # as an older version left it
+        conn.execute("UPDATE attachments SET extracted_text = ?", ("a\x00b",))
+        conn.execute("DELETE FROM sync_state WHERE key = 'attachment_text_without_nul'")
+    assert Store(settings.db_path).get_email("raw-1").attachments[0].extracted_text == "ab"

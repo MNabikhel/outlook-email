@@ -7,18 +7,21 @@ tried to change anything in Outlook would fail."""
 from __future__ import annotations
 
 import json
+import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
-from controller_inbox import outlook_desktop, outlook_sync, web
+from controller_inbox import folder_mail, outlook_desktop, outlook_sync, web
 from controller_inbox.folder_mail import ingest_folder
+from controller_inbox.models import RawMessage
 from controller_inbox.outlook_desktop import FolderInfo, NotInOutlook, OutlookError, Seen
 from controller_inbox.overnight import outlook_run, run_overnight
-from controller_inbox.pipeline import ingest_demo
-from msgfactory import PDF, write_msg
+from controller_inbox.pipeline import ingest_demo, process_message
+from helpers import PAGE
+from msgfactory import PDF, require, write_msg
 
 NOW = datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc)
 STORE = "store-1"
@@ -28,6 +31,7 @@ class FakeOutlook:
     """Outlook with folders and messages, offering only what ``OutlookSession`` reads."""
 
     def __init__(self, folders=("Inbox", "Inbox/Vendors", "Archive", "Deleted Items", "Junk Email")):
+        require()  # each message is copied as a real .msg file
         self.infos = [
             FolderInfo(path, STORE, f"folder-{path}", path.count("/") + 1, inbox=path == "Inbox", trash=path in ("Deleted Items", "Junk Email"))
             for path in folders
@@ -380,8 +384,6 @@ def test_outlook_missing_is_said_and_the_rest_of_the_run_happens(store, settings
 
 # The Settings page ---------------------------------------------------------------------------------------
 
-PAGE = {"X-CloseDesk": "1"}
-
 
 def test_settings_api_without_classic_outlook(store, settings):
     client = TestClient(web.create_app(settings, store))
@@ -460,3 +462,145 @@ def test_a_first_message_that_cant_be_read_brings_the_sample_back(store, setting
     monkeypatch.setattr(pipeline, "process_message", broken)
     report = sync(store, settings, outlook)
     assert report["failed"] and len(store.list_emails(limit=100)) == sample, "the board isn't left empty"
+
+
+def test_outlook_message_without_message_id_synced_and_dropped_is_stored_twice(store, settings):
+    """Without a Message-ID, outlook_sync._copy_in names the email by its subject, sender, time and text, but the drop
+    folder names the same message by the bytes of its file (folder_mail._message_id). So a message synced from classic
+    Outlook and also saved into the drop folder (to bring its attachment along) is filed twice, with two sets of tasks
+    and a "possible duplicate invoice" on the copy."""
+    from controller_inbox import outlook_sync
+    from controller_inbox.folder_mail import ingest_folder
+    from msgfactory import write_msg
+    from test_outlook_sync import FakeOutlook
+
+    class ExchangeOutlook(FakeOutlook):
+        # Internal Exchange mail saved as .msg: no transport headers, so no Message-ID.
+        def save_copy(self, entry_id, store_id, dest):
+            m = self.messages[entry_id]
+            write_msg(dest, m["subject"], f"Hello,\n\n{m['subject']}. Thanks.", sender_email=m["sender"],
+                      sender_name="Northwind AP", sent=m["received"], exchange=True)
+
+    outlook = ExchangeOutlook()
+    outlook.add("e1", "Invoice INV-7741 from Northwind", message_id="", sender="ap@taz.com")
+    outlook_sync.sync(store, settings, outlook, now=NOW)
+    assert len(store.list_emails(limit=50)) == 1
+    m = outlook.messages["e1"]
+    settings.ensure_data_dir()
+    write_msg(settings.inbox_incoming / "Invoice INV-7741.msg", m["subject"], f"Hello,\n\n{m['subject']}. Thanks.",
+              sender_email=m["sender"], sender_name="Northwind AP", sent=m["received"], exchange=True)
+    ingest_folder(store, settings, now=NOW)
+
+    stored = store.list_emails(limit=50)
+    assert len(stored) == 1, [(e.id, e.source, e.flags) for e in stored]
+
+
+def test_two_files_with_one_name_synced_from_outlook_each_keep_their_original(store, settings):
+    """A vendor sends two invoices both called "Invoice.pdf". Dropped in as a .msg, the second is renamed
+    "Invoice (2).pdf"; synced from classic Outlook, both are written to inbox/extracted/<id>/Invoice.pdf, the second
+    over the first, so the first has no original: no Preview, no Page, no Download."""
+    from controller_inbox import agent
+    from controller_inbox.demo import make_pdf
+    from msgfactory import PDF
+    from test_outlook_sync import FakeOutlook, sync
+
+    outlook = FakeOutlook()
+    first = make_pdf([["Invoice INV-7741", "Total due $4,210.00"]])
+    second = make_pdf([["Invoice INV-7742", "Total due $980.00"]])
+    outlook.add("e1", "Two invoices from Northwind", attachments=[("Invoice.pdf", first, PDF), ("Invoice.pdf", second, PDF)])
+    report = sync(store, settings, outlook)
+    assert report["new"] == 1 and not report["failed"], report
+    [email] = store.list_emails(limit=10)
+    assert len(email.attachments) == 2
+    originals = [agent.original_file(settings, email, att) for att in email.attachments]
+    assert all(path is not None for path in originals), [(a.filename, p) for a, p in zip(email.attachments, originals)]
+
+
+class NoHeaderOutlook(FakeOutlook):
+    """Outlook whose saved copies carry no Internet headers: no Message-ID (an Exchange colleague's mail)."""
+
+    def save_copy(self, entry_id, store_id, dest):
+        m = self.messages[entry_id]
+        self.copies += 1
+        write_msg(dest, m["subject"], "Hello, see below.", sender_email=m["sender"], sender_name="Northwind AP",
+                  sent=m["received"], exchange=True)
+
+
+# Filed once, however it arrives ----------------------------------------------------------------------------
+def test_outlook_message_without_a_subject_is_stored_without_one(store, settings):
+    """A message from Outlook that has no subject is stored with an empty subject, not its copy's file name."""
+    outlook = FakeOutlook()
+    outlook.add("e1", "")
+    report = sync(store, settings, outlook)
+    assert report["new"] == 1, report
+    [email] = store.list_emails(limit=10)
+    assert not re.fullmatch(r"[0-9a-f]{24}", email.subject), email.subject
+    assert email.subject == ""
+
+
+def test_outlook_message_without_subject_or_message_id_in_two_folders_is_one_email(store, settings):
+    """A message with no subject and no Message-ID, seen in two synced folders, is filed once."""
+    outlook = NoHeaderOutlook()
+    outlook.add("e1", "", message_id="")
+    outlook.add("e2", "", message_id="", folder="Inbox/Vendors")
+    report = sync(store, settings, outlook)
+    assert (report["new"], report["already"]) == (1, 1), report
+    assert len(store.list_emails(limit=10)) == 1
+
+
+def test_outlook_message_reusing_a_message_id_without_a_subject_is_one_email(store, settings):
+    """A subjectless Outlook message that reuses another email's Message-ID gets one id, in every synced folder."""
+    settings.ensure_data_dir()
+    write_msg(settings.inbox_incoming / "scan.msg", "Scan 1", "Scanned.", sender_email="scanner@taz.com",
+              message_id="<scan@taz.com>", sent=NOW - timedelta(days=2))
+    folder_mail.ingest_folder(store, settings, now=NOW)
+    outlook = FakeOutlook()
+    outlook.add("e2", "", message_id="<scan@taz.com>")
+    outlook.add("e3", "", message_id="<scan@taz.com>", folder="Inbox/Vendors")
+    report = sync(store, settings, outlook)
+    assert (report["new"], report["already"]) == (1, 1), report
+    assert len(store.list_emails(limit=10)) == 2
+
+
+def test_outlook_message_already_read_from_microsoft_365_is_not_filed_again(store, settings):
+    """A message already stored from Microsoft 365 is recognised by its Message-ID when Outlook sync meets it."""
+    graph = RawMessage(
+        id="AAMkAD-graph-1",
+        subject="Invoice INV-7741 from Northwind",
+        sender_name="Northwind AP",
+        sender_email="ap@northwind.com",
+        received_at=NOW,
+        body_text="Hello,\n\nInvoice INV-7741 from Northwind. Thanks.",
+        body_preview="",
+        has_attachments=False,
+        internet_message_id="<e1@northwind.com>",
+        source="graph",
+    )
+    process_message(graph, store, settings, now=NOW)
+    outlook = FakeOutlook()
+    outlook.add("e1", "Invoice INV-7741 from Northwind")
+    report = sync(store, settings, outlook)
+    assert (report["new"], report["already"]) == (0, 1), report
+    assert [e.id for e in store.list_emails(limit=10)] == ["AAMkAD-graph-1"]
+    assert not store.outlook_items()["e1"]["owned"], "a deletion in Outlook doesn't remove the Microsoft 365 email"
+
+
+def test_outlook_removal_that_fails_keeps_following_the_message(store, settings, monkeypatch):
+    """A copy that can't be removed after a deletion in Outlook is still followed, so the next sync removes it."""
+    outlook = FakeOutlook()
+    outlook.add("e1", "Invoice INV-7741 from Northwind")
+    sync(store, settings, outlook)
+    del outlook.messages["e1"]
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(store, "delete_emails", broken)
+    try:
+        sync(store, settings, outlook, now=NOW + timedelta(minutes=15))
+    except RuntimeError:
+        pass
+    assert "e1" in store.outlook_items()
+    monkeypatch.undo()
+    report = sync(store, settings, outlook, now=NOW + timedelta(minutes=30))
+    assert report["removed"] == 1 and not store.list_emails(limit=10)

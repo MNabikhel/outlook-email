@@ -11,8 +11,9 @@ from fastapi.testclient import TestClient
 from controller_inbox import teach, web
 from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.models import ActionItem, ActionStatus, Importance
+from helpers import PAGE
 from pdffactory import Text, build_pdf
-from test_teach_and_preview import PAGE, SENDER, _box, _drop, _region, _teach, client, mail  # noqa: F401  (fixtures)
+from test_teach_and_preview import SENDER, _box, _drop, _region, _teach, client, mail  # noqa: F401  (fixtures)
 
 AS_OF = date(2026, 10, 20)
 
@@ -223,7 +224,6 @@ def test_spread_leaves_a_fraud_locked_email_alone(client, store, mail, monkeypat
 
 def test_spread_builds_the_trust_context_once(store, settings, mail, monkeypatch):
     from controller_inbox import fraud
-
     from test_teach_and_preview import _invoice
 
     email = mail["Your Keystone invoice"]
@@ -278,7 +278,7 @@ def test_a_label_in_the_same_box_stops_where_the_value_starts():
 
 # On the page, in a browser ---------------------------------------------------------------------------
 
-from test_workspace import _harbor, _open_page_tab, browser, page  # noqa: E402,F401  (fixtures)
+from test_workspace import _harbor, _open_page_tab  # noqa: E402
 
 
 def test_a_field_taught_inside_a_table_can_be_taken_back_with_the_mouse(settings, store, page):
@@ -340,3 +340,52 @@ def test_a_field_taught_inside_a_table_can_be_taken_back_with_the_mouse(settings
         page.locator(".pv-tip:not([hidden]) button:text-is('Take it back')").click()
         page.wait_for_function("() => !document.querySelector('.pv-taught')")
     assert "total" not in store.get_email(email.id).extracted.taught
+
+
+# Front end: Undo from the note after going back to the email -----------------------------------------
+@pytest.mark.usefixtures("harbor_ocr")
+def test_undoing_a_taught_total_from_its_note_on_the_email_page_redraws_the_email(settings, store, page):
+    """Teach the total on the Page tab, go back to the email (its facts show the taught total), then click Undo on
+    the note that is still showing: the fix is taken back, but the email page keeps showing the taught total."""
+    from controller_inbox import web
+    from controller_inbox.folder_mail import ingest_folder
+    from liveserver import serving
+    from test_teach_and_preview import _drop, _invoice
+
+    settings.trusted_domains = "keystonepaper.com"
+    settings.ensure_data_dir()
+    _drop(settings, "a", "Your Keystone invoice", _invoice("KP-55120", "$2,118.40", "11/15/2026"), "KP-55120.pdf")
+    [email] = ingest_folder(store, settings)
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size({"width": 1440, "height": 900})
+        page.goto(f"{base}/app/mail/{email.id}/file/1?tab=page")
+        page.wait_for_function("() => { const i = document.querySelector('.pv-sheet img'); return i && i.naturalWidth > 0; }")
+        page.select_option(".pv-teach-pick", "total")
+        boxes = page.query_selector_all(".pv-box[aria-label='$2,118.40']")
+        lowest = max(boxes, key=lambda b: b.bounding_box()["y"])
+        lowest.scroll_into_view_if_needed()
+        box = lowest.bounding_box()
+        page.mouse.move(box["x"] - 3, box["y"] - 3)
+        page.mouse.down()
+        page.mouse.move(box["x"] + box["width"] + 3, box["y"] + box["height"] + 3, steps=4)
+        with page.expect_response(lambda r: r.url.endswith("/fixes") and r.request.method == "POST"):
+            page.mouse.up()
+        page.wait_for_selector(".toast-action:has-text('Undo')")
+        page.click(".rd-bar a.btn-quiet")  # back to the email
+        page.wait_for_selector(".rd-facts dt:has-text('Total')")
+        assert "$2,118.40" in page.text_content(".rd-facts")
+        with page.expect_response(lambda r: r.url.endswith("/undo")):
+            page.click(".toast-action:has-text('Undo')")
+        assert "total" not in store.get_email(email.id).extracted.taught
+        page.wait_for_function("() => ![...document.querySelectorAll('.rd-facts dt')].some((dt) => dt.textContent === 'Total')", timeout=4000)
+
+
+# A field taught in a box doesn't replace another field taught in the same box --------------------------------------
+@pytest.mark.usefixtures("harbor_ocr")
+def test_two_fields_taught_in_one_box_are_both_kept(store):
+    row = {"attachment_id": "e:a", "sha256": "", "page": 1, "kind": "field", "x": 0.5, "y": 0.1, "w": 0.2, "h": 0.03, "was": "10/01/2026"}
+    first = store.add_page_fix({**row, "now": "invoice_date"})
+    second = store.add_page_fix({**row, "now": "due_date"})
+    assert {fix["id"] for fix in store.page_fixes("e:a")} == {first, second}
+    third = store.add_page_fix({**row, "now": "due_date", "was": "10/31/2026"})
+    assert {fix["id"] for fix in store.page_fixes("e:a")} == {first, third}, "the same field taught again replaces it"

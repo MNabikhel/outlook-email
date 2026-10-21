@@ -18,8 +18,7 @@ from controller_inbox.local_llm import EmptyReply, ThinkFilter, complete_text, s
 from controller_inbox.profile import active_profile
 from controller_inbox.store import Store
 from controller_inbox.web import _host_name, allowed_hosts, create_app
-
-PAGE = {"X-CloseDesk": "1"}
+from helpers import PAGE
 
 
 def _events(text: str) -> list[dict]:

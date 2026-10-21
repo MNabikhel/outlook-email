@@ -14,9 +14,19 @@ from pathlib import Path
 
 import pytest
 
-msg = pytest.importorskip("aspose.email_foss.msg")
+try:
+    from aspose.email_foss import msg
+except ImportError:  # the dev extra isn't installed: only the tests that build a .msg file skip
+    msg = None
 
 SENDER_SMTP = 0x5D01
+
+
+def require() -> None:
+    """Skip the test when .msg files can't be built here. Called where a test starts, it also covers .msg files
+    built later on another thread (a background sync), where a skip would only stop that thread."""
+    if msg is None:
+        pytest.skip("building .msg files needs aspose-email-foss (the dev extra)")
 
 
 def build_message(
@@ -34,6 +44,7 @@ def build_message(
     logo: bytes | None = None,
     html: str = "",
 ):
+    require()
     sent = sent or datetime(2026, 9, 28, 14, 30, tzinfo=timezone.utc)
     message = msg.MapiMessage.create(subject, body)
     string = msg.PropertyTypeCode.PTYP_STRING

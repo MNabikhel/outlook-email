@@ -13,6 +13,7 @@ import io
 import json
 import math
 import re
+import threading
 import time
 
 import httpx
@@ -24,9 +25,9 @@ from controller_inbox import agent, answer_check, assistant, local_llm, ocr, tab
 from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.local_llm import check_model
 from controller_inbox.store import shown_text
+from helpers import PAGE
 from msgfactory import PDF, write_msg
 
-PAGE = {"X-CloseDesk": "1"}
 MODEL = "qwen3.5-9b"
 
 # What a model that can see writes for the scanned balance sheet: the table whole, every figure as printed.
@@ -1993,3 +1994,46 @@ def test_token_confidence_splits_html_and_markdown_tables_into_cells():
     sure = vision.token_confidence(tokens)
     assert dict(sure["cells"])["Fuel surcharge"] == pytest.approx(math.exp(-0.02), abs=1e-3)
     assert dict(sure["figures"])["2,199.48"] == pytest.approx(math.exp(-1.2), abs=1e-3)
+
+
+# Two scans share one RapidOCR engine ------------------------------------------------------------------------
+class _OneAtATime:
+    """A RapidOCR stand-in that notes when two reads overlap."""
+
+    def __init__(self):
+        self.inside = 0
+        self.overlapped = False
+        self.guard = threading.Lock()
+
+    def __call__(self, _data, **_options):
+        with self.guard:
+            self.inside += 1
+            self.overlapped |= self.inside > 1
+        time.sleep(0.2)
+        with self.guard:
+            self.inside -= 1
+        return [], 0.0
+
+
+def test_a_second_scan_never_reads_with_the_engine_while_another_scan_does(monkeypatch):
+    """The re-reads of a strip (missed lines, empty footnote marks) wait for the engine like the first read does."""
+    from PIL import Image
+
+    engine = _OneAtATime()
+    monkeypatch.setattr(ocr, "_engine", engine)
+    start = threading.Barrier(2)
+
+    def first_read():
+        start.wait()
+        ocr._read(b"page")
+
+    def strip_reread():
+        start.wait()
+        ocr._engine_lines(engine, Image.new("RGB", (40, 20), "white"))
+
+    threads = [threading.Thread(target=first_read), threading.Thread(target=strip_reread)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert not engine.overlapped, "two scans read with the one RapidOCR engine at the same time"

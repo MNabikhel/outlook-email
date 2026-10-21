@@ -1334,7 +1334,7 @@ class Store:
     def list_corrections(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM corrections ORDER BY created_at DESC"
+                "SELECT * FROM corrections ORDER BY created_at DESC, rowid DESC"
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -1342,7 +1342,7 @@ class Store:
         """The latest correction saved for this email: the first of ``list_corrections`` with its id."""
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT * FROM corrections WHERE email_id = ? ORDER BY created_at DESC, rowid LIMIT 1", (email_id,)
+                "SELECT * FROM corrections WHERE email_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", (email_id,)
             ).fetchone()
         return dict(row) if row else None
 
@@ -1352,7 +1352,7 @@ class Store:
                 """
                 SELECT * FROM corrections
                 WHERE lower(sender_email) = ?
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (sender_email.lower(),),

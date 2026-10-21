@@ -5,7 +5,12 @@ from the server into the page as HTML."""
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
+from datetime import datetime, timezone
+from email.message import EmailMessage
+from email.utils import format_datetime
 from pathlib import Path
 
 import pytest
@@ -15,12 +20,6 @@ from controller_inbox import web
 from controller_inbox.pipeline import ingest_demo
 
 UI = Path(web.__file__).parent / "static" / "ui"
-
-
-@pytest.fixture
-def client(store, settings, as_of_now):
-    ingest_demo(store, settings, now=as_of_now)
-    return TestClient(web.create_app(settings, store))
 
 
 def test_the_workspace_page_loads_at_every_address_with_versioned_scripts(client):
@@ -112,41 +111,6 @@ def test_a_cell_cited_in_a_csv_links_to_the_cell(settings, store, tmp_path):
 
 
 # ---------- The workspace's own scripts in a real browser, one test per fixed bug ----------
-
-
-@pytest.fixture(scope="module")
-def browser():
-    pytest.importorskip("playwright")
-    from playwright.sync_api import sync_playwright
-
-    from liveserver import chromium_path
-
-    path = chromium_path()
-    if path is None:
-        pytest.skip("no Chromium for Playwright on this machine")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path=path)
-        yield browser
-        browser.close()
-
-
-@pytest.fixture
-def site(settings, loaded):
-    from liveserver import serving
-
-    with serving(web.create_app(settings, loaded)) as base:
-        yield base
-
-
-@pytest.fixture
-def page(browser):
-    context = browser.new_context()
-    context.set_default_timeout(15000)
-    context.errors = []
-    context.on("weberror", lambda error: context.errors.append(str(error.error)))
-    yield context.new_page()
-    assert context.errors == []
-    context.close()
 
 
 def _draft(page, words: str) -> str:
@@ -567,3 +531,268 @@ def test_slash_on_the_digest_opens_an_empty_palette(site, page):
     page.keyboard.press("/")
     page.wait_for_selector(".palette input")
     assert page.input_value(".palette input") == ""
+
+
+NOW = datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc)
+
+
+def _age(path: Path) -> None:
+    """Files written just now look like they are still being copied; date them a minute back."""
+    old = time.time() - 60
+    os.utime(path, (old, old))
+
+
+# A close pack with a workbook is not an AP invoice --------------------------------------------------
+def _invoice_eml(settings) -> Path:
+    message = EmailMessage()
+    message["From"] = "Acme AR <ar@acme-industrial.example>"
+    message["To"] = "ap@horizongoods.example"
+    message["Subject"] = "Invoice INV-88123 from Acme Industrial Supply"
+    message["Date"] = format_datetime(NOW)
+    message["Message-ID"] = "<acme-inv-1@acme-industrial.example>"
+    message.set_content("Hello,\n\nPlease find attached invoice INV-88123 for PO-4410. Total due $4,319.50 by 11/11/2026.\n\nThanks,\nAcme AR")
+    path = settings.inbox_incoming / "acme-inv-1.eml"
+    path.write_bytes(bytes(message))
+    _age(path)
+    return path
+
+
+# The workspace in a real browser ------------------------------------------------------------------------
+@pytest.fixture
+def serve(settings, store):
+    """Starts the app on the store as it is when called and gives its address."""
+    from contextlib import ExitStack
+
+    from liveserver import serving
+
+    with ExitStack() as stack:
+        yield lambda: stack.enter_context(serving(web.create_app(settings, store)))
+
+
+def _page(browser, *, width=1280, height=900, dark=False):
+    context = browser.new_context(viewport={"width": width, "height": height}, color_scheme="dark" if dark else "light")
+    context.set_default_timeout(15000)
+    return context.new_page()
+
+
+def test_process_new_mail_says_how_many_files_could_not_be_read(browser, serve, settings):
+    settings.ensure_data_dir()
+    _invoice_eml(settings)
+    broken = settings.inbox_incoming / "broken.msg"
+    broken.write_bytes(b"this is not an outlook message at all" * 10)
+    _age(broken)
+    base = serve()
+    page = _page(browser)
+    page.goto(f"{base}/app")
+    page.wait_for_selector("body.ready")
+    page.click("#process-btn")
+    page.wait_for_selector(".toast:has-text('Processed')", timeout=60000)
+    text = page.inner_text(".toast:has-text('Processed')")
+    assert "1 file couldn't be read" in text and str(settings.inbox_failed) in text, text
+    page.context.close()
+
+
+# Toolbars fit the reading pane -----------------------------------------------------------------------
+OUTSIDE = """() => {
+  const pane = document.querySelector('.reader-pane').getBoundingClientRect();
+  const out = [];
+  for (const el of document.querySelectorAll('.reader-pane .rd-bar > *, .reader-pane .rd-bar .btn, .reader-pane .tabs .tab')) {
+    const box = el.getBoundingClientRect();
+    if (box.width && (box.right > pane.right + 0.5 || box.left < pane.left - 0.5)) out.push((el.textContent || el.className).trim());
+  }
+  const scroller = document.querySelector('.reader-pane');
+  if (scroller.scrollWidth > scroller.clientWidth + 1) out.push('the pane scrolls sideways');
+  if (document.documentElement.scrollWidth > innerWidth + 1) out.push('the page scrolls sideways');
+  return out;
+}"""
+
+
+@pytest.mark.parametrize("width,chat", [(390, False), (1280, True)])
+def test_the_reader_and_file_toolbars_fit(browser, serve, store, settings, as_of_now, width, chat):
+    ingest_demo(store, settings, now=as_of_now)
+    base = serve()
+    page = _page(browser, width=width)
+    page.goto(f"{base}/app")
+    page.wait_for_selector("body.ready")
+    if chat:
+        page.click("#chat-btn")
+        page.wait_for_selector("#chat:not([hidden])")
+    for path, ready in (
+        ("/app/mail/demo-bec-wire?in=all", '.rd[data-email="demo-bec-wire"]'),
+        ("/app/mail/demo-payroll/file/1?in=all&tab=tables", ".file-view .tabs"),
+    ):
+        page.goto(f"{base}{path}")
+        page.wait_for_selector(ready)
+        page.wait_for_timeout(300)
+        assert page.evaluate(OUTSIDE) == [], path
+    page.context.close()
+
+
+# A first start says how to get mail in --------------------------------------------------------------
+def test_today_with_no_mail_shows_how_to_get_started(browser, serve, store, settings):
+    settings.ensure_data_dir()
+    base = serve()
+    page = _page(browser)
+    page.goto(f"{base}/app")
+    page.wait_for_selector(".get-started")
+    text = page.inner_text(".get-started")
+    assert str(settings.inbox_incoming) in text and "Nothing new since" not in page.inner_text("#reader")
+    assert page.is_visible(".get-started button:has-text('Process new mail')")
+    page.click(".get-started button:has-text('Load sample mailbox')")
+    page.wait_for_function("() => document.querySelector('.kpis')", timeout=30000)
+    assert store.counts()["emails"] > 0
+    assert not page.query_selector(".get-started")
+    page.context.close()
+
+
+# The top bar at 1280 pixels -------------------------------------------------------------------------
+CUT = "sel => { const e = document.querySelector(sel); return e ? e.scrollWidth > e.clientWidth + 1 : 'missing'; }"
+
+
+def test_the_top_bar_shows_the_date_and_the_progress_whole_at_1280(browser, serve, store, settings, as_of_now):
+    import json as _json
+
+    ingest_demo(store, settings, now=as_of_now)
+    base = serve()
+    page = _page(browser, width=1280)
+    page.goto(f"{base}/app")
+    page.wait_for_selector("body.ready")
+    page.wait_for_timeout(300)
+    assert page.evaluate(CUT, ".top-date") is False
+
+    def running(route):
+        reply = route.fetch()
+        state = reply.json()
+        state["job"].update(state="running", stage="rereading", stage_label="Re-reading attachments", done=6, total=6, note="Close workbook.xlsx")
+        route.fulfill(response=reply, body=_json.dumps(state))
+
+    page.route("**/api/state", running)
+    page.evaluate("dispatchEvent(new Event('visibilitychange'))")
+    page.wait_for_selector(".top-job .job")
+    page.wait_for_timeout(300)
+    assert page.evaluate(CUT, ".top-job .job") is False
+    page.context.close()
+
+
+def test_past_digests_are_listed_in_the_workspace(browser, serve, store, settings):
+    for day in ("2026-09-20", "2026-09-21", "2026-09-22"):
+        store.save_digest(day, f"{day}T12:00:00+00:00", f"# {day}", "<p></p>", {"date": day, "headline": f"Digest {day}"})
+    base = serve()
+    page = _page(browser, width=1280)
+    page.goto(f"{base}/app/digest?date=2026-09-22")
+    page.wait_for_selector(".doc-nav")
+    page.click(".doc-nav a:has-text('Past digests')")
+    page.click("#past-digests a:has-text('2026-09-20')")
+    page.wait_for_url(f"{base}/app/digest?date=2026-09-20")
+    page.context.close()
+
+
+# Dark mode text keeps its contrast -------------------------------------------------------------------
+CONTRAST = """sel => {
+  const parse = (c) => c.match(/[\\d.]+/g).map(Number);
+  const lum = ([r, g, b]) => [r, g, b].map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); })
+    .reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+  const background = (el) => { for (; el; el = el.parentElement) { const c = parse(getComputedStyle(el).backgroundColor); if (c.length < 4 || c[3] > 0.5) return c; } return [255, 255, 255]; };
+  const el = document.querySelector(sel);
+  if (!el) return 'missing';
+  const [a, b] = [lum(parse(getComputedStyle(el).color)), lum(background(el))];
+  return Math.round(((Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)) * 100) / 100;
+}"""
+
+
+@pytest.mark.parametrize("dark", [True, False])
+def test_badges_and_buttons_keep_their_contrast_in_dark_mode(browser, serve, store, settings, as_of_now, dark):
+    ingest_demo(store, settings, now=as_of_now)
+    base = serve()
+    page = _page(browser, width=1280, dark=dark)
+    checks = {
+        "/app/mail/demo-bec-wire?in=fraud": [".brand-mark", ".rd-head .pill.imp-critical", "#rd-fraud .btn-danger", "#rd-fraud .tag-fraud"],
+        "/app/mail/demo-approval?in=all": [".rd-head .pill.imp-high"],
+        "/app/fraud": [".items .tag-fraud"],
+    }
+    seen = {}
+    for path, selectors in checks.items():
+        page.goto(f"{base}{path}")
+        page.wait_for_selector(selectors[-1])
+        for selector in selectors:
+            seen[selector] = page.evaluate(CONTRAST, selector)
+    if dark:
+        assert all(ratio >= 4.5 for ratio in seen.values()), seen
+    else:
+        # Light mode is as it was: white on the danger red and on the brand blue.
+        assert seen["#rd-fraud .btn-danger"] >= 4.5 and seen[".brand-mark"] >= 4.5, seen
+    page.context.close()
+
+
+def test_the_classic_pages_fit_a_phone(browser, serve, store, settings, as_of_now):
+    ingest_demo(store, settings, now=as_of_now)
+    base = serve()
+    page = _page(browser, width=390, height=844)
+    wide = {}
+    for path in ("/", "/inbox", "/coding", "/settings", "/actions", "/attachments"):
+        page.goto(f"{base}{path}")
+        page.wait_for_selector(".main")
+        width = page.evaluate("document.documentElement.scrollWidth")
+        if width > 390:
+            wide[path] = page.evaluate("[...document.querySelectorAll('.main *')].filter(e => e.getBoundingClientRect().right > 391 && !e.closest('.table-wrap')).map(e => e.tagName + '.' + e.className + ' ' + e.textContent.slice(0, 50))")
+    assert wide == {}
+    page.context.close()
+
+
+def test_coming_back_to_the_tab_while_a_status_check_is_out_keeps_one_poll_loop(site, page):
+    """A visibilitychange during an in-flight status poll neither sends a second request nor starts a second loop."""
+    page.clock.install()
+    page.goto(f"{site}/app")
+    page.wait_for_selector("body.ready")
+    held = []
+    page.route("**/api/state", lambda route: held.append(route))
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    page.wait_for_timeout(300)
+    assert len(held) == 1
+    page.evaluate("document.dispatchEvent(new Event('visibilitychange'))")
+    page.wait_for_timeout(300)
+    assert len(held) == 1, "a second poll went out while the first was still on its way"
+    for route in held:
+        route.continue_()
+    page.unroute("**/api/state")
+    sent = []
+    page.on("request", lambda request: sent.append(request.url) if request.url.endswith("/api/state") else None)
+    page.wait_for_timeout(300)
+    page.clock.run_for(16000)
+    page.wait_for_timeout(300)
+    assert len(sent) == 1, f"one poll loop runs, not {len(sent)}"
+
+
+def test_open_in_outlook_shows_the_servers_refusal_when_it_is_not_json(site, page):
+    """A non-JSON error from the open-original endpoint shows as an error, not a silent download."""
+    asked = []
+    page.on("request", lambda request: asked.append(request.url))
+    page.route("**/inbox/*/open", lambda route: route.fulfill(status=500, body="Internal Server Error", content_type="text/plain"))
+    page.goto(f"{site}/app/mail/demo-payroll")
+    page.wait_for_selector('.rd[data-email="demo-payroll"]')
+    page.click("button:has-text('Open in Outlook')")
+    page.wait_for_selector(".toast.error")
+    assert "500" in page.inner_text(".toast.error")
+    page.wait_for_timeout(300)
+    assert not [url for url in asked if url.endswith("/original")]
+
+
+def test_open_in_outlook_shows_the_servers_message_on_a_refusal(site, page):
+    """A JSON refusal from the open-original endpoint shows the server's own words."""
+    page.route("**/inbox/*/open", lambda route: route.fulfill(status=403, body='{"detail": "Files open on the computer running CloseDesk only."}', content_type="application/json"))
+    page.goto(f"{site}/app/mail/demo-payroll")
+    page.wait_for_selector('.rd[data-email="demo-payroll"]')
+    page.click("button:has-text('Open in Outlook')")
+    page.wait_for_selector(".toast.error")
+    assert "computer running CloseDesk only" in page.inner_text(".toast.error")
+
+
+def test_workspace_scripts_link_to_the_workspace_settings_not_the_classic_page():
+    """No workspace script links to the classic /settings page, which has a workspace equivalent."""
+    found = [
+        f"{path.name}:{n}"
+        for path in sorted(UI.glob("*.js"))
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if re.search(r"""["'`]/settings\b""", line)
+    ]
+    assert found == []

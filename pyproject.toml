@@ -15,7 +15,7 @@ dependencies = [
   "pydantic>=2.7,<3",
   "pydantic-settings>=2.3,<3",
   "pypdf>=4.0,<7",
-  "pdfminer.six>=20231228",
+  "pdfminer.six>=20231228,<20280000",
   # Draws a PDF page as a picture for a model that can see (vision.py).
   "pypdfium2>=4.30,<6",
   "Pillow>=10,<13",
@@ -36,9 +36,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "aspose-email-foss>=26.3,<27"]
+dev = ["pytest>=8.0,<10", "aspose-email-foss>=26.3,<27"]
+# Drives a real Chromium for the tests marked "browser" (pytest -m browser); then run: python -m playwright install chromium
+browser = ["playwright>=1.45,<2"]
 # Reads scanned PDFs and pictures on this computer. Not yet built for Python 3.13+, where Tesseract is used if installed.
-ocr = ["rapidocr-onnxruntime>=1.4,<2; python_version < '3.13'"]
+ocr = [
+  "rapidocr-onnxruntime>=1.4,<2; python_version < '3.13'",
+  # rapidocr runs on these; named here so their versions are bounded too.
+  "onnxruntime>=1.17,<2; python_version < '3.13'",
+  "numpy>=1.24,<3; python_version < '3.13'",
+]
 # A second reader for the tables in a PDF's text (camelot_tables.py). Optional: without it, PDFs are read as before.
 tables = ["camelot-py>=2.0,<3"]
 
@@ -56,3 +63,19 @@ controller_inbox = ["templates/*", "static/*", "static/ui/*"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+  "browser: drives a real Chromium through Playwright (needs the browser extra); deselect with -m \"not browser\"",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Syntax errors and pyflakes: undefined names, unused imports and variables, redefinitions.
+select = ["E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Uses the fixtures it imports from test_teach_and_preview by name, which pyflakes reads as redefinitions.
+"tests/test_teach_edges.py" = ["F811"]

@@ -19,19 +19,24 @@ if [ ! -x .venv/bin/python ]; then
   echo "Setup finished."
 fi
 
-# An update can add a package; install it before starting.
+# An update can add or raise a package (the add-ons' too); install it before starting. The add-ons are
+# kept where they install, and left out where they can't.
 if ! .venv/bin/python scripts/check_deps.py >/dev/null 2>&1; then
   echo "Installing what this update needs..."
-  if ! .venv/bin/python -m pip install --quiet -e .; then
+  if ! { .venv/bin/python -m pip install --quiet -e ".[ocr,tables]" >/dev/null 2>&1 \
+         || .venv/bin/python -m pip install --quiet -e ".[ocr]" >/dev/null 2>&1 \
+         || .venv/bin/python -m pip install --quiet -e .; }; then
     echo "Install failed. The message above says why."
     read -r -p "Press Enter to close. " _
     exit 1
   fi
 fi
 
-# The second table reader (Camelot) is optional: installed when it can be, skipped when it can't.
-if ! .venv/bin/python -c "import camelot" >/dev/null 2>&1; then
+# The second table reader (Camelot) is optional: installed when it can be, skipped when it can't. It is tried
+# once; .venv/.tables-tried remembers that, so a computer that can't install it doesn't try on every start.
+if [ ! -e .venv/.tables-tried ] && ! .venv/bin/python -c "import camelot" >/dev/null 2>&1; then
   .venv/bin/python -m pip install --quiet -e ".[tables]" >/dev/null 2>&1 || true
+  : > .venv/.tables-tried
 fi
 
 exec .venv/bin/python -m controller_inbox run "$@"

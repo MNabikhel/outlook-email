@@ -2,25 +2,11 @@
 
 from __future__ import annotations
 
-import json
-
-import pytest
-from fastapi.testclient import TestClient
-
 from controller_inbox import assistant, chats
-from controller_inbox.web import create_app
+from helpers import PAGE
+from helpers import ndjson_events as _events
 
-PAGE = {"X-CloseDesk": "1"}
 ROSTER = b"Employee,Department,Manager\nJonathan Reyes,,Priya Raman\nLi Wei,Finance,Dana Cole\n"
-
-
-def _events(response) -> list[dict]:
-    return [json.loads(line) for line in response.text.splitlines() if line.strip()]
-
-
-@pytest.fixture
-def client(settings, loaded) -> TestClient:
-    return TestClient(create_app(settings, loaded))
 
 
 def test_a_conversation_is_saved_reopened_searched_and_deleted(client, loaded, monkeypatch):

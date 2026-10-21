@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+
 from controller_inbox.table_lookup import lookup, tables_in, verify
 from controller_inbox.table_query import Tables
 
@@ -365,3 +367,83 @@ def test_formula_text_after_a_figure_is_not_counted_as_its_decimals():
     )
     verdicts = [verify(table) for table in tables_in(text)]
     assert [m for v in verdicts for m in v.mismatched] == [] and sum(v.matched for v in verdicts) == 2, verdicts
+
+
+class _Canvas:
+    """Text placed on a letter-size page, written as a PDF (the few reportlab canvas calls these tests use)."""
+
+    def __init__(self, out: io.BytesIO):
+        self.out, self.font, self.ops = out, ("F1", 12), []
+
+    def setFont(self, name: str, size: float) -> None:
+        self.font = ("F2" if name.endswith("Bold") else "F1", size)
+
+    def drawString(self, x: float, y: float, text: str) -> None:
+        escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        self.ops.append(f"BT /{self.font[0]} {self.font[1]} Tf {x} {y} Td ({escaped}) Tj ET")
+
+    def showPage(self) -> None:
+        pass
+
+    def save(self) -> None:
+        stream = "\n".join(self.ops).encode("latin-1")
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
+            b"/Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> >>",
+            b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
+        ]
+        pdf = bytearray(b"%PDF-1.4\n")
+        offsets = []
+        for number, body in enumerate(objects, 1):
+            offsets.append(len(pdf))
+            pdf += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+        xref = len(pdf)
+        pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+        pdf += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+        pdf += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+        self.out.write(bytes(pdf))
+
+
+def _bolt_invoice(number: str, amount: str) -> bytes:
+    """A letterhead, a block of details on the right, a parts table and "Amount Due" with no currency mark."""
+    out = io.BytesIO()
+    c = _Canvas(out)
+    c.setFont("Helvetica-Bold", 20)
+    c.drawString(72, 720, "Bolt Fasteners Inc")
+    c.setFont("Helvetica", 10)
+    c.drawString(72, 704, "77 Rivet Lane, Akron OH 44301")
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(420, 720, "INVOICE")
+    c.setFont("Helvetica", 11)
+    for i, (key, value) in enumerate([("Invoice #", number), ("Date", "10/14/2026"), ("Due", "11/13/2026"), ("PO", "PO-9001"), ("Job Site", "Riverside Plant")]):
+        c.drawString(380, 690 - 16 * i, key)
+        c.drawString(460, 690 - 16 * i, value)
+    y = 580
+    c.setFont("Helvetica-Bold", 11)
+    for x, text in [(72, "Part"), (200, "Description"), (400, "Qty"), (450, "Price"), (510, "Ext")]:
+        c.drawString(x, y, text)
+    c.setFont("Helvetica", 11)
+    for row in [("B-1", "Lag bolts", "100", "2.00", "200.00"), ("B-2", "Washers", "500", "0.10", "50.00")]:
+        y -= 18
+        for x, text in zip([72, 200, 400, 450, 510], row):
+            c.drawString(x, y, text)
+    y -= 30
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(400, y, "Amount Due")
+    c.drawString(510, y, amount)
+    c.showPage()
+    c.save()
+    return out.getvalue()
+
+
+def test_a_letterhead_beside_the_invoice_details_is_not_read_as_a_table():
+    """The vendor's name and address beside "INVOICE" and its details read as lines, not "Bolt Fasteners Inc: not listed"."""
+    from controller_inbox import documents
+
+    text = documents.pdf_text(_bolt_invoice("BF-5001", "250.00"))
+    assert "not listed | INVOICE" not in text and "Bolt Fasteners Inc: not listed" not in text
+    assert "Invoice # BF-5001" in text and "Due 11/13/2026" in text

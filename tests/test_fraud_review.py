@@ -310,7 +310,7 @@ def test_done_email_leaves_focus_and_the_need_you_count(loaded, settings, as_of_
 
     before = digest()
     target = next(row for row in before["focus"] if row["kind"] != "fraud")
-    # Not the payment-change warning: marked done, it still needs its phone check (see test_fraud_review2).
+    # Not the payment-change warning: marked done, it still needs its phone check (see test_fraud.py).
     important = next(
         row["id"] for row in before["new_mail"]["important"]
         if row["id"] != target["email_id"] and "fraud_risk" not in row["flags"]
