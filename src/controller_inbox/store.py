@@ -258,6 +258,21 @@ CREATE TABLE IF NOT EXISTS page_failures (
     model TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (attachment_id, page)
 );
+-- Messages copied from classic Outlook (outlook_sync.py): Outlook's id for each, the email it became, and what
+-- Outlook last said about it, so the next sync sees what changed. ``owned``: CloseDesk filed it from Outlook (a
+-- deletion in Outlook removes it); 0 when the same message was already here, dropped in by hand.
+CREATE TABLE IF NOT EXISTS outlook_items (
+    entry_id TEXT PRIMARY KEY,
+    store_id TEXT NOT NULL DEFAULT '',
+    email_id TEXT NOT NULL,
+    folder TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL DEFAULT '',
+    unread INTEGER NOT NULL DEFAULT 0,
+    flagged INTEGER NOT NULL DEFAULT 0,
+    received_at TEXT NOT NULL DEFAULT '',
+    owned INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_outlook_email ON outlook_items(email_id);
 CREATE INDEX IF NOT EXISTS idx_emails_received ON emails(received_at);
 CREATE INDEX IF NOT EXISTS idx_emails_importance ON emails(importance);
 CREATE INDEX IF NOT EXISTS idx_emails_category ON emails(category);
@@ -268,7 +283,14 @@ CREATE INDEX IF NOT EXISTS idx_att_hash ON attachments(sha256);
 
 
 # Setup choices kept in sync_state. Loading the sample mailbox keeps these; everything else there is mail bookkeeping.
-SETTING_KEYS = frozenset({"timezone", "profile", "min_context_tokens", "vision_mode", "vision_model"})
+SETTING_KEYS = frozenset(
+    {
+        "timezone", "profile", "min_context_tokens", "vision_mode", "vision_model",
+        # Settings → Outlook (outlook_sync.py)
+        "outlook_auto", "outlook_interval", "outlook_days", "outlook_folders", "outlook_subfolders",
+        "outlook_folder_list", "outlook_account",
+    }
+)
 
 BUSY_TIMEOUT_SECONDS = 30.0
 
@@ -344,6 +366,7 @@ class Store:
                 conn.execute(f"DELETE FROM {table} WHERE email_id IN ({mail})")
             conn.execute("DELETE FROM emails")
             conn.execute("DELETE FROM digests")
+            conn.execute("DELETE FROM outlook_items")
             keep = ", ".join("?" for _ in SETTING_KEYS)
             conn.execute(f"DELETE FROM sync_state WHERE key NOT IN ({keep})", sorted(SETTING_KEYS))
         return removed
@@ -1001,6 +1024,59 @@ class Store:
             if not conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]:
                 conn.execute("DELETE FROM digests")
         return removed
+
+    def delete_emails(self, email_ids: list[str]) -> int:
+        """Remove these emails and what was worked out from them (an email deleted in Outlook). Kept: corrections
+        (what they taught stays learned) and the fraud log (the record of what was flagged)."""
+        ids = [str(email_id) for email_id in email_ids if email_id]
+        if not ids:
+            return 0
+        marks = ", ".join("?" for _ in ids)
+        files = f"SELECT id FROM attachments WHERE email_id IN ({marks})"
+        with self.connect() as conn:
+            for table in ("file_summaries", "page_readings", "page_failures", "page_fixes"):
+                conn.execute(f"DELETE FROM {table} WHERE attachment_id IN ({files})", ids)
+            for table in ("embeddings", "findings", "attachments", "action_items", "fraud_checks", "cost_codings", "outlook_items"):
+                conn.execute(f"DELETE FROM {table} WHERE email_id IN ({marks})", ids)
+            return conn.execute(f"DELETE FROM emails WHERE id IN ({marks})", ids).rowcount
+
+    def set_read(self, email_id: str, is_read: bool) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE emails SET is_read = ? WHERE id = ?", (int(is_read), email_id))
+
+    def outlook_items(self) -> dict[str, dict]:
+        """Every message copied from Outlook, by Outlook's id for it."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT * FROM outlook_items").fetchall()
+        return {row["entry_id"]: {key: row[key] for key in row.keys()} for row in rows}
+
+    def save_outlook_item(self, item: dict) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO outlook_items
+                   (entry_id, store_id, email_id, folder, message_id, unread, flagged, received_at, owned)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    item["entry_id"], item.get("store_id") or "", item["email_id"], item.get("folder") or "",
+                    item.get("message_id") or "", int(bool(item.get("unread"))), int(bool(item.get("flagged"))),
+                    item.get("received_at") or "", int(bool(item.get("owned", True))),
+                ),
+            )
+
+    def keep_outlook_copy(self, email_id: str) -> None:
+        """The user dropped this synced email in by hand too: a deletion in Outlook no longer removes it."""
+        with self.connect() as conn:
+            conn.execute("UPDATE outlook_items SET owned = 0 WHERE email_id = ?", (email_id,))
+
+    def forget_outlook_item(self, entry_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM outlook_items WHERE entry_id = ?", (entry_id,))
+
+    def outlook_folder_of(self, email_id: str) -> str:
+        """The Outlook folder a synced email is in, as the last sync saw it; "" for mail from elsewhere."""
+        with self.connect() as conn:
+            row = conn.execute("SELECT folder FROM outlook_items WHERE email_id = ? LIMIT 1", (email_id,)).fetchone()
+        return row["folder"] if row else ""
 
     def set_source_path(self, email_id: str, path: str) -> None:
         """Where the original .msg/.eml was archived. Kept apart from upsert so re-reads keep it."""

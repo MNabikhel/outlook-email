@@ -16,6 +16,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -24,7 +26,10 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
-from controller_inbox import agent, chats, cost_codes, documents, fixes, fraud, model_roles, ocr, page_details, page_view, semantic, table_lookup, vision
+from controller_inbox import (
+    agent, chats, cost_codes, documents, fixes, fraud, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
+    semantic, table_lookup, vision,
+)
 from controller_inbox.digest import build_digest
 from controller_inbox.local_llm import check_model, context_target, needs_more_context
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
@@ -42,6 +47,8 @@ UI_VERSION = hashlib.sha256(
     b"".join(path.name.encode() + path.read_bytes() for path in sorted(UI_DIR.glob("*")) if path.is_file())
 ).hexdigest()[:10]
 
+# How often the automatic Outlook sync checks whether its interval has passed.
+OUTLOOK_TICK_SECONDS = 30
 MAX_TABLES = 40
 MAX_TABLE_ROWS = 1500
 CLIP_CHARS = 280
@@ -53,6 +60,7 @@ LOCKED_MESSAGE = (
 RUN_STATES = {"last_run": "last_overnight_at", "last_folder": "last_folder_ingest", "last_sync": "last_sync_at"}
 STAGES = {
     "starting": "Starting",
+    "outlook": "Copying mail from Outlook",
     "importing": "Reading files",
     "rereading": "Re-reading attachments",
     "reading": "Local model reading",
@@ -69,6 +77,13 @@ def page_only(request: Request) -> None:
     if not _same_origin(headers, headers.get(b"host", b"").decode("latin-1")):
         raise HTTPException(status_code=403, detail="Use the CloseDesk page for this.")
     _require_page(request)
+
+
+def _yes(value) -> bool:
+    """A yes/no setting from the page: true, 1, "true", "on" or "yes"; anything else is no ("false" included)."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "on", "yes")
+    return value is True or value == 1
 
 
 def _money(value: float | None) -> str:
@@ -915,6 +930,7 @@ def register_workspace(
             },
             "runs": {name: format_when(store.get_state(key) or "", settings.tz) for name, key in RUN_STATES.items()},
             "graph_configured": settings.graph_configured,
+            "outlook": outlook_state(),
             "corrections": store.correction_count(),
             "corrections_file": str(settings.training_path),
             "cost_codes": {"workbook": str(cost_codes.workbook_path(settings)), "counts": store.coding_counts()},
@@ -999,6 +1015,110 @@ def register_workspace(
         if notice == "busy":
             raise HTTPException(status_code=409, detail="Already processing. Index again when it finishes.")
         return saved(notice, job=job.snapshot())
+
+    # Classic Outlook, read only (outlook_desktop.py, outlook_sync.py).
+
+    def outlook_state() -> dict[str, Any]:
+        why = outlook_desktop.available()
+        cfg = outlook_sync.config(store)
+        try:
+            last = json.loads(store.get_state(outlook_sync.LAST_RESULT_KEY) or "{}")
+        except ValueError:
+            last = {}
+        return {
+            **cfg,
+            "available": not why,
+            "why": why,
+            "intervals": list(outlook_sync.INTERVALS),
+            "day_choices": list(outlook_sync.DAYS),
+            "folder_list": outlook_sync.folder_list(store),
+            "account": store.get_state(outlook_sync.ACCOUNT_KEY) or "",
+            "last_sync": format_when(store.get_state(outlook_sync.LAST_SYNC_KEY) or "", settings.tz),
+            "last_result": outlook_sync.describe(last) if last else "",
+            "copied": len(store.outlook_items()),
+        }
+
+    @api.post("/settings/outlook")
+    async def settings_outlook(request: Request):
+        data = await _json_body(request)
+        folders = data.get("folders")
+        try:
+            outlook_sync.save_config(
+                store,
+                auto=_yes(data.get("auto")),
+                interval=int(data.get("interval", outlook_sync.DEFAULT_INTERVAL)),
+                days=int(data.get("days", outlook_sync.DEFAULT_DAYS)),
+                folders=[str(path)[:400] for path in folders][:200] if isinstance(folders, list) else [],
+                subfolders=_yes(data.get("subfolders", True)),
+            )
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc) or "Choose from the lists.") from None
+        auto = outlook_sync.config(store)["auto"]
+        return {
+            "ok": True,
+            "message": "Saved. CloseDesk syncs Outlook when it starts and every "
+            f"{outlook_sync.config(store)['interval']} minutes while it's open." if auto else "Saved. Outlook syncs only when you click Sync now.",
+        }
+
+    def check_outlook() -> dict[str, Any]:
+        with outlook_desktop.connect() as session:
+            infos = outlook_sync.remember_folders(store, session)
+            account = session.account()
+        mail = [info for info in infos if not info.trash]
+        where = f" ({account})" if account else ""
+        return {"ok": True, "message": f"Found classic Outlook{where}: {len(mail)} mail folder{'' if len(mail) == 1 else 's'}. Pick the ones to copy below."}
+
+    @api.post("/settings/outlook/check")
+    async def settings_outlook_check():
+        try:
+            return await run_in_threadpool(check_outlook)
+        except outlook_desktop.OutlookUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except Exception as exc:
+            raise HTTPException(status_code=409, detail=f"Outlook didn't answer ({str(exc)[:200]}). Open Outlook and try again.") from None
+
+    def outlook_job(progress, *, auto: bool = False) -> dict:
+        from controller_inbox.overnight import RunBusy, outlook_run
+
+        try:
+            return outlook_run(store, settings, on_progress=progress, auto=auto)
+        except RunBusy:
+            message = "Another run was processing mail, so Outlook wasn't synced. It syncs next time."
+            return {"kind": "outlook", "message": message, "outlook": {}, "quiet": auto}
+
+    @api.post("/outlook/sync")
+    def outlook_sync_now():
+        why = outlook_desktop.available()
+        if why:
+            raise HTTPException(status_code=409, detail=why)
+        started = job.start(outlook_job, about={"kind": "outlook"})
+        if not started:
+            raise HTTPException(status_code=409, detail="Already processing. Sync again when it finishes.")
+        return {"ok": True, "started": True, "message": "Syncing Outlook. New mail shows up as it's copied.", "job": job.snapshot()}
+
+    def outlook_ticker() -> None:
+        """While CloseDesk is open: sync when automatic sync is on and its interval has passed. A sync that couldn't
+        run (Outlook closed, another run) is tried again after the interval, not every check."""
+        tried: float | None = None  # when this CloseDesk last tried; None: not yet, so the first check syncs
+        while True:
+            time.sleep(OUTLOOK_TICK_SECONDS)
+            try:
+                if outlook_desktop.available() or not outlook_sync.due(store):
+                    continue
+                interval = outlook_sync.config(store)["interval"] * 60
+                if (tried is not None and time.monotonic() - tried < interval) or job.snapshot()["state"] == "running":
+                    continue
+                tried = time.monotonic()
+                job.start(lambda progress: outlook_job(progress, auto=True), about={"kind": "outlook", "auto": True})
+            except Exception:  # the next check tries again
+                log.warning("Automatic Outlook sync check failed", exc_info=True)
+
+    def start_ticker() -> None:
+        if not outlook_desktop.available():
+            threading.Thread(target=outlook_ticker, name="outlook-sync", daemon=True).start()
+
+    # Started by ``cli._serve`` when the dashboard runs for real (not in tests).
+    app.state.start_outlook_sync = start_ticker
 
     @api.post("/settings/sample")
     def settings_sample():

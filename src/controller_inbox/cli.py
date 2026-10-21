@@ -369,7 +369,7 @@ def _run(settings: Settings, store: Store, args) -> int:
     print(f"CloseDesk — reading {settings.inbox_incoming}")
 
     def progress(stage: str, done: int, total: int, note: str) -> None:
-        label = {"importing": "Reading file", "rereading": "Re-reading file", "reading": "Model reading", "digest": "Writing digest"}.get(stage, stage)
+        label = {"outlook": "Outlook", "importing": "Reading file", "rereading": "Re-reading file", "reading": "Model reading", "digest": "Writing digest"}.get(stage, stage)
         suffix = f" {done}/{total}" if total > 1 else ""
         print(f"  {label}{suffix}: {note[:70]}", flush=True)
 
@@ -394,6 +394,8 @@ def _run(settings: Settings, store: Store, args) -> int:
 
 def _print_overnight(result: dict) -> None:
     print(result["headline"])
+    if result.get("outlook_message"):
+        print(result["outlook_message"])
     print(
         f"Read {result['ingested']} new file(s)"
         + (f", {result['already_read']} already filed" if result.get("already_read") else "")
@@ -509,6 +511,8 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None)
     if host:
         settings.host = host
     app = create_app(settings, store)
+    # Automatic Outlook sync while the dashboard is open (Settings → Outlook).
+    app.state.start_outlook_sync()
     if not is_loopback(settings.host):
         names = ", ".join(sorted(allowed_hosts(settings.host, settings.allowed_hosts)))
         print(
