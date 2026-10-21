@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone, tzinfo
 from zoneinfo import ZoneInfo
 
 from controller_inbox.classify import own_words
+from controller_inbox.clock import aware_utc, parse_stamp
 from controller_inbox.extract import YEAR_AFTER_DAY, parse_due_date
 from controller_inbox.models import (
     ActionItem,
@@ -15,6 +16,7 @@ from controller_inbox.models import (
     ExtractedFields,
     Importance,
 )
+from controller_inbox.money import fmt_money
 
 
 ACTION_RE = re.compile(
@@ -124,7 +126,7 @@ def extract_actions(
     due = fields.primary_due
     amount = fields.primary_amount
     invoice = fields.primary_invoice
-    amount_txt = f"${amount:,.2f}" if amount is not None else "an amount"
+    amount_txt = fmt_money(amount) if amount is not None else "an amount"
     if category == DocumentType.AP_INVOICE:
         title = _named("Code and enter", "invoice", invoice, subject)
         if amount is not None:
@@ -307,16 +309,13 @@ def received_day(received_at, tz: tzinfo | None = None, *, fallback: date | None
     without a zone is UTC; a blank or malformed one gives ``fallback`` (default: today).
     """
     zone = tz or timezone.utc
-    if isinstance(received_at, datetime):
-        received = received_at
-    else:
-        try:
-            received = datetime.fromisoformat(str(received_at or "").strip().replace("Z", "+00:00"))
-        except ValueError:
-            return fallback or datetime.now(zone).date()
-    if received.tzinfo is None:
-        received = received.replace(tzinfo=timezone.utc)
-    return received.astimezone(zone).date()
+    received = received_at if isinstance(received_at, datetime) else parse_stamp(received_at)
+    try:
+        if received is not None:
+            return aware_utc(received).astimezone(zone).date()
+    except OverflowError:  # the first or last moment a datetime can hold, moved to another zone
+        pass
+    return fallback or datetime.now(zone).date()
 
 
 def local_today(tz: ZoneInfo, now: datetime | None = None) -> date:

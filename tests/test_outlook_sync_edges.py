@@ -64,7 +64,7 @@ def test_mail_synced_then_dropped_by_hand_survives_deletion_in_outlook(store, se
 
 
 def test_two_messages_sharing_a_message_id_are_both_copied(store, settings, outlook):
-    """Scan-to-email copiers reuse one Message-ID. ingest_folder handles that (_another_message); the Outlook
+    """Scan-to-email copiers reuse one Message-ID. ingest_folder handles that (mail_identity.another_message); the Outlook
     sync counts the second scan as 'already' and never copies it."""
     outlook.add("s1", "Scan 0001 - invoice", message_id="<scan@copier.local>")
     outlook.add("s2", "Scan 0002 - W-9", minutes=5, message_id="<scan@copier.local>")
@@ -86,14 +86,14 @@ def test_a_new_message_reusing_a_deleted_ones_message_id_is_copied(store, settin
 def test_message_without_message_id_in_two_synced_folders_is_one_email(store, settings, outlook, monkeypatch):
     from controller_inbox import folder_mail
 
-    real = folder_mail._parse_msg
+    real = folder_mail.parse_msg
 
     def parse(path):  # a message with no Internet Message-ID header (Outlook-internal, some imports)
         raw = real(path)
         raw.internet_message_id = ""
         return raw
 
-    monkeypatch.setattr(folder_mail, "_parse_msg", parse)
+    monkeypatch.setattr(folder_mail, "parse_msg", parse)
     outlook.add("n1", "Internal note", message_id="")
     outlook.add("n2", "Internal note", folder="Inbox/Vendors", message_id="")  # Outlook copy: new EntryID
     sync(store, settings, outlook)

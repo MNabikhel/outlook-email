@@ -20,7 +20,8 @@ from dataclasses import replace
 from datetime import date
 from typing import TYPE_CHECKING
 
-from controller_inbox.extract import parse_amount, parse_due_date
+from controller_inbox.extract import parse_due_date
+from controller_inbox.money import fmt_money, parse_amount
 from controller_inbox.models import TAUGHT_LISTS, ActionItem, ActionStatus, ExtractedFields
 
 if TYPE_CHECKING:
@@ -85,15 +86,12 @@ def _amounts(text: str) -> list[tuple[float, bool]]:
     text = _DATE.sub(" ", text)
     for found in _MONEY.finditer(text):
         figure, thousands = found.group(2), found.group(3)
-        if thousands:
-            figure = figure.replace(thousands, "")
-        amount = parse_amount(figure.replace(",", "."))
+        # The match holds its brackets and minus; a "CR" is the next word.
+        credit = re.match(r"\s*CR\b", text[found.end():], re.IGNORECASE)
+        amount = parse_amount(found.group(0) + (" CR" if credit else ""))
         if amount is None or amount == 0:
             continue
-        whole = found.group(0).strip()
-        credit = (whole.startswith("(") and whole.endswith(")")) or "-" in whole[: whole.find(found.group(2))]
-        credit = credit or bool(re.match(r"\s*CR\b", text[found.end():], re.IGNORECASE))
-        out.append((-abs(amount) if credit else abs(amount), bool(found.group(1) or thousands or re.search(r"[.,]\d{1,2}$", figure))))
+        out.append((float(amount), bool(found.group(1) or thousands or re.search(r"[.,]\d{1,2}$", figure))))
     return out
 
 
@@ -137,7 +135,7 @@ def shown(field: str, value: str) -> str:
             amount = float(value)
         except ValueError:
             return value
-        return f"-${-amount:,.2f}" if amount < 0 else f"${amount:,.2f}"
+        return fmt_money(amount)
     return value
 
 

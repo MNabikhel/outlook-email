@@ -43,7 +43,10 @@ MAX_COLUMNS = 60
 PART_SIZE = 1_800
 
 SPREADSHEET_SUFFIXES = (".xlsx", ".xlsm", ".xltx", ".xltm")
+# The line that starts each page, sheet, slide or part of a file's text ("[page 3]", "[sheet "AP" (A1:F40)]").
 MARKER_RE = re.compile(r"^\[(page \d+|sheet \"[^\"\n]*\"[^\]\n]*|slide \d+|part \d+)\]\s*$", re.M)
+# A page's own marker, with its number.
+PAGE_MARKER_RE = re.compile(r"^\[page (\d+)\]\s*$", re.M)
 
 
 @dataclass
@@ -1290,23 +1293,43 @@ def outline(text: str, *, limit: int = 40) -> list[str]:
     return rows
 
 
-_TERM = re.compile(r"[A-Za-z0-9][A-Za-z0-9.$%&'-]*[A-Za-z0-9%]|[A-Za-z0-9]")
+# A word as the questions, the mail search, the passage search and past answers all read it: letters and figures,
+# with the marks inside a name, a code, an address or a figure ("F-150", "ap@vendor.com", "12.5%", "AT&T").
+_TERM = re.compile(r"[A-Za-z0-9][A-Za-z0-9.@$%&'-]*[A-Za-z0-9%]|[A-Za-z0-9]")
+# A possessive or a contraction's ending: "Reyes's" is "reyes", "don't" is "don".
+_ENDING = re.compile(r"'(?:s|t|ll|re|ve|d|m)$")
+# The words every question has that say nothing about what it is after; each caller adds its own.
+STOP_WORDS = frozenset(
+    """
+    a about an and any are be can could did do does for from have how i in is it me my of on or our please show
+    tell that the their them there this to was we what when where which who why will with you your
+    """.split()
+)
 
 
-def terms_of(query: str, stop: set[str] | frozenset[str] = frozenset()) -> list[str]:
+def singular(word: str) -> str:
+    """A plural folded to its word ("invoices" is "invoice"), not a word that ends "ss" or a code ("Q4s" stays)."""
+    if len(word) > 4 and word.endswith("s") and not word.endswith("ss") and not word[-2].isdigit():
+        return word[:-1]
+    return word
+
+
+def terms(text: str, *, stop: set[str] | frozenset[str] = frozenset(), fold_plurals: bool = True) -> list[str]:
+    """The words of ``text`` that carry meaning, lower case, each once in order: no ``stop`` words, nothing under
+    three letters but a figure, a possessive dropped, and with ``fold_plurals`` a plural read as its word."""
     words = []
-    for match in _TERM.findall(query or ""):
-        word = match.lower().strip(".'-")
+    for match in _TERM.findall(text or ""):
+        word = _ENDING.sub("", match.lower().strip(".'-"))
         if (len(word) < 3 and not word.isdigit()) or word in stop:
             continue
-        words.append(word)
+        words.append(singular(word) if fold_plurals else word)
     return list(dict.fromkeys(words))
 
 
 def search_parts(text: str, query: str, *, limit: int = 3, stop: set[str] | frozenset[str] = frozenset()) -> list[Part]:
     """The sections that best match ``query`` (rarer words count more)."""
     parts = split_parts(text)
-    words = terms_of(query, stop)
+    words = terms(query, stop=stop)
     if not words:
         return []
     lowered = [p.text.lower() + "\n" + p.label.lower() for p in parts]

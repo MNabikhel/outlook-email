@@ -21,7 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
-from controller_inbox import assistant, cli, web
+from controller_inbox import assistant, cli, services, web
 from controller_inbox.cli import load_sample
 from controller_inbox.config import Settings
 from controller_inbox.demo import make_pdf
@@ -659,7 +659,7 @@ def test_actions_export_writes_formulas_as_text(settings: Settings, store: Store
 def test_other_pages_answer_while_a_chat_answer_gets_ready(settings: Settings, loaded: Store, monkeypatch):
     started = threading.Event()
     release = threading.Event()
-    real_digest = web.build_digest
+    real_digest = services.build_digest
 
     def slow_digest(*args, **kwargs):
         # The chat's setup is held until the other page has answered (or 10 s pass).
@@ -667,7 +667,7 @@ def test_other_pages_answer_while_a_chat_answer_gets_ready(settings: Settings, l
         release.wait(10)
         return real_digest(*args, **kwargs)
 
-    monkeypatch.setattr(web, "build_digest", slow_digest)
+    monkeypatch.setattr(services, "build_digest", slow_digest)
     answered: dict = {}
 
     def ask(base: str) -> None:

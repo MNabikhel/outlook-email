@@ -43,9 +43,7 @@
     return Date.UTC(Number(p.year), new Date(`${p.month} 1, 2000`).getMonth(), Number(p.day));
   }
 
-  function isTyping(target) {
-    return target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
-  }
+  const isTyping = (target) => shared().isTyping(target);
 
   /* ---------- Email preview panel ---------- */
 
@@ -234,138 +232,15 @@
       ? `/inbox/${encodeURIComponent(source.id)}/files/1`
       : `/inbox/${encodeURIComponent(source.id)}`;
 
-  /* A citation opens the file it is about: the file named in the same sentence, or the email's one
-     readable file when the sentence talks about a page, sheet or file. PDFs open at the cited page;
-     other files open in the text view at the cited page, slide, sheet or cell. */
-  const PAGE_AT = /\b(?:page|p\.)\s?(\d{1,4})\b/i;
-  const SLIDE_AT = /\bslide\s?(\d{1,3})\b/i;
-  const SHEET_AT = /\bsheet\s+["“']([^"”'\n]+)["”']/i;
-  const CELL_AT = /(?:(?:'([^'\n]+)'|"([^"\n]+)"|([A-Za-z][\w]*))!)?\b([A-Z]{1,3}\d{1,6})\b/g;
-  const CELL_WORD = /\bcells?\s+$/i;
-  const SHEET_FILE = /\.(xlsx|xlsm|xls|csv|tsv)$/i;
-  const ABOUT_A_FILE = /\b(attach\w*|file|pdf|document|spreadsheet|workbook|sheet|tab|deck|slide|page|cell|row|table)\b/i;
-  const SENTENCE_END = /(?<!\b(?:p|pp|no|e\.g|i\.e|vs))[.!?](?=\s)|\n/gi;
-
-  function sentences(text) {
-    const out = [];
-    let start = 0;
-    for (const match of text.matchAll(SENTENCE_END)) {
-      out.push(text.slice(start, match.index + 1));
-      start = match.index + 1;
-    }
-    if (start < text.length) out.push(text.slice(start));
-    return out;
-  }
-
-  function citedCell(context) {
-    // "cell C4" or Budget!C4 over a bare reference, which could as well be "Q4" in a sentence.
-    const found = [...context.matchAll(CELL_AT)];
-    return (
-      found.find((m) => CELL_WORD.test(context.slice(0, m.index))) || found.find((m) => m[1] || m[2] || m[3]) || found[found.length - 1] || null
-    );
-  }
-
-  function fileHref(source, file, context) {
-    const base = `/inbox/${encodeURIComponent(source.id)}/files/${file.n}`;
-    context = context.split(file.name).join(" ");
-    const page = context.match(PAGE_AT);
-    if (file.view) return `${base}/view${/\.pdf$/i.test(file.name) && page ? `#page=${page[1]}` : ""}`;
-    const slide = context.match(SLIDE_AT);
-    // A CSV's one sheet is named after the file, which was just blanked out: an empty name means "the sheet".
-    const sheet = ((context.match(SHEET_AT) || [])[1] || "").trim();
-    const cell = SHEET_FILE.test(file.name) ? citedCell(context) : null;
-    let at = "";
-    if (page) at = `page ${page[1]}`;
-    else if (slide) at = `slide ${slide[1]}`;
-    else if (cell) {
-      const name = [cell[1], cell[2], cell[3], sheet].map((part) => (part || "").trim()).find(Boolean);
-      at = name ? `${name}!${cell[4]}` : cell[4];
-    } else if (sheet) at = `sheet "${sheet}"`;
-    return at ? `${base}?at=${encodeURIComponent(at)}` : base;
-  }
-
-  function citedFile(source, context) {
-    const files = source.files || [];
-    const lower = context.toLowerCase();
-    const named = files.find((file) => lower.includes(file.name.toLowerCase()));
-    if (named) return named;
-    const readable = files.filter((file) => file.text);
-    return readable.length === 1 && ABOUT_A_FILE.test(context) ? readable[0] : null;
-  }
+  /* Answers are formatted, and their citations linked, by the workspace's format.js (static/ui/classic.js hands
+     it over); a citation of an email opens its page here. Without it (the module didn't load), the plain text. */
+  const shared = () => window.CloseDeskShared || {};
+  const formatAnswer = (text, sources) =>
+    shared().formatAnswer ? shared().formatAnswer(text, sources, { mailHref, nav: false }) : escapeHtml(text).replace(/\n/g, "<br>");
+  const fileHref = (source, file, context) => shared().fileHref(source, file, context);
 
   const fileLink = (href, title, inner, cls) =>
     `<a class="${cls}" href="${escapeHtml(href)}" target="_blank" rel="noopener" title="Open ${escapeHtml(title)}">${inner}</a>`;
-
-  const LOCATION = new RegExp([PAGE_AT, SLIDE_AT, SHEET_AT, /\bcells?\s+[A-Z]{1,3}\d/, /!\$?[A-Z]{1,3}\$?\d/].map((re) => re.source).join("|"), "i");
-
-  function citeTarget(source, context, whole) {
-    // The sentence decides; else a file the rest of the answer names ("Source: roster.pdf, page 1").
-    const file = citedFile(source, context);
-    if (file) return { file, href: fileHref(source, file, context) };
-    const files = source.files || [];
-    const named = files.filter((item) => whole.toLowerCase().includes(item.name.toLowerCase()));
-    if (named.length !== 1) return null;
-    const where = LOCATION.test(context.split(named[0].name).join(" ")) ? context : whole;
-    return { file: named[0], href: fileHref(source, named[0], where) };
-  }
-
-  function formatSentence(sentence, context, sources, names, whole) {
-    const html = escapeHtml(sentence)
-      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      .replace(/(^|[\s(])\*(?!\s)([^*\n]+?)\*(?=[\s).,!?:;]|$)/g, "$1<em>$2</em>")
-      .replace(/`([^`\n]+)`/g, "<code>$1</code>");
-    // File names and [n] citations in one pass, so a link is never looked through again: a file named
-    // report[1].csv stays one link instead of getting a citation inside its title. Tags pass unchanged.
-    return html.replace(names.pattern, (match, tag, name, n) => {
-      if (tag) return tag;
-      if (name) {
-        const hit = names.byName.get(name.toLowerCase());
-        return hit ? fileLink(fileHref(hit.source, hit.file, context), hit.file.name, name, "cite-name") : name;
-      }
-      const source = sources.find((item) => String(item.n) === n);
-      if (!source) return match;
-      const target = citeTarget(source, context, whole);
-      if (target) return fileLink(target.href, target.file.name, `[${n}]`, "cite");
-      return `<a class="cite" href="${mailHref(source)}" title="${escapeHtml(source.subject)}">[${n}]</a>`;
-    });
-  }
-
-  function fileNames(sources) {
-    const byName = new Map();
-    const counts = new Map();
-    sources.forEach((source) =>
-      (source.files || []).forEach((file) => {
-        const key = file.name.toLowerCase();
-        counts.set(key, (counts.get(key) || 0) + 1);
-        byName.set(key, { source, file });
-      })
-    );
-    // Matched in the escaped HTML, so keyed by the escaped name.
-    const unique = new Map(
-      [...byName].filter(([key]) => counts.get(key) === 1 && key.length >= 5).map(([key, hit]) => [escapeHtml(key), hit])
-    );
-    const escaped = [...unique.keys()]
-      .sort((a, b) => b.length - a.length)
-      .map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-    // A tag added for bold, italics or code; a file name (none: matches nothing); a citation.
-    const name = escaped.length ? `(?<![\\w/])(?:${escaped.join("|")})(?![\\w])` : "(?!)";
-    return { byName: unique, pattern: new RegExp(`(<[^>]*>)|(${name})|\\[(\\d{1,2})\\]`, "gi") };
-  }
-
-  function formatAnswer(text, sources) {
-    sources = sources || [];
-    const names = fileNames(sources);
-    const parts = sentences(text);
-    return parts
-      .map((sentence, index) => {
-        // "... is blank. [1]": a citation after the full stop belongs to the sentence before.
-        const lead = sentence.split(/\[\d{1,2}\]/)[0];
-        const context = !lead.trim() && index ? parts[index - 1] + sentence : sentence;
-        return formatSentence(sentence, context, sources, names, text);
-      })
-      .join("")
-      .replace(/\n/g, "<br>");
-  }
 
   function renderSteps(turn) {
     const steps = turn.steps || [];
@@ -406,7 +281,7 @@
       html += now ? renderReadingNow(now) : renderReading(turn.reading);
       html += renderSteps(turn);
       const waiting = turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
-      if (turn.text || !now) html += `<div>${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
+      if (turn.text || !now) html += `<div class="msg-text">${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
       if (turn.checks && turn.checks.length) {
         html += `<ul class="msg-check">${turn.checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
       }
@@ -542,73 +417,53 @@
     const answer = { role: "assistant", text: "", sources: [], steps: [], notes: [], pending: true };
     const bubble = renderTurn(answer);
     $("button[type='submit']", chatForm).disabled = true;
+    // A newer round (a new or another conversation opened meanwhile) stops reading this answer.
+    const stop = new AbortController();
     try {
-      const response = await fetch("/chat", {
-        method: "POST",
-        headers: JSON_HEADERS,
-        body: JSON.stringify({ message: question, chat_id: chatId, email_id: emailId || chatInput.dataset.emailId || currentEmailId() }),
-      });
-      if (!response.ok || !response.body) throw new Error(`the server said ${response.status}`);
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        if (round !== chatRound) {
-          reader.cancel().catch(() => {});
-          break;
-        }
-        buffer += decoder.decode(value, { stream: true });
-        let cut;
-        while ((cut = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, cut).trim();
-          buffer = buffer.slice(cut + 1);
-          if (!line) continue;
-          const event = JSON.parse(line);
-          if (round !== chatRound) break;
-          if (event.type === "chat") {
-            rememberChat(event.id);
-            setTitle(event.title);
-          } else if (event.type === "sources") {
-            answer.sources = event.sources || [];
-            if (event.warning) answer.warning = event.warning;
-            answer.mode = event.mode;
-          } else if (event.type === "step" || event.type === "note") {
-            const list = event.type === "step" ? (answer.steps = answer.steps || []) : (answer.notes = answer.notes || []);
-            list.push(event.text);
-            renderTurn(answer, bubble);
-          } else if (event.type === "revise") {
-            answer.text = event.text;
-            renderTurn(answer, bubble);
-          } else if (event.type === "check") {
-            answer.checks = event.items || [];
-            renderTurn(answer, bubble);
-          } else if (event.type === "context") {
-            answer.context = event.text;
-            renderTurn(answer, bubble);
-          } else if (event.type === "mode") {
-            answer.mode = event.mode;
-            answer.note = event.note || "";
-            renderTurn(answer, bubble);
-          } else if (event.type === "vision") {
-            answer.vision = event;
-          } else if (event.type === "reading") {
-            if (event.state === "running") answer.readingNow = event;
-            else {
-              if (event.label) answer.reading = event;
-              answer.readingNow = null;
-            }
-            renderTurn(answer, bubble);
-          } else if (event.type === "error") {
-            answer.text = (answer.text ? answer.text + "\n\n" : "") + event.text;
-            renderTurn(answer, bubble);
-          } else if (event.type === "delta") {
-            answer.text += event.text;
-            renderTurn(answer, bubble);
+      const body = { message: question, chat_id: chatId, email_id: emailId || chatInput.dataset.emailId || currentEmailId() };
+      await shared().postStream("/chat", body, (event) => {
+        if (round !== chatRound) return stop.abort();
+        if (event.type === "chat") {
+          rememberChat(event.id);
+          setTitle(event.title);
+        } else if (event.type === "sources") {
+          answer.sources = event.sources || [];
+          if (event.warning) answer.warning = event.warning;
+          answer.mode = event.mode;
+        } else if (event.type === "step" || event.type === "note") {
+          const list = event.type === "step" ? (answer.steps = answer.steps || []) : (answer.notes = answer.notes || []);
+          list.push(event.text);
+          renderTurn(answer, bubble);
+        } else if (event.type === "revise") {
+          answer.text = event.text;
+          renderTurn(answer, bubble);
+        } else if (event.type === "check") {
+          answer.checks = event.items || [];
+          renderTurn(answer, bubble);
+        } else if (event.type === "context") {
+          answer.context = event.text;
+          renderTurn(answer, bubble);
+        } else if (event.type === "mode") {
+          answer.mode = event.mode;
+          answer.note = event.note || "";
+          renderTurn(answer, bubble);
+        } else if (event.type === "vision") {
+          answer.vision = event;
+        } else if (event.type === "reading") {
+          if (event.state === "running") answer.readingNow = event;
+          else {
+            if (event.label) answer.reading = event;
+            answer.readingNow = null;
           }
+          renderTurn(answer, bubble);
+        } else if (event.type === "error") {
+          answer.text = (answer.text ? answer.text + "\n\n" : "") + event.text;
+          renderTurn(answer, bubble);
+        } else if (event.type === "delta") {
+          answer.text += event.text;
+          renderTurn(answer, bubble);
         }
-      }
+      }, { signal: stop.signal });
     } catch (error) {
       answer.text = (answer.text ? answer.text + "\n\n" : "") + `Something went wrong (${error.message}). Try again.`;
     }

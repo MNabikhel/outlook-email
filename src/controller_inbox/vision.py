@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from controller_inbox import memo, ocr, tables
-from controller_inbox.documents import MAX_PDF_PAGES
+from controller_inbox.documents import MARKER_RE, MAX_PDF_PAGES, PAGE_MARKER_RE
 from controller_inbox.local_llm import (
     EmptyReply,
     check_model,
@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 # PDFium can't be used from two threads at once (a read in the background, a file page opened meanwhile).
-_PDFIUM = threading.Lock()
+PDFIUM_LOCK = threading.Lock()
 
 PROMPT = (
     "Transcribe this document page exactly. Return all the text as it appears, top to bottom. "
@@ -116,7 +116,8 @@ OVIS_PROMPT = (
     "Markdown. Preserve the original text without translation or paraphrasing."
 )
 GENERAL = Reader("a general model that can see")
-# Models made for reading document pages, by a word in their name: preferred over a general one when downloaded.
+# Models made for reading document pages, by a word in their name: preferred over a general one when downloaded, and
+# never taken for the chat model (``local_llm.document_reader``). The one list of them.
 READERS = {"ovisocr": Reader("OvisOCR2, a document reader", OVIS_PROMPT, 200, 2048, 12288, 20480)}
 
 
@@ -366,7 +367,7 @@ def _scanned_pages(data: bytes) -> list[int]:
     except ImportError:
         return []
     found = []
-    with _PDFIUM:
+    with PDFIUM_LOCK:
         try:
             pdf = pdfium.PdfDocument(data)
         except Exception:
@@ -407,22 +408,20 @@ def _doubtful_pages(text: str) -> list[int]:
     return found
 
 
-_PAGE_MARK = re.compile(r"^\[page (\d+)\]\s*$", re.M)
 # Written after a PDF's last page read (documents.py): kept after that page, never part of it.
 _TAIL = re.compile(r"\n*(\[CloseDesk read the first \d+ of \d+ pages\.\])\s*$")
-_MARK = re.compile(r"^\[(?:page \d+|sheet \"[^\"\n]*\"[^\]\n]*|slide \d+|part \d+)\]\s*$", re.M)
 
 
 def page_bodies(text: str) -> list[tuple[int, str]]:
     """Each ``[page N]`` block's number and text. Text without page marks (a picture) is page 1."""
     text = text or ""
-    marks = list(_MARK.finditer(text))
+    marks = list(MARKER_RE.finditer(text))
     if not marks:
         body = text.strip()
         return [(1, body)] if body else []
     out = []
     for i, mark in enumerate(marks):
-        page = _PAGE_MARK.match(mark.group(0))
+        page = PAGE_MARKER_RE.match(mark.group(0))
         if not page:
             continue
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
@@ -443,7 +442,7 @@ def render(data: bytes, filename: str, page: int, *, reader: Reader = GENERAL) -
     if suffix == ".pdf":
         import pypdfium2 as pdfium
 
-        with _PDFIUM:
+        with PDFIUM_LOCK:
             pdf = pdfium.PdfDocument(data)
             try:
                 if not 1 <= page <= len(pdf):
@@ -1439,7 +1438,7 @@ def shown_text(text: str, rows: dict[int, dict]) -> str:
     if not rows:
         return text
     text = text or ""
-    marks = list(_MARK.finditer(text))
+    marks = list(MARKER_RE.finditer(text))
     unmarked = {page: row for page, row in rows.items() if _saved(row).get("kind") == "unmarked"}
     if not marks:
         body = text.strip()
@@ -1452,12 +1451,12 @@ def shown_text(text: str, rows: dict[int, dict]) -> str:
         # A PDF CloseDesk couldn't read page by page (its text is only a note): each page read follows the note.
         pages = [f"[page {page}]\n{_page_for('', row)}" for page, row in sorted(unmarked.items())]
         return "\n\n".join(part for part in [body, *pages] if part)
-    seen = {int(found.group(1)) for found in _PAGE_MARK.finditer(text)}
+    seen = {int(found.group(1)) for found in PAGE_MARKER_RE.finditer(text)}
     extra = [f"[page {page}]\n{_page_for('', row)}" for page, row in sorted(rows.items()) if page not in seen]
     pieces = [text[: marks[0].start()]]
     for i, mark in enumerate(marks):
         end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
-        page = _PAGE_MARK.match(mark.group(0))
+        page = PAGE_MARKER_RE.match(mark.group(0))
         row = rows.get(int(page.group(1))) if page else None
         if row is None:
             pieces.append(text[mark.start():end])
@@ -1561,7 +1560,7 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
     scanned = set(scanned_pages(data, sha256=att.sha256)) if suffix == ".pdf" else set()
     stored_text = store.stored_text(att.id)
     raw = (att.extracted_text or "") if stored_text is None else stored_text
-    kind = "picture" if suffix in IMAGE_SUFFIXES else ("pdf" if _PAGE_MARK.search(raw) else "unmarked")
+    kind = "picture" if suffix in IMAGE_SUFFIXES else ("pdf" if PAGE_MARKER_RE.search(raw) else "unmarked")
     bodies = dict(page_bodies(raw)) if kind != "unmarked" else {}
     stored = store.page_readings(att.id, att.sha256)
     todo = pages[:MAX_PAGES]

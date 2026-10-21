@@ -415,7 +415,8 @@ src/controller_inbox/
   graph.py          Microsoft Graph client (device code or client secret)
   outlook_desktop.py Classic Outlook on this Windows computer, read only (COM)
   outlook_sync.py   Copies mail from classic Outlook in, and keeps the copies in step with it
-  folder_mail.py    Drop folder: .msg / .eml / loose files, Message-ID dedupe, inbox/failed
+  folder_mail.py    Drop folder: .msg / .eml / loose files, inbox/failed
+  mail_identity.py  Whether a message is already stored, however it came in, and the id it is filed under
   tnef.py           The files inside a winmail.dat
   demo.py           Sample mailbox
   pipeline.py       Ingest → classify → store (scripts only, fast)
@@ -453,8 +454,10 @@ src/controller_inbox/
   tools.py          JSON tools for the Bionic agent
   web.py            Local dashboard
   web_api.py        The workspace page (/app) and the JSON it is built from (/api)
+  web_common.py     What both share: notices, which files download, same-page checks, finding an attachment
+  services.py       What a button does, the same from the classic pages and the workspace
   templates/        The classic pages
-  static/app.js     Open-in-place preview, chat box, search shortcut
+  static/app.js     Open-in-place preview, chat box, search shortcut (answers formatted by static/ui/format.js)
   static/ui/        The workspace's scripts and styles (no build step, no CDN)
 CloseDesk.bat / CloseDesk.command   Double-click launchers (first run sets up .venv)
 scripts/check_deps.py               What the launchers run to see if an update needs a reinstall

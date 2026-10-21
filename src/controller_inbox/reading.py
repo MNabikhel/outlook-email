@@ -28,6 +28,7 @@ from controller_inbox.models import (
     EmailRecord,
     Importance,
 )
+from controller_inbox.money import fmt_money
 
 # Per attachment in the overnight packet: the section list, the opening, and what matches the email.
 PACKET_FILE_CHARS = 1500
@@ -112,7 +113,7 @@ def script_summary(email: EmailRecord) -> str:
         bits.append(email.extracted.primary_invoice)
     amount = email.extracted.primary_amount
     if amount is not None:
-        bits.append(f"${amount:,.2f}")
+        bits.append(fmt_money(amount))
     if email.extracted.primary_due:
         bits.append(f"due {email.extracted.primary_due}")
     line = " · ".join(bits)
@@ -243,7 +244,8 @@ def overlay_reading(
     within a week stays in Important.
     """
     now = now or datetime.now(timezone.utc)
-    today = _today(now, tz)
+    # Today where the user is: what due dates and "within a week" are measured against.
+    today = received_day(now, tz)
     script_line = email.summary
     category = _category(parsed.get("category"), email.category)
     importance = _importance(parsed.get("importance"), email.importance)
@@ -251,7 +253,7 @@ def overlay_reading(
     summary = _clean_sentence(parsed.get("summary") or email.summary or "")
     why = _clean_sentence(parsed.get("why") or "Local model reading", limit=300)
     guard_notes: list[str] = []
-    invented = _ungrounded_amounts(summary, email)
+    invented = ungrounded_amounts(summary, email)
     if invented:
         guard_notes.append(
             f"Kept the script summary: the model quoted {', '.join(invented)}, which is not in the message."
@@ -295,7 +297,8 @@ def overlay_reading(
     email.flags = [flag for flag in email.flags if flag != "needs_model"]
     if "bionic" not in email.flags:
         email.flags.append("bionic")
-    as_of = _as_of(email, tz)
+    # The day the message arrived where the user is: evening mail west of UTC is already tomorrow in UTC.
+    as_of = received_day(email.received_at, tz)
     previous_actions = list(email.actions)
     provided = parsed.get("actions")
     if isinstance(provided, list) and provided:
@@ -387,18 +390,6 @@ def _score(importance: Importance, fraud: bool) -> int:
     }[importance]
 
 
-def _as_of(email: EmailRecord, tz: tzinfo | None = None) -> date:
-    """The day the message arrived where the user is. Evening mail west of UTC is already tomorrow in UTC."""
-    return received_day(email.received_at, tz)
-
-
-def _today(now: datetime, tz: tzinfo | None) -> date:
-    """Today where the user is: what due dates and "within a week" are measured against."""
-    zone = tz or timezone.utc
-    current = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
-    return current.astimezone(zone).date()
-
-
 _DATE_NOTE = "Model suggested due"
 _MONEY = re.compile(r"\$\s?((?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?)(\s?[kKmM]\b)?")
 
@@ -429,7 +420,7 @@ def _haystack(email: EmailRecord) -> str:
     return "\n".join(part or "" for part in parts)
 
 
-def _ungrounded_amounts(summary: str, email: EmailRecord) -> list[str]:
+def ungrounded_amounts(summary: str, email: EmailRecord) -> list[str]:
     """Dollar figures in a model summary that the message itself does not contain."""
     known = [float(value) for value in email.extracted.amounts]
     for att in email.attachments:

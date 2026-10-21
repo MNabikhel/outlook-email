@@ -29,7 +29,7 @@ except ImportError:
 from controller_inbox import documents, memo
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
-from controller_inbox.local_llm import _headers, _http
+from controller_inbox.local_llm import auth_headers, http_method, lm_studio_root
 from controller_inbox.models import AttachmentRecord, EmailRecord
 from controller_inbox.store import Store
 
@@ -68,9 +68,9 @@ def embedding_model(settings: Settings) -> str:
 
 
 def _find_model(settings: Settings, base: str) -> str:
-    root = base[: -len("/v1")] if base.endswith("/v1") else base
+    root = lm_studio_root(base)
     try:
-        data = _http("get")(root + "/api/v1/models", headers=_headers(settings), timeout=2.0).json()
+        data = http_method("get")(root + "/api/v1/models", headers=auth_headers(settings), timeout=2.0).json()
         models = [m for m in data.get("models", []) if isinstance(m, dict) and "embed" in str(m.get("type", "")).lower()]
         models.sort(key=lambda m: not m.get("loaded_instances"))
         if models and models[0].get("key"):
@@ -78,7 +78,7 @@ def _find_model(settings: Settings, base: str) -> str:
     except (httpx.HTTPError, ValueError, AttributeError, TypeError):
         pass
     try:
-        data = _http("get")(base + "/models", headers=_headers(settings), timeout=2.0).json()
+        data = http_method("get")(base + "/models", headers=auth_headers(settings), timeout=2.0).json()
         ids = [str(m.get("id")) for m in data.get("data", []) if isinstance(m, dict) and "embed" in str(m.get("id", "")).lower()]
         return ids[0] if ids else ""
     except (httpx.HTTPError, ValueError, AttributeError, TypeError):
@@ -93,10 +93,10 @@ def embed(settings: Settings, texts: list[str], *, query: bool = False) -> list[
     if "nomic" in model.lower():
         texts = [("search_query: " if query else "search_document: ") + text for text in texts]
     try:
-        response = _http("post")(
+        response = http_method("post")(
             base_url(settings) + "/embeddings",
             json={"model": model, "input": texts},
-            headers=_headers(settings),
+            headers=auth_headers(settings),
             timeout=httpx.Timeout(max(settings.llm_timeout, 60.0), connect=5.0),
         )
         response.raise_for_status()
@@ -194,7 +194,7 @@ def index_mail(
     stale = [key for key, (email_id, _size) in owners.items() if email_id in indexed and key not in items]
     if stale:
         store.delete_embeddings(model, stale)
-        _vector_cache.pop((str(store.path), model), None)
+        _forget(store, model)
     todo = [(key, email_id, text) for key, (email_id, text) in items.items() if have.get(key) != _key(text)]
     added = 0
     size = 0
@@ -218,7 +218,7 @@ def index_mail(
         store.save_embeddings(model, [(key, email_id, _key(text), v.tobytes()) for (key, email_id, text), v in zip(batch, vectors)])
         # The vectors kept for search are read again: after the mail was cleared, a new index can have as many rows
         # and the same last row number as the old one, which the version check alone takes for no change.
-        _vector_cache.pop((str(store.path), model), None)
+        _forget(store, model)
         added += len(batch)
         start += len(batch)
     if emails is None:
@@ -271,6 +271,14 @@ def file_states(store: Store, settings: Settings, email: EmailRecord) -> dict[st
 _question_cache: dict[tuple[str, str], array] = {}
 
 
+def _forget(store: Store, model: str) -> None:
+    """Drop what is kept of ``model``'s vectors once its index changes: the mail's, and the questions' (another model
+    loaded under the same name places them differently)."""
+    _vector_cache.pop((str(store.path), model), None)
+    for key in [key for key in _question_cache if key[0] == model]:
+        del _question_cache[key]
+
+
 def rank_sections(store: Store, settings: Settings, att: AttachmentRecord, question: str, *, limit: int = 4) -> list[str]:
     """Labels of the file's sections closest in meaning to ``question``, best first. [] when the file
     isn't indexed for its current text or there is no embedding model."""
@@ -281,24 +289,30 @@ def rank_sections(store: Store, settings: Settings, att: AttachmentRecord, quest
     rows = [(key, blob) for key, text_key, blob in store.embedding_rows(model, prefix=f"file:{att.id}:") if current.get(key) == text_key]
     if not rows:
         return []
+    asked = _asked(settings, model, question)
+    if asked is None:
+        return []
+    best: dict[str, float] = {}
+    prefix = len(f"file:{att.id}:")
+    for (key, _blob), score in zip(rows, _score(asked, [blob for _key, blob in rows])):
+        if score is None:
+            continue
+        label = re.sub(r":\d+$", "", key[prefix:])
+        best[label] = max(best.get(label, -1.0), score)
+    return sorted(best, key=best.get, reverse=True)[:limit]
+
+
+def _asked(settings: Settings, model: str, question: str) -> array | None:
+    """The question's vector, kept a while: the chat asks it of the mail and of each file it opens."""
     asked = _question_cache.get((model, question))
     if asked is None:
         vectors = embed(settings, [question], query=True)
         if not vectors:
-            return []
+            return None
         if len(_question_cache) > 64:
             _question_cache.clear()
         asked = _question_cache[(model, question)] = vectors[0]
-    best: dict[str, float] = {}
-    prefix = len(f"file:{att.id}:")
-    for key, blob in rows:
-        vector = array("f")
-        vector.frombytes(blob)
-        if len(vector) != len(asked):
-            continue
-        label = re.sub(r":\d+$", "", key[prefix:])
-        best[label] = max(best.get(label, -1.0), sum(a * b for a, b in zip(asked, vector)))
-    return sorted(best, key=best.get, reverse=True)[:limit]
+    return asked
 
 
 def search(store: Store, settings: Settings, query: str, *, limit: int = 5) -> list[EmailRecord]:
@@ -310,20 +324,20 @@ def search(store: Store, settings: Settings, query: str, *, limit: int = 5) -> l
         return []
     if store.embedding_version(model).startswith("0:"):
         return []
-    asked = embed(settings, [query], query=True)
-    if not asked:
+    asked = _asked(settings, model, query)
+    if asked is None:
         return []
-    ids, vectors = _vectors(store, model, len(asked[0]))
+    ids, vectors = _vectors(store, model, len(asked))
     if not ids:
         return []
-    scores = _scores(asked[0], vectors)
+    scores = _score(asked, vectors)
     mean = sum(scores) / len(scores)
     spread = math.sqrt(sum((s - mean) ** 2 for s in scores) / len(scores))
     best: dict[str, float] = {}
     for email_id, score in zip(ids, scores):
         if score > best.get(email_id, -1.0):
             best[email_id] = score
-    _without_locked_files(store, model, asked[0], best)
+    _without_locked_files(store, model, asked, best)
     if not best:
         return []
     top = max(best.values())
@@ -338,7 +352,7 @@ def search(store: Store, settings: Settings, query: str, *, limit: int = 5) -> l
         reverse=True,
     )
     found = []
-    for _score, email_id in ranked:
+    for _rank, email_id in ranked:
         email = store.get_email(email_id)
         if email is not None:
             found.append(email)
@@ -358,14 +372,8 @@ def _without_locked_files(store: Store, model: str, asked: array, best: dict[str
     for email_id in [email_id for email_id, score in best.items() if score >= MIN_SCORE - NEAR_TOP]:
         if not _locked(store, email_id):
             continue
-        own = []
-        for key, _text_key, blob in store.embedding_rows(model, prefix=f"email:{email_id}"):
-            if key != f"email:{email_id}":
-                continue
-            vector = array("f")
-            vector.frombytes(blob)
-            if len(vector) == len(asked):
-                own.append(sum(a * b for a, b in zip(asked, vector)))
+        blobs = [blob for key, _text_key, blob in store.embedding_rows(model, prefix=f"email:{email_id}") if key == f"email:{email_id}"]
+        own = [score for score in _score(asked, blobs) if score is not None]
         if own:
             best[email_id] = max(own)
         else:
@@ -424,8 +432,7 @@ def _vectors(store: Store, model: str, size: int) -> tuple[list[str], Any]:
     ids: list[str] = []
     vectors: list[array] = []
     for email_id, blob in store.embedding_vectors(model):
-        vector = array("f")
-        vector.frombytes(blob)
+        vector = _decoded(blob)
         if len(vector) != size:
             continue
         ids.append(email_id)
@@ -437,9 +444,27 @@ def _vectors(store: Store, model: str, size: int) -> tuple[list[str], Any]:
     return ids, matrix
 
 
-def _scores(query: array, vectors: Any) -> list[float]:
+def _decoded(blob: bytes) -> array:
+    vector = array("f")
+    vector.frombytes(blob)
+    return vector
+
+
+def _score(asked: array, vectors: Any) -> list[float | None]:
+    """How close each vector is to the question: their dot product, as both are unit length. ``vectors`` are
+    stored blobs, arrays, or ``_vectors``' numpy matrix. None for a vector of another size (another model made it
+    under the same name), which can't be compared. numpy works it out when it is installed."""
     if np is not None and not isinstance(vectors, list):
-        if vectors.shape[1] != len(query):
-            return [-1.0] * vectors.shape[0]
-        return (vectors @ np.array(query, dtype=np.float32)).tolist()
-    return [sum(a * b for a, b in zip(query, v)) if len(v) == len(query) else -1.0 for v in vectors]
+        if vectors.shape[1] != len(asked):
+            return [None] * vectors.shape[0]
+        return (vectors @ np.array(asked, dtype=np.float32)).tolist()
+    rows = [vector if isinstance(vector, array) else _decoded(vector) for vector in vectors]
+    scores: list[float | None] = [None] * len(rows)
+    same = [index for index, vector in enumerate(rows) if len(vector) == len(asked)]
+    if np is not None and same:
+        found = (np.array([rows[index] for index in same], dtype=np.float32) @ np.array(asked, dtype=np.float32)).tolist()
+    else:
+        found = [sum(a * b for a, b in zip(asked, rows[index])) for index in same]
+    for index, score in zip(same, found):
+        scores[index] = score
+    return scores

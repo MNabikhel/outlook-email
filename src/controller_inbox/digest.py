@@ -15,6 +15,7 @@ from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from typing import Any
 
 from controller_inbox.classify import month_end
+from controller_inbox.clock import aware_utc
 from controller_inbox.models import (
     DOCUMENT_LABELS,
     FOLDER_LABELS,
@@ -24,6 +25,7 @@ from controller_inbox.models import (
     EmailRecord,
     Importance,
 )
+from controller_inbox.money import fmt_money
 from controller_inbox.store import Store
 
 FOCUS_LIMIT = 7
@@ -65,8 +67,8 @@ def build_digest(
     tz = tz or generated_at.tzinfo or timezone.utc
     start, end = digest_window(as_of, tz, lookback_days)
     window_emails = store.list_emails(
-        received_from=_utc(start),
-        received_before=_utc(end),
+        received_from=_utc_stamp(start),
+        received_before=_utc_stamp(end),
         order="score",
         limit=-1,  # every email in the window, so the counts are right however busy the mailbox (SQLite: no limit)
     )
@@ -147,8 +149,8 @@ def build_digest(
         "finance": finance,
         "generated_at": generated_at.isoformat(),
         "window": {
-            "start": _utc(start),
-            "end": _utc(end),
+            "start": _utc_stamp(start),
+            "end": _utc_stamp(end),
             "since_label": _long_date(start.date(), short=True),
         },
         "headline": _headline(kpis, _long_date(start.date(), short=True)),
@@ -379,7 +381,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
                 continue
             lines.append(f"### {heading}")
             for item in rows:
-                amount = f" · ${item['amount']:,.2f}" if item["amount"] is not None else ""
+                amount = f" · {fmt_money(item['amount'])}" if item["amount"] is not None else ""
                 due = f" · due {item['due']}" if item["due"] else ""
                 lines.append(f"- {item['invoice'] or item['subject']}{amount}{due}")
             lines.append("")
@@ -415,7 +417,7 @@ def render_html(payload: dict[str, Any]) -> str:
             if item.get("due_label") or item.get("due"):
                 meta.append("due " + str(item.get("due_label") or item.get("due")))
             if item.get("amount") is not None:
-                meta.append(f"${item['amount']:,.2f}")
+                meta.append(fmt_money(item["amount"]))
             text = item.get("summary") if summary else ""
             out.append(
                 f"<li><strong>{_esc(title)}</strong><span>{_esc(' · '.join(m for m in meta if m))}</span>"
@@ -512,8 +514,8 @@ def render_html(payload: dict[str, Any]) -> str:
 """
 
 
-def _utc(value: datetime) -> str:
-    return value.astimezone(timezone.utc).isoformat()
+def _utc_stamp(value: datetime) -> str:
+    return aware_utc(value).isoformat()
 
 
 def _long_date(value: date, *, short: bool = False) -> str:

@@ -193,14 +193,14 @@ def test_setup_count_follows_a_file_read_again(store, settings, mail):
 
 
 def test_model_calls_share_one_client_unless_httpx_is_replaced(monkeypatch):
-    assert local_llm._http("post") == local_llm.shared_client().post
+    assert local_llm.http_method("post") == local_llm.shared_client().post
     assert local_llm.shared_client() is local_llm.shared_client()
 
     def fake(*_a, **_k):
         return httpx.Response(200, json={})
 
     monkeypatch.setattr(local_llm.httpx, "post", fake)
-    assert local_llm._http("post") is fake
+    assert local_llm.http_method("post") is fake
 
 
 def test_the_shared_client_keeps_no_cookies():

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from itertools import permutations
 
 from controller_inbox import memo
+from controller_inbox.documents import PAGE_MARKER_RE
 
 # "€1.234,56" is European style: dots group the thousands and a comma marks the decimals.
 _EUROPEAN = r"\d{1,3}(?:\.\d{3})+,\d{1,2}(?!\d)"
@@ -34,7 +35,6 @@ _REFERENCE_BEFORE = re.compile(r"(?:\bpages?|\bp\.|\bsections?|\brows?|\bsheets?
 _SENTENCE_RE = re.compile(r"(?:[^\n.!?]|[.!?](?!\s|$))+(?:[.!?]+|\n|$)")
 PAGE_RE = re.compile(r"\b(?P<word>pages?|p\.)\s?(?P<page>\d{1,4})\b", re.I)
 CELL_RE = re.compile(r"(?:(?P<sheet>'[^'\n]+'|\"[^\"\n]+\"|[A-Za-z][\w]*)!)?\b(?P<cell>[A-Z]{1,3}\d{1,6})\b")
-_PAGE_SPLIT = re.compile(r"^\[page (\d+)\]\s*$", re.M)
 _SHEET_SPLIT = re.compile(r'^\[sheet "([^"]+)"[^\]]*\]\s*$', re.M)
 _CELL_VALUE = re.compile(r"(?:^|\| )([A-Z]{1,3}\d{1,6})(?: \((?:[^()\n]|\([^()\n]*\))*\))?: ([^|\n]*)")
 _WORKED_OUT_BEFORE = re.compile(
@@ -250,6 +250,7 @@ def check_numbers(answer: str, grounding: Grounding) -> Review:
     return Review(text=text, checks=checks)
 
 
+# A line of an answer that starts "Total", whatever follows; a table's total row is totals.py's.
 _TOTAL_LINE = re.compile(r"^[\s*_#>|-]*(?:grand\s+)?total\b[^\n]*$", re.I)
 # "Total:", "**Total Due:**", "Grand total owed:": a total of the list itself. "Total owed to all four vendors:" can be
 # a total of more than the lines listed (the top three of four), so a sum that differs is flagged, not rewritten.
@@ -348,7 +349,7 @@ def _sentences(text: str):
 
 
 def pages_of(text: str) -> dict[int, str]:
-    pieces = _PAGE_SPLIT.split(text or "")
+    pieces = PAGE_MARKER_RE.split(text or "")
     return {int(pieces[i]): pieces[i + 1] for i in range(1, len(pieces) - 1, 2)}
 
 

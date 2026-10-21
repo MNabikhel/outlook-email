@@ -56,7 +56,7 @@ def page_count(data: bytes, filename: str) -> int:
         return ocr.picture_pages(data)
     import pypdfium2 as pdfium
 
-    with vision._PDFIUM:
+    with vision.PDFIUM_LOCK:
         pdf = pdfium.PdfDocument(data)
         try:
             return len(pdf)
@@ -130,7 +130,7 @@ def _text_layer(data: bytes, page: int) -> list[dict] | None:
     page has no text to speak of (a scan)."""
     import pypdfium2 as pdfium
 
-    with vision._PDFIUM:
+    with vision.PDFIUM_LOCK:
         pdf = pdfium.PdfDocument(data)
         try:
             if not 1 <= page <= len(pdf):

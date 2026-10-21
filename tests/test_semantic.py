@@ -300,3 +300,30 @@ def test_the_chat_says_how_it_searched(store, settings, mail, server):
     pick_sources(store, "Where is the team trip in Portugal?", settings=settings, report=report)
     assert report == {"how": "meaning", "meaning_hits": 1}
     assert semantic.search_step("meaning", settings, 1) == f"Searched your mail by words and meaning ({MODEL}): 1 email found by meaning"
+
+
+@pytest.mark.parametrize("with_numpy", [True, False])
+def test_score_is_one_dot_product_for_blobs_arrays_and_the_matrix(monkeypatch, with_numpy):
+    from array import array
+
+    if not with_numpy:
+        monkeypatch.setattr(semantic, "np", None)
+    asked = array("f", [0.6, 0.8, 0.0])
+    same, other, short = array("f", [0.6, 0.8, 0.0]), array("f", [0.0, 0.0, 1.0]), array("f", [1.0, 0.0])
+    want = [1.0, 0.0, None]
+    for vectors in ([same, other, short], [v.tobytes() for v in (same, other, short)]):
+        got = semantic._score(asked, vectors)
+        assert [None if g is None else round(g, 6) for g in got] == want
+    assert semantic._score(asked, []) == []
+    if with_numpy and semantic.np is not None:
+        matrix = semantic.np.array([same, other], dtype=semantic.np.float32)
+        assert [round(g, 6) for g in semantic._score(asked, matrix)] == [1.0, 0.0]
+        assert semantic._score(short, matrix) == [None, None]
+
+
+def test_search_asks_the_model_for_a_question_once(store, settings, mail, server):
+    semantic.index_mail(store, settings)
+    server.calls = 0
+    first = semantic.search(store, settings, "team trip in Portugal")
+    assert semantic.search(store, settings, "team trip in Portugal") == first
+    assert server.calls == 1, "the question's vector is kept, as it is for the file sections"

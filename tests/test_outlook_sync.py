@@ -466,7 +466,7 @@ def test_a_first_message_that_cant_be_read_brings_the_sample_back(store, setting
 
 def test_outlook_message_without_message_id_synced_and_dropped_is_stored_twice(store, settings):
     """Without a Message-ID, outlook_sync._copy_in names the email by its subject, sender, time and text, but the drop
-    folder names the same message by the bytes of its file (folder_mail._message_id). So a message synced from classic
+    folder names the same message by the bytes of its file (mail_identity.file_id). So a message synced from classic
     Outlook and also saved into the drop folder (to bring its attachment along) is filed twice, with two sets of tasks
     and a "possible duplicate invoice" on the copy."""
     from controller_inbox import outlook_sync

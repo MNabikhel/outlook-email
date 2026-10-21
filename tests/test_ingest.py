@@ -1200,6 +1200,17 @@ def test_a_message_that_always_fails_stops_holding_the_cursor(store: Store, sett
     assert store.get_state("last_sync_at") == later.isoformat(), "after the last try the sync moves on"
 
 
+def test_a_cursor_held_for_a_failed_message_is_stored_in_utc(store: Store, settings: Settings):
+    from datetime import timedelta
+
+    # Outlook can give a message's time with the sender's offset: the cursor kept for it is UTC, as mail is stored.
+    eastern = timezone(timedelta(hours=-4))
+    t0 = datetime(2026, 10, 6, 5, 0, tzinfo=eastern)
+    mailbox = _FlakyMailbox([_graph_raw("throttled", t0)], {"throttled": 1})
+    ingest_mailbox(mailbox, store, settings, received_after=t0 - timedelta(hours=72), now=t0 + timedelta(minutes=5))
+    assert store.get_state("last_sync_at") == "2026-10-06T09:00:00+00:00"
+
+
 # watch reads the drop folder and writes the digest while Outlook is down ---------------------
 def test_watch_reads_the_drop_folder_while_outlook_is_down(settings: Settings, store: Store, monkeypatch, capsys):
     from controller_inbox import cli
@@ -1277,7 +1288,7 @@ def test_an_email_is_not_stored_when_its_files_cannot_be_saved(settings: Setting
     def full(*_args):
         raise OSError("No space left on device")
 
-    monkeypatch.setattr(folder_mail, "_write_extracted", full)
+    monkeypatch.setattr(folder_mail, "write_extracted", full)
     report: dict = {}
     assert ingest_folder(store, settings, report=report) == []
     assert len(report["failed"]) == 1 and store.counts()["emails"] == 0

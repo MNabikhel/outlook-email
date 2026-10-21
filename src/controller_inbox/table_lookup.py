@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-from controller_inbox import memo, tables
+from controller_inbox import memo, tables, totals
 from controller_inbox.documents import MARKER_RE
 
 MAX_ROWS = 6
@@ -139,9 +139,6 @@ _BUDGET = re.compile(r"\b(over|under|below|above|missed|beat|exceeded|within)\s+
 _LIMIT = re.compile(r"\b(over|above|under|below|exceed(?:s|ed|ing)?)\s+(?:their|its|his|her|the)\s+([a-z][a-z ]{2,30}?)(?=[?.,;]|\s+(?:so far|now|this|in|on|for|at)\b|$)", re.I)
 _GROUP = re.compile(r"\b(?:by|per|for each|for every|each)\s+([a-z][a-z#&-]*)", re.I)
 _RANGE = re.compile(r"^\s*(?:through|thru|to|until|-|–)\s*$", re.I)
-_TOTAL = re.compile(r"^(?:grand\s+|sub-?)?totals?\b|^%", re.I)
-# A row's own label can name its total last ("Finance Subtotal", "Company Total"); a description can't.
-_TOTAL_LAST = re.compile(r"\b(?:sub-?)?totals?$", re.I)
 _DATE = re.compile(r"(?<![\d/])(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?![\d/])")
 _ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
 _MONTH_DAY = re.compile(
@@ -514,9 +511,9 @@ class _Running:
         return bool(held)
 
 
-# A label that is only the word for a total: such a row is a total whatever its figures.
-# A cell that is just "Total", or an invoice's "Amount Due" under its lines.
-_TOTAL_WORD = re.compile(r"^(?:(?:grand\s+|sub-?\s?)?totals?(?:\s+due)?|(?:amount|balance)\s+due):?$|^%", re.I)
+# Which row is a total is ``totals.is_total_label``, the file reader's rule too; here a "%" row ("% of budget") is one
+# as well, as it is never a record to add up. A cell that is only the word for a total ("Total", or an invoice's
+# "Amount Due" under its lines) makes its row a total whatever its figures (``totals.is_total_word``).
 # "Total Revenue": a total of what follows, when that is the column's name or another row's value in it.
 _TOTAL_OF = re.compile(r"^(?:grand\s+|sub-?)?totals?\s+(.+)$", re.I)
 
@@ -589,7 +586,7 @@ def _settle_totals(table: Table) -> bool:
     held = _held_totals(rows, figures, as_rows)
     key = _key_column(table)
     for index, row in enumerate(rows):
-        if index not in held or held[index] or _TOTAL_WORD.match(row.name.strip()):
+        if index not in held or held[index] or totals.is_total_word(row.name, percent=True):
             continue
         if not _figures_of(row, figures) or not any(not other.total for other in rows[:index]):
             continue
@@ -613,9 +610,9 @@ def _record_details(row: Row, table: Table, figures: list[str]) -> bool:
     its own ("INV-2" under "Invoice"). A total row leaves those cells blank."""
     body = [other for other in table.rows if not other.total]
     for label, value in row.cells:
-        if label in figures or not value or value == tables.BLANK or _TOTAL.match(value) or _TOTAL_LAST.search(value):
+        if label in figures or not value or value == tables.BLANK or totals.is_total_label(value, percent=True):
             continue
-        if _when(value) is not None:
+        if cell_date(value) is not None:
             return True
         codes = [other.value(label) for other in body if other.value(label)]
         if any(ch.isdigit() for ch in value) and len(codes) >= max(2, 0.8 * len(body)) and len(set(codes)) == len(codes):
@@ -778,7 +775,7 @@ def _is_total(row: Row, counts: dict[tuple[str, str], int]) -> bool:
     A cell in any column that is just "Total" or "Grand Total", or totals what its column names ("Line: Total
     Revenue" under rows of "Line: Revenue"), says so too."""
     for label, value in row.cells:
-        if _TOTAL_WORD.match(value.strip()):
+        if totals.is_total_word(value, percent=True):
             return True
         named = _TOTAL_OF.match(value)
         if named:
@@ -791,7 +788,7 @@ def _is_total(row: Row, counts: dict[tuple[str, str], int]) -> bool:
         value = cell[1]
         if not value or value == tables.BLANK or tables.is_value(value):
             continue
-        if _TOTAL.match(value) or _TOTAL_LAST.search(value):
+        if totals.is_total_label(value, percent=True):
             return True
         if counts.get(cell, 0) <= 1:
             return False
@@ -829,7 +826,7 @@ def _kinds(table: Table) -> dict[str, str]:
         if not values:
             kinds[label] = "text"
             continue
-        dates = sum(_when(value) is not None for value in values)
+        dates = sum(cell_date(value) is not None for value in values)
         figures = sum(_number(value) is not None for value in values)
         kinds[label] = "date" if dates >= 0.6 * len(values) else "figure" if figures >= 0.6 * len(values) else "text"
     return kinds
@@ -870,7 +867,7 @@ def read_question(question: str) -> Question:
     words = [word for word in _words(text) if word not in _STOP]
     return Question(
         text,
-        list(dict.fromkeys(words + _dates(text))),
+        list(dict.fromkeys(words + date_keys(text))),
         _op_for(found_op, text),
         conditions,
         budget=">" if (budget or limit) and (budget or limit).group(1).lower()[:4] in {"over", "abov", "exce"} else "<" if (budget or limit) else "",
@@ -900,7 +897,7 @@ def _answer(table: Table, asked: Question) -> Answer | None:
     conditions = _placed(table, asked, columns)
     # The question's words that named a column ("review" for "Reviewer") don't also pick out rows.
     label_words = {word for word in asked.words for label in columns for own in _label_words(label) if _matches(own, [word])}
-    held = {word for condition in conditions for word in _words(condition.phrase) + _dates(condition.phrase)}
+    held = {word for condition in conditions for word in _words(condition.phrase) + date_keys(condition.phrase)}
     words = [word for word in asked.words if word not in label_words and word not in held and word not in _ASKING]
 
     # A word found in a named column of text limits that column ("Priya Raman" on PTO: PTO in her column).
@@ -1097,7 +1094,7 @@ def _whole_years(span: tuple[When, When]) -> bool:
 
 
 def _dated_with_years(table: Table, label: str) -> bool:
-    return any((when := _when(row.value(label))) is not None and when[0] is not None for row in table.rows)
+    return any((when := cell_date(row.value(label))) is not None and when[0] is not None for row in table.rows)
 
 
 def _in_heading(condition: Condition, table: Table) -> bool:
@@ -1105,7 +1102,7 @@ def _in_heading(condition: Condition, table: Table) -> bool:
     "FY 2026 Forecast", "over 90 days" in "Past due 90+"."""
     if condition.kind == "number" and _day_buckets(condition.phrase + " days") & {bucket for label in table.labels for bucket in _day_buckets(label)}:
         return True
-    words = _words(condition.phrase) + _dates(condition.phrase)
+    words = _words(condition.phrase) + date_keys(condition.phrase)
     content = {word for word in words if word not in _CONNECTIVES}
     if not content:
         return False
@@ -1128,7 +1125,7 @@ def _meets(row: Row, condition: Condition, table: Table) -> bool:
         return {
             ">": number > target, ">=": number >= target, "<": number < target, "<=": number <= target, "=": number == target,
         }[condition.op]
-    when = _when(value)
+    when = cell_date(value)
     if when is None:
         return False
     low, high = condition.value
@@ -1214,8 +1211,8 @@ def _worked(
             label for label in table.labels if table.kinds.get(label) == "date"
         ]
         # Among the rows with a date: an undated one ("Opening balance") is neither the first nor the last.
-        order = [row for row in body if _when(row.value(dated[0]))] if dated else []
-        order = sorted(order, key=lambda row: _date_key(_when(row.value(dated[0])))) if order else body
+        order = [row for row in body if cell_date(row.value(dated[0]))] if dated else []
+        order = sorted(order, key=lambda row: _date_key(cell_date(row.value(dated[0])))) if order else body
         row = order[0] if op == "first" else order[-1]
         shown = [label for label in columns] or figures
         lines = [f"- The {op} row{where}{reading}" + (f", by {dated[0]}" if dated else "") + ":"]
@@ -1411,7 +1408,7 @@ def _points(table: Table, chosen: list[Row], columns: dict[str, set[str]], budge
     words the question doesn't already give, "Account" for "what is account code 160-5190"), or, for many rows
     picked by a limit ("over 500,000"), each row with the figure the limit is on."""
     asked = list(dict.fromkeys([*(budget or ()), *(label for label in columns if label in table.labels)]))
-    said = set(_words(question)) | set(_dates(question))
+    said = set(_words(question)) | set(date_keys(question))
 
     def wanted(row: Row, label: str) -> bool:
         value = row.value(label)
@@ -1436,7 +1433,7 @@ def _title(row: Row, table: Table) -> str:
     """A row as a person names it: its words, not its figures or dates ("Mountain · Iris sensor", "Water Utility ·
     Vehicle maintenance · 180-5160")."""
     names = [value for label, value in row.cells if value and value != tables.BLANK and table.kinds.get(label) not in {"figure", "date"}]
-    names = [value for value in names if _number(value) is None and _when(value) is None][:3]
+    names = [value for value in names if _number(value) is None and cell_date(value) is None][:3]
     return " · ".join(names) or _short(row)
 
 
@@ -1528,7 +1525,7 @@ def _row_score(row: Row, words: list[str], question: str) -> tuple[float, list[s
             continue
         if not tables.is_value(value) or re.fullmatch(r"\d{1,6}", value) and (index == 0 or len(value) >= 3):
             own.update(_words(value))
-        own.update(_dates(value))
+        own.update(date_keys(value))
     own.update(_words(row.group))
     score = 0.0
     hits = []
@@ -1548,11 +1545,11 @@ def _row_score(row: Row, words: list[str], question: str) -> tuple[float, list[s
 
 def _label_words(label: str) -> list[str]:
     words = [word for word in _words(label) if word not in _STOP or word in {"over", "under"}]
-    return list(dict.fromkeys(words + _dates(label)))
+    return list(dict.fromkeys(words + date_keys(label)))
 
 
 def _cell_words(value: str) -> set[str]:
-    return set(_words(value)) | set(_dates(value))
+    return set(_words(value)) | set(date_keys(value))
 
 
 def _words(text: str) -> list[str]:
@@ -1567,7 +1564,7 @@ def _words(text: str) -> list[str]:
     return out
 
 
-def _dates(text: str) -> list[str]:
+def date_keys(text: str) -> list[str]:
     """Month/day keys for the dates written in ``text``: 10/14, "October 14", "Oct 3-4", 2026-10-14."""
     keys: list[str] = []
     for match in _DATE.finditer(text or ""):
@@ -1642,7 +1639,7 @@ def _number(value: str) -> Decimal | None:
     if text in _DASHES:
         # The accounting format's zero.
         return Decimal(0)
-    if not text or _when(text) is not None:
+    if not text or cell_date(text) is not None:
         return None
     match = _LEADING_FIGURE.match(text)
     if not match:
@@ -1689,7 +1686,7 @@ def _places(sample: str) -> int:
     return len(m.group(1)) if m else 0
 
 
-def _when(value: str) -> When | None:
+def cell_date(value: str) -> When | None:
     """The date a cell holds ("01/15/2026", "Mon 09/28", "10/14", "2026-10-14", "Oct 14, 2026"), or None."""
     text = (value or "").strip()
     if not text or len(text) > 40:
@@ -1737,7 +1734,7 @@ def _span(text: str) -> tuple[When, When] | None:
     if month_only:
         month, year = _MONTHS[month_only.group(1).lower()], _year(month_only.group(2))
         return (year, month, 1), (year, month, _DAYS[month - 1])
-    when = _when(text)
+    when = cell_date(text)
     return (when, when) if when else None
 
 

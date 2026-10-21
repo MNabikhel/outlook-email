@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import logging
 import mimetypes
 import quopri
@@ -11,7 +10,7 @@ import re
 import shutil
 import time
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from email import policy
 from email.header import decode_header, make_header
 from email.parser import BytesParser
@@ -21,7 +20,8 @@ from pathlib import Path
 from controller_inbox import tnef
 from controller_inbox.config import Settings
 from controller_inbox.documents import decode_text
-from controller_inbox.extract import _rtf_text, explode_archives, html_to_text, redact_financial_secrets, sha256_bytes
+from controller_inbox.extract import _rtf_text, explode_archives, html_to_text, sha256_bytes
+from controller_inbox.mail_identity import file_id, find_existing, stable_id, tidy
 from controller_inbox.models import RawAttachment, RawMessage
 from controller_inbox.pipeline import attachment_text, process_message
 from controller_inbox.store import Store
@@ -96,21 +96,21 @@ def ingest_folder(
                     cleared = store.clear_sample()
                     report["sample_cleared"] = cleared
             # The files are saved first: an email is only stored once everything that came with it is.
-            _write_extracted(settings, raw)
+            write_extracted(settings, raw)
             record = process_message(raw, store, settings, now=now)
         except PermissionError:
             # Windows: another program (Outlook, Explorer's copy) still holds the file open.
             log.info("%s is in use; it will be read on the next run", path)
             report["waiting"].append(path.name)
             if cleared:
-                sample_checked = _restore_sample(store, settings, report, now)
+                sample_checked = restore_sample(store, settings, report, now)
             continue
         except Exception as exc:
             log.warning("Couldn't read %s", path.name, exc_info=True)
             report["failed"].append({"file": path.name, "error": str(exc)[:300]})
             _quarantine(settings, owned, exc)
             if cleared:
-                sample_checked = _restore_sample(store, settings, report, now)
+                sample_checked = restore_sample(store, settings, report, now)
             continue
         # Stored, so on the board: what goes wrong from here is logged, and the file isn't reported unreadable.
         archived = _file_away(store, settings, path, owned, record.id)
@@ -128,7 +128,7 @@ def ingest_folder(
     return records
 
 
-def _restore_sample(store: Store, settings: Settings, report: dict, now: datetime | None) -> bool:
+def restore_sample(store: Store, settings: Settings, report: dict, now: datetime | None) -> bool:
     """The first real message failed after the sample was cleared: put the sample back, so a bad
     file never leaves an empty board. Returns whether the sample check is still done."""
     if store.real_mail_count():
@@ -280,7 +280,7 @@ def _sidecars_for(
 def _parse_message(path: Path) -> RawMessage:
     if path.suffix.lower() == ".eml":
         return _parse_eml(path)
-    return _parse_msg(path)
+    return parse_msg(path)
 
 
 def _parse_eml(path: Path) -> RawMessage:
@@ -302,7 +302,7 @@ def _address_header(message, name: str) -> str:
     for key, raw in message.raw_items():
         if key.lower() == name and not any("\udc80" <= char <= "\udcff" for char in raw):
             try:
-                return _tidy(str(make_header(decode_header(raw))))
+                return tidy(str(make_header(decode_header(raw))))
             except Exception:
                 break
     return _header(message, name)
@@ -320,7 +320,7 @@ def _header(message, name: str) -> str:
         return value
     for key, raw in message.raw_items():
         if key.lower() == name and any("\udc80" <= char <= "\udcff" for char in raw):
-            return _tidy(decode_text(raw.encode("ascii", "surrogateescape")))
+            return tidy(decode_text(raw.encode("ascii", "surrogateescape")))
     return value
 
 
@@ -350,7 +350,7 @@ def _eml_content(message, prefix: str = "", depth: int = 0) -> tuple[str, list[R
         disposition = (part.get_content_disposition() or "").lower()
         payload = part.get_payload(decode=True) or b""
         cid = str(part.get("content-id") or "").strip().strip("<>")
-        if _inline_picture(ctype, filename or "", len(payload), disposition != "attachment" and bool(cid and cid in html)):
+        if inline_picture(ctype, filename or "", len(payload), disposition != "attachment" and bool(cid and cid in html)):
             continue
         if filename or disposition == "attachment":
             mail = mail_file_attachments(filename or "", ctype, payload, prefix, depth)
@@ -429,13 +429,13 @@ def forwarded_attachments(inner, filename: str = "", prefix: str = "", depth: in
 
     Used for .eml files and for Graph item attachments, so both read like a forwarded .msg.
     """
-    subject = _tidy(str(inner.get("subject") or ""))
+    subject = tidy(str(inner.get("subject") or ""))
     stem = _forward_stem(filename, subject)
     body, files = _eml_content(inner, f"{prefix}{stem} › ", depth + 1)
     text = _forward_text(
         subject,
-        _tidy(str(inner.get("from") or "")),
-        _tidy(str(inner.get("date") or "")),
+        tidy(str(inner.get("from") or "")),
+        tidy(str(inner.get("date") or "")),
         [att.filename.rsplit(" › ", 1)[-1] for att in files],
         body,
     )
@@ -449,12 +449,12 @@ def _forward_stem(filename: str, subject: str) -> str:
     """A forwarded email's name for its files: its file name without a .eml/.msg extension, else its subject.
     Names are often the subject itself ("Statement 09/30", "Q3 accruals v2.1 final"), so only a real mail
     extension is cut, and slashes are replaced rather than read as folders."""
-    stem = re.sub(r"\.(eml|msg)$", "", _tidy(filename), flags=re.IGNORECASE)
-    stem = stem or _tidy(subject) or "forwarded message"
+    stem = re.sub(r"\.(eml|msg)$", "", tidy(filename), flags=re.IGNORECASE)
+    stem = stem or tidy(subject) or "forwarded message"
     return re.sub(r"[\\/]", "_", stem).strip()[:80] or "forwarded message"
 
 
-def _parse_msg(path: Path) -> RawMessage:
+def parse_msg(path: Path) -> RawMessage:
     try:
         import extract_msg
     except ImportError as exc:
@@ -564,7 +564,7 @@ def _msg_attachments(message, prefix: str = "", depth: int = 0) -> list[RawAttac
                 continue
             cid = str(getattr(att, "cid", None) or getattr(att, "contentId", None) or "")
             inline = bool(getattr(att, "hidden", False)) or bool(cid and cid.strip("<>") in html)
-            if _inline_picture(content_type, filename, len(payload), inline):
+            if inline_picture(content_type, filename, len(payload), inline):
                 continue
             found.append(_attachment(prefix + filename, content_type, bytes(payload)))
             continue
@@ -600,7 +600,7 @@ def mail_file_attachments(
 
             message = extract_msg.Message(data)
             try:
-                stem = _forward_stem(filename, _tidy(_msg_property(message, "subject")))
+                stem = _forward_stem(filename, tidy(_msg_property(message, "subject")))
                 inner = getattr(message, "attachments", None) or []
                 text = _embedded_message_text(message, [a.longFilename or a.shortFilename or "" for a in inner])
                 found = [_attachment(f"{prefix}{stem}.txt", "text/plain", text.encode("utf-8"))]
@@ -636,7 +636,7 @@ def _attachment(filename: str, content_type: str, payload: bytes) -> RawAttachme
     return RawAttachment(id=filename, filename=filename, content_type=content_type, size_bytes=len(payload), content=payload)
 
 
-def _inline_picture(content_type: str, filename: str, size: int, inline: bool) -> bool:
+def inline_picture(content_type: str, filename: str, size: int, inline: bool) -> bool:
     """Signature logos and pasted pictures shown inside the body, not files anyone sent."""
     picture = content_type.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp"))
     return picture and inline and size < 400_000
@@ -653,7 +653,7 @@ def _msg_smtp_address(message) -> str:
         except Exception:
             continue
         if value and "@" in str(value):
-            return _tidy(value)
+            return tidy(value)
     header = getattr(message, "header", None)
     if header is not None:
         _name, address = _split_address(str(header.get("From") or ""))
@@ -664,7 +664,7 @@ def _msg_smtp_address(message) -> str:
 
 def _reply_address(raw: str) -> str:
     _name, address = _split_address(raw)
-    return _tidy(address).lower() if "@" in address else ""
+    return tidy(address).lower() if "@" in address else ""
 
 
 def _embedded_message_text(item, filenames: list[str] | None = None) -> str:
@@ -673,7 +673,7 @@ def _embedded_message_text(item, filenames: list[str] | None = None) -> str:
     date = getattr(item, "date", "") or ""
     header = getattr(item, "header", None)
     if not date and header is not None:
-        date = _tidy(str(header.get("Date") or ""))
+        date = tidy(str(header.get("Date") or ""))
     return _forward_text(subject, sender, date, filenames or [], _msg_body(item))
 
 
@@ -688,7 +688,7 @@ def _standalone(path: Path) -> RawMessage:
     received = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     attachment = _file_attachment(path)
     return RawMessage(
-        id=_message_id(data),
+        id=file_id(data),
         subject=path.stem,
         sender_name="Dropped file",
         sender_email="",
@@ -706,15 +706,15 @@ def _raw_message(
 ) -> RawMessage:
     """A message without a subject is named after its file, and one without a sent time (``received`` None) is
     dated by its file; ``from_file`` says which, as two saved copies of one message differ in those."""
-    from_file = tuple(part for part, missing in (("subject", not _tidy(subject)), ("sent", received is None)) if missing)
-    subject = _tidy(subject) or _tidy(path.stem)
+    from_file = tuple(part for part, missing in (("subject", not tidy(subject)), ("sent", received is None)) if missing)
+    subject = tidy(subject) or tidy(path.stem)
     if received is None:
         received = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
-    sender_name, sender_email = _tidy(sender_name), _tidy(sender_email)
+    sender_name, sender_email = tidy(sender_name), tidy(sender_email)
     body = (body or "").replace("\x00", "").strip()
-    message_id = _tidy(message_id)
+    message_id = tidy(message_id)
     return RawMessage(
-        id=_stable_id(message_id) if message_id else _message_id(data),
+        id=stable_id(message_id) if message_id else file_id(data),
         internet_message_id=message_id,
         subject=subject,
         sender_name=sender_name or ("" if sender_email else "Unknown sender"),
@@ -729,11 +729,6 @@ def _raw_message(
     )
 
 
-def _tidy(value) -> str:
-    """Outlook pads some .msg strings with NUL characters; drop them and fold whitespace."""
-    return re.sub(r"\s+", " ", str(value or "").replace("\x00", "")).strip()
-
-
 def _file_attachment(path: Path) -> RawAttachment:
     data = path.read_bytes()
     return RawAttachment(
@@ -743,111 +738,6 @@ def _file_attachment(path: Path) -> RawAttachment:
         size_bytes=len(data),
         content=data,
     )
-
-
-def content_id(raw: RawMessage) -> str:
-    """The id of a message without a Message-ID, from what it says: its subject, sender, sent time and text. The
-    Outlook sync names such a message this way, so the same message saved into the drop folder meets it."""
-    sent = raw.received_at.astimezone(timezone.utc).isoformat()
-    said = "\n".join([raw.subject, raw.sender_email.lower(), sent, raw.body_text[:5000]])
-    return "mail-" + hashlib.sha256(f"outlook:{said}".encode()).hexdigest()[:20]
-
-
-def find_existing(store: Store, raw: RawMessage):
-    """The stored email this message already is, however it was filed: under its own id, under the id a reused
-    Message-ID gives it (``alternative_id``), or from another source (``_stored_elsewhere``). ``raw`` takes the id
-    it is filed under. None when it is new. The drop folder and the Outlook sync both file mail through this."""
-    existing = store.get_email(raw.id)
-    if existing is not None and raw.internet_message_id and _another_message(existing, raw):
-        # Some scanners and mail tools give every message the same Message-ID. A stored email with another subject,
-        # sender or date is a different message, so this one gets an id from those too, which a copy of it saved
-        # again later shares.
-        raw.id = alternative_id(raw)
-        existing = store.get_email(raw.id)
-    if existing is None:
-        existing = _stored_elsewhere(store, raw)
-    return existing
-
-
-def alternative_id(raw: RawMessage) -> str:
-    """The id of a message whose Message-ID another message already has: from its Message-ID, subject, sender and
-    sent time. What the message doesn't say itself (a subject or date taken from its file) is left out of it."""
-    subject = "" if "subject" in raw.from_file else raw.subject
-    sent = "" if "sent" in raw.from_file else raw.received_at.astimezone(timezone.utc).isoformat()
-    return _stable_id("\n".join([raw.internet_message_id, subject, raw.sender_email, sent]))
-
-
-def stored_from(store: Store, raw: RawMessage, sources: tuple[str, ...]):
-    """The stored email from one of ``sources`` (other than the message's own) that has this message's Message-ID
-    and is this message, not another reusing the Message-ID. None when there is none."""
-    for source in sources:
-        if source == raw.source:
-            continue
-        found = store.email_with_message_id(raw.internet_message_id, source)
-        stored = store.get_email(found) if found else None
-        if stored is not None and not _another_message(stored, raw):
-            return stored
-    return None
-
-
-def _stored_elsewhere(store: Store, raw: RawMessage):
-    """The stored email this dropped message already is, when it came in another way: from Microsoft 365 (same
-    Message-ID, under Microsoft's id) or synced from classic Outlook without a Message-ID (named by what it says).
-    ``raw`` takes that email's id, so the copy adds only its new files. None when it is new."""
-    if raw.internet_message_id:
-        stored = stored_from(store, raw, ("graph",))
-        if stored is None:
-            return None
-        # Still the Microsoft 365 email: the next sync reads it under that id, and writes its categories back.
-        raw.source = "graph"
-    elif raw.sender_email and not raw.from_file:
-        # Only for a message that names its own subject and sent time: one taken from its file differs between
-        # two copies. A new one is filed under this id too, so the Outlook sync meets it when it comes later; one
-        # filed earlier under its file's id was found by that id already.
-        stored = store.get_email(content_id(raw))
-        if stored is None:
-            raw.id = content_id(raw)
-            return None
-    else:
-        return None
-    raw.id = stored.id
-    return stored
-
-
-def _message_id(data: bytes) -> str:
-    return "file-" + hashlib.sha256(data).hexdigest()[:20]
-
-
-def _stable_id(message_id: str) -> str:
-    """Same Outlook message, same id — whether it was saved as .msg or .eml, today or next week."""
-    normalized = message_id.strip().strip("<>").strip().lower()
-    return "mail-" + hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
-
-
-# A .msg and an .eml of one message can disagree on the sent time by a few seconds.
-SAME_MESSAGE_SLACK = timedelta(minutes=2)
-
-
-def _another_message(stored, raw: RawMessage) -> bool:
-    """Whether a stored email that has this message's Message-ID is a different message after all.
-
-    Only what the message itself says counts: a message without a subject is named after its file and one
-    without a date is dated by its file, and those differ between two copies of it saved at different times."""
-    # The stored subject has its account numbers masked, as this one's will be.
-    subject = redact_financial_secrets(raw.subject)
-    if "subject" not in raw.from_file and _tidy(stored.subject).casefold() != _tidy(subject).casefold():
-        return True
-    if (stored.sender_email or "").strip().lower() != (raw.sender_email or "").strip().lower():
-        return True
-    if "sent" in raw.from_file:
-        return False
-    try:
-        sent = datetime.fromisoformat(str(stored.received_at))
-    except ValueError:
-        return False
-    if sent.tzinfo is None:
-        sent = sent.replace(tzinfo=timezone.utc)
-    return abs(sent - raw.received_at) > SAME_MESSAGE_SLACK
 
 
 def _files(folder: Path) -> list[Path]:
@@ -912,7 +802,10 @@ def _decode_text_part(part, payload: bytes) -> str:
 
 def _new_files(settings: Settings, raw: RawMessage, existing) -> list[RawAttachment]:
     """The files in this copy of a stored message that aren't stored with it yet (the same bytes under any
-    name are), renamed when a kept file under inbox/extracted already has the name, so none replaces it."""
+    name are), renamed when a kept file under inbox/extracted already has the name, so none replaces it.
+
+    pipeline._unstored asks the same of files already taken out of their zips; this one asks it of the files as they
+    came (a zip is stored when every file in it is), because what it keeps is written to disk as it came."""
     hashes = {att.sha256 for att in existing.attachments if att.sha256}
     names = {att.filename for att in existing.attachments}
     fresh = []
@@ -929,13 +822,16 @@ def _new_files(settings: Settings, raw: RawMessage, existing) -> list[RawAttachm
     return unique_attachments(fresh, taken=taken)
 
 
-def _write_extracted(settings: Settings, raw: RawMessage) -> None:
+def write_extracted(settings: Settings, raw: RawMessage) -> None:
+    """Keep a message's files under inbox/extracted/<email id>, by the names ``unique_attachments`` gave them."""
     if not raw.attachments:
         return
     dest = settings.inbox_extracted / raw.id
     dest.mkdir(parents=True, exist_ok=True)
     for att in raw.attachments:
         (dest / safe_filename(att.filename)).write_bytes(att.content or b"")
+
+
 
 
 READER_KEY = "attachment_reader"
@@ -1042,6 +938,11 @@ def unique_attachments(attachments: list[RawAttachment], *, taken: set[str] = fr
     Names are compared as saved on disk (``safe_filename``, any case), and a name that is not
     repeated keeps its name and id, so files already stored still match. ``taken`` are names
     (as saved on disk, casefolded) that are already used.
+
+    pipeline._unique_ids numbers repeated attachment *ids* after the extension instead ("invoice.pdf (2)"), for
+    files that share a name inside zips or with files already stored. That scheme stays: those ids key stored
+    attachments (their page readings, fixes and search index), and reading a message again must give the same ids.
+    This one names files on disk, where the extension has to stay last.
     """
     taken = set(taken)
     for att in attachments:

@@ -15,7 +15,7 @@ from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import ToolReply
 from controller_inbox.models import DocumentType, EmailRecord, ExtractedFields, Importance
-from controller_inbox.reading import _number_in, _ungrounded_amounts
+from controller_inbox.reading import _number_in, ungrounded_amounts
 from msgfactory import write_msg
 
 
@@ -610,9 +610,9 @@ def _fraud_email():
 
 def test_amount_check_matches_whole_numbers_only():
     email = _fraud_email()
-    assert _ungrounded_amounts("Pay $4,850 deposit.", email) == ["$4,850"]
-    assert _ungrounded_amounts("Pay $500.", email) == ["$500"]
-    assert _ungrounded_amounts("Invoice for $48,500.00.", email) == []
+    assert ungrounded_amounts("Pay $4,850 deposit.", email) == ["$4,850"]
+    assert ungrounded_amounts("Pay $500.", email) == ["$500"]
+    assert ungrounded_amounts("Invoice for $48,500.00.", email) == []
     assert _number_in("48500", "total 48500.00") and not _number_in("4850", "total 48500.00")
 
 

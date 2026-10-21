@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+from controller_inbox.clock import aware_utc
+
 # Outlook's numbers for what is read here.
 _INBOX, _DELETED, _JUNK = 6, 3, 23
 _MAIL_FOLDER = 0  # Folder.DefaultItemType for mail
@@ -231,7 +233,7 @@ class OutlookSession:
         for column in _COLUMNS:
             table.Columns.Add(column)
         table.Sort("[ReceivedTime]", True)
-        cutoff = _utc(since)
+        cutoff = aware_utc(since)
         seen: list[Seen] = []
         while not table.EndOfTable:
             entry_id, received, unread, message_class, importance, message_id, flag = table.GetNextRow().GetValues()
@@ -311,10 +313,6 @@ def local_time(value) -> datetime | None:
         return None
     naive = value.replace(tzinfo=None)
     return naive.astimezone(timezone.utc)
-
-
-def _utc(when: datetime) -> datetime:
-    return when.astimezone(timezone.utc) if when.tzinfo else when.replace(tzinfo=timezone.utc)
 
 
 def _not_found(exc: Exception) -> bool:

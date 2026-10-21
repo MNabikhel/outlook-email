@@ -30,7 +30,7 @@ from decimal import Decimal
 from itertools import zip_longest
 from pathlib import Path
 
-from controller_inbox import answer_check, documents, memo, semantic, table_lookup, table_query
+from controller_inbox import answer_check, documents, memo, money, semantic, table_lookup, table_query
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
@@ -49,12 +49,11 @@ LOCKED = (
 
 SUMMARY_RE = re.compile(r"\b(summar\w*|overview|gist|tl;?dr|walk me through|what(?:'s| is| does) (?:it|this|the \w+) (?:say|about|cover))\b", re.I)
 
-_STOP = frozenset(
+# A question's filler, past what every question has (``documents.STOP_WORDS``), and the words for a file itself.
+_STOP = documents.STOP_WORDS | set(
     """
-    a about above after all also an and any are as at be been but by can could did do does for from had has have
-    how i if in into is it its just me my no not of on or our please show so tell than that the their them then
-    there these they this those to was we were what when where which who why will with would you your file files
-    attachment attachments document documents doc draft email message sheet page summary summarize summarise
+    above after all also as at been but by had has if into its just no not so than then these they those were would
+    file files attachment attachments document documents doc draft email message sheet page summary summarize summarise
     """.split()
 )
 
@@ -703,13 +702,13 @@ def missing_points(points: list[tuple[str, str]], answer: str, *, exact: bool = 
     flat = _flat(answer)
     # Figures by their amount ("$9,000" gives "9,000.00"), dates by their day ("October 9, 2026" gives "10/09/2026").
     amounts = {_amount(figure) for figure in _FIGURE.findall(answer or "")}
-    days = set(table_lookup._dates(answer))
+    days = set(table_lookup.date_keys(answer))
 
     def said(value: str) -> bool:
         if _FIGURE.fullmatch(value.strip()):
             return _amount(value) in amounts
-        if table_lookup._when(value) is not None and table_lookup._dates(value):
-            return bool(set(table_lookup._dates(value)) & days)
+        if table_lookup.cell_date(value) is not None and table_lookup.date_keys(value):
+            return bool(set(table_lookup.date_keys(value)) & days)
         # A whole phrase: "Fuel" is not given by "Fuels".
         return re.search(rf"(?<![\w.]){re.escape(_flat(value))}(?![\w]|\.\d)", flat) is not None
 
@@ -726,8 +725,9 @@ _FIGURE = re.compile(r"[$€£]?\s?[(\u2212-]?[$€£]?\d[\d,]*(?:\.\d+)?\)?%?(?
 
 
 def _amount(figure: str) -> Decimal:
-    """A figure's amount, without its sign (a negative is written many ways): 9,000 and 9,000.00 are one amount."""
-    return Decimal(re.sub(r"[^\d.]", "", figure).rstrip(".") or "0")
+    """A figure's amount, without its sign (a negative is written many ways): 9,000 and 9,000.00 are one amount.
+    A figure here is read US style (``_FIGURE``), and a percentage by its figure."""
+    return abs(money.parse_amount(figure.strip().rstrip("%"), decimal=".") or Decimal(0))
 
 
 def _flat(text: str) -> str:
@@ -939,8 +939,8 @@ def earlier_findings(ws: Workspace, email: EmailRecord, limit: int = 5) -> str:
     its files, which the model must not be given."""
     if attachments_locked(email):
         return ""
-    asked = set(documents.terms_of(ws.question, _STOP))
-    rows = [row for row in ws.store.findings(email.id, limit=20) if asked & set(documents.terms_of(row["text"], _STOP))][:limit]
+    asked = set(documents.terms(ws.question, stop=_STOP))
+    rows = [row for row in ws.store.findings(email.id, limit=20) if asked & set(documents.terms(row["text"], stop=_STOP))][:limit]
     if not rows:
         return ""
     return NOTES_HEAD + "\n" + "\n".join(f"- {row['text']}" for row in reversed(rows))
@@ -959,7 +959,7 @@ def file_matches(email: EmailRecord, question: str, *, limit: int = 3, outline: 
         if not hits:
             continue
         for part in hits[:limit]:
-            snippet = _snippet(part.text, documents.terms_of(question, _STOP))
+            snippet = _snippet(part.text, documents.terms(question, stop=_STOP))
             lines.append(f"{att.filename} · {part.label}: {snippet}")
     if not lines and outline:
         for att in email.attachments[:4]:
