@@ -1,0 +1,2 @@
+commit: $Format:%H$
+date: $Format:%cs$

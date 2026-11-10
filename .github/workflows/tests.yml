@@ -34,6 +34,8 @@ jobs:
           for f in $files; do
             node --check "$f"
           done
+      - name: Launchers parse (bash -n)
+        run: bash -n CloseDesk.command CloseDesk-Update.command scripts/install.sh scripts/overnight.sh
 
   pytest:
     strategy:
@@ -45,6 +47,12 @@ jobs:
           # The oldest Python CloseDesk supports (pyproject's requires-python), so code it can't run is caught here.
           - os: ubuntu-latest
             python: "3.11"
+          # Newer Pythons, so one a computer was updated to doesn't break CloseDesk. (The OCR add-on isn't built
+          # for them yet; its tests skip.)
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: ubuntu-latest
+            python: "3.14"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -59,6 +67,27 @@ jobs:
       - name: Test
         # The browser tests run in their own job below.
         run: pytest -q -m "not browser"
+
+  # The launchers themselves, run as a person runs them: set-up from nothing, a second start, a renamed folder,
+  # the dashboard answering, an update. Once with the machine's Python (nothing may be downloaded), once with
+  # --get-python.
+  launcher:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+        own_python: ["", "1"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Launcher smoke test
+        env:
+          CLOSEDESK_OWN_PYTHON: ${{ matrix.own_python }}
+        run: python tests/launcher_smoke.py
 
   browser:
     runs-on: ubuntu-latest

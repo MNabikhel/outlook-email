@@ -582,8 +582,8 @@ def test_a_phone_photo_turned_by_its_exif_tag_is_read_upright():
 
     from controller_inbox import ocr, page_view, vision
 
-    if ocr.engine_name() != "RapidOCR":
-        pytest.skip("RapidOCR isn't installed")
+    # The real engine reads here; harbor_ocr says "RapidOCR" whether or not it is installed (it isn't on Python 3.13+).
+    pytest.importorskip("rapidocr_onnxruntime")
     upright = Image.open(io.BytesIO(vision.render(_invoice(), "invoice.pdf", 1, reader=page_view.VIEW))).convert("RGB")
     exif = Image.Exif()
     exif[0x0112] = 6  # turn 90 degrees clockwise to view

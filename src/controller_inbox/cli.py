@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import logging
+import sqlite3
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -105,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
     trust.add_argument("--report", action="store_true", help="Report the domain as fraud instead.")
     trust.add_argument("--note", default="")
 
+    sub.add_parser("doctor", help="Say what is and isn't in order on this computer, and what to do about it.")
+
     from controller_inbox.tools import TOOL_NAMES
 
     tool = sub.add_parser("tool", help="JSON tool for the local Bionic agent.")
@@ -115,8 +118,21 @@ def main(argv: list[str] | None = None) -> int:
     tool.add_argument("--date", default=None)
 
     args = parser.parse_args(argv)
-    settings = load_settings()
-    store = Store(settings.db_path)
+    if args.cmd == "doctor":
+        from controller_inbox import doctor
+
+        return doctor.main()
+    try:
+        settings = load_settings()
+        store = Store(settings.db_path)
+    except (ValueError, OSError, sqlite3.Error):
+        # A line in .env that isn't valid, a folder that can't be written, a database that can't be read: said in
+        # plain words with what to do, not as a traceback.
+        from controller_inbox import doctor
+
+        print("CloseDesk can't start yet:\n")
+        doctor.main()
+        return 1
     apply_saved_timezone(settings, store)
     apply_saved_mode(settings, store)
 
@@ -391,12 +407,38 @@ def _run(settings: Settings, store: Store, args) -> int:
     if args.no_serve:
         return 0
     host = args.host or settings.host
-    port = args.port or settings.port
+    port, running = _port_to_use(host, args.port or settings.port)
+    if not port:
+        return 1
     url = f"http://{host}:{port}/"
+    if running:
+        print(f"\nCloseDesk is already open in another window: showing it ({url}).")
+        if not args.no_browser:
+            import webbrowser
+
+            webbrowser.open(url)
+        return 0
     print(f"\nOpening {url}  (leave this window open; press Ctrl+C to stop)")
     if not args.no_browser:
         _open_browser_soon(url)
     return _serve(settings, store, host=host, port=port)
+
+
+def _port_to_use(host: str, port: int) -> tuple[int, bool]:
+    """(the port the dashboard opens on, whether a CloseDesk already answers there). When another program has the
+    port (LM Studio's server set to it, say), the next free one is used and said; 0 when none is free."""
+    from controller_inbox import doctor
+
+    if not doctor.listening(host, port):
+        return port, False
+    if doctor.is_closedesk(host, port):
+        return port, True
+    other = doctor.free_port(host, port + 1)
+    if not other:
+        print(f"\nPort {port} and the twenty after it are all in use. Set CONTROLLER_INBOX_PORT in .env to a free port.")
+        return 0, False
+    print(f"\nAnother program is using port {port}, so CloseDesk uses {other} this time.")
+    return other, False
 
 
 def _print_overnight(result: dict) -> None:
@@ -517,6 +559,15 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None)
 
     if host:
         settings.host = host
+    if port is None:
+        # Opened without `run` (serve, demo --serve): the same care about a port that is taken.
+        port, running = _port_to_use(settings.host, settings.port)
+        if running:
+            print(f"CloseDesk is already running at http://{settings.host}:{port}/")
+            return 0
+        if not port:
+            return 1
+        print(f"CloseDesk is at http://{settings.host}:{port}/  (press Ctrl+C to stop)")
     app = create_app(settings, store)
     # Automatic Outlook sync while the dashboard is open (Settings → Outlook).
     app.state.start_outlook_sync()

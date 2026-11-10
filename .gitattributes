@@ -1,3 +1,5 @@
 *.bat text eol=crlf
 *.command text eol=lf
 *.sh text eol=lf
+# GitHub writes the commit into this file in a downloaded ZIP, so a copy knows which version it is.
+.git_archival.txt export-subst

@@ -889,6 +889,12 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .md-copy { white-space: pre-wrap; font: 12px/1.5 var(--mono); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; max-height: 360px; overflow: auto; }
 .keys-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
 .keys-list dd { margin: 0; color: var(--text-2); }
+.set-checks { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.set-checks:empty { display: none; }
+.set-check { display: flex; gap: 8px; align-items: flex-start; }
+.set-check .ic { flex: none; margin-top: 2px; color: var(--ok); }
+.set-check.is-note .ic { color: var(--warn); }
+.set-check.is-problem .ic { color: var(--danger); }
 
 /* ---------- Settings ---------- */
 
