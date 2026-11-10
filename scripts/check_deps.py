@@ -1,5 +1,6 @@
 """Exit 1 when a package listed in pyproject.toml is missing or older than it asks for, as after an update
-that added or raised one. The launchers run this before starting and reinstall when it fails.
+that added or raised one. ``launch.py`` (what the launchers run) uses these checks on every start and installs
+what they find; run on its own, this file only reports.
 
 Besides the base dependencies, the optional extras the launchers install (``LAUNCHER_EXTRAS``) are checked too,
 so raising one of their versions also brings a reinstall. An extra counts only where it is installed: its first
@@ -40,16 +41,22 @@ def _name(requirement: str) -> str:
     return re.split(r"[<>=!~;\[ ]", requirement, maxsplit=1)[0]
 
 
+def applies_here(requirement: str) -> bool:
+    """Whether ``requirement`` is for this Python and system (its marker, if it has one, holds here)."""
+    if Requirement is None:
+        return applies(requirement)
+    marker = Requirement(requirement).marker
+    return marker is None or bool(marker.evaluate())
+
+
 def problem(requirement: str) -> str:
     """Why ``requirement`` is not met here, or "" when it is."""
+    if not applies_here(requirement):
+        return ""
     if Requirement is not None:
         req = Requirement(requirement)
-        if req.marker is not None and not req.marker.evaluate():
-            return ""
         name = req.name
     else:
-        if not applies(requirement):
-            return ""
         req = None
         name = _name(requirement)
     try:
@@ -66,15 +73,9 @@ def extra_installed(requirements: list[str]) -> bool:
     if not requirements:
         return False
     first = requirements[0]
-    if Requirement is not None:
-        req = Requirement(first)
-        if req.marker is not None and not req.marker.evaluate():
-            return False
-        name = req.name
-    else:
-        if not applies(first):
-            return False
-        name = _name(first)
+    if not applies_here(first):
+        return False
+    name = Requirement(first).name if Requirement is not None else _name(first)
     try:
         importlib.metadata.version(name)
     except importlib.metadata.PackageNotFoundError:

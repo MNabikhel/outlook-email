@@ -1215,6 +1215,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         model = check_model(settings)
         return {
             "ok": True,
+            # Says this is CloseDesk, to a second CloseDesk started while this one is open.
+            "app": "closedesk",
             "emails": store.counts()["emails"],
             "graph": settings.graph_configured,
             "model": model.model if model.active else "",

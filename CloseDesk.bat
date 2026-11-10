@@ -1,61 +1,143 @@
 @echo off
 rem Double-click to read the drop folder, let the local model read, write today's digest,
-rem and open the dashboard. The first run sets everything up (a minute or two).
-setlocal
+rem and open the dashboard.
+rem
+rem The first run sets everything up, and every start checks the set-up and puts right what isn't (after an
+rem update, a moved or replaced folder, a Python that went away). No admin rights are needed at any point:
+rem when the computer has no Python that fits, CloseDesk downloads one of its own into your user folder.
+rem
+rem   CloseDesk.bat            start CloseDesk
+rem   CloseDesk.bat --check    say what is and isn't in order, without starting it
+rem   CloseDesk.bat --update   fetch the newest CloseDesk (mail and settings are kept)
+setlocal EnableExtensions
 cd /d "%~dp0"
 
-if not exist ".venv\Scripts\python.exe" (
-  call :setup
-  if errorlevel 1 goto :fail
-)
-
-rem An update can add or raise a package (the add-ons' too); install it before starting. The add-ons are
-rem kept where they install, and left out where they can't.
-".venv\Scripts\python.exe" scripts\check_deps.py >nul 2>&1
-if errorlevel 1 (
-  call :update
-  if errorlevel 1 goto :fail
-)
-
-rem The second table reader (Camelot) is optional: installed when it can be, skipped when it can't. It is tried
-rem once; .venv\.tables-tried remembers that, so a computer that can't install it doesn't try on every start.
-if not exist ".venv\.tables-tried" (
-  ".venv\Scripts\python.exe" -c "import camelot" >nul 2>&1 || ".venv\Scripts\python.exe" -m pip install --quiet -e ".[tables]" >nul 2>&1
-  type nul > ".venv\.tables-tried"
-)
-".venv\Scripts\python.exe" -m controller_inbox run %*
-if errorlevel 1 goto :fail
-exit /b 0
-
-:update
-rem Reinstall with both add-ons, else with OCR only, else without them; errorlevel says if the last try failed.
-echo Installing what this update needs...
-".venv\Scripts\python.exe" -m pip install --quiet -e ".[ocr,tables]" >nul 2>&1 && exit /b 0
-".venv\Scripts\python.exe" -m pip install --quiet -e ".[ocr]" >nul 2>&1 && exit /b 0
-".venv\Scripts\python.exe" -m pip install --quiet -e .
-exit /b
-
-:setup
-echo First run: setting up CloseDesk. This takes a minute or two.
+rem Where CloseDesk keeps the one tool it downloads (uv, which fetches Python): in your own folder.
+set "TOOLS=%LOCALAPPDATA%\CloseDesk"
+set "UV="
 set "PY="
-where py >nul 2>&1 && set "PY=py -3"
-if not defined PY (
-  where python >nul 2>&1 && set "PY=python"
-)
-if not defined PY (
+set "WANT_MANAGED=%CLOSEDESK_OWN_PYTHON%"
+set /a TRIES=0
+
+:again
+set /a TRIES+=1
+if %TRIES% GTR 4 goto :gave_up
+set "PY="
+if exist ".venv\Scripts\python.exe" call :try ".venv\Scripts\python.exe"
+if defined PY goto :start
+
+rem No environment, or one whose Python is gone (it was removed, upgraded, or made on another computer).
+if exist ".venv" set "CLOSEDESK_AGAIN=1"
+if exist ".venv" rmdir /s /q ".venv"
+if not defined WANT_MANAGED call :find_python
+if defined PY goto :start
+call :managed
+if defined PY goto :start
+call :find_python
+if defined PY set "CLOSEDESK_MANAGED_TRIED=1"
+if defined PY goto :start
+goto :no_python
+
+:start
+if defined UV set "CLOSEDESK_UV=%UV%"
+rem An update replaces this file while it runs, so that one is run from a block read whole beforehand.
+if /i "%~1"=="--update" (
+  %PY% scripts\launch.py %*
   echo.
-  echo Python 3.11 or newer is needed.
-  echo Install it from https://www.python.org/downloads/ and tick "Add python.exe to PATH", then double-click CloseDesk again.
-  exit /b 1
+  pause
+  exit /b
 )
-%PY% -m venv .venv
-if errorlevel 1 exit /b 1
-".venv\Scripts\python.exe" -m pip install --quiet --upgrade pip
-rem The OCR add-on reads scanned PDFs; if it can't install here, CloseDesk runs without it.
-".venv\Scripts\python.exe" -m pip install --quiet -e ".[ocr]" || ".venv\Scripts\python.exe" -m pip install --quiet -e .
-if errorlevel 1 exit /b 1
-echo Setup finished.
+%PY% scripts\launch.py %*
+set "CODE=%ERRORLEVEL%"
+if "%CODE%"=="0" exit /b 0
+if "%CODE%"=="130" exit /b 0
+rem 75: launch.py asks for a Python of CloseDesk's own. 76: the environment is beyond repair, make it again.
+if "%CODE%"=="75" set "WANT_MANAGED=1"
+if "%CODE%"=="76" set "CLOSEDESK_REBUILT=1"
+if "%CODE%"=="75" goto :remake
+if "%CODE%"=="76" goto :remake
+goto :fail
+
+:remake
+if exist ".venv" rmdir /s /q ".venv"
+goto :again
+
+rem Sets PY to the command given when it is a Python 3.11 or newer that runs. (The "python" Windows offers
+rem before one is installed only points at the Store; it fails this, and nothing opens.)
+:try
+if defined PY exit /b 0
+%* -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+if not errorlevel 1 set PY=%*
 exit /b 0
+
+rem A Python 3.11 or newer already on this computer. launch.py decides whether it will do.
+:find_python
+set "PY="
+if defined CLOSEDESK_PYTHON call :try "%CLOSEDESK_PYTHON%"
+call :try py -3.12
+call :try py -3.11
+call :try py -3.13
+call :try py -3.14
+call :try py -3
+call :try python
+call :try python3
+exit /b 0
+
+rem uv: already installed, already fetched, or fetched now from its GitHub releases (one file, no installer).
+:get_uv
+set "UV="
+for %%I in (uv.exe) do if not "%%~$PATH:I"=="" set "UV=%%~$PATH:I"
+if defined UV exit /b 0
+if exist "%TOOLS%\uv.exe" set "UV=%TOOLS%\uv.exe"
+if defined UV exit /b 0
+where curl >nul 2>&1 || exit /b 0
+where tar >nul 2>&1 || exit /b 0
+set "ASSET=uv-x86_64-pc-windows-msvc"
+if /i "%PROCESSOR_ARCHITECTURE%"=="ARM64" set "ASSET=uv-aarch64-pc-windows-msvc"
+set "UVURL=https://github.com/astral-sh/uv/releases/latest/download"
+if defined CLOSEDESK_UV_URL set "UVURL=%CLOSEDESK_UV_URL%"
+set "TMPUV=%TEMP%\closedesk-uv-%RANDOM%"
+mkdir "%TMPUV%" >nul 2>&1
+curl -fsSL --retry 2 -o "%TMPUV%\uv.zip" "%UVURL%/%ASSET%.zip" >nul 2>&1
+if exist "%TMPUV%\uv.zip" tar -xf "%TMPUV%\uv.zip" -C "%TMPUV%" >nul 2>&1
+if not exist "%TOOLS%" mkdir "%TOOLS%" >nul 2>&1
+if exist "%TMPUV%\uv.exe" move /y "%TMPUV%\uv.exe" "%TOOLS%\uv.exe" >nul 2>&1
+if exist "%TMPUV%\%ASSET%\uv.exe" move /y "%TMPUV%\%ASSET%\uv.exe" "%TOOLS%\uv.exe" >nul 2>&1
+rmdir /s /q "%TMPUV%" >nul 2>&1
+if exist "%TOOLS%\uv.exe" set "UV=%TOOLS%\uv.exe"
+exit /b 0
+
+rem CloseDesk's own Python, in your user folder: nothing is installed on the computer and no rights are asked.
+:managed
+set "PY="
+call :get_uv
+if not defined UV exit /b 0
+echo Getting CloseDesk its own Python, no admin rights needed. This takes a minute...
+if exist ".venv" rmdir /s /q ".venv"
+rem The computer's own certificates, so a company proxy's is trusted as it is by the browser.
+set "UV_SYSTEM_CERTS=1"
+set "UV_NATIVE_TLS=1"
+set "UV_PYTHON_PREFERENCE=only-managed"
+"%UV%" venv --quiet --seed --python 3.12 .venv >nul 2>&1
+set "UV_PYTHON_PREFERENCE="
+if exist ".venv\Scripts\python.exe" call :try ".venv\Scripts\python.exe"
+exit /b 0
+
+:no_python
+echo.
+echo CloseDesk couldn't get Python, which it runs on.
+echo It downloads its own copy, no admin rights needed, and that download didn't work:
+echo check the internet connection, then double-click CloseDesk again.
+echo If this computer blocks such downloads, install Python 3.12 from https://www.python.org/downloads/
+echo and tick "Add python.exe to PATH". "Install for me only" needs no admin rights.
+pause
+exit /b 1
+
+:gave_up
+echo.
+echo CloseDesk couldn't finish setting up. Double-click it again; if this repeats, run: CloseDesk.bat --check
+pause
+exit /b 1
 
 :fail
 echo.

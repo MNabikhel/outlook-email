@@ -6,9 +6,17 @@ Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get
 
 ## Quick start
 
-1. **Install Python 3.11+** from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH**.
-2. **Get CloseDesk:** green **Code** button → **Download ZIP**, then unzip it somewhere permanent (for example `Documents`). The folder is called `outlook-email-main`; rename it `CloseDesk` if you like.
-3. **Double-click `CloseDesk.bat`** (Windows) or **`CloseDesk.command`** (Mac). The first run sets itself up in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around.
+1. **Get CloseDesk. No admin rights are needed, and you don't install Python.**
+   - **Mac:** open **Terminal** (⌘ Space, type *Terminal*), paste this line and press Return:
+
+     ```bash
+     curl -fsSL https://raw.githubusercontent.com/MNabikhel/outlook-email/main/scripts/install.sh | bash
+     ```
+
+     It puts CloseDesk in a `CloseDesk` folder in your home folder and starts it.
+   - **Windows:** green **Code** button → **Download ZIP**, unzip it somewhere permanent (for example `Documents`), and double-click **`CloseDesk.bat`**. If Windows shows "Windows protected your PC", click **More info → Run anyway**.
+2. **The first start sets itself up** in a minute or two and opens the dashboard. Where the computer has no Python that fits, CloseDesk downloads one of its own into your user folder. Click **Load sample mailbox** to look around.
+3. **From then on, double-click `CloseDesk.command`** (Mac) or **`CloseDesk.bat`** (Windows). Every start checks the set-up and puts right what isn't, so after an update, or after moving the folder, you just open it. **`CloseDesk-Update`** fetches the newest version and keeps your mail and settings.
 4. **Add your mail:** on Windows with classic Outlook, open **Settings → Outlook (classic)**, click **Check Outlook**, pick your folders and click **Sync now** (or turn on **Sync automatically**). It copies your mail and attachments in and never changes anything in Outlook. Otherwise drag emails from Outlook into the `inbox/incoming` folder and click **Process new mail**. ([New Outlook, web, and Mac](docs/SETUP.md#every-morning))
 5. **Optional local AI:** in [LM Studio](https://lmstudio.ai/), load a small instruct model (3B–8B) and start the server (Developer tab → **Start server**). CloseDesk finds it on its own.
 
@@ -41,7 +49,7 @@ More detail: [how it works, in slides](docs/CloseDesk-how-it-works.pptx) and the
 ## The everyday loop
 
 1. Drag yesterday's mail from Outlook into `inbox/incoming/` (`.msg` from classic Outlook, `.eml` from new Outlook, the web, or Mac).
-2. Double-click `CloseDesk.bat` (Windows) or `CloseDesk.command` (Mac/Linux). The first run creates `.venv` and installs everything.
+2. Double-click `CloseDesk.bat` (Windows) or `CloseDesk.command` (Mac/Linux). The first run creates `.venv` and installs everything; later runs check it and install whatever an update added.
 3. The dashboard opens on **Today**:
    - **Do not process — verify by phone** when someone asks to change payment details;
    - **Your focus today** — a ranked list (fraud, overdue, due today, due soon, new decisions), one row per email, with **Done** buttons;
@@ -231,7 +239,7 @@ CloseDesk's own reader is built for the schedules accounting programs print (agi
 
 CloseDesk's own tables are never taken away: every rule tried for replacing them made some of the schedules it reads well worse. A page of prose Camelot reads as a table is left out, and so are letters. Camelot's tables are written the way CloseDesk writes tables (`Label: value` rows), with their heading lines as printed.
 
-Camelot is installed by the launchers (`pip install -e ".[tables]"`), tried once: where it can't be installed (an Intel Mac older than macOS 12 has no OpenCV build for it) the launcher leaves a `.venv/.tables-tried` file and doesn't try again on each start (delete the file to try again). Where it isn't installed or it fails on a file, PDFs are read exactly as before.
+Camelot is installed by the launchers, tried once: where it can't be installed (an Intel Mac older than macOS 12 has no OpenCV build for it) that is remembered in `.venv/closedesk-setup.json` and it isn't tried again on each start, until an update changes what it needs (delete the file to try again). Where it isn't installed or it fails on a file, PDFs are read exactly as before.
 
 How it was measured: the rows of the tables on real pages, as the FinTabNet and ParseBench benchmarks mark them, a row counting as read when its figures and its words both match. *Annual reports* are 240 FinTabNet pages from companies' annual reports; the *mixed set* is 180 ParseBench pages (insurance rate filings, fund reports, SEC filings, schedules, timetables). The rules were tuned on 60 and 30 of them; the *test* pages were used only to compare versions; the *fresh* pages were drawn last and looked at only to check the result.
 
@@ -456,11 +464,16 @@ src/controller_inbox/
   web_api.py        The workspace page (/app) and the JSON it is built from (/api)
   web_common.py     What both share: notices, which files download, same-page checks, finding an attachment
   services.py       What a button does, the same from the classic pages and the workspace
+  doctor.py         The self-check: `controller_inbox doctor`, or `CloseDesk --check`
+  version.py        Which version this copy is
   templates/        The classic pages
   static/app.js     Open-in-place preview, chat box, search shortcut (answers formatted by static/ui/format.js)
   static/ui/        The workspace's scripts and styles (no build step, no CDN)
-CloseDesk.bat / CloseDesk.command   Double-click launchers (first run sets up .venv)
-scripts/check_deps.py               What the launchers run to see if an update needs a reinstall
+CloseDesk.bat / CloseDesk.command   Double-click launchers: find or fetch a Python (no admin rights), then run launch.py
+CloseDesk-Update.bat / .command     Double-click to fetch the newest version (mail and settings are kept)
+scripts/launch.py                   Every start: check the set-up, install what is missing, start; also --check and --update
+scripts/check_deps.py               The package checks launch.py uses
+scripts/install.sh                  The one-line install for a Mac's Terminal
 scripts/overnight.bat / .sh         For Task Scheduler / cron
 tests/                              pytest suite (conftest.py holds the shared fixtures, helpers.py the helpers)
 ```
@@ -475,6 +488,11 @@ pytest                                # everything; tests that need what isn't i
 pytest -m "not browser"               # all but the browser tests (what CI's main jobs run)
 ruff check src tests scripts          # lint (pyflakes and syntax errors), as CI runs it
 ```
+
+The launchers are tested as a person runs them, by `python tests/launcher_smoke.py`: it unpacks a copy of the
+checkout, sets it up from nothing, starts it twice, renames the folder, checks the dashboard answers, and runs an
+update. CI runs it on macOS, Windows and Linux, with the machine's Python and with CloseDesk fetching its own
+(`CLOSEDESK_OWN_PYTHON=1`). The unit tests of the same code are in `tests/test_launch.py`.
 
 Some 47 tests drive the pages in a real Chromium through Playwright. They are marked `browser`, and need the
 `browser` extra and Playwright's Chromium:

@@ -26,3 +26,5 @@ inbox/failed/*
 htmlcov/
 .DS_Store
 AP cost codes/
+.previous/
+.update-*/

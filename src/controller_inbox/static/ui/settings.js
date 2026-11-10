@@ -24,7 +24,7 @@ const SECTIONS = [
   ["Workspace", [["appearance", "Appearance"], ["profile", "Inbox profile"], ["timezone", "Time zone"]]],
   ["Local model", [["model", "Model and status"], ["context", "Context length"], ["vision", "Reading scans"], ["search", "Search by meaning"]]],
   ["Mail", [["mail-in", "Getting mail in"], ["schedule", "Every morning"], ["cost-codes", "AP cost codes"], ["teaching", "Teaching it"], ["outlook", "Outlook connection"], ["sample", "Sample mailbox"]]],
-  ["Help", [["keys", "Keyboard"], ["classic", "Classic view"]]],
+  ["Help", [["about", "This copy and its check"], ["keys", "Keyboard"], ["classic", "Classic view"]]],
 ];
 
 const STATE_LABELS = { on: "Ready", fallback: "Older method", off: "Off" };
@@ -817,6 +817,39 @@ export function createSettings(ctx) {
     );
   }
 
+  function about() {
+    const a = data.about || {};
+    const list = h("ul", { class: "set-checks", "aria-live": "polite" });
+    // The check the launcher runs on every start, asked for here: what is in order, and what to do about what isn't.
+    const check = async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const reply = await getJSON("/api/settings/check");
+        replace(
+          list,
+          reply.checks.map((item) =>
+            h("li", { class: `set-check is-${item.state}` }, icon(item.state === "ok" ? "check" : "alert", 14), h("span", null, item.text, item.todo ? h("span", { class: "set-help" }, ` ${item.todo}`) : null))
+          )
+        );
+      } catch (error) {
+        replace(list, h("li", { class: "set-check is-problem" }, icon("alert", 14), h("span", null, error.message)));
+      } finally {
+        button.disabled = false;
+      }
+    };
+    return section(
+      "about",
+      "This copy and its check",
+      "help",
+      "",
+      facts([["Version", a.version], ["Python", a.python], pathRow("Folder", a.folder)]),
+      h("p", { class: "set-help" }, "To update, close CloseDesk and double-click ", h("b", null, "CloseDesk-Update"), " in its folder: your mail and settings are kept. Every start checks the set-up and puts right what isn't; the same check runs here."),
+      actions("about", h("button", { type: "button", class: "btn btn-sm", onclick: check }, "Check the set-up")),
+      list
+    );
+  }
+
   function keys() {
     return section("keys", "Keyboard", "help", "", h("dl", { class: "keys-list" }, SHORTCUTS.map(([combo, what]) => [h("dt", null, h("kbd", null, combo)), h("dd", null, what)])));
   }
@@ -875,6 +908,7 @@ export function createSettings(ctx) {
     teaching,
     outlook,
     sample,
+    about,
     keys,
     classic,
   };

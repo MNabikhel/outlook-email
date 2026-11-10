@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import platform
 import threading
 import time
 from contextlib import contextmanager
@@ -29,7 +30,7 @@ from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
     agent, cost_codes, documents, fixes, fraud, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
-    semantic, services, table_lookup, vision,
+    semantic, services, table_lookup, version, vision,
 )
 from controller_inbox.extract import extraction_failed
 from controller_inbox.local_llm import check_model, context_target, needs_more_context
@@ -1039,6 +1040,7 @@ def register_workspace(
                 "can_load": not (counts["emails"] and store.real_mail_count()),
             },
             "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
+            "about": {"version": version.describe(), "python": platform.python_version(), "folder": str(version.ROOT)},
         }
 
     def saved(notice: str, **extra) -> dict[str, Any]:
@@ -1050,6 +1052,13 @@ def register_workspace(
     @api.get("/settings")
     def settings_get(recheck: int = 0):
         return settings_state(recheck=bool(recheck))
+
+    @api.get("/settings/check")
+    def settings_check():
+        """The self-check the launchers run (``doctor``), for Settings: what is in order and what isn't."""
+        from controller_inbox import doctor
+
+        return {"checks": [{"state": check.state, "text": check.text, "todo": check.todo} for check in doctor.checks(port=False, settings=settings)]}
 
     @api.post("/settings/profile")
     async def settings_profile(request: Request):
