@@ -150,7 +150,7 @@ def _optional(settings) -> list[Check]:
             Check(
                 NOTE,
                 "Scanned pages and pictures: not read (the OCR add-on isn't built for this Python yet)",
-                "Python 3.12 has it: delete the .venv folder and open CloseDesk again to let it fetch one. Or install Tesseract.",
+                "It works on Python 3.11 and 3.12: install Python 3.12, delete the .venv folder and open CloseDesk again. Or install Tesseract.",
             )
         )
     else:

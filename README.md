@@ -6,17 +6,17 @@ Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get
 
 ## Quick start
 
-1. **Get CloseDesk. No admin rights are needed, and you don't install Python.**
+1. **Python 3.11 or newer** is the one thing CloseDesk needs on the computer (3.12 is the best choice). If it isn't there, install it from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH**; *Install for me only* needs no admin rights. CloseDesk uses the Python that is there and never installs one on its own: where there is none, it says so. ([No admin rights on a Mac?](docs/SETUP.md#without-admin-rights-on-a-mac))
+2. **Get CloseDesk.**
    - **Mac:** open **Terminal** (⌘ Space, type *Terminal*), paste this line and press Return:
 
      ```bash
      curl -fsSL https://raw.githubusercontent.com/MNabikhel/outlook-email/main/scripts/install.sh | bash
      ```
 
-     It puts CloseDesk in a `CloseDesk` folder in your home folder and starts it.
+     It puts CloseDesk in a `CloseDesk` folder in your home folder and starts it. Downloaded this way, macOS doesn't ask an administrator to approve it.
    - **Windows:** green **Code** button → **Download ZIP**, unzip it somewhere permanent (for example `Documents`), and double-click **`CloseDesk.bat`**. If Windows shows "Windows protected your PC", click **More info → Run anyway**.
-2. **The first start sets itself up** in a minute or two and opens the dashboard. Where the computer has no Python that fits, CloseDesk downloads one of its own into your user folder. Click **Load sample mailbox** to look around.
-3. **From then on, double-click `CloseDesk.command`** (Mac) or **`CloseDesk.bat`** (Windows). Every start checks the set-up and puts right what isn't, so after an update, or after moving the folder, you just open it. **`CloseDesk-Update`** fetches the newest version and keeps your mail and settings.
+3. **The first start sets itself up** in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around. From then on, double-click `CloseDesk.command` (Mac) or `CloseDesk.bat` (Windows): every start checks the set-up and puts right what isn't, so after an update, or after moving the folder, you just open it. **`CloseDesk-Update`** fetches the newest version and keeps your mail and settings.
 4. **Add your mail:** on Windows with classic Outlook, open **Settings → Outlook (classic)**, click **Check Outlook**, pick your folders and click **Sync now** (or turn on **Sync automatically**). It copies your mail and attachments in and never changes anything in Outlook. Otherwise drag emails from Outlook into the `inbox/incoming` folder and click **Process new mail**. ([New Outlook, web, and Mac](docs/SETUP.md#every-morning))
 5. **Optional local AI:** in [LM Studio](https://lmstudio.ai/), load a small instruct model (3B–8B) and start the server (Developer tab → **Start server**). CloseDesk finds it on its own.
 
@@ -469,7 +469,7 @@ src/controller_inbox/
   templates/        The classic pages
   static/app.js     Open-in-place preview, chat box, search shortcut (answers formatted by static/ui/format.js)
   static/ui/        The workspace's scripts and styles (no build step, no CDN)
-CloseDesk.bat / CloseDesk.command   Double-click launchers: find or fetch a Python (no admin rights), then run launch.py
+CloseDesk.bat / CloseDesk.command   Double-click launchers: find the computer's Python, then run launch.py (--get-python downloads one, only when asked)
 CloseDesk-Update.bat / .command     Double-click to fetch the newest version (mail and settings are kept)
 scripts/launch.py                   Every start: check the set-up, install what is missing, start; also --check and --update
 scripts/check_deps.py               The package checks launch.py uses
@@ -491,7 +491,7 @@ ruff check src tests scripts          # lint (pyflakes and syntax errors), as CI
 
 The launchers are tested as a person runs them, by `python tests/launcher_smoke.py`: it unpacks a copy of the
 checkout, sets it up from nothing, starts it twice, renames the folder, checks the dashboard answers, and runs an
-update. CI runs it on macOS, Windows and Linux, with the machine's Python and with CloseDesk fetching its own
+update. CI runs it on macOS, Windows and Linux, with the machine's Python and with `--get-python`
 (`CLOSEDESK_OWN_PYTHON=1`). The unit tests of the same code are in `tests/test_launch.py`.
 
 Some 47 tests drive the pages in a real Chromium through Playwright. They are marked `browser`, and need the

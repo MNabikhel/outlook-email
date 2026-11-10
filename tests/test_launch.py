@@ -97,43 +97,37 @@ def test_runs_this_folder_only_when_the_installed_code_is_this_folders(launch, m
     assert module.runs_this_folder() is False
 
 
-# When the install can't be done with this Python -------------------------------------------------------------
+# The computer's Python is used; none is downloaded unasked --------------------------------------------------
 
 
-def _needs_install(launch, monkeypatch):
-    monkeypatch.setattr(launch, "runs_this_folder", lambda: False)
-    launch.install_works = False
-
-
-def test_a_python_that_cant_install_closedesk_asks_for_one_of_closedesks_own(launch, monkeypatch):
-    _needs_install(launch, monkeypatch)
-    assert launch.ensure_packages() == launch.WANT_MANAGED
-
-
-def test_when_closedesks_own_python_cant_install_either_the_environment_is_made_again_once(launch, monkeypatch, capsys):
-    _needs_install(launch, monkeypatch)
-    (launch.VENV / "pyvenv.cfg").write_text("home = /somewhere\nuv = 0.11.0\n", encoding="utf-8")
-    assert launch.managed() is True
-    assert launch.ensure_packages() == launch.REBUILD
-    monkeypatch.setenv("CLOSEDESK_REBUILT", "1")
-    assert launch.ensure_packages() == 1
-    assert "couldn't install what it needs" in capsys.readouterr().out
-
-
-def test_a_python_outside_the_full_range_asks_for_closedesks_own_before_making_anything(launch, monkeypatch):
-    monkeypatch.setattr(launch, "FULL", ((3, 0), (3, 1)))
-    assert launch.create_environment([]) == launch.WANT_MANAGED
-    assert not (launch.VENV / "pyvenv.cfg").exists()
-
-
-def test_a_python_outside_the_full_range_is_used_when_there_is_no_other(launch, monkeypatch):
-    monkeypatch.setattr(launch, "FULL", ((3, 0), (3, 1)))
-    monkeypatch.setenv("CLOSEDESK_MANAGED_TRIED", "1")
+def test_the_environment_is_made_with_the_python_that_runs_this_whatever_its_version(launch, monkeypatch):
     handed = []
     monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append(cmd) or 0)
     assert launch.create_environment(["--check"]) == 0
     assert launch.venv_python().exists()
+    made_with = (launch.VENV / "pyvenv.cfg").read_text(encoding="utf-8")
+    assert "uv =" not in made_with, "a Python was fetched, not the computer's used"
     assert handed and handed[0][0] == str(launch.venv_python()) and handed[0][-1] == "--check"
+
+
+def test_an_install_that_fails_has_the_environment_made_again_once_then_says_why(launch, monkeypatch, capsys):
+    monkeypatch.setattr(launch, "runs_this_folder", lambda: False)
+    launch.install_works = False
+    assert launch.ensure_packages() == launch.REBUILD
+    monkeypatch.setenv("CLOSEDESK_REBUILT", "1")
+    assert launch.ensure_packages() == 1
+    out = capsys.readouterr().out
+    assert "couldn't install what it needs" in out and "Python 3.12 is the safe choice" in out
+
+
+def test_nothing_in_the_start_up_downloads_a_python():
+    """Fetching a Python is the launchers' --get-python, done only when asked: launch.py has no part in it."""
+    source = (ROOT / "scripts" / "launch.py").read_text(encoding="utf-8")
+    assert "python install" not in source and '"venv", "--python"' not in source and "only-managed" not in source
+    for launcher in ("CloseDesk.command", "CloseDesk.bat"):
+        text = (ROOT / launcher).read_text(encoding="utf-8")
+        calls = [line for line in text.splitlines() if ("make_managed" in line or "call :managed" in line) and not line.lstrip().startswith(("#", "rem", "make_managed()"))]
+        assert len(calls) == 1, f"{launcher}: the download must be reachable from --get-python only: {calls}"
 
 
 def test_the_start_runs_the_everyday_command_a_check_or_a_named_command(launch, monkeypatch):

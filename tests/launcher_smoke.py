@@ -4,8 +4,9 @@
 
 A copy of this checkout is unpacked as a download would be (into a folder with a space in its name), then:
 first start (set-up from nothing), second start (nothing to do), the folder renamed, the dashboard really
-answering, and an update that keeps the mail. CI runs this on macOS, Windows and Linux, once with whatever
-Python the machine has and once making CloseDesk fetch its own (CLOSEDESK_OWN_PYTHON=1).
+answering, and an update that keeps the mail. CI runs this on macOS, Windows and Linux, once with the Python
+the machine has (nothing may be downloaded) and once asking CloseDesk to download its own, as a person without
+the rights to install Python would (CLOSEDESK_OWN_PYTHON=1 makes the first start ``--get-python``).
 Not a pytest file: it installs for real and takes minutes.
 """
 
@@ -89,12 +90,16 @@ def main() -> int:
     export(folder, commit="a" * 40)
     print(f"Launcher smoke test in {folder} (own Python: {os.environ.get('CLOSEDESK_OWN_PYTHON', 'no')})", flush=True)
 
-    out = run(folder, "--check")
+    own = bool(os.environ.get("CLOSEDESK_OWN_PYTHON"))
+    out = run(folder, "--get-python", "--check") if own else run(folder, "--check")
     assert "Everything CloseDesk needs is in order." in out, "the first start didn't end with everything in order"
     assert (folder / ".venv").is_dir()
-    if os.environ.get("CLOSEDESK_OWN_PYTHON"):
-        assert "uv =" in (folder / ".venv" / "pyvenv.cfg").read_text(), "CloseDesk's own Python wasn't used"
+    made_with = (folder / ".venv" / "pyvenv.cfg").read_text()
+    if own:
+        assert "uv =" in made_with, "--get-python didn't give CloseDesk a Python of its own"
         assert "Python 3.12" in out, out
+    else:
+        assert "uv =" not in made_with and "Downloading a Python" not in out, "a Python was downloaded without being asked for"
 
     out = run(folder, "--check")
     assert "Installing" not in out and "etting" not in out.split("ok ")[0], "the second start set something up again"

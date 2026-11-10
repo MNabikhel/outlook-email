@@ -7,9 +7,11 @@ On a start it checks, in order:
 - that the environment runs this folder's code, not that of a folder it was copied or moved from;
 - the optional add-ons (the OCR reader, the second table reader), tried once per Python and kept where they install.
 
-Then it starts CloseDesk. Two exit codes ask the launcher to do what a running Python can't do to itself:
-``WANT_MANAGED`` (get CloseDesk a Python of its own, then run this again) and ``REBUILD`` (remove ``.venv`` and
-run this again).
+Then it starts CloseDesk. One exit code asks the launcher to do what a running Python can't do to itself:
+``REBUILD`` (remove ``.venv`` and run this again).
+
+The Python is whichever the launcher found on the computer; none is ever downloaded unasked. (The launcher's
+``--get-python`` downloads one for CloseDesk alone, when the person asks for it.)
 
     launch.py                 set up if needed, then run CloseDesk
     launch.py --check         set up if needed, then say what is and isn't in order (no dashboard)
@@ -44,13 +46,8 @@ VENV = ROOT / ".venv"
 STATE = VENV / "closedesk-setup.json"
 LOG = VENV / "closedesk-setup.log"
 
-# Exit codes the launchers act on (see the module docstring).
-WANT_MANAGED = 75
+# The exit code the launchers act on (see the module docstring).
 REBUILD = 76
-
-# The Python versions every add-on installs on. On another one CloseDesk still runs; the launcher first tries to
-# get CloseDesk a Python of its own from this range, so what the computer has installed doesn't matter.
-FULL = ((3, 11), (3, 12))
 
 REPO = "MNabikhel/outlook-email"
 BRANCH = "main"
@@ -70,14 +67,6 @@ def venv_python() -> Path:
 def in_venv() -> bool:
     try:
         return Path(sys.prefix).resolve() == VENV.resolve()
-    except OSError:
-        return False
-
-
-def managed() -> bool:
-    """Whether the environment's Python is one fetched for CloseDesk (``uv`` leaves its name in pyvenv.cfg)."""
-    try:
-        return any(line.split("=")[0].strip() == "uv" for line in (VENV / "pyvenv.cfg").read_text().splitlines())
     except OSError:
         return False
 
@@ -191,9 +180,6 @@ def ensure_packages() -> int:
         else:
             say("Installing what this update needs...")
         if not install("-e", "."):
-            if not managed() and not os.environ.get("CLOSEDESK_MANAGED_TRIED") and not os.environ.get("CLOSEDESK_PYTHON"):
-                # This Python can't install it (too new or too old for a package): a Python of CloseDesk's own can.
-                return WANT_MANAGED
             if not os.environ.get("CLOSEDESK_REBUILT"):
                 return REBUILD
             say()
@@ -202,6 +188,7 @@ def ensure_packages() -> int:
             say("CloseDesk couldn't install what it needs. The lines above say why; the whole log is in")
             say(f"  {LOG}")
             say("Most often the internet connection (or a company proxy) stopped a download: try again when it is back.")
+            say(f"If this Python ({sys.version_info[0]}.{sys.version_info[1]}) is very new, a package may not be built for it yet: Python 3.12 is the safe choice.")
             return 1
     extras = project["project"].get("optional-dependencies", {})
     tried = dict(state.get("extras") or {})
@@ -224,23 +211,19 @@ def ensure_packages() -> int:
 
 
 def create_environment(args: list[str]) -> int:
-    """Running on a Python outside ``.venv``: make the environment with it, then carry on inside it."""
+    """Running on a Python outside ``.venv`` (the computer's): make the environment with it, then carry on inside it."""
     version = sys.version_info[:2]
-    chosen = bool(os.environ.get("CLOSEDESK_MANAGED_TRIED") or os.environ.get("CLOSEDESK_PYTHON"))
-    if not (FULL[0] <= version <= FULL[1]) and not chosen:
-        return WANT_MANAGED
     if os.environ.get("CLOSEDESK_AGAIN"):
         say("Setting CloseDesk up again: the Python it was set up with is gone or was changed.")
     else:
-        say("First run: setting up CloseDesk.")
+        say(f"First run: setting up CloseDesk with Python {version[0]}.{version[1]}.")
     shutil.rmtree(VENV, ignore_errors=True)
     made = subprocess.run([sys.executable, "-m", "venv", str(VENV)], cwd=ROOT, capture_output=True, text=True)
     if made.returncode != 0 or not venv_python().exists():
         shutil.rmtree(VENV, ignore_errors=True)
-        if not os.environ.get("CLOSEDESK_MANAGED_TRIED"):
-            return WANT_MANAGED  # this Python can't make one (Debian's comes without venv): one of its own can
         say((made.stdout + made.stderr).strip()[-800:])
         say(f"Python {version[0]}.{version[1]} couldn't make CloseDesk's environment. The lines above say why.")
+        say("(On Debian and Ubuntu, Python comes without that part: install the python3-venv package.)")
         return 1
     return _hand_over([str(venv_python()), str(Path(__file__).resolve()), *args])
 

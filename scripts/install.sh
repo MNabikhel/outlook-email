@@ -6,6 +6,10 @@
 #
 # CloseDesk goes in ~/CloseDesk (or the folder named in CLOSEDESK_HOME) and is started. Run again later, this
 # updates that copy; the mail and settings in it are kept.
+#
+# CloseDesk needs Python 3.11 or newer on the computer and says so when there is none. Without the rights to
+# install it, add  -s -- --get-python  after "bash": CloseDesk then downloads a Python for itself into your own
+# folder.
 set -u
 DEST="${CLOSEDESK_HOME:-$HOME/CloseDesk}"
 URL="${CLOSEDESK_DOWNLOAD_URL:-https://github.com/MNabikhel/outlook-email/archive/refs/heads/main.tar.gz}"
@@ -45,4 +49,4 @@ mkdir -p "$(dirname "$DEST")" && mv "$src" "$DEST" || { rm -rf "$tmp"; echo "Cou
 rm -rf "$tmp"
 chmod +x "$DEST/CloseDesk.command" "$DEST/CloseDesk-Update.command" "$DEST/scripts/"*.sh 2>/dev/null
 echo "CloseDesk is in $DEST. From now on, double-click CloseDesk.command there."
-start
+start "$@"

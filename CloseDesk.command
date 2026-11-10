@@ -3,12 +3,16 @@
 # write today's digest, and open the dashboard.
 #
 # The first run sets everything up, and every start checks the set-up and puts right what isn't (after an
-# update, a moved or replaced folder, a Python that went away). No admin rights are needed at any point:
-# when the computer has no Python that fits, CloseDesk downloads one of its own into your user folder.
+# update, a moved or replaced folder, a Python that went away).
 #
-#   CloseDesk.command            start CloseDesk
-#   CloseDesk.command --check    say what is and isn't in order, without starting it
-#   CloseDesk.command --update   fetch the newest CloseDesk (mail and settings are kept)
+# Python 3.11 or newer is the one thing CloseDesk needs on the computer. The Python that is there is used; none
+# is ever installed unasked. Where there is none, CloseDesk says so and how to get it.
+#
+#   CloseDesk.command               start CloseDesk
+#   CloseDesk.command --check       say what is and isn't in order, without starting it
+#   CloseDesk.command --update      fetch the newest CloseDesk (mail and settings are kept)
+#   CloseDesk.command --get-python  only when asked: download a Python for CloseDesk alone into your user
+#                                   folder (no admin rights; nothing is installed on the computer), and use it
 cd "$(dirname "$0")" || exit 1
 OS="$(uname -s)"
 
@@ -18,7 +22,7 @@ if [ "$OS" = "Darwin" ] && xattr -p com.apple.quarantine CloseDesk.command >/dev
   xattr -dr com.apple.quarantine . 2>/dev/null || true
 fi
 
-# Where CloseDesk keeps the one tool it downloads (uv, which fetches Python): in your own folder.
+# Where --get-python keeps the one tool it downloads (uv, which fetches Python): in your own folder.
 if [ "$OS" = "Darwin" ]; then
   TOOLS="$HOME/Library/Application Support/CloseDesk"
 else
@@ -36,7 +40,7 @@ python_ok() {
   "$1" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
 }
 
-# A Python 3.11 or newer already on this computer: prints its path. launch.py decides whether it will do.
+# A Python 3.11 or newer already on this computer: prints its path.
 find_python() {
   local dirs="$PATH:/opt/homebrew/bin:/usr/local/bin:$HOME/.local/bin:/Library/Frameworks/Python.framework/Versions/Current/bin"
   local name found
@@ -84,10 +88,11 @@ get_uv() {
   [ -x "$UV" ] || { UV=""; return 1; }
 }
 
-# CloseDesk's own Python, in your user folder: nothing is installed on the computer and no rights are asked.
+# --get-python: a Python for CloseDesk alone, in your user folder. Nothing is installed on the computer and no
+# rights are asked. Never done unasked.
 make_managed() {
   get_uv || return 1
-  echo "Getting CloseDesk its own Python (no admin rights needed). This takes a minute..."
+  echo "Downloading a Python for CloseDesk into your user folder (no admin rights needed). This takes a minute..."
   rm -rf .venv
   # The computer's own certificates, so a company proxy's is trusted as it is by the browser.
   UV_SYSTEM_CERTS=1 UV_NATIVE_TLS=1 UV_PYTHON_PREFERENCE=only-managed \
@@ -95,37 +100,60 @@ make_managed() {
   [ -x .venv/bin/python ] && python_ok .venv/bin/python
 }
 
-want_managed="${CLOSEDESK_OWN_PYTHON:-}"
+# --get-python is for this script, not for CloseDesk: taken out of what is passed on.
+get_python=""
+args=()
+for arg in "$@"; do
+  if [ "$arg" = "--get-python" ]; then get_python=1; else args+=("$arg"); fi
+done
+# Asked for: the environment is made again, with the downloaded Python.
+[ -n "$get_python" ] && rm -rf .venv
+
+no_python() {
+  echo
+  echo "CloseDesk needs Python 3.11 or newer (3.12 is the best choice), and this computer has none it can use."
+  echo
+  echo "Install Python from https://www.python.org/downloads/ and open CloseDesk again."
+  if [ "$OS" = "Darwin" ]; then
+    echo
+    echo "Python's installer asks for an administrator on a Mac. If you don't have one, CloseDesk can download"
+    echo "a copy of Python for itself into your own folder instead (nothing is installed on the computer)."
+    echo "Paste this into Terminal:"
+    echo
+    echo "  bash \"$PWD/CloseDesk.command\" --get-python"
+  else
+    echo
+    echo "Without the rights to install it, CloseDesk can download a copy for itself into your own folder:"
+    echo
+    echo "  bash \"$PWD/CloseDesk.command\" --get-python"
+  fi
+  finish 1
+}
+
 tries=0
-while [ "$tries" -lt 4 ]; do
+while [ "$tries" -lt 3 ]; do
   tries=$((tries + 1))
   if [ -x .venv/bin/python ] && python_ok .venv/bin/python; then
+    PY=.venv/bin/python
+  elif [ -n "$get_python" ]; then
+    if ! make_managed; then
+      echo
+      echo "The download didn't work. Check the internet connection and try again."
+      echo "Nothing was changed, except that CloseDesk will set itself up again on its next start."
+      finish 1
+    fi
     PY=.venv/bin/python
   else
     # No environment, or one whose Python is gone (it was removed, upgraded, or made on another computer).
     [ -d .venv ] && export CLOSEDESK_AGAIN=1
     rm -rf .venv
-    if [ -z "$want_managed" ] && PY="$(find_python)"; then
-      :
-    elif make_managed; then
-      PY=.venv/bin/python
-    elif PY="$(find_python)"; then
-      export CLOSEDESK_MANAGED_TRIED=1
-    else
-      echo
-      echo "CloseDesk couldn't get Python, which it runs on."
-      echo "It downloads its own copy (no admin rights needed), and that download didn't work:"
-      echo "check the internet connection, then open CloseDesk again."
-      echo "If this computer blocks such downloads, ask for Python 3.12 from https://www.python.org/downloads/"
-      finish 1
-    fi
+    PY="$(find_python)" || no_python
   fi
   [ -n "$UV" ] && export CLOSEDESK_UV="$UV"
-  "$PY" scripts/launch.py "$@"
+  "$PY" scripts/launch.py ${args[@]+"${args[@]}"}
   code=$?
   case "$code" in
     0 | 130) exit 0 ;;
-    75) want_managed=1; rm -rf .venv ;;                    # launch.py: this needs a Python of CloseDesk's own
     76) export CLOSEDESK_REBUILT=1; rm -rf .venv ;;        # launch.py: the environment is beyond repair, make it again
     *)
       echo

@@ -69,7 +69,8 @@ jobs:
         run: pytest -q -m "not browser"
 
   # The launchers themselves, run as a person runs them: set-up from nothing, a second start, a renamed folder,
-  # the dashboard answering, an update. Once with the machine's Python, once with CloseDesk fetching its own.
+  # the dashboard answering, an update. Once with the machine's Python (nothing may be downloaded), once with
+  # --get-python.
   launcher:
     strategy:
       fail-fast: false

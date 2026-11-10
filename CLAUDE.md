@@ -14,9 +14,11 @@ terminal, so set-up, updates and error messages have to work without one.
 
 - `src/controller_inbox/`: the app (FastAPI, SQLite, plain-JS pages with no build step). `README.md` has a line
   on every module under "Project layout".
-- `CloseDesk.command` / `CloseDesk.bat`: the double-click launchers. They only find or fetch a Python (never
-  asking for admin rights) and run `scripts/launch.py`, which checks the set-up on every start, installs what is
-  missing, and starts the app. `--check` runs the self-check (`doctor.py`), `--update` fetches the newest version.
+- `CloseDesk.command` / `CloseDesk.bat`: the double-click launchers. They find the Python on the computer
+  (a prerequisite: none is ever downloaded unasked, and with none they say so) and run `scripts/launch.py`,
+  which checks the set-up on every start, installs what is missing, and starts the app. `--check` runs the
+  self-check (`doctor.py`), `--update` fetches the newest version, and `--get-python` downloads a Python for
+  CloseDesk alone into the user's folder, for someone without the rights to install one.
 - `tests/`: pytest. `tests/launcher_smoke.py` runs the real launchers end to end (CI does, on macOS, Windows
   and Linux).
 - `docs/SETUP.md`: the guide users read.

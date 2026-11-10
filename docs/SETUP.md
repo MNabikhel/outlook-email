@@ -6,9 +6,8 @@ The longer notes are in [BIONIC_GUIDE.md](BIONIC_GUIDE.md). The picture versions
 
 ## One-time setup
 
-No admin rights are needed at any step, and you don't install Python: where the computer has none that fits, CloseDesk downloads its own copy into your user folder.
-
-1. **Get CloseDesk.**
+1. **Python 3.11 or newer** must be on the computer (3.12 is the best choice). If it isn't, install it from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH**; *Install for me only* needs no admin rights. CloseDesk uses the Python that is there and never installs one on its own. Where there is none, it stops and says so. (No admin rights on a Mac? See below.)
+2. **Get CloseDesk.**
    - **Mac:** open **Terminal** (⌘ Space, type *Terminal*, Return), paste this line and press Return:
 
      ```bash
@@ -17,8 +16,22 @@ No admin rights are needed at any step, and you don't install Python: where the 
 
      It puts CloseDesk in a `CloseDesk` folder in your home folder, sets it up, and opens the dashboard. From then on, double-click `CloseDesk.command` in that folder.
    - **Windows:** on GitHub click **Code → Download ZIP**, unzip it somewhere permanent (for example `Documents`), and double-click `CloseDesk.bat`. If Windows shows "Windows protected your PC", click **More info → Run anyway**.
-2. Optional: install [LM Studio](https://lmstudio.ai/), download a small *instruct* model (3B–8B is plenty), load it, and start the local server (Developer tab → **Start server**). CloseDesk finds it on its own. To also search by meaning, load LM Studio's **nomic-embed-text** embedding model next to it. Ollama works too (see the README). If your laptop can't run a model, skip this step: sorting, summaries, tasks, fraud warnings, search, and the digest all work without one.
-3. After the first launch, open **Setup** and choose **What kind of inbox is this?** *General* suits anyone. *Finance* adds the month-end countdown and close sections.
+3. Optional: install [LM Studio](https://lmstudio.ai/), download a small *instruct* model (3B–8B is plenty), load it, and start the local server (Developer tab → **Start server**). CloseDesk finds it on its own. To also search by meaning, load LM Studio's **nomic-embed-text** embedding model next to it. Ollama works too (see the README). If your laptop can't run a model, skip this step: sorting, summaries, tasks, fraud warnings, search, and the digest all work without one.
+4. After the first launch, open **Setup** and choose **What kind of inbox is this?** *General* suits anyone. *Finance* adds the month-end countdown and close sections.
+
+### Without admin rights on a Mac
+
+CloseDesk itself never needs an administrator. Python's installer for the Mac does. If you can't get one to install Python, ask CloseDesk to download a copy of Python for itself. It goes into your own user folder, nothing is installed on the computer, and no rights are asked. CloseDesk only does this when you ask:
+
+- installing for the first time, use this line instead of the one above:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/MNabikhel/outlook-email/main/scripts/install.sh | bash -s -- --get-python
+  ```
+
+- or, with CloseDesk already in place: `bash ~/CloseDesk/CloseDesk.command --get-python`
+
+(On Windows the same is `CloseDesk.bat --get-python`, for a computer where you can't install Python at all.)
 
 ### On a Mac, from a downloaded ZIP
 
@@ -36,7 +49,7 @@ Either way works, and neither needs admin rights:
 - **Double-click `CloseDesk-Update.command`** (Mac) or **`CloseDesk-Update.bat`** (Windows). It fetches the newest CloseDesk and replaces CloseDesk's own files. Your mail (`data`, `inbox`), your settings (`.env`) and the `AP cost codes` folder are not touched, and the files it replaced are kept in `.previous`.
 - **Or by hand:** download the ZIP again and swap the folders, keeping `data`, `inbox`, `.env` and `AP cost codes` from the old one. (On a Mac the Terminal line from the setup does this for you: run again, it updates.)
 
-Then open CloseDesk as usual. Every start checks the set-up and puts right what isn't: packages an update added, a folder that was moved or renamed, a Python that was removed or upgraded. When everything is in place it just starts (the check takes about half a second).
+Then open CloseDesk as usual. Every start checks the set-up and puts right what isn't: packages an update added, a folder that was moved or renamed, a Python that was upgraded or replaced. When everything is in place it just starts (the check takes about half a second).
 
 To see the check without starting, run `CloseDesk.command --check` (Mac) or `CloseDesk.bat --check` (Windows). It lists what is in order, what is optional and missing, and what to do about anything marked FIX.
 
@@ -106,8 +119,8 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 
 | What you see | What to do |
 | --- | --- |
-| The Mac asks for an administrator's name and password | CloseDesk never needs one. It is macOS asking, for one of three things: opening a file downloaded in a browser (use the Terminal line in the setup, or the steps under "On a Mac, from a downloaded ZIP"), Python's own installer from python.org (not needed: CloseDesk fetches its own Python), or "install the command line developer tools" (click **Cancel**; an older CloseDesk tripped that, this one doesn't). |
-| "CloseDesk couldn't get Python" | The download of CloseDesk's own Python didn't work. Check the internet connection and open CloseDesk again. If the computer blocks such downloads, ask IT for Python 3.12; CloseDesk uses it when it finds it. |
+| The Mac asks for an administrator's name and password | CloseDesk never needs one. It is macOS asking, for one of three things. Opening a file downloaded in a browser: use the Terminal line in the setup, or the steps under "On a Mac, from a downloaded ZIP". Python's own installer: see "Without admin rights on a Mac". "Install the command line developer tools": click **Cancel**; an older CloseDesk set that off, this one doesn't. |
+| "CloseDesk needs Python 3.11 or newer" | The computer has no Python CloseDesk can use. Install it from python.org and open CloseDesk again; the message also gives the line to run if you can't install it. |
 | Something is off after an update or after moving the folder | Open CloseDesk again: every start checks the set-up and repairs it. `CloseDesk.command --check` (or `CloseDesk.bat --check`) lists what is and isn't in order. Deleting the `.venv` folder makes the next start set everything up afresh; your mail isn't in it. |
 | "Another program is using port 8765" | CloseDesk says so and uses the next free port that time. If the other program is LM Studio's server, set that back to its own port (1234). |
 | The page does not open | The CloseDesk window must still be open. Go to [http://127.0.0.1:8765](http://127.0.0.1:8765). |
