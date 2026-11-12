@@ -167,3 +167,46 @@ def test_lookback_counts_working_days():
     assert digest_window(monday, NY, 1)[0].date() == date(2026, 9, 18)
     assert digest_window(monday, NY, 2)[0].date() == date(2026, 9, 17)
     assert digest_window(date(2026, 9, 23), NY, 3)[0].date() == date(2026, 9, 18)
+
+
+def test_a_weekly_meeting_with_no_end_is_still_on_the_calendar_months_later(store: Store, settings: Settings):
+    """A repeating invitation is expanded over the months around when it was read; the overnight run expands it
+    again once those months run short, from the invitation kept with the email (its text, or its file)."""
+    from datetime import timedelta
+
+    from controller_inbox import calendar_events as cal
+    from controller_inbox.models import AttachmentRecord, DocumentType, ExtractedFields
+    from controller_inbox.extract import sha256_bytes
+    from test_links import _record
+
+    read_at = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
+    later = read_at + timedelta(days=200)
+    settings.ensure_data_dir()
+
+    def weekly(uid: str) -> str:
+        return ("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\n"
+                f"UID:{uid}\r\nSUMMARY:Close sync {uid}\r\nDTSTART:20261005T140000Z\r\nDTEND:20261005T143000Z\r\nRRULE:FREQ=WEEKLY\r\n"
+                "ORGANIZER:mailto:maya@taz.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+
+    for email_id, uid, kept_as, flags in (("text", "W1", "text", ()), ("file", "W2", "file", ()), ("held", "W3", "text", ("fraud_risk",))):
+        data = weekly(uid)
+        record = _record(email_id, sender="maya@taz.com", flags=flags)
+        record.attachments = [AttachmentRecord(id=f"{email_id}:0", email_id=email_id, filename="invite.ics", content_type="text/calendar",
+                                               size_bytes=len(data), sha256=sha256_bytes(data.encode()),
+                                               extracted_text=data if kept_as == "text" else "Close sync (calendar invitation)",
+                                               document_type=DocumentType.OTHER, document_confidence=0, extracted_fields=ExtractedFields())]
+        store.upsert_email(record)
+        if kept_as == "file":
+            (settings.inbox_extracted / email_id).mkdir(parents=True)
+            (settings.inbox_extracted / email_id / "invite.ics").write_text(data, encoding="utf-8", newline="")
+        store.save_invites(email_id, cal.from_ics(data, email_id=email_id, now=read_at), sender="maya@taz.com", received=record.received_at,
+                           expanded=read_at.isoformat())
+
+    week = (later.isoformat(), (later + timedelta(days=7)).isoformat())
+    assert store.meetings_between(*week) == [], "past the months it was expanded over"
+    assert cal.refresh_invites(store, settings, now=read_at + timedelta(days=10)) == 0, "expanded recently: left as it is"
+    assert cal.refresh_invites(store, settings, now=later, limit=1) == 1, "a few at a time"
+    summary = run_overnight(store, settings, now=later, sync_graph=False)
+    assert summary["meetings_refreshed"] == 1
+    assert sorted(m["uid"] for m in store.meetings_between(*week)) == ["W1", "W2"], "held mail is never read again"
+    assert cal.refresh_invites(store, settings, now=later) == 0

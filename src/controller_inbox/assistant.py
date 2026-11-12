@@ -224,7 +224,7 @@ def calendar_source(store: Store, settings: Settings, today: str = "") -> EmailR
         day = datetime.now(settings.tz).date()
     first, last = day - timedelta(days=CALENDAR_DAYS_BACK), day + timedelta(days=CALENDAR_DAYS_AHEAD)
     start, end = calendar_events.utc_range(first, last, settings.tz)
-    meetings = [calendar_events.shown(meeting, settings.tz) for meeting in store.meetings_between(start, end)]
+    meetings = [calendar_events.shown(meeting, settings.tz) for meeting in _meetings_between(store, start, end)]
     if not meetings:
         return None
     zone = getattr(settings.tz, "key", str(settings.tz))
@@ -234,6 +234,13 @@ def calendar_source(store: Store, settings: Settings, today: str = "") -> EmailR
         f"Times are {zone}.\n" + lines
     )
     return _calendar_record(body, meetings)
+
+
+def _meetings_between(store: Store, start: str, end: str) -> list[dict]:
+    """The calendar's meetings, Outlook's only while it is connected with the calendar on (outlook_sync.calendar_on)."""
+    from controller_inbox import outlook_sync
+
+    return store.meetings_between(start, end, outlook=outlook_sync.calendar_on(store))
 
 
 def _calendar_record(body: str, meetings: list[dict]) -> CalendarSource:
@@ -280,7 +287,7 @@ def asked_meeting(store: Store, settings: Settings, question: str, today: str = 
     except ValueError:
         day = datetime.now(settings.tz).date()
     start, end = calendar_events.utc_range(day - timedelta(days=CALENDAR_DAYS_BACK), day + timedelta(days=CALENDAR_DAYS_AHEAD), settings.tz)
-    rows = [row for row in store.meetings_between(start, end) if " ".join((row["subject"] or "").split()).lower() in titles]
+    rows = [row for row in _meetings_between(store, start, end) if " ".join((row["subject"] or "").split()).lower() in titles]
     if not rows:
         return None
     if email_id and (own := [row for row in rows if row["email_id"] == email_id]):

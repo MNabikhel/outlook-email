@@ -235,14 +235,16 @@ def process_message(
     # Reading the files takes a while (a scan is read with OCR), and meanwhile the user may give a fraud verdict on
     # the email or snooze or finish its tasks. That is read again with the write lock held, so it is kept rather than
     # overwritten from the copy read at the start. (Done is never written here: upsert_email leaves it alone.)
-    # An invitation on mail held as possible payment fraud is no meeting: its text never reaches the calendar. Read
-    # before the write lock is taken, so a long one keeps nobody waiting.
-    found = [] if attachments_locked(record) else invites(raw, record.id, now)
+    # An invitation on mail held as possible payment fraud is no meeting: its text never reaches the calendar, only
+    # which meeting it named, so Outlook's own copy of that meeting isn't shown either. Read before the write lock is
+    # taken, so a long one keeps nobody waiting.
+    found = invites(raw, record.id, now)
     with store.transaction() as conn:
         latest = store.get_email(raw.id, conn=conn)
         verdict_changed = latest is not None and _keep_user_state(record, latest)
         store.upsert_email(record, conn=conn)
-        store.save_invites(record.id, [] if attachments_locked(record) else found, sender=raw.sender_email, received=record.received_at, conn=conn)
+        store.save_invites(record.id, found, sender=raw.sender_email, received=record.received_at, held=attachments_locked(record),
+                           expanded=now.astimezone(timezone.utc).isoformat(timespec="seconds"), conn=conn)
     from controller_inbox import cost_codes
 
     try:
@@ -499,15 +501,21 @@ def _filed_from_a_file(store: Store, raw: RawMessage) -> bool:
 
 
 def invites(raw: RawMessage, email_id: str, now: datetime) -> list:
-    """The meetings an email's invitations name: its .ics files, and the meeting of an Outlook meeting request."""
+    """The meetings an email's invitations name: its .ics files, and the meeting of an Outlook meeting request, at
+    most ``calendar_events.MAX_ROWS``, read within ``calendar_events.ICS_SECONDS`` for them all."""
+    from time import monotonic
+
     from controller_inbox import calendar_events
 
     found = [replace(meeting, email_id=email_id) for meeting in raw.meetings]
+    deadline = monotonic() + calendar_events.ICS_SECONDS
     for att in raw.attachments:
         name = (att.filename or "").lower()
         if (name.endswith(".ics") or "calendar" in (att.content_type or "").lower()) and att.content:
+            if len(found) >= calendar_events.MAX_ROWS:
+                break
             try:
-                found += calendar_events.from_ics(att.content, email_id=email_id, now=now)
+                found += calendar_events.from_ics(att.content, email_id=email_id, now=now, limit=calendar_events.MAX_ROWS - len(found), deadline=deadline)
             except Exception:  # an invitation that can't be read adds no meeting; the email is still read
                 log.warning("Couldn't read the invitation %s", att.filename, exc_info=True)
     return found

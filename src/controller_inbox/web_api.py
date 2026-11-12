@@ -338,7 +338,10 @@ def register_workspace(
 
     def meetings_on(first: date, last: date) -> list[dict[str, Any]]:
         start, end = calendar_events.utc_range(first, last, settings.tz)
-        return [calendar_events.shown(meeting, settings.tz) for meeting in store.meetings_between(start, end) if meeting_overlaps(meeting, first, last)]
+        # Outlook's meetings only while it is connected with the calendar on: a sync still running at Disconnect may
+        # have written some after they were cleared.
+        meetings = store.meetings_between(start, end, outlook=outlook_sync.calendar_on(store))
+        return [calendar_events.shown(meeting, settings.tz) for meeting in meetings if meeting_overlaps(meeting, first, last)]
 
     def meeting_overlaps(meeting: dict, first: date, last: date) -> bool:
         """All-day meetings are kept by date: they overlap the days, whatever the time zone."""
@@ -373,7 +376,7 @@ def register_workspace(
     @api.get("/calendar/{meeting_id}")
     def calendar_meeting(meeting_id: str):
         """One meeting, and the mail about it (its invitation, mail naming it or from its people near its date)."""
-        meeting = store.meeting(meeting_id)
+        meeting = store.meeting(meeting_id, outlook=outlook_sync.calendar_on(store))
         if meeting is None:
             raise HTTPException(status_code=404, detail="That meeting isn't in the calendar any more.")
         today = board_date()

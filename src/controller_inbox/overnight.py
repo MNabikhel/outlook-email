@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from controller_inbox import cost_codes, link_judge, links
+from controller_inbox import calendar_events, cost_codes, link_judge, links
 from controller_inbox.actions import local_today
 from controller_inbox.clock import parse_stamp
 from controller_inbox.config import Settings
@@ -282,6 +282,12 @@ def _run_overnight(
     graph_count = 0
     if sync_graph and settings.graph_configured:
         graph_count, graph_note = _sync_graph(store, settings, now)
+    # Repeating meetings from invitations read a month or more ago, worked out again for the months ahead.
+    meetings_refreshed = 0
+    try:
+        meetings_refreshed = calendar_events.refresh_invites(store, settings, now=now)
+    except Exception:  # the rest of the run still happens
+        log.warning("Reading invitations again failed", exc_info=True)
 
     reading = read_queue(store, settings, limit=limit, now=now, reader=reader, on_progress=on_progress)
     # After reading: the model may have filed more mail as AP invoices, and the workbook may have changed.
@@ -342,6 +348,7 @@ def _run_overnight(
         "ai_linked": ai_linked,
         "pages_seen": looked.pages,
         "files_reread": reread,
+        "meetings_refreshed": meetings_refreshed,
         "invoices_coded": coded,
         "indexed_for_search": indexed,
         "waiting_on_bionic": counts["waiting_on_bionic"],

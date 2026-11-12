@@ -11,7 +11,10 @@ Where meetings come from:
 - ``invite``: an invitation's .ics file on an email, or an Outlook meeting request (.msg) dropped in the drop
   folder or copied from Outlook. Repeating meetings are expanded over the window here (dateutil's rrule), with the
   occurrences that were moved or cancelled taken into account. A cancellation marks its meeting cancelled; a reply
-  ("Accepted: ...") is no meeting.
+  ("Accepted: ...") is no meeting, nor is a proposed new time (COUNTER) or the answer to one. An update to one
+  occurrence of a repeating meeting (its RECURRENCE-ID) names the occurrence it replaces (``occurrence``), so it
+  replaces that one alone (store._invite_winners). A file is read within limits (``MAX_ICS_BYTES``, ``MAX_EVENTS``,
+  ``MAX_ROWS``, ``ICS_SECONDS``): anyone can email one, and one built to take hours must not hold the run.
 - ``demo``: the sample mailbox's.
 
 Nothing here writes to Outlook or to any calendar: meetings are only read and shown.
@@ -21,7 +24,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+from time import monotonic
 from dataclasses import asdict, dataclass, field
+from functools import cache
 from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -31,6 +36,13 @@ MAX_OCCURRENCES = 400  # of one repeating meeting in the window
 MAX_ATTENDEES = 60  # listed per meeting
 MAX_PERSON = 200  # characters of a name or an address
 MAX_STEPS = 50_000  # occurrences of one rule looked at, from its first: a daily meeting from 1890 reaches today
+MAX_ICS_BYTES = 1_000_000  # of an invitation read: Outlook's for a year of a busy meeting is a few hundred kilobytes
+MAX_EVENTS = 200  # meetings (VEVENTs) read from one file
+MAX_ROWS = 2000  # occurrences built from one email's invitations (store.MAX_INVITE_ROWS keeps as many)
+ICS_SECONDS = 3.0  # spent expanding one file's repeating meetings; those left are kept as their first occurrence
+# Methods whose file holds no meeting of its own: an attendee's answer, a proposed new time and the organizer's
+# answer to it, and a request to be sent the meeting again.
+NOT_MEETINGS = frozenset({"REPLY", "COUNTER", "DECLINECOUNTER", "REFRESH"})
 
 
 @dataclass
@@ -49,6 +61,9 @@ class Meeting:
     email_id: str = ""  # the email an invitation came on
     busy: str = ""  # "busy", "tentative", "free", "away" (Outlook's)
     sequence: int = 0  # an invitation's SEQUENCE: a later update has a higher one
+    # An update to one occurrence of a repeating meeting: the start it replaces, written as ``start`` is (a date
+    # "2026-10-19" from an Outlook .msg, which says only the day). "" for a series and a meeting that doesn't repeat.
+    occurrence: str = ""
 
     @property
     def id(self) -> str:
@@ -64,44 +79,63 @@ class Meeting:
 # --- iCalendar (.ics) ------------------------------------------------------------------------------------------------
 
 
-def from_ics(data: bytes | str, *, email_id: str = "", now: datetime | None = None) -> list[Meeting]:
-    """The meetings in an iCalendar file, each occurrence in the window around ``now`` once. A METHOD:REPLY (an
-    attendee's answer) holds none; METHOD:CANCEL or STATUS:CANCELLED marks the meetings cancelled."""
-    text = data.decode("utf-8", "replace") if isinstance(data, (bytes, bytearray)) else data
+def from_ics(
+    data: bytes | str, *, email_id: str = "", now: datetime | None = None, limit: int = MAX_ROWS, deadline: float | None = None
+) -> list[Meeting]:
+    """The meetings in an iCalendar file, each occurrence in the window around ``now`` once, ``limit`` at most. A
+    METHOD:REPLY (an attendee's answer), COUNTER (a proposed new time), DECLINECOUNTER or REFRESH holds none;
+    METHOD:CANCEL or STATUS:CANCELLED marks the meetings cancelled. Repeating meetings are expanded until
+    ``deadline`` (``time.monotonic()``; ``ICS_SECONDS`` from now when not given), those left after it as their first
+    occurrence."""
+    if isinstance(data, (bytes, bytearray)):
+        text = bytes(data[:MAX_ICS_BYTES]).decode("utf-8", "replace")
+    else:
+        text = data[:MAX_ICS_BYTES]
     lines = _unfolded(text)
     method = next((value.upper() for name, _params, value in lines if name == "METHOD"), "")
-    if method == "REPLY":
+    if method in NOT_MEETINGS or limit <= 0:
         return []
     zones = _vtimezones(lines, text)
-    events = _blocks(lines, "VEVENT")
+    events = _blocks(lines, "VEVENT", limit=MAX_EVENTS)
     now = now or datetime.now(timezone.utc)
-    overrides: dict[tuple[str, str], dict] = {}
+    deadline = monotonic() + ICS_SECONDS if deadline is None else deadline
+    overrides: dict[tuple[str, str], tuple[dict, str]] = {}
     series: list[dict] = []
     for event in events:
         if "RECURRENCE-ID" in event:
             when = _when(event["RECURRENCE-ID"], zones)
             if when is not None:
-                overrides[(event.get("UID", ("", {}, ""))[2], _key(when[0]))] = event
+                overrides[(event.get("UID", ("", {}, ""))[2], _key(when[0]))] = (event, _iso(*when))
         else:
             series.append(event)
     out: list[Meeting] = []
     for event in series:
-        out += _occurrences(event, zones, overrides, method, email_id, now)
+        if len(out) >= limit:
+            break
+        out += _occurrences(event, zones, overrides, method, email_id, now, rows=limit - len(out), expand=monotonic() < deadline)
     # A moved occurrence whose series isn't in this file (an update to one week only) is a meeting of its own.
     seen = {(m.uid, m.start) for m in out}
-    for (uid, _start), event in overrides.items():
+    for (uid, _start), (event, replaces) in overrides.items():
         meeting = _meeting(event, zones, method, email_id)
         if meeting is not None and (meeting.uid, meeting.start) not in seen:
+            meeting.occurrence = replaces
             out.append(meeting)
-    return out
+    return out[:limit]
 
 
-def _occurrences(event: dict, zones: dict, overrides: dict, method: str, email_id: str, now: datetime) -> list[Meeting]:
+def _occurrences(
+    event: dict, zones: dict, overrides: dict, method: str, email_id: str, now: datetime, *, rows: int = MAX_ROWS, expand: bool = True
+) -> list[Meeting]:
+    """One meeting's occurrences in the window, ``rows`` at most. With ``expand`` False (the file's time is up), a
+    repeating meeting is its first occurrence, marked as repeating."""
     first = _meeting(event, zones, method, email_id)
     if first is None:
         return []
     rule = event.get("RRULE")
     if rule is None:
+        return [first]
+    if not expand:
+        first.recurring = True
         return [first]
     if _too_often(rule[2]):
         # No meeting repeats more often than a few times a day: such a rule (which anyone can email, from years back)
@@ -121,20 +155,18 @@ def _occurrences(event: dict, zones: dict, overrides: dict, method: str, email_i
     except (ValueError, TypeError):
         first.recurring = True
         return [first]
-    excluded = {_key(when[0]) for name in ("EXDATE",) for raw in event.get("_all", {}).get(name, []) for when in _whens(raw, zones)}
     low = now - WINDOW_BACK
     high = now + WINDOW_AHEAD
     if all_day:
         low, high = low.replace(tzinfo=None), high.replace(tzinfo=None)
+    excluded = {_key(when[0]) for name in ("EXDATE",) for raw in event.get("_all", {}).get(name, []) for when in _whens(raw, zones)}
     # Walked a step at a time from its first occurrence, up to the window's end, and at most ``MAX_STEPS`` steps
     # however far back it starts: a rule from years back that repeats often, which anyone can email, mustn't hold the
     # run or fill the memory. (dateutil's own "after" walks from the start too, with no limit.)
     out = []
     from itertools import islice
 
-    for when in islice(iter(rrule), MAX_STEPS):
-        if when > high:
-            break
+    for when in islice(_walk(rrule, high), MAX_STEPS):
         if when < low:
             continue
         stamp = when.date() if all_day else when
@@ -143,17 +175,66 @@ def _occurrences(event: dict, zones: dict, overrides: dict, method: str, email_i
             continue
         moved = overrides.get((first.uid, key))
         if moved is not None:
-            meeting = _meeting(moved, zones, method, email_id)
+            meeting = _meeting(moved[0], zones, method, email_id)
             if meeting is not None:
                 meeting.recurring = True
+                meeting.occurrence = _iso(stamp, all_day)
                 out.append(meeting)
             continue
         out.append(Meeting(**{**asdict(first), "start": _iso(stamp, all_day), "end": _iso(stamp + length, all_day), "recurring": True}))
-    if len(out) > MAX_OCCURRENCES:
+    cap = min(MAX_OCCURRENCES, rows)
+    if len(out) > cap:
         # More than a calendar shows: those from today on are kept first.
         upcoming = [m for m in out if m.start >= _iso(now.date() if all_day else now, all_day)]
-        out = (upcoming[:MAX_OCCURRENCES] or out[-MAX_OCCURRENCES:])
+        out = (upcoming[:cap] or out[-cap:])
     return out
+
+
+class _PastTheWindow(Exception):
+    """dateutil started on a year past the window's: what it finds from there is no occurrence to keep."""
+
+
+def _walk(rule, high):
+    """The rule's occurrences from its first up to ``high``. dateutil looks for a rule's next occurrence day by day,
+    with no end, until year 9999: a rule no day meets ("every day in February that is the 31st"), which anyone can
+    email, would take seconds each. So the rule is stopped once dateutil reaches a year past ``high``'s: it reads
+    which weeks of the year a rule names (``_byweekno``) as it starts each year, and that read ends the walk."""
+    from dateutil.rrule import rrule as dateutil_rule
+
+    if type(rule) is dateutil_rule:
+        kind = _stops_after_year()
+        stopping = kind.__new__(kind)
+        stopping.__dict__.update(rule.__dict__)
+        stopping._years_left = high.year - rule._dtstart.year + 3  # the start's year, the window's, and dateutil's first look
+        rule = stopping
+    try:
+        for when in rule:
+            if when > high:
+                return
+            yield when
+    except _PastTheWindow:
+        return
+
+
+@cache
+def _stops_after_year():
+    from dateutil.rrule import rrule as dateutil_rule
+
+    class StopsAfterYear(dateutil_rule):
+        """dateutil's rule, ending its walk after a number of years (``_walk``)."""
+
+        @property
+        def _byweekno(self):
+            self._years_left -= 1
+            if self._years_left < 0:
+                raise _PastTheWindow
+            return self.__dict__["_byweekno"]
+
+        @_byweekno.setter
+        def _byweekno(self, value):
+            self.__dict__["_byweekno"] = value
+
+    return StopsAfterYear
 
 
 def _too_often(rule: str) -> bool:
@@ -252,8 +333,9 @@ def _split_value(line: str) -> tuple[str, str]:
     return line, ""
 
 
-def _blocks(lines: list[tuple[str, dict, str]], kind: str) -> list[dict]:
-    """Each BEGIN:kind ... END:kind, its properties by name (the first of each; every one under "_all")."""
+def _blocks(lines: list[tuple[str, dict, str]], kind: str, *, limit: int | None = None) -> list[dict]:
+    """Each BEGIN:kind ... END:kind, its properties by name (the first of each; every one under "_all"), the first
+    ``limit`` of them."""
     blocks: list[dict] = []
     depth = 0
     current: dict | None = None
@@ -270,6 +352,8 @@ def _blocks(lines: list[tuple[str, dict, str]], kind: str) -> list[dict]:
             if value.upper() == kind and depth == 0:
                 blocks.append(current)
                 current = None
+                if limit is not None and len(blocks) >= limit:
+                    break
             else:
                 depth -= 1
             continue
@@ -420,9 +504,8 @@ def from_msg(path, *, email_id: str = "", zone=None) -> list[Meeting]:
             return []
         end = end if isinstance(end, datetime) else start
         start, end = _aware(start), _aware(end)
-        uid = str(getattr(message, "cleanGlobalObjectID", None) or b"").strip() or str(getattr(message, "subject", "") or "")
-        if isinstance(getattr(message, "cleanGlobalObjectID", None), (bytes, bytearray)):
-            uid = invitation_uid(message.cleanGlobalObjectID)
+        clean = _id_bytes(_property(message, "cleanGlobalObjectID"))
+        uid = invitation_uid(clean) if clean else str(getattr(message, "subject", "") or "")
         # Outlook's own all-day flag: the times are UTC, so a New York all-day meeting doesn't start at midnight here.
         all_day = bool(getattr(message, "appointmentSubType", False))
         if all_day:
@@ -443,12 +526,44 @@ def from_msg(path, *, email_id: str = "", zone=None) -> list[Meeting]:
                 recurring=bool(getattr(message, "isRecurring", False) or getattr(message, "appointmentRecur", None)),
                 source="invite",
                 email_id=email_id,
+                occurrence=_exception_day(_id_bytes(_property(message, "globalObjectID"))),
             )
         ]
     except Exception:  # a request extract-msg can't fully read is still an email: it just adds no meeting
         return []
     finally:
         message.close()
+
+
+def _property(message, name: str):
+    """One of the message's properties, or None when extract-msg can't read it."""
+    try:
+        return getattr(message, name, None)
+    except Exception:
+        return None
+
+
+def _id_bytes(value) -> bytes:
+    """A GlobalObjectID as its bytes: extract-msg gives an object for it (its ``toBytes``), or the bytes."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    to_bytes = getattr(value, "toBytes", None)
+    try:
+        return bytes(to_bytes()) if callable(to_bytes) else b""
+    except Exception:
+        return b""
+
+
+def _exception_day(global_id: bytes) -> str:
+    """The day of the occurrence an Outlook request for one occurrence of a repeating meeting replaces
+    ("2026-10-19"): Outlook writes it into the meeting's GlobalObjectID (bytes 16 to 19: year, month, day), which is
+    all zeros for the series. Only the day: the request doesn't say the time it replaces."""
+    if len(global_id) < 20 or not any(global_id[16:20]):
+        return ""
+    try:
+        return date(int.from_bytes(global_id[16:18], "big"), global_id[18], global_id[19]).isoformat()
+    except ValueError:
+        return ""
 
 
 def _organizer_dates(start: datetime, end: datetime, zone=None) -> tuple[date, date]:
@@ -488,6 +603,74 @@ def invitation_uid(global_id: bytes) -> str:
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+# --- Repeating invitations, expanded again overnight ----------------------------------------------------------------
+
+EXPAND_AGAIN_AFTER = timedelta(days=30)  # an invitation's repeats are worked out again once this old
+MAX_EXPAND_AGAIN = 50  # emails whose invitations are read again in one overnight run
+
+
+def refresh_invites(store, settings, *, now: datetime | None = None, limit: int = MAX_EXPAND_AGAIN) -> int:
+    """Work out again the repeats of the invitations whose were worked out more than ``EXPAND_AGAIN_AFTER`` before
+    ``now``, ``limit`` emails at most, the longest ago first. A repeating meeting is kept as its occurrences in the
+    window around when its invitation was read (``WINDOW_BACK``, ``WINDOW_AHEAD``): a weekly meeting with no end
+    would otherwise leave the calendar six months on. The invitation is read again from what was kept of the email:
+    the .ics text stored with it, else the file kept under inbox/extracted, or the Outlook meeting request (.msg) the
+    email was read from. Held mail is never read again. Returns how many emails' meetings were saved again."""
+    from controller_inbox.fraud import attachments_locked
+
+    now = now or datetime.now(timezone.utc)
+    stamp = now.astimezone(timezone.utc).isoformat(timespec="seconds")
+    done = 0
+    for email_id in store.invites_to_expand((now - EXPAND_AGAIN_AFTER).astimezone(timezone.utc).isoformat(timespec="seconds"), limit=limit):
+        email = store.get_email(email_id)
+        found = None
+        if email is not None and not attachments_locked(email):
+            try:
+                found = _kept_invitations(email, settings, now)
+            except Exception:  # read again next time; the meetings stay as they were
+                found = None
+        if found is None:
+            # Nothing kept to read it from (or held mail): its meetings stay as they are, looked at again in a while.
+            store.mark_expanded(email_id, stamp)
+            continue
+        with store.transaction() as conn:
+            current = store.get_email(email_id, conn=conn)
+            if current is None or attachments_locked(current):  # held meanwhile
+                continue
+            store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp, conn=conn)
+        done += 1
+    return done
+
+
+def _kept_invitations(email, settings, now: datetime) -> list[Meeting] | None:
+    """The meetings an email's invitations name, read again from what was kept of it; None when none could be."""
+    from controller_inbox import links
+    from controller_inbox.agent import is_invitation
+    from controller_inbox.folder_mail import _kept_file, safe_filename
+
+    found: list[Meeting] = []
+    read = False
+    deadline = monotonic() + ICS_SECONDS
+    for att in email.attachments:
+        if not is_invitation(att) or len(found) >= MAX_ROWS:
+            continue
+        text = att.extracted_text or ""
+        if text.lstrip().upper().startswith("BEGIN:VCALENDAR") and "[CloseDesk stopped reading here" not in text:
+            data: bytes | str | None = text
+        else:
+            data = _kept_file(settings.inbox_extracted / email.id / safe_filename(att.filename), att.sha256) if att.sha256 else None
+        if data is None:
+            continue
+        read = True
+        found += from_ics(data, email_id=email.id, now=now, limit=MAX_ROWS - len(found), deadline=deadline)
+    kept = links.kept_file(settings, email.source_path)
+    if kept is not None and kept.suffix.lower() == ".msg":
+        request = from_msg(kept, email_id=email.id)
+        read = read or bool(request)
+        found = request + found
+    return found if read else None
 
 
 # --- For the calendar page and the chat -----------------------------------------------------------------------------

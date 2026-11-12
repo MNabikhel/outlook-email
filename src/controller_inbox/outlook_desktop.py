@@ -5,8 +5,8 @@ add-in or script on the computer can: no Microsoft 365 app, no IT approval, noth
 ever *reads*: it lists folders, reads a folder's table of messages, finds a message by its id and saves a copy of
 it as a .msg file (``SaveAs``, which writes the file and leaves the message as it is). It never calls ``Save``,
 ``Delete``, ``Move``, ``Display``, ``Send`` or ``Close``, and never sets a property, so a message's folder, read
-state, flag and categories in Outlook stay exactly as they were. ``tests/test_outlook_desktop.py`` checks this file
-for those calls.
+state, flag and categories in Outlook stay exactly as they were. ``tests/test_outlook_desktop.py`` checks that this
+file calls only the reads listed there, so a call that isn't one fails until it has been looked at.
 
 The calendar is read the same way (``calendar``): the meetings in a window, each property read off the item, nothing
 saved. The one thing set is ``IncludeRecurrences`` on the list of calendar items CloseDesk asked for, which tells
@@ -82,6 +82,15 @@ class Seen:
     flagged: bool
     importance: str
     message_id: str
+
+
+class CalendarRead(list):
+    """The meetings ``OutlookSession.calendar`` read, and whether it stopped at ``MAX_CALENDAR_ITEMS`` with more
+    left (``cut_short``): the meetings past the last one read weren't looked at, so they aren't gone from Outlook."""
+
+    def __init__(self, meetings=(), *, cut_short: bool = False) -> None:
+        super().__init__(meetings)
+        self.cut_short = cut_short
 
 
 def available() -> str:
@@ -265,10 +274,11 @@ class OutlookSession:
             )
         return seen
 
-    def calendar(self, start: datetime, end: datetime) -> list[dict]:
+    def calendar(self, start: datetime, end: datetime) -> CalendarRead:
         """The meetings in the default calendar between ``start`` and ``end``, each occurrence of a repeating one,
         earliest first: subject, times (UTC; dates for all-day ones), place, organizer, attendees, busy, cancelled,
-        and the series id. The meeting's text isn't read."""
+        and the series id. The meeting's text isn't read. ``cut_short`` says Outlook listed more than
+        ``MAX_CALENDAR_ITEMS`` (counting those left out for ending before ``start``) and the rest weren't read."""
         try:
             items = self.ns.GetDefaultFolder(_CALENDAR).Items
             items.Sort("[Start]")
@@ -279,6 +289,7 @@ class OutlookSession:
             raise OutlookError(f"Outlook's calendar couldn't be read just now ({_said(exc)}).") from None
         low, high = aware_utc(start), aware_utc(end)
         found: list[dict] = []
+        cut_short = False
         item = listed.GetFirst()
         for _ in range(MAX_CALENDAR_ITEMS):
             if item is None:
@@ -291,7 +302,9 @@ class OutlookSession:
                 if meeting.pop("_ends") >= low:
                     found.append(meeting)
             item = listed.GetNext()
-        return found
+        else:
+            cut_short = item is not None
+        return CalendarRead(found, cut_short=cut_short)
 
     def save_copy(self, entry_id: str, store_id: str, dest: Path) -> None:
         """Save a copy of the message as a .msg file. The message in Outlook is not changed."""

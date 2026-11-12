@@ -360,3 +360,197 @@ def test_a_meetings_mail_is_found_among_a_year_of_mail_with_the_same_words(store
     store.upsert_email(near)
     meeting = {"subject": "Month-end close checklist review", "start": "2026-10-30T14:00:00+00:00", "organizer": "", "attendees": [], "email_id": ""}
     assert [e.id for e in cal.related_mail(store, meeting)] == ["near"]
+
+
+# One week of a weekly meeting, a proposed new time, who owns a meeting, Outlook's own copy ----------------------
+
+WEEKLY = _ics(_event("UID:wk", "SUMMARY:AP standup", "DTSTART:20261005T140000Z", "DTEND:20261005T143000Z", "RRULE:FREQ=WEEKLY;COUNT=10",
+                     "SEQUENCE:0", "ORGANIZER:mailto:maya@taz.com"))
+
+
+def _one_week(recurrence_id, start, end, *, sequence, method="REQUEST", cancelled=False, organizer="mailto:maya@taz.com"):
+    lines = ["UID:wk", f"RECURRENCE-ID:{recurrence_id}", "SUMMARY:AP standup", f"DTSTART:{start}", f"DTEND:{end}", f"SEQUENCE:{sequence}",
+             f"ORGANIZER:{organizer}"] + (["STATUS:CANCELLED"] if cancelled else [])
+    return _ics(_event(*lines), method=method)
+
+
+def test_cancelling_or_moving_one_week_of_a_weekly_meeting_keeps_the_other_weeks(store):
+    def save(email_id, data, sender, received):
+        store.save_invites(email_id, cal.from_ics(data, email_id=email_id, now=NOW), sender=sender, received=received)
+
+    save("series", WEEKLY, "maya@taz.com", "2026-10-01T09:00:00+00:00")
+    cancel = _one_week("20261019T140000Z", "20261019T140000Z", "20261019T143000Z", sequence=1, method="CANCEL", cancelled=True)
+    [cancelled] = cal.from_ics(cancel, now=NOW)
+    assert cancelled.occurrence == "2026-10-19T14:00:00+00:00", "the week it replaces, written as a start is"
+    assert {m.occurrence for m in cal.from_ics(WEEKLY, now=NOW)} == {""}
+    save("cancel", cancel, "maya@taz.com", "2026-10-02T09:00:00+00:00")
+    save("move", _one_week("20261026T140000Z", "20261027T150000Z", "20261027T153000Z", sequence=2), "maya@taz.com", "2026-10-03T09:00:00+00:00")
+    # Someone outside, or a lookalike of the organizer's domain, can't cancel a week of it.
+    save("outsider", _one_week("20261102T140000Z", "20261102T140000Z", "20261102T143000Z", sequence=9, method="CANCEL", cancelled=True),
+         "x@evil.example", "2026-10-04T09:00:00+00:00")
+    save("lookalike", _one_week("20261109T140000Z", "20261109T140000Z", "20261109T143000Z", sequence=9, method="CANCEL", cancelled=True,
+                                organizer="mailto:maya@taz-c0rp.com"), "maya@taz-c0rp.com", "2026-10-04T09:00:00+00:00")
+    shown = store.meetings_between("2026-10-01", "2026-11-30")
+    assert [(m["start"][:16], m["cancelled"]) for m in shown] == [
+        ("2026-10-05T14:00", False), ("2026-10-12T14:00", False), ("2026-10-19T14:00", True), ("2026-10-27T15:00", False),
+        ("2026-11-02T14:00", False), ("2026-11-09T14:00", False), ("2026-11-16T14:00", False), ("2026-11-23T14:00", False),
+    ]
+    assert all(store.meeting(m["id"]) is not None for m in shown)
+    with store.connect() as conn:
+        replaced = conn.execute("SELECT id FROM meetings WHERE email_id = 'series' AND start = '2026-10-19T14:00:00+00:00'").fetchone()[0]
+    assert store.meeting(replaced) is None, "the week as the series had it is replaced"
+
+    # The whole series sent again later (a new time for every week, as Outlook sends it, with its weeks moved or
+    # cancelled since inside it): the earlier word on one week no longer stands beside it.
+    save("again", _ics(_event("UID:wk", "SUMMARY:AP standup", "DTSTART:20261005T150000Z", "DTEND:20261005T153000Z", "RRULE:FREQ=WEEKLY;COUNT=10",
+                              "SEQUENCE:3", "ORGANIZER:mailto:maya@taz.com")), "maya@taz.com", "2026-10-04T10:00:00+00:00")
+    assert {m["start"][11:16] for m in store.meetings_between("2026-10-01", "2026-11-30")} == {"15:00"}
+
+
+def test_a_proposed_new_time_and_the_answers_to_one_add_no_meeting(store):
+    event = _event("UID:B1", "SUMMARY:Budget review", "DTSTART:20261009T180000Z", "DTEND:20261009T190000Z", "ORGANIZER:mailto:maya@taz.com")
+    for method in ("COUNTER", "DECLINECOUNTER", "REFRESH", "REPLY"):
+        assert cal.from_ics(_ics(event, method=method), now=NOW) == [], method
+    assert len(cal.from_ics(_ics(event, method="PUBLISH"), now=NOW)) == 1
+
+
+def test_the_organizers_own_invitations_decide_a_meeting_whichever_is_read_first(store):
+    """A lookalike's invitation with the meeting's UID, read first (the drop folder reads by file name), doesn't
+    take the meeting over: the domain whose own invitations name it as organizer does."""
+    window = ("2026-10-01T00:00:00+00:00", "2026-10-20T00:00:00+00:00")
+    store.save_invites("fake", cal.from_ics(_invite("U2", "20261007T140000Z", organizer="mailto:maya@taz-c0rp.com"), email_id="fake", now=NOW),
+                       sender="maya@taz-c0rp.com", received="2026-10-02T09:00:00+00:00")
+    store.save_invites("real", cal.from_ics(_invite("U2", "20261006T140000Z", sequence=1), email_id="real", now=NOW),
+                       sender="maya@taz.com", received="2026-10-01T09:00:00+00:00")
+    assert [(m["start"], m["email_id"]) for m in store.meetings_between(*window)] == [("2026-10-06T14:00:00+00:00", "real")]
+
+    # Read first and dated earliest, one lookalike email is outnumbered by the organizer's invitation and update.
+    store.save_invites("fake2", cal.from_ics(_invite("U4", "20261008T140000Z", organizer="mailto:maya@taz-c0rp.com"), email_id="fake2", now=NOW),
+                       sender="maya@taz-c0rp.com", received="2026-09-30T09:00:00+00:00")
+    store.save_invites("orig4", cal.from_ics(_invite("U4", "20261009T140000Z"), email_id="orig4", now=NOW),
+                       sender="maya@taz.com", received="2026-10-01T09:00:00+00:00")
+    store.save_invites("upd4", cal.from_ics(_invite("U4", "20261009T160000Z", sequence=1), email_id="upd4", now=NOW),
+                       sender="maya@taz.com", received="2026-10-02T09:00:00+00:00")
+    assert [m["email_id"] for m in store.meetings_between(*window) if m["uid"] == "U4"] == ["upd4"]
+
+
+def test_an_invitation_for_a_meeting_on_the_outlook_calendar_adds_no_meeting_of_its_own(store):
+    from controller_inbox.calendar_events import Meeting
+
+    window = ("2026-10-01T00:00:00+00:00", "2026-10-20T00:00:00+00:00")
+    store.replace_meetings("outlook", [Meeting(uid="U3", start="2026-10-06T14:00:00+00:00", end="2026-10-06T15:00:00+00:00", subject="Q4 review",
+                                               organizer="maya@taz.com", source="outlook")], start=window[0], end=window[1])
+    store.save_invites("fake3", cal.from_ics(_invite("U3", "20261008T140000Z", sequence=9), email_id="fake3", now=NOW),
+                       sender="maya@taz-c0rp.com", received="2026-10-02T09:00:00+00:00")
+    store.save_invites("own3", cal.from_ics(_invite("U3", "20261006T140000Z"), email_id="own3", now=NOW),
+                       sender="maya@taz.com", received="2026-10-01T09:00:00+00:00")
+    assert [(m["start"], m["source"]) for m in store.meetings_between(*window)] == [("2026-10-06T14:00:00+00:00", "outlook")]
+    with store.connect() as conn:
+        invited = [row[0] for row in conn.execute("SELECT id FROM meetings WHERE source = 'invite'")]
+    assert invited and all(store.meeting(row) is None for row in invited)
+    # Without Outlook's calendar (Disconnect, or the calendar turned off), the invitation is the meeting again.
+    assert [m["email_id"] for m in store.meetings_between(*window, outlook=False)] == ["own3"]
+
+
+def test_outlooks_copy_of_a_meeting_whose_invitation_is_on_held_mail_is_not_shown(store, settings):
+    import sys
+
+    from controller_inbox.calendar_events import Meeting
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    window = ("2026-10-01T00:00:00+00:00", "2026-10-20T00:00:00+00:00")
+    store.upsert_email(_record("held", sender="ceo@taz-corp.co", flags=["fraud_risk"]))
+    store.save_invites("held", cal.from_ics(_invite("U1", "20261006T140000Z", subject="Urgent wire approval call"), email_id="held", now=NOW),
+                       sender="ceo@taz-corp.co")
+    # Outlook adds a meeting request to the calendar as tentative by itself; the next calendar read brings it in.
+    outlook = [Meeting(uid="U1", start="2026-10-06T14:00:00+00:00", end="2026-10-06T15:00:00+00:00", subject="Urgent wire approval call",
+                       location="call +1 555 0100", busy="tentative", source="outlook"),
+               Meeting(uid="U9", start="2026-10-07T14:00:00+00:00", end="2026-10-07T15:00:00+00:00", subject="Mine", source="outlook")]
+    store.replace_meetings("outlook", outlook, start=window[0], end=window[1])
+    assert [m["subject"] for m in store.meetings_between(*window)] == ["Mine"]
+    assert store.meeting(outlook[0].id) is None and store.meeting(outlook[1].id) is not None
+
+
+def test_outlooks_copy_of_an_invitation_held_as_it_arrived_is_not_shown(store, settings):
+    """Mail held as it is read keeps no meeting from its invitation, only which meeting it named, so Outlook's own
+    copy of that meeting isn't shown either; once the email is cleared it is."""
+    from controller_inbox import pipeline
+    from controller_inbox.calendar_events import Meeting
+    from controller_inbox.models import RawAttachment, RawMessage
+
+    window = ("2026-10-01T00:00:00+00:00", "2026-10-20T00:00:00+00:00")
+    data = _invite("U5", "20261006T140000Z", subject="Bank change call", organizer="mailto:billing@acme-payments.net").encode()
+    raw = RawMessage(id="scam", subject="Updated remittance details", sender_name="Acme Billing", sender_email="billing@acme-payments.net",
+                     received_at=NOW, body_text="Our bank details have changed. Please use the following account for all payments from today: "
+                     "account 5566778899 routing 021000021.", body_preview="", has_attachments=True, source="folder",
+                     attachments=[RawAttachment(id="a1", filename="invite.ics", content_type="text/calendar", size_bytes=len(data), content=data)])
+    record = pipeline.process_message(raw, store, settings, now=NOW)
+    assert pipeline.attachments_locked(record), "the sample scam is held"
+    store.replace_meetings("outlook", [Meeting(uid="U5", start="2026-10-06T14:00:00+00:00", end="2026-10-06T15:00:00+00:00", subject="Bank change call",
+                                               source="outlook")], start=window[0], end=window[1])
+    assert store.meetings_between(*window) == []
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM meetings WHERE email_id = 'scam' AND subject != ''").fetchone()[0] == 0, "nothing of what it says"
+    email = store.get_email("scam")
+    email.flags = [*email.flags, "fraud_cleared"]
+    store.upsert_email(email)
+    assert [m["source"] for m in store.meetings_between(*window)] == ["outlook"]
+
+
+def test_a_hostile_invitation_is_read_in_a_moment(store):
+    import time as clock
+
+    many = _ics(*[_event(f"UID:n{n}", "SUMMARY:x", f"DTSTART:202610{1 + n % 28:02d}T090000Z", "DTEND:20261001T100000Z") for n in range(400)])
+    never = _ics(*[_event(f"UID:i{n}", "SUMMARY:Never", "DTSTART:20261005T090000Z", "DTEND:20261005T100000Z",
+                          "RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=31") for n in range(400)])
+    ancient = _ics(*[_event(f"UID:a{n}", "SUMMARY:Ancient", "DTSTART:00010101T090000Z", "DTEND:00010101T100000Z",
+                            "RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=31") for n in range(60)])
+    daily = _ics(*[_event(f"UID:d{n}", "SUMMARY:Daily", "DTSTART:20260601T090000Z", "DTEND:20260601T091500Z", "RRULE:FREQ=DAILY") for n in range(20)])
+    started = clock.monotonic()
+    assert len(cal.from_ics(many, now=NOW)) == cal.MAX_EVENTS
+    assert len(cal.from_ics(never, now=NOW)) == 0
+    assert clock.monotonic() - started < 3
+    started = clock.monotonic()
+    old = cal.from_ics(ancient, now=NOW)
+    assert clock.monotonic() - started < cal.ICS_SECONDS + 2
+    assert old and all(m.recurring for m in old), "what time didn't allow is kept as its first occurrence"
+    assert len(cal.from_ics(daily, now=NOW)) == cal.MAX_ROWS
+    assert len(cal.from_ics(("X-PAD:" + "x" * 70 + "\r\n") * 20_000 + WEEKLY, now=NOW)) == 0, "only the first megabyte is read"
+
+
+def test_an_outlook_request_for_one_occurrence_names_the_occurrence(monkeypatch):
+    import struct
+
+    import extract_msg
+    from extract_msg.msg_classes import MeetingRequest
+    from extract_msg.structures.misc_id import GlobalObjectID
+
+    def goid(year=0, month=0, day=0):
+        head = bytes.fromhex("040000008200E00074C5B7101A82E008") + struct.pack(">H", year) + bytes([month, day])
+        return GlobalObjectID(head + b"\x00" * 16 + struct.pack("<I", 4) + b"wk42")
+
+    class Request(MeetingRequest):
+        def __init__(self, exception):
+            pass
+
+        appointmentStartWhole = datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc)
+        appointmentEndWhole = datetime(2026, 10, 20, 15, 30, tzinfo=timezone.utc)
+        appointmentSubType = False
+        subject, location, sender, allAttendeesString, isRecurring, appointmentRecur = "AP standup", "", "Maya", "", False, None
+        cleanGlobalObjectID = goid()
+
+        def close(self):
+            pass
+
+    exception = Request(True)
+    exception.globalObjectID = goid(2026, 10, 19)
+    series = Request(False)
+    series.globalObjectID = goid()
+    found = {}
+    for name, message in (("exception", exception), ("series", series)):
+        monkeypatch.setattr(extract_msg, "openMsg", lambda *_a, message=message, **_k: message)
+        [found[name]] = cal.from_msg("x.msg")
+    assert found["exception"].occurrence == "2026-10-19" and found["series"].occurrence == ""
+    assert found["exception"].uid == found["series"].uid == goid().toBytes().hex().upper(), "the same meeting, whichever .msg it came on"

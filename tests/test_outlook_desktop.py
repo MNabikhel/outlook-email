@@ -15,26 +15,82 @@ from controller_inbox.outlook_desktop import NotInOutlook, OutlookError, Outlook
 
 SOURCE = Path(outlook_desktop.__file__)
 
-# Everything in Outlook's object model that changes, sends, opens or moves an item or folder.
+# What outlook_desktop.py may call, and on what. Outlook's object model is reached through COM, where a method's name
+# is matched whatever its case ("item.delete()" calls Delete), so the methods called are listed rather than the ones
+# that change something: a call that isn't listed here fails the test until someone has checked that it only reads.
+COM_CALLS = {
+    "Dispatch": {"win32com.client"}, "GetActiveObject": {"win32com.client"},
+    "CoInitialize": {"pythoncom"}, "CoUninitialize": {"pythoncom"}, "GetLocaleInfo": {"win32api"},
+    "GetNamespace": {"app"}, "GetDefaultFolder": {"self.ns", "store"}, "GetRootFolder": {"store"}, "GetItemFromID": {"self.ns"},
+    "Item": {"children", "self.ns.Stores"}, "GetTable": {"folder"}, "GetNextRow": {"table"}, "GetValues": {"table.GetNextRow()"},
+    # Columns.Add and RemoveAll shape the table CloseDesk asked for; Sort and Restrict order and filter a list of items.
+    "RemoveAll": {"table.Columns"}, "Add": {"table.Columns"}, "Sort": {"table", "items"}, "Restrict": {"items"},
+    "GetFirst": {"listed"}, "GetNext": {"listed"},
+    "SaveAs": {"item"},  # writes a .msg file and leaves the message as it is: the only way a copy is made
+}
+# Python's own methods on Python values (strings, dates, lists, sets), and this file's own.
+PYTHON_CALLS = {
+    "append", "astimezone", "date", "get", "group", "isoformat", "lower", "mkdir", "now", "pop", "replace", "split",
+    "startswith", "strftime", "strip", "sub",
+}
+PYTHON_CALLS_ON = {"add": {"bins", "codes", "names", "trash"}, "sort": {"stores"}, "_item": {"self"}, "folders": {"self"}, "__init__": {"super()"}}
+# What Outlook's objects are read for (and the methods above): any other capitalised name is something new of Outlook's.
+COM_NAMES = set(COM_CALLS) | {
+    "AllDayEvent", "BusyStatus", "Columns", "Count", "DefaultItemType", "End", "EndOfTable", "EntryID", "Folders",
+    "GlobalAppointmentID", "IncludeRecurrences", "IsRecurring", "Items", "Location", "MeetingStatus", "Name", "OptionalAttendees",
+    "Organizer", "Parent", "RequiredAttendees", "Start", "StoreID", "Stores", "Subject",
+}
+READ_BY_NAME = {"ExchangeStoreType", "DisplayName", "hresult", "excepinfo", "args"}  # getattr(obj, "...", default)
+# Never called: they reach a method or property by a name made up at run time.
+NOT_CALLED = {"setattr", "delattr", "eval", "exec", "compile", "__import__", "vars", "globals", "locals"}
+# Outlook's methods that change, send, open or close something: none may be on the lists above, in any case.
 WRITES = {
-    "Save", "Delete", "Move", "MoveTo", "Copy", "CopyTo", "Display", "Send", "Close", "Reply", "ReplyAll", "Forward",
-    "SetProperty", "SetProperties", "DeleteProperty", "DeleteProperties", "MarkAsTask", "ClearTaskFlag", "PrintOut",
-    "ShowCategoriesDialog", "AddMember", "Remove", "Add",  # Columns.Add is checked apart: it only shapes the table read
-    "Respond", "Accept", "Decline", "ClearConversationIndex", "Undelete", "Empty",
-    "GetAssociatedAppointment",  # with True, it adds the meeting to the calendar
+    "Save", "Delete", "Move", "MoveTo", "Copy", "CopyTo", "Display", "Send", "Close", "Reply", "ReplyAll", "Forward", "Quit",
+    "SetProperty", "SetProperties", "DeleteProperty", "DeleteProperties", "MarkAsTask", "ClearTaskFlag", "PrintOut", "Import",
+    "Execute", "ShowCategoriesDialog", "AddMember", "Remove", "Respond", "Accept", "Decline", "ClearConversationIndex", "Undelete",
+    "Empty", "GetAssociatedAppointment", "CreateItem", "CreateItemFromTemplate", "AddStore", "RemoveStore", "Logoff", "InvokeTypes",
 }
 
 
+def _not_read_only(source: str) -> list[str]:
+    """What in this source isn't on the lists of reads above, by line."""
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Attribute) and node.attr[:1].isupper() and node.attr not in COM_NAMES:
+            found.append(f"line {line}: {node.attr}")
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            on = ast.unparse(func.value)
+            if not (on in COM_CALLS.get(func.attr, ()) or func.attr in PYTHON_CALLS or on in PYTHON_CALLS_ON.get(func.attr, ())):
+                found.append(f"line {line}: {on}.{func.attr}()")
+        elif isinstance(func, ast.Name):
+            if func.id in NOT_CALLED:
+                found.append(f"line {line}: {func.id}()")
+            elif func.id == "getattr":
+                named = node.args[1] if len(node.args) > 1 else None
+                if not (isinstance(named, ast.Constant) and named.value in READ_BY_NAME):
+                    found.append(f"line {line}: {ast.unparse(node)}")
+        else:
+            found.append(f"line {line}: {ast.unparse(node)}")  # getattr(item, "Delete")(), a call of a call
+    return found
+
+
 def test_the_reader_makes_no_call_that_changes_outlook():
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
-    calls = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            calls.append((node.func.attr, ast.unparse(node.func.value)))
-    bad = [(name, on) for name, on in calls if name in WRITES and not (name == "Add" and on == "table.Columns")]
-    assert not bad, f"outlook_desktop.py must only read Outlook: {bad}"
-    # SaveAs writes a file and leaves the message as it is; it's the only way a copy is made.
-    assert [on for name, on in calls if name == "SaveAs"] == ["item"]
+    assert _not_read_only(SOURCE.read_text(encoding="utf-8")) == [], "outlook_desktop.py must only read Outlook"
+    writes = {name.lower() for name in WRITES}
+    assert not writes & {name.lower() for name in [*COM_CALLS, *PYTHON_CALLS, *PYTHON_CALLS_ON, *COM_NAMES]}
+
+
+def test_the_read_only_check_catches_a_call_that_isnt_a_read():
+    for bad in (
+        "item.Delete()", "app.Quit()", "self.ns.Application.Session.Logoff()", "folder.Items.Add(1)", "item.delete()",
+        "namespace.Import(path)", "explorer.CommandBars.ExecuteMso('x')", "getattr(item, 'Delete')()", "getattr(item, name)",
+        "setattr(item, 'UnRead', False)", "move = item.Move", "item.Parent.Folders.add('New')", "item._oleobj_.InvokeTypes(1)",
+    ):
+        assert _not_read_only(f"def f(item, app, folder, namespace, explorer, name):\n    {bad}\n"), bad
 
 
 def test_the_reader_sets_no_property_on_an_outlook_object():
@@ -400,3 +456,23 @@ def test_windows_short_date_patterns_become_outlooks_filter_dates():
     assert outlook_desktop._strftime_pattern("M/d/yyyy") == "%m/%d/%Y"
     assert outlook_desktop._strftime_pattern("yyyy-MM-dd") == "%Y-%m-%d"
     assert outlook_desktop._strftime_pattern("") == ""
+
+
+def test_the_calendar_says_when_outlooks_limit_cut_it_short(outlook, monkeypatch):
+    session, _items = outlook
+    # Long meetings that ended before the window come first (Outlook lists them by start) and are left out.
+    old = [Appointment(f"Old {n}", local(2026, 1, 1, 9), local(2026, 1, 2, 9), gid=f"G-old{n}") for n in range(5)]
+    kept = [Appointment("AP standup", local(2026, 10, 6, 9), local(2026, 10, 6, 9, 15), gid="G-standup")]
+    later = [Appointment("Later", local(2026, 11, 6, 9), local(2026, 11, 6, 10), gid="G-later")]
+    window = (datetime(2026, 10, 5, tzinfo=timezone.utc), datetime(2026, 11, 30, tzinfo=timezone.utc))
+
+    def read():
+        object.__setattr__(session.ns, "_defaults", {**session.ns._defaults, 9: CalendarFolder(CalendarItems(old + kept + later))})
+        return session.calendar(*window)
+
+    monkeypatch.setattr(outlook_desktop, "MAX_CALENDAR_ITEMS", 6)
+    found = read()
+    assert [m["subject"] for m in found] == ["AP standup"] and found.cut_short
+    monkeypatch.setattr(outlook_desktop, "MAX_CALENDAR_ITEMS", 3000)
+    found = read()
+    assert [m["subject"] for m in found] == ["AP standup", "Later"] and not found.cut_short

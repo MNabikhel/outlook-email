@@ -696,6 +696,8 @@ def test_the_calendar_is_read_hourly_and_follows_outlook(store, settings):
             assert start == now - calendar_events.WINDOW_BACK and end == now + calendar_events.WINDOW_AHEAD
             return [dict(item) for item in calendar]
 
+    outlook_sync.set_calendar(store, True)
+
     assert outlook_sync.sync_calendar(store, Calendar(), now=now) == 2
     assert [m["subject"] for m in store.meetings_between("2026-10-01", "2026-11-01")] == ["AP standup", "Close day"]
     calendar.pop(0)  # deleted in Outlook
@@ -749,3 +751,84 @@ def test_turning_the_calendar_off_removes_outlooks_meetings_and_keeps_invitation
     store.save_invites("e1", [calendar_events.Meeting(uid="X", start="2026-10-07T13:00:00+00:00", end="2026-10-07T14:00:00+00:00", subject="Review", email_id="e1")])
     outlook_sync.set_calendar(store, False)
     assert [m["subject"] for m in store.meetings_between("2026-01-01", "2027-01-01")] == ["Review"]
+
+
+def test_disconnecting_while_mail_is_copied_stops_the_copying(store, settings):
+    fake = FakeOutlook()
+    for n in range(5):
+        fake.add(f"e{n}", f"Message {n}", minutes=n)
+    copy = fake.save_copy
+    asked = []
+
+    def save_copy(entry_id, store_id, dest):
+        asked.append(entry_id)
+        copy(entry_id, store_id, dest)
+        outlook_sync.disconnect(store)  # the user clicks Disconnect while the first message is copied
+
+    fake.save_copy = save_copy
+    report = outlook_sync.sync(store, settings, fake, now=NOW)
+    assert len(asked) == 1, "no message is copied from Outlook after Disconnect"
+    assert report["new"] <= 1 and not report["failed"]
+    assert not store.get_state(outlook_sync.LAST_SYNC_KEY) and not store.get_state(outlook_sync.LAST_RESULT_KEY)
+
+
+def test_disconnecting_or_turning_the_calendar_off_while_it_is_read_keeps_none_of_it(store, settings):
+    for stop in (outlook_sync.disconnect, lambda store: outlook_sync.set_calendar(store, False)):
+        outlook_sync.connect(store, calendar=True, now=NOW)
+        store.set_state(outlook_sync.LAST_SYNC_KEY, "")
+        fake = FakeOutlook()
+
+        def calendar(start, end, stop=stop):
+            stop(store)  # clicked while Outlook's calendar is being read
+            return [{"uid": "abcd", "start": NOW.isoformat(), "end": NOW.isoformat(), "subject": "Board call", "all_day": False, "location": "",
+                     "organizer": "", "attendees": [], "busy": "busy", "cancelled": False, "recurring": False}]
+
+        fake.calendar = calendar
+        outlook_sync.sync(store, settings, fake, now=NOW)
+        with store.connect() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM meetings WHERE source = 'outlook'").fetchone()[0] == 0
+        assert not store.get_state(outlook_sync.CALENDAR_LAST_KEY)
+        if stop is outlook_sync.disconnect:
+            assert not store.get_state(outlook_sync.LAST_SYNC_KEY), "nothing stamped after Disconnect"
+
+
+def test_the_calendar_page_and_the_chat_show_outlooks_meetings_only_while_it_is_connected(store, settings):
+    from controller_inbox import assistant, calendar_events
+
+    outlook_sync.connect(store, calendar=True, now=NOW)
+    store.replace_meetings("outlook", [calendar_events.Meeting(uid="G1", start="2026-10-21T13:00:00+00:00", end="2026-10-21T13:15:00+00:00",
+                                                               subject="Standup", source="outlook")], start="2026-10-01", end="2026-11-01")
+    client = TestClient(web.create_app(settings, store))
+
+    def shown():
+        meetings = client.get("/api/calendar", params={"start": "2026-10-21", "end": "2026-10-21"}, headers=PAGE).json()["meetings"]
+        source = assistant.calendar_source(store, settings, "2026-10-21")
+        return [m["subject"] for m in meetings], bool(source and "Standup" in source.body_text)
+
+    meeting_id = calendar_events.Meeting(uid="G1", start="2026-10-21T13:00:00+00:00", end="", source="outlook").id
+    assert shown() == (["Standup"], True) and client.get(f"/api/calendar/{meeting_id}", headers=PAGE).status_code == 200
+    # Left behind by a sync that was still running at Disconnect: not shown all the same.
+    store.set_state(outlook_sync.CALENDAR_KEY, "0")
+    assert shown() == ([], False) and client.get(f"/api/calendar/{meeting_id}", headers=PAGE).status_code == 404
+    store.set_state(outlook_sync.CALENDAR_KEY, "1")
+    store.set_state(outlook_sync.CONSENT_KEY, "revoked")
+    assert shown() == ([], False)
+
+
+def test_a_calendar_read_cut_short_by_outlooks_limit_keeps_the_meetings_past_it(store, settings):
+    from controller_inbox import calendar_events, outlook_desktop
+
+    now = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+    outlook_sync.connect(store, calendar=True, now=now)
+    later = calendar_events.Meeting(uid="G9", start="2026-12-01T13:00:00+00:00", end="2026-12-01T14:00:00+00:00", subject="Later", source="outlook")
+    store.replace_meetings("outlook", [later], start="2026-01-01", end="2027-06-01")
+
+    class CutShort:
+        def calendar(self, start, end):
+            # Outlook listed its limit, most of them meetings that ended before the window (left out), and stopped.
+            return outlook_desktop.CalendarRead([{"uid": "G1", "start": "2026-10-06T13:00:00+00:00", "end": "2026-10-06T13:15:00+00:00",
+                                                  "all_day": False, "subject": "AP standup", "location": "", "organizer": "", "attendees": [],
+                                                  "busy": "busy", "cancelled": False, "recurring": True}], cut_short=True)
+
+    outlook_sync.sync_calendar(store, CutShort(), now=now)
+    assert [m["subject"] for m in store.meetings_between("2026-10-01", "2027-01-01")] == ["AP standup", "Later"]

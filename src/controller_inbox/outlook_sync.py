@@ -81,6 +81,18 @@ def config(store: Store) -> dict:
 NO_CONSENT = ("", "none", "revoked")
 
 
+def calendar_on(store: Store, conn=None) -> bool:
+    """Whether Outlook's calendar is read and shown: the user agreed to the sync and turned the calendar on. Read in
+    ``conn``'s transaction when given (``sync_calendar``)."""
+    consent = store.get_state(CONSENT_KEY, conn=conn) or ""
+    return consent not in NO_CONSENT and store.get_state(CALENDAR_KEY, conn=conn) == "1"
+
+
+def _connected(store: Store, conn=None) -> bool:
+    """Whether the user still agrees that CloseDesk reads Outlook (Disconnect may be clicked while a sync runs)."""
+    return (store.get_state(CONSENT_KEY, conn=conn) or "") not in NO_CONSENT
+
+
 def decided(store: Store) -> str:
     """Whether the user agreed, decided once: someone who had turned the sync on, or synced, before this version
     asked had agreed to it and isn't asked again; anyone else hasn't. Recorded the first time it is asked (when
@@ -267,6 +279,8 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
 
     fresh.sort(key=lambda item: item.received)
     for index, item in enumerate(fresh, start=1):
+        if not _connected(store):
+            return report  # Disconnected while this sync ran: nothing more is read from Outlook, and nothing stamped
         if on_progress:
             on_progress("outlook", index, len(fresh), f"Copying from {item.folder}")
         try:
@@ -304,6 +318,8 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
             continue
         if _before(row["received_at"], since):
             continue  # older than the sync looks back: no longer followed
+        if not _connected(store):
+            return report
         try:
             where = session.locate(row["entry_id"], row["store_id"])
         except NotInOutlook:
@@ -313,6 +329,8 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
         if where is None:
             # Gone under this id. A message moved to another folder can get a new id (Exchange, or another mailbox or
             # data file, such as an archive): found by its Message-ID, it was moved, not deleted.
+            if not _connected(store):
+                return report
             try:
                 moved = _moved_copy(session.find_message(row["message_id"]), row, trash)
             except Exception:
@@ -340,19 +358,17 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
         except OutlookError as exc:
             report["failed"].append({"folder": "Calendar", "error": str(exc)[:300]})
     stamp = now.astimezone(timezone.utc).isoformat()
-    store.set_state(LAST_SYNC_KEY, stamp)
-    store.set_state(LAST_ERROR_KEY, "")
-    store.set_state(
-        LAST_RESULT_KEY,
-        json.dumps({key: report[key] for key in ("new", "updated", "moved", "removed", "already")} | {"failed": len(report["failed"]), "at": stamp}),
-    )
+    with store.transaction() as conn:
+        if not _connected(store, conn):
+            return report  # disconnected while the calendar was read
+        store.set_state(LAST_SYNC_KEY, stamp, conn=conn)
+        store.set_state(LAST_ERROR_KEY, "", conn=conn)
+        store.set_state(
+            LAST_RESULT_KEY,
+            json.dumps({key: report[key] for key in ("new", "updated", "moved", "removed", "already")} | {"failed": len(report["failed"]), "at": stamp}),
+            conn=conn,
+        )
     return report
-
-
-def outlook_desktop_limit() -> int:
-    from controller_inbox.outlook_desktop import MAX_CALENDAR_ITEMS
-
-    return MAX_CALENDAR_ITEMS
 
 
 def calendar_due(store: Store, now: datetime) -> bool:
@@ -366,7 +382,8 @@ def calendar_due(store: Store, now: datetime) -> bool:
 
 def sync_calendar(store: Store, session, *, now: datetime | None = None) -> int:
     """Read Outlook's calendar for the window around now and keep it: a meeting moved or deleted in Outlook
-    follows. Returns how many meetings are kept."""
+    follows. Returns how many meetings are kept: none when the user disconnected or turned the calendar off while it
+    was read (checked in the same transaction the meetings are written in, so Disconnect's clearing comes after)."""
     from controller_inbox import calendar_events
 
     now = now or datetime.now(timezone.utc)
@@ -374,9 +391,16 @@ def sync_calendar(store: Store, session, *, now: datetime | None = None) -> int:
     found = session.calendar(start, end)
     meetings = [calendar_events.Meeting(**{**item, "uid": calendar_events.series_uid(item["uid"])}, source="outlook") for item in found]
     # Read to Outlook's limit (a very busy calendar): what wasn't read is kept as it was, not taken for deleted.
-    upto = max((m.start for m in meetings), default=end.isoformat()) if len(found) >= outlook_desktop_limit() else end.isoformat()
-    kept = store.replace_meetings("outlook", meetings, start=start.date().isoformat(), end=upto)
-    store.set_state(CALENDAR_LAST_KEY, now.astimezone(timezone.utc).isoformat())
+    # Outlook says so (``cut_short``): the meetings it read and left out (ended before the window) count to its limit.
+    if getattr(found, "cut_short", False):
+        upto = max((m.start for m in meetings), default="")  # none read in the window: none removed
+    else:
+        upto = end.isoformat()
+    with store.transaction() as conn:
+        if not calendar_on(store, conn):
+            return 0
+        kept = store.replace_meetings("outlook", meetings, start=start.date().isoformat(), end=upto, conn=conn)
+        store.set_state(CALENDAR_LAST_KEY, now.astimezone(timezone.utc).isoformat(), conn=conn)
     return kept
 
 
