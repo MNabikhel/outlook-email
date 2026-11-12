@@ -33,7 +33,7 @@ from email.utils import getaddresses
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
 
-KEYS_VERSION = "3"  # changed whenever keys() files emails differently, so stored mail is filed again
+KEYS_VERSION = "4"  # changed whenever keys() files emails differently, so stored mail is filed again
 COMMON = 25  # a key shared by more emails than this links none of them
 MAX_THREAD = 60  # emails shown of one conversation, around the one opened
 MAX_CONVERSATION = 1000  # emails one conversation is followed to
@@ -108,19 +108,7 @@ def threading(*, in_reply_to: str = "", references: str = "", thread_index: byte
 
 def keys(email: EmailRecord) -> list[tuple[str, str]]:
     """The keys ``email`` is filed under (see the module's docstring)."""
-    found: set[tuple[str, str]] = set()
-    info = email.threading or {}
-    # Its own Message-ID ("msg") joins a conversation only through another email naming it in a reply ("thread"):
-    # two emails that merely carry the same id (a scanner gives every scan one) are no conversation.
-    if own := norm_id(email.internet_message_id):
-        found.add(("msg", f"mid:{own}"))
-    for mid in (info.get("in_reply_to"), *(info.get("references") or [])):
-        if norm := norm_id(mid):
-            found.add(("thread", f"mid:{norm}"))
-    if info.get("conversation"):
-        found.add(("thread", f"conv:{info['conversation']}"))
-    if email.conversation_id:
-        found.add(("thread", f"graph:{email.conversation_id}"))
+    found = set(conversation_keys(email.threading, email.internet_message_id, email.conversation_id))
     domain = sender_domain(email)
     held = attachments_locked(email)
     # A held email's numbers count only where its own text names them: read from its files (which stay closed), a
@@ -130,7 +118,10 @@ def keys(email: EmailRecord) -> list[tuple[str, str]]:
         for number in numbers:
             if held and number not in said:
                 continue
-            found.add((kind, f"{domain}|{number}" if number.isdigit() else number))
+            # A number of digits alone is one sender's: two vendors' invoice 10482 are two invoices. A PO is the
+            # buyer's own number, quoted back by the vendor, so one of five digits or more is one PO whoever writes it.
+            scoped = number.isdigit() and not (kind == "po" and len(number) >= 5)
+            found.add((kind, f"{domain}|{number}" if scoped else number))
     # A held email's files link to nothing, either way: a "new bank details" form sent from a lookalike domain must
     # not show up as the same file the real vendor sent.
     for att in [] if held else email.attachments:
@@ -141,6 +132,31 @@ def keys(email: EmailRecord) -> list[tuple[str, str]]:
         if stem := file_stem(att.filename):
             found.add(("stem", f"{domain}|{stem}"))  # one sender's versions: everyone's "Timesheet.xlsx" isn't one file
     return sorted(found)
+
+
+def conversation_keys(threading: dict | None, message_id: str | None, conversation_id: str | None) -> list[tuple[str, str]]:
+    """The keys that put an email in a conversation: what it replies to, its own Message-ID, Outlook's and
+    Microsoft 365's conversation."""
+    found: set[tuple[str, str]] = set()
+    info = threading or {}
+    # Its own Message-ID ("msg") joins a conversation only through another email naming it in a reply ("thread"):
+    # two emails that merely carry the same id (a scanner gives every scan one) are no conversation.
+    if own := norm_id(message_id):
+        found.add(("msg", f"mid:{own}"))
+    for mid in (info.get("in_reply_to"), *(info.get("references") or [])):
+        if norm := norm_id(mid):
+            found.add(("thread", f"mid:{norm}"))
+    if info.get("conversation"):
+        found.add(("thread", f"conv:{info['conversation']}"))
+    if conversation_id:
+        found.add(("thread", f"graph:{conversation_id}"))
+    return sorted(found)
+
+
+def conversation_members(store, email_id: str, threading: dict | None, message_id: str | None, conversation_id: str | None) -> set[str]:
+    """The stored emails in the same conversation as an email (stored or still being read), not the email itself."""
+    mine = conversation_keys(threading, message_id, conversation_id)
+    return set(_conversation(store, email_id, mine)) - {email_id} if mine else set()
 
 
 def sender_domain(email: EmailRecord) -> str:
