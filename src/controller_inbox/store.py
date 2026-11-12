@@ -559,6 +559,28 @@ class Store:
         conn.execute("DELETE FROM email_keys WHERE email_id = ?", (email.id,))
         conn.executemany("INSERT OR IGNORE INTO email_keys (email_id, kind, value) VALUES (?, ?, ?)", [(email.id, kind, value) for kind, value in links.keys(email)])
 
+    def received_times(self, email_ids: list[str]) -> dict[str, str]:
+        """When each email came, by id: to order a long conversation without loading its emails."""
+        out: dict[str, str] = {}
+        ids = list(dict.fromkeys(email_ids))
+        with self.connect() as conn:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start : start + 500]
+                out.update(conn.execute(f"SELECT id, received_at FROM emails WHERE id IN ({', '.join('?' * len(chunk))})", chunk).fetchall())
+        return {key: value or "" for key, value in out.items()}
+
+    def save_threadings(self, found: dict[str, dict], *, cursor: tuple[str, str] | None = None) -> None:
+        """Keep each email's conversation headers and file it under its keys again, all in one write."""
+        with self.transaction() as conn:
+            records = self.get_emails(list(found), conn=conn)
+            for email_id, info in found.items():
+                if (email := records.get(email_id)) is not None:
+                    email.threading = info
+                    conn.execute("UPDATE emails SET threading = ? WHERE id = ?", (_dumps(info), email_id))
+                    self._file_keys(conn, email)
+            if cursor is not None:
+                conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES (?, ?)", cursor)
+
     def save_threading(self, email: EmailRecord) -> None:
         """Keep what ``email.threading`` says now, and file it under its keys again."""
         with self.connect() as conn:
@@ -579,6 +601,16 @@ class Store:
         found: dict[str, list[str]] = {}
         values = list(dict.fromkeys(values))
         with self.connect() as conn:
+            if common:
+                # A value more emails share than ``common`` is left out: counted first, not read and thrown away.
+                kept = []
+                for start in range(0, len(values), 400):
+                    chunk = values[start : start + 400]
+                    kept += [row[0] for row in conn.execute(
+                        f"SELECT value FROM email_keys WHERE kind = ? AND value IN ({', '.join('?' * len(chunk))}) GROUP BY value HAVING COUNT(*) <= ?",
+                        [kind, *chunk, common],
+                    )]
+                values = kept
             for start in range(0, len(values), 400):
                 chunk = values[start : start + 400]
                 marks = ", ".join("?" * len(chunk))

@@ -35,7 +35,8 @@ from controller_inbox.models import AttachmentRecord, EmailRecord
 
 KEYS_VERSION = "3"  # changed whenever keys() files emails differently, so stored mail is filed again
 COMMON = 25  # a key shared by more emails than this links none of them
-MAX_THREAD = 60  # emails shown in one conversation (the newest kept)
+MAX_THREAD = 60  # emails shown of one conversation, around the one opened
+MAX_CONVERSATION = 1000  # emails one conversation is followed to
 MAX_PER_REASON = 12
 MIN_FILE_BYTES = 1024
 
@@ -225,17 +226,20 @@ def related(store, email: EmailRecord) -> dict:
                 continue
             groups.append({"kind": kind, "value": value, "ids": others[:MAX_PER_REASON]})
             shown |= set(others)
-    cards = store.get_emails(list(dict.fromkeys([*thread_ids, *(i for g in groups for i in g["ids"])])))
-    thread = sorted(
-        (email if i == email.id else cards[i] for i in thread_ids if i == email.id or i in cards),
-        key=lambda record: record.received_at or "",
-    )
+    # A long conversation is shown around the email opened (it is always in it), its emails loaded only there.
+    times = store.received_times(thread_ids)
+    order = sorted((i for i in thread_ids if i in times or i == email.id), key=lambda i: (times.get(i) or email.received_at or "", i))
+    at = order.index(email.id) if email.id in order else 0
+    first = max(0, min(at - MAX_THREAD // 2, len(order) - MAX_THREAD))
+    window = order[first : first + MAX_THREAD]
+    cards = store.get_emails(list(dict.fromkeys([*window, *(i for g in groups for i in g["ids"])])))
+    thread = [email if i == email.id else cards[i] for i in window if i == email.id or i in cards]
     out_groups = []
     for group in groups:
         records = [cards[i] for i in group["ids"] if i in cards]
         if records:
             out_groups.append({"kind": group["kind"], "label": _label(group, email, records), "emails": sorted(records, key=lambda r: r.received_at or "", reverse=True)})
-    return {"thread": thread[-MAX_THREAD:] if len(thread) > 1 else [], "groups": out_groups, "new_domains": new_domains(thread)}
+    return {"thread": thread if len(thread) > 1 else [], "groups": out_groups, "new_domains": new_domains(thread), "thread_size": len(order)}
 
 
 def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str]:
@@ -249,10 +253,10 @@ def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str
     for _round in range(4):
         refs = [value for value in refs if ("thread", value) not in seen]
         owns = [value for value in owns if ("msg", value) not in seen]
-        if (not refs and not owns) or len(found) > MAX_THREAD * 2:
+        if (not refs and not owns) or len(found) > MAX_CONVERSATION:
             break
         seen |= {("thread", value) for value in refs} | {("msg", value) for value in owns}
-        cap = MAX_THREAD * 2
+        cap = MAX_CONVERSATION
         hits = store.emails_with_keys("thread", refs + owns, exclude="", common=cap)  # replies to these, or siblings
         hits.update({f"msg:{k}": v for k, v in store.emails_with_keys("msg", refs, exclude="", common=cap).items()})  # what they reply to
         new_ids = {other for ids in hits.values() for other in ids} - found
@@ -316,9 +320,8 @@ def catch_up(store, settings, *, limit: int = 20_000) -> dict:
 
 
 def _headers_from_files(store, settings, *, batch: int) -> int:
-    """Read the conversation headers of stored mail that has none from its kept file. Resumes where it stopped."""
-    from pathlib import Path
-
+    """Read the conversation headers of stored mail that has none from its kept file, ``batch`` at a time, and save
+    them together. Resumes where it stopped."""
     with store.connect() as conn:
         after = int((conn.execute("SELECT value FROM sync_state WHERE key = 'thread_headers_rowid'").fetchone() or ["0"])[0] or 0)
         rows = conn.execute(
@@ -327,21 +330,39 @@ def _headers_from_files(store, settings, *, batch: int) -> int:
         ).fetchall()
     if not rows:
         return 0
+    found: dict[str, dict] = {}
     for _rowid, email_id, source_path in rows:
-        path = Path(source_path or "")
-        if not source_path or path.suffix.lower() not in {".eml", ".msg"} or not path.is_file():
+        path = kept_file(settings, source_path)
+        if path is None:
             continue
         try:
             info = _file_threading(path)
         except Exception:  # a file that can't be read again keeps what was read before
             continue
-        email = store.get_email(email_id)
-        if email is not None and info:
-            email.threading = info
-            store.save_threading(email)
-    with store.connect() as conn:
-        conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('thread_headers_rowid', ?)", (str(rows[-1][0]),))
+        if info:
+            found[email_id] = info
+    store.save_threadings(found, cursor=("thread_headers_rowid", str(rows[-1][0])))
     return len(rows)
+
+
+def kept_file(settings, source_path: str | None):
+    """The .eml or .msg an email was read from, also when the CloseDesk folder was moved since (the path stored is
+    the old one; the file is under this copy's inbox folder now). None when it isn't there."""
+    from pathlib import Path
+
+    if not source_path:
+        return None
+    path = Path(source_path)
+    if path.suffix.lower() not in {".eml", ".msg"}:
+        return None
+    if path.is_file():
+        return path
+    parts = [part.lower() for part in path.parts]
+    if "inbox" in parts:
+        moved = Path(settings.inbox_dir).joinpath(*path.parts[parts.index("inbox") + 1 :])
+        if moved.is_file():
+            return moved
+    return None
 
 
 def _file_threading(path) -> dict:

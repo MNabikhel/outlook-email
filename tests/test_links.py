@@ -277,3 +277,24 @@ def test_a_files_versions_are_one_senders(store):
     store.upsert_email(_record("a", sender="pat@contractor-a.com", files=[("Timesheet week 40.xlsx", "1" * 64, 20_000, None)]))
     store.upsert_email(_record("b", sender="lee@contractor-b.com", files=[("Timesheet week 40.xlsx", "2" * 64, 20_000, None)]))
     assert links.related(store, store.get_email("a"))["groups"] == []
+
+
+def test_a_long_conversation_is_shown_around_the_email_opened(store):
+    for n in range(200):
+        threading = {"in_reply_to": f"m{n - 1}@n.com", "references": ["m0@n.com"]} if n else {}
+        store.upsert_email(_record(f"e{n:03d}", mid=f"<m{n}@n.com>", threading=threading, received=f"2026-0{1 + n // 30 % 9}-{1 + n % 28:02d}T09:{n % 60:02d}:00+00:00"))
+    for opened in ("e000", "e100", "e199"):
+        found = links.related(store, store.get_email(opened))
+        ids = [e.id for e in found["thread"]]
+        assert opened in ids and len(ids) == links.MAX_THREAD and found["thread_size"] == 200, opened
+
+
+def test_a_moved_closedesk_folder_still_finds_its_kept_files(tmp_path, settings):
+    settings.ensure_data_dir()
+    kept = settings.inbox_dir / "processed" / "2026-10" / "a.eml"
+    kept.parent.mkdir(parents=True)
+    kept.write_text("Subject: x\n\nbody")
+    old = tmp_path / "Old place" / "CloseDesk" / "inbox" / "processed" / "2026-10" / "a.eml"
+    assert links.kept_file(settings, str(old)) == kept
+    assert links.kept_file(settings, str(tmp_path / "elsewhere" / "b.eml")) is None
+    assert links.kept_file(settings, "") is None
