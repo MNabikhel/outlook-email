@@ -471,7 +471,8 @@ def _without_results(cached: bytes | None) -> bytes:
 def test_formulas_saved_without_results_are_not_read_as_zeros():
     for cached in (b"0", None):
         text = documents.extract_document("pack.xlsx", XLSX, _without_results(cached))
-        assert "saved without their results" in text
+        # Said where a 0 was taken away; a formula with no result at all already reads as no figure.
+        assert ("saved without their results" in text) == (cached is not None)
         assert "D2 (Total): =B2+C2" in text and "0 (=B2+C2)" not in text
         tables = _tables(text, "What is the total for Acme?", "pack.xlsx")
         assert "saved without their results" in tables.schema()

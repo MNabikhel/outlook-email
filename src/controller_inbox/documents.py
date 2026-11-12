@@ -849,7 +849,8 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
     rows: list[SheetRow] = []
     more = 0
     formula_count = 0
-    # Formulas with no result saved, or 0 (the cells and their formula), and whether the sheet has figures of its own.
+    # Formulas with no result saved or 0 as their result, the cells of those with 0 (and their formula), and whether
+    # the sheet has figures of its own.
     unworked: list[tuple[dict[int, str], int, str]] = []
     no_result = 0
     figures = False
@@ -874,7 +875,8 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
                 shown = f"{_formatted(value, cell)} ({formula})" if value is not None else formula
                 if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0):
                     no_result += 1
-                    unworked.append((cells, column + 1, formula))
+                    if value is not None:
+                        unworked.append((cells, column + 1, formula))
             else:
                 shown = _formatted(value if value is not None else raw, cell)
                 figures = figures or (isinstance(value, (int, float)) and not isinstance(value, bool) and value != 0)
@@ -890,7 +892,8 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
         rows.append(SheetRow(number, cells, bold))
     # A file saved by a reporting tool (or XlsxWriter) holds its formulas without their results, which Excel works out
     # when it opens the file: their 0s are not figures. Each such cell is written as its formula alone.
-    saved_without = formula_count >= 2 and no_result >= 0.8 * formula_count and figures
+    # Said in the text only where a 0 was taken away: a formula shown alone already reads as no figure.
+    saved_without = formula_count >= 2 and no_result >= 0.8 * formula_count and figures and bool(unworked)
     if saved_without:
         for cells_of_row, column, formula in unworked:
             if column in cells_of_row:
@@ -925,10 +928,8 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
     return out
 
 
-_SAVED_WITHOUT_RESULTS = (
-    "This sheet's formulas were saved without their results, as some reporting tools save a file: a cell shows its "
-    "formula where Excel would show the figure, so those figures are not in the file as read"
-)
+# Short: it is read with every question about the sheet.
+_SAVED_WITHOUT_RESULTS = "Formulas saved without their results: such a cell shows its formula, not the figure Excel shows"
 
 
 def _columns_left_out(first: int, last: int, *, workbook: bool = True) -> str:
