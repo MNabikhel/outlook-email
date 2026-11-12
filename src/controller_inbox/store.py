@@ -719,7 +719,8 @@ class Store:
             }
             conn.execute("DELETE FROM meetings WHERE email_id = ? AND source IN ('invite', 'held')", (email_id,))
             if held:
-                _hold(conn, email_id, [(meeting.uid, meeting.start, meeting.organizer) for meeting in meetings], _named(sender_name, sender))
+                _hold(conn, email_id, [(meeting.uid, meeting.start, meeting.organizer, meeting.recurring) for meeting in meetings],
+                      _named(sender_name, sender))
                 return
             stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
             expanded = expanded or datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -730,13 +731,14 @@ class Store:
         """An email held as possible payment fraud after its invitation was read: its meetings become only which
         meetings it named (``_hold``), as for mail held as it arrives. Returns how many it named."""
         with self._use(conn) as conn:
-            rows = conn.execute("SELECT uid, start, organizer, sender FROM meetings WHERE email_id = ? AND source = 'invite'", (email_id,)).fetchall()
+            rows = conn.execute("SELECT uid, start, organizer, sender, recurring FROM meetings WHERE email_id = ? AND source = 'invite'",
+                                (email_id,)).fetchall()
             if not rows:
                 return 0
             email = conn.execute("SELECT sender_name, sender_email FROM emails WHERE id = ?", (email_id,)).fetchone()
             sender = _named(email["sender_name"], email["sender_email"]) if email else rows[0]["sender"]
             conn.execute("DELETE FROM meetings WHERE email_id = ? AND source = 'invite'", (email_id,))
-            _hold(conn, email_id, [(row["uid"], row["start"], row["organizer"]) for row in rows], sender)
+            _hold(conn, email_id, [(row["uid"], row["start"], row["organizer"], bool(row["recurring"])) for row in rows], sender)
             return len(rows)
 
     def held_markers(self, email_id: str) -> int:
@@ -2285,7 +2287,7 @@ def _shown_meetings(conn: sqlite3.Connection, rows: list[sqlite3.Row], *, outloo
     if outlook:
         sql = "SELECT DISTINCT uid FROM meetings WHERE source = 'outlook' AND uid IN ({})"
         on_outlook = {row["uid"] for row in _in_chunks(conn, sql, invited)}
-        sql = """SELECT m.uid, m.start, m.organizer, m.sender, m.source AS kind, e.id AS email, e.sender_email, e.sender_name,
+        sql = """SELECT m.uid, m.start, m.organizer, m.sender, m.recurring, m.source AS kind, e.id AS email, e.sender_email, e.sender_name,
                         'invite' AS source, e.flags AS email_flags, e.category AS email_category
                  FROM meetings m LEFT JOIN emails e ON e.id = m.email_id WHERE m.source IN ('invite', 'held') AND m.uid IN ({})"""
         for row in _in_chunks(conn, sql, [row["uid"] for row in rows if row["source"] == "outlook"]):
@@ -2293,9 +2295,12 @@ def _shown_meetings(conn: sqlite3.Connection, rows: list[sqlite3.Row], *, outloo
             if _held_invite(row) or (row["kind"] == "held" and row["email"] is None):
                 # Outlook's copy of an invitation is organized by whoever it names as organizer, or by its sender:
                 # Outlook gives that person's name (or address), which is matched.
-                held.setdefault((row["uid"], row["start"]), set()).update(
-                    _who(row["organizer"]) | _who(row["sender"]) | _who(row["sender_email"]) | _who(row["sender_name"])
-                )
+                who = _who(row["organizer"]) | _who(row["sender"]) | _who(row["sender_email"]) | _who(row["sender_name"])
+                held.setdefault((row["uid"], row["start"]), set()).update(who)
+                if row["recurring"]:
+                    # Outlook expands a repeating request itself, with no end, and further on than the weeks the
+                    # invitation was read for: every week of it is its copy.
+                    held.setdefault((row["uid"], ""), set()).update(who)
     out = []
     for row in rows:
         if row["source"] == "held":
@@ -2461,16 +2466,19 @@ def _named(name: str | None, address: str | None) -> str:
     return f"{name} <{address}>" if name and address else name or address
 
 
-def _hold(conn: sqlite3.Connection, email_id: str, named: list[tuple[str, str, str]], sender: str) -> None:
+def _hold(conn: sqlite3.Connection, email_id: str, named: list[tuple[str, str, str, bool]], sender: str) -> None:
     """Keep only which meetings a held email's invitation named: each one's UID and start, who it says organized it,
-    and who sent it (to tell Outlook's own tentative copy of it from another meeting with its UID). Nothing it says
-    about the meeting. They stay when the email is deleted (``delete_emails``)."""
-    seen = list(dict.fromkeys((uid, start, organizer or "") for uid, start, organizer in named))[:MAX_INVITE_ROWS]
+    whether it repeats, and who sent it (to tell Outlook's own tentative copy of it from another meeting with its
+    UID). Nothing it says about the meeting. They stay when the email is deleted (``delete_emails``)."""
+    seen: dict[tuple[str, str, str], bool] = {}
+    for uid, start, organizer, recurring in named:
+        key = (uid, start, organizer or "")
+        seen[key] = seen.get(key, False) or bool(recurring)
     conn.executemany(
-        """INSERT OR REPLACE INTO meetings (id, uid, source, start, "end", email_id, organizer, sender)
-           VALUES (?, ?, 'held', ?, '', ?, ?, ?)""",
-        [("held-" + hashlib.sha256(f"{email_id}|{uid}|{start}".encode()).hexdigest()[:20], uid, start, email_id, organizer, sender)
-         for uid, start, organizer in seen],
+        """INSERT OR REPLACE INTO meetings (id, uid, source, start, "end", email_id, organizer, sender, recurring)
+           VALUES (?, ?, 'held', ?, '', ?, ?, ?, ?)""",
+        [("held-" + hashlib.sha256(f"{email_id}|{uid}|{start}".encode()).hexdigest()[:20], uid, start, email_id, organizer, sender, int(recurring))
+         for (uid, start, organizer), recurring in list(seen.items())[:MAX_INVITE_ROWS]],
     )
 
 

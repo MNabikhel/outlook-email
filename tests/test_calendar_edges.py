@@ -149,3 +149,37 @@ def test_unknown_zone_names_are_looked_up_once(monkeypatch):
     events = [_event(f"UID:u{n}", "DTSTART;TZID=Nowhere/Land:20261009T140000") for n in range(50)]
     cal.from_ics(_ics(*events, zones=lines), now=NOW)
     assert len(looked) <= cal.MAX_ZONES + 1
+
+
+def _record(email_id, *, sender="maya@taz.com", flags=(), received="2026-10-05T14:00:00+00:00", subject=None, source="folder"):
+    from controller_inbox.models import DocumentType, EmailRecord, ExtractedFields, Importance
+
+    return EmailRecord(
+        id=email_id, subject=subject or email_id, sender_name="", sender_email=sender, received_at=received, body_text="",
+        body_preview="", has_attachments=False, outlook_importance="normal", is_read=False, category=DocumentType.OTHER,
+        category_confidence=0, importance=Importance.LOW, importance_score=0, flags=list(flags), extracted=ExtractedFields(),
+        source=source,
+    )
+
+
+def test_outlooks_copy_of_a_held_weekly_invitation_stays_hidden_past_the_weeks_it_named(store, settings):
+    from dataclasses import replace
+
+    from controller_inbox.calendar_events import Meeting
+
+    store.upsert_email(_record("held", sender="ceo@taz-corp.co", flags=["fraud_risk"]))
+    data = _ics(_event("UID:U1", "SUMMARY:Urgent wire approval call", "DTSTART:20261006T140000Z", "DTEND:20261006T150000Z",
+                       "RRULE:FREQ=WEEKLY", "ORGANIZER;CN=CEO:mailto:ceo@taz-corp.co"))
+    store.save_invites("held", cal.from_ics(data, email_id="held", now=NOW), sender="ceo@taz-corp.co", held=True, sender_name="CEO")
+    day = datetime(2027, 4, 27, 14, tzinfo=timezone.utc)  # Outlook expands the series itself, with no end
+    copy = Meeting(uid="U1", start=day.isoformat(timespec="seconds"), end=(day + timedelta(hours=1)).isoformat(timespec="seconds"),
+                   subject="Urgent wire approval call", organizer="CEO", busy="tentative", source="outlook", recurring=True)
+    store.replace_meetings("outlook", [copy], start="2027-01-01T00:00:00+00:00", end="2027-10-01T00:00:00+00:00")
+    assert store.meetings_between("2027-04-26", "2027-04-28") == []
+    # Held after it was read: the same.
+    store.upsert_email(_record("later", sender="ceo@taz-corp.co"))
+    store.save_invites("later", cal.from_ics(data.replace("UID:U1", "UID:U2"), email_id="later", now=NOW), sender="ceo@taz-corp.co")
+    store.upsert_email(_record("later", sender="ceo@taz-corp.co", flags=["fraud_risk"]))
+    store.hold_invites("later")
+    store.replace_meetings("outlook", [copy, replace(copy, uid="U2")], start="2027-01-01T00:00:00+00:00", end="2027-10-01T00:00:00+00:00")
+    assert store.meetings_between("2027-04-26", "2027-04-28") == []
