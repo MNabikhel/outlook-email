@@ -524,6 +524,25 @@ def test_a_fix_on_the_page_tab_shows_on_the_text_tab_and_its_undo_too(settings, 
         assert "ZEBRAWORD" not in page.text_content(".text-view .parts")
 
 
+def test_the_fix_form_stays_open_while_the_page_scrolls_and_follows_its_box(settings, store, page):
+    # Clicking a box scrolls it into view first, and that scroll can arrive after the form opened; a reader also
+    # scrolls a little while typing. The form moves with its box rather than closing; scrolled out of sight, it closes.
+    from liveserver import serving
+    from msgfactory import PDF
+    from test_page_view import _invoice
+
+    email = _harbor(settings, store, ("invoice.pdf", _invoice(pages=2), PDF))
+    with serving(web.create_app(settings, store)) as base:
+        _open_page_tab(page, base, email)
+        page.click(".pv-box[aria-label='Amount']")
+        page.wait_for_selector(".pv-tip.pinned .pv-fix")
+        page.evaluate("document.dispatchEvent(new Event('scroll'))")
+        assert page.is_visible(".pv-fix button[type=submit]"), "a scroll keeps the form open"
+        page.evaluate("document.querySelector(\".pv-box[aria-label='Amount']\").style.top = '-500%'")
+        page.evaluate("document.dispatchEvent(new Event('scroll'))")
+        assert not page.is_visible(".pv-fix button[type=submit]"), "its box out of sight, the form closes"
+
+
 def test_slash_on_the_digest_opens_an_empty_palette(site, page):
     page.goto(f"{site}/app/digest")
     page.wait_for_selector("body.ready")

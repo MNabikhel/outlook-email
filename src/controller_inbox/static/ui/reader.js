@@ -719,6 +719,8 @@ let pageUrl = "";
 // A card opened to fix a box stays open while the pointer moves to it, until it is saved, cancelled or left.
 let pinned = false;
 
+let anchor = null; // the box the tip is for
+
 function hideTip(force = false) {
   if (!tip || (pinned && force !== true)) return;
   pinned = false;
@@ -730,7 +732,9 @@ function showTip(box, children, { pin = false } = {}) {
   if (!tip) {
     tip = h("div", { class: "pv-tip", role: "tooltip", id: "pv-tip", hidden: true });
     document.body.append(tip);
-    document.addEventListener("scroll", (event) => (!pinned || !tip.contains(event.target)) && hideTip(true), true);
+    // A scroll closes a passing tip. An open fix form moves with its box instead (clicking a box scrolls it into
+    // view, and that scroll can arrive after the form opened), and closes once the box is out of sight.
+    document.addEventListener("scroll", (event) => (pinned ? !tip.contains(event.target) && follow() : hideTip(true)), true);
     window.addEventListener("resize", () => hideTip(true));
     document.addEventListener("pointerdown", (event) => pinned && !tip.contains(event.target) && hideTip(true), true);
     document.addEventListener(
@@ -747,10 +751,21 @@ function showTip(box, children, { pin = false } = {}) {
   }
   if (pinned && !pin) return;
   pinned = pin;
+  anchor = box;
   tip.classList.toggle("pinned", pin);
   tip.setAttribute("role", pin ? "dialog" : "tooltip");
   replace(tip, children);
   tip.hidden = false;
+  place(box);
+}
+
+function follow() {
+  const at = anchor && anchor.isConnected ? anchor.getBoundingClientRect() : null;
+  if (!at || at.bottom < 0 || at.top > window.innerHeight || at.right < 0 || at.left > window.innerWidth) return hideTip(true);
+  place(anchor);
+}
+
+function place(box) {
   // Below the box when it fits, else above it; never past the edges of the window.
   const at = box.getBoundingClientRect();
   const { offsetWidth: w, offsetHeight: tall } = tip;
