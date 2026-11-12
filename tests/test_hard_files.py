@@ -26,6 +26,13 @@ def _baseline() -> dict[str, bool]:
     return json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else {}
 
 
+def _needs(case: dict) -> None:
+    from controller_inbox import ocr
+
+    if case.get("needs") == "ocr" and not ocr.engine_name():
+        pytest.skip("a scanned file: needs the OCR extra (RapidOCR or Tesseract)")
+
+
 def _report(case: dict, result: dict, reach: bool) -> None:
     path = os.environ.get("CLOSEDESK_EVAL_REPORT")
     if not path:
@@ -38,6 +45,7 @@ def _report(case: dict, result: dict, reach: bool) -> None:
 
 @pytest.mark.parametrize("case", CASES, ids=[case_id(c) for c in CASES])
 def test_the_answer_is_within_the_models_reach(case, store, settings, monkeypatch):
+    _needs(case)
     email = mail_with(store, settings, case["file"])
     result = evidence(store, settings, email, case["question"], monkeypatch)
     reach = any(found(prompt, case["answers"]) for prompt in result["prompts"]) or found(result["answer"], case["answers"])
@@ -83,6 +91,7 @@ def test_a_real_model_answers(case, store, settings):
     url = os.environ.get("CLOSEDESK_EVAL_URL")
     if not url:
         pytest.skip("set CLOSEDESK_EVAL_URL to an OpenAI-compatible server to ask a real model")
+    _needs(case)
     settings.llm = True
     settings.llm_base_url = url
     if model := os.environ.get("CLOSEDESK_EVAL_MODEL"):

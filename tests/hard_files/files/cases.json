@@ -7,7 +7,8 @@
   ],
   "where": "Summary!E5",
   "held_out": false,
-  "sql": "SELECT q3 FROM {Summary} WHERE department = 'Marketing'"
+  "sql": "SELECT q3 FROM {Summary} WHERE department = 'Marketing'",
+  "needs": ""
  },
  {
   "file": "Q3 Opex Pack.xlsx",
@@ -17,7 +18,8 @@
   ],
   "where": "Summary!C7",
   "held_out": false,
-  "sql": "SELECT actual_aug FROM {Summary} WHERE department = 'IT'"
+  "sql": "SELECT actual_aug FROM {Summary} WHERE department = 'IT'",
+  "needs": ""
  },
  {
   "file": "Q3 Opex Pack.xlsx",
@@ -27,7 +29,8 @@
   ],
   "where": "Summary!E11",
   "held_out": false,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Q3 Opex Pack.xlsx",
@@ -37,7 +40,8 @@
   ],
   "where": "Detail",
   "held_out": true,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Q3 Opex Pack.xlsx",
@@ -47,7 +51,8 @@
   ],
   "where": "Summary",
   "held_out": true,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "AP Aging by entity 10-31-26.xlsx",
@@ -57,7 +62,8 @@
   ],
   "where": "",
   "held_out": false,
-  "sql": "SELECT SUM(c_61_90) FROM {(CAD)}"
+  "sql": "SELECT SUM(c_61_90) FROM {(CAD)}",
+  "needs": ""
  },
  {
   "file": "AP Aging by entity 10-31-26.xlsx",
@@ -67,7 +73,8 @@
   ],
   "where": "",
   "held_out": true,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "AP Aging by entity 10-31-26.xlsx",
@@ -77,7 +84,8 @@
   ],
   "where": "",
   "held_out": false,
-  "sql": "SELECT total FROM {(USD)} WHERE vendor = 'Clearwater Labs'"
+  "sql": "SELECT total FROM {(USD)} WHERE vendor = 'Clearwater Labs'",
+  "needs": ""
  },
  {
   "file": "Granite statement Oct 2026.pdf",
@@ -87,7 +95,8 @@
   ],
   "where": "last page",
   "held_out": false,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Granite statement Oct 2026.pdf",
@@ -97,7 +106,8 @@
   ],
   "where": "page 3",
   "held_out": false,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Granite statement Oct 2026.pdf",
@@ -107,7 +117,8 @@
   ],
   "where": "",
   "held_out": true,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Brightline MSA signed.docx",
@@ -117,7 +128,8 @@
   ],
   "where": "clause 14.2",
   "held_out": false,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Brightline MSA signed.docx",
@@ -128,7 +140,8 @@
   ],
   "where": "clause 22.2",
   "held_out": false,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Brightline MSA signed.docx",
@@ -139,7 +152,8 @@
   ],
   "where": "clause 11.2",
   "held_out": true,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Kessler Rechnung 2026-4471.pdf",
@@ -150,7 +164,8 @@
   ],
   "where": "",
   "held_out": false,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Kessler Rechnung 2026-4471.pdf",
@@ -161,7 +176,8 @@
   ],
   "where": "",
   "held_out": true,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "bank_export_oct2026.csv",
@@ -172,7 +188,8 @@
   ],
   "where": "",
   "held_out": false,
-  "sql": "SELECT -SUM(betrag) FROM {csv} WHERE buchungstag = '2026-10-15' AND betrag < 0"
+  "sql": "SELECT -SUM(betrag) FROM {csv} WHERE buchungstag = '2026-10-15' AND betrag < 0",
+  "needs": ""
  },
  {
   "file": "bank_export_oct2026.csv",
@@ -183,7 +200,8 @@
   ],
   "where": "",
   "held_out": true,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Board update Q3 2026.pptx",
@@ -193,7 +211,8 @@
   ],
   "where": "",
   "held_out": false,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Board update Q3 2026.pptx",
@@ -203,7 +222,8 @@
   ],
   "where": "",
   "held_out": true,
-  "sql": ""
+  "sql": "",
+  "needs": ""
  },
  {
   "file": "Payroll journal 10-15-26.xlsx",
@@ -213,7 +233,8 @@
   ],
   "where": "",
   "held_out": false,
-  "sql": "SELECT SUM(c_401k_er) FROM {26} WHERE dept = 410"
+  "sql": "SELECT SUM(c_401k_er) FROM {26} WHERE dept = 410",
+  "needs": ""
  },
  {
   "file": "Payroll journal 10-15-26.xlsx",
@@ -223,6 +244,29 @@
   ],
   "where": "",
   "held_out": true,
-  "sql": ""
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Bluebird scan BF-77310.pdf",
+  "question": "What is the total due on the Bluebird scanned invoice?",
+  "answers": [
+   "3,298.96"
+  ],
+  "where": "",
+  "held_out": false,
+  "sql": "",
+  "needs": "ocr"
+ },
+ {
+  "file": "Bluebird scan BF-77310.pdf",
+  "question": "How much is the fuel surcharge on the Bluebird invoice?",
+  "answers": [
+   "353.46"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": "ocr"
  }
 ]

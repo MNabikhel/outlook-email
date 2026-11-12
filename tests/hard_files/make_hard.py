@@ -36,12 +36,12 @@ BOLD = Font(bold=True)
 CASES: list[dict] = []
 
 
-def case(file: str, question: str, answers: list[str], *, where: str = "", held_out: bool = False, sql: str = "") -> None:
+def case(file: str, question: str, answers: list[str], *, where: str = "", held_out: bool = False, sql: str = "", needs: str = "") -> None:
     """``answers``: any one of these in what the model is given (or says) counts. ``where``: the page or cell it is
     in. ``held_out``: not looked at while fixing, to check a fix isn't tuned to the questions. ``sql``: a query a
     model could write over the file's tables that gives the answer; ``{Canada}`` stands for the table whose title
-    ends with that word."""
-    CASES.append({"file": file, "question": question, "answers": answers, "where": where, "held_out": held_out, "sql": sql})
+    ends with that word. ``needs``: "ocr" when the file can only be read with the OCR extra installed."""
+    CASES.append({"file": file, "question": question, "answers": answers, "where": where, "held_out": held_out, "sql": sql, "needs": needs})
 
 
 def money(value: float) -> str:
@@ -334,6 +334,46 @@ def euro_invoice() -> None:
     case(pdf.name, "How much VAT is on the Kessler invoice?", [_de(vat), money(vat)], held_out=True)
 
 
+def scanned_statement() -> None:
+    """A vendor's invoice printed and scanned: pages as pictures, slightly tilted and grey, no text to copy."""
+    import io
+
+    import pypdfium2
+    from PIL import ImageFilter
+
+    doc = Document()
+    doc.add_heading("Bluebird Freight Lines — INVOICE", 1)
+    doc.add_paragraph("Invoice no. BF-77310        Invoice date: 10/22/2026        Terms: Net 30")
+    doc.add_paragraph("Bill to: Taz Holdings LLC, 400 Commerce Way, Columbus OH")
+    rows = [("10/03/2026", "Columbus → Chicago, 18 pallets", 1_840.00), ("10/09/2026", "Chicago → Detroit, 6 pallets", 920.50),
+            ("10/14/2026", "Liftgate and inside delivery", 185.00), ("10/18/2026", "Fuel surcharge 12%", 353.46)]
+    table = doc.add_table(rows=1, cols=3)
+    table.style = "Table Grid"
+    for cell, label in zip(table.rows[0].cells, ["Date", "Description", "Amount"]):
+        cell.text = label
+    for row in rows:
+        for cell, text in zip(table.add_row().cells, [row[0], row[1], money(row[2])]):
+            cell.text = text
+    total = sum(r[2] for r in rows)
+    doc.add_paragraph(f"TOTAL DUE: ${money(total)}")
+    doc.add_paragraph("Remit to: Bluebird Freight Lines, PO Box 2210, Toledo OH")
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "scan.docx"
+        doc.save(source)
+        pdf = pypdfium2.PdfDocument(str(as_pdf(source)))
+        pages = []
+        for page in pdf:
+            image = page.render(scale=150 / 72).to_pil().convert("L").rotate(0.6, expand=True, fillcolor=255)
+            pages.append(image.filter(ImageFilter.GaussianBlur(0.6)))
+        pdf.close()
+    out = io.BytesIO()
+    pages[0].save(out, "PDF", resolution=150, save_all=True, append_images=pages[1:])
+    name = "Bluebird scan BF-77310.pdf"
+    (OUT / name).write_bytes(out.getvalue())
+    case(name, "What is the total due on the Bluebird scanned invoice?", [money(total)], needs="ocr")
+    case(name, "How much is the fuel surcharge on the Bluebird invoice?", ["353.46"], needs="ocr", held_out=True)
+
+
 def _de(value: float) -> str:
     return f"{value:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -425,7 +465,7 @@ def payroll_journal() -> None:
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    for make in (opex_pack, stacked_aging, vendor_statement, long_agreement, euro_invoice, bank_export, board_deck, payroll_journal):
+    for make in (opex_pack, stacked_aging, vendor_statement, long_agreement, euro_invoice, bank_export, board_deck, payroll_journal, scanned_statement):
         make()
     (OUT / "cases.json").write_text(json.dumps(CASES, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
     print(f"{len(CASES)} questions over {len({c['file'] for c in CASES})} files in {OUT}")
