@@ -389,7 +389,8 @@ class Workspace:
         # Each email as the model may read it: a reply quoting held mail without the quote (fraud.as_model_reads).
         self.sources[:] = [as_model_reads(self.store, email) for email in self.sources]
         # The emails in the prompt, plus those the model opens with a tool: the only ones it may write notes on.
-        self.opened |= {email.id for email in self.sources}
+        # Held mail is never read, so it is never among them.
+        self.opened |= {email.id for email in self.sources if not attachments_locked(email)}
 
     def number(self, email: EmailRecord) -> int:
         for index, item in enumerate(self.sources, start=1):
@@ -1151,10 +1152,10 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
     if email is None:
         return "No email with that number. Use a number from the list, like 1."
     ws.last_email = email.id
-    ws.opened.add(email.id)
     if attachments_locked(email):
         # Held as possible payment fraud: nothing of it is read to the model, its text no more than its files.
         return HELD
+    ws.opened.add(email.id)
     if name == "open_email":
         return _open_email(ws, email)
     if name == "find_in_file":
@@ -1329,6 +1330,9 @@ def _note(ws: Workspace, text: str, ref) -> str:
     email = ws.email(ref) if ref else (ws.store.get_email(ws.last_email) if ws.last_email else ws.primary())
     if ref and email is None:
         return "No email with that number. Use a number from the list, like 1."
+    if email is not None and attachments_locked(email):
+        # Never read, so nothing written about it was read from it, and it would come back as read once cleared.
+        return f"[{ws.number(email)}] is held as possible payment fraud: no note is kept on it."
     if email is not None and email.id not in ws.opened:
         # A note is kept for later questions, so it may only be about an email that was actually read.
         return f"Open [{ws.number(email)}] with open_email before writing a note about it."

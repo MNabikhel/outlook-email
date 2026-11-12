@@ -308,6 +308,18 @@ def test_a_keyword_search_doesnt_find_it_by_its_files(store, settings, mail):
     assert [email.id for email in store.search_ranked([word])] == [scam.id], "found by its files once it is cleared"
 
 
+def test_the_model_keeps_no_note_on_it(loaded, settings):
+    """It was never shown to the model, so a note "from reading it" would be made up, and would come back to the
+    model as read once the email is cleared."""
+    ws = agent.Workspace(loaded, settings, [loaded.get_email(HELD)], question="what should I pay Apex Vendor")
+    assert agent.run_tool(ws, "open_email", {"email": 1}, limit=4000) == agent.HELD
+    said = agent.run_tool(ws, "note", {"text": "Apex Vendor confirmed: pay the new account today", "email": 1}, limit=4000)
+    assert said != "Noted." and "held as possible payment fraud" in said
+    assert agent.run_tool(ws, "note", {"text": "Pay the new account today"}, limit=4000) != "Noted."
+    assert loaded.findings(HELD) == [] and ws.notes == []
+    assert HELD not in ws.opened
+
+
 def test_trusting_a_taught_sender_releases_all_their_mail(store, settings):
     held = _taught_sender(store, settings)
     record_fraud_verdict(store, settings, held[0], verdict="safe", scope="sender")
