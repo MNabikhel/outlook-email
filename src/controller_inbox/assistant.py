@@ -615,8 +615,9 @@ def locked_files_answer(email: EmailRecord) -> str:
 def held_answer(store: Store, email: EmailRecord) -> str:
     """The answer about an email held as possible payment fraud, whatever was asked: why it is held (the check's own
     reasons, nothing the email says) and what to do. Neither the email nor its files are read to answer it."""
-    check = store.fraud_check(email.id) or {}
-    reasons = list(dict.fromkeys(signal.get("label") for signal in check.get("signals", []) if signal.get("label")))[:5]
+    from controller_inbox.fraud import hold_reasons
+
+    reasons = hold_reasons(email, store.fraud_check(email.id))
     why = ("It was held because: " + "; ".join(reasons) + ".\n\n") if reasons else ""
     return (
         "This email is held as possible payment fraud [1], so I don't read it or its files, and I won't answer "
@@ -624,7 +625,7 @@ def held_answer(store: Store, email: EmailRecord) -> str:
         + why
         + "Don't pay anything, change any bank details, open its files or follow its links because of it. Call the "
         "sender on a phone number you already have, not one from this email. If they confirm it is genuine, click "
-        "**Not fraud** on the email page (or trust the sender in Settings) and ask me again."
+        "**Not fraud** in the email's Fraud check (or trust the sender there) and ask me again."
     )
 
 

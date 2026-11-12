@@ -332,13 +332,16 @@ function fraudPanel(d, ctx) {
     }
   };
   const choices = [];
-  if (f.verdict !== "safe" && (level !== "none" || f.verdict === "fraud")) choices.push(btn("Not fraud", { class: "btn-sm", onclick: () => verdict("safe:email") }));
+  // Offered whenever the email is held, also when what you taught about its sender holds it and the check found nothing.
+  if (f.verdict !== "safe" && (level !== "none" || f.verdict === "fraud" || f.held)) choices.push(btn("Not fraud", { class: "btn-sm", onclick: () => verdict("safe:email") }));
   if (f.can_trust_sender) choices.push(btn(`Trust ${d.sender_email}`, { class: "btn-sm btn-quiet", onclick: () => verdict("safe:sender") }));
   if (f.can_trust_domain) choices.push(btn(`Trust @${f.sender_domain}`, { class: "btn-sm btn-quiet", onclick: () => verdict("safe:domain") }));
   if (f.verdict !== "fraud") choices.push(btn("This is fraud", { class: "btn-sm btn-danger", onclick: () => verdict("fraud:email") }));
   if (d.sender_email) choices.push(btn("Report this sender", { class: "btn-sm btn-danger-quiet", onclick: () => verdict("fraud:sender") }));
-  const label = level === "high" ? "Possible payment fraud" : level === "caution" ? "Double-check before paying" : f.verdict === "safe" ? "Marked not fraud" : "Nothing suspicious";
+  const label = level === "high" ? "Possible payment fraud" : f.held ? "Held as possible payment fraud" : level === "caution" ? "Double-check before paying" : f.verdict === "safe" ? "Marked not fraud" : "Nothing suspicious";
+  const tone = level === "high" || f.held ? "high" : level;
   const body = [
+    f.held_reason ? h("p", { class: "note" }, `${f.held_reason} Its files are locked and the model doesn't read it until you mark it Not fraud. To stop holding this sender's mail, trust the sender or correct the category.`) : null,
     f.verdict === "safe" ? h("p", { class: "note" }, "You marked this email as not fraud.") : f.verdict === "fraud" ? h("p", { class: "note" }, "You reported this email as fraud.") : null,
     f.signals && f.signals.length
       ? h(
@@ -350,11 +353,11 @@ function fraudPanel(d, ctx) {
     h("div", { class: "verdict" }, note, h("div", { class: "row-actions" }, choices)),
     h("p", { class: "muted small" }, "Every answer goes to the fraud log and changes how much these signals count next time. A request to change bank details always gets at least a caution, even from someone you trust."),
   ];
-  const head = h("span", { class: `tag ${level === "high" ? "tag-fraud" : level === "caution" ? "tag-due_soon" : "tag-ok"}` }, `${label} · score ${f.score}`);
-  if (level === "none") {
+  const head = h("span", { class: `tag ${tone === "high" ? "tag-fraud" : tone === "caution" ? "tag-due_soon" : "tag-ok"}` }, `${label} · score ${f.score}`);
+  if (tone === "none") {
     return h("details", { class: "rd-sec rd-fold", id: "rd-fraud" }, h("summary", { class: "rd-h" }, "Fraud check", h("span", { class: "rd-h-aside" }, head)), ...body);
   }
-  return section("Fraud check", { id: "rd-fraud", class: `fraud-${level}`, aside: head }, ...body);
+  return section("Fraud check", { id: "rd-fraud", class: `fraud-${tone}`, aside: head }, ...body);
 }
 
 /* ---------- Related mail: the conversation, and mail sharing an invoice, a PO or a file ---------- */

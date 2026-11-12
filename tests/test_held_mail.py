@@ -4,6 +4,8 @@ open in a mail app or download, where its links and files would work. Marking it
 
 from __future__ import annotations
 
+import html
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -93,3 +95,60 @@ def test_an_earlier_answer_quoting_its_text_is_left_out_once_it_is_held_again(lo
     assert not any("9988776612" in turn["text"] for turn in history)
     assert chats.LOCKED_ANSWER in [turn["text"] for turn in history]
     assert "9988776612" not in chats.past_context(loaded, "Which account does the wiring email say to use?", exclude="c2")
+
+
+def _taught_sender(store, settings) -> list[str]:
+    """A sender whose statement you corrected to a payment-instruction change, and two of their later emails: held
+    because of what you taught, with a fraud check that found nothing."""
+    from controller_inbox.folder_mail import ingest_folder
+    from controller_inbox.learn import record_correction
+    from msgfactory import write_msg
+
+    settings.ensure_data_dir()
+    kwargs = {"sender_name": "Vendor AR", "sender_email": "ar@vendor-x.com"}
+    write_msg(settings.inbox_incoming / "a.msg", "Statement for September", "Please see the statement.", message_id="<a@vendor-x.com>", **kwargs)
+    first = ingest_folder(store, settings)[0].id
+    record_correction(store, settings, email_id=first, corrected_category="payment_instruction_change", reason="they always try a bank switch")
+    later = []
+    for n in (2, 3):
+        write_msg(settings.inbox_incoming / f"m{n}.msg", f"Invoice 55{n}", f"Invoice 55{n}, due October 30.", message_id=f"<m{n}@vendor-x.com>", **kwargs)
+        later.append(ingest_folder(store, settings)[0].id)
+    return later
+
+
+def test_mail_held_by_what_you_taught_says_so_and_offers_not_fraud(store, settings):
+    from controller_inbox.web import create_app
+
+    held = _taught_sender(store, settings)[0]
+    email = store.get_email(held)
+    assert attachments_locked(email) and (store.fraud_check(held) or {}).get("level") == "none"
+    client = TestClient(create_app(settings, store), headers=PAGE)
+    panel = client.get(f"/api/mail/{held}").json()["fraud"]
+    assert panel["held"] and "taught" in panel["held_reason"], "the panel says why it is held, though the check found nothing"
+    page = html.unescape(client.get(f"/inbox/{held}").text)
+    assert 'value="safe:email"' in page and panel["held_reason"] in page, "the classic page offers Not fraud"
+    answer = assistant.held_answer(store, email)
+    assert "taught" in answer and "in Settings" not in answer and "Fraud check" in answer
+
+
+def test_the_held_answer_gives_the_strongest_reasons_and_none_that_count_for_it(loaded):
+    signals = [
+        {"key": "first_contact", "label": "First email from this address", "points": 10},
+        {"key": "urgency", "label": "Urgency or secrecy", "points": 10},
+        {"key": "reply_to_mismatch", "label": "Replies go to another address", "points": 15},
+        {"key": "trusted_domain", "label": "Trusted domain", "points": -30},
+        {"key": "attachment_link", "label": "Link to a file", "points": 10},
+        {"key": "display_name", "label": "Display name names someone else", "points": 10},
+        {"key": "lookalike_domain", "label": "Sender domain looks like a known one", "points": 40},
+    ]
+    loaded.save_fraud_check(HELD, 95, "high", signals, "2026-09-22T12:00:00+00:00")
+    answer = assistant.held_answer(loaded, loaded.get_email(HELD))
+    assert "Trusted domain" not in answer
+    because = answer.split("It was held because: ", 1)[1]
+    assert because.startswith("Sender domain looks like a known one; Replies go to another address;")
+
+
+def test_trusting_a_taught_sender_releases_all_their_mail(store, settings):
+    held = _taught_sender(store, settings)
+    record_fraud_verdict(store, settings, held[0], verdict="safe", scope="sender")
+    assert not any(attachments_locked(store.get_email(email_id)) for email_id in held)

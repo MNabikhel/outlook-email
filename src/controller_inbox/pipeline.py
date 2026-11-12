@@ -572,7 +572,7 @@ def _classify(
     script draft is built, so it can see amounts and dates. A correction
     the user already saved is kept and is not sent back to the model.
     """
-    from controller_inbox.learn import apply_learned, match_correction
+    from controller_inbox.learn import apply_learned, match_correction, trusted_since
 
     own_file = any(c.document_type == DocumentType.AP_INVOICE for c in attachments)
     me = me or SimpleNamespace(id=email_id, subject=subject, sender_email=sender_email, threading={}, received_at="", flags=[], invoice_file=own_file)
@@ -604,6 +604,8 @@ def _classify(
         invitation=invitation,
     )
     learned = match_correction(store, sender_email=sender_email, subject=subject, email_id=email_id)
+    if learned and trusted_since(store, learned, sender_email=sender_email):
+        learned = None
     return apply_learned(classified, learned) if learned else classified
 
 

@@ -50,6 +50,23 @@ def match_correction(store: Store, *, sender_email: str, subject: str, email_id:
     return None
 
 
+def trusted_since(store: Store, correction: dict, *, sender_email: str) -> bool:
+    """Whether you marked this sender (or their domain) "Not fraud" after teaching their mail as a payment-instruction
+    change. Your later word wins: their mail is no longer held for the teaching (the fraud check still runs)."""
+    from controller_inbox.fraud import domain_of
+
+    if correction.get("corrected_category") != DocumentType.PAYMENT_INSTRUCTION_CHANGE.value:
+        return False
+    sender = (sender_email or "").strip().lower()
+    wanted = {("sender", sender), ("domain", domain_of(sender))}
+    taught = correction.get("created_at") or ""
+    return any(
+        (row["kind"], row["value"]) in wanted and row["verdict"] == "safe" and (row.get("created_at") or "") >= taught
+        for row in store.trust_entries()
+        if sender
+    )
+
+
 def apply_learned(classification: Classification, correction: dict) -> Classification:
     corrected = DocumentType(correction["corrected_category"])
     reason = (correction.get("reason") or "").strip()

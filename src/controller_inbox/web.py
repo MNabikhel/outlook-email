@@ -492,7 +492,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             check = fraud.assess_email(store, fraud.trust_context(store, settings), email)
             saved = {"level": check.level, "score": check.score, "signals": check.signal_dicts(), "checked_at": ""}
         verdict = "safe" if "fraud_cleared" in email.flags else "fraud" if "fraud_confirmed" in email.flags else ""
-        return {**saved, "verdict": verdict}
+        # Held by what you taught about its sender: the check may have found nothing, and the panel says so.
+        taught = f"{fraud.TAUGHT_HOLD}, so this email is held." if fraud.taught_hold(email) else ""
+        return {**saved, "verdict": verdict, "held": fraud.attachments_locked(email), "held_reason": taught}
 
     def file_cards(email) -> list[dict]:
         cards = []

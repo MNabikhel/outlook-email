@@ -716,6 +716,30 @@ def attachments_locked(email: "EmailRecord") -> bool:
     return "fraud_risk" in email.flags or email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE
 
 
+TAUGHT_HOLD = "You taught this sender's mail as a payment-instruction change"
+
+
+def taught_hold(email: "EmailRecord") -> bool:
+    """Held because of a correction you saved for its sender (``learn.apply_learned``), whatever the check found."""
+    from controller_inbox.models import DocumentType
+
+    return (
+        attachments_locked(email)
+        and "user_trained" in email.flags
+        and "fraud_confirmed" not in email.flags
+        and email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE
+    )
+
+
+def hold_reasons(email: "EmailRecord", check: dict | None, *, limit: int = 5) -> list[str]:
+    """Why an email is held, strongest first: your own word on it, then the check's signals that count against it.
+    Signals that count for it ("Trusted domain") are no reason to hold it."""
+    own = ["You marked it as fraud"] if "fraud_confirmed" in email.flags else [TAUGHT_HOLD] if taught_hold(email) else []
+    signals = [signal for signal in (check or {}).get("signals") or [] if isinstance(signal, dict) and signal.get("label")]
+    against = sorted((signal for signal in signals if int(signal.get("points") or 0) > 0), key=lambda signal: -int(signal["points"]))
+    return list(dict.fromkeys([*own, *(signal["label"] for signal in against)]))[:limit]
+
+
 def save_check(store: "Store", email: "EmailRecord", check: FraudCheck, *, now: datetime | None = None, event: str = "") -> None:
     """Remember the check; log it when it flags something new or changes level."""
     at = _stamp(now)

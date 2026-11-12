@@ -313,3 +313,23 @@ def test_the_workspace_chat_keeps_its_conversation_and_answer_while_it_loads(sit
     assert "What does this email need from me?" in texts[2] and "part11" in texts[3]
     assert [turn["role"] for turn in store.chat_turns(chat_id)] == ["user", "assistant"] * 2
     assert context.errors == []
+
+
+def test_mail_held_by_what_you_taught_offers_not_fraud_in_the_workspace(site, page, context, store, settings, mail):
+    # Its fraud check found nothing, but a correction you saved for its sender holds it: the panel says so, open.
+    from controller_inbox.learn import record_correction
+    from msgfactory import write_msg
+
+    kwargs = {"sender_name": "Vendor AR", "sender_email": "ar@vendor-x.com"}
+    write_msg(settings.inbox_incoming / "t1.msg", "Statement for September", "Please see the statement.", message_id="<t1@vendor-x.com>", **kwargs)
+    first = ingest_folder(store, settings)[0].id
+    record_correction(store, settings, email_id=first, corrected_category="payment_instruction_change", reason="they always try a bank switch")
+    write_msg(settings.inbox_incoming / "t2.msg", "Invoice 552", "Invoice 552, due October 30.", message_id="<t2@vendor-x.com>", **kwargs)
+    held = ingest_folder(store, settings)[0].id
+    page.goto(f"{site}/app/mail/{held}")
+    panel = page.wait_for_selector("#rd-fraud")
+    assert panel.evaluate("el => el.tagName") != "DETAILS", "not folded away as nothing suspicious"
+    text = panel.inner_text().lower()
+    assert "held as possible payment fraud" in text and "you taught this sender" in text
+    assert panel.query_selector("button:has-text('Not fraud')") is not None
+    assert context.errors == []

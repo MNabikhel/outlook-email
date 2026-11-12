@@ -38,7 +38,7 @@
     {% endfor %}
   </div>
   {% endif %}
-  {% if check.level != 'none' %}{% include "_fraud_panel.html" %}{% endif %}
+  {% if check.level != 'none' or check.held %}{% include "_fraud_panel.html" %}{% endif %}
   {% with back="/inbox/" ~ email.id, coding_class="panel" %}{% include "_coding_panel.html" %}{% endwith %}
 
   {% if email.importance_reasons %}
@@ -144,7 +144,7 @@
   </section>
   {% endif %}
 
-  {% if check.level == 'none' %}{% include "_fraud_panel.html" %}{% endif %}
+  {% if check.level == 'none' and not check.held %}{% include "_fraud_panel.html" %}{% endif %}
   <section class="panel correct" id="correct">
     <h3>Wrong category?</h3>
     <p class="muted">Say what this actually is, and why. The next message from this sender follows that correction, and the example is saved for the local model.</p>
