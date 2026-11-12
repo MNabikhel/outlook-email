@@ -1107,7 +1107,7 @@ class Store:
                 f" + CASE WHEN fold(sender_name) {_LIKE} OR fold(sender_email) {_LIKE} THEN 3 ELSE 0 END"
                 f" + CASE WHEN fold(summary) {_LIKE} THEN 2 ELSE 0 END"
                 f" + CASE WHEN fold(body_text) {_LIKE} THEN 1 ELSE 0 END"
-                f" + CASE WHEN EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
+                f" + CASE WHEN {_FILES_SEARCHED} AND EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
                 f" AND (fold(a.filename) {_LIKE} OR fold(a.extracted_text) {_LIKE})) THEN 1 ELSE 0 END)"
             )
             params.extend([like] * 7)
@@ -2749,10 +2749,14 @@ _NOT_FLAGGED = (
 _PRIORITY_ORDER = "CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END"
 # Longest search word kept: SQLite refuses a LIKE pattern over 50,000 bytes (a pasted blob in the search box).
 _TERM_CHARS = 200
+# The files of mail held as possible payment fraud decide nothing a search finds, as in search by meaning
+# (semantic._without_locked_files): what a locked file says is not told by which email a search turns up.
+_FILES_SEARCHED = f"NOT {_held_sql('emails')}"
+
 _MATCH_ANY = (
     f"(fold(subject) {_LIKE} OR fold(sender_email) {_LIKE} OR fold(sender_name) {_LIKE} OR fold(summary) {_LIKE}"
     f" OR fold(body_text) {_LIKE}"
-    " OR EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
+    f" OR {_FILES_SEARCHED} AND EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = emails.id"
     f" AND (fold(a.filename) {_LIKE} OR fold(a.extracted_text) {_LIKE}))"
     # The cost code an AP invoice was coded to, and its description, find it too.
     f" OR EXISTS (SELECT 1 FROM cost_codings c WHERE c.email_id = emails.id AND fold(c.codes) {_LIKE}))"

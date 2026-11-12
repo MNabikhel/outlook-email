@@ -292,6 +292,22 @@ def test_the_classic_pages_dont_show_its_files_text(store, settings, mail):
     assert said in " ".join(html.unescape(client.get(f"/inbox/{scam.id}").text).split()), "shown once it is marked safe"
 
 
+def test_a_keyword_search_doesnt_find_it_by_its_files(store, settings, mail):
+    """Its files decide nothing the chat or the mail list finds, as in search by meaning: a word only its locked
+    file holds finds nothing (and the model isn't told one held email has it)."""
+    from controller_inbox.web import create_app
+
+    scam = mail["Updated remittance details"]
+    att = store.get_email(scam.id).attachments[0]
+    word = next(w for w in att.extracted_text.split() if len(w) > 5 and w.isalpha() and w.lower() not in (scam.subject + scam.body_text).lower())
+    assert store.search_ranked([word]) == [] and store.list_emails(q=word) == []
+    ws = agent.Workspace(store, settings, [], question=word)
+    assert "held" not in agent.run_tool(ws, "search_mail", {"query": word}, limit=4000)
+    assert TestClient(create_app(settings, store), headers=PAGE).get("/api/mail", params={"q": word}).json()["items"] == []
+    record_fraud_verdict(store, settings, scam.id, verdict="safe")
+    assert [email.id for email in store.search_ranked([word])] == [scam.id], "found by its files once it is cleared"
+
+
 def test_trusting_a_taught_sender_releases_all_their_mail(store, settings):
     held = _taught_sender(store, settings)
     record_fraud_verdict(store, settings, held[0], verdict="safe", scope="sender")
