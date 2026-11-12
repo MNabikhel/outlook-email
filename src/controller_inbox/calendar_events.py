@@ -382,32 +382,128 @@ def _blocks(lines: list[tuple[str, dict, str]], kind: str, *, limit: int | None 
 def _vtimezones(lines, text: str = ""):
     """The zones an invitation names, by its TZID: an IANA name, a Windows name ("Eastern Standard Time"), else the
     zone the invitation itself defines (its VTIMEZONE block: Outlook's "(UTC-05:00) Eastern Time (US & Canada)" or
-    "Customized Time Zone", with its own daylight saving rules), else the "(UTC-05:00)" offset in its name."""
+    "Customized Time Zone", with its own daylight saving rules), else the "(UTC-05:00)" offset in its name. A name
+    that is none of these is kept as None, so it isn't looked up again; past ``MAX_ZONES`` names, the others are
+    None too (a real invitation names one or two, and anyone can email a file naming thousands)."""
     zones: dict = {}
-    defined = {}
-    if "BEGIN:VTIMEZONE" in text:
-        try:
-            import io
-
-            from dateutil.tz import tzical
-
-            calendar = tzical(io.StringIO(re.sub(r"\r?\n", "\r\n", text)))
-            defined = {key: calendar.get(key) for key in calendar.keys()}
-        except Exception:  # a block dateutil can't read: the names and offsets below still apply
-            defined = {}
+    defined = _defined_zones(lines) if "BEGIN:VTIMEZONE" in text.upper() else {}
     for name, params, value in lines:
         tzid = params.get("TZID") or (value if name == "TZID" else "")
-        if tzid and tzid not in zones and (zone := zone_named(tzid) or defined.get(tzid) or _offset_zone(tzid)) is not None:
-            zones[tzid] = zone
+        if not tzid or tzid in zones:
+            continue
+        zones[tzid] = (zone_named(tzid) or defined.get(tzid) or _offset_zone(tzid)) if len(zones) < MAX_ZONES else None
     return zones
 
 
+MAX_ZONES = 20  # zones looked up for one file
+# What a zone's STANDARD or DAYLIGHT part may say: dateutil refuses any other property (Thunderbird's
+# X-LIC-LOCATION, a TZNAME with a language), and loses every zone of the file with it.
+_ZONE_PROPERTIES = ("DTSTART", "TZOFFSETFROM", "TZOFFSETTO", "RRULE")
+
+
+def _defined_zones(lines) -> dict:
+    """The zones the file's VTIMEZONE blocks define, by TZID, each read on its own (a block dateutil can't read loses
+    only itself), ``MAX_ZONES`` at most. A zone changes its clocks once or twice a year: a part whose rule is not a
+    plain yearly one ("the second Sunday of March") is no real zone's, and dateutil would walk such a rule from 1601
+    for every time asked of it (every second, or day by day to year 9999 for a day that never comes), so that zone
+    is its standard offset all year."""
+    import io
+
+    from dateutil.tz import tzical
+
+    defined: dict = {}
+    block: list | None = None
+    for name, params, value in lines:
+        if name == "BEGIN" and value.upper() == "VTIMEZONE":
+            block = []
+        elif block is not None and name == "END" and value.upper() == "VTIMEZONE":
+            tzid, zone = _zone_of(block, io, tzical)
+            if tzid and zone is not None:
+                defined.setdefault(tzid, zone)
+            block = None
+            if len(defined) >= MAX_ZONES:
+                break
+        elif block is not None and len(block) < 200:
+            block.append((name, params, value))
+    return defined
+
+
+def _zone_of(block, io, tzical):
+    """One VTIMEZONE block's (TZID, zone); the zone is None when it can't be read."""
+    tzid = next((value for name, _params, value in block if name == "TZID"), "")
+    out, offsets, plain = [], [], True
+    part = ""
+    for name, _params, value in block:
+        if name == "BEGIN" and value.upper() in ("STANDARD", "DAYLIGHT"):
+            part = value.upper()
+            out.append(f"BEGIN:{part}")
+        elif name == "END" and part and value.upper() == part:
+            out.append(f"END:{part}")
+            part = ""
+        elif part and name in _ZONE_PROPERTIES:
+            if name == "TZOFFSETTO":
+                offsets.append((part, value.strip()))
+            if name == "RRULE" and not _yearly_change(value):
+                plain = False
+            out.append(f"{name}:{value.strip()}")
+    if not tzid:
+        return "", None
+    if not plain:
+        standard = next((value for part, value in offsets if part == "STANDARD"), offsets[0][1] if offsets else "")
+        return tzid, _fixed_offset(standard)
+    try:
+        text = "\r\n".join(["BEGIN:VTIMEZONE", "TZID:" + re.sub(r"[\r\n]", "", tzid), *out, "END:VTIMEZONE"])
+        return tzid, tzical(io.StringIO(text)).get(tzid)
+    except Exception:  # a block dateutil can't read: the names and offsets still apply
+        return tzid, None
+
+
+def _yearly_change(rule: str) -> bool:
+    """A zone's rule for when its clocks change, as real zones write it: yearly, in one month, on one day of it
+    ("BYDAY=2SU", "BYDAY=-1SU"; or a week of days, "BYMONTHDAY=8,9,10,11,12,13,14;BYDAY=SU"), with an UNTIL or COUNT
+    at most. Such a rule comes true every year or every few, so dateutil finds its dates in a moment."""
+    parts = dict(part.partition("=")[::2] for part in rule.upper().strip().split(";") if part)
+    if parts.get("FREQ") != "YEARLY" or parts.get("INTERVAL", "1") != "1":
+        return False
+    if set(parts) - {"FREQ", "INTERVAL", "BYMONTH", "BYDAY", "BYMONTHDAY", "UNTIL", "COUNT", "WKST"}:
+        return False
+    if not re.fullmatch(r"(1[0-2]|[1-9])", parts.get("BYMONTH", "")):
+        return False
+    days = parts.get("BYMONTHDAY")
+    weekday = parts.get("BYDAY")
+    if days is not None:
+        try:
+            numbers = sorted(int(day) for day in days.split(","))
+        except ValueError:
+            return False
+        if not all(1 <= day <= 28 for day in numbers):
+            return False
+        if weekday is None:
+            return len(numbers) == 1
+        return re.fullmatch(r"(SU|MO|TU|WE|TH|FR|SA)", weekday) is not None and numbers == list(range(numbers[0], numbers[0] + 7))
+    return weekday is None or re.fullmatch(r"(-?[1-5])?(SU|MO|TU|WE|TH|FR|SA)", weekday) is not None
+
+
+def _fixed_offset(value: str):
+    """A zone's offset as written ("-0500", "+0530", "+053000"); None when it isn't one."""
+    match = re.fullmatch(r"([+-])(\d{2})(\d{2})(\d{2})?", value.strip())
+    if not match or int(match.group(2)) > 23 or int(match.group(3)) > 59:
+        return None
+    span = timedelta(hours=int(match.group(2)), minutes=int(match.group(3)), seconds=int(match.group(4) or 0))
+    return timezone(-span if match.group(1) == "-" else span)
+
+
 def zone_named(name: str) -> ZoneInfo | None:
+    """The IANA zone a TZID names: itself, a Windows name, or the zone a path-like name ends in (SOGo's
+    "/inverse.ca/20091015_1/America/New_York", Thunderbird's "/mozilla.org/20050126_1/America/New_York")."""
     from tzlocal import windows_tz
 
     candidates = [name, windows_tz.win_tz.get(name, "")]
+    if name.startswith("/"):
+        pieces = [piece for piece in name.split("/") if piece]
+        candidates += ["/".join(pieces[-3:]), "/".join(pieces[-2:])]
     for candidate in candidates:
-        if not candidate:
+        if not candidate or candidate.startswith("/"):
             continue
         try:
             return ZoneInfo(candidate)
@@ -451,7 +547,7 @@ def _whens(prop, zones) -> list[tuple[datetime | date, bool]]:
             out.append((stamp.replace(tzinfo=timezone.utc), False))
             continue
         tzid = params.get("TZID", "")
-        zone = zones.get(tzid) or (zone_named(tzid) or _offset_zone(tzid) if tzid else None)
+        zone = zones[tzid] if tzid in zones else (zone_named(tzid) or _offset_zone(tzid) if tzid else None)
         # Kept in its own zone, so a repeating meeting stays at its local time across daylight saving changes.
         out.append((stamp.replace(tzinfo=zone) if zone else stamp.astimezone(), False))  # no zone: this computer's
     return out

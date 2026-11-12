@@ -90,3 +90,62 @@ def test_an_invitation_stored_cut_off_is_read_again_from_its_kept_file(store, se
     (folder / safe_filename("invite.ics")).write_bytes(data)
     found = cal._kept_invitations(store.get_email("m1"), settings, NOW)
     assert found and found[0].subject == "Weekly close sync"
+
+
+def _zone(tzid: str, standard_rule: str, daylight_rule: str = "FREQ=YEARLY;BYDAY=2SU;BYMONTH=3", extra: str = "") -> str:
+    return (
+        f"BEGIN:VTIMEZONE\r\nTZID:{tzid}\r\n{extra}BEGIN:STANDARD\r\nDTSTART:16010101T020000\r\nTZOFFSETFROM:-0400\r\n"
+        f"TZOFFSETTO:-0500\r\nRRULE:{standard_rule}\r\nEND:STANDARD\r\nBEGIN:DAYLIGHT\r\nDTSTART:16010101T020000\r\n"
+        f"TZOFFSETFROM:-0500\r\nTZOFFSETTO:-0400\r\nRRULE:{daylight_rule}\r\nEND:DAYLIGHT\r\nEND:VTIMEZONE\r\n"
+    )
+
+
+def test_a_zone_whose_rules_repeat_every_hour_or_never_come_true_is_read_in_a_moment():
+    from time import monotonic
+
+    for rule in ("FREQ=SECONDLY", "FREQ=HOURLY", "FREQ=DAILY;BYMONTH=2;BYMONTHDAY=31", "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=31"):
+        data = _ics(_event("UID:a", "SUMMARY:x", "DTSTART;TZID=Customized Time Zone:20261026T090000",
+                           "DTEND;TZID=Customized Time Zone:20261026T100000"), zones=_zone("Customized Time Zone", rule))
+        began = monotonic()
+        [meeting] = cal.from_ics(data, now=NOW)
+        assert monotonic() - began < 1, rule
+        assert meeting.start == "2026-10-26T14:00:00+00:00", "read at the zone's standard offset"
+    # Many zones, each built to take seconds, in one file.
+    zones = "".join(_zone(f"Z{n}", "FREQ=DAILY;BYMONTH=2;BYMONTHDAY=31", "FREQ=DAILY;BYMONTH=2;BYMONTHDAY=30") for n in range(10))
+    events = [_event(f"UID:u{n}", f"DTSTART;TZID=Z{n}:20261026T090000") for n in range(10)]
+    began = monotonic()
+    assert len(cal.from_ics(_ics(*events, zones=zones), now=NOW)) == 10
+    assert monotonic() - began < 2
+
+
+def test_a_zone_with_outlooks_rules_keeps_its_daylight_saving():
+    data = _ics(_event("UID:a", "DTSTART;TZID=Customized Time Zone:20261019T090000", "RRULE:FREQ=WEEKLY;COUNT=4"),
+                zones=_zone("Customized Time Zone", "FREQ=YEARLY;INTERVAL=1;BYDAY=1SU;BYMONTH=11"))
+    assert [m.start[11:16] for m in cal.from_ics(data, now=NOW)] == ["13:00", "13:00", "14:00", "14:00"]
+
+
+def test_a_thunderbird_or_sogo_zone_with_its_own_properties_is_still_read(monkeypatch):
+    zone = (
+        "BEGIN:VTIMEZONE\r\nTZID:/inverse.ca/20091015_1/Custom/Place\r\nX-LIC-LOCATION:Custom/Place\r\nBEGIN:DAYLIGHT\r\n"
+        "TZOFFSETFROM:-0500\r\nTZOFFSETTO:-0400\r\nTZNAME;LANGUAGE=en:EDT\r\nDTSTART:19700308T020000\r\n"
+        "RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=2SU\r\nEND:DAYLIGHT\r\nBEGIN:STANDARD\r\nTZOFFSETFROM:-0400\r\nTZOFFSETTO:-0500\r\n"
+        "TZNAME:EST\r\nDTSTART:19701101T020000\r\nRRULE:FREQ=YEARLY;BYMONTH=11;BYDAY=1SU\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n"
+    )
+    broken = "BEGIN:VTIMEZONE\r\nTZID:Broken\r\nBEGIN:STANDARD\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\n"
+    data = _ics(_event("UID:s", "DTSTART;TZID=/inverse.ca/20091015_1/Custom/Place:20261008T100000"), zones=broken + zone)
+    [meeting] = cal.from_ics(data, now=NOW)
+    assert meeting.start == "2026-10-08T14:00:00+00:00", "10:00 at UTC-4"
+    # A path-like name ending in a real zone is that zone.
+    data = _ics(_event("UID:m", "DTSTART;TZID=/mozilla.org/20050126_1/America/New_York:20261208T100000"))
+    [meeting] = cal.from_ics(data, now=NOW)
+    assert meeting.start == "2026-12-08T15:00:00+00:00"
+
+
+def test_unknown_zone_names_are_looked_up_once(monkeypatch):
+    looked = []
+    real = cal.zone_named
+    monkeypatch.setattr(cal, "zone_named", lambda name: looked.append(name) or real(name))
+    lines = "".join(f"X-NOTE;TZID=Z{n}:1\r\n" for n in range(500)) + "X-NOTE;TZID=Nowhere/Land:1\r\n" * 500
+    events = [_event(f"UID:u{n}", "DTSTART;TZID=Nowhere/Land:20261009T140000") for n in range(50)]
+    cal.from_ics(_ics(*events, zones=lines), now=NOW)
+    assert len(looked) <= cal.MAX_ZONES + 1
