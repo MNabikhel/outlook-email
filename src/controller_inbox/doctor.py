@@ -192,7 +192,7 @@ def _outlook_sync(settings) -> Check:
     except Exception:
         return Check(OK, "Classic Outlook: can be read on this computer")
     if not cfg["consent"]:
-        return Check(OK, "Classic Outlook: can be read on this computer; not connected (Settings → Sync inbox)")
+        return Check(OK, "Classic Outlook: can be read on this computer; not connected (Settings, Sync inbox)")
     said = f"connected, last synced {last[:16].replace('T', ' ')} UTC" if last else "connected, not synced yet"
     if cfg["calendar"]:
         said += f"; calendar read {calendar[:16].replace('T', ' ')} UTC" if calendar else "; calendar on, not read yet"
@@ -235,5 +235,13 @@ def report(found: list[Check]) -> str:
 
 def main() -> int:
     found = checks()
+    # A Windows console writes in its own code page: a character it lacks is shown as "?" rather than stopping the
+    # check with an error.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
+            pass
     print(report(found))
     return 1 if any(check.state == PROBLEM for check in found) else 0
