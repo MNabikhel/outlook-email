@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from controller_inbox import cli
-from controller_inbox.cli import DIGEST_SENT_KEY, watch_tick
+from controller_inbox.cli import watch_tick
 from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, digest_window
 from controller_inbox.overnight import RunBusy, run_lock, run_overnight
@@ -47,38 +47,32 @@ def _eml(path: Path, *, subject: str, body: str) -> None:
     path.write_bytes(message.as_bytes())
 
 
-# watch emails the digest once a day, even when another run saved it first, and rebuilds after new mail.
-def test_watch_sends_the_digest_once_even_if_overnight_saved_it(settings: Settings, store: Store, monkeypatch):
+# watch rebuilds today's digest after new mail, even when another run saved it first; it sends nothing.
+def test_watch_rebuilds_the_digest_after_new_mail_and_sends_nothing(settings: Settings, store: Store, monkeypatch):
     settings.ensure_data_dir()
-    settings.digest_to, settings.azure_client_id, settings.digest_hour = "me@taz.com", "client-id", 7
+    settings.azure_client_id, settings.digest_hour = "client-id", 7
     monkeypatch.setattr(cli, "_graph_mailbox", lambda _settings: object())
     monkeypatch.setattr(cli, "ingest_mailbox", lambda *a, **k: [])
     morning = datetime(2026, 9, 22, 8, 0, tzinfo=settings.tz)
     build_digest(store, as_of=morning.date(), generated_at=morning, tz=settings.tz)  # the 06:30 overnight run
 
-    first = watch_tick(settings, store, now=morning)
-    assert first["send"] is True and first["digest"] is not None
-    store.set_state(DIGEST_SENT_KEY, morning.date().isoformat())
-
     quiet = watch_tick(settings, store, now=morning.replace(hour=9))
-    assert quiet["send"] is False and quiet["digest"] is None
+    assert quiet["digest"] is None and "send" not in quiet
 
     _eml(settings.inbox_incoming / "late.eml", subject="Late invoice", body="Invoice INV-77 for $90.00.")
     later = watch_tick(settings, store, now=morning.replace(hour=10))
-    assert later["send"] is False
     assert later["digest"] is not None, "new mail rebuilds today's digest"
     assert "Late invoice" in store.get_digest(morning.date().isoformat())["markdown"]
 
 
-def test_watch_records_the_day_it_sent(settings: Settings, store: Store, monkeypatch):
+def test_digest_send_no_longer_sends_and_says_so(settings: Settings, store: Store, monkeypatch, capsys):
+    # A scheduled "digest --send" from before still runs: it writes the digest and says it isn't emailed.
+    monkeypatch.setattr(cli, "load_settings", lambda *a, **k: settings)
     settings.ensure_data_dir()
-    settings.digest_to, settings.azure_client_id, settings.digest_hour = "me@taz.com", "client-id", 0
-    monkeypatch.setattr(cli, "_graph_mailbox", lambda _settings: object())
-    monkeypatch.setattr(cli, "ingest_mailbox", lambda *a, **k: [])
-    sent = []
-    monkeypatch.setattr(cli, "_send_digest", lambda _s, payload, period: sent.append(period))
-    assert cli._watch(settings, store, once=True) == 0
-    assert sent and store.get_state(DIGEST_SENT_KEY) == sent[0]
+    assert cli.main(["digest", "--send", "--date", "2026-09-22"]) == 0
+    said = capsys.readouterr().out
+    assert "no longer emailed" in said and "sends nothing" in said
+    assert not hasattr(cli, "_send_digest")
 
 
 # One failing check does not stop watch.

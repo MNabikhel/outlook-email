@@ -24,7 +24,6 @@ from controller_inbox.store import Store
 
 DEMO_NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
 # The day ``watch`` last emailed the digest. Kept apart from "a digest was saved", which other runs do too.
-DIGEST_SENT_KEY = "digest_sent_on"
 
 log = logging.getLogger("controller_inbox")
 
@@ -64,7 +63,8 @@ def main(argv: list[str] | None = None) -> int:
 
     digest = sub.add_parser("digest", help="Rebuild today's focus digest from the local database.")
     digest.add_argument("--date", default=None, help="YYYY-MM-DD (defaults to today in the configured timezone).")
-    digest.add_argument("--send", action="store_true", help="Email the digest via Graph if CONTROLLER_INBOX_DIGEST_TO is set.")
+    # Kept so a scheduled "digest --send" still runs: CloseDesk no longer sends mail, so it only says so.
+    digest.add_argument("--send", action="store_true", help=argparse.SUPPRESS)
     digest.add_argument("--history", action="store_true", help="List saved digests instead of building one.")
     digest.add_argument("--json", action="store_true", help="Print JSON instead of markdown.")
 
@@ -213,7 +213,8 @@ def main(argv: list[str] | None = None) -> int:
             print(payload["markdown"])
             print(f"\nWrote {md_path}\nWrote {html_path}")
         if args.send:
-            _send_digest(settings, payload, as_of.isoformat())
+            print("The digest is no longer emailed: CloseDesk only reads your mailbox and sends nothing. "
+                  f"Open or forward the file above ({html_path}).")
         return 0
 
     if args.cmd == "serve":
@@ -588,7 +589,7 @@ def watch_tick(settings: Settings, store: Store, *, force_digest: bool = False, 
     """One watch cycle. Never touches the sample mailbox.
 
     After the digest hour, today's digest is (re)built when there is none yet or new mail came in, even if
-    another run already saved one. ``send`` is True until the digest has been emailed today (``DIGEST_SENT_KEY``).
+    another run already saved one.
     """
     from controller_inbox.folder_mail import ingest_folder
     from controller_inbox.overnight import read_queue, run_lock
@@ -612,11 +613,9 @@ def watch_tick(settings: Settings, store: Store, *, force_digest: bool = False, 
     now = now or datetime.now(settings.tz)
     as_of = local_today(settings.tz, now)
     wrote = None
-    send = False
     if now.hour >= settings.digest_hour:
-        send = bool(settings.digest_to and settings.graph_configured) and store.get_state(DIGEST_SENT_KEY) != as_of.isoformat()
         changed = bool(records or reading["read_ids"])
-        if force_digest or changed or send or not store.get_digest(as_of.isoformat()):
+        if force_digest or changed or not store.get_digest(as_of.isoformat()):
             payload = make_digest(store, settings, as_of=as_of, now=now)
             write_digest_files(payload, settings.digest_dir, as_of.isoformat())
             wrote = payload
@@ -624,7 +623,6 @@ def watch_tick(settings: Settings, store: Store, *, force_digest: bool = False, 
         "records": records,
         "read": len(reading["read_ids"]),
         "digest": wrote,
-        "send": send,
         "busy": not locked,
         "graph_note": graph_note,
     }
@@ -647,9 +645,6 @@ def _watch(settings: Settings, store: Store, *, once: bool) -> int:
             payload = result["digest"]
             if payload:
                 print(f"Digest {payload['date']} written: {payload['headline']}")
-                if result.get("send"):
-                    _send_digest(settings, payload, payload["date"])
-                    store.set_state(DIGEST_SENT_KEY, payload["date"])
         except Exception as exc:  # one bad check (network, Outlook, a file) must not stop the watch
             log.exception("watch check failed")
             print(f"{stamp} this check failed ({type(exc).__name__}: {exc}). Trying again in {max(30, settings.poll_seconds)}s.", flush=True)
@@ -662,17 +657,6 @@ def _watch(settings: Settings, store: Store, *, once: bool) -> int:
     while True:
         time.sleep(max(30, settings.poll_seconds))
         tick()
-
-
-def _send_digest(settings: Settings, payload: dict, period: str) -> None:
-    if not settings.digest_to:
-        raise SystemExit("CONTROLLER_INBOX_DIGEST_TO is not set.")
-    from controller_inbox.graph import DIGEST_SUBJECT
-
-    mailbox = _graph_mailbox(settings)
-    subject = f"{DIGEST_SUBJECT}{period}: {payload['headline']}"
-    mailbox.send_mail(settings.digest_to, subject, payload["html"])
-    print(f"Sent digest to {settings.digest_to}")
 
 
 def export_actions_csv(store: Store) -> str:

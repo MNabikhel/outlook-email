@@ -28,7 +28,8 @@ def test_a_line_left_empty_in_dotenv_means_the_default_and_amounts_may_have_comm
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text("CONTROLLER_INBOX_PORT=\nCONTROLLER_INBOX_WRITEBACK=\nCONTROLLER_INBOX_HIGH_AMOUNT=$25,000\n")
     settings = Settings()
-    assert (settings.port, settings.writeback, settings.high_amount) == (8765, False, 25000.0)
+    assert (settings.port, settings.high_amount) == (8765, 25000.0)
+    assert not hasattr(settings, "writeback"), "an old write-back setting in .env is ignored: Outlook is only read"
 
 
 def test_a_windows_path_in_double_quotes_is_refused_with_a_clear_message():

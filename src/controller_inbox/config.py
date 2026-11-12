@@ -68,9 +68,7 @@ class Settings(BaseSettings):
     high_amount: float = 10_000.0
     vip_senders: str = ""
     trusted_domains: str = ""
-    writeback: bool = False
     digest_hour: int = 7
-    digest_to: str = ""
     mailbox: str = ""
     llm: bool | None = None
     llm_model: str = "local-model"

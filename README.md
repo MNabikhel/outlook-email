@@ -343,8 +343,6 @@ CloseDesk talks to Outlook through **Microsoft Graph**. You need an Entra ID app
 4. Under **API permissions** add Microsoft Graph *delegated* permissions:
    - `User.Read`
    - `Mail.Read` (required)
-   - `Mail.ReadWrite` (optional — flag and categorize mail in Outlook)
-   - `Mail.Send` (optional — email yourself the daily digest)
    - Grant admin consent if your tenant requires it
 5. Copy the **Application (client) ID**. Copy `.env.example` to `.env` and set:
 
@@ -353,8 +351,6 @@ AZURE_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 AZURE_TENANT_ID=common
 # Time zone follows this computer. Set an IANA name to pin one, or change it in Setup.
 # CONTROLLER_INBOX_TIMEZONE=auto
-CONTROLLER_INBOX_WRITEBACK=false
-# CONTROLLER_INBOX_DIGEST_TO=you@yourco.com
 ```
 
 6. Sign in and pull mail:
@@ -371,16 +367,16 @@ Leave it running in the background:
 python -m controller_inbox watch
 ```
 
-That command polls Graph on `CONTROLLER_INBOX_POLL_SECONDS` (default 2 minutes) and writes the daily digest at `CONTROLLER_INBOX_DIGEST_HOUR` (default 7:00 local), rebuilding it when new mail arrives later that day. With `CONTROLLER_INBOX_DIGEST_TO` set it emails the digest once a day, even if the overnight run already wrote one. A failed check (network, Outlook) is logged and retried on the next poll. Only one run reads the drop folder at a time (`overnight`, `run`, `watch`, and the dashboard's **Process new mail** share a lock in the data folder); a second one skips with a message. A cron equivalent if you prefer not to keep a process up:
+That command polls Graph on `CONTROLLER_INBOX_POLL_SECONDS` (default 2 minutes) and writes the daily digest at `CONTROLLER_INBOX_DIGEST_HOUR` (default 7:00 local), rebuilding it when new mail arrives later that day. A failed check (network, Outlook) is logged and retried on the next poll. Only one run reads the drop folder at a time (`overnight`, `run`, `watch`, and the dashboard's **Process new mail** share a lock in the data folder); a second one skips with a message. A cron equivalent if you prefer not to keep a process up:
 
 ```cron
 */15 * * * * cd /path/to/outlook-email && .venv/bin/python -m controller_inbox sync
-0 7 * * *   cd /path/to/outlook-email && .venv/bin/python -m controller_inbox digest --send
+0 7 * * *   cd /path/to/outlook-email && .venv/bin/python -m controller_inbox digest
 ```
 
 ### Daemon / shared mailbox (optional)
 
-If IT would rather do app-only access against a shared mailbox, create a *confidential* client (client secret), grant **application** Graph permissions `Mail.Read` (and `Mail.ReadWrite` / `Mail.Send` if you want write-back or digest mail), then set:
+If IT would rather do app-only access against a shared mailbox, create a *confidential* client (client secret), grant the **application** Graph permission `Mail.Read` (CloseDesk only reads), then set:
 
 ```env
 AZURE_CLIENT_ID=...
@@ -512,6 +508,6 @@ The suite classifies the demo mailbox end-to-end (including the fraud wire and d
 
 - Mail is processed on the machine that runs CloseDesk and stored in local SQLite.
 - Routing / account / IBAN values are redacted in stored bodies; only last-4 is kept for matching.
-- Outlook write-back is **off** until you set `CONTROLLER_INBOX_WRITEBACK=true`.
+- Outlook and Microsoft 365 are only read: CloseDesk asks Microsoft only to sign in and read mail, and never changes, files, flags or sends anything in the mailbox.
 - There is no cloud AI in the default path. The model, when used, runs on the laptop, and so do the chat box and reply drafts. Ask CloseDesk conversations, and the files you add to them, are saved in the same local SQLite database and listed under **Past conversations** (the clock button in the chat box); delete one there (trash icon) to remove it and its files. The fraud rules are deterministic so a $48,500 “new account” email cannot be quietly labeled “FYI”, whatever the model says. The chat's tools only read; attachment text is given to the model as data, never as instructions, and files from fraud-flagged mail are never given to it. Dashboard forms refuse posts from other websites.
 - The dashboard has no login. It listens on `127.0.0.1` (this computer only) unless you set `CONTROLLER_INBOX_HOST`; on any other address it prints a warning, answers only to this computer's own names and addresses plus any listed in `CONTROLLER_INBOX_ALLOWED_HOSTS` (comma-separated), and anyone who can reach it can read your mail.

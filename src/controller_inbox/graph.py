@@ -1,3 +1,10 @@
+"""Microsoft 365 mail through Microsoft Graph (needs an app registered by IT), read only.
+
+CloseDesk asks Microsoft only to sign in and read mail (``DELEGATED_SCOPES``), and every request it makes is a
+GET: it never changes, files, flags or sends anything in the mailbox. ``tests/test_graph_read_only.py`` checks
+this file for any other request.
+"""
+
 from __future__ import annotations
 
 import base64
@@ -10,18 +17,17 @@ from typing import Any, Iterable
 import httpx
 import msal
 
-from controller_inbox.classify import DOCUMENT_OUTLOOK
 from controller_inbox.clock import parse_stamp
 from controller_inbox.extract import html_to_text
-from controller_inbox.models import DocumentType, RawAttachment, RawMessage
+from controller_inbox.models import RawAttachment, RawMessage
 
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 # MSAL asks for "offline_access" (the refresh token) by itself and refuses a sign-in that names it, or
 # "openid" or "profile", so they are not listed here.
-DELEGATED_SCOPES = ["User.Read", "Mail.Read", "Mail.ReadWrite", "Mail.Send"]
+DELEGATED_SCOPES = ["User.Read", "Mail.Read"]
 APP_SCOPES = ["https://graph.microsoft.com/.default"]
-# The digest CloseDesk mails (``cli._send_digest``); when it goes to this mailbox it is not read back as mail.
+# The digest earlier versions mailed to this mailbox: it is not read back as mail.
 DIGEST_SUBJECT = "CloseDesk daily digest — "
 
 
@@ -93,13 +99,14 @@ class GraphClient:
             return f"/users/{self.mailbox}"
         return "/me"
 
-    def request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+    def get(self, path: str, **kwargs: Any) -> httpx.Response:
+        """A GET from Microsoft Graph: the only kind of request CloseDesk makes there (it only reads)."""
         token = self.acquire_token()
         headers = kwargs.pop("headers", {})
         headers["Authorization"] = f"Bearer {token}"
         url = path if path.startswith("http") else f"{GRAPH_BASE}{path}"
         with httpx.Client(timeout=self.timeout) as client:
-            response = client.request(method, url, headers=headers, **kwargs)
+            response = client.get(url, headers=headers, **kwargs)
         if response.status_code == 429:
             raise GraphError("Microsoft Graph throttled the request (HTTP 429). Wait and retry.")
         if response.status_code >= 400:
@@ -107,10 +114,10 @@ class GraphClient:
         return response
 
     def get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.request("GET", path, params=params).json()
+        return self.get(path, params=params).json()
 
     def get_bytes(self, path: str) -> bytes:
-        return self.request("GET", path).content
+        return self.get(path).content
 
     def signed_in_user(self) -> dict[str, Any]:
         if self.mailbox:
@@ -205,31 +212,6 @@ class GraphMailbox:
             att.id = f"{item_id}:{att.filename}"
         return found
 
-    def apply_categories(self, message_id: str, categories: list[str], flag: bool) -> str:
-        """Set CloseDesk's categories on a message. Graph replaces the whole list, so the categories the user (or a
-        colleague on a shared mailbox) set are read first and kept; CloseDesk's own from an earlier filing go."""
-        path = f"{self.client._user_root()}/messages/{message_id}"
-        current = self.client.get_json(path, params={"$select": "categories"}).get("categories") or []
-        filed = "CloseDesk" in current
-        kept = [name for name in current if not _closedesk_category(name, filed) and name not in categories]
-        body: dict[str, Any] = {"categories": kept + list(categories)}
-        if flag:
-            body["flag"] = {"flagStatus": "flagged"}
-            body["importance"] = "high"
-        self.client.request("PATCH", path, json=body)
-        return "written"
-
-    def send_mail(self, to: str, subject: str, html: str) -> None:
-        payload = {
-            "message": {
-                "subject": subject,
-                "body": {"contentType": "HTML", "content": html},
-                "toRecipients": [{"emailAddress": {"address": to}}],
-            },
-            "saveToSentItems": True,
-        }
-        self.client.request("POST", f"{self.client._user_root()}/sendMail", json=payload)
-
     def _to_raw(self, item: dict[str, Any]) -> RawMessage:
         sender = (item.get("from") or {}).get("emailAddress") or {}
         body = item.get("body") or {}
@@ -256,18 +238,6 @@ class GraphMailbox:
             reply_to=_reply_to(item, sender.get("address") or ""),
             attachments=[],
         )
-
-
-# The document labels ``classify.outlook_categories`` gives, beside "CloseDesk" and "CloseDesk-…".
-_DOCUMENT_CATEGORIES = set(DOCUMENT_OUTLOOK.values()) | {kind.value for kind in DocumentType}
-
-
-def _closedesk_category(name: str, filed: bool) -> bool:
-    """Whether CloseDesk set this category. A document label ("AP-Invoice", "Tax") counts only on a message
-    CloseDesk has filed (``filed``: it carries "CloseDesk"), as a user may use one of those names too."""
-    if name == "CloseDesk" or name.startswith("CloseDesk-"):
-        return True
-    return filed and name in _DOCUMENT_CATEGORIES
 
 
 def _reply_to(item: dict[str, Any], sender: str) -> str:
