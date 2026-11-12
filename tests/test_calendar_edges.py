@@ -394,3 +394,47 @@ def test_an_update_or_a_cancellation_closes_the_earlier_invitations_answer_task(
     assert _open_meeting_tasks(store, "req", "upd") == [("upd", "Accept or decline: Q3 close review")]
     pipeline.process_message(_with_invitation("cxl", "Canceled: Q3 close review", cancel, received=NOW + timedelta(hours=2)), store, settings, now=NOW)
     assert _open_meeting_tasks(store, "req", "upd", "cxl") == []
+
+
+def test_one_broken_meeting_in_a_file_loses_only_itself():
+    good = _event("UID:good", "SUMMARY:Good meeting", "DTSTART:20261008T140000Z", "DTEND:20261008T150000Z")
+    for bad in (
+        _event("UID:bad", "SUMMARY:Mixed end", "DTSTART:20261008T140000Z", "DTEND;VALUE=DATE:20261009"),
+        _event("UID:bad", "SUMMARY:No such hour", "DTSTART:20261008T250000Z"),
+        _event("UID:bad", "SUMMARY:Endless", "DTSTART:20261008T140000Z", "DURATION:P999999999W"),
+        _event("UID:bad", "SUMMARY:Every no weeks", "DTSTART:20261008T140000Z", "RRULE:FREQ=WEEKLY;INTERVAL=0"),
+        _event("UID:bad", "SUMMARY:Every minus one day", "DTSTART:20261008T140000Z", "RRULE:FREQ=DAILY;INTERVAL=-1"),
+    ):
+        found = cal.from_ics(_ics(good, bad), now=NOW)
+        assert "Good meeting" in [m.subject for m in found], bad
+        assert len(found) <= 2, bad
+
+
+def test_an_all_day_meeting_ending_on_its_own_day_lasts_the_day():
+    [meeting] = cal.from_ics(_ics(_event("UID:x", "SUMMARY:Close day", "DTSTART;VALUE=DATE:20261030", "DTEND;VALUE=DATE:20261030")), now=NOW)
+    assert (meeting.start, meeting.end) == ("2026-10-30", "2026-10-31")
+
+
+def test_extra_dates_of_a_repeating_meeting_are_kept_and_an_all_day_ones_skipped_day_is_skipped():
+    data = _ics(_event("UID:r", "SUMMARY:Review", "DTSTART:20261005T140000Z", "DTEND:20261005T150000Z", "RRULE:FREQ=WEEKLY;COUNT=2",
+                       "RDATE:20261008T140000Z", "EXDATE:20261012T140000Z"))
+    assert [m.start[:10] for m in cal.from_ics(data, now=NOW)] == ["2026-10-05", "2026-10-08"]
+    data = _ics(_event("UID:a", "SUMMARY:Close", "DTSTART;VALUE=DATE:20261008", "RRULE:FREQ=WEEKLY;COUNT=3", "EXDATE:20261015T000000Z"))
+    assert [m.start for m in cal.from_ics(data, now=NOW)] == ["2026-10-08", "2026-10-22"]
+
+
+def test_a_repeating_meeting_at_a_floating_time_keeps_its_local_time_after_the_clock_change(monkeypatch):
+    import time
+
+    from zoneinfo import ZoneInfo
+
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    monkeypatch.setattr(cal, "_local_zone", lambda: ZoneInfo("America/New_York"), raising=False)  # tzlocal keeps the first it found
+    try:
+        data = _ics(_event("UID:fl", "SUMMARY:Standup", "DTSTART:20261019T090000", "DTEND:20261019T093000", "RRULE:FREQ=WEEKLY;COUNT=4"))
+        local = [datetime.fromisoformat(m.start).astimezone().strftime("%m-%d %H:%M") for m in cal.from_ics(data, now=NOW)]
+        assert local == ["10-19 09:00", "10-26 09:00", "11-02 09:00", "11-09 09:00"]
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()

@@ -112,11 +112,17 @@ def from_ics(
     for event in series:
         if len(out) >= limit:
             break
-        out += _occurrences(event, zones, overrides, method, email_id, now, rows=limit - len(out), deadline=deadline)
+        try:
+            out += _occurrences(event, zones, overrides, method, email_id, now, rows=limit - len(out), deadline=deadline)
+        except Exception:  # one meeting written wrong loses only itself, not the others in the file
+            continue
     # A moved occurrence whose series isn't in this file (an update to one week only) is a meeting of its own.
     seen = {(m.uid, m.start) for m in out}
     for (uid, _start), (event, replaces) in overrides.items():
-        meeting = _meeting(event, zones, method, email_id)
+        try:
+            meeting = _meeting(event, zones, method, email_id)
+        except Exception:
+            continue
         if meeting is not None and (meeting.uid, meeting.start) not in seen:
             meeting.occurrence = replaces
             meeting.recurring = True  # one occurrence of a repeating meeting
@@ -128,71 +134,107 @@ def _occurrences(
     event: dict, zones: dict, overrides: dict, method: str, email_id: str, now: datetime, *, rows: int = MAX_ROWS,
     deadline: float | None = None,
 ) -> list[Meeting]:
-    """One meeting's occurrences in the window, ``rows`` at most. Once ``deadline`` has passed (the file's time is
-    up), a repeating meeting is its first occurrence, marked as repeating; one being walked then keeps what was found."""
+    """One meeting's occurrences in the window, ``rows`` at most: its rule's (RRULE), and the dates it adds to them
+    (RDATE), less those it skips (EXDATE). Once ``deadline`` has passed (the file's time is up), a repeating meeting
+    is its first occurrence, marked as repeating; one being walked then keeps what was found."""
     first = _meeting(event, zones, method, email_id)
     if first is None:
         return []
     rule = event.get("RRULE")
-    if rule is None:
+    extra = event.get("_all", {}).get("RDATE", [])
+    if rule is None and not extra:
         return [first]
-    # The rule alone: dateutil reads what follows a space on the line as more rules and dates ("... RDATE:..."), as a
-    # set of rules none of the limits below would reach.
-    rule_text = (rule[2].split() or [""])[0]
+    first.recurring = True
     if deadline is not None and monotonic() >= deadline:
-        first.recurring = True
         return [first]
-    if _too_often(rule_text):
-        # No meeting repeats more often than a few times a day: such a rule (which anyone can email, from years back)
-        # would take minutes to walk. Its first occurrence is kept, marked as repeating.
-        first.recurring = True
-        return [first]
-    from dateutil.rrule import rrulestr
-
     start = _when(event["DTSTART"], zones)
     if start is None:
         return [first]
     begin, all_day = start
     length = _parse(first.end, first.all_day) - _parse(first.start, first.all_day)
-    try:
-        anchor = begin if not all_day else datetime.combine(begin, time())
-        rrule = rrulestr(_until_in_utc(rule_text, begin, all_day), dtstart=anchor.replace(tzinfo=None) if all_day else anchor, ignoretz=all_day)
-    except (ValueError, TypeError):
-        first.recurring = True
-        return [first]
     low = now - WINDOW_BACK
     high = now + WINDOW_AHEAD
     if all_day:
         low, high = low.replace(tzinfo=None), high.replace(tzinfo=None)
-    excluded = {_key(when[0]) for name in ("EXDATE",) for raw in event.get("_all", {}).get(name, []) for when in _whens(raw, zones)}
-    # Walked a step at a time from its first occurrence, up to the window's end, and at most ``MAX_STEPS`` steps
-    # however far back it starts: a rule from years back that repeats often, which anyone can email, mustn't hold the
-    # run or fill the memory. (dateutil's own "after" walks from the start too, with no limit.)
+    # An all-day series' skipped day written as a time ("EXDATE:20261015T000000Z") is that day.
+    excluded = {_key(_on_day(when, all_day)) for raw in event.get("_all", {}).get("EXDATE", []) for when, _date in _whens(raw, zones)}
+    starts = [begin] if rule is None else _walked(rule[2], begin, all_day, low, high, deadline)
+    if starts is None:
+        return [first]
+    for raw in extra[:MAX_OCCURRENCES]:
+        for when, is_date in _whens(raw, zones)[:MAX_OCCURRENCES]:
+            if is_date and not all_day:
+                continue
+            stamp = _on_day(when, all_day)
+            if low <= (datetime.combine(stamp, time()) if all_day else stamp) <= high:
+                starts.append(stamp)
     out = []
-    from itertools import islice
-
-    for when in islice(_walk(rrule, high, deadline), MAX_STEPS):
-        if when < low:
-            continue
-        stamp = when.date() if all_day else when
-        key = _key(stamp)
-        if key in excluded:
-            continue
-        moved = overrides.get((first.uid, key))
-        if moved is not None:
-            meeting = _meeting(moved[0], zones, method, email_id)
-            if meeting is not None:
-                meeting.recurring = True
-                meeting.occurrence = _iso(stamp, all_day)
-                out.append(meeting)
-            continue
-        out.append(Meeting(**{**asdict(first), "start": _iso(stamp, all_day), "end": _iso(stamp + length, all_day), "recurring": True}))
+    try:
+        for stamp in sorted({_key(stamp): stamp for stamp in starts}.values(), key=_key):
+            key = _key(stamp)
+            if key in excluded:
+                continue
+            moved = overrides.get((first.uid, key))
+            if moved is not None:
+                meeting = _meeting(moved[0], zones, method, email_id)
+                if meeting is not None:
+                    meeting.recurring = True
+                    meeting.occurrence = _iso(stamp, all_day)
+                    out.append(meeting)
+                continue
+            out.append(Meeting(**{**asdict(first), "start": _iso(stamp, all_day), "end": _iso(stamp + length, all_day), "recurring": True}))
+    except (OverflowError, ValueError):  # a date past what a calendar holds: what was found is kept
+        pass
     cap = min(MAX_OCCURRENCES, rows)
     if len(out) > cap:
         # More than a calendar shows: those from today on are kept first.
         upcoming = [m for m in out if m.start >= _iso(now.date() if all_day else now, all_day)]
         out = (upcoming[:cap] or out[-cap:])
     return out
+
+
+def _on_day(when, all_day: bool):
+    """A date-time as an all-day series' day; anything else as it is."""
+    return when.date() if all_day and isinstance(when, datetime) else when
+
+
+def _walked(rule_line: str, begin, all_day: bool, low, high, deadline: float | None) -> list | None:
+    """A rule's occurrences from ``low`` to ``high`` (dates for an all-day series); None for a rule that can't be
+    walked (it repeats too often, or every no weeks, or dateutil can't read it): the meeting is then its first
+    occurrence."""
+    from dateutil.rrule import rrulestr
+
+    # The rule alone: dateutil reads what follows a space on the line as more rules and dates ("... RDATE:..."), as a
+    # set of rules none of the limits below would reach.
+    rule_text = (rule_line.split() or [""])[0]
+    if _too_often(rule_text) or _no_interval(rule_text):
+        # No meeting repeats more often than a few times a day: such a rule (which anyone can email, from years back)
+        # would take minutes to walk.
+        return None
+    try:
+        anchor = begin if not all_day else datetime.combine(begin, time())
+        rrule = rrulestr(_until_in_utc(rule_text, begin, all_day), dtstart=anchor.replace(tzinfo=None) if all_day else anchor, ignoretz=all_day)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    # Walked a step at a time from its first occurrence, up to the window's end, and at most ``MAX_STEPS`` steps
+    # however far back it starts: a rule from years back that repeats often, which anyone can email, mustn't hold the
+    # run or fill the memory. (dateutil's own "after" walks from the start too, with no limit.)
+    from itertools import islice
+
+    found = []
+    try:
+        for when in islice(_walk(rrule, high, deadline), MAX_STEPS):
+            if when >= low:
+                found.append(when.date() if all_day else when)
+    except (ValueError, TypeError, OverflowError):  # dateutil gave up partway: what it found is kept
+        pass
+    return found
+
+
+def _no_interval(rule: str) -> bool:
+    """A rule repeating every 0 (or -1) weeks: dateutil reads it, then fails or repeats the first day forever."""
+    match = re.search(r"INTERVAL=(-?\d+)", rule, re.I)
+    return bool(match) and int(match.group(1)) < 1
 
 
 class _PastTheWindow(Exception):
@@ -283,12 +325,17 @@ def _meeting(event: dict, zones: dict, method: str, email_id: str) -> Meeting | 
         return None
     begin, all_day = start
     end_raw = _when(event.get("DTEND"), zones) if event.get("DTEND") else None
-    if end_raw is not None:
+    if end_raw is not None and end_raw[1] == all_day:  # an end of the other kind (a date for a timed start) is none
         end = end_raw[0]
     elif event.get("DURATION"):
-        end = begin + _duration(event["DURATION"][2])
+        try:
+            end = begin + _duration(event["DURATION"][2])
+        except OverflowError:  # a length past what a calendar holds
+            end = begin
     else:
         end = begin + (timedelta(days=1) if all_day else timedelta(0))
+    if all_day and end <= begin:  # ending on its own day ("DTEND;VALUE=DATE" the same as its start): that day
+        end = begin + timedelta(days=1)
     uid = event.get("UID", ("", {}, ""))[2] or hashlib.sha256(f"{event.get('SUMMARY', ('', {}, ''))[2]}{_iso(begin, all_day)}".encode()).hexdigest()[:24]
     organizer = event.get("ORGANIZER")
     attendees = [_person(raw) for raw in event.get("_all", {}).get("ATTENDEE", [])[:MAX_ATTENDEES * 2]]
@@ -542,15 +589,31 @@ def _whens(prop, zones) -> list[tuple[datetime | date, bool]]:
         match = re.fullmatch(r"(\d{8})T(\d{4,6})(Z?)", piece)
         if not match:
             continue
-        stamp = datetime.strptime(match.group(1) + match.group(2).ljust(6, "0"), "%Y%m%d%H%M%S")
+        try:
+            stamp = datetime.strptime(match.group(1) + match.group(2).ljust(6, "0"), "%Y%m%d%H%M%S")
+        except ValueError:  # no such hour or day ("T250000")
+            continue
         if match.group(3):
             out.append((stamp.replace(tzinfo=timezone.utc), False))
             continue
         tzid = params.get("TZID", "")
         zone = zones[tzid] if tzid in zones else (zone_named(tzid) or _offset_zone(tzid) if tzid else None)
-        # Kept in its own zone, so a repeating meeting stays at its local time across daylight saving changes.
-        out.append((stamp.replace(tzinfo=zone) if zone else stamp.astimezone(), False))  # no zone: this computer's
+        # Kept in its own zone, so a repeating meeting stays at its local time across daylight saving changes. With
+        # none (a "floating" time), this computer's, with its daylight saving rules too.
+        zone = zone or _local_zone()
+        out.append((stamp.replace(tzinfo=zone) if zone else stamp.astimezone(), False))
     return out
+
+
+def _local_zone():
+    """This computer's time zone, with its rules (a fixed offset would move a weekly meeting an hour at the clock
+    change); None when it can't be told."""
+    try:
+        from tzlocal import get_localzone
+
+        return get_localzone()
+    except Exception:
+        return None
 
 
 def _duration(value: str) -> timedelta:
