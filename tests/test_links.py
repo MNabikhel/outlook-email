@@ -246,7 +246,7 @@ def test_an_email_shows_its_conversation_and_related_mail(loaded, settings):
     related = client.get("/api/mail/demo-inv-10482").json()["related"]
     assert [(row["id"], row["here"]) for row in related["thread"]] == [("demo-inv-10482", True), ("demo-inv-10482-dup", False)]
     assert related["thread"][1]["file_names"] == ["INV-10482.pdf"]
-    assert client.get("/api/mail/demo-chase-stmt").json()["related"] == {"thread": [], "groups": []}
+    assert client.get("/api/mail/demo-chase-stmt").json()["related"] == {"thread": [], "groups": [], "can_look": False}
 
 
 # --- A whole matter ------------------------------------------------------------------------------------------------

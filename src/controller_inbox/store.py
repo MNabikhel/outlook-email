@@ -5,7 +5,7 @@ import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -272,6 +272,23 @@ CREATE TABLE IF NOT EXISTS email_keys (
 );
 CREATE INDEX IF NOT EXISTS idx_email_keys_value ON email_keys(kind, value);
 
+-- What the local model said about two emails nothing else links (link_judge.py): same matter or not, and why.
+-- a < b. ``key`` says what the verdict was made from, so it is asked again only when that changes.
+CREATE TABLE IF NOT EXISTS ai_links (
+    a TEXT NOT NULL,
+    b TEXT NOT NULL,
+    same INTEGER NOT NULL,
+    why TEXT DEFAULT '',
+    key TEXT DEFAULT '',
+    at TEXT DEFAULT '',
+    PRIMARY KEY (a, b)
+);
+CREATE INDEX IF NOT EXISTS idx_ai_links_b ON ai_links(b);
+CREATE TABLE IF NOT EXISTS ai_link_checks (
+    email_id TEXT PRIMARY KEY,
+    version TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS outlook_items (
     entry_id TEXT PRIMARY KEY,
     store_id TEXT NOT NULL DEFAULT '',
@@ -315,6 +332,9 @@ EMAIL_ROWS = (
     ("page_fixes", "attachment_id"),
     ("embeddings", "email_id"),
     ("email_keys", "email_id"),
+    ("ai_links", "a"),
+    ("ai_links", "b"),
+    ("ai_link_checks", "email_id"),
     ("findings", "email_id"),
     ("action_items", "email_id"),
     ("fraud_checks", "email_id"),
@@ -564,6 +584,44 @@ class Store:
         with self.connect() as conn:
             conn.execute("UPDATE emails SET threading = ? WHERE id = ?", (_dumps(email.threading) if email.threading else "", email.id))
             self._file_keys(conn, email)
+
+    def ai_link(self, one: str, other: str) -> dict | None:
+        a, b = sorted([one, other])
+        with self.connect() as conn:
+            row = conn.execute("SELECT same, why, key FROM ai_links WHERE a = ? AND b = ?", (a, b)).fetchone()
+        return {"same": bool(row[0]), "why": row[1] or "", "key": row[2] or ""} if row else None
+
+    def save_ai_link(self, one: str, other: str, *, same: bool, why: str, key: str) -> None:
+        a, b = sorted([one, other])
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO ai_links (a, b, same, why, key, at) VALUES (?, ?, ?, ?, ?, ?)", (a, b, int(same), why, key, _now())
+            )
+
+    def ai_links_of(self, email_id: str) -> dict[str, str]:
+        """The emails the model said are about the same matter as ``email_id``, with why."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT CASE WHEN a = ? THEN b ELSE a END, why FROM ai_links WHERE (a = ? OR b = ?) AND same = 1", (email_id, email_id, email_id)
+            ).fetchall()
+        return {row[0]: row[1] or "" for row in rows}
+
+    def mark_ai_checked(self, email_id: str, version: str) -> None:
+        with self.connect() as conn:
+            conn.execute("INSERT OR REPLACE INTO ai_link_checks (email_id, version) VALUES (?, ?)", (email_id, version))
+
+    def ai_checked(self, email_id: str) -> str:
+        with self.connect() as conn:
+            row = conn.execute("SELECT version FROM ai_link_checks WHERE email_id = ?", (email_id,)).fetchone()
+        return row[0] if row else ""
+
+    def recent_emails(self, *, days: int, now: datetime | None = None, limit: int = 500) -> list[EmailRecord]:
+        """The mail received in the last ``days`` days, newest first."""
+        since = ((now or datetime.now(timezone.utc)) - timedelta(days=days)).astimezone(timezone.utc).isoformat()
+        with self.connect() as conn:
+            ids = [row[0] for row in conn.execute("SELECT id FROM emails WHERE received_at >= ? ORDER BY received_at DESC LIMIT ?", (since, limit))]
+        found = self.get_emails(ids)
+        return [found[i] for i in ids if i in found]
 
     def link_keys(self, email_id: str) -> list[tuple[str, str]]:
         with self.connect() as conn:

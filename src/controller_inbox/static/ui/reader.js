@@ -370,6 +370,7 @@ function relatedRow(r) {
     h("span", { class: "rel-subject trunc" }, r.subject),
     r.first_line ? h("span", { class: "muted small rel-first" }, r.first_line) : null,
     r.file_names.length ? h("span", { class: "muted small rel-files" }, icon("clip", 12), h("span", null, r.file_names.join(", "))) : null,
+    r.why ? h("span", { class: "small rel-why" }, icon("chat", 12), h("span", null, r.why)) : null,
     mark
   );
   return h(
@@ -379,15 +380,40 @@ function relatedRow(r) {
   );
 }
 
-function related(d) {
+function lookButton(d, ctx) {
+  const button = h("button", { type: "button", class: "btn btn-sm btn-quiet", title: "Have the local model weigh the few emails most likely about the same matter" }, icon("search", 14), "Look for more");
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    button.lastChild.textContent = "Looking…";
+    try {
+      const reply = await postJSON(`/api/mail/${enc(d.id)}/related/look`);
+      d.related = reply.related;
+      toast(reply.message, { tone: "ok" });
+      const old = document.getElementById("rd-related");
+      const fresh = related(d, ctx);
+      if (old && fresh) old.replaceWith(fresh);
+    } catch (error) {
+      toast(error.message, { tone: "error" });
+      button.disabled = false;
+      button.lastChild.textContent = "Look for more";
+    }
+  });
+  return button;
+}
+
+function related(d, ctx) {
   const rel = d.related || { thread: [], groups: [] };
-  if (!rel.thread.length && !rel.groups.length) return null;
+  if (!rel.thread.length && !rel.groups.length) {
+    // Nothing links it yet: the model can still look, when one is running.
+    return rel.can_look ? section("Related", { id: "rd-related", aside: h("span", { class: "rd-h-aside" }, lookButton(d, ctx)) }, h("p", { class: "muted small" }, "Nothing in this email ties it to others: no conversation, invoice, PO or file in common.")) : null;
+  }
   const count = rel.thread.length ? rel.thread.length - 1 : 0;
   const others = rel.groups.reduce((n, g) => n + g.emails.length, 0);
   const aside = h(
     "span",
     { class: "rd-h-aside" },
     h("span", { class: "muted small" }, [count ? plural(count, "other email") + " in this conversation" : "", others ? plural(others, "related email") : ""].filter(Boolean).join(" · ")),
+    rel.can_look ? lookButton(d, ctx) : null,
     h("a", { class: "btn btn-sm btn-quiet", href: `/app/trace/${enc(d.id)}`, dataset: { nav: "" }, title: "Every email linked to this one, two links out, and what changed in their files" }, icon("route", 14), "Whole matter")
   );
   return section(
@@ -527,7 +553,7 @@ export function emailView(d, ctx) {
         facts(d),
         tasks(d, ctx),
         attachments(d, ctx),
-        related(d),
+        related(d, ctx),
         coding(d, ctx),
         section("Message", { class: "rd-body-sec" }, h("div", { class: "rd-body" }, body || "(no text)")),
         fraudPanel(d, ctx),

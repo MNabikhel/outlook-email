@@ -193,9 +193,13 @@ REASONS = {
 }
 
 
-def related(store, email: EmailRecord) -> dict:
+AI_LABEL = "CloseDesk thinks these are about the same matter"
+
+
+def related(store, email: EmailRecord, *, ai: bool = True) -> dict:
     """The conversation ``email`` is in, oldest first, and the other emails it shares an invoice, a PO, a file or a
-    file's name with, grouped by why. Every email listed is one ``store`` still has."""
+    file's name with, grouped by why; with ``ai``, then those the local model said are about the same matter
+    (link_judge.py), each with its reason in the group's ``why``. Every email listed is one ``store`` still has."""
     mine = store.link_keys(email.id) or keys(email)
     thread_ids = _conversation(store, email.id, [value for kind, value in mine if kind == "thread"])
     groups: list[dict] = []
@@ -215,6 +219,11 @@ def related(store, email: EmailRecord) -> dict:
                 continue
             groups.append({"kind": kind, "value": value, "ids": others[:MAX_PER_REASON]})
             shown |= set(others)
+    if ai and not locked_here:
+        judged = {other: why for other, why in store.ai_links_of(email.id).items() if other not in shown}
+        if judged:
+            groups.append({"kind": "ai", "value": "", "ids": list(judged)[:MAX_PER_REASON], "why": judged})
+            shown |= set(judged)
     cards = store.get_emails(list(dict.fromkeys([*thread_ids, *(i for g in groups for i in g["ids"])])))
     thread = sorted(
         (email if i == email.id else cards[i] for i in thread_ids if i == email.id or i in cards),
@@ -222,9 +231,10 @@ def related(store, email: EmailRecord) -> dict:
     )
     out_groups = []
     for group in groups:
-        records = [cards[i] for i in group["ids"] if i in cards]
+        records = [cards[i] for i in group["ids"] if i in cards and not (group["kind"] == "ai" and attachments_locked(cards[i]))]
         if records:
-            out_groups.append({"kind": group["kind"], "label": _label(group, email, records), "emails": sorted(records, key=lambda r: r.received_at or "", reverse=True)})
+            label = AI_LABEL if group["kind"] == "ai" else _label(group, email, records)
+            out_groups.append({"kind": group["kind"], "label": label, "emails": sorted(records, key=lambda r: r.received_at or "", reverse=True), "why": group.get("why", {})})
     return {"thread": thread[-MAX_THREAD:] if len(thread) > 1 else [], "groups": out_groups, "new_domains": new_domains(thread)}
 
 

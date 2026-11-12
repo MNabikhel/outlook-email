@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from controller_inbox import cost_codes, links
+from controller_inbox import cost_codes, link_judge, links
 from controller_inbox.actions import local_today
 from controller_inbox.clock import parse_stamp
 from controller_inbox.config import Settings
@@ -300,6 +300,11 @@ def _run_overnight(
         )
     # Runs whenever an embedding model answers, even with no chat model loaded.
     indexed = max(0, index_mail(store, settings, on_progress=(lambda i, n, _name: on_progress("indexing", i, n, "")) if on_progress else None))
+    ai_linked = 0
+    if reading["model"] and not (stats and stats.stopped_reason) and settings.overnight_ai_links:
+        if on_progress:
+            on_progress("linking", 1, 1, "Looking for related mail")
+        ai_linked = link_judge.judge_recent(store, settings, limit=settings.overnight_ai_links, now=now)
 
     if on_progress:
         on_progress("digest", 1, 1, "Writing the digest")
@@ -326,6 +331,7 @@ def _run_overnight(
         "outlook_message": _outlook_message(outlook),
         "read_by_bionic": len(reading["read_ids"]),
         "files_summarized": summarized,
+        "ai_linked": ai_linked,
         "pages_seen": looked.pages,
         "files_reread": reread,
         "invoices_coded": coded,

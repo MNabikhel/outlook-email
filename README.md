@@ -426,6 +426,7 @@ src/controller_inbox/
   folder_mail.py    Drop folder: .msg / .eml / loose files, inbox/failed
   mail_identity.py  Whether a message is already stored, however it came in, and the id it is filed under
   links.py          Which emails belong together (one conversation, the same invoice, PO or file), a whole matter, what changed
+  link_judge.py     The local model's view of which emails are about the same matter where nothing they carry says so
   tnef.py           The files inside a winmail.dat
   demo.py           Sample mailbox
   pipeline.py       Ingest → classify → store (scripts only, fast)

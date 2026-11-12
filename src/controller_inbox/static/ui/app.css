@@ -627,6 +627,8 @@ a.rel-link:hover, a.rel-link:focus-visible { background: var(--surface-2); }
 .rel-files { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .rel-files > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rel-files svg { flex: none; }
+.rel-why { display: flex; gap: 4px; align-items: flex-start; color: var(--text-2); font-style: italic; }
+.rel-why svg { flex: none; margin-top: 3px; }
 .rel-main .tag { align-self: flex-start; margin-top: 3px; }
 /* The whole matter (/app/trace/<id>). */
 .tr-steps { list-style: none; margin: 0; padding: 0 0 0 12px; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
