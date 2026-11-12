@@ -768,9 +768,8 @@ def _refile_invitation(store, settings, email_id: str, now: datetime) -> None:
     """An invitation an older version filed by its subject alone (as "Other", or with an "Accept or decline" task on a
     cancellation): filed again by what its invitation is (its METHOD), as a new one is, keeping what the user did with
     its tasks. Held mail, and mail the user corrected, stays as it is."""
-    from controller_inbox.fraud import assess_email, attachments_locked, trust_context
+    from controller_inbox.fraud import attachments_locked, refile_checked
     from controller_inbox.models import ActionStatus, DocumentType
-    from controller_inbox.pipeline import rescore_stored
 
     email = store.get_email(email_id)
     if email is None or attachments_locked(email) or email.model_status == "corrected":
@@ -783,7 +782,7 @@ def _refile_invitation(store, settings, email_id: str, now: datetime) -> None:
     if email.category == DocumentType.MEETING and asks == wants:
         return  # filed as it would be now
     try:
-        rescore_stored(store, settings, email, assess_email(store, trust_context(store, settings), email), now=now)
+        refile_checked(store, settings, email, now=now)
     except Exception:  # filed as it was; the meeting is on the calendar either way
         return
 

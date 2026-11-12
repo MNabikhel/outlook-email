@@ -701,10 +701,10 @@ def _settle_conversation(store: Store, settings: Settings, record: EmailRecord, 
         if _talk(head) and (head.received_at or "") >= (record.received_at or "") and _sent_to(record, head):
             store.drop_open_tasks(head.id, source="invoice")
         elif _replying(head) and _has_invoice_file(head) and "duplicate_invoice" not in head.flags and domain_of(head.sender_email) != domain:
-            from controller_inbox.fraud import assess_email
+            from controller_inbox.fraud import refile_checked
 
             if (stored := store.get_email(head.id)) is not None:
-                rescore_stored(store, settings, stored, assess_email(store, trust_context(store, settings), stored), now=now)
+                refile_checked(store, settings, stored, now=now)
 
 
 def _bank_caution(check) -> list[str]:

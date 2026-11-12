@@ -215,6 +215,35 @@ def test_the_embedding_model_is_given_its_subject_and_sender_only(loaded, settin
     assert not any(word in text.lower() for text in embedded for word in SAYS)
 
 
+def test_a_lookalike_held_when_the_vendors_invoice_is_read_keeps_the_check_that_holds_it(store, settings):
+    # The drop folder reads files by name: the lookalike's "resent as a PDF" first, then the invoice it answers.
+    from datetime import datetime, timezone
+
+    from controller_inbox.demo import make_pdf
+    from controller_inbox.folder_mail import ingest_folder
+    from msgfactory import PDF, write_msg
+
+    settings.ensure_data_dir()
+    inbox = settings.inbox_incoming
+    day = lambda n: datetime(2026, 9, n, 14, tzinfo=timezone.utc)  # noqa: E731
+    vendor = {"sender_name": "Dana Ortiz", "sender_email": "dana@northwind.com"}
+    invoice = [["Northwind Traders Invoice INV-55120", ["Item", "Amount"], ["Consulting", "$12,450.00"]]]
+    write_msg(inbox / "0 hello.msg", "September statement coming", "Our statement follows next week. Dana", sent=day(10), message_id="<hello@northwind.com>", **vendor)
+    ingest_folder(store, settings)
+    write_msg(inbox / "a reply.msg", "RE: Invoice INV-55120", "Resending the invoice as a PDF. Thanks, Dana",
+              sender_name="Dana Ortiz", sender_email="dana@northwlnd.com", sent=day(21), message_id="<r@northwlnd.com>",
+              headers=["In-Reply-To: <inv1@northwind.com>", "References: <inv1@northwind.com>"],
+              attachments=[("INV-55120.pdf", make_pdf([*invoice, ["Our bank details have changed. Please remit to our new account 5566778899."]]), PDF)])
+    write_msg(inbox / "b invoice.msg", "Invoice INV-55120", "Hi, invoice INV-55120 is attached. Thanks, Dana", sent=day(20),
+              message_id="<inv1@northwind.com>", attachments=[("INV-55120.pdf", make_pdf(invoice), PDF)], **vendor)
+    lookalike = next(email.id for email in ingest_folder(store, settings) if email.sender_email == "dana@northwlnd.com")
+    assert attachments_locked(store.get_email(lookalike))
+    check = store.fraud_check(lookalike)
+    assert check["level"] == "high" and "lookalike_domain" in {signal["key"] for signal in check["signals"]}
+    assert "looks like a known one" in assistant.held_answer(store, store.get_email(lookalike))
+    assert any(row.get("email_id") == lookalike and row.get("level") == "high" for row in store.fraud_log(limit=50)), "logged"
+
+
 def test_trusting_a_taught_sender_releases_all_their_mail(store, settings):
     held = _taught_sender(store, settings)
     record_fraud_verdict(store, settings, held[0], verdict="safe", scope="sender")

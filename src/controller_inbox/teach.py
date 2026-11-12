@@ -389,12 +389,10 @@ def refile(store: Store, settings, email: EmailRecord, *, ctx=None, codes: bool 
     the AP cost code follow. Tasks already done stay done. ``ctx`` is the fraud check's trust context, when the
     caller files several emails; ``codes=False`` leaves the cost codes for the caller to refresh."""
     from controller_inbox import cost_codes, fraud
-    from controller_inbox.pipeline import rescore_stored
 
     before = list(email.actions)
     read = (email.folder, email.summary, email.model_status) if email.model_status != "script_draft" else None
-    check = fraud.assess_email(store, ctx or fraud.trust_context(store, settings), email)
-    email = rescore_stored(store, settings, email, check)
+    email = fraud.refile_checked(store, settings, email, ctx=ctx)
     email.actions = _same_tasks(before, email.actions, keep_dropped=read is not None)
     if read is not None:
         # The local model's reading (its folder, summary and tasks) stays: a field shown on the page doesn't undo it.

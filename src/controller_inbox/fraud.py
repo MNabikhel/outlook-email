@@ -829,6 +829,22 @@ def reassess_email(store: "Store", settings: "Settings", email: "EmailRecord", *
     return email, check
 
 
+def refile_checked(store: "Store", settings: "Settings", email: "EmailRecord", *, ctx: TrustContext | None = None,
+                   now: datetime | None = None) -> "EmailRecord":
+    """File a stored email again under a fresh fraud check, and keep that check: saved (logged when its level
+    changed) and its meetings following a hold, as ``reassess_email`` does. An email held by a refile then says
+    why it is held: the panel, the log and Ask CloseDesk give the signals that hold it."""
+    from controller_inbox.pipeline import rescore_stored
+
+    check = assess_email(store, ctx or trust_context(store, settings), email)
+    email = rescore_stored(store, settings, email, check, now=now)
+    save_check(store, email, check, now=now)
+    from controller_inbox import calendar_events
+
+    calendar_events.follow_hold(store, settings, email, now=now)
+    return email
+
+
 def record_fraud_verdict(
     store: "Store",
     settings: "Settings",
