@@ -129,6 +129,8 @@ def test_mail_held_by_what_you_taught_says_so_and_offers_not_fraud(store, settin
     assert 'value="safe:email"' in page and panel["held_reason"] in page, "the classic page offers Not fraud"
     answer = assistant.held_answer(store, email)
     assert "taught" in answer and "in Settings" not in answer and "Fraud check" in answer
+    store.save_fraud_check(held, 10, "none", [{"key": "urgency", "label": "Urgency or secrecy", "points": 10}], "2026-09-22T12:00:00+00:00")
+    assert "Urgency" not in assistant.held_answer(store, email), "a signal that didn't hold it is no reason"
 
 
 def test_the_held_answer_gives_the_strongest_reasons_and_none_that_count_for_it(loaded):

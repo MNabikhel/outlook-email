@@ -780,6 +780,8 @@ def hold_reasons(email: "EmailRecord", check: dict | None, *, limit: int = 5) ->
     """Why an email is held, strongest first: your own word on it, then the check's signals that count against it.
     Signals that count for it ("Trusted domain") are no reason to hold it."""
     own = ["You marked it as fraud"] if "fraud_confirmed" in email.flags else [TAUGHT_HOLD] if taught_hold(email) else []
+    if own and (check or {}).get("level") != "high":
+        return own  # the check didn't hold it: its weaker signals are no reason it is held
     signals = [signal for signal in (check or {}).get("signals") or [] if isinstance(signal, dict) and signal.get("label")]
     against = sorted((signal for signal in signals if int(signal.get("points") or 0) > 0), key=lambda signal: -int(signal["points"]))
     return list(dict.fromkeys([*own, *(signal["label"] for signal in against)]))[:limit]
