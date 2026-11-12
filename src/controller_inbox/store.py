@@ -649,6 +649,18 @@ class Store:
         with self.connect() as conn:
             return [(row[0], row[1]) for row in conn.execute("SELECT kind, value FROM email_keys WHERE email_id = ? ORDER BY kind, value", (email_id,))]
 
+    def link_values_of(self, email_ids: list[str], kind: str) -> list[str]:
+        """The values the emails ``email_ids`` are filed under (``kind``), each once, in one query per 400."""
+        found: dict[str, None] = {}
+        with self.connect() as conn:
+            for start in range(0, len(email_ids), 400):
+                chunk = email_ids[start : start + 400]
+                for row in conn.execute(
+                    f"SELECT value FROM email_keys WHERE kind = ? AND email_id IN ({', '.join('?' * len(chunk))})", [kind, *chunk]
+                ):
+                    found.setdefault(row[0], None)
+        return list(found)
+
     def link_values(self, email_id: str, kind: str) -> list[str]:
         with self.connect() as conn:
             return [row[0] for row in conn.execute("SELECT value FROM email_keys WHERE email_id = ? AND kind = ?", (email_id, kind))]

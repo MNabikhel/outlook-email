@@ -113,7 +113,7 @@ def test_keys_leave_out_what_links_everything():
     )
     found = set(links.keys(email))
     assert ("invoice", "INV10482") in found and ("invoice", "northwind.com|10482") in found
-    assert ("po", "PO77821") in found
+    assert ("po", "77821") in found, "a PO is matched however it is written (PO-77821, PO 77821, 77821)"
     assert ("file", "a" * 64) in found and ("file", "e" * 64) in found
     assert not {("file", "b" * 64), ("file", "c" * 64), ("file", "d" * 64)} & found
     assert not any(kind == "invoice" and value.endswith(("1001", "1002")) for kind, value in found)
@@ -489,3 +489,75 @@ def test_a_po_links_the_buyers_mail_and_the_vendors(store):
     store.upsert_email(_record("short-b", sender="ar@coastalprint.com", pos=["4410"]))
     assert [e.id for g in links.related(store, store.get_email("purchasing"))["groups"] for e in g["emails"]] == ["vendor"]
     assert not links.related(store, store.get_email("short-a"))["groups"]
+
+
+def test_a_lookalikes_resent_pdf_never_takes_the_task_off_the_vendors_invoice(store, settings):
+    """The vendor's invoice came as text only; a lookalike replying in the thread with "the PDF" must not take its
+    "Code and enter" task, whether it is held, cautioned or only new to the conversation, in either order."""
+    from controller_inbox.demo import make_pdf
+
+    pdf = make_pdf([["Coastal Print Co", "Invoice CP-5521", "Total due $1,840.00"]])
+    _eml(settings, "1-vendor.eml", "Invoice CP-5521", sender="Coastal Print AR <ar@coastalprint.com>", mid="<cp1@coastalprint.com>",
+         body="Invoice CP-5521 for $1,840.00 is due November 30. Thank you.")
+    _eml(settings, "2-lookalike.eml", "RE: Invoice CP-5521", sender="Coastal Print AR <ar@coastalprlnt.com>", mid="<cp9@coastalprlnt.com>",
+         reply_to_mid="<cp1@coastalprint.com>", refs="<cp1@coastalprint.com>", hours=3, files=[("CP-5521.pdf", pdf)],
+         body="Resending invoice CP-5521 as a PDF.")
+    ingest_folder(store, settings, now=START + timedelta(hours=4))
+    tasks = _invoice_tasks(store)
+    assert ("Invoice CP-5521", "Code and enter invoice CP-5521 ($1,840.00)") in tasks, tasks
+
+
+def test_microsoft_365_replies_are_no_duplicates_and_their_recipients_count(store):
+    """Microsoft 365 mail has its conversation and recipients but no reply headers: the earliest stored email
+    started it, its recipients took part, and a colleague's reply to the vendor's invoice is no duplicate."""
+    invoice = _record("I", sender="ar@coastalprint.com", invoices=["CP-5521"], threading={"to": ["ap@taz.com"]}, received="2026-10-01T09:00:00+00:00")
+    invoice.conversation_id = "conv-1"
+    invoice.created_at = "2026-10-01T09:05:00+00:00"
+    reply = _record("R", sender="maya@taz.com", threading={"to": ["ar@coastalprint.com"]}, received="2026-10-01T10:00:00+00:00")
+    reply.conversation_id = "conv-1"
+    reply.created_at = "2026-10-01T10:05:00+00:00"
+    store.upsert_email(invoice)
+    store.upsert_email(reply)
+    assert links.related(store, store.get_email("R"))["new_domains"] == set()
+    lookalike = _record("L", sender="ar@coastalprlnt.com", threading={"to": ["ap@taz.com"]}, received="2026-09-01T09:00:00+00:00")
+    lookalike.conversation_id = "conv-1"
+    lookalike.created_at = "2026-10-02T09:00:00+00:00"
+    store.upsert_email(lookalike)
+    assert links.related(store, store.get_email("I"))["new_domains"] == {"L"}, "backdating its Date doesn't make it the starter"
+
+
+def test_an_email_claiming_another_domains_message_id_is_new_to_the_conversation():
+    real = _record("real", sender="ar@coastalprint.com", mid="<cp1@coastalprint.com>", threading={"to": ["ap@taz.com"]}, received="2026-10-02T09:00:00+00:00")
+    real.created_at = "2026-10-02T09:01:00+00:00"
+    fake = _record("fake", sender="ar@coastalprlnt.com", mid="<cp1@coastalprint.com>", threading={"to": ["ap@taz.com"]}, received="2026-09-01T09:00:00+00:00")
+    fake.created_at = "2026-10-03T09:00:00+00:00"
+    reply = _record("reply", sender="ap@taz.com", mid="<r1@taz.com>", threading={"in_reply_to": "cp1@coastalprint.com"}, received="2026-10-02T10:00:00+00:00")
+    reply.created_at = "2026-10-02T10:01:00+00:00"
+    assert links.new_domains([fake, reply, real]) == {"fake"}
+
+
+def test_a_po_written_two_ways_is_one_po_and_a_held_emails_own_numbers_count(store):
+    store.upsert_email(_record("a", sender="purchasing@taz.com", pos=["PO 77821"]))
+    store.upsert_email(_record("b", sender="ar@coastalprint.com", pos=["PO-77821"], received="2026-10-06T14:00:00+00:00"))
+    assert [e.id for g in links.related(store, store.get_email("a"))["groups"] for e in g["emails"]] == ["b"]
+    assert {"22918", "77821"} <= links._numbers_written("Invoice 22918 for PO-77821")
+
+
+def test_a_file_name_of_thousands_of_spaces_is_read_in_a_moment():
+    import time
+
+    started = time.monotonic()
+    links.file_stem("a" + " " * 4000 + "b.pdf")
+    links.file_stem("a" + "_" * 4000 + "b copy.pdf")
+    assert time.monotonic() - started < 1
+    assert links.file_stem("Budget  _ copy (2).xlsx") == "budget.xlsx"
+
+
+def test_microsoft_365_mail_keeps_who_it_went_to():
+    from controller_inbox.graph import GraphMailbox
+
+    item = {"id": "g1", "subject": "RE: Invoice", "from": {"emailAddress": {"address": "maya@taz.com"}},
+            "toRecipients": [{"emailAddress": {"address": "AR@CoastalPrint.com"}}], "ccRecipients": [{"emailAddress": {"address": "ap@taz.com"}}],
+            "receivedDateTime": "2026-10-01T10:00:00Z", "body": {"contentType": "text", "content": "Which PO?"}, "conversationId": "conv-1"}
+    raw = GraphMailbox.__new__(GraphMailbox)._to_raw(item)
+    assert raw.threading == {"to": ["ar@coastalprint.com", "ap@taz.com"]}
