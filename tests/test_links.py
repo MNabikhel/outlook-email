@@ -343,7 +343,8 @@ def test_the_model_is_warned_about_held_mail_among_the_related(store):
                                received="2026-10-02T08:00:00+00:00", flags=["fraud_risk"]))
     ws = agent.Workspace(store, None, [store.get_email("real")])
     lines = agent.related_lines(ws, ws.sources[0])
-    assert "(same conversation) — Warning: payment-detail change, verify by phone" in lines
+    assert "held as possible payment fraud (same conversation): not shown — Warning: verify by phone" in lines
+    assert "northwind-supplies" not in lines, "a held email is listed without its words or address"
 
 
 def test_emails_that_only_share_a_message_id_are_no_conversation(store):
@@ -561,3 +562,12 @@ def test_microsoft_365_mail_keeps_who_it_went_to():
             "receivedDateTime": "2026-10-01T10:00:00Z", "body": {"contentType": "text", "content": "Which PO?"}, "conversationId": "conv-1"}
     raw = GraphMailbox.__new__(GraphMailbox)._to_raw(item)
     assert raw.threading == {"to": ["ar@coastalprint.com", "ap@taz.com"]}
+
+
+def test_the_whole_matter_of_a_long_conversation_keeps_the_email_it_was_opened_for(store):
+    for n in range(50):
+        threading = {"in_reply_to": f"m{n - 1}@taz.com", "references": [f"m{k}@taz.com" for k in range(max(0, n - 20), n)]} if n else {}
+        store.upsert_email(_record(f"e{n:02d}", sender="ap@taz.com", mid=f"<m{n}@taz.com>", threading=threading,
+                                   received=f"2026-10-{1 + n // 24:02d}T{n % 24:02d}:00:00+00:00"))
+    steps = [record.id for record, _why in links.trace(store, store.get_email("e00"))["steps"]]
+    assert "e00" in steps and len(steps) == links.MAX_TRACE

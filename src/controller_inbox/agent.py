@@ -1156,16 +1156,24 @@ def related_lines(ws: Workspace, email: EmailRecord) -> str:
     rows: list[str] = []
 
     def row(other: EmailRecord, why: str) -> str:
-        # Marked as anywhere else the model sees it: a held or cautioned email is never taken at its word, and a
-        # sender new to the conversation (a lookalike's reply) is named by address, to be checked.
+        # A held email is listed without its words or a number to open it by. A cautioned one is never taken at its
+        # word, and a sender new to the conversation (a lookalike's reply) is named by address, to be checked.
+        if attachments_locked(other):
+            return f"- {other.received_at[:10]} · an email held as possible payment fraud ({why}): not shown — Warning: verify by phone"
         warn = " — Warning: payment-detail change, verify by phone" if is_fraud(other) or "payment_caution" in other.flags else ""
         if other.id in found["new_domains"]:
             warn += " — Warning: this sender's domain is new to the conversation; check it is who it claims"
         who = f"{other.sender_name} <{other.sender_email}>" if other.sender_name and other.sender_email else other.sender_name or other.sender_email or "(no address)"
         return f"[{ws.number(other)}] {other.received_at[:10]} · {who} · “{other.subject}” ({why}){warn}"
 
-    for other in found["thread"]:
-        if other.id != email.id and len(rows) < MAX_RELATED:
+    # The conversation's emails nearest the one open, not its oldest: the window ``related`` gives is centred on it.
+    thread = [other for other in found["thread"] if other.id != email.id]
+    if len(thread) > MAX_RELATED:
+        times = [abs((links.when(other) or datetime.min.replace(tzinfo=timezone.utc)) - (links.when(email) or datetime.min.replace(tzinfo=timezone.utc))) for other in thread]
+        keep = {other.id for _gap, other in sorted(zip(times, thread), key=lambda pair: pair[0])[:MAX_RELATED]}
+        thread = [other for other in thread if other.id in keep]
+    for other in thread:
+        if len(rows) < MAX_RELATED:
             rows.append(row(other, "same conversation"))
     for group in found["groups"]:
         for other in group["emails"]:

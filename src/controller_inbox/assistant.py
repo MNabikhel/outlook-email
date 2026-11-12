@@ -93,7 +93,8 @@ _ELSEWHERE = re.compile(
 _HISTORY = re.compile(
     r"\b(thread|conversation|history|trace\w*|timeline|back[- ]and[- ]forth|what happened|so far|whole matter|"
     r"(?:email|mail|message)s? (?:chain|trail)|chain|earlier (?:e-?mails?|messages?|versions?)|previous (?:e-?mails?|messages?|versions?)|"
-    r"related (?:e-?mails?|mail|messages?)|what changed|versions?|follow[- ]?ups?|started|led up to|origin\w*)\b",
+    r"related (?:e-?mails?|mail|messages?)|what changed|(?:other|earlier|previous|older|newer|all) versions?|follow[- ]?ups?|"
+    r"how (?:it|this|that) started|led up to|how (?:it|this|that) began)\b",
     re.I,
 )
 

@@ -515,7 +515,11 @@ def trace(store, email: EmailRecord) -> dict:
         frontier = nxt
         if len(records) >= MAX_TRACE:
             break
-    steps = sorted(records.values(), key=lambda record: record.received_at or "")[-MAX_TRACE:]
+    ordered = sorted(records.values(), key=lambda record: record.received_at or "")
+    # A long matter is cut to the window around the email it was opened for, which is always on it.
+    here = next(i for i, record in enumerate(ordered) if record.id == email.id)
+    start = max(0, min(here - MAX_TRACE // 2, len(ordered) - MAX_TRACE))
+    steps = ordered[start : start + MAX_TRACE]
     return {"steps": [(record, reasons.get(record.id, [])) for record in steps], "versions": versions(steps)}
 
 
