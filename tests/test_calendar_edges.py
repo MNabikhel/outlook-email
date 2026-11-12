@@ -231,3 +231,19 @@ def test_a_forward_and_the_organizers_own_word_on_one_week_say_nothing_doubtful(
     _save(store, "fwd2", series.replace("AP standup", "AP standup, new dial-in"), "maya@taz-c0rp.com", received="2026-10-03T09:00:00+00:00")
     shown = cal.with_cautions(store, store.meetings_between("2026-10-01", "2026-11-03"))
     assert shown and all(m["caution"] for m in shown)
+
+
+def _weekly(sequence=0, method="REQUEST", count=6):
+    return _ics(_event("UID:wk", "SUMMARY:AP standup", "DTSTART:20261005T140000Z", "DTEND:20261005T143000Z", f"RRULE:FREQ=WEEKLY;COUNT={count}",
+                       f"SEQUENCE:{sequence}", "ORGANIZER:mailto:maya@taz.com"), method=method)
+
+
+def test_a_whole_series_cancelled_after_one_week_moved_cancels_that_week_too(store):
+    _save(store, "series", _weekly(), "maya@taz.com")
+    _save(store, "move", _ics(_event("UID:wk", "RECURRENCE-ID:20261019T140000Z", "SUMMARY:AP standup", "DTSTART:20261020T150000Z",
+                                     "DTEND:20261020T153000Z", "SEQUENCE:1", "ORGANIZER:mailto:maya@taz.com")),
+          "maya@taz.com", received="2026-10-02T09:00:00+00:00")
+    assert any(m["start"].startswith("2026-10-20T15") for m in store.meetings_between("2026-10-01", "2026-11-30"))
+    _save(store, "cancel", _weekly(1, method="CANCEL"), "maya@taz.com", received="2026-10-03T09:00:00+00:00")
+    shown = store.meetings_between("2026-10-01", "2026-11-30")
+    assert len(shown) == 6 and all(m["cancelled"] for m in shown)

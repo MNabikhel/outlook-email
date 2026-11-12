@@ -2443,7 +2443,9 @@ def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:
         weeks: dict[str, list[sqlite3.Row]] = {}
         for row in said:
             if row["occurrence"] and row["email_id"] not in word.series_emails.get(uid, ()):
-                if owner is None or (row["sequence"] or 0) >= (owner["sequence"] or 0):
+                # Not older than the series: at the same SEQUENCE (Outlook numbers a moved week and the cancelling
+                # of the whole series alike), the later word counts.
+                if owner is None or _word_order(row) >= _word_order(owner):
                     weeks.setdefault(row["occurrence"], []).append(row)
         for occurrence, about in weeks.items():
             word.occurrences[(uid, key[1], occurrence)] = _latest(about)["email_id"]
@@ -2464,6 +2466,11 @@ def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:
                 if sequence >= (owners[first]["sequence"] or 0):
                     word.replaced.setdefault(first, []).append(occurrence)
     return word
+
+
+def _word_order(row: sqlite3.Row) -> tuple:
+    """Which of two invitations of one meeting is the later word: the higher SEQUENCE, then the later received."""
+    return (row["sequence"] or 0, row["received"] or "", row["first_seen"] or "")
 
 
 def _latest(rows: list[sqlite3.Row]) -> sqlite3.Row:
