@@ -960,7 +960,9 @@ class Store:
         ``batch`` at a time, oldest first; resumes where the last call stopped. Returns how many were filed."""
         from controller_inbox import links
 
-        with self.connect() as conn:
+        # The emails are read with the write lock held: an email held as fraud meanwhile (from the web page) is not
+        # filed again from what it was before, with the files a held email never links.
+        with self.transaction() as conn:
             if (conn.execute("SELECT value FROM sync_state WHERE key = 'link_keys_version'").fetchone() or [""])[0] != links.KEYS_VERSION:
                 conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('link_keys_version', ?)", (links.KEYS_VERSION,))
                 conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('link_keys_rowid', '0')")

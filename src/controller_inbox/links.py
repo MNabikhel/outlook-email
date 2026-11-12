@@ -33,7 +33,7 @@ from email.utils import getaddresses
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
 
-KEYS_VERSION = "5"  # changed whenever keys() files emails differently, so stored mail is filed again
+KEYS_VERSION = "6"  # changed whenever keys() files emails differently, so stored mail is filed again
 COMMON = 25  # a key shared by more emails than this links none of them
 MAX_THREAD = 60  # emails shown of one conversation, around the one opened
 MAX_CONVERSATION = 1000  # emails one conversation is followed to
@@ -45,14 +45,42 @@ _GENERIC_STEM = re.compile(
     r"(?i)^(image|img|att|attachment|untitled|document|doc|scan|scanned|file|picture|photo|outlook|logo|"
     r"signature|invoice|statement|noname|unnamed|winmail|smime|part|text|mail|message|copy|download)[\s_-]*\d*$"
 )
+# Excel's, Word's and Google's own names for a new file: two colleagues' "Book1.xlsx" are two files.
+_DEFAULT_NAME = re.compile(
+    r"(?i)^((book|sheet|workbook|presentation|drawing|chart)[\s_-]*\d*|(new )?microsoft (office )?(excel|word|powerpoint)"
+    r"( (worksheet|document|presentation|macro-enabled worksheet))?|untitled (spreadsheet|document|presentation|form|drawing))$"
+)
+# Parts of the message itself, which Outlook names: "ATT00001.htm", "image001.png", "winmail.dat".
+_MESSAGE_PART = re.compile(r"(?i)^(att|image|img|part|noname|unnamed|winmail|smime|outlook|text|mail|message)[\s_-]*\d*$")
+# An invoice number that only puts a word like "INV" before its digits is one sender's, as digits alone are.
+_GENERIC_PREFIX = re.compile(r"^(INVOICE|INV|IN|BILL|NO|NR)(?=\d+$)")
 _PICTURE = re.compile(r"(?i)\.(png|jpe?g|gif|bmp|emz|wmz|ico|svg)$")
 # Version marks in a file's name: "v2", "rev 3", "final", "draft", "(1)", "- Copy", dates, "updated", "revised".
 MAX_FILE_NAME = 255  # characters of a file's name read for its versions
 _VERSION_MARKS = re.compile(
     r"(?i)([\s_-]+copy(\s*\(\d+\))?|\s*\(\d+\)|[\s_-]*\bv(er(sion)?)?\s*\.?\s*\d+(\.\d+)*\b|[\s_-]*\brev(ision)?\s*\.?\s*\d+\b|"
     r"[\s_-]*\b(final|draft|updated|revised|latest|clean|redline|signed|new|old)\b|"
-    r"[\s_-]*\b\d{1,2}[-./]\d{1,2}[-./]\d{2,4}\b|[\s_-]*\b(19|20)\d{2}[-_.]?\d{2}[-_.]?\d{2}\b)"
+    r"[\s_-]*\b(?P<dmy>\d{1,2}[-./]\d{1,2}[-./]\d{2,4})\b|[\s_-]*\b(?P<ymd>(19|20)\d{2}(?P<sep>[-_.]?)\d{2}(?P=sep)\d{2})\b)"
 )
+
+
+def _not_a_date(match: re.Match) -> str:
+    """A version mark taken out of a file's name, kept when it only looks like a date: "Invoice_20481234" and
+    "Purchase Order 2026-1101" name an invoice and a PO, not a day."""
+    from datetime import date
+
+    if match.group("ymd"):
+        digits = re.sub(r"\D", "", match.group("ymd"))
+        try:
+            date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+        except ValueError:
+            return match.group(0)
+    elif match.group("dmy"):
+        first, second, year = re.split(r"[-./]", match.group("dmy"))
+        days = (int(first), int(second))
+        if len(year) == 3 or not any(1 <= a <= 12 and 1 <= b <= 31 for a, b in (days, days[::-1])):
+            return match.group(0)
+    return ""
 
 
 # --- What a message's headers say -------------------------------------------------------------------------------
@@ -120,8 +148,13 @@ def keys(email: EmailRecord) -> list[tuple[str, str]]:
         for number in numbers:
             if held and number not in said:
                 continue
-            # A number of digits alone is one sender's: two vendors' invoice 10482 are two invoices. A PO is the
-            # buyer's own number, quoted back by the vendor, so one of five digits or more is one PO whoever writes it.
+            # A number of digits alone is one sender's: two vendors' invoice 10482 are two invoices. So is one that
+            # only puts "INV" or "BILL" before them: Xero numbers every small vendor's invoices INV-0001, INV-0002…
+            # A PO is the buyer's own number, quoted back by the vendor, so one of five digits or more is one PO
+            # whoever writes it.
+            if kind == "invoice" and (plain := _GENERIC_PREFIX.sub("", number)).isdigit():
+                found.add((kind, f"{domain}|{plain}"))
+                continue
             scoped = number.isdigit() and not (kind == "po" and len(number) >= 5)
             found.add((kind, f"{domain}|{number}" if scoped else number))
     # A held email's files link to nothing, either way: a "new bank details" form sent from a lookalike domain must
@@ -179,14 +212,21 @@ def po_key(text: str | None) -> str:
 
 def _numbers(email: EmailRecord, name: str) -> set[str]:
     key = po_key if name == "po_numbers" else number_key
-    found = {key(n) for n in getattr(email.extracted, name, []) or []}
+    written, lists = [], set()
     for att in email.attachments:
         listed = getattr(att.extracted_fields, name, []) or []
-        # A workbook or CSV that lists several numbers is a list (an aging, a remittance), not one document of them.
+        # A workbook or CSV that lists several numbers is a list (an aging, a remittance, an open-PO report), not
+        # one document of them.
         if len(listed) > 1 and re.search(r"(?i)\.(xlsx|xlsm|xls|csv|tsv)$", att.filename or ""):
+            lists |= {key(n) for n in listed}
             continue
-        found |= {key(n) for n in listed}
-    return {n for n in found if len(n) >= 4 and any(ch.isdigit() for ch in n)}
+        written += listed
+    # The email's own fields hold its files' numbers too: one only a list names counts where its text names it.
+    said = _numbers_written(f"{email.subject} {email.body_text}") if lists else set()
+    files = {key(n) for n in written}
+    written += [n for n in getattr(email.extracted, name, []) or [] if key(n) not in lists or key(n) in files or key(n) in said]
+    # Long enough as written: FreshBooks' "0000123" is a number, though its key drops the zeros.
+    return {key(n) for n in written if (len(key(n)) >= 4 or sum(ch.isdigit() for ch in n) >= 4) and any(ch.isdigit() for ch in n)}
 
 
 def _numbers_written(text: str) -> set[str]:
@@ -207,7 +247,9 @@ def _real_file(att: AttachmentRecord) -> bool:
         name = name.rsplit(" › ", 1)[-1]
     if _PICTURE.search(name) and (att.size_bytes or 0) < 200_000:
         return False
-    return not _GENERIC_STEM.match(re.sub(r"\.[A-Za-z0-9]{1,5}$", "", name).strip())
+    # An ordinary name ("Invoice.pdf", "Scan_0001.pdf") is still a real file: its contents say which one it is,
+    # and one repeated on many emails links none of them (``COMMON``).
+    return not _MESSAGE_PART.match(re.sub(r"\.[A-Za-z0-9]{1,5}$", "", name).strip())
 
 
 def file_stem(filename: str) -> str:
@@ -219,12 +261,13 @@ def file_stem(filename: str) -> str:
     match = re.match(r"^(.*?)(\.[A-Za-z0-9]{1,5})?$", name)
     base, ext = (match.group(1), (match.group(2) or "").lower()) if match else (name, "")
     base = " ".join(base.replace("_", " ").split())  # "Budget_v3" is "Budget v3"
+    base = re.sub(r"(?i)^(copy of )+", "", base)  # Google's "Copy of Budget"
     previous = None
     while previous != base:
         previous = base
-        base = _VERSION_MARKS.sub("", base)
+        base = _VERSION_MARKS.sub(_not_a_date, base)
     base = re.sub(r"[\s_.-]+", " ", base).strip().lower()
-    if len(base) < 4 or _GENERIC_STEM.match(base) or base.isdigit():
+    if len(base) < 4 or _GENERIC_STEM.match(base) or _DEFAULT_NAME.match(base) or base.isdigit():
         return ""
     return f"{base}{ext}"
 
@@ -296,14 +339,16 @@ def related(store, email: EmailRecord, *, ai: bool = True, known_thread: list[st
 
 
 def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str]:
-    """The emails in ``email_id``'s conversation, a few rounds out: those replying to it or to what it replies to
+    """The emails in ``email_id``'s conversation, followed out to its ends: those replying to it or to what it replies to
     (their In-Reply-To / References name the same Message-ID), those it replies to, and those sharing Outlook's or
     Microsoft 365's conversation."""
     found = {email_id}
     refs = [value for kind, value in mine if kind == "thread"]
     owns = [value for kind, value in mine if kind == "msg"]
     seen: set[tuple[str, str]] = set()
-    for _round in range(4):
+    # Round by round until nothing new is found (a chain of replies naming only their parent gains one email a
+    # round), at most ``MAX_CONVERSATION`` emails.
+    while True:
         refs = [value for value in refs if ("thread", value) not in seen]
         owns = [value for value in owns if ("msg", value) not in seen]
         if (not refs and not owns) or len(found) > MAX_CONVERSATION:
@@ -311,7 +356,13 @@ def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str
         seen |= {("thread", value) for value in refs} | {("msg", value) for value in owns}
         cap = MAX_CONVERSATION
         hits = store.emails_with_keys("thread", refs + owns, exclude="", common=cap)  # replies to these, or siblings
-        hits.update({f"msg:{k}": v for k, v in store.emails_with_keys("msg", refs, exclude="", common=cap).items()})  # what they reply to
+        # What they reply to. A Message-ID that several emails from one sender carry (a copier gives every scan one)
+        # names none of them: a reply to one scan doesn't make all the scans one conversation. Carried by emails of
+        # different senders, all are kept: one of them claims another's id, which is marked (``_participation``).
+        parents = store.emails_with_keys("msg", refs, exclude="", common=cap)
+        shared = {other for ids in parents.values() if len(ids) > 1 for other in ids}
+        senders = {head.id: head.sender_email.strip().lower() for head in store.email_heads(sorted(shared))} if shared else {}
+        hits.update({f"msg:{k}": v for k, v in parents.items() if len(v) == 1 or len({senders.get(i, i) for i in v}) > 1})
         new_ids = {other for ids in hits.values() for other in ids} - found
         if not new_ids:
             break
@@ -436,7 +487,7 @@ def _label(group: dict, email: EmailRecord, records: list[EmailRecord]) -> str:
         shown = value.split("|")[-1]
         named = next((n for n in [*email.extracted.invoice_numbers, *email.extracted.po_numbers,
                                   *(x for att in email.attachments for x in [*att.extracted_fields.invoice_numbers, *att.extracted_fields.po_numbers])]
-                      if shown in {number_key(n), po_key(n)}), shown)
+                      if shown in {number_key(n), po_key(n), _GENERIC_PREFIX.sub("", number_key(n))}), shown)
         return f"{REASONS[kind]} {named}"
     if kind == "file":
         name = next((att.filename for att in email.attachments if att.sha256 == value), "")

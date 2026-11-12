@@ -112,7 +112,7 @@ def test_keys_leave_out_what_links_everything():
         mid="<abc@northwind.com>",
     )
     found = set(links.keys(email))
-    assert ("invoice", "INV10482") in found and ("invoice", "northwind.com|10482") in found
+    assert ("invoice", "northwind.com|10482") in found and not any(value == "INV10482" for _kind, value in found), "INV-0010482 and 10482 are one vendor's"
     assert ("po", "77821") in found, "a PO is matched however it is written (PO-77821, PO 77821, 77821)"
     assert ("file", "a" * 64) in found and ("file", "e" * 64) in found
     assert not {("file", "b" * 64), ("file", "c" * 64), ("file", "d" * 64)} & found
@@ -320,19 +320,19 @@ def test_a_question_about_how_an_email_came_about_reads_its_linked_mail(loaded):
 
 
 def test_a_held_emails_numbers_count_only_where_its_own_text_names_them(store):
-    # The lookalike's body names no invoice; the PDF it carries (held, never opened) says INV-10482. It must not
+    # The lookalike's body names no invoice; the PDF it carries (held, never opened) says NW-10482. It must not
     # show up as "Same invoice" beside the real vendor's mail.
-    store.upsert_email(_record("real", invoices=["INV-10482"]))
+    store.upsert_email(_record("real", invoices=["NW-10482"]))
     lookalike = _record("bec", sender="ap@northwind-supp1y.com", flags=["fraud_risk"],
-                        files=[("remit.pdf", "r" * 64, 30_000, ExtractedFields(invoice_numbers=["INV-10482"]))])
-    lookalike.extracted.invoice_numbers = ["INV-10482"]  # merged from its file, as the pipeline does
+                        files=[("remit.pdf", "r" * 64, 30_000, ExtractedFields(invoice_numbers=["NW-10482"]))])
+    lookalike.extracted.invoice_numbers = ["NW-10482"]  # merged from its file, as the pipeline does
     store.upsert_email(lookalike)
     assert not any(kind == "invoice" for kind, _value in store.link_keys("bec"))
     assert links.related(store, store.get_email("real"))["groups"] == []
-    said = _record("bec2", sender="ap@northwind-supp1y.com", flags=["fraud_risk"], invoices=["INV-10482"])
-    said.body_text = "Please pay invoice INV-10482 to our new account."
+    said = _record("bec2", sender="ap@northwind-supp1y.com", flags=["fraud_risk"], invoices=["NW-10482"])
+    said.body_text = "Please pay invoice NW-10482 to our new account."
     store.upsert_email(said)
-    assert ("invoice", "INV10482") in store.link_keys("bec2"), "named in its own words, it is linked (and shown held)"
+    assert ("invoice", "NW10482") in store.link_keys("bec2"), "named in its own words, it is linked (and shown held)"
 
 
 def test_the_model_is_warned_about_held_mail_among_the_related(store):
@@ -717,3 +717,131 @@ def test_payment_details_changed_only_when_a_bank_detail_did():
     bank = lambda number: [["Vendor", "Account number", "Routing"], ["Northwind", number, "021000021"]]  # noqa: E731
     assert _two_versions(_book("Vendors", bank("12345678")), _book("Vendors", bank("87654321")), "Vendor list.xlsx")["payment"]
     assert _two_versions("[page 1]\nPay to account no. 12345678", "[page 1]\nPay to account no. 87654321", "Remittance letter.pdf")["payment"]
+
+
+def _groups(store, email_id: str) -> list[tuple[str, list[str]]]:
+    return [(g["label"], [e.id for e in g["emails"]]) for g in links.related(store, store.get_email(email_id), ai=False)["groups"]]
+
+
+# Guards against: Xero numbers every small vendor's invoices INV-0001, INV-0002…, and only numbers of digits alone
+# were one vendor's, so two unrelated vendors' INV-0042 were "Same invoice" and each one's whole matter (and the
+# chat's answer about it) took in the other's mail.
+def test_two_vendors_invoice_numbered_inv_and_digits_are_two_invoices(store):
+    store.upsert_email(_record("a", invoices=["INV-0042"]))
+    store.upsert_email(_record("b", sender="ar@acmesteel.com", invoices=["INV-0042"], received="2026-10-06T14:00:00+00:00"))
+    store.upsert_email(_record("c", sender="ap@northwind.com", invoices=["0042"], received="2026-10-07T14:00:00+00:00"))
+    store.upsert_email(_record("d", sender="ar@coastalprint.com", invoices=["CP-5521"]))
+    store.upsert_email(_record("e", sender="maya@taz.com", invoices=["CP-5521"], received="2026-10-07T14:00:00+00:00"))
+    assert _groups(store, "a") == [("Same invoice INV-0042", ["c"])]
+    assert _groups(store, "d") == [("Same invoice CP-5521", ["e"])], "a vendor's own prefix still links whoever writes it"
+
+
+# Guards against: a workbook or CSV listing several POs still filed its email under each of them (its numbers
+# reached the email's own fields), so an open-PO report tied every vendor's invoice for those POs together.
+def test_an_open_po_report_links_none_of_its_pos(store, settings):
+    from controller_inbox.models import RawAttachment, RawMessage
+    from controller_inbox.pipeline import process_message
+
+    def message(id_, subject, sender, body, files=(), hour=9):
+        return RawMessage(id=id_, subject=subject, sender_name="", sender_email=sender, received_at=START + timedelta(hours=hour), body_text=body,
+                          body_preview=body[:100], has_attachments=bool(files), source="folder", internet_message_id=f"<{id_}@x>", attachments=list(files))
+
+    rows = "PO Number,Vendor,Open amount\n" + "\n".join(f"PO-45001{n:02d},Vendor {n},{n * 100}.00" for n in range(1, 9)) + "\n"
+    report = RawAttachment(id="a1", filename="Open PO report.csv", content_type="text/csv", size_bytes=len(rows), content=rows.encode())
+    process_message(message("rep", "Open PO report for the week", "controller@taz.com", "Attached is this week's open PO report.", [report]), store, settings, now=START)
+    process_message(message("va", "Invoice CP-5521 for PO 4500103", "ar@coastalprint.com", "Invoice CP-5521 for PO 4500103, $1,200.00 due.", hour=1), store, settings, now=START)
+    process_message(message("vb", "Invoice NW-88001 for PO 4500106", "billing@northwind.com", "Invoice NW-88001 for PO 4500106, $900.00 due.", hour=2), store, settings, now=START)
+    assert not [key for key in store.link_keys("rep") if key[0] == "po"]
+    assert "vb" not in [record.id for record, _why in links.trace(store, store.get_email("va"))["steps"]]
+
+
+# Guards against: invoice and PO numbers in file names were taken out as if they were dates, so each month's
+# separate invoice was "Another version of" the last one, and the whole matter compared two different invoices.
+# Excel's and Google's own names for a new file ("Book1.xlsx") made two colleagues' unrelated files versions too.
+@pytest.mark.parametrize(("name", "stem"), [
+    ("Coastal_Invoice_20481234.pdf", "coastal invoice 20481234.pdf"),
+    ("Purchase Order 2026-1101.pdf", "purchase order 2026 1101.pdf"),
+    ("Acme quote 1-2-345.pdf", "acme quote 1 2 345.pdf"),
+    ("Budget 2026-10-31.xlsx", "budget.xlsx"),
+    ("Budget 20261031.xlsx", "budget.xlsx"),
+    ("Budget 31.10.2026.xlsx", "budget.xlsx"),
+    ("Book1.xlsx", ""), ("Presentation1.pptx", ""), ("New Microsoft Excel Worksheet.xlsx", ""), ("Untitled spreadsheet.xlsx", ""),
+    ("Copy of Lease schedule.xlsx", "lease schedule.xlsx"),
+])
+def test_a_number_or_a_default_name_in_a_files_name_is_no_version_mark(name, stem):
+    assert links.file_stem(name) == stem
+
+
+# Guards against: a number's key drops its leading zeros, and a key under four characters was left out, so
+# FreshBooks' "Invoice 0000123" got no invoice key and its reminder never showed as the same invoice.
+def test_a_zero_padded_invoice_number_is_kept():
+    assert ("invoice", "northwind.com|123") in links.keys(_record("a", invoices=["0000123"]))
+    assert not [key for key in links.keys(_record("b", invoices=["123"])) if key[0] == "invoice"]
+
+
+# Guards against: a file with an ordinary name ("Invoice.pdf", "Scan_0001.pdf") got no "file" key at all, so the
+# vendor's invoice and a colleague's forward of the very same PDF weren't shown as the same file.
+def test_a_file_with_an_ordinary_name_is_still_the_same_file(store):
+    for name in ("Invoice.pdf", "Scan_0001.pdf"):
+        sha = (name[0] * 64).lower()
+        store.upsert_email(_record(f"vendor-{name}", files=[(name, sha, 80_000, None)]))
+        store.upsert_email(_record(f"forward-{name}", sender="maya@taz.com", files=[(name, sha, 80_000, None)], received="2026-10-06T14:00:00+00:00"))
+        assert _groups(store, f"vendor-{name}") == [(f"Same file: {name}", [f"forward-{name}"])]
+    assert not [key for key in links.keys(_record("x", files=[("ATT00001.htm", "c" * 64, 3_000, None)])) if key[0] == "file"]
+
+
+# Guards against: a conversation chained by In-Reply-To alone was followed four replies out, so the thread shown
+# (and the invoice checks' conversation) depended on which email was opened.
+def test_a_chain_of_replies_naming_only_their_parent_is_followed_to_its_ends(store):
+    for n in range(8):
+        store.upsert_email(_record(f"e{n}", mid=f"<m{n}@n.com>", threading={"in_reply_to": f"m{n - 1}@n.com"} if n else {},
+                                   received=f"2026-10-0{1 + n}T09:00:00+00:00"))
+    for opened in ("e0", "e7"):
+        assert [e.id for e in links.related(store, store.get_email(opened), ai=False)["thread"]] == [f"e{n}" for n in range(8)], opened
+
+
+# Guards against: a copier gives every scan the same Message-ID, and once a colleague replied to one scan, the
+# next round of a conversation took in every scan carrying that id: all ten were "This conversation".
+def test_a_reply_to_one_scan_makes_no_conversation_of_all_the_scans(store):
+    for n in range(10):
+        store.upsert_email(_record(f"scan{n}", sender="scanner@taz.com", mid="<scan@copier.local>", received=f"2026-10-0{1 + n % 9}T0{n % 10}:00:00+00:00"))
+    store.upsert_email(_record("reply", sender="maya@taz.com", mid="<r@taz.com>", threading={"in_reply_to": "scan@copier.local"}, received="2026-10-09T12:00:00+00:00"))
+    assert {e.id for e in links.related(store, store.get_email("scan0"), ai=False)["thread"]} == {"scan0", "reply"}
+    # A lookalike claiming the vendor's Message-ID is still found beside it, to be marked.
+    store.upsert_email(_record("real", sender="ar@coastalprint.com", mid="<cp1@coastalprint.com>", threading={"to": ["ap@taz.com"]}))
+    store.upsert_email(_record("fake", sender="ar@coastalprlnt.com", mid="<cp1@coastalprint.com>", received="2026-10-06T09:00:00+00:00"))
+    store.upsert_email(_record("ours", sender="ap@taz.com", mid="<o@taz.com>", threading={"in_reply_to": "cp1@coastalprint.com"}, received="2026-10-07T09:00:00+00:00"))
+    found = links.related(store, store.get_email("ours"), ai=False)
+    assert {e.id for e in found["thread"]} == {"real", "fake", "ours"} and found["new_domains"] == {"fake"}
+
+
+# Guards against: the background catch-up read a batch of emails before it took the write lock. An email held as
+# fraud from the web page in between was filed again from what it was before, with the files a held email never
+# links, so the real vendor's email showed the held one under "Same file".
+def test_catching_up_reads_its_batch_with_the_write_lock_held(store, monkeypatch):
+    import sqlite3
+
+    from controller_inbox.store import Store
+
+    store.upsert_email(_record("a", invoices=["INV-1"]))
+    store.upsert_email(_record("b", invoices=["INV-2"]))
+    with store.connect() as conn:
+        conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('link_keys_version', 'old')")
+    assert store.file_link_keys(batch=1) == 1
+    original, writable = Store.get_emails, []
+
+    def read_then_try_to_write(self, ids, *, conn=None):
+        other = sqlite3.connect(store.path, timeout=0)
+        try:
+            other.execute("BEGIN IMMEDIATE")
+            writable.append(True)
+            other.rollback()
+        except sqlite3.OperationalError:
+            writable.append(False)
+        finally:
+            other.close()
+        return original(self, ids, conn=conn)
+
+    monkeypatch.setattr(Store, "get_emails", read_then_try_to_write)
+    assert store.file_link_keys(batch=500) == 1
+    assert writable == [False], "another writer could change the emails between their read and their filing"
