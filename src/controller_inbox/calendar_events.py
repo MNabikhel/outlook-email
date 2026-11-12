@@ -801,7 +801,9 @@ def _kept_invitations(email, settings, now: datetime) -> list[Meeting] | None:
         if not is_invitation(att) or len(found) >= MAX_ROWS:
             continue
         text = att.extracted_text or ""
-        if text.lstrip().upper().startswith("BEGIN:VCALENDAR") and "[CloseDesk stopped reading here" not in text:
+        # The text stored is read when it is the whole file: an older version kept only its first 2000 characters,
+        # and a long one is cut at the stored text's limit. Else the file kept under inbox/extracted is.
+        if _whole_calendar(text):
             data: bytes | str | None = text
         else:
             data = _kept_file(settings.inbox_extracted / email.id / safe_filename(att.filename), att.sha256) if att.sha256 else None
@@ -815,6 +817,13 @@ def _kept_invitations(email, settings, now: datetime) -> list[Meeting] | None:
         read = read or bool(request)
         found = request + found
     return found if read else None
+
+
+def _whole_calendar(text: str) -> bool:
+    """The stored text of an invitation, from its BEGIN:VCALENDAR to its END:VCALENDAR, not cut short."""
+    body = text.strip()
+    return (body.upper().startswith("BEGIN:VCALENDAR") and body.upper().endswith("END:VCALENDAR")
+            and "[CloseDesk stopped reading here" not in text)
 
 
 # --- For the calendar page and the chat -----------------------------------------------------------------------------
