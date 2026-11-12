@@ -34,7 +34,7 @@ logging.getLogger("pypdf").setLevel(logging.ERROR)
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 # Raise when attachments read differently, so text stored by an older reader is read again.
-READER_VERSION = "18"
+READER_VERSION = "19"
 MAX_TEXT = 400_000
 MAX_PDF_PAGES = 300
 MAX_SHEETS = 40
@@ -639,6 +639,12 @@ def _defined_names(book) -> list[tuple[str, str]]:
 
 
 _HEADER_SEARCH = 10
+# Headings of a column of numbers that name something rather than count it: an invoice or account number, a year.
+_ID_COLUMN = re.compile(
+    r"(?i)(?:\b(?:no|nos|nbr|num|number|id|code|ref|reference|acct|account|gl|year|fy|period|dept|department|store|"
+    r"branch|site|entity|cost cent(?:er|re)|cc|po|check|cheque|invoice|zip|postal code)\.?|#)\s*$"
+)
+_GROUPED_WHOLE = re.compile(r"\d{1,3}(?:,\d{3})+")
 
 
 @dataclass
@@ -675,7 +681,12 @@ def sheet_row_lines(rows: list[SheetRow], *, first_names_columns: bool = False) 
         for column in columns:
             ref = f"{get_column_letter(column)}{row.number}"
             label = f" ({labels[column]})" if named and column in labels else ""
-            cells.append(f"{ref}{label}: {row.cells.get(column) or tables.BLANK}")
+            value = row.cells.get(column) or tables.BLANK
+            if label and _ID_COLUMN.search(labels[column]) and _GROUPED_WHOLE.fullmatch(value):
+                # A number typed into an invoice-number, account or year column reads as Excel shows it (100235,
+                # 2026), not as an amount (100,235), so it matches the number on the invoice.
+                value = value.replace(",", "")
+            cells.append(f"{ref}{label}: {value}")
         line = " | ".join(cells)
         # Each stacked table's title is a heading over its rows, so its rows are a table of their own, told apart
         # by the title ("Canada entity (CAD)"), not added to the table above.
@@ -724,16 +735,28 @@ def _two_row_labels(top: dict[int, str], under: dict[int, object]) -> dict[int, 
 
 def _sheet_header(rows: list[SheetRow], *, first_names_columns: bool = False) -> int | None:
     """The index of the row naming the columns: one of the first rows, with two or more distinct labels,
-    bold over rows that aren't, or over a column of figures."""
-    for index, row in enumerate(rows[:_HEADER_SEARCH]):
-        if len(row.cells) < 2:
-            continue
+    bold over rows that aren't, or over a column of figures. A title of two cells over wider rows (the company
+    in A1, "As of 10/31/2026" in D1) is not the header when a row of more labels under it is."""
+
+    def heads(index: int) -> bool:
+        row = rows[index]
         below = rows[index + 1 : index + 31]
         columns = range(min(row.cells), max(max(r.cells) for r in [row, *below]) + 1)
         grid = [[r.cells.get(c, "") for c in columns] for r in [row, *below]]
         bold = row.bold and not all(r.bold for r in below)
-        if tables.has_header(grid, bold_first=bold, marked=first_names_columns and index == 0 and row.number == 1):
-            return index
+        return tables.has_header(grid, bold_first=bold, marked=first_names_columns and index == 0 and row.number == 1)
+
+    for index, row in enumerate(rows[:_HEADER_SEARCH]):
+        if len(row.cells) < 2 or not heads(index):
+            continue
+        if len(row.cells) == 2:
+            wider = next(
+                (later for later in range(index + 1, min(len(rows), _HEADER_SEARCH)) if len(rows[later].cells) >= 3 and heads(later)),
+                None,
+            )
+            if wider is not None:
+                return wider
+        return index
     return None
 
 

@@ -33,6 +33,11 @@ MAX_CHARS = 1800
 
 FOUND_HEAD = "Rows that match the question, copied from the table (the file is above):"
 WORKED_HEAD = "Worked out from the table, exactly (check it is what was asked; the file is above):"
+# The same, over a sheet too long to read whole: what is worked out covers only the rows that were read.
+PARTIAL_HEAD = (
+    "Worked out from the first {read} rows of the table only: the file has {left} more rows CloseDesk did not read, "
+    "so a total or count here is not the whole sheet; say so (the file is above):"
+)
 
 # Words that carry no meaning for matching a column or a row.
 _STOP = frozenset(
@@ -157,6 +162,8 @@ _LEADING_FIGURE = re.compile(
     r"\s*([(\-−–])?\s*([$€£¥])?\s*([(\-−–])?\s*"
     r"(\d{1,3}(?:\.\d{3})+,\d+|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{1,3},\d{1,2}(?![\d,])|\d+(?:\.\d+)?|\.\d+)"
 )
+# The line a sheet too long to read whole ends with ("[501 more rows not shown; ask for a range ...]").
+_LEFT_OUT = re.compile(r"^\[(\d+) more rows not shown\b")
 _CREDIT_DEBIT = re.compile(r"(CR|DR)\.?", re.I)
 
 When = tuple  # (year or None, month, day)
@@ -195,6 +202,8 @@ class Table:
     labels: tuple[str, ...]
     rows: list[Row] = field(default_factory=list)
     kinds: dict[str, str] = field(default_factory=dict)
+    # Rows of the sheet past the last one read ("[501 more rows not shown ...]"): the table is not the whole sheet.
+    left_out: int = 0
 
     @property
     def body(self) -> list[Row]:
@@ -262,6 +271,9 @@ def answer(text: str, question: str) -> Answer | None:
         found = _answer(table, asked)
         if not found:
             continue
+        if table.left_out and found.head == WORKED_HEAD:
+            found.head = PARTIAL_HEAD.format(read=len(table.body), left=table.left_out)
+            found.exact = False
         # The table whose rows the question names more of wins ("Sales" and "travel" on a detail tab over "Sales"
         # alone on the summary); the better match breaks a tie.
         named = _rows_named(table, asked.words)
@@ -364,12 +376,17 @@ def _tables_in(text: str) -> list[Table]:
     headed: set[int] = set()
     page = ""
     heading = False
+    # Each sheet's rows left out at its end, by its marker.
+    cut: dict[str, int] = {}
     for at, raw in enumerate((text or "").splitlines()):
         line = raw.strip()
         marker = MARKER_RE.match(line)
         if marker:
             page = marker.group(1)
             heading = False
+            continue
+        if left := _LEFT_OUT.match(line):
+            cut[page] = int(left.group(1))
             continue
         if line == "[heading]":
             heading = True
@@ -398,6 +415,10 @@ def _tables_in(text: str) -> list[Table]:
         _with_row_labels(table)
         _close_sections(table)
     found = _joined_across_pages(found)
+    for page, left in cut.items():
+        last = next((table for table in reversed(found) if table.rows and table.rows[-1].page == page), None)
+        if last is not None:
+            last.left_out = left
     for table in found:
         _name_rows(table)
         table.kinds = _kinds(table)
@@ -894,6 +915,9 @@ def _kinds(table: Table) -> dict[str, str]:
         dates = sum(cell_date(value) is not None for value in values)
         figures = sum(_number(value) is not None for value in values)
         kinds[label] = "date" if dates >= 0.6 * len(values) else "figure" if figures >= 0.6 * len(values) else "text"
+        if kinds[label] == "figure" and codes(label, cells):
+            # A department, an account or a store named by a number picks rows; it is never added up.
+            kinds[label] = "text"
     return kinds
 
 
@@ -1701,6 +1725,49 @@ def _stem(word: str) -> str:
 
 
 _ID_LABEL = re.compile(r"#|\b(?:id|no\.?|number|code|acct|account)\s*$", re.I)
+
+# Headings of a column that names its rows by a number (a department, an account, a store), rather than counting.
+_CODE_HEADING = re.compile(
+    r"\b(dept|department|div|division|code|id|no|nbr|num|number|entity|co|company|acct|account|gl|cost cent(er|re)|"
+    r"cc|store|branch|location|loc|site|region|units?|bu|class|fund|project|job|vendor|customer|emp|employee|check|"
+    r"cheque|po|ref|invoice)\b\.?|#",
+    re.I,
+)
+# Headings that say outright they hold codes, whatever else they say ("Cost center", "Budget code", "Sales region").
+_CODE_PHRASE = re.compile(
+    r"\b(cost cent(er|re)s?|codes?|id|ids|region|regions|business units?|dept|department|division|entity|gl|"
+    r"(acct|account)\s*(no|nbr|num|number|#))\b|#",
+    re.I,
+)
+# Headings of a quantity, however they start ("Employee count", "Customer balance", "No. of invoices"): figures.
+_QUANTITY_HEADING = re.compile(
+    r"\b(count|counts|balance|total|amount|amt|cost|costs|sales|qty|quantity|units|hours|hrs|days|price|rate|revenue|"
+    r"spend|budget|actual|value|paid|due|owed|headcount|fte|items|invoices|orders|salary|salaries|wages?|pay|gross|"
+    r"fees?|rent|bonus|bonuses|expenses?|charges?|deposits?|income|payments?|cash|profit|margin|tax)\b"
+    r"|\b(no|number)\.?\s+of\b",
+    re.I,
+)
+# Headings of an identifier, unique on each row: an invoice, vendor or check number, a GL account.
+_ID_HEADING = re.compile(r"\b(no|nbr|num|number|id|code|acct|account|ref)\b\.?|#", re.I)
+
+
+def codes(label: str, cells: list[str]) -> bool:
+    """A figure column that is really a list of codes: headed like one, every cell a whole number as written
+    (no separators, decimals or signs), and few of them repeated over the rows (210, 320, 410), or each an
+    identifier ("Invoice No", "Vendor ID", "GL Account", "Check #"), or written with a leading zero ("00417").
+    A heading's last word says what it holds: "Budget code" and "Sales region" are codes, "Dept Budget",
+    "Region Revenue" and "Employee Salary" amounts."""
+    if not _CODE_HEADING.search(label):
+        return False
+    quantity = [match.end() for match in _QUANTITY_HEADING.finditer(label)]
+    if quantity and max((match.end() for match in _CODE_PHRASE.finditer(label)), default=-1) < max(quantity):
+        return False
+    written = [cell.strip() for cell in cells if cell and cell != tables.BLANK]
+    if not written or not all(re.fullmatch(r"\d{1,10}", cell) for cell in written):
+        return False
+    if _ID_HEADING.search(label) or any(len(cell) > 1 and cell.startswith("0") for cell in written):
+        return True
+    return len(set(written)) <= max(40, len(written) // 3) and (len(written) < 4 or len(set(written)) < len(written))
 
 
 # Short forms in headings that aren't the start of the word they stand for ("Hours OT" for overtime hours).

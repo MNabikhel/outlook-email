@@ -195,6 +195,7 @@ class Sheet:
     of: str = ""  # a _cells table: the table it lays out one value per row
     across: str = ""  # its columns that were laid out (the first ... the last)
     caution: str = ""  # its printed totals that don't match its rows as read
+    left_out: int = 0  # rows of the sheet past the last one read: the table is not the whole sheet
 
 
 @dataclass
@@ -323,7 +324,7 @@ class Tables:
         title = " / ".join(part for part in (source, sheet, " / ".join(headings[:3])) if part)
         verdict = table_lookup.verify(table)
         caution = f"{len(verdict.mismatched)} of its {verdict.checked} printed totals don't match its rows as read" if verdict.mismatched else ""
-        self._register(Sheet(name, title, _notes(lines), columns, len(values), caution=caution))
+        self._register(Sheet(name, title, _notes(lines), columns, len(values), caution=caution, left_out=table.left_out))
         family = _family(columns)
         if family:
             self._load_cells(self.sheets[-1], family, values, _over(headings, columns, family))
@@ -367,7 +368,7 @@ class Tables:
         if over:
             for index in family:
                 columns[index].under = over
-        self._register(Sheet(name, sheet.title, "", cells_columns, len(rows), of=sheet.name, across=across))
+        self._register(Sheet(name, sheet.title, "", cells_columns, len(rows), of=sheet.name, across=across, left_out=sheet.left_out))
 
     def _register(self, sheet: Sheet) -> None:
         self.sheets.append(sheet)
@@ -411,6 +412,7 @@ class Tables:
             comma = "," if index < len(sheet.columns) - 1 else ""
             lines.append(f"  {column.name} {_sql_type(column.kind)}{comma}  -- {_describe(column, names)}")
         notes = [f"caution: {sheet.caution}, so its figures may be misread"] if sheet.caution else []
+        notes += [f"note: it {_partial(sheet)}"] if sheet.left_out and not sheet.of else []
         notes += [f"note: {sheet.note}"] if sheet.note else []
         lines.append(");" + (f"  -- {'; '.join(notes)}" if notes else ""))
         return "\n".join(lines)
@@ -468,6 +470,8 @@ class Tables:
         for sheet in self.sheets:
             if sheet.name in used and sheet.caution:
                 lines.append(f"Caution: {sheet.caution} ({sheet.title}); its figures may be misread, so say so if you use them.")
+            if sheet.name in used and sheet.left_out and not sheet.of:
+                lines.append(f"Caution: {sheet.name} {_partial(sheet)}; say so if you use them.")
         lines.append(f"Result ({len(found.rows)} row{'s' if len(found.rows) != 1 else ''}{', more not shown' if found.more else ''}):")
         for row in found.rows:
             cells = [f"{self._heading(name)}: {self._shown(name, value)}" for name, value in zip(found.names, row)]
@@ -730,35 +734,16 @@ def _ident(label: str, taken: set[str]) -> str:
     return name
 
 
-# Headings of a column that names its rows by a number (a department, an account, a store), rather than counting.
-_CODE_HEADING = re.compile(
-    r"\b(dept|department|div|division|code|id|no|nbr|num|number|#|entity|co|company|acct|account|gl|cost cent(er|re)|"
-    r"cc|store|branch|location|loc|site|region|units?|bu|class|fund|project|job|vendor|customer|emp|employee)\b\.?",
-    re.I,
-)
-# Headings that say outright they hold codes, whatever else they say ("Cost center", "Budget code", "Sales region").
-_CODE_PHRASE = re.compile(
-    r"\b(cost cent(er|re)s?|codes?|id|ids|region|regions|business units?|dept|department|division|entity|gl|"
-    r"(acct|account)\s*(no|nbr|num|number|#))\b|#",
-    re.I,
-)
-# Headings of a quantity, however they start ("Employee count", "Customer balance", "No. of invoices"): figures.
-_QUANTITY_HEADING = re.compile(
-    r"\b(count|counts|balance|total|amount|amt|cost|costs|sales|qty|quantity|units|hours|hrs|days|price|rate|revenue|"
-    r"spend|budget|actual|value|paid|due|owed|headcount|fte|items|invoices|orders)\b|\b(no|number)\.?\s+of\b",
-    re.I,
-)
+# A figure column that is really a list of codes (a department, an account, a store): see ``table_lookup.codes``.
+_codes = table_lookup.codes
 
 
-def _codes(label: str, cells: list[str]) -> bool:
-    """A figure column that is really a list of codes: headed like one, every cell a whole number as written
-    (no separators, decimals or signs), and few of them repeated over the rows (210, 320, 410)."""
-    if not _CODE_HEADING.search(label) or (_QUANTITY_HEADING.search(label) and not _CODE_PHRASE.search(label)):
-        return False
-    written = [cell.strip() for cell in cells if cell and cell != tables.BLANK]
-    if not written or not all(re.fullmatch(r"\d{1,10}", cell) for cell in written):
-        return False
-    return len(set(written)) <= max(40, len(written) // 3) and (len(written) < 4 or len(set(written)) < len(written))
+def _partial(sheet: Sheet) -> str:
+    """What a table of a sheet too long to read whole leaves out."""
+    return (
+        f"holds only the first rows of its sheet: the file has {sheet.left_out} more rows that were not read, "
+        "so a total or count over it is not the whole sheet"
+    )
 
 
 def _sql_type(kind: str) -> str:
