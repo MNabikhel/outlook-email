@@ -68,7 +68,7 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
         return False
     first = [cell.strip() for cell in rows[0] if cell is not None]
     filled = [cell for cell in first if cell]
-    if len(filled) < 2 or len(set(filled)) != len(filled):
+    if len(filled) < 2 or (len(set(filled)) != len(filled) and not _repeated_block(filled)):
         return False
     # A year or a month over each column ("2026", "Oct 2026") names it when the file marks the row as headings, or
     # when a word heads the row and figures sit under two or more periods ("Account | Sep 2026 | Oct 2026").
@@ -105,6 +105,16 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
 
 
 _YES_NO = re.compile(r"(?i)yes|no|n/?a")
+
+
+def _repeated_block(labels: list[str]) -> bool:
+    """Distinct labels written twice or more side by side ("Date | Amount | Date | Amount"): two lists of one kind
+    beside each other, such as a bank reconciliation's deposits in transit and outstanding checks."""
+    for size in range(2, len(labels) // 2 + 1):
+        block = labels[:size]
+        if len(labels) % size == 0 and len(set(block)) == size and labels == block * (len(labels) // size):
+            return True
+    return False
 
 
 def _period_headings(rows: list[list[str | None]]) -> bool:

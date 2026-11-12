@@ -342,6 +342,12 @@ class Tables:
         title = " / ".join(part for part in (source, sheet, " / ".join(headings[:3])) if part)
         verdict = table_lookup.verify(table)
         caution = f"{len(verdict.mismatched)} of its {verdict.checked} printed totals don't match its rows as read" if verdict.mismatched else ""
+        unworked = [column.label for column in columns if column.samples and all(sample.startswith("=") for sample in column.samples)]
+        if unworked:
+            # A workbook saved without its formulas' results: those columns hold formulas, not figures.
+            caution = "; ".join(
+                part for part in (caution, f"its formulas were saved without their results, so {', '.join(unworked)} holds no figures") if part
+            )
         self._register(Sheet(name, title, _notes(lines), columns, len(values), caution=caution, left_out=table.left_out))
         family = _family(columns)
         if family:

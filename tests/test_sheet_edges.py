@@ -429,3 +429,49 @@ def test_columns_past_the_sixtieth_are_said_to_be_left_out():
     assert "[Columns BI–BT not shown" in text
     cells = documents.read_cells(data, "Sheet", "A2:BT2")
     assert "Columns BI–BT not shown" in cells
+
+
+def test_headings_repeated_side_by_side_still_head_the_table():
+    rows = [("Date", "Amount", "Date", "Amount"), ("10/29/2026", 1250, "10/20/2026", 980), ("10/30/2026", 3400, "10/24/2026", 1200),
+            ("10/31/2026", 560, "10/28/2026", 75.25)]
+    for bold in ((1,), ()):
+        text = _xlsx_text(rows, bold=bold)
+        tables = _tables(text, "What is the total amount?")
+        assert tables.schema()
+        assert tables.run("SELECT SUM(amount), SUM(amount_2) FROM t1")[1] == [(5210.0, 2255.25)]
+
+
+# Formulas saved without their results ----------------------------------------------------------
+
+
+def _without_results(cached: bytes | None) -> bytes:
+    """A workbook as a reporting tool saves one: each formula with 0 as its result (XlsxWriter), or none."""
+    import re
+    import zipfile
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Vendor", "Jul", "Aug", "Total"])
+    for number, (vendor, jul, aug) in enumerate((("Acme", 100, 200), ("Beta", 50, 25), ("Gamma", 10, 5), ("Delta", 1, 2)), start=2):
+        ws.append([vendor, jul, aug, f"=B{number}+C{number}"])
+    plain = io.BytesIO()
+    wb.save(plain)
+    if cached is None:
+        return plain.getvalue()
+    source, out = zipfile.ZipFile(io.BytesIO(plain.getvalue())), io.BytesIO()
+    with zipfile.ZipFile(out, "w") as target:
+        for item in source.infolist():
+            body = source.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                body = re.sub(rb"(<f>[^<]*</f>)(<v></v>|<v/>)?", rb"\1<v>" + cached + rb"</v>", body)
+            target.writestr(item, body)
+    return out.getvalue()
+
+
+def test_formulas_saved_without_results_are_not_read_as_zeros():
+    for cached in (b"0", None):
+        text = documents.extract_document("pack.xlsx", XLSX, _without_results(cached))
+        assert "saved without their results" in text
+        assert "D2 (Total): =B2+C2" in text and "0 (=B2+C2)" not in text
+        tables = _tables(text, "What is the total for Acme?", "pack.xlsx")
+        assert "saved without their results" in tables.schema()

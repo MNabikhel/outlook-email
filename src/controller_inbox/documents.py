@@ -802,6 +802,10 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
     rows: list[SheetRow] = []
     more = 0
     formula_count = 0
+    # Formulas with no result saved, or 0 (the cells and their formula), and whether the sheet has figures of its own.
+    unworked: list[tuple[dict[int, str], int, str]] = []
+    no_result = 0
+    figures = False
     first_col = first_row = last_col = last_row = 0
     for index, (frow, vrow) in enumerate(
         zip(
@@ -821,8 +825,12 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
             if formula := _formula(raw):
                 formula_count += 1
                 shown = f"{_formatted(value, cell)} ({formula})" if value is not None else formula
+                if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0):
+                    no_result += 1
+                    unworked.append((cells, column + 1, formula))
             else:
                 shown = _formatted(value if value is not None else raw, cell)
+                figures = figures or (isinstance(value, (int, float)) and not isinstance(value, bool) and value != 0)
             if shown:
                 cells[column + 1] = shown
                 bold = bold and bool(getattr(getattr(cell, "font", None), "b", False))
@@ -833,6 +841,13 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
             continue
         number = next((cell.row for cell in frow if getattr(cell, "row", None)), index + 1)
         rows.append(SheetRow(number, cells, bold))
+    # A file saved by a reporting tool (or XlsxWriter) holds its formulas without their results, which Excel works out
+    # when it opens the file: their 0s are not figures. Each such cell is written as its formula alone.
+    saved_without = formula_count >= 2 and no_result >= 0.8 * formula_count and figures
+    if saved_without:
+        for cells_of_row, column, formula in unworked:
+            if column in cells_of_row:
+                cells_of_row[column] = formula
     _fill_merged_down(rows, _merged_ranges(formula_sheet))
     rows_text = sheet_row_lines(rows)
     try:
@@ -848,7 +863,10 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
     note = f"({len(rows) + more} row{'s' if len(rows) + more != 1 else ''} with data" + (
         f", {formula_count} formula{'s' if formula_count != 1 else ''}" if formula_count else ""
     ) + ")"
-    out = [head, note, *rows_text]
+    out = [head, note]
+    if saved_without:
+        out.append(f"[{_SAVED_WITHOUT_RESULTS}]")
+    out += rows_text
     if more:
         out.append(f"[{more} more rows not shown; ask for a range such as rows {MAX_ROWS + 1}–{MAX_ROWS + 200}.]")
     try:
@@ -858,6 +876,12 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
     if widest > MAX_COLUMNS:
         out.append(_columns_left_out(MAX_COLUMNS + 1, widest))
     return out
+
+
+_SAVED_WITHOUT_RESULTS = (
+    "This sheet's formulas were saved without their results, as some reporting tools save a file: a cell shows its "
+    "formula where Excel would show the figure, so those figures are not in the file as read"
+)
 
 
 def _columns_left_out(first: int, last: int, *, workbook: bool = True) -> str:
