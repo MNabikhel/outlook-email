@@ -633,8 +633,12 @@ def changes(old: str, new: str, *, limit: int = MAX_CHANGES) -> tuple[list[str],
     import difflib
 
     lines = lambda text: [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("[")]  # noqa: E731
+    before, after = lines(old), lines(new)
+    if max(len(before), len(after)) > MAX_DIFF_LINES:
+        found = _line_changes(before, after)
+        return found[:limit], max(0, len(found) - limit)
     found = []
-    for line in difflib.unified_diff(lines(old), lines(new), lineterm="", n=0):
+    for line in difflib.unified_diff(before, after, lineterm="", n=0):
         if line.startswith(("---", "+++", "@@")):
             continue
         if line.startswith("-"):
@@ -642,6 +646,37 @@ def changes(old: str, new: str, *, limit: int = MAX_CHANGES) -> tuple[list[str],
         elif line.startswith("+"):
             found.append(f"Added: {line[1:][:200]}")
     return found[:limit], max(0, len(found) - limit)
+
+
+MAX_DIFF_LINES = 1000  # lines of a version compared line by line in order; a longer one by which lines it has
+
+
+def _line_changes(before: list[str], after: list[str]) -> list[str]:
+    """The lines taken out of ``before`` and put in ``after``, in the order the files have them: a long report's
+    versions are compared by which lines each has (lining them up as a diff does takes seconds on thousands of
+    lines), a line taken out listed next to the one put in its place."""
+    from collections import Counter
+
+    start = 0
+    while start < min(len(before), len(after)) and before[start] == after[start]:
+        start += 1
+    end = 0
+    while end < min(len(before), len(after)) - start and before[-1 - end] == after[-1 - end]:
+        end += 1
+    old, new = before[start : len(before) - end], after[start : len(after) - end]
+
+    def only_in(lines: list[str], other: list[str]) -> list[tuple[int, str]]:
+        left = Counter(other)
+        out = []
+        for at, line in enumerate(lines):
+            if left[line] > 0:
+                left[line] -= 1
+            else:
+                out.append((at, line))
+        return out
+
+    marked = [(at, 0, f"Removed: {line[:200]}") for at, line in only_in(old, new)] + [(at, 1, f"Added: {line[:200]}") for at, line in only_in(new, old)]
+    return [text for _at, _kind, text in sorted(marked)]
 
 
 def _cells(text: str) -> dict[tuple[str, str], tuple[str, str]]:

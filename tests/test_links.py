@@ -276,6 +276,24 @@ def test_what_changed_between_versions_of_a_workbook_and_a_document():
     assert listed == ["Removed: Term: 12 months"] and more == 1
 
 
+def test_what_changed_between_two_long_reports_is_found_quickly():
+    """A weekly report of thousands of lines, numbers changed on half of them: the trace page lists its changes in
+    a moment, each line taken out next to the one put in its place, and an unchanged stretch moved adds nothing."""
+    import time
+
+    def report(week: int) -> str:
+        return "\n".join(f"Customer {i} open {i * 3.17 + (week if i % 2 == 0 else 0):.2f}" for i in range(6000))
+
+    started = time.monotonic()
+    listed, more = links.changes(report(1), report(2))
+    assert time.monotonic() - started < 0.5
+    assert listed[:2] == ["Removed: Customer 0 open 1.00", "Added: Customer 0 open 2.00"]
+    assert listed[2:4] == ["Removed: Customer 2 open 7.34", "Added: Customer 2 open 8.34"]
+    assert len(listed) + more == 6000
+    moved = "\n".join(f"Line {i}" for i in range(3000))
+    assert links.changes(moved + "\nTotal 1", "Total 2\n" + moved) == (["Added: Total 2", "Removed: Total 1"], 0)
+
+
 def test_the_versions_along_a_matter_say_what_changed(store):
     v1 = _record("v1", files=[("Lease schedule v1.xlsx", "1" * 64, 20_000, None)], received="2026-09-01T09:00:00+00:00")
     v1.attachments[0].extracted_text = '[sheet "Lease" A1:B2]\nA1: Item | B1: Rent\nA2 (Item): Unit 4 | B2 (Rent): 4,000'
