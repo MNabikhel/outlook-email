@@ -298,3 +298,25 @@ def test_a_moved_closedesk_folder_still_finds_its_kept_files(tmp_path, settings)
     assert links.kept_file(settings, str(old)) == kept
     assert links.kept_file(settings, str(tmp_path / "elsewhere" / "b.eml")) is None
     assert links.kept_file(settings, "") is None
+
+
+def test_a_backdated_or_addressless_reply_is_still_new_to_the_conversation(store):
+    # The real thread: the vendor writes to AP, AP answers.
+    store.upsert_email(_record("root", mid="<root@northwind.com>", received="2026-10-01T09:00:00+00:00", threading={"to": ["ap@taz.com"]}))
+    store.upsert_email(_record("ours", sender="ap@taz.com", mid="<r1@taz.com>", received="2026-10-01T11:00:00+00:00",
+                               threading={"in_reply_to": "root@northwind.com", "references": ["root@northwind.com"], "to": ["priya@northwind.com"]}))
+    # A lookalike's reply, dated before the vendor's first email, copying the vendor to look at home.
+    store.upsert_email(_record("hijack", sender="priya@northwnd.com", received="2026-09-01T09:00:00+00:00",
+                               threading={"in_reply_to": "r1@taz.com", "references": ["root@northwind.com", "r1@taz.com"], "to": ["ap@taz.com", "priya@northwind.com"]}))
+    # A reply with no From address at all, only a Reply-To.
+    nobody = _record("nobody", sender="", received="2026-10-02T09:00:00+00:00", threading={"in_reply_to": "r1@taz.com"})
+    nobody.reply_to = "priya@northwnd-ap.com"
+    store.upsert_email(nobody)
+    assert links.related(store, store.get_email("ours"))["new_domains"] == {"hijack", "nobody"}
+
+
+def test_a_held_emails_number_counts_only_as_a_whole_number_of_its_text(store):
+    held = _record("held", sender="ar@nw-remit.net", flags=["fraud_risk"], invoices=["INV2291", "10482"])
+    held.subject, held.body_text = "Ref INV-22918", "Call 555 104 8221"
+    store.upsert_email(held)
+    assert not any(kind == "invoice" for kind, _value in store.link_keys("held"))
