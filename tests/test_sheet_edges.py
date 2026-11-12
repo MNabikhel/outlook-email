@@ -157,6 +157,28 @@ def test_an_unheaded_row_number_column_keeps_the_table():
     assert _tables(text, "What is the total amount?").run("SELECT SUM(amount) FROM t1")[1] == [(17980.5,)]
 
 
+def test_a_cell_holding_the_separators_stays_one_cell_of_its_row():
+    text = _csv_text("Date,Memo,Amount\n10/01/2026,Rent,950.00\n10/02/2026,ACH | Ref: 4471,1200.00\n10/03/2026,Card,45.20\n10/04/2026,Fee,5.00\n")
+    tables = _tables(text, "What is the total amount?", "memo.csv")
+    assert len([sheet for sheet in tables.sheets if not sheet.of]) == 1
+    assert tables.run("SELECT COUNT(*), ROUND(SUM(amount), 2) FROM t1")[1] == [(4, 2200.2)]
+    from controller_inbox import tables as table_text
+
+    line = table_text.labelled_row(["Memo", "Amount"], ["ACH | Ref: 4471", "1,200.00"])
+    assert line.count(" | ") == 1
+
+
+def test_a_heading_with_a_colon_keeps_its_rows_one_table():
+    rows = [("Department", "Budget: FY26", "Actual: FY26"), ("Finance", 120000, 118000), ("Sales", 340000, 365000), ("IT", 210000, 199000),
+            ("HR", 90000, 93000)]
+    tables = _tables(_xlsx_text(rows), "Which departments are over budget?")
+    assert len([sheet for sheet in tables.sheets if not sheet.of]) == 1 and tables.sheets[0].rows == 4
+    from controller_inbox import tables as table_text
+
+    line = table_text.labelled_row(["Item", "Amount: USD"], ["Freight", "100"])
+    assert table_lookup._row(line, "page 1").cells == [("Item", "Freight"), ("Amount - USD", "100")]
+
+
 # Two heading rows ------------------------------------------------------------------------------
 
 

@@ -135,8 +135,9 @@ def table_lines(rows: list[list[str | None]], *, header: bool) -> list[str]:
 
 def labelled_row(labels: list[str | None], row: list[str | None]) -> str:
     """``Label: value`` for each column, ``Label: not listed`` where the cell is empty."""
-    labels = [_clean(label) or "" for label in labels]
-    row = [_clean(cell) for cell in row] + [""] * (len(labels) - len(row))
+    # A "|" or ": " in a heading, or " | " in a cell, would read as the end of a cell or of its name.
+    labels = [(_clean(label) or "").replace("|", "/").replace(": ", " - ") for label in labels]
+    row = [None if cell is None else cell.replace(" | ", " / ") for cell in map(_clean, row)] + [""] * (len(labels) - len(row))
     filled = [cell for cell in row if cell]
     # A lone heading ("Contractors") reads on its own; a lone figure, often a total, needs its column.
     if len(filled) == 1 and len(labels) > 2 and not is_value(filled[0]):

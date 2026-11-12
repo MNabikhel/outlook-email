@@ -647,6 +647,12 @@ _ID_COLUMN = re.compile(
 _GROUPED_WHOLE = re.compile(r"\d{1,3}(?:,\d{3})+")
 
 
+def _label(heading) -> str:
+    """A heading as it is written before each cell ("C5 (Budget - FY26): 120,000"): a "|" or ": " in it would read
+    as the end of the cell or of its name."""
+    return str(heading).replace("|", "/").replace(": ", " - ")
+
+
 @dataclass
 class SheetRow:
     number: int
@@ -662,7 +668,7 @@ def sheet_row_lines(rows: list[SheetRow], *, first_names_columns: bool = False) 
     from openpyxl.utils import get_column_letter
 
     header = _sheet_header(rows, first_names_columns=first_names_columns)
-    labels = {c: v.replace("|", "/") for c, v in rows[header].cells.items()} if header is not None else {}
+    labels = {c: _label(v) for c, v in rows[header].cells.items()} if header is not None else {}
     second = _second_heading_row(rows, header)
     if second is not None:
         labels = _two_row_labels(labels, rows[second].cells)
@@ -681,7 +687,7 @@ def sheet_row_lines(rows: list[SheetRow], *, first_names_columns: bool = False) 
         for column in columns:
             ref = f"{get_column_letter(column)}{row.number}"
             label = f" ({labels[column]})" if named and column in labels else ""
-            value = row.cells.get(column) or tables.BLANK
+            value = (row.cells.get(column) or tables.BLANK).replace(" | ", " / ")
             if label and _ID_COLUMN.search(labels[column]) and _GROUPED_WHOLE.fullmatch(value):
                 # A number typed into an invoice-number, account or year column reads as Excel shows it (100235,
                 # 2026), not as an amount (100,235), so it matches the number on the invoice.
@@ -744,7 +750,7 @@ def _two_row_labels(top: dict[int, str], under: dict[int, object]) -> dict[int, 
     and its own ("Actual Jul"). A column with nothing under its label keeps the label alone ("Q3", "Budget")."""
     labels = dict(top)
     for column in sorted(under):
-        own = str(under[column]).replace("|", "/")
+        own = _label(under[column])
         left = [c for c in top if c <= column]
         if not left:
             # Left of every heading above: its own label alone ("Account" beside "Q3 2026").
