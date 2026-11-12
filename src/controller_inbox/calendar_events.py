@@ -938,9 +938,13 @@ def with_cautions(store, meetings: list[dict]) -> list[dict]:
     from controller_inbox.store import _meeting_of
 
     invites = [m for m in meetings if m.get("source") == "invite" and m.get("email_id")]
-    senders: dict[str, set[str]] = {}
+    # Every invitation naming the meeting's id, not only those on show: a lookalike's moved to another day is
+    # doubtful in the Day view too.
+    senders = store.invitation_meetings([m["uid"] for m in invites]) if invites else {}
     for meeting in invites:
         senders.setdefault(meeting["uid"], set()).add(_meeting_of(meeting.get("sender"), meeting.get("organizer")))
+    for uid, about in senders.items():
+        senders[uid] = _others(about)
     emails = store.get_emails(list(dict.fromkeys(m["email_id"] for m in invites))) if invites else {}
     newcomer: dict[str, bool] = {}
     for meeting in meetings:
@@ -964,6 +968,21 @@ def with_cautions(store, meetings: list[dict]) -> list[dict]:
             meeting["caution"] = f"{CAUTION}: {why}."
     return meetings
 
+
+def _others(meetings: set[str]) -> set[str]:
+    """The different senders among the meetings invitations with one id are about (``store._meeting_of``): the
+    organizer's own word ("vendor.com") and one colleague's forward of it ("vendor.com|taz.com") are one sender, the
+    organizer; two domains forwarding it, or another organizer, are not."""
+    forwards: dict[str, int] = {}
+    for meeting in meetings:
+        if "|" in meeting:
+            organizer = meeting.partition("|")[0]
+            forwards[organizer] = forwards.get(organizer, 0) + 1
+    out = set()
+    for meeting in meetings:
+        organizer = meeting.partition("|")[0]
+        out.add(organizer if organizer in meetings and forwards.get(organizer) == 1 else meeting)
+    return out
 
 
 def shown(meeting: dict, tz) -> dict:

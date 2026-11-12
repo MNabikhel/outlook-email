@@ -741,6 +741,18 @@ class Store:
             _hold(conn, email_id, [(row["uid"], row["start"], row["organizer"], bool(row["recurring"])) for row in rows], sender)
             return len(rows)
 
+    def invitation_meetings(self, uids: list[str]) -> dict[str, set[str]]:
+        """For each of ``uids``, which meetings (``_meeting_of``) the invitations naming it are about, whenever they
+        are and whether or not they count (held mail's left out): more than one is a lookalike's or a forger's."""
+        out: dict[str, set[str]] = {}
+        with self.connect() as conn:
+            sql = """SELECT DISTINCT m.uid, m.sender, m.organizer, 'invite' AS source, e.flags AS email_flags, e.category AS email_category
+                     FROM meetings m LEFT JOIN emails e ON e.id = m.email_id WHERE m.source = 'invite' AND m.uid IN ({})"""
+            for row in _in_chunks(conn, sql, list(dict.fromkeys(uids))):
+                if not _held_invite(row):
+                    out.setdefault(row["uid"], set()).add(_meeting_of(row["sender"], row["organizer"]))
+        return out
+
     def held_markers(self, email_id: str) -> int:
         """How many meetings an email's invitation named while it was held (``_hold``)."""
         with self.connect() as conn:
@@ -2352,11 +2364,22 @@ def _same_occurrence(start: str, occurrence: str) -> bool:
 def _owner(sender: str | None, organizer: str | None) -> tuple[str, bool]:
     """The organizer's domain an invitation is about (its ORGANIZER's, else its sender's when it names none), and
     whether it is that domain's own (sent from it), not a forward of it. A file with no sender is one the user dropped
-    in the drop folder: their own copy of the organizer's invitation, counted as the organizer's."""
-    named, sent = _address_domain(organizer), _address_domain(sender)
+    in the drop folder: their own copy of the organizer's invitation, counted as the organizer's. At a free-mail
+    domain (gmail.com), where anyone can have an address, it is the whole address: another gmail.com user is
+    someone else."""
+    named, sent = _party(organizer), _party(sender)
     if not named:
         return sent, True
     return named, sent == named or not sent
+
+
+def _party(text: str | None) -> str:
+    """Who sent or organized an invitation, as meetings are told apart: the domain of the address, or the whole
+    address at a free-mail domain."""
+    from controller_inbox.fraud import FREEMAIL
+
+    domain = _address_domain(text)
+    return (_address(text) or domain) if domain and domain in FREEMAIL else domain
 
 
 def _meeting_of(sender: str | None, organizer: str | None) -> str:
@@ -2364,7 +2387,7 @@ def _meeting_of(sender: str | None, organizer: str | None) -> str:
     domain and the domain that forwarded it ("vendor.com|taz.com"). A forward only updates the forwards from its own
     sending domain: someone else claiming the same organizer (a forged ORGANIZER) is a meeting of their own."""
     domain, theirs = _owner(sender, organizer)
-    return domain if theirs else f"{domain}|{_address_domain(sender)}"
+    return domain if theirs else f"{domain}|{_party(sender)}"
 
 
 def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:

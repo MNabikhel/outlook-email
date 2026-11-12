@@ -183,3 +183,51 @@ def test_outlooks_copy_of_a_held_weekly_invitation_stays_hidden_past_the_weeks_i
     store.hold_invites("later")
     store.replace_meetings("outlook", [copy, replace(copy, uid="U2")], start="2027-01-01T00:00:00+00:00", end="2027-10-01T00:00:00+00:00")
     assert store.meetings_between("2027-04-26", "2027-04-28") == []
+
+
+def _invite(uid, start, *, subject="Budget review", method="REQUEST", sequence=0, organizer="mailto:maya@taz.com", end=""):
+    lines = [f"UID:{uid}", f"SUMMARY:{subject}", f"DTSTART:{start}", f"SEQUENCE:{sequence}", f"ORGANIZER:{organizer}"]
+    return _ics(_event(*lines, *([f"DTEND:{end}"] if end else [])), method=method)
+
+
+def _save(store, email_id, data, sender, received="2026-10-01T09:00:00+00:00", **record):
+    store.upsert_email(_record(email_id, sender=sender, received=received, **record))
+    store.save_invites(email_id, cal.from_ics(data, email_id=email_id, now=NOW), sender=sender, received=received)
+
+
+def test_a_lookalikes_invitation_says_to_check_who_sent_it_on_its_own_day(store):
+    _save(store, "real", _invite("U2", "20261006T140000Z"), "maya@taz.com")
+    _save(store, "fake", _invite("U2", "20261007T140000Z", subject="Updated: Budget review", sequence=1, organizer="mailto:maya@taz-c0rp.com"),
+          "maya@taz-c0rp.com")
+    day = cal.with_cautions(store, store.meetings_between("2026-10-07T00:00:00+00:00", "2026-10-08T00:00:00+00:00"))
+    assert [(m["email_id"], bool(m["caution"])) for m in day] == [("fake", True)]
+    day = cal.with_cautions(store, store.meetings_between("2026-10-06T00:00:00+00:00", "2026-10-07T00:00:00+00:00"))
+    assert [(m["email_id"], bool(m["caution"])) for m in day] == [("real", True)]
+
+
+def test_another_free_mail_user_cant_move_a_free_mail_organizers_meeting(store):
+    _save(store, "real", _invite("G1", "20261009T140000Z", organizer="mailto:maya.chen.cpa@gmail.com"), "maya.chen.cpa@gmail.com")
+    _save(store, "other", _invite("G1", "20261009T200000Z", sequence=3, subject="Urgent: wire approval call, dial +1 555 0100",
+                                  organizer="mailto:maya.chen.cpa@gmail.com"), "billing.dept.payments@gmail.com", received="2026-10-02T09:00:00+00:00")
+    shown = cal.with_cautions(store, store.meetings_between("2026-10-09", "2026-10-10"))
+    assert [(m["email_id"], m["subject"]) for m in shown] == [("real", "Budget review")]
+    # The organizer's own update still moves it.
+    _save(store, "update", _invite("G1", "20261009T160000Z", sequence=1, organizer="mailto:maya.chen.cpa@gmail.com"), "maya.chen.cpa@gmail.com",
+          received="2026-10-03T09:00:00+00:00")
+    assert [m["email_id"] for m in store.meetings_between("2026-10-09", "2026-10-10")] == ["update"]
+
+
+def test_a_forward_and_the_organizers_own_word_on_one_week_say_nothing_doubtful(store):
+    vendor = "mailto:pat@vendor.com"
+    series = _ics(_event("UID:wk", "SUMMARY:AP standup", "DTSTART:20261005T140000Z", "DTEND:20261005T143000Z", "RRULE:FREQ=WEEKLY;COUNT=4",
+                         f"ORGANIZER:{vendor}"))
+    week = _ics(_event("UID:wk", "RECURRENCE-ID:20261019T140000Z", "SUMMARY:AP standup", "DTSTART:20261019T140000Z",
+                       "DTEND:20261019T143000Z", "SEQUENCE:1", f"ORGANIZER:{vendor}", "STATUS:CANCELLED"), method="CANCEL")
+    _save(store, "fwd", series, "maya@taz.com")
+    _save(store, "cancel", week, "pat@vendor.com", received="2026-10-02T09:00:00+00:00")
+    shown = cal.with_cautions(store, store.meetings_between("2026-10-01", "2026-11-03"))
+    assert len(shown) == 4 and not any(m["caution"] for m in shown)
+    # A second forwarding domain naming the same organizer is doubtful.
+    _save(store, "fwd2", series.replace("AP standup", "AP standup, new dial-in"), "maya@taz-c0rp.com", received="2026-10-03T09:00:00+00:00")
+    shown = cal.with_cautions(store, store.meetings_between("2026-10-01", "2026-11-03"))
+    assert shown and all(m["caution"] for m in shown)
