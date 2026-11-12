@@ -5,7 +5,8 @@ so; one that comes into reach fails too, until the baseline is updated, so an im
 quietly slip back. ``CLOSEDESK_EVAL_REPORT=path`` writes what each question got, for looking into a miss.
 
 ``pytest -m live_model`` asks a real model the same questions instead (set ``CLOSEDESK_EVAL_URL`` to its server,
-for example http://127.0.0.1:1234/v1, and ``CLOSEDESK_EVAL_MODEL`` to the model's name if the server has several).
+for example http://127.0.0.1:1234/v1, ``CLOSEDESK_EVAL_MODEL`` to the model's name if the server has several, and
+``CLOSEDESK_EVAL_CONTEXT`` to its context length when it doesn't report it; 16384 by default).
 """
 
 from __future__ import annotations
@@ -97,6 +98,9 @@ def test_a_real_model_answers(case, store, settings):
     if model := os.environ.get("CLOSEDESK_EVAL_MODEL"):
         settings.llm_model = model
     settings.llm_timeout = float(os.environ.get("CLOSEDESK_EVAL_TIMEOUT", "900"))
+    # The context the server was started with, for a server that doesn't say (llama-cpp-python): else CloseDesk
+    # assumes a short one, as it would in use, and reads less of each file than the server could take.
+    settings.chat_context_tokens = int(os.environ.get("CLOSEDESK_EVAL_CONTEXT", "16384"))
     email = mail_with(store, settings, case["file"])
     events = live(store, settings, email, case["question"])
     answer = "".join(e["text"] for e in events if e["type"] == "delta")
