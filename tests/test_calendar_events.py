@@ -158,6 +158,62 @@ def test_an_update_moves_a_meeting_and_a_cancellation_cancels_it_from_the_same_s
     assert [m["start"] for m in store.meetings_between("2026-10-09", "2026-10-10")] == ["2026-10-09T18:00:00+00:00"]
 
 
+def test_which_invitation_counts_is_decided_when_the_calendar_is_read(store):
+    """An update read before the invitation it replaces still counts; the organizer's word beats a forward of it,
+    and neither removes the other's rows; a lookalike's "update" never counts once the organizer has written."""
+    window = ("2026-10-09", "2026-10-10")
+    vendor = "mailto:priya@northwind.com"
+    store.save_invites("upd", cal.from_ics(_invite("Y", "20261009T180000Z", sequence=1, organizer=vendor), email_id="upd", now=NOW),
+                       sender="priya@northwind.com", received="2026-10-02T09:00:00+00:00")
+    store.save_invites("orig", cal.from_ics(_invite("Y", "20261009T140000Z", organizer=vendor), email_id="orig", now=NOW),
+                       sender="priya@northwind.com", received="2026-10-01T09:00:00+00:00")
+    assert [m["start"] for m in store.meetings_between(*window)] == ["2026-10-09T18:00:00+00:00"], "read out of order"
+
+    # A colleague's forward read first counts only until the organizer's own invitation arrives.
+    store.save_invites("fwd", cal.from_ics(_invite("Z", "20261009T150000Z", organizer=vendor), email_id="fwd", now=NOW),
+                       sender="maya@taz.com", received="2026-10-01T08:00:00+00:00")
+    assert [m["email_id"] for m in store.meetings_between(*window) if m["uid"] == "Z"] == ["fwd"]
+    store.save_invites("own", cal.from_ics(_invite("Z", "20261009T160000Z", organizer=vendor), email_id="own", now=NOW),
+                       sender="priya@northwind.com", received="2026-10-01T07:00:00+00:00")
+    assert [m["email_id"] for m in store.meetings_between(*window) if m["uid"] == "Z"] == ["own"]
+    store.save_invites("fake", cal.from_ics(_invite("Z", "20261009T200000Z", method="CANCEL", sequence=9, organizer="mailto:priya@northwlnd.com"),
+                                            email_id="fake", now=NOW), sender="priya@northwlnd.com", received="2026-10-03T09:00:00+00:00")
+    assert [(m["email_id"], m["cancelled"]) for m in store.meetings_between(*window) if m["uid"] == "Z"] == [("own", False)]
+    assert store.meeting(next(m["id"] for m in store.meetings_between(*window) if m["uid"] == "Z")) is not None
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(DISTINCT email_id) FROM meetings WHERE uid = 'Z'").fetchone()[0] == 3, "nothing removed"
+
+
+def test_an_answered_invitation_deleted_in_outlook_keeps_its_meeting_and_a_flood_keeps_outlooks_own(store):
+    from controller_inbox.calendar_events import Meeting
+    from controller_inbox.models import DocumentType, EmailRecord, ExtractedFields, Importance
+
+    record = EmailRecord(id="inv", subject="Budget review", sender_name="Maya", sender_email="maya@taz.com", received_at="2026-10-01T09:00:00+00:00",
+                         body_text="", body_preview="", has_attachments=True, outlook_importance="normal", is_read=True,
+                         category=DocumentType.MEETING, category_confidence=0.5, importance=Importance.LOW, importance_score=1,
+                         importance_reasons=[], flags=[], extracted=ExtractedFields(), source="outlook")
+    store.upsert_email(record)
+    store.save_invites("inv", cal.from_ics(_invite("K", "20261009T140000Z"), email_id="inv", now=NOW), sender="maya@taz.com", received=record.received_at)
+    store.delete_emails(["inv"])
+    assert [m["uid"] for m in store.meetings_between("2026-10-09", "2026-10-10")] == ["K"]
+
+    flood = [Meeting(uid=f"f{n}", start="2026-10-12T09:00:00+00:00", end="2026-10-12T10:00:00+00:00", subject="x", source="invite", email_id="flood")
+             for n in range(3000)]
+    store.save_invites("flood", flood, sender="spam@x.example", received="2026-10-02T09:00:00+00:00")
+    with store.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM meetings WHERE email_id = 'flood'").fetchone()[0] == store_module().MAX_INVITE_ROWS
+    store.replace_meetings("outlook", [Meeting(uid="o1", start="2026-10-12T23:00:00+00:00", end="2026-10-12T23:30:00+00:00", subject="Mine", source="outlook")],
+                           start="2026-10-12T00:00:00+00:00", end="2026-10-13T00:00:00+00:00")
+    shown = store.meetings_between("2026-10-12", "2026-10-13", limit=50)
+    assert len(shown) == 50 and any(m["uid"] == "o1" for m in shown)
+
+
+def store_module():
+    from controller_inbox import store
+
+    return store
+
+
 def test_an_invitation_on_held_mail_is_no_meeting(loaded, settings):
     from controller_inbox import assistant
 
@@ -233,10 +289,25 @@ def test_outlooks_id_for_a_meeting_from_another_calendar_is_its_invitations_uid(
 
 
 def test_an_all_day_meeting_request_keeps_its_days():
-    start, end = datetime(2026, 10, 30, 4, 0, tzinfo=timezone.utc), datetime(2026, 10, 31, 4, 0, tzinfo=timezone.utc)
-    assert cal._organizer_dates(start, end) == (datetime(2026, 10, 30).date(), datetime(2026, 10, 31).date())
+    from zoneinfo import ZoneInfo
+
+    days = (datetime(2026, 10, 30).date(), datetime(2026, 10, 31).date())
+    new_york = (datetime(2026, 10, 30, 4, 0, tzinfo=timezone.utc), datetime(2026, 10, 31, 4, 0, tzinfo=timezone.utc))
+    assert cal._organizer_dates(*new_york, ZoneInfo("America/New_York")) == days
     tokyo = (datetime(2026, 10, 29, 15, 0, tzinfo=timezone.utc), datetime(2026, 10, 30, 15, 0, tzinfo=timezone.utc))
-    assert cal._organizer_dates(*tokyo) == (datetime(2026, 10, 30).date(), datetime(2026, 10, 31).date())
+    assert cal._organizer_dates(*tokyo, ZoneInfo("Asia/Tokyo")) == days
+    # Auckland is 13 hours ahead in October: its midnight is 11:00 UTC the day before, which rounding gets wrong.
+    auckland = (datetime(2026, 10, 29, 11, 0, tzinfo=timezone.utc), datetime(2026, 10, 30, 11, 0, tzinfo=timezone.utc))
+    assert cal._organizer_dates(*auckland, ZoneInfo("Pacific/Auckland")) == days
+
+
+def test_an_invitation_with_huge_names_or_endless_attendees_is_kept_small():
+    huge = "A" * 5000
+    lines = [f"ATTENDEE;CN={huge}:mailto:{'b' * 3000}@x.example" for _ in range(3)] + [f"ATTENDEE:mailto:p{n}@x.example" for n in range(5000)]
+    [meeting] = cal.from_ics(_ics(_event("UID:a", "SUMMARY:Big", "DTSTART:20261012T150000Z", "DTEND:20261012T160000Z",
+                                         f"ORGANIZER;CN={huge}:mailto:o@x.example", *lines)), now=NOW)
+    assert len(meeting.attendees) == cal.MAX_ATTENDEES and all(len(person) <= 2 * cal.MAX_PERSON + 3 for person in meeting.attendees)
+    assert len(meeting.organizer) <= 2 * cal.MAX_PERSON + 3
 
 
 def test_an_invitation_built_to_overload_is_read_in_a_moment_and_a_broken_one_adds_nothing(store, settings):
@@ -257,6 +328,21 @@ def test_an_invitation_built_to_overload_is_read_in_a_moment_and_a_broken_one_ad
                      received_at=NOW, body_text="Invoice INV-77 attached, and an invitation.", body_preview="", has_attachments=True,
                      source="folder", attachments=[RawAttachment(id="a1", filename="invite.ics", content_type="text/calendar", size_bytes=len(broken), content=broken.encode())])
     assert pipeline.invites(raw, raw.id, NOW) == [], "the email is still read; its invitation adds nothing"
+
+
+def test_a_daily_rule_listing_every_minute_is_refused_and_a_twice_daily_one_is_kept():
+    """A DAILY rule can list every hour, minute and second of each day: dateutil walks it from its start, so one
+    from 1970 would take hours. It is kept as its first occurrence; a meeting at 9 and 2 every day is expanded."""
+    import time as clock
+
+    started = clock.monotonic()
+    hostile = cal.from_ics(_ics(_event("UID:h", "DTSTART:19700101T000000Z", "DTEND:19700101T000100Z",
+                                       "RRULE:FREQ=DAILY;BYHOUR=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23;BYMINUTE=0,15,30,45")), now=NOW)
+    seconds = cal.from_ics(_ics(_event("UID:s", "DTSTART:19700101T000000Z", "DTEND:19700101T000100Z", "RRULE:FREQ=WEEKLY;BYSECOND=1,2,3")), now=NOW)
+    assert clock.monotonic() - started < 3
+    assert len(hostile) == 1 and hostile[0].recurring and len(seconds) == 1
+    twice = cal.from_ics(_ics(_event("UID:t", "DTSTART:20260901T090000Z", "DTEND:20260901T091500Z", "RRULE:FREQ=DAILY;BYHOUR=9,14;COUNT=60")), now=NOW)
+    assert {m.start[11:16] for m in twice} == {"09:00", "14:00"} and len(twice) > 2
 
 
 def test_a_meetings_mail_is_found_among_a_year_of_mail_with_the_same_words(store):

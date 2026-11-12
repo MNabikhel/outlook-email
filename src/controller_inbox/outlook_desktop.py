@@ -351,7 +351,7 @@ def _meeting(item) -> dict | None:
             return None
         ends = ends or starts
         all_day = bool(item.AllDayEvent)
-        people = [p.strip() for field in (item.RequiredAttendees, item.OptionalAttendees) for p in str(field or "").split(";") if p.strip()]
+        people = [p.strip()[:200] for field in (item.RequiredAttendees, item.OptionalAttendees) for p in str(field or "")[:50_000].split(";") if p.strip()]
         start = item.Start.date().isoformat() if all_day else starts.isoformat(timespec="seconds")
         end = item.End.date().isoformat() if all_day else ends.isoformat(timespec="seconds")
         return {

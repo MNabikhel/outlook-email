@@ -28,7 +28,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 WINDOW_BACK = timedelta(days=90)
 WINDOW_AHEAD = timedelta(days=180)
 MAX_OCCURRENCES = 400  # of one repeating meeting in the window
-MAX_STEPS = 20_000  # occurrences of one rule looked at, however often it repeats
+MAX_ATTENDEES = 60  # listed per meeting
+MAX_PERSON = 200  # characters of a name or an address
+MAX_STEPS = 50_000  # occurrences of one rule looked at, from its first: a daily meeting from 1890 reaches today
 
 
 @dataclass
@@ -101,9 +103,9 @@ def _occurrences(event: dict, zones: dict, overrides: dict, method: str, email_i
     rule = event.get("RRULE")
     if rule is None:
         return [first]
-    if re.search(r"FREQ=(SECONDLY|MINUTELY|HOURLY)", rule[2], re.I):
-        # No meeting repeats more often than daily: such a rule (which anyone can email, from years back) would take
-        # minutes to walk. Its first occurrence is kept, marked as repeating.
+    if _too_often(rule[2]):
+        # No meeting repeats more often than a few times a day: such a rule (which anyone can email, from years back)
+        # would take minutes to walk. Its first occurrence is kept, marked as repeating.
         first.recurring = True
         return [first]
     from dateutil.rrule import rrulestr
@@ -124,14 +126,17 @@ def _occurrences(event: dict, zones: dict, overrides: dict, method: str, email_i
     high = now + WINDOW_AHEAD
     if all_day:
         low, high = low.replace(tzinfo=None), high.replace(tzinfo=None)
-    # Walked a step at a time from the window's start, up to its end, and at most so far: a rule every minute (or
-    # second) from years back, which anyone can email, mustn't hold the run or fill the memory.
+    # Walked a step at a time from its first occurrence, up to the window's end, and at most ``MAX_STEPS`` steps
+    # however far back it starts: a rule from years back that repeats often, which anyone can email, mustn't hold the
+    # run or fill the memory. (dateutil's own "after" walks from the start too, with no limit.)
     out = []
     from itertools import islice
 
-    for when in islice(rrule.xafter(low, inc=True), MAX_STEPS):
+    for when in islice(iter(rrule), MAX_STEPS):
         if when > high:
             break
+        if when < low:
+            continue
         stamp = when.date() if all_day else when
         key = _key(stamp)
         if key in excluded:
@@ -149,6 +154,16 @@ def _occurrences(event: dict, zones: dict, overrides: dict, method: str, email_i
         upcoming = [m for m in out if m.start >= _iso(now.date() if all_day else now, all_day)]
         out = (upcoming[:MAX_OCCURRENCES] or out[-MAX_OCCURRENCES:])
     return out
+
+
+def _too_often(rule: str) -> bool:
+    """A rule repeating more often than a few times a day: every hour, minute or second, or a daily rule listing
+    seconds, several minutes or many hours of each day."""
+    if re.search(r"FREQ=(SECONDLY|MINUTELY|HOURLY)", rule, re.I) or re.search(r"BYSECOND=", rule, re.I):
+        return True
+    minutes = re.search(r"BYMINUTE=([^;]*)", rule, re.I)
+    hours = re.search(r"BYHOUR=([^;]*)", rule, re.I)
+    return bool((minutes and "," in minutes.group(1)) or (hours and hours.group(1).count(",") >= 4))
 
 
 def _until_in_utc(rule: str, begin, all_day: bool) -> str:
@@ -179,7 +194,7 @@ def _meeting(event: dict, zones: dict, method: str, email_id: str) -> Meeting | 
         end = begin + (timedelta(days=1) if all_day else timedelta(0))
     uid = event.get("UID", ("", {}, ""))[2] or hashlib.sha256(f"{event.get('SUMMARY', ('', {}, ''))[2]}{_iso(begin, all_day)}".encode()).hexdigest()[:24]
     organizer = event.get("ORGANIZER")
-    attendees = [_person(raw) for raw in event.get("_all", {}).get("ATTENDEE", [])]
+    attendees = [_person(raw) for raw in event.get("_all", {}).get("ATTENDEE", [])[:MAX_ATTENDEES * 2]]
     status = event.get("STATUS", ("", {}, ""))[2].upper()
     return Meeting(
         uid=uid,
@@ -189,7 +204,7 @@ def _meeting(event: dict, zones: dict, method: str, email_id: str) -> Meeting | 
         all_day=all_day,
         location=_text(event.get("LOCATION", ("", {}, ""))[2]),
         organizer=_person(organizer) if organizer else "",
-        attendees=[person for person in attendees if person][:60],
+        attendees=[person for person in attendees if person][:MAX_ATTENDEES],
         cancelled=method == "CANCEL" or status == "CANCELLED",
         recurring="RRULE" in event,
         source="invite",
@@ -352,10 +367,10 @@ def _duration(value: str) -> timedelta:
 
 
 def _person(prop) -> str:
-    """"Maya Chen <maya@taz.com>" from an ORGANIZER or ATTENDEE line."""
+    """"Maya Chen <maya@taz.com>" from an ORGANIZER or ATTENDEE line, each part kept to a sensible length."""
     _name, params, value = prop
-    address = re.sub(r"(?i)^mailto:", "", value).strip()
-    shown = params.get("CN", "").strip()
+    address = re.sub(r"(?i)^mailto:", "", value).strip()[:MAX_PERSON]
+    shown = " ".join(params.get("CN", "").split())[:MAX_PERSON]
     if shown and "@" in address:
         return f"{shown} <{address}>"
     return shown or address
@@ -387,7 +402,7 @@ def _key(value: datetime | date) -> str:
 # --- Outlook meeting requests (.msg) ---------------------------------------------------------------------------------
 
 
-def from_msg(path, *, email_id: str = "") -> list[Meeting]:
+def from_msg(path, *, email_id: str = "", zone=None) -> list[Meeting]:
     """The meeting an Outlook meeting request, update or cancellation (.msg) is about; [] for anything else, a
     reply to one included. A repeating meeting's request gives its first occurrence, marked as repeating."""
     import extract_msg
@@ -411,9 +426,9 @@ def from_msg(path, *, email_id: str = "") -> list[Meeting]:
         # Outlook's own all-day flag: the times are UTC, so a New York all-day meeting doesn't start at midnight here.
         all_day = bool(getattr(message, "appointmentSubType", False))
         if all_day:
-            local = _organizer_dates(start, end)
+            local = _organizer_dates(start, end, zone)
             start, end = local
-        attendees = [part.strip() for part in str(getattr(message, "allAttendeesString", "") or "").split(";") if part.strip()]
+        attendees = [part.strip()[:MAX_PERSON] for part in str(getattr(message, "allAttendeesString", "") or "")[:50_000].split(";") if part.strip()]
         return [
             Meeting(
                 uid=uid,
@@ -423,7 +438,7 @@ def from_msg(path, *, email_id: str = "") -> list[Meeting]:
                 all_day=all_day,
                 location=str(getattr(message, "location", "") or "")[:300],
                 organizer=str(getattr(message, "sender", "") or "")[:200],
-                attendees=attendees[:60],
+                attendees=attendees[:MAX_ATTENDEES],
                 cancelled=isinstance(message, MeetingCancellation),
                 recurring=bool(getattr(message, "isRecurring", False) or getattr(message, "appointmentRecur", None)),
                 source="invite",
@@ -436,11 +451,16 @@ def from_msg(path, *, email_id: str = "") -> list[Meeting]:
         message.close()
 
 
-def _organizer_dates(start: datetime, end: datetime) -> tuple[date, date]:
-    """An all-day meeting's days from its UTC times: midnight where it was set up is a few hours either side of
-    midnight UTC, so the nearest midnight gives the day (12:00 UTC or later rounds to the next day)."""
+def _organizer_dates(start: datetime, end: datetime, zone=None) -> tuple[date, date]:
+    """An all-day meeting's days from its UTC times, read in ``zone`` (this computer's when not given): Outlook
+    stores an all-day meeting as midnight where it was set up, which is most likely the zone of the people it is
+    for. (Rounding to the nearest UTC midnight puts a New Zealand all-day meeting on the day before.)"""
+
     def day(value: datetime) -> date:
-        return (value + timedelta(hours=12)).date()
+        local = value.astimezone(zone) if zone is not None else value.astimezone()
+        # A midnight a few minutes off (a zone rule changed since) still names its day.
+        return (local + timedelta(hours=2)).date() if local.hour >= 22 else local.date()
+
     first, last = day(start), day(end)
     return first, max(last, first + timedelta(days=1))
 
