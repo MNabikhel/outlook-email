@@ -1202,7 +1202,7 @@ def _search_mail(ws: Workspace, query: str) -> str:
         n = ws.number(email)
         files = ", ".join(att.filename for att in email.attachments[:5])
         lines.append(
-            f"[{n}] {email.received_at[:10]} · from {email.sender_name or email.sender_email} · “{email.subject}”"
+            f"[{n}] {when_local(email.received_at, _zone(ws))} · from {email.sender_name or email.sender_email} · “{email.subject}”"
             + (f" · files: {files}" if files else "")
             + (" · related in meaning, not by the same words" if email.id in by_meaning else "")
             + (" · Warning: payment-detail change — verify by phone." if is_fraud(email) else "")
@@ -1214,7 +1214,7 @@ def _open_email(ws: Workspace, email: EmailRecord) -> str:
     n = ws.number(email)
     body = re.sub(r"\n{3,}", "\n\n", email.body_text or "").strip()
     lines = [
-        f"[{n}] {email.received_at[:10]} · from {email.sender_name or email.sender_email} <{email.sender_email}> · “{email.subject}”",
+        f"[{n}] {when_local(email.received_at, _zone(ws))} · from {email.sender_name or email.sender_email} <{email.sender_email}> · “{email.subject}”",
         body[:2500] + (" …" if len(body) > 2500 else ""),
     ]
     from controller_inbox.assistant import is_fraud
@@ -1239,6 +1239,22 @@ def _open_email(ws: Workspace, email: EmailRecord) -> str:
 MAX_RELATED = 6
 
 
+def when_local(value: str, tz) -> str:
+    """When an email came, in the app's time zone as its pages show it ("2026-09-21 21:00"): the UTC day it is stored
+    by is a day off for evening mail. The stored day when the stamp can't be read."""
+    from controller_inbox.clock import parse_stamp
+
+    parsed = parse_stamp(value or "")
+    if parsed is None:
+        return (value or "")[:10]
+    return (parsed.astimezone(tz) if tz is not None else parsed).strftime("%Y-%m-%d %H:%M")
+
+
+def _zone(ws: Workspace):
+    """The app's time zone, for when an email came; none for a workspace without settings."""
+    return getattr(ws.settings, "tz", None)
+
+
 def related_lines(ws: Workspace, email: EmailRecord) -> str:
     """The emails linked to ``email`` (links.py), numbered so the model can open them: its conversation, then the
     mail sharing an invoice, a PO or a file with it, each with why."""
@@ -1253,12 +1269,12 @@ def related_lines(ws: Workspace, email: EmailRecord) -> str:
         # A held email is listed without its words or a number to open it by. A cautioned one is never taken at its
         # word, and a sender new to the conversation (a lookalike's reply) is named by address, to be checked.
         if attachments_locked(other):
-            return f"- {other.received_at[:10]} · an email held as possible payment fraud ({why}): not shown — Warning: verify by phone"
+            return f"- {when_local(other.received_at, _zone(ws))} · an email held as possible payment fraud ({why}): not shown — Warning: verify by phone"
         warn = " — Warning: payment-detail change, verify by phone" if is_fraud(other) or "payment_caution" in other.flags else ""
         if other.id in found["new_domains"]:
             warn += " — Warning: this sender's domain is new to the conversation; check it is who it claims"
         who = f"{other.sender_name} <{other.sender_email}>" if other.sender_name and other.sender_email else other.sender_name or other.sender_email or "(no address)"
-        return f"[{ws.number(other)}] {other.received_at[:10]} · {who} · “{other.subject}” ({why}){warn}"
+        return f"[{ws.number(other)}] {when_local(other.received_at, _zone(ws))} · {who} · “{other.subject}” ({why}){warn}"
 
     # The conversation's emails nearest the one open, not its oldest: the window ``related`` gives is centred on it.
     thread = [other for other in found["thread"] if other.id != email.id]

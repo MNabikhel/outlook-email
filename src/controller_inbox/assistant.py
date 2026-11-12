@@ -533,9 +533,12 @@ def _shown(meeting: dict, settings: Settings) -> dict:
     return calendar_events.shown(meeting, settings.tz)
 
 
-def meeting_sources(store: Store, settings: Settings, meeting: dict, email_id: str | None = None) -> list[EmailRecord]:
+def meeting_sources(
+    store: Store, settings: Settings, meeting: dict, email_id: str | None = None, report: dict | None = None
+) -> list[EmailRecord]:
     """The sources for a question about one meeting: the meeting itself (as a calendar source), and the mail about
-    it (its invitation, then mail near its date naming its title or from its people). The open email leads."""
+    it (its invitation, then mail near its date naming its title or from its people). The open email leads.
+    ``report`` gets how many emails about it are held as possible payment fraud ("held")."""
     from controller_inbox import calendar_events
 
     shown = calendar_events.shown(meeting, settings.tz)
@@ -543,7 +546,10 @@ def meeting_sources(store: Store, settings: Settings, meeting: dict, email_id: s
     lines = "\n".join(_calendar_times(line) for line in calendar_events.listing([shown]).splitlines())
     calendar = _calendar_record(f"The meeting asked about. Times are {zone}.\n" + lines, [shown])
     # Held mail about a meeting (a lookalike's "updated dial-in") is no source: it never reaches the model.
-    mail = [email for email in calendar_events.related_mail(store, meeting, limit=MAX_SOURCES) if not attachments_locked(email)]
+    about = calendar_events.related_mail(store, meeting, limit=MAX_SOURCES)
+    mail = [email for email in about if not attachments_locked(email)]
+    if report is not None:
+        report["held"] = len(about) - len(mail)
     if email_id and email_id not in {email.id for email in mail} and (current := store.get_email(email_id)) is not None:
         mail = [current, *mail]
     lead = [email for email in mail if email.id == email_id]
@@ -908,12 +914,14 @@ def build_messages(
     tools: bool = False,
     tail: str = "",
     bodies: bool = True,
+    tz=None,
 ) -> list[dict]:
     """System prompt, recent turns, and one user message: the emails (with file passages), then the question.
 
     ``budget`` is for everything sent: the system prompt (and tool guide), earlier turns, each email's
     header, summary, tasks and file list, the file text, notes, ``tail`` and the question. Email bodies get
-    what is left (none with ``bodies=False``, which callers use to measure the rest)."""
+    what is left (none with ``bodies=False``, which callers use to measure the rest). ``tz``: the app's time zone, for
+    when each email came."""
     files = files or {}
     numbers = {email.id: index for index, email in enumerate(sources, start=1)}
     system = SYSTEM + (TOOLS_GUIDE if tools else "")
@@ -948,7 +956,7 @@ def build_messages(
 
     def heads() -> int:
         return sum(
-            size(_source_block(numbers[email.id], email, 0, on_screen=email.id == current_id, brief=brief[email.id])) + 1
+            size(_source_block(numbers[email.id], email, 0, on_screen=email.id == current_id, brief=brief[email.id], tz=tz)) + 1
             for email in sources
         )
 
@@ -963,7 +971,7 @@ def build_messages(
         # The body's share is in budget characters; a body full of figures gets fewer of its own.
         body = re.sub(r"\s+", " ", email.body_text or "").strip()  # as _source_block shows it
         limit = int(limit * len(body) / max(1, size(body))) if body else limit
-        block = _source_block(numbers[email.id], email, limit, on_screen=email.id == current_id, brief=brief[email.id])
+        block = _source_block(numbers[email.id], email, limit, on_screen=email.id == current_id, brief=brief[email.id], tz=tz)
         lines.append(block + fenced.get(email.id, ""))
     if notes:
         lines += ["", notes]
@@ -993,12 +1001,12 @@ def prompt_chars(messages: list[dict]) -> int:
     return sum(agent.prompt_size(str(m.get("content") or "")) + MESSAGE_CHARS for m in messages)
 
 
-def _source_block(number: int, email: EmailRecord, limit: int, *, on_screen: bool, brief: bool = False) -> str:
+def _source_block(number: int, email: EmailRecord, limit: int, *, on_screen: bool, brief: bool = False, tz=None) -> str:
     if email.source == "chat":
         return f"[{number}] Files the user added to this chat (not an email)\n" + agent.files_line(email)
     label = DOCUMENT_LABELS.get(email.category, email.category.value)
     head = (
-        f"[{number}] {email.received_at[:10]} · from {email.sender_name or email.sender_email} · "
+        f"[{number}] {agent.when_local(email.received_at, tz)} · from {email.sender_name or email.sender_email} · "
         f"\"{email.subject}\" · {label} · {email.folder or 'unfiled'}" + (" · (open on screen)" if on_screen else "")
     )
     bits = [head]
@@ -1199,7 +1207,7 @@ def offline_answer(
         return HELP_TEXT
     note = "Here's a straight lookup instead." if model_failed else "The local model isn't running, so this is a straight lookup."
     if meeting is not None:
-        return _meeting_answer(note, question, sources, meeting, numbers, tz)
+        return _meeting_answer(note, question, sources, meeting, numbers, tz, held=held)
     calendar = next((email for email in sources if email.source == "calendar"), None)
     if calendar is not None:
         return f"{note} " + _meetings_for(question, calendar.body_text, today, f" [{numbers[calendar.id]}]")
@@ -1368,9 +1376,17 @@ def _history_answer(
     return "\n".join(lines)
 
 
-def _meeting_answer(note: str, question: str, sources: list[EmailRecord], meeting: dict, numbers: dict, tz) -> str:
+def _held_line(held: int, of: str) -> str:
+    """How many emails of a conversation or about a meeting are held: "1 email of this conversation is held as possible
+    payment fraud, so its text isn't shown"."""
+    one = held == 1
+    return f"{held} email{'' if one else 's'} {of} {'is' if one else 'are'} held as possible payment fraud, so {'its' if one else 'their'} text isn't shown."
+
+
+def _meeting_answer(note: str, question: str, sources: list[EmailRecord], meeting: dict, numbers: dict, tz, *, held: int = 0) -> str:
     """A meeting asked about, with no model: when and where it is, then the mail about it (its invitation, mail
-    naming it or from its people). An invitation's file is the meeting, already said, so it isn't quoted."""
+    naming it or from its people), and how many emails about it are held as possible payment fraud (``held``), with
+    nothing of them. An invitation's file is the meeting, already said, so it isn't quoted."""
     calendar = next((email for email in sources if email.source == "calendar"), None)
     ref = f" [{numbers[calendar.id]}]" if calendar is not None else ""
     facts = [f"**{meeting['subject']}**, {agent.meeting_when(meeting)}"]
@@ -1382,8 +1398,12 @@ def _meeting_answer(note: str, question: str, sources: list[EmailRecord], meetin
         facts.append("cancelled")
     lines = [f"{note} The meeting{ref}:", " · ".join(facts) + "."]
     mail = [email for email in sources if email.source != "calendar"]
+    if held:
+        # A lookalike's "updated dial-in" or "new bank details" is the email the user most needs to hear about.
+        lines.append(f"{_held_line(held, 'about it')} Verify by phone before acting on any change to it.")
     if not mail:
-        lines.append("No mail about it turned up: nothing near its date names it or comes from its people.")
+        if not held:
+            lines.append("No mail about it turned up: nothing near its date names it or comes from its people.")
         return "\n".join(lines)
     lines.append("Mail about it:")
     for email in mail:
@@ -1422,7 +1442,7 @@ def answer_stream(
     if meeting is not None:
         # "Ask about this meeting": the meeting and the mail about it, not every email that shares a word with its
         # day and time.
-        sources, about_today = meeting_sources(store, settings, meeting, email_id), False
+        sources, about_today = meeting_sources(store, settings, meeting, email_id, report=searched), False
         found = {email.id for email in sources}
     else:
         sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings, report=searched)
@@ -1455,7 +1475,7 @@ def answer_stream(
         return
     use_model = llm_active(settings)
     event: dict[str, Any] = {"type": "sources", "sources": source_cards(sources, settings), "mode": "model" if use_model else "lookup"}
-    if any(is_fraud(email) for email in sources):
+    if any(is_fraud(email) for email in sources) or searched.get("held"):
         event["warning"] = FRAUD_WARNING
     current = next((email for email in sources if email.id == email_id), None)
     if current is not None and asks_about_locked_files(current, question):
@@ -1476,6 +1496,17 @@ def answer_stream(
         yield {"type": "delta", "text": offline_answer(question, sources, **lookup)}
         yield {"type": "done"}
         return
+    numbers = {email.id: number for number, email in enumerate(sources, start=1)}
+    if len(steps := [step for step in searched.get("thread") or [] if step in numbers]) > 1:
+        # "What happened so far?": the open email is [1] whatever its place, so the model is told the order.
+        by_id = {email.id: email for email in sources}
+        order = ", ".join(f"[{numbers[step]}] {agent.when_local(by_id[step].received_at, settings.tz)}"
+                          + (" (open on screen)" if step == email_id else "") for step in steps)
+        past = "\n\n".join(part for part in (f"This conversation, oldest first: {order}.", past) if part)
+    if held := searched.get("held", 0):
+        # Held mail is no source, so the model is told only that it is there.
+        past = "\n\n".join(part for part in (_held_line(held, "about this meeting" if meeting is not None else "of this conversation")
+                                                  + " Tell the user, and to verify by phone before acting on it.", past) if part)
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id, past=past)
     state = {"wrote": False, "text": ""}
     offer = None
@@ -1798,6 +1829,7 @@ def _model_answer(ws: agent.Workspace, question: str, state: dict, *, history, f
                     current_id=ws.current_id,
                     budget=_budget(settings, tools=False) // shrink,
                     notes=ws.past,
+                    tz=settings.tz,
                 )
                 yield from _stream(settings, messages, state)
             return
@@ -1957,7 +1989,7 @@ def _read_material(ws: agent.Workspace, *, history, today: str, focus: list[dict
     files = []
     for email in ws.sources:
         material.append(f"{email.subject}\n{email.body_text}")
-        material.append(_source_block(0, email, len(email.body_text or "") + 1, on_screen=False))
+        material.append(_source_block(0, email, len(email.body_text or "") + 1, on_screen=False, tz=ws.settings.tz))
         if not agent.attachments_locked(email):
             files += [(att.filename, att.extracted_text) for att in email.attachments if att.extracted_text]
     return {"material": material, "files": files}
@@ -2020,7 +2052,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     primary = ws.primary()
     notes = agent.earlier_findings(ws, primary) if primary is not None else ""
     notes = "\n\n".join(part for part in (notes, ws.past) if part)
-    base = dict(history=history, today=today, current_id=ws.current_id, notes=notes)
+    base = dict(history=history, today=today, current_id=ws.current_id, notes=notes, tz=settings.tz)
     yield from agent.query_tables(ws, question, complete_text)
     plain = _budget(settings, tools=False) // shrink
     room = int((plain - prompt_chars(build_messages(question, ws.sources, budget=plain, bodies=False, **base))) * 0.85)

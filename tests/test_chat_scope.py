@@ -138,3 +138,20 @@ def test_a_long_conversation_keeps_the_replies_nearest_the_open_email(store, set
     assert "5 more emails of this conversation aren't shown here" in text, text
     lines = [line for line in text.splitlines() if "Step" in line]
     assert lines == sorted(lines, key=lambda line: int(line.split("Step ")[1].split()[0])), "oldest first"
+
+
+def test_the_model_reads_when_each_email_came_in_the_apps_time_zone(loaded, settings, model):
+    from controller_inbox import agent
+
+    asked, _tools = model
+    list(assistant.answer_stream(loaded, settings, "When did the parking garage email arrive?", today=TODAY))
+    head = next(line for line in asked[-1].splitlines() if "Parking garage" in line)
+    assert "2026-09-21 21:00" in head, "Sep 21 at 21:00 in New York, as the app shows it, not the UTC day"
+    ws = agent.Workspace(loaded, settings, [], question="x")
+    assert "2026-09-21 21:00" in agent.run_tool(ws, "search_mail", {"query": "parking garage"}, limit=4000)
+
+
+def test_the_model_is_told_the_conversations_order(loaded, settings, model):
+    asked, _tools = model
+    list(assistant.answer_stream(loaded, settings, "What happened so far?", email_id="demo-inv-10482-dup", today=TODAY, focus=[]))
+    assert "This conversation, oldest first: [2] 2026-09-22 02:00, [1] 2026-09-22 06:00 (open on screen)." in asked[-1], asked[-1][-1200:]
