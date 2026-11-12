@@ -476,7 +476,7 @@ def register_workspace(
         return {
             "thread": [row(other) for other in found["thread"]],
             "groups": [
-                {"kind": group["kind"], "label": group["label"], "emails": [{**row(other), "why": group["why"].get(other.id, "")} for other in group["emails"]]}
+                {"kind": group["kind"], "label": group["label"], "emails": [{**row(other), "model_why": group["why"].get(other.id, "") if group["kind"] == "ai" else ""} for other in group["emails"]]}
                 for group in found["groups"]
             ],
             "can_look": check_model(settings).active and not fraud.attachments_locked(email),

@@ -136,3 +136,21 @@ def test_candidates_are_searched_within_the_window_not_after_the_best_of_all_tim
     _mail(store, "near", "Harbor Steel quote for brackets", body="Harbor Steel quote", received="2026-10-03T09:00:00+00:00")
     later = _mail(store, "question", "Question on the Harbor Steel quote", sender="ap@taz.com", body="Harbor Steel quote?", received="2026-10-10T09:00:00+00:00")
     assert [e.id for e in link_judge.candidates(store, settings, later)] == ["near"]
+
+
+def test_only_the_models_links_carry_its_reason(loaded, settings):
+    """A conversation or invoice row has no "model's guess": the card's filing reason is no reason the emails are linked."""
+    from fastapi.testclient import TestClient
+    from helpers import PAGE
+
+    from controller_inbox.web import create_app
+
+    loaded.save_ai_link("demo-question", "demo-inv-10482", same=True, why="Both are about invoice 10482's amount", key="k")
+    client = TestClient(create_app(settings, loaded), headers=PAGE)
+    related = client.get("/api/mail/demo-question").json()["related"]
+    rows = [(group["kind"], row["id"], row["model_why"]) for group in related["groups"] for row in group["emails"]]
+    assert ("ai", "demo-inv-10482", "Both are about invoice 10482's amount") in rows or not any(kind == "ai" for kind, _id, _why in rows)
+    assert all(why == "" for kind, _id, why in rows if kind != "ai")
+    assert all("model_why" not in row for row in related["thread"])
+    dup = client.get("/api/mail/demo-inv-10482").json()["related"]
+    assert dup["groups"] and all(row["model_why"] == "" for group in dup["groups"] if group["kind"] != "ai" for row in group["emails"])
