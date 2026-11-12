@@ -470,6 +470,7 @@ def register_workspace(
             card = mail_card(other, settings.tz, today)
             first = " ".join((other.body_text or other.body_preview or "").split())[:160]
             return {**card, "here": other.id == email.id, "new_domain": other.id in found["new_domains"], "first_line": "" if card["locked"] else first,
+                    "domain": links._domain_of(other) or "no address",
                     "file_names": [] if card["locked"] else [att.filename.rsplit(" › ", 1)[-1] for att in other.attachments][:6]}
 
         return {

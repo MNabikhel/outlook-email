@@ -125,7 +125,7 @@ def keys(email: EmailRecord) -> list[tuple[str, str]]:
     held = attachments_locked(email)
     # A held email's numbers count only where its own text names them: read from its files (which stay closed), a
     # lookalike's "invoice" would tie it to the real vendor's mail.
-    said = number_key(f"{email.subject} {email.body_text}") if held else ""
+    said = _numbers_written(f"{email.subject} {email.body_text}") if held else set()
     for kind, numbers in (("invoice", _numbers(email, "invoice_numbers")), ("po", _numbers(email, "po_numbers"))):
         for number in numbers:
             if held and number not in said:
@@ -163,6 +163,11 @@ def _numbers(email: EmailRecord, name: str) -> set[str]:
             continue
         found |= {number_key(n) for n in listed}
     return {n for n in found if len(n) >= 4 and any(ch.isdigit() for ch in n)}
+
+
+def _numbers_written(text: str) -> set[str]:
+    """The numbers a text writes, each whole, as ``number_key`` gives them ("INV-22918" is not "INV2291")."""
+    return {number_key(token) for token in re.findall(r"[A-Za-z]*[-#\s]?\d[\d-]*[A-Za-z0-9]*", text or "")}
 
 
 def _real_file(att: AttachmentRecord) -> bool:
@@ -279,17 +284,38 @@ def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str
 
 
 def new_domains(thread: list[EmailRecord]) -> set[str]:
-    """The emails in a conversation whose sender's domain hadn't written in it before: a reply from a lookalike
-    domain slipped into a real thread is how payment-change fraud usually starts."""
-    seen: set[str] = set()
+    """The emails in a conversation whose sender's domain hadn't taken part in it: a reply from a lookalike domain
+    slipped into a real thread is how payment-change fraud usually starts.
+
+    Who has taken part is counted from the email the conversation started with (the one none of the others answer),
+    not from the earliest date: a Date header can be set to anything. Its sender and the people it went to have
+    taken part; so do the senders, and the people they wrote to, of each reply from someone who had. A sender with no
+    address is new (its Reply-To is what replies would reach)."""
+    if len(thread) < 2:
+        return set()
+    owns = {norm_id(record.internet_message_id): record for record in thread if record.internet_message_id}
+    answered = {norm_id(ref) for record in thread for ref in [(record.threading or {}).get("in_reply_to"), *((record.threading or {}).get("references") or [])] if ref}
+    roots = [record for record in thread if not ({norm_id(r) for r in [(record.threading or {}).get("in_reply_to"), *((record.threading or {}).get("references") or [])] if r} & set(owns))]
+    root = next((record for record in roots if norm_id(record.internet_message_id) in answered), None) or (roots[0] if roots else thread[0])
+    seen = {_domain_of(root)} - {""} | _to_domains(root)
     marked: set[str] = set()
-    for record in thread:
-        domain = sender_domain(record)
-        if seen and domain and domain not in seen:
+    for record in sorted(thread, key=lambda r: r.received_at or ""):
+        if record.id == root.id:
+            continue
+        domain = _domain_of(record)
+        if not domain or domain not in seen:
             marked.add(record.id)
-        # The domains a message went to are in the conversation too: the reply of someone it was sent to is not new.
-        seen |= {domain} - {""} | {address.rpartition("@")[2] for address in (record.threading or {}).get("to") or []}
+            continue  # whom a newcomer wrote to doesn't count as taking part
+        seen |= _to_domains(record)
     return marked
+
+
+def _domain_of(record: EmailRecord) -> str:
+    return sender_domain(record) or (record.reply_to or "").rpartition("@")[2].lower()
+
+
+def _to_domains(record: EmailRecord) -> set[str]:
+    return {address.rpartition("@")[2].lower() for address in (record.threading or {}).get("to") or [] if "@" in address}
 
 
 def _label(group: dict, email: EmailRecord, records: list[EmailRecord]) -> str:
