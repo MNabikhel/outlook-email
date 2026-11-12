@@ -528,3 +528,30 @@ def test_todays_meetings_card_says_to_check_who_sent_a_doubtful_invitation(page,
     item.wait_for()
     assert "Check who sent this before joining or paying" in item.text_content()
     assert "Check who sent this" in (item.locator("a").get_attribute("aria-label") or "")
+
+
+def test_a_meeting_running_past_midnight_shows_on_each_day_it_runs(page, site, loaded, settings):
+    from controller_inbox.calendar_events import Meeting
+
+    def local(day, hour):
+        return datetime(2026, 10, day, hour, tzinfo=settings.tz).astimezone(timezone.utc).isoformat(timespec="seconds")
+
+    loaded.upsert_email(_record("late", sender="ops@taz.com"))
+    loaded.save_invites("late", [Meeting(uid="L1", start=local(12, 22), end=local(13, 2), subject="Year-end cutover", email_id="late"),
+                                 Meeting(uid="L2", start=local(12, 9), end=local(14, 17), subject="Audit fieldwork", email_id="late")],
+                        sender="ops@taz.com")
+    page.goto(f"{site}/app/calendar?view=day&date=2026-10-13")
+    page.wait_for_selector(".cal-week")
+    cutover = page.locator(".cal-block:has-text('Year-end cutover')")
+    fieldwork = page.locator(".cal-block:has-text('Audit fieldwork')")
+    assert cutover.count() == 1 and fieldwork.count() == 1
+    # Drawn from the day's start: the cutover's two hours, the fieldwork all day.
+    top = page.locator(".cal-col").bounding_box()["y"]
+    assert abs(cutover.bounding_box()["y"] - top) < 4 and abs(fieldwork.bounding_box()["y"] - top) < 4
+    assert cutover.bounding_box()["height"] < fieldwork.bounding_box()["height"]
+    page.goto(f"{site}/app/calendar?view=day&date=2026-10-15")
+    page.wait_for_selector(".cal-week")
+    assert page.locator(".cal-block:has-text('Audit fieldwork')").count() == 0
+    page.goto(f"{site}/app/calendar?view=month&date=2026-10-13")
+    page.wait_for_selector(".cal-month")
+    assert page.locator(".cal-chip:has-text('Audit fieldwork')").count() == 3
