@@ -1037,3 +1037,36 @@ def test_after_an_update_stored_invitations_are_filed_as_meetings_keeping_what_w
     assert [(a.title, a.status) for a in invite.actions if a.source == "meeting"] == [("Accept or decline: Weekly AP payment run review", ActionStatus.OPEN)]
     assert [a for a in cancel.actions if a.status == ActionStatus.OPEN] == [], "a cancellation asks for no answer"
     assert [(a.title, a.status) for a in done.actions if a.source == "meeting"] == [("Accept or decline: Budget sync", ActionStatus.DONE)]
+
+
+def test_after_an_update_stored_replies_lose_their_accept_or_decline_task(store, settings):
+    """An attendee's answer ("Accepted: ...") and a proposed new time hold no meeting, so the catch-up saves none for
+    them: they are still filed again by their invitation, as a new one is, with no "Accept or decline" task."""
+    import sys
+
+    from controller_inbox.extract import sha256_bytes
+    from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, DocumentType, ExtractedFields, Importance
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    event = ["UID:rp1", "SUMMARY:Budget review", "DTSTART:20261009T140000Z", "DTEND:20261009T150000Z", "ORGANIZER:mailto:jordan@horizon-goods.com"]
+    stored = {
+        "rp-accept": ("Accepted: Budget review", "REPLY", DocumentType.MEETING, ["Accept or decline: Accepted: Budget review"]),
+        "rp-counter": ("New Time Proposed: Budget review", "COUNTER", DocumentType.OTHER, []),
+    }
+    for email_id, (subject, method, category, tasks) in stored.items():
+        data = _ics(_event(*event), method=method)
+        record = _record(email_id, sender="jordan@horizon-goods.com")
+        record.subject, record.category, record.model_status = subject, category, "needs_model"
+        record.attachments = [AttachmentRecord(id=f"{email_id}:0", email_id=email_id, filename="invite.ics", content_type="text/calendar",
+                                               size_bytes=len(data), sha256=sha256_bytes(data.encode()), extracted_text=data,
+                                               document_type=DocumentType.OTHER, document_confidence=0, extracted_fields=ExtractedFields())]
+        record.actions = [ActionItem(id=f"{email_id}-t{n}", email_id=email_id, title=title, detail="", due_date=None, priority=Importance.MEDIUM,
+                                     status=ActionStatus.OPEN, source="meeting") for n, title in enumerate(tasks)]
+        store.upsert_email(record)
+    cal.catch_up_invites(store, settings, now=NOW)
+    accept, counter = (store.get_email(email_id) for email_id in stored)
+    assert accept.category == counter.category == DocumentType.MEETING
+    assert [a.title for a in accept.actions if a.source == "meeting" and a.status == ActionStatus.OPEN] == []
+    assert store.meetings_between("2026-10-01", "2026-10-31") == []

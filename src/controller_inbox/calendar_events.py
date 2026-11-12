@@ -758,7 +758,9 @@ def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int
                     if current is not None and not store.has_meetings(email_id, conn=conn):  # read meanwhile: as it was read
                         store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp,
                                            held=attachments_locked(current), sender_name=current.sender_name, conn=conn)
-                _refile_invitation(store, settings, email_id, now)
+            # Filed again by its invitation even when it named no meeting: an attendee's answer ("Accepted: ...") or a
+            # proposed new time an older version gave an "Accept or decline" task, or filed as "Other".
+            _refile_invitation(store, settings, email_id, now)
         looked += len(rows)
         store.set_state(CATCH_UP_KEY, str(rows[-1][0]))
     return looked
