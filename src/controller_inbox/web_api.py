@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, cost_codes, documents, fixes, fraud, links, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
+    agent, cost_codes, documents, fixes, fraud, link_judge, links, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
     semantic, services, table_lookup, version, vision,
 )
 from controller_inbox.extract import extraction_failed
@@ -76,6 +76,7 @@ STAGES = {
     "summarizing": "Summarizing attachments",
     "vision": "Reading scans with the vision model",
     "indexing": "Indexing for search",
+    "linking": "Looking for related mail",
     "digest": "Writing the digest",
 }
 
@@ -474,7 +475,60 @@ def register_workspace(
 
         return {
             "thread": [row(other) for other in found["thread"]],
-            "groups": [{"kind": group["kind"], "label": group["label"], "emails": [row(other) for other in group["emails"]]} for group in found["groups"]],
+            "groups": [
+                {"kind": group["kind"], "label": group["label"], "emails": [{**row(other), "model_why": group["why"].get(other.id, "") if group["kind"] == "ai" else ""} for other in group["emails"]]}
+                for group in found["groups"]
+            ],
+            "can_look": check_model(settings).active and not fraud.attachments_locked(email),
+        }
+
+    @api.post("/mail/{email_id}/related/look")
+    async def look_for_related(email_id: str):
+        """Ask the local model about this email and the few others most likely about the same matter (link_judge)."""
+        email = known(email_id)
+        if not check_model(settings).active:
+            raise HTTPException(409, "Start the local model to have it look for related mail.")
+        if fraud.attachments_locked(email):
+            raise HTTPException(409, "This email is held as possible payment fraud, so it isn't shown to the model.")
+        verdicts = await run_in_threadpool(link_judge.judge, store, settings, email)
+        same = sum(1 for verdict in verdicts if verdict["same"])
+        if same:
+            message = f"Found {same} more related email{'s' if same != 1 else ''}."
+        elif verdicts:
+            message = "Looked at the likeliest emails: none is about the same matter."
+        else:
+            message = "No other email looks like a match."
+        return {"ok": True, "message": message, "related": related_json(email, board_date())}
+
+    @api.get("/trace/{email_id}")
+    def trace(email_id: str):
+        """The whole matter an email belongs to (links.trace), oldest first, and how its files changed."""
+        email = known(email_id)
+        today = board_date()
+        found = links.trace(store, email)
+
+        def file_ref(record: EmailRecord, att) -> dict[str, Any]:
+            n = next((i for i, other in enumerate(record.attachments, start=1) if other.id == att.id), 0)
+            return {"email_id": record.id, "n": n, "name": att.filename.rsplit(" › ", 1)[-1], "when": short_when(record.received_at, settings.tz, today),
+                    "sender": record.sender_name or record.sender_email, "domain": links._domain_of(record) or "no address"}
+
+        steps = []
+        for record, reasons in found["steps"]:
+            card = mail_card(record, settings.tz, today)
+            steps.append({
+                **card,
+                "here": record.id == email.id,
+                "reasons": reasons,
+                "first_line": "" if card["locked"] else " ".join((record.body_text or record.body_preview or "").split())[:240],
+                "file_names": [] if card["locked"] else [att.filename.rsplit(" › ", 1)[-1] for att in record.attachments][:8],
+            })
+        return {
+            "email": {"id": email.id, "subject": email.subject or "(no subject)"},
+            "steps": steps,
+            "versions": [
+                {"old": file_ref(*version["old"]), "new": file_ref(*version["new"]), "changes": version["changes"], "more": version["more"], "payment": version["payment"]}
+                for version in found["versions"]
+            ],
         }
 
     @api.get("/mail/{email_id}/files/{n}")

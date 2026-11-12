@@ -246,7 +246,77 @@ def test_an_email_shows_its_conversation_and_related_mail(loaded, settings):
     related = client.get("/api/mail/demo-inv-10482").json()["related"]
     assert [(row["id"], row["here"]) for row in related["thread"]] == [("demo-inv-10482", True), ("demo-inv-10482-dup", False)]
     assert related["thread"][1]["file_names"] == ["INV-10482.pdf"]
-    assert client.get("/api/mail/demo-chase-stmt").json()["related"] == {"thread": [], "groups": []}
+    assert client.get("/api/mail/demo-chase-stmt").json()["related"] == {"thread": [], "groups": [], "can_look": False}
+
+
+# --- A whole matter ------------------------------------------------------------------------------------------------
+
+
+def test_a_matter_is_followed_two_links_out_with_why_each_email_is_there(store):
+    # The invoice names the PO; the PO's email names the quote's file; the quote is two links from the invoice.
+    store.upsert_email(_record("quote", sender="sales@northwind.com", files=[("Northwind quote Q-88.pdf", "q" * 64, 30_000, None)], received="2026-08-20T09:00:00+00:00"))
+    store.upsert_email(_record("po", sender="buyer@taz.com", pos=["PO-77821"], files=[("Northwind quote Q-88.pdf", "q" * 64, 30_000, None)], received="2026-09-01T09:00:00+00:00"))
+    store.upsert_email(_record("invoice", pos=["PO-77821"], invoices=["INV-10482"], mid="<inv@northwind.com>", received="2026-09-20T09:00:00+00:00"))
+    store.upsert_email(_record("reply", sender="ap@taz.com", threading={"in_reply_to": "inv@northwind.com"}, received="2026-09-21T09:00:00+00:00"))
+    store.upsert_email(_record("unrelated", sender="news@acct.com"))
+    found = links.trace(store, store.get_email("invoice"))
+    assert [(record.id, reasons) for record, reasons in found["steps"]] == [
+        ("quote", ["Same file: Northwind quote Q-88.pdf"]),
+        ("po", ["Same PO PO-77821"]),
+        ("invoice", []),
+        ("reply", ["In the conversation"]),
+    ]
+
+
+def test_what_changed_between_versions_of_a_workbook_and_a_document():
+    old = '[sheet "Budget" A1:C3]\nA1: Line | B1: Q3 | C1: Q4\nA2 (Line): Rent | B2 (Q3): 1,200 | C2 (Q4): 1,200\nA3 (Line): Travel | B3 (Q3): 400 (=SUM(D1:D4)) | C3 (Q4): 450'
+    new = '[sheet "Budget" A1:C4]\nA1: Line | B1: Q3 | C1: Q4\nA2 (Line): Rent | B2 (Q3): 1,200 | C2 (Q4): 1,450\nA3 (Line): Travel | B3 (Q3): 400 (=SUM(D1:D5)) | C3 (Q4): 450\nA4 (Line): Fees | B4 (Q3): 90'
+    assert links.changes(old, new) == (["Budget!C2 (Q4): 1,200 → 1,450", "Budget!A4 (Line): added Fees", "Budget!B4 (Q3): added 90"], 0)
+    listed, more = links.changes("[page 1]\nTerm: 12 months\nRent: $4,000", "[page 1]\nTerm: 24 months\nRent: $4,000", limit=1)
+    assert listed == ["Removed: Term: 12 months"] and more == 1
+
+
+def test_the_versions_along_a_matter_say_what_changed(store):
+    v1 = _record("v1", files=[("Lease schedule v1.xlsx", "1" * 64, 20_000, None)], received="2026-09-01T09:00:00+00:00")
+    v1.attachments[0].extracted_text = '[sheet "Lease" A1:B2]\nA1: Item | B1: Rent\nA2 (Item): Unit 4 | B2 (Rent): 4,000'
+    v2 = _record("v2", files=[("Lease schedule v2.xlsx", "2" * 64, 20_000, None)], received="2026-09-15T09:00:00+00:00")
+    v2.attachments[0].extracted_text = '[sheet "Lease" A1:B2]\nA1: Item | B1: Rent\nA2 (Item): Unit 4 | B2 (Rent): 4,250'
+    store.upsert_email(v1)
+    store.upsert_email(v2)
+    found = links.trace(store, store.get_email("v2"))
+    [version] = found["versions"]
+    assert (version["old"][0].id, version["new"][0].id, version["changes"]) == ("v1", "v2", ["Lease!B2 (Rent): 4,000 → 4,250"])
+
+
+def test_the_trace_page_s_data(loaded, settings):
+    from fastapi.testclient import TestClient
+    from helpers import PAGE
+
+    from controller_inbox.web import create_app
+
+    client = TestClient(create_app(settings, loaded), headers=PAGE)
+    data = client.get("/api/trace/demo-inv-10482").json()
+    assert data["email"]["id"] == "demo-inv-10482"
+    assert [(step["id"], step["here"], step["reasons"]) for step in data["steps"]] == [
+        ("demo-inv-10482", True, []), ("demo-inv-10482-dup", False, ["In the conversation"])
+    ]
+    assert client.get("/api/trace/nope").status_code == 404
+
+
+def test_a_question_about_how_an_email_came_about_reads_its_linked_mail(loaded):
+    from controller_inbox import agent
+    from controller_inbox.assistant import pick_sources
+
+    for question in ("What happened on this so far?", "Trace this back to where it started", "show me the whole thread"):
+        sources, about_today, _found = pick_sources(loaded, question, email_id="demo-inv-10482")
+        assert [email.id for email in sources] == ["demo-inv-10482", "demo-inv-10482-dup"] and not about_today, question
+    sources, _today, _found = pick_sources(loaded, "What is the amount due?", email_id="demo-inv-10482")
+    assert [email.id for email in sources] == ["demo-inv-10482"], "a question about the email itself stays on it"
+    ws = agent.Workspace(loaded, None, [loaded.get_email("demo-inv-10482")])
+    opened = agent._open_email(ws, ws.sources[0])
+    assert "Related emails (open one by its number):\n[2] " in opened and "(same conversation)" in opened
+    assert ws.email("2").id == "demo-inv-10482-dup", "the model opens a related email by the number it was given"
+
 
 
 def test_a_held_emails_numbers_count_only_where_its_own_text_names_them(store):
@@ -263,6 +333,18 @@ def test_a_held_emails_numbers_count_only_where_its_own_text_names_them(store):
     said.body_text = "Please pay invoice INV-10482 to our new account."
     store.upsert_email(said)
     assert ("invoice", "INV10482") in store.link_keys("bec2"), "named in its own words, it is linked (and shown held)"
+
+
+def test_the_model_is_warned_about_held_mail_among_the_related(store):
+    from controller_inbox import agent
+
+    store.upsert_email(_record("real", mid="<p1@northwind.com>", received="2026-10-01T09:00:00+00:00", threading={"to": ["ap@taz.com"]}))
+    store.upsert_email(_record("hijack", sender="billing@northwind-supplies.co", threading={"in_reply_to": "p1@northwind.com"},
+                               received="2026-10-02T08:00:00+00:00", flags=["fraud_risk"]))
+    ws = agent.Workspace(store, None, [store.get_email("real")])
+    lines = agent.related_lines(ws, ws.sources[0])
+    assert "held as possible payment fraud (same conversation): not shown — Warning: verify by phone" in lines
+    assert "northwind-supplies" not in lines, "a held email is listed without its words or address"
 
 
 def test_emails_that_only_share_a_message_id_are_no_conversation(store):
@@ -321,6 +403,34 @@ def test_a_held_emails_number_counts_only_as_a_whole_number_of_its_text(store):
     store.upsert_email(held)
     assert not any(kind == "invoice" for kind, _value in store.link_keys("held"))
 
+
+def test_a_lookalikes_corrected_copy_is_no_version_and_a_changed_remit_line_is_flagged(store):
+    real = _record("real", files=[("Northwind invoice INV-10482.pdf", "1" * 64, 30_000, None)], received="2026-10-01T09:00:00+00:00")
+    real.attachments[0].extracted_text = "[page 1]\nInvoice INV-10482\nRemit to: First Bank account ****3333"
+    fake = _record("fake", sender="ar@nw-remit.net", files=[("Northwind invoice INV-10482 (1).pdf", "2" * 64, 30_000, None)], received="2026-10-02T09:00:00+00:00", invoices=["INV-10482"])
+    fake.attachments[0].extracted_text = "[page 1]\nInvoice INV-10482\nRemit to: Metro Bank account ****7777"
+    real.extracted.invoice_numbers = ["INV-10482"]
+    store.upsert_email(real)
+    store.upsert_email(fake)
+    assert links.trace(store, store.get_email("real"))["versions"] == [], "another sender's file is no version"
+    newer = _record("v2", files=[("Northwind invoice INV-10482 v2.pdf", "3" * 64, 30_000, None)], received="2026-10-03T09:00:00+00:00")
+    newer.attachments[0].extracted_text = "[page 1]\nInvoice INV-10482\nRemit to: Metro Bank account ****7777"
+    store.upsert_email(newer)
+    [version] = links.trace(store, store.get_email("real"))["versions"]
+    assert version["payment"] and version["new"][0].id == "v2"
+
+
+def test_the_model_is_told_which_related_email_is_from_a_new_domain_and_a_cautioned_email_loses_its_model_links(store):
+    from controller_inbox import agent
+
+    store.upsert_email(_record("root", mid="<root@northwind.com>", received="2026-10-01T09:00:00+00:00", threading={"to": ["ap@taz.com"]}))
+    store.upsert_email(_record("hijack", sender="priya@northwnd.com", received="2026-10-02T09:00:00+00:00", threading={"in_reply_to": "root@northwind.com"}))
+    ws = agent.Workspace(store, None, [store.get_email("root")])
+    lines = agent.related_lines(ws, ws.sources[0])
+    assert "priya@northwnd.com" in lines and "domain is new to the conversation" in lines
+    store.save_ai_link("root", "other", same=True, why="same quote", key="k")
+    store.upsert_email(_record("other", sender="billing@harbor-pack.net", flags=["payment_caution"]))
+    assert all(g["kind"] != "ai" for g in links.related(store, store.get_email("root"))["groups"])
 
 # --- An invoice's conversation ------------------------------------------------------------------------------------
 
@@ -454,6 +564,14 @@ def test_microsoft_365_mail_keeps_who_it_went_to():
     assert raw.threading == {"to": ["ar@coastalprint.com", "ap@taz.com"]}
 
 
+def test_the_whole_matter_of_a_long_conversation_keeps_the_email_it_was_opened_for(store):
+    for n in range(50):
+        threading = {"in_reply_to": f"m{n - 1}@taz.com", "references": [f"m{k}@taz.com" for k in range(max(0, n - 20), n)]} if n else {}
+        store.upsert_email(_record(f"e{n:02d}", sender="ap@taz.com", mid=f"<m{n}@taz.com>", threading=threading,
+                                   received=f"2026-10-{1 + n // 24:02d}T{n % 24:02d}:00:00+00:00"))
+    steps = [record.id for record, _why in links.trace(store, store.get_email("e00"))["steps"]]
+    assert "e00" in steps and len(steps) == links.MAX_TRACE
+
 def test_a_run_links_stored_mail_for_a_few_seconds_and_a_failure_stops_nothing(store, settings, monkeypatch):
     from controller_inbox import overnight
 
@@ -469,3 +587,15 @@ def test_a_new_store_needs_no_refiling(tmp_path):
     fresh = Store(tmp_path / "new.sqlite")
     with fresh.connect() as conn:
         assert conn.execute("SELECT value FROM sync_state WHERE key = 'link_keys_version'").fetchone()[0] == links.KEYS_VERSION
+
+
+def test_the_whole_matter_walks_a_conversation_once(store, monkeypatch):
+    for n in range(35):
+        threading = {"in_reply_to": f"m{n - 1}@taz.com", "references": ["m0@taz.com", *[f"m{k}@taz.com" for k in range(max(1, n - 19), n)]]} if n else {}
+        store.upsert_email(_record(f"e{n:02d}", sender="ap@taz.com", mid=f"<m{n}@taz.com>", threading=threading,
+                                   received=f"2026-10-{1 + n // 24:02d}T{n % 24:02d}:00:00+00:00"))
+    walks = []
+    real = links._conversation
+    monkeypatch.setattr(links, "_conversation", lambda *args: (walks.append(args[1]), real(*args))[1])
+    steps = links.trace(store, store.get_email("e10"))["steps"]
+    assert len(steps) == 35 and len(walks) <= 2, len(walks)

@@ -627,7 +627,27 @@ a.rel-link:hover, a.rel-link:focus-visible { background: var(--surface-2); }
 .rel-files { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .rel-files > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rel-files svg { flex: none; }
+.rel-why { display: flex; gap: 4px; align-items: flex-start; color: var(--text-2); font-style: italic; }
+.rel-why svg { flex: none; margin-top: 3px; }
 .rel-main .tag { align-self: flex-start; margin-top: 3px; }
+/* The whole matter (/app/trace/<id>). */
+.tr-steps { list-style: none; margin: 0; padding: 0 0 0 12px; border-left: 2px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
+.tr-step { position: relative; }
+.tr-step::before { content: ""; position: absolute; left: -19px; top: 16px; width: 10px; height: 10px; border-radius: 50%; background: var(--surface); border: 2px solid var(--border-strong); }
+.tr-step.here::before { background: var(--accent); border-color: var(--accent); }
+.tr-card { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; color: inherit; text-decoration: none; min-width: 0; }
+a.tr-card:hover, a.tr-card:focus-visible { background: var(--surface-2); }
+.tr-step.here .tr-card { border-color: var(--accent); background: var(--accent-soft); }
+.tr-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; min-width: 0; }
+.tr-subject { font-weight: 550; }
+.tr-first { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tr-whys { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.tr-why { font-size: 11.5px; padding: 1px 7px; border-radius: 999px; background: var(--surface-3); color: var(--text-2); }
+.tr-why.here { background: var(--accent); color: var(--on-accent, #fff); }
+.tr-versions { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.tr-version-h { margin: 0 0 4px; overflow-wrap: anywhere; }
+.tr-changes { margin: 0; padding-left: 18px; font: 12.5px/1.5 var(--mono); display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 .rd-notes { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; }
 .rd-notes small { display: block; color: var(--muted); font-size: 12px; }
 .correct-form { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }

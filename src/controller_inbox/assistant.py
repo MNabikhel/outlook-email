@@ -90,6 +90,25 @@ _ELSEWHERE = re.compile(
     r"any\s+(?:other\s+)?e-?mails?|inbox|search)\b",
     re.I,
 )
+# A question about how the email on screen came about, or what else belongs with it: its linked mail answers it.
+_HISTORY = re.compile(
+    r"\b(thread|conversation|history|trace\w*|timeline|back[- ]and[- ]forth|what happened|so far|whole matter|"
+    r"(?:email|mail|message)s? (?:chain|trail)|chain|earlier (?:e-?mails?|messages?|versions?)|previous (?:e-?mails?|messages?|versions?)|"
+    r"related (?:e-?mails?|mail|messages?)|what changed|(?:other|earlier|previous|older|newer|all) versions?|follow[- ]?ups?|"
+    r"how (?:it|this|that) started|led up to|how (?:it|this|that) began)\b",
+    re.I,
+)
+
+
+def _matter(store: Store, current: EmailRecord) -> list[EmailRecord]:
+    """The mail linked to ``current``: its conversation (oldest first), then mail sharing an invoice, a PO or a file."""
+    from controller_inbox import links
+
+    found = links.related(store, current)
+    thread = [email for email in found["thread"] if email.id != current.id]
+    return thread + [email for group in found["groups"] for email in group["emails"]]
+
+
 _HELP = re.compile(
     r"\b(set ?up|install\w*|lm studio|ollama|bionic|local model|how do i|how to|export\w*|drop folder|"
     r"profile|launcher|start (?:the )?server)\b",
@@ -229,6 +248,9 @@ def pick_sources(
     current = store.get_email(email_id) if email_id else None
     if current is not None:
         picked[current.id] = current
+        if _HISTORY.search(question) and (matter := _matter(store, current)):
+            # "What happened on this so far?", "trace this back": the email's conversation and linked mail.
+            return [current, *matter][: MAX_SOURCES + 1], False, set()
         here = not _ELSEWHERE.search(question) and answered_here(current, question)
         if on_screen_question(question) or (here and (not about_today or _due_here(current, question))):
             return [current], False, set()
