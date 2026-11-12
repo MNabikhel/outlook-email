@@ -615,6 +615,26 @@ def invitation_method(attachments, meetings=()) -> str:
     return ""
 
 
+def all_over(meetings, now: datetime) -> bool:
+    """Whether every meeting an invitation names (``meetings``: as read, or ``store.email_meetings``) ended before
+    ``now``: an invitation to a meeting long past asks for no answer. A repeating meeting may go on past the
+    occurrences read, so it is never over here; nor is an invitation that names none."""
+    if not meetings:
+        return False
+    for meeting in meetings:
+        if meeting.recurring:
+            return False
+        try:
+            if meeting.all_day:
+                if date.fromisoformat((meeting.end or meeting.start)[:10]) > now.date():
+                    return False
+            elif datetime.fromisoformat(meeting.end or meeting.start) > now:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
 # --- Outlook meeting requests (.msg) ---------------------------------------------------------------------------------
 
 
@@ -871,11 +891,12 @@ def _refile_invitation(store, settings, email_id: str, now: datetime) -> None:
     email = store.get_email(email_id)
     if email is None or attachments_locked(email) or email.model_status == "corrected":
         return
-    method = invitation_method(email.attachments)
+    meetings = store.email_meetings(email_id)
+    method = invitation_method(email.attachments, meetings)
     if not method:
         return
     asks = any(a.source == "meeting" and a.status == ActionStatus.OPEN for a in email.actions)
-    wants = method in ("REQUEST", "PUBLISH", "ADD")
+    wants = method in ("REQUEST", "PUBLISH", "ADD") and not all_over(meetings, now)
     if email.category == DocumentType.MEETING and asks == wants:
         return  # filed as it would be now
     try:

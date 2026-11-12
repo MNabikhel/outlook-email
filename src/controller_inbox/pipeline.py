@@ -22,7 +22,7 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import AttachmentRecord, DocumentType, EmailRecord, ExtractedFields, RawMessage
-from controller_inbox.calendar_events import invitation_method
+from controller_inbox.calendar_events import all_over, invitation_method
 from controller_inbox.fraud import assess, attachments_locked, domain_of, dropped_file_body, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
@@ -152,6 +152,8 @@ def process_message(
         invoice_file=any(c.document_type == DocumentType.AP_INVOICE for c in att_classifications),
     )
     invitation = invitation_method([*raw.attachments, *att_records], raw.meetings)
+    # The meetings its invitations name. Read before the write lock is taken, so a long one keeps nobody waiting.
+    found = invites(replace(raw, attachments=came_with), raw.id, now)
     holders = _holders(store, merged_fields.primary_invoice)
     classified_email = _classify(
         store,
@@ -197,6 +199,7 @@ def process_message(
         sender=raw.sender_name or raw.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in att_records),
         invitation=invitation,
+        meeting_over=all_over(found, now),
         received_on=anchor,
         entered_elsewhere=_entered_elsewhere(
             store, me, holders, conversation, own_file=me.invoice_file, fraud=check.level
@@ -243,9 +246,7 @@ def process_message(
     # the email or snooze or finish its tasks. That is read again with the write lock held, so it is kept rather than
     # overwritten from the copy read at the start. (Done is never written here: upsert_email leaves it alone.)
     # An invitation on mail held as possible payment fraud is no meeting: its text never reaches the calendar, only
-    # which meeting it named, so Outlook's own copy of that meeting isn't shown either. Read before the write lock is
-    # taken, so a long one keeps nobody waiting.
-    found = invites(replace(raw, attachments=came_with), record.id, now)
+    # which meeting it named, so Outlook's own copy of that meeting isn't shown either.
     with store.transaction() as conn:
         latest = store.get_email(raw.id, conn=conn)
         verdict_changed = latest is not None and _keep_user_state(record, latest)
@@ -253,6 +254,11 @@ def process_message(
         store.save_invites(record.id, found, sender=raw.sender_email, received=record.received_at, held=attachments_locked(record),
                            sender_name=raw.sender_name,
                            expanded=now.astimezone(timezone.utc).isoformat(timespec="seconds"), conn=conn)
+        if found and not attachments_locked(record):
+            # An update or a cancellation of a meeting: an earlier invitation of it no longer asks for an answer
+            # (one the user snoozed or finished stays as they left it).
+            for replaced in store.replaced_invitations(record.id, conn=conn):
+                store.drop_open_tasks(replaced, source="meeting", conn=conn)
     from controller_inbox import cost_codes
 
     try:
@@ -745,6 +751,9 @@ def rescore_stored(
     me.invoice_file = any(c.document_type == DocumentType.AP_INVOICE for c in attachments)
     me.flags = []  # judged under ``check``, the level it is filed again under
     holders = _holders(store, email.extracted.primary_invoice)
+    # What its invitation is: its .ics file, else the meetings saved from it (an Outlook meeting request has no file).
+    meetings = store.email_meetings(email.id)
+    invitation = invitation_method(email.attachments, meetings)
     classified = _classify(
         store,
         settings,
@@ -761,7 +770,7 @@ def rescore_stored(
         as_of=as_of,
         has_attachments=email.has_attachments,
         fraud=check.level,
-        invitation=invitation_method(email.attachments),
+        invitation=invitation,
     )
     kept = [flag for flag in email.flags if flag in VERDICT_FLAGS | {"model_said_bank_change"}]
     email.category = classified.document_type
@@ -782,7 +791,8 @@ def rescore_stored(
         now=now,
         sender=email.sender_name or email.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in email.attachments),
-        invitation=invitation_method(email.attachments),
+        invitation=invitation,
+        meeting_over=all_over(meetings, now or datetime.now(timezone.utc)),
         received_on=sent_date(email.received_at, settings, fallback=as_of),
         entered_elsewhere=_entered_elsewhere(store, me, holders, conversation, own_file=me.invoice_file, fraud=check.level),
     )

@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 
 from controller_inbox.actions import extract_actions, keep_task_status, local_today, received_day
-from controller_inbox.calendar_events import invitation_method
+from controller_inbox.calendar_events import all_over, invitation_method
 from controller_inbox.classify import Classification, score_importance
 from controller_inbox.config import Settings
 from controller_inbox.models import DOCUMENT_LABELS, ActionStatus, DocumentType, Importance
@@ -179,6 +179,7 @@ def record_correction(
         item for item in learned.importance_reasons if not item.startswith("You corrected")
     ]
     stored = list(email.actions)
+    meetings = store.email_meetings(email.id)  # an Outlook meeting request has no file to say what it is
     email.actions = extract_actions(
         email_id=email.id,
         subject=email.subject,
@@ -189,7 +190,8 @@ def record_correction(
         flags=email.flags,
         as_of=today,
         received_on=received_on,
-        invitation=invitation_method(email.attachments),
+        invitation=invitation_method(email.attachments, meetings),
+        meeting_over=all_over(meetings, datetime.now(timezone.utc)),
     )
     # The tasks are written again for the new category; one it still asks for keeps what the user did with it.
     # A snoozed task it no longer asks for goes (it would come back when the snooze ends); a finished one stays.

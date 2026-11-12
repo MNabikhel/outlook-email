@@ -758,6 +758,47 @@ class Store:
                     out.setdefault(row["uid"], set()).add(_meeting_of(row["sender"], row["organizer"]))
         return out
 
+    def email_meetings(self, email_id: str) -> list[SimpleNamespace]:
+        """The meetings an email's invitation named, as saved (held mail's only by their start): what it is about
+        when the email is filed again, its file gone or never there (an Outlook meeting request)."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT uid, start, "end", all_day, cancelled, recurring, occurrence FROM meetings
+                   WHERE email_id = ? AND source IN ('invite', 'held') ORDER BY start""",
+                (email_id,),
+            ).fetchall()
+        return [SimpleNamespace(uid=row["uid"], start=row["start"], end=row["end"] or row["start"], all_day=bool(row["all_day"]),
+                                cancelled=bool(row["cancelled"]), recurring=bool(row["recurring"]), occurrence=row["occurrence"] or "")
+                for row in rows]
+
+    def replaced_invitations(self, email_id: str, *, conn: sqlite3.Connection | None = None) -> list[str]:
+        """The emails whose invitation of a whole meeting a later word on it replaces (an update or a cancellation,
+        by the same organizer: ``_meeting_of``), of those naming the meetings ``email_id``'s invitation does: the
+        earlier ones when it is the later word, or ``email_id`` itself when a later word is already here. Their
+        answer is no longer asked for."""
+        with self._use(conn) as conn:
+            words: dict[str, dict[str, tuple]] = {}
+            uids = [row[0] for row in conn.execute(
+                "SELECT DISTINCT uid FROM meetings WHERE email_id = ? AND source = 'invite' AND occurrence = ''", (email_id,))]
+            sql = """SELECT uid, email_id, MAX(sequence) AS sequence, MAX(received) AS received, MIN(first_seen) AS first_seen,
+                            MAX(sender) AS sender, MAX(organizer) AS organizer, 'invite' AS source, e.flags AS email_flags,
+                            e.category AS email_category
+                     FROM meetings m LEFT JOIN emails e ON e.id = m.email_id
+                     WHERE m.source = 'invite' AND m.occurrence = '' AND m.uid IN ({}) GROUP BY uid, email_id"""
+            for row in _in_chunks(conn, sql, uids):
+                if not _held_invite(row):
+                    words.setdefault(row["uid"], {})[row["email_id"]] = (_meeting_of(row["sender"], row["organizer"]), _word_order(row))
+        out: list[str] = []
+        for said in words.values():
+            if email_id not in said:
+                continue
+            meeting, order = said[email_id]
+            same = {other: when for other, (about, when) in said.items() if about == meeting and other != email_id}
+            out += [other for other, when in same.items() if when < order]
+            if any(when > order for when in same.values()):
+                out.append(email_id)
+        return list(dict.fromkeys(out))
+
     def held_markers(self, email_id: str) -> int:
         """How many meetings an email's invitation named while it was held (``_hold``)."""
         with self.connect() as conn:
@@ -1256,9 +1297,9 @@ class Store:
             rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
-    def drop_open_tasks(self, email_id: str, *, source: str) -> int:
+    def drop_open_tasks(self, email_id: str, *, source: str, conn: sqlite3.Connection | None = None) -> int:
         """Remove an email's open tasks of one kind (``source``); finished and snoozed ones stay."""
-        with self.connect() as conn:
+        with self._use(conn) as conn:
             return conn.execute(
                 "DELETE FROM action_items WHERE email_id = ? AND source = ? AND status = 'open'", (email_id, source)
             ).rowcount

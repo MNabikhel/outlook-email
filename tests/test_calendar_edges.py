@@ -323,3 +323,74 @@ def test_a_meeting_declined_or_deleted_in_outlook_doesnt_come_back_from_its_invi
     store.replace_meetings("outlook", [mine], start=window[0], end=window[1])
     outlook_sync.set_calendar(store, False)
     assert [m["subject"] for m in store.meetings_between(*window, outlook=outlook_sync.calendar_on(store))] == ["Vendor pitch", "Forwarded file"]
+
+
+def _with_invitation(email_id, subject, data: str, *, received=NOW, sender="jordan@horizon-goods.com"):
+    return RawMessage(id=email_id, subject=subject, sender_name="Jordan Lee", sender_email=sender, received_at=received,
+                      body_text="See the invitation.", body_preview="", has_attachments=True, source="folder",
+                      attachments=[RawAttachment(id="a1", filename="invite.ics", content_type="text/calendar", size_bytes=len(data),
+                                                 content=data.encode())])
+
+
+def _open_meeting_tasks(store, *email_ids):
+    return [(email_id, action.title) for email_id in email_ids for action in store.get_email(email_id).actions
+            if action.source == "meeting" and action.status.value == "open"]
+
+
+def test_an_invitation_for_a_meeting_long_past_asks_for_no_answer(store, settings):
+    from controller_inbox import pipeline
+    from controller_inbox.extract import sha256_bytes
+    from controller_inbox.models import AttachmentRecord, DocumentType, ExtractedFields
+
+    past = _invite("past1", "20250301T140000Z", subject="FY25 audit kickoff", end="20250301T150000Z", organizer="mailto:jordan@horizon-goods.com")
+    record = pipeline.process_message(_with_invitation("dropped", "FY25 audit kickoff", past, received=datetime(2025, 2, 20, tzinfo=timezone.utc)),
+                                      store, settings, now=NOW)
+    assert record.category == DocumentType.MEETING and _open_meeting_tasks(store, "dropped") == []
+    coming = _invite("soon", "20261020T140000Z", subject="FY26 planning", end="20261020T150000Z", organizer="mailto:jordan@horizon-goods.com")
+    pipeline.process_message(_with_invitation("coming", "FY26 planning", coming), store, settings, now=NOW)
+    assert _open_meeting_tasks(store, "coming") == [("coming", "Accept or decline: FY26 planning")]
+
+    # Stored by an older version, as "Other": the catch-up after the update files it as a meeting, with no task.
+    old = _record("old", sender="jordan@horizon-goods.com", received="2025-02-20T09:00:00+00:00", subject="FY25 audit kickoff")
+    old.model_status = "needs_model"
+    old.attachments = [AttachmentRecord(id="old:0", email_id="old", filename="invite.ics", content_type="text/calendar", size_bytes=len(past),
+                                        sha256=sha256_bytes(past.encode()), extracted_text=past, document_type=DocumentType.OTHER,
+                                        document_confidence=0, extracted_fields=ExtractedFields())]
+    store.upsert_email(old)
+    cal.catch_up_invites(store, settings, now=NOW)
+    assert store.get_email("old").category == DocumentType.MEETING and _open_meeting_tasks(store, "old") == []
+
+
+def test_a_meeting_request_from_outlook_stays_a_meeting_when_filed_again(store, settings):
+    from controller_inbox import fraud, pipeline
+    from controller_inbox.models import DocumentType
+
+    meeting = cal.Meeting(uid="ABC", start="2026-10-20T15:00:00+00:00", end="2026-10-20T15:30:00+00:00", subject="Q3 close review",
+                          organizer="Jordan Lee", source="invite")
+    raw = RawMessage(id="m1", subject="Q3 close review", sender_name="Jordan Lee", sender_email="jordan@horizon-goods.com",
+                     received_at=NOW, body_text="Let's go over the Q3 close numbers.", body_preview="", has_attachments=False,
+                     source="folder", meetings=[meeting])
+    record = pipeline.process_message(raw, store, settings, now=NOW)
+    assert record.category == DocumentType.MEETING and _open_meeting_tasks(store, "m1")
+    stored = store.get_email("m1")
+    again = pipeline.rescore_stored(store, settings, stored, fraud.assess_email(store, fraud.trust_context(store, settings), stored), now=NOW)
+    assert again.category == DocumentType.MEETING and _open_meeting_tasks(store, "m1") == [("m1", "Accept or decline: Q3 close review")]
+
+
+def test_an_update_or_a_cancellation_closes_the_earlier_invitations_answer_task(store, settings):
+    from controller_inbox import pipeline
+
+    base = ["UID:q3", "SUMMARY:Q3 close review", "DTSTART:20261016T150000Z", "DTEND:20261016T153000Z",
+            "ORGANIZER;CN=Jordan Lee:mailto:jordan@horizon-goods.com"]
+    request = _ics(_event(*base, "SEQUENCE:0"))
+    update = _ics(_event(*base, "SEQUENCE:1", "LOCATION:Room 5"))
+    cancel = _ics(_event(*base, "SEQUENCE:2"), method="CANCEL")
+    pipeline.process_message(_with_invitation("req", "Q3 close review", request), store, settings, now=NOW)
+    # A lookalike's "update" closes nothing.
+    pipeline.process_message(_with_invitation("fake", "Q3 close review", update.replace("SEQUENCE:1", "SEQUENCE:9"), sender="jordan@horizon-g00ds.com",
+                                              received=NOW + timedelta(minutes=30)), store, settings, now=NOW)
+    assert ("req", "Accept or decline: Q3 close review") in _open_meeting_tasks(store, "req")
+    pipeline.process_message(_with_invitation("upd", "Q3 close review", update, received=NOW + timedelta(hours=1)), store, settings, now=NOW)
+    assert _open_meeting_tasks(store, "req", "upd") == [("upd", "Accept or decline: Q3 close review")]
+    pipeline.process_message(_with_invitation("cxl", "Canceled: Q3 close review", cancel, received=NOW + timedelta(hours=2)), store, settings, now=NOW)
+    assert _open_meeting_tasks(store, "req", "upd", "cxl") == []
