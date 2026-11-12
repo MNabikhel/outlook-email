@@ -859,3 +859,12 @@ def test_the_whole_matter_is_one_page_and_esc_goes_back(site, page):
     assert "In the conversation" in page.text_content(".tr-steps")
     page.keyboard.press("Escape")
     page.wait_for_selector('.rd[data-email="demo-inv-10482"]')
+
+
+def test_a_link_the_model_made_shows_with_its_reason(loaded, site, page):
+    loaded.save_ai_link("demo-question", "demo-approval", same=True, why="Both are about the Senior Analyst hire.", key="k")
+    page.goto(f"{site}/app/mail/demo-question")
+    related = page.wait_for_selector("#rd-related")
+    text = related.inner_text()
+    assert "CloseDesk thinks these are about the same matter" in text and "Both are about the Senior Analyst hire." in text
+    assert page.locator("#rd-related button:has-text('Look for more')").count() == 0, "no model running: no button"
