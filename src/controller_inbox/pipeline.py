@@ -20,6 +20,7 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import AttachmentRecord, DocumentType, EmailRecord, ExtractedFields, RawMessage
+from controller_inbox.calendar_events import invitation_method
 from controller_inbox.fraud import assess, attachments_locked, domain_of, dropped_file_body, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store, _invoice_key
@@ -147,6 +148,7 @@ def process_message(
         received_at=raw.received_at.astimezone(timezone.utc).isoformat(),
         flags=[],
     )
+    invitation = invitation_method([*raw.attachments, *att_records], raw.meetings)
     classified_email = _classify(
         store,
         settings,
@@ -162,6 +164,7 @@ def process_message(
         as_of=as_of,
         has_attachments=bool(att_records) or raw.has_attachments,
         fraud=check.level,
+        invitation=invitation,
     )
     classified_email.flags.extend(verdicts + _bank_caution(check))
 
@@ -182,6 +185,7 @@ def process_message(
         now=now,
         sender=raw.sender_name or raw.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in att_records),
+        invitation=invitation,
         received_on=anchor,
         entered_elsewhere=_entered_elsewhere(
             store,
@@ -556,6 +560,7 @@ def _classify(
     fraud: str,
     conversation: set[str] | None = None,
     me=None,
+    invitation: str = "",
 ) -> Classification:
     """Script classification, then any correction the user saved for this sender or subject.
 
@@ -580,6 +585,7 @@ def _classify(
         duplicate_invoice=duplicate,
         finance=is_finance(settings, store),
         fraud=fraud,
+        invitation=invitation,
     )
     learned = match_correction(store, sender_email=sender_email, subject=subject, email_id=email_id)
     return apply_learned(classified, learned) if learned else classified
@@ -729,6 +735,7 @@ def rescore_stored(
         as_of=as_of,
         has_attachments=email.has_attachments,
         fraud=check.level,
+        invitation=invitation_method(email.attachments),
     )
     kept = [flag for flag in email.flags if flag in VERDICT_FLAGS | {"model_said_bank_change"}]
     email.category = classified.document_type
@@ -749,6 +756,7 @@ def rescore_stored(
         now=now,
         sender=email.sender_name or email.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in email.attachments),
+        invitation=invitation_method(email.attachments),
         received_on=sent_date(email.received_at, settings, fallback=as_of),
         entered_elsewhere=_entered_elsewhere(
             store,

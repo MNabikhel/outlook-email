@@ -269,6 +269,10 @@ def _run_overnight(
     )
     # Mail stored before emails were linked is filed under its keys (a few seconds, once).
     links.catch_up(store, settings)
+    try:
+        calendar_events.catch_up_invites(store, settings, now=now)  # once, after an update: stored invitations
+    except Exception:
+        log.warning("Couldn't read the stored invitations yet", exc_info=True)
     outlook = _sync_outlook(store, settings, sync_outlook, now, on_progress)
     folder_report: dict = {}
     ingested = ingest_folder(

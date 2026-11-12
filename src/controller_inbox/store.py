@@ -730,6 +730,28 @@ class Store:
             ).fetchall()
         return [row[0] for row in rows]
 
+    def emails_without_meetings(self, after: int, *, batch: int) -> list[tuple[int, str]]:
+        """(rowid, id) of stored emails after ``after`` with an invitation (an .ics file, or read from a .msg that may
+        be a meeting request) and no meeting saved from it, ``batch`` at a time in the order stored."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT e.rowid, e.id FROM emails e
+                WHERE e.rowid > ? AND COALESCE(e.source, '') != 'demo'
+                  AND (EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = e.id
+                               AND (lower(a.filename) LIKE '%.ics' OR lower(a.filename) LIKE '%.vcs' OR lower(a.content_type) LIKE 'text/calendar%'))
+                       OR (lower(COALESCE(e.source_path, '')) LIKE '%.msg' AND e.category = 'meeting'))
+                  AND NOT EXISTS (SELECT 1 FROM meetings m WHERE m.email_id = e.id)
+                ORDER BY e.rowid LIMIT ?
+                """,
+                (after, max(1, batch)),
+            ).fetchall()
+        return [(row[0], row[1]) for row in rows]
+
+    def has_meetings(self, email_id: str, *, conn: sqlite3.Connection | None = None) -> bool:
+        with self._use(conn) as conn:
+            return conn.execute("SELECT 1 FROM meetings WHERE email_id = ? LIMIT 1", (email_id,)).fetchone() is not None
+
     def mark_expanded(self, email_id: str, stamp: str) -> None:
         """An email's invitations looked at again (``stamp``) without being read: not looked at again for a while."""
         with self.connect() as conn:

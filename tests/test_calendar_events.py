@@ -616,3 +616,75 @@ def test_an_outlook_exception_occurrence_keeps_its_series_id():
     exception = head + "07EA0A13" + "00" * 8 + "00" * 8 + "10000000" + "AB" * 16
     assert cal.series_uid(exception) == cal.series_uid(series) == series.upper()
     assert cal.outlook_occurrence(exception) == "2026-10-19" and cal.outlook_occurrence(series) == ""
+
+
+def _mail_with_invitation(email_id, subject, data, *, sender="jordan@horizon-goods.com", received=NOW):
+    from controller_inbox.models import RawAttachment, RawMessage
+
+    return RawMessage(id=email_id, subject=subject, sender_name="Jordan Lee", sender_email=sender, received_at=received,
+                      body_text="See the invitation.", body_preview="", has_attachments=True, source="folder",
+                      attachments=[RawAttachment(id="a1", filename="invite.ics", content_type="text/calendar", size_bytes=len(data), content=data.encode())])
+
+
+def test_meeting_mail_is_filed_by_what_its_invitation_says(store, settings):
+    """Outlook's invitations have no "Invitation:" in their subject: the invitation's METHOD says what the email is.
+    A request asks for an answer; a cancellation and a proposed new time don't."""
+    from controller_inbox import pipeline
+    from controller_inbox.models import DocumentType
+
+    organizer = "ORGANIZER;CN=Jordan Lee:mailto:jordan@horizon-goods.com"
+    event = _event("UID:wk1", "SUMMARY:Weekly AP payment run review", "DTSTART:20261116T150000Z", "DTEND:20261116T153000Z", organizer)
+    cases = {
+        "req": ("Weekly AP payment run review", _ics(event, method="REQUEST")),
+        "cxl": ("Canceled: Weekly AP payment run review", _ics(event, method="CANCEL")),
+        "ctr": ("New Time Proposed: Weekly AP payment run review", _ics(event, method="COUNTER")),
+        "rep": ("Accepted: Weekly AP payment run review", _ics(event, method="REPLY")),
+    }
+    got = {}
+    for email_id, (subject, data) in cases.items():
+        record = pipeline.process_message(_mail_with_invitation(email_id, subject, data), store, settings, now=NOW)
+        got[email_id] = (record.category, record.folder, [a.source for a in record.actions if a.source == "meeting"])
+    assert got["req"] == (DocumentType.MEETING, "informational", ["meeting"])
+    assert got["cxl"] == (DocumentType.MEETING, "informational", [])
+    assert got["ctr"] == got["rep"] == (DocumentType.MEETING, "informational", [])
+
+
+def test_invitations_already_in_the_mailbox_reach_the_calendar_after_an_update(store, settings):
+    """Mail read by a version that kept no meetings: once, in batches, its invitations are read from what was kept
+    (the .ics text stored with it, else its kept file), the cancellation counted. Held mail adds no meeting."""
+    import sys
+
+    from controller_inbox import cli
+    from controller_inbox.extract import sha256_bytes
+    from controller_inbox.models import AttachmentRecord, DocumentType, ExtractedFields
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    settings.ensure_data_dir()
+    event = ["UID:old1", "SUMMARY:Budget review", "DTSTART:20261009T140000Z", "DTEND:20261009T150000Z", "ORGANIZER:mailto:maya@taz.com"]
+    stored = [
+        ("invite", _ics(_event(*event, "SEQUENCE:0")), "text", ()),
+        ("cancel", _ics(_event(*event, "SEQUENCE:1"), method="CANCEL"), "file", ()),
+        ("held", _ics(_event("UID:old2", "SUMMARY:Wire call", "DTSTART:20261010T140000Z", "ORGANIZER:mailto:x@evil.example")), "text", ("fraud_risk",)),
+    ]
+    for email_id, data, kept_as, flags in stored:
+        record = _record(email_id, sender="x@evil.example" if flags else "maya@taz.com", flags=flags,
+                         received=f"2026-10-0{1 + len(email_id) % 5}T09:00:00+00:00")
+        record.attachments = [AttachmentRecord(id=f"{email_id}:0", email_id=email_id, filename="invite.ics", content_type="text/calendar",
+                                               size_bytes=len(data), sha256=sha256_bytes(data.encode()),
+                                               extracted_text=data if kept_as == "text" else "",
+                                               document_type=DocumentType.OTHER, document_confidence=0, extracted_fields=ExtractedFields())]
+        store.upsert_email(record)
+        if kept_as == "file":
+            (settings.inbox_extracted / email_id).mkdir(parents=True)
+            (settings.inbox_extracted / email_id / "invite.ics").write_text(data, encoding="utf-8", newline="")
+    assert store.meetings_between("2026-10-01", "2026-10-31") == []
+    assert cal.catch_up_invites(store, settings, now=NOW, batch=1) == 3, "a batch at a time, to the end"
+    assert [(m["uid"], m["cancelled"]) for m in store.meetings_between("2026-10-01", "2026-10-31")] == [("old1", True)]
+    assert cal.catch_up_invites(store, settings, now=NOW) == 0, "once"
+    store.set_state(cal.CATCH_UP_KEY, "")
+    with store.connect() as conn:
+        conn.execute("DELETE FROM meetings")
+    cli._link_stored_mail(settings, store)  # what CloseDesk starts in the background after an update
+    assert [m["uid"] for m in store.meetings_between("2026-10-01", "2026-10-31")] == ["old1"]

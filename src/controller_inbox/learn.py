@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime, timezone
 
 from controller_inbox.actions import extract_actions, keep_task_status, local_today, received_day
+from controller_inbox.calendar_events import invitation_method
 from controller_inbox.classify import Classification, score_importance
 from controller_inbox.config import Settings
 from controller_inbox.models import DOCUMENT_LABELS, ActionStatus, DocumentType, Importance
@@ -188,6 +189,7 @@ def record_correction(
         flags=email.flags,
         as_of=today,
         received_on=received_on,
+        invitation=invitation_method(email.attachments),
     )
     # The tasks are written again for the new category; one it still asks for keeps what the user did with it.
     # A snoozed task it no longer asks for goes (it would come back when the snooze ends); a finished one stays.

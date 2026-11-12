@@ -572,7 +572,8 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None)
     app = create_app(settings, store)
     # Automatic Outlook sync while the dashboard is open (Settings → Sync inbox).
     app.state.start_outlook_sync()
-    # Mail stored by an older version is linked to its conversations in the background, once.
+    # Mail stored by an older version is linked to its conversations, and its invitations put on the calendar, in the
+    # background, once.
     threading.Thread(target=_link_stored_mail, args=(settings, store), name="link-mail", daemon=True).start()
     if not is_loopback(settings.host):
         names = ", ".join(sorted(allowed_hosts(settings.host, settings.allowed_hosts)))
@@ -591,12 +592,17 @@ def _link_stored_mail(settings: Settings, store: Store) -> None:
     """File mail stored by an older version under its conversation keys, in the background. Without the run lock:
     it only writes link keys and conversation headers, a batch at a time, so Process new mail and the Outlook sync
     aren't kept waiting on the first start after an update."""
-    from controller_inbox import links
+    from controller_inbox import calendar_events, links
 
     try:
         links.catch_up(store, settings)
     except Exception:  # the next run catches up instead
         log.warning("Couldn't link the stored mail yet", exc_info=True)
+    try:
+        # The invitations of mail stored before meetings were kept, onto the calendar (once).
+        calendar_events.catch_up_invites(store, settings)
+    except Exception:
+        log.warning("Couldn't read the stored invitations yet", exc_info=True)
 
 
 def watch_tick(settings: Settings, store: Store, *, force_digest: bool = False, now: datetime | None = None) -> dict:

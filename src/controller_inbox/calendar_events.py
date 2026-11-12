@@ -498,6 +498,26 @@ def _key(value: datetime | date) -> str:
     return value.strftime("%Y%m%d")
 
 
+def invitation_method(attachments, meetings=()) -> str:
+    """What an email's invitation is (its METHOD: "REQUEST", "CANCEL", "REPLY", "COUNTER", ...), from its first
+    .ics file (``attachments``: as read, or as stored), else from the meeting of an Outlook meeting request
+    (``meetings``): "CANCEL" for a cancellation, "REQUEST" for a request. "" when it has no invitation."""
+    for att in attachments:
+        name = (getattr(att, "filename", "") or "").lower()
+        if not (name.endswith((".ics", ".vcs")) or "calendar" in (getattr(att, "content_type", "") or "").lower()):
+            continue
+        content = getattr(att, "content", None) or getattr(att, "extracted_text", "") or ""
+        head = bytes(content[:65_536]).decode("utf-8", "replace") if isinstance(content, (bytes, bytearray)) else str(content)[:65_536]
+        found = re.search(r"(?im)^METHOD:\s*([A-Z-]+)", head)
+        if found:
+            return found.group(1).upper()
+        if "BEGIN:VEVENT" in head.upper():
+            return "PUBLISH"  # a calendar file with no METHOD: a meeting, sent for the calendar
+    if meetings:
+        return "CANCEL" if any(meeting.cancelled for meeting in meetings) else "REQUEST"
+    return ""
+
+
 # --- Outlook meeting requests (.msg) ---------------------------------------------------------------------------------
 
 
@@ -674,6 +694,44 @@ def refresh_invites(store, settings, *, now: datetime | None = None, limit: int 
             store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp, conn=conn)
         done += 1
     return done
+
+
+CATCH_UP_KEY = "invites_catch_up"  # how far reading the invitations of mail stored before meetings were kept got
+
+
+def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int = 200, limit: int = 20_000) -> int:
+    """Once, after an update: the invitations of mail stored by a version that kept no meetings, read from what was
+    kept of the email (as ``refresh_invites`` reads them), ``batch`` emails at a time, resuming where it stopped. Mail
+    with an invitation (an .ics file, or a meeting request it was read from) and no meeting saved is read; held mail
+    keeps only which meeting it named. Returns how many emails were looked at."""
+    from controller_inbox.fraud import attachments_locked
+
+    if store.get_state(CATCH_UP_KEY) == "done":
+        return 0
+    now = now or datetime.now(timezone.utc)
+    stamp = now.astimezone(timezone.utc).isoformat(timespec="seconds")
+    looked = 0
+    while looked < limit:
+        after = int(store.get_state(CATCH_UP_KEY) or 0)
+        rows = store.emails_without_meetings(after, batch=batch)
+        if not rows:
+            store.set_state(CATCH_UP_KEY, "done")
+            break
+        for _rowid, email_id in rows:
+            email = store.get_email(email_id)
+            try:
+                found = _kept_invitations(email, settings, now) if email is not None else None
+            except Exception:  # an invitation that can't be read again adds nothing
+                found = None
+            if found:
+                with store.transaction() as conn:
+                    current = store.get_email(email_id, conn=conn)
+                    if current is not None and not store.has_meetings(email_id, conn=conn):  # read meanwhile: as it was read
+                        store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp,
+                                           held=attachments_locked(current), conn=conn)
+        looked += len(rows)
+        store.set_state(CATCH_UP_KEY, str(rows[-1][0]))
+    return looked
 
 
 def _kept_invitations(email, settings, now: datetime) -> list[Meeting] | None:
