@@ -723,7 +723,8 @@ def pick_sources(
             return stay, False, set()
         about_today = today
     # "What's urgent today?", "summarize my day": the focus list answers them, not mail with the word "day" in it.
-    stripped = _TODAY.sub(" ", _MY_DAY.sub(" ", question)) if about_today else question
+    # "What is due next week?": the period is no search word (``due_mail`` answers it).
+    stripped = _TODAY.sub(" ", _MY_DAY.sub(" ", _DUE_WHEN.sub(" ", question))) if about_today else question
     by_kind: list[EmailRecord] = []
     for pattern, categories in _INTENTS:
         if pattern.search(question):
@@ -1110,6 +1111,51 @@ def due_window(question: str, today: str) -> tuple[date, date, str] | None:
     return day, nxt - timedelta(days=1), "due this month"
 
 
+MAX_DUE = 12  # emails a "what's due next week?" answer lists
+
+
+def _due_dates(email: EmailRecord) -> list[date]:
+    """The days an email falls due: the date printed on it, and its open tasks'."""
+    found = []
+    for value in [email.extracted.primary_due, *(a.due_date for a in email.actions if a.status == ActionStatus.OPEN)]:
+        try:
+            found.append(date.fromisoformat(str(value)[:10]))
+        except ValueError:
+            continue
+    return sorted(set(found))
+
+
+def due_mail(store: Store, window: tuple[date, date, str]) -> list[EmailRecord]:
+    """The emails with an open task that fall due in ``window`` (on the date printed on them or a task's), soonest
+    first: at most MAX_DUE."""
+    first, last, _said = window
+    emails = [store.get_email(email_id) for email_id in dict.fromkeys(email.id for _action, email in store.list_actions(status="open"))]
+    dated = []
+    for email in emails:
+        if email is not None and (days := [day for day in _due_dates(email) if first <= day <= last]):
+            dated.append((days[0], email.received_at or "", email))
+    return [email for _day, _received, email in sorted(dated, key=lambda item: item[:2])][:MAX_DUE]
+
+
+def _due_answer(note: str, sources: list[EmailRecord], window: tuple[date, date, str], numbers: dict, current_id: str | None) -> str:
+    """What falls due in a period, with no model: each email and the day, soonest first."""
+    first, last, said = window
+    due = [email for email in sources if email.id != current_id]
+    if not due:
+        return f"{note} Nothing is {said}."
+    lines = [f"{note} {'This is' if len(due) == 1 else 'These are'} {said}:"]
+    for email in due:
+        day = next(day for day in _due_dates(email) if first <= day <= last)
+        tasks = [a.title.rstrip(".") for a in email.actions if a.status == ActionStatus.OPEN and a.due_date and str(a.due_date)[:10] == day.isoformat()]
+        what = f" — {tasks[0]}" if tasks else ""
+        lines.append(f"- {day:%a %b} {day.day} · **{email.subject}** · {_who(email)}{what} [{numbers[email.id]}]")
+    if any(is_fraud(email) for email in due):
+        lines.append(FRAUD_WARNING)
+    if len(due) == MAX_DUE:
+        lines.append(f"The first {MAX_DUE} are listed: ask about a shorter period for the rest.")
+    return "\n".join(lines)
+
+
 def _due_on(email: EmailRecord) -> date | None:
     """When the email falls due: the date printed on it (an invoice's due date), else its earliest open task's."""
     dates = [email.extracted.primary_due] if email.extracted.primary_due else sorted(
@@ -1137,13 +1183,14 @@ def offline_answer(
     held: int = 0,
     conversation: list[str] | None = None,
     unlinked: bool = False,
+    due: tuple[date, date, str] | None = None,
 ) -> str:
     """The answer with no model: the emails, lines and file passages that match, as a list.
 
     ``tz``: the app's time zone, for when each email came and when a meeting is. ``thread``: the open email's
     conversation, oldest first, for a question about how it came about. ``conversation``: the ids of the emails of
     its conversation among ``sources``, for a question their words answer. ``unlinked``: the open email has no mail
-    linked to it. ``meeting``: the meeting asked about (as ``calendar_events.shown`` gives it), whose mail
+    linked to it. ``due``: the period (``due_window``) a question asks what falls due in, whose mail ``sources`` is. ``meeting``: the meeting asked about (as ``calendar_events.shown`` gives it), whose mail
     ``sources`` are."""
     found = found or set()
     current = next((email for email in sources if email.id == current_id), None)
@@ -1156,6 +1203,8 @@ def offline_answer(
     calendar = next((email for email in sources if email.source == "calendar"), None)
     if calendar is not None:
         return f"{note} " + _meetings_for(question, calendar.body_text, today, f" [{numbers[calendar.id]}]")
+    if due is not None:
+        return _due_answer(note, sources, due, numbers, current_id)
     if current is not None and not found and not about_today:
         if thread and (len(sources) > 1 or held):
             return _history_answer(note, sources, current, thread, numbers, tz, held=held)
@@ -1377,6 +1426,12 @@ def answer_stream(
         found = {email.id for email in sources}
     else:
         sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings, report=searched)
+        if about_today and not found and (window := due_window(question, today)) is not None:
+            # "What is due next week?", "anything overdue?": every email that falls due then, not the focus list's top.
+            current_first = sources[:1] if email_id and sources and sources[0].id == email_id else []
+            due = [email for email in due_mail(store, window) if email not in current_first]
+            sources, found = current_first + due, {email.id for email in due}
+            searched["due"] = window
     if meeting is None and _about_calendar(question, email_id) and (calendar := calendar_source(store, settings, today, question)) is not None:
         # "What meetings do I have tomorrow?": the calendar answers it, beside the mail it may name.
         current_first = sources[:1] if email_id and sources and sources[0].id == email_id else []
@@ -1415,7 +1470,7 @@ def answer_stream(
     lookup = {
         "about_today": about_today, "focus": focus, "found": found, "current_id": email_id, "today": today, "tz": settings.tz,
         "thread": searched.get("thread"), "meeting": _shown(meeting, settings) if meeting is not None else None, "held": searched.get("held", 0),
-        "conversation": searched.get("conversation"), "unlinked": searched.get("unlinked", False),
+        "conversation": searched.get("conversation"), "unlinked": searched.get("unlinked", False), "due": searched.get("due"),
     }
     if not use_model:
         yield {"type": "delta", "text": offline_answer(question, sources, **lookup)}
