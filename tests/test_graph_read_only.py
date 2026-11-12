@@ -20,3 +20,18 @@ def test_every_request_it_makes_is_a_get():
     calls = {node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
     assert not calls & {"request", "post", "patch", "put", "delete", "send", "stream"}, calls & {"request", "post", "patch", "put", "delete", "send", "stream"}
     assert not hasattr(graph.GraphMailbox, "apply_categories") and not hasattr(graph.GraphMailbox, "send_mail")
+
+
+def test_a_sign_in_saved_by_a_version_that_could_write_is_dropped(tmp_path, monkeypatch):
+    from controller_inbox import graph
+    from controller_inbox.graph import GraphClient
+
+    monkeypatch.setattr(graph.msal, "PublicClientApplication", lambda *_a, **_k: object())  # no network
+
+    cache = tmp_path / "msal_cache.json"
+    cache.write_text('{"AccessToken": {"k": {"target": "Mail.ReadWrite Mail.Send User.Read", "secret": "x"}}}', encoding="utf-8")
+    GraphClient(client_id="00000000-0000-0000-0000-000000000000", cache_path=cache)
+    assert not cache.exists()
+    cache.write_text('{"AccessToken": {"k": {"target": "Mail.Read User.Read", "secret": "x"}}}', encoding="utf-8")
+    GraphClient(client_id="00000000-0000-0000-0000-000000000000", cache_path=cache)
+    assert cache.exists()

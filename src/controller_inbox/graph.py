@@ -8,6 +8,7 @@ this file for any other request.
 from __future__ import annotations
 
 import base64
+import re
 from datetime import datetime, timezone
 from email import policy
 from email.parser import BytesParser
@@ -26,6 +27,7 @@ GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 # MSAL asks for "offline_access" (the refresh token) by itself and refuses a sign-in that names it, or
 # "openid" or "profile", so they are not listed here.
 DELEGATED_SCOPES = ["User.Read", "Mail.Read"]
+_WRITE_SCOPES = re.compile(r"(?i)\bmail\.(readwrite|send)\b")
 APP_SCOPES = ["https://graph.microsoft.com/.default"]
 # The digest earlier versions mailed to this mailbox: it is not read back as mail.
 DIGEST_SUBJECT = "CloseDesk daily digest — "
@@ -54,7 +56,13 @@ class GraphClient:
         self.timeout = timeout
         self._cache = msal.SerializableTokenCache()
         if cache_path and cache_path.exists():
-            self._cache.deserialize(cache_path.read_text(encoding="utf-8"))
+            saved = cache_path.read_text(encoding="utf-8")
+            if _WRITE_SCOPES.search(saved):
+                # Signed in by an older version, which asked to change and send mail: that sign-in is dropped, and the
+                # next asks for reading only. (Every request CloseDesk sends is a GET either way, see ``get``.)
+                cache_path.unlink(missing_ok=True)
+            else:
+                self._cache.deserialize(saved)
         authority = f"https://login.microsoftonline.com/{self.tenant_id}"
         if client_secret:
             self.app = msal.ConfidentialClientApplication(
