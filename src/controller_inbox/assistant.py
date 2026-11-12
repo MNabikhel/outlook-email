@@ -108,15 +108,17 @@ def _matter(store: Store, current: EmailRecord) -> tuple[list[EmailRecord], list
     from controller_inbox import links
 
     found = links.related(store, current)
-    thread = [email for email in found["thread"] if email.id != current.id]
-    return thread + [email for group in found["groups"] for email in group["emails"]], [email.id for email in found["thread"]]
+    # Held mail of the matter is no source: it never reaches the model (the Related panel lists it, marked).
+    thread = [email for email in found["thread"] if email.id != current.id and not attachments_locked(email)]
+    linked = [email for group in found["groups"] for email in group["emails"] if not attachments_locked(email)]
+    return thread + linked, [email.id for email in found["thread"] if email.id == current.id or not attachments_locked(email)]
 
 
 def _conversation(store: Store, current: EmailRecord) -> list[EmailRecord]:
     """The other emails of ``current``'s conversation, oldest first."""
     from controller_inbox import links
 
-    return [email for email in links.related(store, current, ai=False)["thread"] if email.id != current.id]
+    return [email for email in links.related(store, current, ai=False)["thread"] if email.id != current.id and not attachments_locked(email)]
 
 
 def _stays_on(store: Store, current: EmailRecord, question: str, *, about_today: bool) -> list[EmailRecord] | None:
@@ -318,7 +320,8 @@ def meeting_sources(store: Store, settings: Settings, meeting: dict, email_id: s
     zone = getattr(settings.tz, "key", str(settings.tz))
     lines = "\n".join(_calendar_times(line) for line in calendar_events.listing([shown]).splitlines())
     calendar = _calendar_record(f"The meeting asked about. Times are {zone}.\n" + lines, [shown])
-    mail = calendar_events.related_mail(store, meeting, limit=MAX_SOURCES)
+    # Held mail about a meeting (a lookalike's "updated dial-in") is no source: it never reaches the model.
+    mail = [email for email in calendar_events.related_mail(store, meeting, limit=MAX_SOURCES) if not attachments_locked(email)]
     if email_id and email_id not in {email.id for email in mail} and (current := store.get_email(email_id)) is not None:
         mail = [current, *mail]
     lead = [email for email in mail if email.id == email_id]

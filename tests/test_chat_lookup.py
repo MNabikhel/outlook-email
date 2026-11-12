@@ -155,3 +155,23 @@ def test_an_invitation_file_is_never_shown_as_raw_text(loaded):
         lines = agent.file_matches(invite, question)
         assert lines and all("BEGIN:VCALENDAR" not in line and "DTSTART" not in line for line in lines), lines
         assert any("Q4 planning review" in line for line in lines)
+
+
+def test_held_mail_of_a_matter_or_about_a_meeting_is_no_source(store, settings):
+    """A held reply in the conversation, or a held email about a meeting, never reaches the model."""
+    from controller_inbox import assistant
+    from controller_inbox.models import DocumentType
+    from test_links import _record
+
+    store.upsert_email(_record("root", sender="ar@northwind.com", mid="<root@northwind.com>", threading={"to": ["ap@taz.com"]}))
+    held = _record("held", sender="ar@northwlnd.com", threading={"in_reply_to": "root@northwind.com"}, received="2026-10-06T09:00:00+00:00",
+                   flags=["fraud_risk"])
+    held.subject = "Budget review: new dial-in and bank details"
+    held.category = DocumentType.PAYMENT_INSTRUCTION_CHANGE
+    store.upsert_email(held)
+    sources, thread = assistant._matter(store, store.get_email("root"))
+    assert "held" not in {email.id for email in sources} and "held" not in thread
+    assert "held" not in {email.id for email in assistant._conversation(store, store.get_email("root"))}
+    meeting = {"id": "m1", "uid": "u1", "subject": "Budget review", "start": "2026-10-07T15:00:00+00:00", "end": "2026-10-07T16:00:00+00:00",
+               "email_id": "held", "organizer": "ar@northwlnd.com", "attendees": [], "all_day": False, "location": "", "source": "invite", "cancelled": False, "recurring": False, "busy": ""}
+    assert "held" not in {email.id for email in assistant.meeting_sources(store, settings, meeting)}
