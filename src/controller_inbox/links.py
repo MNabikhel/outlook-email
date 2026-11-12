@@ -583,8 +583,13 @@ def trace(store, email: EmailRecord) -> dict:
     return {"steps": [(record, reasons.get(record.id, [])) for record in steps], "versions": versions(steps)}
 
 
-# A change to payment details between two versions of a file is to be checked by phone, whoever sent it.
-_PAYMENT_WORDS = re.compile(r"(?i)\b(bank|account|acct|iban|routing|aba|swift|bic|sort code|remit|wire|ach|beneficiary)\b")
+# A change to payment details between two versions of a file is to be checked by phone, whoever sent it. "Account"
+# alone is no bank detail (a GL account column, "Account balance"): it counts as an account number's label
+# ("Account no.", "Acct #") or before a long run of digits.
+_PAYMENT_WORDS = re.compile(
+    r"(?i)\b(bank|iban|routing|aba|swift|bic|sort code|remit|wire|ach|beneficiary)\b|"
+    r"\b(account|acct)\b\.?\s*(number|num|no\b|#)|\b(account|acct)\b[^|\n\d]{0,20}\d[\d\s-]{6,}"
+)
 
 
 def versions(emails: list[EmailRecord]) -> list[dict]:
@@ -610,12 +615,47 @@ def versions(emails: list[EmailRecord]) -> list[dict]:
     return out
 
 
-def _payment_lines(text: str | None) -> set[str]:
-    """The lines of a file naming a bank, an account or where to send money: any change in them is worth a call."""
-    return {" ".join(line.split()) for line in (text or "").splitlines() if _PAYMENT_WORDS.search(line)}
+def _payment_lines(text: str | None) -> set:
+    """What a file says about a bank, an account number or where to send money: any change in it is worth a call.
+    A section's marker ("[sheet "Bank Rec" A1:C4]") is no part of it. A workbook counts cell by cell: a cell naming
+    a bank detail, the cells under a heading that names one, and the cell right of a label that names one (a changed
+    amount on the same row is no new bank detail)."""
+    if "[sheet " in (text or ""):
+        cells = _cells(text)
+        names = lambda value: bool(_PAYMENT_WORDS.search(value))  # noqa: E731
+        top = {}
+        for sheet, ref in cells:
+            top[sheet] = min(top.get(sheet, 1 << 30), _cell_order((sheet, ref))[1])
+        place = {key: (key[0], re.match(r"[A-Z]+", key[1]).group(0), _cell_order(key)[1]) for key in cells}
+        by_place = {spot: cells[key][0] for key, spot in place.items()}
+        found = set()
+        one_sheet = len(top) == 1
+        for key, (value, heading) in cells.items():
+            sheet, column, row = place[key]
+            header = by_place.get((sheet, column, top[sheet]), "")
+            left = by_place.get((sheet, _column_before(column), row), "")
+            if names(value) or names(heading) or (row != top[sheet] and names(header)) or names(left):
+                # A CSV's one sheet is named after its file, which differs between versions.
+                found.add(("" if one_sheet else sheet, key[1], value))
+        return found
+    return {" ".join(line.split()) for line in (text or "").splitlines() if not line.startswith("[") and _PAYMENT_WORDS.search(line)}
 
 
-_CELL_LINE = re.compile(r"^([A-Z]{1,3})(\d+)(?: \(([^)]*)\))?: (.*)$")
+def _column_before(letters: str) -> str:
+    """The column left of one ("B" for "C", "Z" for "AA"); "" for column A."""
+    number = 0
+    for letter in letters:
+        number = number * 26 + ord(letter) - 64
+    number -= 1
+    out = ""
+    while number > 0:
+        number, rest = divmod(number - 1, 26)
+        out = chr(65 + rest) + out
+    return out
+
+
+# The heading is read up to the "): " that ends it, so one with brackets of its own ("Amount (USD)") is read whole.
+_CELL_LINE = re.compile(r"^([A-Z]{1,3})(\d+)(?: \((.*?)\))?: (.*)$")
 
 
 def changes(old: str, new: str, *, limit: int = MAX_CHANGES) -> tuple[list[str], int]:
@@ -623,6 +663,12 @@ def changes(old: str, new: str, *, limit: int = MAX_CHANGES) -> tuple[list[str],
     (Q3): 1,200 → 1,450"), other files line by line ("Removed: …", "Added: …"). At most ``limit``, with how many more."""
     if "[sheet " in old and "[sheet " in new:
         before, after = _cells(old), _cells(new)
+        # A file of one sheet each time (a CSV's is named after the file, "Accruals v1.csv") is compared with the
+        # other's one sheet, whatever they are called.
+        old_sheets, new_sheets = {sheet for sheet, _ref in before}, {sheet for sheet, _ref in after}
+        if len(old_sheets) == 1 and len(new_sheets) == 1 and old_sheets != new_sheets:
+            [name] = new_sheets
+            before = {(name, ref): value for (_sheet, ref), value in before.items()}
         found = []
         for key in sorted(before.keys() | after.keys(), key=_cell_order):
             was, now = before.get(key), after.get(key)

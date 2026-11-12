@@ -655,3 +655,65 @@ def test_the_related_panel_is_told_the_whole_conversations_size(store, settings)
                                    threading={"conversation": "ab" * 16, "to": ["ap@taz.com"]}))
     related = TestClient(create_app(settings, store), headers=PAGE).get("/api/mail/m149").json()["related"]
     assert len(related["thread"]) == links.MAX_THREAD and related["thread_size"] == 150
+
+
+def _book(title: str, rows: list[list]) -> str:
+    import io
+
+    from openpyxl import Workbook
+
+    from controller_inbox.documents import xlsx_text
+
+    book = Workbook()
+    book.active.title = title
+    for row in rows:
+        book.active.append(row)
+    data = io.BytesIO()
+    book.save(data)
+    return xlsx_text(data.getvalue())
+
+
+def _two_versions(old_text: str, new_text: str, name: str = "Budget.xlsx") -> dict:
+    old = _record("old", files=[(name.replace(".", " v1."), "1" * 64, 20_000, None)], received="2026-09-01T09:00:00+00:00")
+    new = _record("new", files=[(name.replace(".", " v2."), "2" * 64, 20_000, None)], received="2026-09-15T09:00:00+00:00")
+    old.attachments[0].extracted_text, new.attachments[0].extracted_text = old_text, new_text
+    [version] = links.versions([old, new])
+    return version
+
+
+# Guards against: a cell whose column heading has brackets ("Amount (USD)") wasn't read at all, so a changed
+# amount under it gave "No change in what was read from the two files".
+def test_a_changed_cell_under_a_heading_with_brackets_is_listed():
+    rows = lambda amount: [["Line", "Amount (USD)", "Change (%)"], ["Rent", 12000, 3], ["Utilities", amount, 5]]  # noqa: E731
+    listed, _more = links.changes(_book("Budget", rows(1200)), _book("Budget", rows(1450)))
+    assert len(listed) == 1 and listed[0].startswith("Budget!B3 (Amount (USD)): 1") and listed[0].endswith("450"), listed
+
+
+# Guards against: a CSV's one sheet is named after its file, so two versions ("Accruals v1.csv", "v2.csv") shared
+# no cell: every cell was listed as removed and added again, and the one real change was cut off the list.
+def test_two_versions_of_a_csv_are_compared_cell_by_cell():
+    from controller_inbox.documents import csv_text
+
+    old = csv_text(b"Vendor,Amount\nNorthwind,1200.00\nAcme,500.00\nHarbor,75.00\n", "Accruals v1.csv")
+    new = csv_text(b"Vendor,Amount\nNorthwind,1450.00\nAcme,500.00\nHarbor,75.00\n", "Accruals v2.csv")
+    assert links.changes(old, new) == (["Accruals v2.csv!B2 (Amount): 1200.00 → 1450.00"], 0)
+
+
+# Guards against: "Payment details changed between these versions: check them by phone" came up when no bank
+# detail changed: when only a sheet's marker line did (a CSV named "Bank Rec Oct v2.csv", a sheet named "Bank Rec"
+# that gained a row), and on any changed row of a schedule with a GL "Account" column or an "Account balance" line.
+def test_payment_details_changed_only_when_a_bank_detail_did():
+    from controller_inbox.documents import csv_text
+
+    old = csv_text(b"Item,Amount\nCoffee,5.00\nRent,4000.00\n", "Bank Rec Oct v1.csv")
+    new = csv_text(b"Item,Amount\nCoffee,6.00\nRent,4000.00\n", "Bank Rec Oct v2.csv")
+    assert not _two_versions(old, new, "Bank Rec Oct.csv")["payment"]
+    rows = [["Item", "Amount"], ["Coffee", 5], ["Rent", 4000]]
+    assert not _two_versions(_book("Bank Rec", rows), _book("Bank Rec", [*rows, ["Fees", 12]]), "Bank Rec.xlsx")["payment"]
+    gl = lambda amount: [["Account", "Description", "Amount"], [6200, "Utilities", amount], [6300, "Rent", 4000]]  # noqa: E731
+    assert not _two_versions(_book("Accruals", gl(1200)), _book("Accruals", gl(1450)), "Accruals.xlsx")["payment"]
+    assert not _two_versions("[page 1]\nAccount balance: $5,000.00", "[page 1]\nAccount balance: $6,250.00", "Statement Acme.pdf")["payment"]
+    # A bank detail that did change is still flagged, in a workbook and in a letter.
+    bank = lambda number: [["Vendor", "Account number", "Routing"], ["Northwind", number, "021000021"]]  # noqa: E731
+    assert _two_versions(_book("Vendors", bank("12345678")), _book("Vendors", bank("87654321")), "Vendor list.xlsx")["payment"]
+    assert _two_versions("[page 1]\nPay to account no. 12345678", "[page 1]\nPay to account no. 87654321", "Remittance letter.pdf")["payment"]
