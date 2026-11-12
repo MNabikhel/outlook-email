@@ -21,10 +21,11 @@ from controller_inbox.totals import is_total_label
 # A further "-0457" segment belongs to the number ("INV-2024-0457"); a segment needs a digit, so
 # "12345-due" stays "12345".
 _ID_TAIL = r"(?:[-_](?=[A-Z0-9]*\d)[A-Z0-9]{1,12})*"
-# "Invoice Number: 12345", "PO No. 4500123": the label word is read whole, or the separators would take its "No".
+# "Invoice Number: 12345", "PO No. 4500123": the label word is read whole, and the separators are no letters, so
+# a number's own N or O stays ("NW-88001", "ON-7731").
 _NUMBER_WORD = r"(?:\s*(?:number|num|no)\b\.?)?"
 INVOICE_RE = re.compile(
-    r"\b(?:invoice|inv(?![-_]?\d)\.?|bill)" + _NUMBER_WORD + r"[\s#:No.-]*((?:[A-Z]{1,6}[-_]?\d{2,12}|\d{3,12})" + _ID_TAIL + r")",
+    r"\b(?:invoice|inv(?![-_]?\d)\.?|bill)" + _NUMBER_WORD + r"[\s#:.-]*((?:[A-Z]{1,6}[-_]?\d{2,12}|\d{3,12})" + _ID_TAIL + r")",
     re.IGNORECASE,
 )
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -41,7 +42,7 @@ def _is_date(value: str) -> bool:
     return True
 INVOICE_BARE_RE = re.compile(r"\b(INV[-_]?\d{3,8}(?:[-_]\d{1,8})*|IN[-_]?\d{4,8}(?:[-_]\d{1,8})*)\b", re.IGNORECASE)
 PO_RE = re.compile(
-    r"\b(?:purchase\s+order|p\.?o\.?)" + _NUMBER_WORD + r"[\s#:No.-]*([A-Z]{0,4}-?\d{3,10})\b",
+    r"\b(?:purchase\s+order|p\.?o\.?)" + _NUMBER_WORD + r"[\s#:.-]*([A-Z]{0,4}-?\d{3,10})\b",
     re.IGNORECASE,
 )
 # An amount written European style ("4.210,50", "€48.000", "12,50"): thousands dots or decimal cents, so it

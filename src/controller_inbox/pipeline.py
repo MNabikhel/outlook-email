@@ -9,11 +9,12 @@ from types import SimpleNamespace
 from typing import Protocol
 
 from controller_inbox.actions import extract_actions, keep_task_status, received_day
-from controller_inbox.classify import Classification, classify_document, classify_email, is_data_file, outlook_categories
+from controller_inbox.classify import Classification, classify_document, classify_email, is_data_file, outlook_categories, own_words
 from controller_inbox.clock import aware_utc, parse_stamp
 from controller_inbox.config import Settings
 from controller_inbox.documents import MAX_TEXT
 from controller_inbox.extract import (
+    ATTACHMENT_MENTION_RE,
     explode_archives,
     extract_fields,
     extract_text_from_bytes,
@@ -176,7 +177,13 @@ def process_message(
 
     # If Graph said there were attachments but we still have none after fetch.
     has_files = bool(att_records)
-    if merged_fields.mentions_attachment and not has_files and "missing_attachment" not in classified_email.flags:
+    # "Please find attached" in the quoted email a reply carries is no file this one forgot.
+    if (
+        merged_fields.mentions_attachment
+        and not has_files
+        and "missing_attachment" not in classified_email.flags
+        and ATTACHMENT_MENTION_RE.search(f"{raw.subject}\n{own_words(raw.body_text)}")
+    ):
         classified_email.flags.append("missing_attachment")
 
     actions = extract_actions(

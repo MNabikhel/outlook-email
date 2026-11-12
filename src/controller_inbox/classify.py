@@ -872,7 +872,10 @@ def classify_email(
         confidence = max(confidence, 0.8)
         reasons.append(_INVITATION_REASONS.get(invitation, "Meeting invitation"))
 
-    if fields.mentions_attachment and not has_attachments:
+    # "Please find attached" in the quoted email a reply carries is no file this one forgot.
+    from controller_inbox.extract import ATTACHMENT_MENTION_RE
+
+    if fields.mentions_attachment and not has_attachments and ATTACHMENT_MENTION_RE.search(f"{subject}\n{own_words(body)}"):
         combined_flags.append("missing_attachment")
         reasons.append("Email says something is attached, but no attachment was found")
 
