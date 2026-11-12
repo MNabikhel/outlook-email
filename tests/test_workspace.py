@@ -326,6 +326,11 @@ def test_the_page_tab_marks_where_text_was_read_and_says_what_on_hover(settings,
         assert page.locator(".pv-box").count() >= 10
         total.hover()
         page.wait_for_selector(".pv-tip:not([hidden])")
+        # A scroll that lands just after (hovering scrolls the box into view first) moves the card with its box.
+        page.evaluate("() => document.querySelector('.pv-box[aria-label=\"1,560.50\"]').closest('.rd-scroll, .pv-scroll, main')?.scrollBy(0, 1)")
+        page.evaluate("() => document.dispatchEvent(new Event('scroll'))")
+        page.wait_for_timeout(100)
+        assert page.is_visible(".pv-tip"), "a scroll with the box still in sight keeps the card"
         card = page.text_content(".pv-tip")
         assert "From the file's own text" in card and "exact" in card and "1,560.50" in card
         box = page.evaluate("() => { const r = document.querySelector('.pv-tip').getBoundingClientRect(); return [r.left, r.right, r.top, r.bottom]; }")
