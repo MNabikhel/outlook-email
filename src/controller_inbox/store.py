@@ -707,10 +707,12 @@ class Store:
 
     def save_invites(
         self, email_id: str, meetings: list, *, sender: str = "", received: str = "", expanded: str = "", held: bool = False,
-        sender_name: str = "", conn: sqlite3.Connection | None = None,
+        sender_name: str = "", keep_before: str = "", conn: sqlite3.Connection | None = None,
     ) -> None:
         """The meetings an email's invitations name (calendar_events), replacing what it named before, at most
-        ``MAX_INVITE_ROWS``, their repeats worked out at ``expanded`` (now when not given). Which email's word on a
+        ``MAX_INVITE_ROWS``, their repeats worked out at ``expanded`` (now when not given). With ``keep_before`` (an
+        invitation read again for a window that has moved on), the occurrences it named before then stay: a weekly
+        meeting's past weeks are still on the calendar. Which email's word on a
         meeting counts (an update, a cancellation, a forward of it) is decided when the calendar is read
         (``_invite_winners``): an email never removes another's rows, so one arriving out of order, or later deleted,
         can't lose the meeting. For ``held`` mail only which meetings it named is kept (``_hold``), so Outlook's own
@@ -722,7 +724,11 @@ class Store:
                     "SELECT uid, MIN(first_seen) FROM meetings WHERE email_id = ? AND source = 'invite' GROUP BY uid", (email_id,)
                 )
             }
-            conn.execute("DELETE FROM meetings WHERE email_id = ? AND source IN ('invite', 'held')", (email_id,))
+            if keep_before and not held:
+                conn.execute("DELETE FROM meetings WHERE email_id = ? AND (source = 'held' OR (source = 'invite' AND start >= ?))",
+                             (email_id, keep_before))
+            else:
+                conn.execute("DELETE FROM meetings WHERE email_id = ? AND source IN ('invite', 'held')", (email_id,))
             if held:
                 _hold(conn, email_id, [(meeting.uid, meeting.start, meeting.organizer, meeting.recurring) for meeting in meetings],
                       _named(sender_name, sender))
@@ -731,6 +737,8 @@ class Store:
             expanded = expanded or datetime.now(timezone.utc).isoformat(timespec="seconds")
             for meeting in meetings[:MAX_INVITE_ROWS]:
                 self._put_meeting(conn, meeting, sender=sender, received=received, first_seen=first.get(meeting.uid) or stamp, expanded=expanded)
+            if keep_before:
+                conn.execute("UPDATE meetings SET expanded = ? WHERE email_id = ? AND source = 'invite'", (expanded, email_id))
 
     def hold_invites(self, email_id: str, *, conn: sqlite3.Connection | None = None) -> int:
         """An email held as possible payment fraud after its invitation was read: its meetings become only which

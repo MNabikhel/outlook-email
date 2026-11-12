@@ -871,7 +871,9 @@ def refresh_invites(store, settings, *, now: datetime | None = None, limit: int 
             current = store.get_email(email_id, conn=conn)
             if current is None or attachments_locked(current):  # held meanwhile
                 continue
-            store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp, conn=conn)
+            # The occurrences before the new window stay: the weeks of last quarter are still on the calendar.
+            store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp,
+                               keep_before=(now - WINDOW_BACK).astimezone(timezone.utc).isoformat(timespec="seconds"), conn=conn)
         done += 1
     return done
 

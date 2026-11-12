@@ -456,3 +456,27 @@ def test_a_vcalendar_file_sent_as_any_kind_of_file_reaches_the_calendar(store, s
     data = _invite("V1", "20261020T140000Z", subject="Year-end close planning", end="20261020T150000Z").encode()
     _read_invitation(store, settings, data, filename="meeting.vcs", content_type="application/octet-stream", subject="Year-end close planning")
     assert [m["subject"] for m in store.meetings_between("2026-10-20", "2026-10-21")] == ["Year-end close planning"]
+
+
+def test_the_overnight_reread_of_a_weekly_invitation_keeps_its_past_weeks(store, settings):
+    from controller_inbox import pipeline
+
+    july = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    weekly = _ics(_event("UID:s1", "SUMMARY:Month-end close sync", "DTSTART:20260706T140000Z", "DTEND:20260706T143000Z",
+                         "RRULE:FREQ=WEEKLY", "ORGANIZER:mailto:jordan@horizon-goods.com"))
+    ended = _ics(_event("UID:s2", "SUMMARY:Audit fieldwork", "DTSTART;VALUE=DATE:20260707", "RRULE:FREQ=WEEKLY;COUNT=3",
+                        "ORGANIZER:mailto:jordan@horizon-goods.com"))
+    settings.ensure_data_dir()
+    pipeline.process_message(_with_invitation("e1", "Month-end close sync", weekly, received=july), store, settings, now=july)
+    pipeline.process_message(_with_invitation("e2", "Audit fieldwork", ended, received=july), store, settings, now=july)
+
+    def in_july():
+        return sorted((m["uid"], m["start"][:10]) for m in store.meetings_between("2026-07-01", "2026-07-31"))
+
+    before = in_july()
+    assert [uid for uid, _day in before].count("s1") == 4 and [uid for uid, _day in before].count("s2") == 3
+    later = july + timedelta(days=200)
+    assert cal.refresh_invites(store, settings, now=later) == 2
+    assert in_july() == before
+    assert store.meetings_between((later + timedelta(days=7)).date().isoformat(), (later + timedelta(days=14)).date().isoformat())
+    assert cal.refresh_invites(store, settings, now=later) == 0, "not read again the next night"
