@@ -1052,18 +1052,21 @@ def meeting_when(meeting: dict) -> str:
     return f"{day}, {clock(start)}–{clock(end)}"
 
 
-def invitation_line(att: AttachmentRecord, tz=None) -> str:
+def invitation_line(att: AttachmentRecord, tz=None, *, now: datetime | None = None) -> str:
     """An invitation file as the meeting it holds: "Q4 planning review, Thursday September 24, 2:00 PM–3:00 PM",
-    in ``tz`` (UTC, said so, without one). "" when no meeting can be read from it."""
+    in ``tz`` (UTC, said so, without one); a repeating one as its next meeting from ``now``. "" when no meeting can
+    be read from it."""
     from controller_inbox import calendar_events
 
+    now = now or datetime.now(timezone.utc)
     try:
-        meetings = calendar_events.from_ics(att.extracted_text or "")
+        meetings = calendar_events.from_ics(att.extracted_text or "", now=now)
     except Exception:  # an invitation that can't be read is left out, never shown as raw text
         return ""
     if not meetings:
         return ""
-    first = meetings[0]
+    # Its next meeting (not one three months gone, as the weeks read start then), else its last.
+    first = next((m for m in meetings if _ends_after(m, now)),meetings[-1])
     shown = calendar_events.shown(first.to_row(), tz or timezone.utc)
     said = f"{shown['subject']}, {meeting_when(shown)}" + ("" if tz is not None or shown["all_day"] else " (UTC)")
     if first.cancelled:
@@ -1071,6 +1074,16 @@ def invitation_line(att: AttachmentRecord, tz=None) -> str:
     elif first.recurring or len(meetings) > 1:
         said += " (repeats)"
     return said
+
+
+def _ends_after(meeting, now: datetime) -> bool:
+    """Whether a meeting (one occurrence) ends after ``now``."""
+    try:
+        if meeting.all_day:
+            return date.fromisoformat(meeting.end[:10]) > now.date()
+        return datetime.fromisoformat(meeting.end) > now
+    except (TypeError, ValueError):
+        return False
 
 
 # Tools --------------------------------------------------------------------------------------

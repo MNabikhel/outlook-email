@@ -500,3 +500,17 @@ def test_ask_about_this_meeting_finds_a_cancelled_or_untitled_one_and_the_week_n
                      "“AP standup” on 2026-10-19"):
         found = assistant.asked_meeting(store, settings, f"What do I need to know before {question}?", today="2026-10-05")
         assert found["start"].startswith("2026-10-19"), question
+
+
+def test_an_invitation_file_is_described_by_its_next_meeting():
+    from zoneinfo import ZoneInfo
+
+    from controller_inbox import agent
+    from controller_inbox.models import AttachmentRecord, DocumentType, ExtractedFields
+
+    data = _ics(_event("UID:wk9", "SUMMARY:AP standup", "DTSTART:20260302T150000Z", "DTEND:20260302T153000Z", "RRULE:FREQ=WEEKLY",
+                       "SEQUENCE:3"))
+    att = AttachmentRecord(id="a", email_id="e", filename="invite.ics", content_type="text/calendar", size_bytes=len(data), sha256="",
+                           extracted_text=data, document_type=DocumentType.OTHER, document_confidence=0, extracted_fields=ExtractedFields())
+    line = agent.invitation_line(att, ZoneInfo("America/New_York"), now=datetime(2026, 11, 12, 12, tzinfo=timezone.utc))
+    assert line.startswith("AP standup, Monday November 16") and line.endswith("(repeats)"), line
