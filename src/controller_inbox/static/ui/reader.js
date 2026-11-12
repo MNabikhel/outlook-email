@@ -1,7 +1,7 @@
 /* The reading pane: one email (header, why it was flagged, what was read from it, tasks, files, coding,
    fraud check), and an attachment's Page, Tables and Text views. */
 
-import { h, icon, replace, toast, plural, isTyping, $ } from "./dom.js";
+import { h, icon, replace, toast, plural, isTyping, keepTabIn, $ } from "./dom.js";
 import { getJSON, getBlob, postJSON, mailPath, filePath } from "./api.js";
 import { previewPane, thumb } from "./preview.js";
 
@@ -758,11 +758,19 @@ let pinned = false;
 
 let anchor = null; // the box the tip is for
 
-function hideTip(force = false) {
+function hideTip(force = false, { refocus = false } = {}) {
   if (!tip || (pinned && force !== true)) return;
+  // A fix form closed from the keyboard (Esc, Cancel) gives the focus back to its box, so Tab goes on from there.
+  const back = refocus && pinned && tip.contains(document.activeElement) && anchor && anchor.isConnected ? anchor : null;
   pinned = false;
   tip.hidden = true;
   tip.classList.remove("pinned");
+  if (back) back.focus({ preventScroll: true });
+}
+
+/** The card closed whatever it shows: the reading pane is about to show something else, and its box goes. */
+export function closeTip() {
+  hideTip(true);
 }
 
 function showTip(box, children, { pin = false } = {}) {
@@ -780,8 +788,10 @@ function showTip(box, children, { pin = false } = {}) {
         if (event.key === "Escape" && pinned) {
           event.preventDefault();
           event.stopImmediatePropagation();
-          hideTip(true);
+          hideTip(true, { refocus: true });
         }
+        // The open fix form is a dialog over the page: Tab goes round its fields and buttons until it closes.
+        if (event.key === "Tab" && pinned && !tip.hidden && keepTabIn(tip, event)) event.stopImmediatePropagation();
       },
       true
     );
@@ -1184,7 +1194,7 @@ function pageView(data, ctx) {
       if (!region || !box) return;
       const input = h("input", { type: "text", class: "pv-fix-input", value: region.text, maxlength: "500", "aria-label": "What the page says here" });
       const save = h("button", { type: "submit", class: "btn btn-sm btn-primary" }, "Save fix");
-      const cancel = h("button", { type: "button", class: "btn btn-sm", onclick: () => hideTip(true) }, "Cancel");
+      const cancel = h("button", { type: "button", class: "btn btn-sm", onclick: () => hideTip(true, { refocus: true }) }, "Cancel");
       let extra = null;
       if (region.fixed && region.fixed.by === "you") {
         extra = h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => undo(region.fixed.id) }, "Undo my fix");
@@ -1201,7 +1211,7 @@ function pageView(data, ctx) {
       );
       form.addEventListener("submit", (event) => {
         event.preventDefault();
-        if (input.value.trim() === region.text.trim()) return hideTip(true);
+        if (input.value.trim() === region.text.trim()) return hideTip(true, { refocus: true });
         send({ kind: "text", region: index, now: input.value });
       });
       hideTip(true);
@@ -1584,7 +1594,8 @@ export function fileView(data, tab, ctx) {
   );
 }
 
-export function errorView(message, retry) {
-  return h("div", { class: "rd-empty" }, icon("alert", 28), h("p", null, message), retry ? btn("Try again", { class: "btn-sm", onclick: retry }, "refresh") : null);
+/** A message in place of what couldn't be shown, with Try again when trying again can help, or another way on. */
+export function errorView(message, retry, onward = null) {
+  return h("div", { class: "rd-empty" }, icon("alert", 28), h("p", null, message), retry ? btn("Try again", { class: "btn-sm", onclick: retry }, "refresh") : onward);
 }
 

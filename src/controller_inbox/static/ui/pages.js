@@ -160,7 +160,7 @@ function meetingsCard(meetings) {
       )
     ),
     // Beside the list, not in its heading: read out, the heading said "Today's meetings Calendar".
-    h("p", { class: "small" }, h("a", { href: "/app/calendar", dataset: { nav: "" } }, "Open the calendar", icon("right", 12))
+    h("p", { class: "small" }, h("a", { class: "link-arrow", href: "/app/calendar", dataset: { nav: "" } }, "Open the calendar", icon("right", 12))
     )
   );
 }
