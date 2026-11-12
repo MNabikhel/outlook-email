@@ -177,3 +177,10 @@ def test_a_reply_deep_in_a_long_invoice_thread_is_no_duplicate_and_is_read_quick
     record = process_message(reply, store, settings, now=START + timedelta(days=20))
     assert time.monotonic() - started < 3
     assert "duplicate_invoice" not in record.flags
+
+
+def test_at_a_free_mail_service_a_new_address_is_new_to_the_conversation():
+    vendor = _raw("v", "coastalprint.ar@gmail.com", "Invoice CP-5521", TEXT_INVOICE, 0, ["ap@taz.com"])
+    other = _raw("o", "coastalprint.billing@gmail.com", "RE: Invoice CP-5521", "Resending invoice CP-5521 as a PDF.", 2, ["ap@taz.com"])
+    vendor.created_at, other.created_at = "2026-10-05T14:00:00+00:00", "2026-10-05T16:00:00+00:00"
+    assert links.new_domains([vendor, other]) == {"o"}

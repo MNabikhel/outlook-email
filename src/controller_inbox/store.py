@@ -863,17 +863,17 @@ class Store:
             return [(row[0], row[1]) for row in conn.execute("SELECT kind, value FROM email_keys WHERE email_id = ? ORDER BY kind, value", (email_id,))]
 
     def email_heads(self, email_ids: list[str]) -> list[SimpleNamespace]:
-        """What the conversation checks need of each email, without its text or files: id, sender, Reply-To,
-        Message-ID, threading, when it was stored and sent, flags, category, its invoice numbers and whether it
-        brings an invoice file. In the order asked."""
+        """What the invoice checks need of each email, without its text or files: id, the order it was stored in,
+        subject, sender, Reply-To, Message-ID, threading, when it was stored and sent, flags, category, its invoice
+        numbers and whether it brings an invoice file. In the order asked."""
         found: dict[str, SimpleNamespace] = {}
         ids = list(dict.fromkeys(email_ids))
         with self.connect() as conn:
             for start in range(0, len(ids), 400):
                 chunk = ids[start : start + 400]
                 rows = conn.execute(
-                    f"""SELECT e.id, e.sender_email, e.reply_to, e.internet_message_id, e.threading, e.created_at, e.received_at,
-                               e.flags, e.category, e.extracted,
+                    f"""SELECT e.rowid AS stored, e.id, e.subject, e.sender_email, e.reply_to, e.internet_message_id, e.threading,
+                               e.created_at, e.received_at, e.flags, e.category, e.extracted,
                                EXISTS(SELECT 1 FROM attachments a WHERE a.email_id = e.id AND a.document_type = ?) AS invoice_file
                         FROM emails e WHERE e.id IN ({", ".join("?" * len(chunk))})""",
                     [DocumentType.AP_INVOICE.value, *chunk],
@@ -886,6 +886,8 @@ class Store:
                         category = DocumentType.OTHER
                     found[row["id"]] = SimpleNamespace(
                         id=row["id"],
+                        stored=row["stored"],
+                        subject=row["subject"] or "",
                         sender_email=row["sender_email"] or "",
                         reply_to=row["reply_to"] or "",
                         internet_message_id=row["internet_message_id"] or "",
@@ -2198,19 +2200,17 @@ class Store:
                 ((sender_email or "").lower(), exclude, *_NOT_FLAGGED_ARGS),
             ).fetchone()["n"]
 
-    def domain_history(self, domain: str, *, exclude: str = "", outside: list[str] | tuple = ()) -> int:
-        """Emails from addresses at exactly this domain, other than ``exclude`` and those in ``outside`` (900 at
-        most are left out), that the fraud check let through or the user said weren't fraud. A look-alike domain's
-        own first email was flagged, so it doesn't make the domain one the user already hears from."""
+    def domain_history(self, domain: str, *, exclude: str = "") -> int:
+        """Emails from addresses at exactly this domain, other than ``exclude``, that the fraud check let
+        through or the user said weren't fraud. A look-alike domain's own first email was flagged, so it
+        doesn't make the domain one the user already hears from."""
         if not domain:
             return 0
-        skip = [exclude, *list(outside)[:900]]
         with self.connect() as conn:
             return conn.execute(
                 f"""SELECT COUNT(*) AS n FROM emails WHERE instr(sender_email, '@') > 0
-                AND lower(substr(sender_email, instr(sender_email, '@') + 1)) = ?
-                AND id NOT IN ({", ".join("?" * len(skip))}) AND {_NOT_FLAGGED}""",
-                (domain.lower(), *skip, *_NOT_FLAGGED_ARGS),
+                AND lower(substr(sender_email, instr(sender_email, '@') + 1)) = ? AND id != ? AND {_NOT_FLAGGED}""",
+                (domain.lower(), exclude, *_NOT_FLAGGED_ARGS),
             ).fetchone()["n"]
 
     def email_ids_from(self, *, sender: str = "", domain: str = "") -> list[str]:

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, replace
+import re
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Protocol
@@ -23,7 +24,7 @@ from controller_inbox.models import AttachmentRecord, DocumentType, EmailRecord,
 from controller_inbox.calendar_events import invitation_method
 from controller_inbox.fraud import assess, attachments_locked, domain_of, dropped_file_body, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
-from controller_inbox.store import Store, _invoice_key
+from controller_inbox.store import Store
 
 
 VERDICT_FLAGS = {"fraud_cleared", "fraud_confirmed"}
@@ -138,22 +139,25 @@ def process_message(
 
     conversation = conversation_members(store, raw.id, raw.threading, raw.internet_message_id, raw.conversation_id)
     # The email being read, as the conversation checks see it (it isn't stored yet).
+    stored = store.email_heads([raw.id]) if existing is not None else []
     me = SimpleNamespace(
         id=raw.id,
+        stored=stored[0].stored if stored else None,  # read again: where it was stored first
+        subject=clean.subject,
         sender_email=raw.sender_email,
         reply_to=raw.reply_to,
         internet_message_id=raw.internet_message_id,
         threading=dict(raw.threading),
         received_at=raw.received_at.astimezone(timezone.utc).isoformat(),
         flags=[],
+        invoice_file=any(c.document_type == DocumentType.AP_INVOICE for c in att_classifications),
     )
     invitation = invitation_method([*raw.attachments, *att_records], raw.meetings)
-    view = _conversation_view(store, me, conversation)
     holders = _holders(store, merged_fields.primary_invoice)
     classified_email = _classify(
         store,
         settings,
-        view=view,
+        conversation=conversation,
         holders=holders,
         me=me,
         email_id=raw.id,
@@ -190,11 +194,7 @@ def process_message(
         invitation=invitation,
         received_on=anchor,
         entered_elsewhere=_entered_elsewhere(
-            store,
-            merged_fields.primary_invoice,
-            me,
-            view,
-            any(c.document_type == DocumentType.AP_INVOICE for c in att_classifications),
+            store, me, holders, conversation, own_file=me.invoice_file, fraud=check.level
         ),
     )
     if existing is not None:
@@ -564,7 +564,7 @@ def _classify(
     as_of,
     has_attachments: bool,
     fraud: str,
-    view: "_Conversation | None" = None,
+    conversation: set[str] | None = None,
     holders: list[str] | None = None,
     me=None,
     invitation: str = "",
@@ -577,15 +577,16 @@ def _classify(
     """
     from controller_inbox.learn import apply_learned, match_correction
 
-    me = me or SimpleNamespace(id=email_id, sender_email=sender_email, reply_to="", internet_message_id="", threading={}, received_at="", flags=[])
+    own_file = any(c.document_type == DocumentType.AP_INVOICE for c in attachments)
+    me = me or SimpleNamespace(id=email_id, subject=subject, sender_email=sender_email, threading={}, received_at="", flags=[], invoice_file=own_file)
     duplicate = bool(
         fields.primary_invoice
         and _repeats(
             store,
             me,
-            view or _Conversation([me], set(), me, set()),
             _holders(store, fields.primary_invoice) if holders is None else holders,
-            own_file=any(c.document_type == DocumentType.AP_INVOICE for c in attachments),
+            conversation or set(),
+            own_file=own_file,
             fraud=fraud,
         )
     )
@@ -609,56 +610,25 @@ def _classify(
     return apply_learned(classified, learned) if learned else classified
 
 
-@dataclass
-class _Conversation:
-    """One email's conversation as the invoice checks see it: ``thread`` is that email first, then the light record
-    (``Store.email_heads``) of each stored email of the conversation; ``newcomers`` the ids from a domain new to it;
-    ``root`` the email it started with; ``ids`` the stored ids."""
-
-    thread: list
-    newcomers: set[str]
-    root: object
-    ids: set[str]
-
-    def seen_from(self, record) -> "_Conversation":
-        """The same conversation with ``record`` (one of it) first: who started it and who is new don't change."""
-        return _Conversation([record, *(other for other in self.thread if other.id != record.id)], self.newcomers, self.root,
-                             (self.ids | {self.thread[0].id}) - {record.id})
+_REPLY_SUBJECT = re.compile(r"^\s*(re|fw|fwd|aw|wg|tr|sv)\s*:", re.I)
 
 
-def _conversation_view(store: Store, me, conversation: set[str]) -> _Conversation:
-    """``me`` (an email being read, or stored) and its conversation, read once, light."""
-    from controller_inbox.links import MAX_CONVERSATION, _participation
-
-    ids = sorted(conversation - {me.id})[:MAX_CONVERSATION]
-    thread = [me, *store.email_heads(ids)]
-    root, newcomers = _participation(thread)
-    return _Conversation(thread, newcomers, root, set(ids))
+def _replying(record) -> bool:
+    """A reply or forward: it answers another email, or says so in its subject."""
+    info = getattr(record, "threading", None) or {}
+    return bool(info.get("in_reply_to") or info.get("references")) or bool(_REPLY_SUBJECT.match(getattr(record, "subject", "") or ""))
 
 
-def _doubtful(record, newcomers: set[str], fraud: str = "") -> bool:
-    """An email not to be taken at its word about an invoice: held, cautioned (``fraud`` is the level of one still
-    being read), or from a domain new to its conversation. (A duplicate flag is the conversation's own verdict,
-    worked out again as mail arrives: counted here, one wrong flag would keep itself.)"""
-    flags = getattr(record, "flags", []) or []
-    return (
-        fraud in {"caution", "high"}
-        or record.id in newcomers
-        or "payment_caution" in flags
-        or (hasattr(record, "category") and attachments_locked(record))
+def _talk(record) -> bool:
+    """A reply (or forward) that brings no invoice file: it writes about an invoice, and is no invoice itself."""
+    return _replying(record) and not _has_invoice_file(record)
+
+
+def _doubtful(record, fraud: str = "") -> bool:
+    """An email not to be taken at its word: held, or cautioned (``fraud`` is the level of one still being read)."""
+    return fraud in {"caution", "high"} or "payment_caution" in (getattr(record, "flags", []) or []) or (
+        hasattr(record, "category") and attachments_locked(record)
     )
-
-
-def _trusted(store: Store, record, view: _Conversation, fraud: str = "") -> bool:
-    """An email whose invoice file may stand for its conversation's: not doubtful, and from the domain that started
-    the conversation or one the user heard from before it. Only such an email takes the "Code and enter" task off
-    the mail about its invoice, or has that mail left out of its duplicates."""
-    if _doubtful(record, view.newcomers, fraud):
-        return False
-    domain = domain_of(record.sender_email)
-    if view.root is not None and domain and domain == domain_of(view.root.sender_email):
-        return True
-    return store.domain_history(domain, exclude=record.id, outside=sorted(view.ids)) > 0
 
 
 def _has_invoice_file(record) -> bool:
@@ -667,86 +637,75 @@ def _has_invoice_file(record) -> bool:
     return any(att.document_type == DocumentType.AP_INVOICE for att in getattr(record, "attachments", []) or [])
 
 
+def _sent_to(record, other) -> bool:
+    """Whether ``other`` came from ``record``'s own sender or from someone ``record`` went to: who answers about it."""
+    sender = (getattr(other, "sender_email", "") or "").strip().lower()
+    if not sender:
+        return False
+    return sender == (record.sender_email or "").strip().lower() or sender in {a.lower() for a in (record.threading or {}).get("to") or []}
+
+
 def _holders(store: Store, invoice: str | None) -> list[str]:
     """Every stored email with this invoice number (``Store.find_duplicate_invoices``), looked up once per email read."""
     return store.find_duplicate_invoices(invoice, "") if invoice else []
 
 
-def _repeats(store: Store, me, view: _Conversation, holders: list[str], *, own_file: bool, fraud: str = "") -> list[str]:
-    """The other emails with ``me``'s invoice number (``holders``: all that have it), but mail of its own
-    conversation that only writes about it: a colleague's "which PO is this for?" and the vendor's answer are no
-    second invoice.
+def _repeats(store: Store, me, holders: list[str], conversation: set[str], *, own_file: bool, fraud: str = "") -> list[str]:
+    """The other emails with ``me``'s invoice number (``holders``: all that have it), as possible duplicates.
 
-    It is safe by construction: only a trusted email (``_trusted``) bringing the invoice as a file has the mail about
-    it left out, and only a plain email (not doubtful) writing about it leaves out the others. Two that both bring
-    the invoice as a file (a forward of it to AP) are duplicates; an email held, cautioned or new to the
-    conversation keeps every duplicate, as does any of theirs. Mail held as possible fraud is no duplicate of
-    anything else: it is held, and flagged itself. ``own_file``: ``me`` brings an invoice file; ``fraud``: its level."""
+    Each email is judged on itself, never by trusting another: a reply that brings no invoice file (a colleague's
+    "which PO is this for?", the vendor's answer) is no second invoice, so it is never flagged; and an invoice read
+    after such replies in its own conversation, from its sender or the people it went to, isn't flagged because of
+    them. Everything else counts, as two copies of an invoice always did. Held or cautioned mail is never let off.
+    Mail held as possible fraud is no duplicate of anything else: it is held, and flagged itself."""
     found = [other for other in holders if other != me.id]
     if not found:
         return []
-    heads = {head.id: head for head in view.thread[1:]}
-    if fraud != "high" and not (hasattr(me, "category") and attachments_locked(me)):
-        outside = [other for other in found if other not in heads]
-        held = {head.id for head in [*heads.values(), *store.email_heads(outside)] if attachments_locked(head)}
-        found = [other for other in found if other not in held]
-    if not view.ids & set(found):
+    heads = {head.id: head for head in store.email_heads(found)}
+    if _doubtful(me, fraud):
         return found
-    if _doubtful(me, view.newcomers, fraud) or (own_file and not _trusted(store, me, view, fraud)):
-        return found
-    ours = {head.id for head in heads.values() if not _doubtful(head, view.newcomers) and not (own_file and _has_invoice_file(head))}
-    return [other for other in found if other not in ours]
+    found = [other for other in found if other not in heads or not attachments_locked(heads[other])]
+    if _talk(me) and not own_file:
+        return []
+    return [
+        other for other in found
+        if not (other in conversation and other in heads and _talk(heads[other]) and _sent_to(me, heads[other]))
+    ]
 
 
-def _entered_elsewhere(store: Store, invoice: str | None, me, view: _Conversation, own_invoice_file: bool) -> bool:
-    """Whether an invoice is entered from another email of the same conversation: a trusted one (``_trusted``) that
-    brought the invoice as a file, or came before this one, while this one brings no invoice file. The colleague's
-    "which PO is this for?" and the vendor's answer make no second "Code and enter" task; a lookalike's "resent as
-    a PDF" never takes the task off the vendor's own."""
-    if not invoice or own_invoice_file or not view.ids:
+def _entered_elsewhere(store: Store, me, holders: list[str], conversation: set[str], *, own_file: bool, fraud: str = "") -> bool:
+    """Whether a reply about an invoice needs no "Code and enter" task of its own: it brings no invoice file, and
+    an earlier email of its conversation, not held or cautioned, is the invoice (it brings the file, or isn't a reply)
+    and came from the same sender or went to the one replying. That email keeps its own task, always."""
+    if own_file or not _talk(me) or _doubtful(me, fraud):
         return False
-    key = _invoice_key(invoice)
-    for other in view.thread[1:]:
-        if other.category != DocumentType.AP_INVOICE or key not in {_invoice_key(n) for n in other.invoice_numbers}:
+    mine = getattr(me, "stored", None)
+    for head in store.email_heads([other for other in holders if other != me.id and other in conversation]):
+        if _talk(head) or _doubtful(head) or head.category != DocumentType.AP_INVOICE:
             continue
-        if not (_has_invoice_file(other) or (other.received_at or "") < (me.received_at or "")):
-            continue
-        if _trusted(store, other, view):
+        earlier = (mine is None or head.stored < mine) and (head.received_at or "") <= (me.received_at or "")
+        if earlier and _sent_to(head, me):
             return True
     return False
 
 
 def _settle_conversation(store: Store, settings: Settings, record: EmailRecord, conversation: set[str], holders: list[str], *, now: datetime) -> None:
-    """Mail about an invoice read before the invoice itself (the drop folder reads files by name, not by date) is
-    filed again now that its conversation is known. A trusted email bringing the invoice as a file takes the
-    "Code and enter" task off the mail about it (one the user already finished or snoozed stays). An email of the
-    conversation with that invoice whose duplicate flag the conversation no longer bears out is filed again
-    without it; one not to be trusted (a lookalike's copy read before the invoice) is filed again with it."""
-    invoice = record.extracted.primary_invoice
-    if not conversation or not invoice:
+    """An invoice read after mail about it (the drop folder reads files by name, not by date). The "Code and
+    enter" task goes from replies that bring no invoice file, came later than the invoice, and are from its sender
+    or someone it went to. And a reply from another domain that brought an invoice file of its own (a lookalike's
+    "resent as a PDF" read first) is filed again as a possible duplicate. Nothing is taken from the invoice's own
+    email, or from any email that brings an invoice file; a task the user already finished or snoozed stays."""
+    if not conversation or _talk(record) or _doubtful(record) or record.category != DocumentType.AP_INVOICE:
         return
-    key = _invoice_key(invoice)
-    heads = store.email_heads([record.id])
-    if not heads:
-        return
-    view = _conversation_view(store, heads[0], conversation)
-    holders = sorted(set(holders) | {record.id})
-    takes_task = _has_invoice_file(heads[0]) and _trusted(store, heads[0], view)
-    for other in view.thread[1:]:
-        if not other.invoice_numbers or _invoice_key(other.invoice_numbers[0]) != key:
-            continue
-        theirs = view.seen_from(other)
-        fraud = "high" if attachments_locked(other) else "caution" if "payment_caution" in other.flags else ""
-        wanted = bool(_repeats(store, other, theirs, holders, own_file=_has_invoice_file(other), fraud=fraud))
-        flagged = "duplicate_invoice" in other.flags
-        if (flagged and not wanted) or (wanted and not flagged and not _trusted(store, other, theirs, fraud)):
+    domain = domain_of(record.sender_email)
+    for head in store.email_heads([other for other in holders if other != record.id and other in conversation]):
+        if _talk(head) and (head.received_at or "") >= (record.received_at or "") and _sent_to(record, head):
+            store.drop_open_tasks(head.id, source="invoice")
+        elif _replying(head) and _has_invoice_file(head) and "duplicate_invoice" not in head.flags and domain_of(head.sender_email) != domain:
             from controller_inbox.fraud import assess_email
 
-            stored = store.get_email(other.id)
-            if stored is not None:
+            if (stored := store.get_email(head.id)) is not None:
                 rescore_stored(store, settings, stored, assess_email(store, trust_context(store, settings), stored), now=now)
-        if takes_task and not _has_invoice_file(other):
-            store.drop_open_tasks(other.id, source="invoice")
 
 
 def _bank_caution(check) -> list[str]:
@@ -781,12 +740,19 @@ def rescore_stored(
     from controller_inbox.links import conversation_members
 
     conversation = conversation_members(store, email.id, email.threading, email.internet_message_id, email.conversation_id)
-    view = _conversation_view(store, email, conversation)
+    # The email as the invoice checks see it: stored, with its files' kinds as just read again.
+    heads = store.email_heads([email.id])
+    me = heads[0] if heads else SimpleNamespace(id=email.id, stored=None, subject=email.subject, sender_email=email.sender_email,
+                                                threading=email.threading, received_at=email.received_at, flags=[])
+    me.invoice_file = any(c.document_type == DocumentType.AP_INVOICE for c in attachments)
+    me.flags = []  # judged under ``check``, the level it is filed again under
+    holders = _holders(store, email.extracted.primary_invoice)
     classified = _classify(
         store,
         settings,
-        view=view,
-        me=email,
+        conversation=conversation,
+        holders=holders,
+        me=me,
         email_id=email.id,
         subject=email.subject,
         body=email.body_text,
@@ -820,13 +786,7 @@ def rescore_stored(
         has_invite=any(att.filename.lower().endswith(".ics") for att in email.attachments),
         invitation=invitation_method(email.attachments),
         received_on=sent_date(email.received_at, settings, fallback=as_of),
-        entered_elsewhere=_entered_elsewhere(
-            store,
-            email.extracted.primary_invoice,
-            email,
-            view,
-            any(att.document_type == DocumentType.AP_INVOICE for att in email.attachments),
-        ),
+        entered_elsewhere=_entered_elsewhere(store, me, holders, conversation, own_file=me.invoice_file, fraud=check.level),
     )
     # As when the email is read again: the new reading's tasks, keeping what the user did with each.
     email.actions = keep_task_status(fresh, email.actions)
