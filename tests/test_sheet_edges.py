@@ -157,6 +157,31 @@ def test_an_unheaded_row_number_column_keeps_the_table():
     assert _tables(text, "What is the total amount?").run("SELECT SUM(amount) FROM t1")[1] == [(17980.5,)]
 
 
+# Two heading rows ------------------------------------------------------------------------------
+
+
+def test_a_first_row_of_text_under_a_blank_heading_is_a_row_not_a_second_heading():
+    rows = [("Vendor", "Contact", None, "Status"), ("Acme", "Jane Roe", "Primary", "Active"), ("Beta", "John Doe", "Backup", "On hold"),
+            ("Gamma", "Ann Lee", "Primary", "Active")]
+    text = _xlsx_text(rows, bold=(1,))
+    assert "A2 (Vendor): Acme" in text and "D2 (Status): Active" in text
+    assert "Active" in table_lookup.lookup(text, "What is Acme's status?")
+    text = _csv_text("Employee,Department,,Location\nJonathan Alvarez,Finance,Contractor,Chicago\nMaya Chen,Sales,Employee,Austin\n"
+                     "Priya Raman,IT,Employee,Remote\n")
+    assert "A2 (Employee): Jonathan Alvarez" in text and "D2 (Location): Chicago" in text
+
+
+def test_a_group_heading_row_over_some_columns_heads_the_row_under_it():
+    for top in ((None, None, "Q3 2026", None, None, "YTD"), (None, None, "Q3 2026", None, None, "Q4 2026", None, None, "YTD")):
+        months = ("Jul", "Aug", "Sep") if len(top) == 6 else ("Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+        rows = [top, ("Account", "Description", *months, "Total"),
+                (6100, "Rent", *([12000] * len(months)), 12000 * len(months)), (6300, "Travel", *([2100] * len(months)), 2100 * len(months)),
+                (6400, "Meals", *([800] * len(months)), 800 * len(months))]
+        text = _xlsx_text(rows)
+        assert "A4 (Account): 6300 | B4 (Description): Travel" in text and "Aug): 2,100" in text
+        assert "2,100" in table_lookup.lookup(text, "What was travel in August?")
+
+
 # Figures written other ways --------------------------------------------------------------------
 
 

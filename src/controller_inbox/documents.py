@@ -710,13 +710,30 @@ def _second_heading_row(rows: list[SheetRow], header: int | None) -> int | None:
     # row with a note past the last heading ("Called twice"): a heading row leaves a heading merged down empty under
     # it ("Department", "Q3"), or has its own cells between two headings; that row fills every heading's column.
     spanned = [column for column in under.cells if column not in top]
-    if not spanned or any(not any(c < column for c in top) for column in spanned):
+    # Columns left of every heading above ("Account", "Description" beside "Q3 2026" merged over the months) name
+    # themselves, when the row above heads later columns of this one.
+    lead = [column for column in spanned if column < min(top)]
+    if not spanned or (lead and len(lead) == len(spanned)):
         return None
     merged_down = any(column not in under.cells for column in top)
     between = any(any(c > column for c in top) for column in spanned)
     if not merged_down and not between:
         return None
+    if not merged_down and _shaped_like(under, rows[header + 2 : header + 7]):
+        # A list's first row filling a column left without a heading ("Acme | Jane Roe | Primary | Active" under
+        # "Vendor | Contact | | Status"): the rows under it are text in the same columns, as a row of the list is.
+        return None
     return header + 1
+
+
+def _shaped_like(under: SheetRow, later: list[SheetRow]) -> bool:
+    """Whether one of the rows after ``under`` fills every one of its columns with text, as a row of a list does;
+    under a second heading row there are figures ("Jul", "Aug" over amounts)."""
+    columns = set(under.cells)
+    return any(
+        columns <= set(row.cells) and not any(tables.is_value(str(row.cells[column])) for column in columns)
+        for row in later
+    )
 
 
 _MONTH_HEADING = re.compile(r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?(\s*[-' ]?\s*\d{2,4})?|q[1-4](\s*\d{2,4})?|(19|20)\d\d")
@@ -728,7 +745,12 @@ def _two_row_labels(top: dict[int, str], under: dict[int, object]) -> dict[int, 
     labels = dict(top)
     for column in sorted(under):
         own = str(under[column]).replace("|", "/")
-        over = top.get(column) or top[max(c for c in top if c < column)]
+        left = [c for c in top if c <= column]
+        if not left:
+            # Left of every heading above: its own label alone ("Account" beside "Q3 2026").
+            labels[column] = own
+            continue
+        over = top.get(column) or top[max(left)]
         labels[column] = f"{over} {own}" if over != own else own
     return labels
 
