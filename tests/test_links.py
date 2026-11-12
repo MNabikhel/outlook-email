@@ -117,8 +117,8 @@ def test_keys_leave_out_what_links_everything():
     assert ("file", "a" * 64) in found and ("file", "e" * 64) in found
     assert not {("file", "b" * 64), ("file", "c" * 64), ("file", "d" * 64)} & found
     assert not any(kind == "invoice" and value.endswith(("1001", "1002")) for kind, value in found)
-    assert ("thread", "mid:abc@northwind.com") in found
-    assert ("stem", "inv 10482.pdf") in found and ("stem", "ap aging.xlsx") in found
+    assert ("msg", "mid:abc@northwind.com") in found, "its own id, linked only through a reply naming it"
+    assert ("stem", "northwind.com|inv 10482.pdf") in found and ("stem", "northwind.com|ap aging.xlsx") in found
 
 
 @pytest.mark.parametrize(
@@ -216,7 +216,7 @@ def test_deleting_an_email_removes_its_keys_and_old_mail_is_filed_in_batches(sto
     assert store.link_keys("a") == []
     assert store.file_link_keys(batch=1) == 1
     assert store.file_link_keys(batch=1) == 0
-    assert ("thread", "mid:a@n.com") in store.link_keys("a")
+    assert ("msg", "mid:a@n.com") in store.link_keys("a")
 
 
 def test_mail_read_by_an_older_version_gets_its_conversation_from_its_kept_file(store, settings):
@@ -316,3 +316,45 @@ def test_a_question_about_how_an_email_came_about_reads_its_linked_mail(loaded):
     opened = agent._open_email(ws, ws.sources[0])
     assert "Related emails (open one by its number):\n[2] " in opened and "(same conversation)" in opened
     assert ws.email("2").id == "demo-inv-10482-dup", "the model opens a related email by the number it was given"
+
+
+
+def test_a_held_emails_numbers_count_only_where_its_own_text_names_them(store):
+    # The lookalike's body names no invoice; the PDF it carries (held, never opened) says INV-10482. It must not
+    # show up as "Same invoice" beside the real vendor's mail.
+    store.upsert_email(_record("real", invoices=["INV-10482"]))
+    lookalike = _record("bec", sender="ap@northwind-supp1y.com", flags=["fraud_risk"],
+                        files=[("remit.pdf", "r" * 64, 30_000, ExtractedFields(invoice_numbers=["INV-10482"]))])
+    lookalike.extracted.invoice_numbers = ["INV-10482"]  # merged from its file, as the pipeline does
+    store.upsert_email(lookalike)
+    assert not any(kind == "invoice" for kind, _value in store.link_keys("bec"))
+    assert links.related(store, store.get_email("real"))["groups"] == []
+    said = _record("bec2", sender="ap@northwind-supp1y.com", flags=["fraud_risk"], invoices=["INV-10482"])
+    said.body_text = "Please pay invoice INV-10482 to our new account."
+    store.upsert_email(said)
+    assert ("invoice", "INV10482") in store.link_keys("bec2"), "named in its own words, it is linked (and shown held)"
+
+
+def test_the_model_is_warned_about_held_mail_among_the_related(store):
+    from controller_inbox import agent
+
+    store.upsert_email(_record("real", mid="<p1@northwind.com>", received="2026-10-01T09:00:00+00:00", threading={"to": ["ap@taz.com"]}))
+    store.upsert_email(_record("hijack", sender="billing@northwind-supplies.co", threading={"in_reply_to": "p1@northwind.com"},
+                               received="2026-10-02T08:00:00+00:00", flags=["fraud_risk"]))
+    ws = agent.Workspace(store, None, [store.get_email("real")])
+    lines = agent.related_lines(ws, ws.sources[0])
+    assert "(same conversation) — Warning: payment-detail change, verify by phone" in lines
+
+
+def test_emails_that_only_share_a_message_id_are_no_conversation(store):
+    # A scanner gives every scan the same Message-ID: the scans are not one thread.
+    for n in range(3):
+        store.upsert_email(_record(f"scan{n}", sender="scanner@taz.com", mid="<scan@printer.local>", received=f"2026-10-0{n + 1}T09:00:00+00:00"))
+    assert links.related(store, store.get_email("scan0"))["thread"] == []
+
+
+def test_a_files_versions_are_one_senders(store):
+    # Everyone's "Timesheet.xlsx" is not one file.
+    store.upsert_email(_record("a", sender="pat@contractor-a.com", files=[("Timesheet week 40.xlsx", "1" * 64, 20_000, None)]))
+    store.upsert_email(_record("b", sender="lee@contractor-b.com", files=[("Timesheet week 40.xlsx", "2" * 64, 20_000, None)]))
+    assert links.related(store, store.get_email("a"))["groups"] == []

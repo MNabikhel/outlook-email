@@ -66,7 +66,7 @@ SYSTEM = (
 
 def candidates(store: Store, settings: Settings | None, email: EmailRecord, *, limit: int = CANDIDATES) -> list[EmailRecord]:
     """The emails most likely to be about the same matter as ``email`` that nothing links already, best first."""
-    if attachments_locked(email):
+    if _suspect(email):
         return []
     known = {email.id} | _linked(store, email)
     terms = _terms(email)
@@ -77,7 +77,7 @@ def candidates(store: Store, settings: Settings | None, email: EmailRecord, *, l
     when = links.when(email)
     out = []
     for other in found:
-        if other.id in known or attachments_locked(other) or not _near(when, links.when(other)):
+        if other.id in known or _suspect(other) or not _near(when, links.when(other)):
             continue
         if links.sender_domain(other) == links.sender_domain(email) and _subject(other) == _subject(email):
             continue  # the same subject from the same sender is a conversation links.py finds, or a repeated notice
@@ -89,7 +89,7 @@ def candidates(store: Store, settings: Settings | None, email: EmailRecord, *, l
 
 def judge(store: Store, settings: Settings, email: EmailRecord, *, limit: int = CANDIDATES) -> list[dict]:
     """Ask about ``email`` and its candidates; keep and return each verdict ({"other", "same", "why"})."""
-    if not llm_active(settings) or attachments_locked(email):
+    if not llm_active(settings) or _suspect(email):
         return []
     out = []
     model = settings.llm_model or ""
@@ -200,6 +200,12 @@ def _ask(settings: Settings, a: EmailRecord, b: EmailRecord) -> dict | None:
         return None
     why = " ".join(str(parsed.get("why") or "").split())[:200]
     return {"same": same, "why": why}
+
+
+def _suspect(email: EmailRecord) -> bool:
+    """Mail held as payment fraud, or flagged with a payment-details caution: never shown to the model or linked by it,
+    so a lookalike's "remittance update" can't borrow a real vendor's thread on the model's say-so."""
+    return attachments_locked(email) or "payment_caution" in email.flags
 
 
 def _linked(store: Store, email: EmailRecord) -> set[str]:
