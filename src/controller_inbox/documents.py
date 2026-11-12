@@ -695,8 +695,10 @@ def _second_heading_row(rows: list[SheetRow], header: int | None) -> int | None:
     values = [str(value) for value in under.cells.values()]
     if any(tables.is_value(value) and not _MONTH_HEADING.fullmatch(value) for value in values) or len(set(values)) != len(values):
         return None
+    # Each of its own columns sits under a heading merged across it: between two headings of the row above
+    # ("Actual" over Jul, Aug, Sep, then "Q3"). A cell past the last heading is a row's note, not a heading.
     spanned = [column for column in under.cells if column not in top]
-    if not spanned or any(not any(c < column for c in top) for column in spanned):
+    if not spanned or any(not (any(c < column for c in top) and any(c > column for c in top)) for column in spanned):
         return None
     return header + 1
 

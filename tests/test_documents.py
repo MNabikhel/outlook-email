@@ -1437,3 +1437,21 @@ def test_a_two_row_heading_names_each_column_by_both_rows():
 
     tables = Tables([("Opex.xlsx", text)])
     assert tables.sheets and tables.sheets[0].rows == 3
+
+
+def test_a_lists_first_row_with_a_note_past_its_headings_is_a_row_not_a_heading():
+    from openpyxl.styles import Font
+
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["Vendor", "Contact", "Status"])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    sheet.append(["Acme Supply", "Joe Smith", "Open", "Called twice"])
+    sheet.append(["Harbor Steel", "Ann Lee", "Closed"])
+    sheet.append(["Delta Office", "Raj Patel", "Open"])
+    buf = io.BytesIO()
+    book.save(buf)
+    text = xlsx_text(buf.getvalue())
+    assert "A2 (Vendor): Acme Supply | B2 (Contact): Joe Smith | C2 (Status): Open" in text
+    assert "A3 (Vendor): Harbor Steel" in text

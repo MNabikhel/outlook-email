@@ -661,3 +661,15 @@ def test_a_hidden_sheet_is_left_out_unless_the_question_names_it():
     titles = lambda question: sorted(sheet.title for sheet in Tables([("Aging.xlsx", AGING)], question).sheets if not sheet.of)  # noqa: E731
     assert not any("Old draft" in title for title in titles("What do we owe Harbor Steel over 60 days?"))
     assert any("Old draft" in title for title in titles("What did the old draft say for Harbor Steel?"))
+
+
+def test_counts_and_balances_stay_figures_whatever_their_heading_names():
+    rows = "\n".join(
+        f"A{n} (Team): {team} | B{n} (Employee count): {count} | C{n} (Customer balance): {balance}"
+        for n, (team, count, balance) in enumerate([("AP", 8, 350), ("AR", 12, 1200), ("Tax", 8, 90)], start=2)
+    )
+    tables = Tables([("Teams.csv", '[sheet "Teams.csv" A1:C4]\nA1: Team | B1: Employee count | C1: Customer balance\n' + rows)])
+    schema = tables.schema()
+    assert "employee_count REAL" in schema and "customer_balance REAL" in schema
+    assert tables.run("SELECT MAX(employee_count) FROM t1")[1] == [(12.0,)]
+    assert tables.run("SELECT team FROM t1 WHERE customer_balance > 1000")[1] == [("AR",)]

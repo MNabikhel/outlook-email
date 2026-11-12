@@ -736,12 +736,18 @@ _CODE_HEADING = re.compile(
     r"cc|store|branch|location|loc|site|region|unit|bu|class|fund|project|job|vendor|customer|emp|employee)\b\.?",
     re.I,
 )
+# Headings of a quantity, however they start ("Employee count", "Customer balance", "No. of invoices"): figures.
+_QUANTITY_HEADING = re.compile(
+    r"\b(count|counts|balance|total|amount|amt|cost|costs|sales|qty|quantity|units|hours|hrs|days|price|rate|revenue|"
+    r"spend|budget|actual|value|paid|due|owed|headcount|fte|items|invoices|orders)\b|\b(no|number)\.?\s+of\b",
+    re.I,
+)
 
 
 def _codes(label: str, cells: list[str]) -> bool:
     """A figure column that is really a list of codes: headed like one, every cell a whole number as written
     (no separators, decimals or signs), and few of them repeated over the rows (210, 320, 410)."""
-    if not _CODE_HEADING.search(label):
+    if not _CODE_HEADING.search(label) or _QUANTITY_HEADING.search(label):
         return False
     written = [cell.strip() for cell in cells if cell and cell != tables.BLANK]
     if not written or not all(re.fullmatch(r"\d{1,10}", cell) for cell in written):
