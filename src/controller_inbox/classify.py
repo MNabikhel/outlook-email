@@ -857,7 +857,10 @@ def classify_email(
         category = email_type
         confidence = min(0.9, 0.3 + weight / 180) if weight else 0.25
 
-    if fields.mentions_attachment and not has_attachments:
+    # "Please find attached" in the quoted email a reply carries is no file this one forgot.
+    from controller_inbox.extract import ATTACHMENT_MENTION_RE
+
+    if fields.mentions_attachment and not has_attachments and ATTACHMENT_MENTION_RE.search(f"{subject}\n{own_words(body)}"):
         combined_flags.append("missing_attachment")
         reasons.append("Email says something is attached, but no attachment was found")
 

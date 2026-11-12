@@ -184,3 +184,26 @@ def test_at_a_free_mail_service_a_new_address_is_new_to_the_conversation():
     other = _raw("o", "coastalprint.billing@gmail.com", "RE: Invoice CP-5521", "Resending invoice CP-5521 as a PDF.", 2, ["ap@taz.com"])
     vendor.created_at, other.created_at = "2026-10-05T14:00:00+00:00", "2026-10-05T16:00:00+00:00"
     assert links.new_domains([vendor, other]) == {"o"}
+
+
+def test_a_reply_quoting_please_find_attached_is_missing_nothing(store, settings):
+    body = "Can you send the PO for this one?\n\n-----Original Message-----\nFrom: Coastal Print AR\nPlease find attached invoice CP-5521."
+    record = process_message(_raw("q", "maya@taz.com", "RE: Invoice CP-5521", body, 1, ["ar@coastalprint.com"]), store, settings, now=START + timedelta(hours=2))
+    assert "missing_attachment" not in record.flags
+    forgot = process_message(_raw("f", "ar@coastalprint.com", "Invoice CP-5522", "Please find attached invoice CP-5522.", 1, ["ap@taz.com"]),
+                             store, settings, now=START + timedelta(hours=2))
+    assert "missing_attachment" in forgot.flags
+
+
+@pytest.mark.parametrize(("text", "number"), [("Invoice NW-88001 is due", "NW-88001"), ("Invoice ON-7731 attached", "ON-7731"),
+                                              ("Invoice No. 12345", "12345"), ("Invoice #: INV-2024-0457", "INV-2024-0457")])
+def test_an_invoice_number_keeps_its_own_letters(text, number):
+    from controller_inbox.extract import INVOICE_RE
+
+    assert INVOICE_RE.search(text).group(1) == number
+
+
+def test_a_po_number_keeps_its_own_letters():
+    from controller_inbox.extract import PO_RE
+
+    assert PO_RE.search("PO NX-4410 approved").group(1) == "NX-4410" and PO_RE.search("PO No. 4500123").group(1) == "4500123"
