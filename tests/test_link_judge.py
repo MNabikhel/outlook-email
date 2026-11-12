@@ -127,3 +127,12 @@ def test_mail_with_a_payment_caution_is_neither_weighed_nor_linked_by_the_model(
     link_judge.judge(store, settings, later)
     assert not any("harb0r" in prompt for prompt in model)
     assert link_judge.judge(store, settings, store.get_email("lookalike")) == []
+
+
+def test_candidates_are_searched_within_the_window_not_after_the_best_of_all_time(store, settings, model):
+    # A hundred older emails with the same words don't crowd out the two from the same weeks.
+    for n in range(100):
+        _mail(store, f"old{n}", f"Harbor Steel quote {n}", body="Harbor Steel quote", received=f"2025-0{1 + n % 9}-{1 + n % 27:02d}T09:00:00+00:00")
+    _mail(store, "near", "Harbor Steel quote for brackets", body="Harbor Steel quote", received="2026-10-03T09:00:00+00:00")
+    later = _mail(store, "question", "Question on the Harbor Steel quote", sender="ap@taz.com", body="Harbor Steel quote?", received="2026-10-10T09:00:00+00:00")
+    assert [e.id for e in link_judge.candidates(store, settings, later)] == ["near"]
