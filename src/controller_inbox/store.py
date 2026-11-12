@@ -2234,19 +2234,21 @@ def _shown_meetings(conn: sqlite3.Connection, rows: list[sqlite3.Row], *, outloo
     if outlook:
         sql = "SELECT DISTINCT uid FROM meetings WHERE source = 'outlook' AND uid IN ({})"
         on_outlook = {row["uid"] for row in _in_chunks(conn, sql, invited)}
-        sql = """SELECT m.uid, m.organizer, m.sender, e.sender_email, 'invite' AS source, e.flags AS email_flags, e.category AS email_category
+        sql = """SELECT m.uid, m.organizer, m.sender, e.sender_email, e.sender_name, 'invite' AS source, e.flags AS email_flags,
+                        e.category AS email_category
                  FROM meetings m JOIN emails e ON e.id = m.email_id WHERE m.source IN ('invite', 'held') AND m.uid IN ({})"""
         for row in _in_chunks(conn, sql, [row["uid"] for row in rows if row["source"] == "outlook"]):
             if _held_invite(row):
-                # Outlook's copy of an invitation is organized by whoever it names as organizer, or by its sender.
+                # Outlook's copy of an invitation is organized by whoever it names as organizer, or by its sender:
+                # Outlook gives that person's name (or address), which is matched.
                 held.setdefault(row["uid"], set()).update(
-                    filter(None, (_address(row["organizer"]), _address(row["sender"]), _address(row["sender_email"])))
+                    _who(row["organizer"]) | _who(row["sender"]) | _who(row["sender_email"]) | _who(row["sender_name"])
                 )
     out = []
     for row in rows:
         if row["source"] == "held":
             continue
-        if row["source"] == "outlook" and (not outlook or _address(row["organizer"]) in held.get(row["uid"], ())):
+        if row["source"] == "outlook" and (not outlook or _who(row["organizer"]) & held.get(row["uid"], set())):
             continue
         if row["source"] == "invite" and (_held_invite(row) or row["uid"] in on_outlook or not word.counts(row)):
             continue
@@ -2361,6 +2363,14 @@ def _latest(rows: list[sqlite3.Row]) -> sqlite3.Row:
     """Of one organizer's invitations of a meeting, the one that counts: the highest SEQUENCE (an update or a
     cancellation), then the latest."""
     return max(rows, key=lambda row: (row["sequence"] or 0, row["received"] or "", row["first_seen"] or "", row["email_id"]))
+
+
+def _who(text: str | None) -> set[str]:
+    """Who "Maya Chen <maya@taz.com>", "maya@taz.com" or "Maya Chen" names, as lowercased name and address."""
+    value = (text or "").strip()
+    address = _address(value)
+    name = " ".join(value.rpartition("<")[0].replace('"', "").split()).lower() if "<" in value else ("" if address else " ".join(value.split()).lower())
+    return {part for part in (address, name) if part}
 
 
 def _address(text: str | None) -> str:

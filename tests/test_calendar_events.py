@@ -493,6 +493,33 @@ def test_outlooks_copy_of_a_meeting_whose_invitation_is_on_held_mail_is_not_show
     assert store.meeting(outlook[0].id) is None and store.meeting(outlook[1].id) is not None
 
 
+def test_outlooks_copy_of_a_held_invitation_is_matched_by_the_organizers_name(store, settings):
+    """Outlook gives the organizer's name only (CloseDesk doesn't ask it for addresses): the held invitation's
+    organizer is matched by name, and another person's meeting with the same id stays."""
+    import sys
+
+    from controller_inbox.calendar_events import Meeting
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    window = ("2026-10-01T00:00:00+00:00", "2026-10-20T00:00:00+00:00")
+    record = _record("held", sender="ceo@taz-corp.co", flags=["fraud_risk"])
+    record.sender_name = "Dana Ortiz"
+    store.upsert_email(record)
+    store.save_invites("held", cal.from_ics(_invite("U1", "20261006T140000Z", subject="Urgent wire approval call",
+                                                    organizer="mailto:ceo@taz-corp.co"),
+                                            email_id="held", now=NOW), sender="ceo@taz-corp.co")
+    copy = Meeting(uid="U1", start="2026-10-06T14:00:00+00:00", end="2026-10-06T15:00:00+00:00", subject="Urgent wire approval call",
+                   organizer="Dana Ortiz", busy="tentative", source="outlook")
+    store.replace_meetings("outlook", [copy], start=window[0], end=window[1])
+    assert store.meetings_between(*window) == []
+    other = Meeting(uid="U1", start="2026-10-06T14:00:00+00:00", end="2026-10-06T15:00:00+00:00", subject="Board meeting",
+                    organizer="Pat Lee", source="outlook")
+    store.replace_meetings("outlook", [other], start=window[0], end=window[1])
+    assert [m["subject"] for m in store.meetings_between(*window)] == ["Board meeting"]
+
+
 def test_outlooks_copy_of_an_invitation_held_as_it_arrived_is_not_shown(store, settings):
     """Mail held as it is read keeps no meeting from its invitation, only which meeting it named, so Outlook's own
     copy of that meeting isn't shown either; once the email is cleared it is."""

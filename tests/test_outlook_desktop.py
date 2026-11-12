@@ -27,7 +27,6 @@ COM_CALLS = {
     # Columns.Add and RemoveAll shape the table CloseDesk asked for; Sort and Restrict order and filter a list of items.
     "RemoveAll": {"table.Columns"}, "Add": {"table.Columns"}, "Sort": {"table", "items"}, "Restrict": {"items"},
     "GetFirst": {"listed"}, "GetNext": {"listed"},
-    "GetOrganizer": {"item"}, "GetExchangeUser": {"entry"},  # who organized a meeting: its address
     "SaveAs": {"item"},  # writes a .msg file and leaves the message as it is: the only way a copy is made
 }
 # Python's own methods on Python values (strings, dates, lists, sets), and this file's own.
@@ -40,7 +39,7 @@ PYTHON_CALLS_ON = {"add": {"bins", "codes", "names", "trash"}, "sort": {"stores"
 COM_NAMES = set(COM_CALLS) | {
     "AllDayEvent", "BusyStatus", "Columns", "Count", "DefaultItemType", "End", "EndOfTable", "EntryID", "Folders",
     "GlobalAppointmentID", "IncludeRecurrences", "IsRecurring", "Items", "Location", "MeetingStatus", "Name", "OptionalAttendees",
-    "Organizer", "Parent", "RequiredAttendees", "Start", "StoreID", "Stores", "Subject", "Address", "PrimarySmtpAddress",
+    "Organizer", "Parent", "RequiredAttendees", "Start", "StoreID", "Stores", "Subject",
 }
 # Python's own attributes read in the file (of datetimes, exceptions, modules and this file's classes).
 PYTHON_NAMES = PYTHON_CALLS | set(PYTHON_CALLS_ON) | {
@@ -520,33 +519,3 @@ def test_the_calendar_says_when_outlooks_limit_cut_it_short(outlook, monkeypatch
     monkeypatch.setattr(outlook_desktop, "MAX_CALENDAR_ITEMS", 3000)
     found = read()
     assert [m["subject"] for m in found] == ["AP standup", "Later"] and not found.cut_short
-
-
-def test_the_calendar_gives_the_organizers_address_when_outlook_has_it(outlook):
-    session, _items = outlook
-
-    class Entry:
-        def __init__(self, address, smtp=""):
-            self.Address, self._smtp = address, smtp
-
-        def GetExchangeUser(self):
-            return type("User", (), {"PrimarySmtpAddress": self._smtp})() if self._smtp else None
-
-    class Organized(Appointment):
-        def __init__(self, subject, start, entry, **kwargs):
-            object.__setattr__(self, "_entry", entry)
-            super().__init__(subject, start, start + timedelta(hours=1), **kwargs)
-
-        def GetOrganizer(self):
-            if isinstance(self._entry, Exception):
-                raise self._entry
-            return self._entry
-
-    appointments = [
-        Organized("Emailed", local(2026, 10, 6, 9), Entry("ceo@taz-corp.co"), gid="G1"),
-        Organized("In house", local(2026, 10, 7, 9), Entry("/o=ExchangeLabs/ou=Exchange/cn=Recipients/cn=maya", "maya@taz.com"), gid="G2"),
-        Organized("Older Outlook", local(2026, 10, 8, 9), ComError(-2147352567, "no", None, None), gid="G3"),
-    ]
-    object.__setattr__(session.ns, "_defaults", {**session.ns._defaults, 9: CalendarFolder(CalendarItems(appointments))})
-    found = session.calendar(datetime(2026, 10, 5, tzinfo=timezone.utc), datetime(2026, 11, 30, tzinfo=timezone.utc))
-    assert [m["organizer"] for m in found] == ["Maya Chen <ceo@taz-corp.co>", "Maya Chen <maya@taz.com>", "Maya Chen"]
