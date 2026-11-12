@@ -379,3 +379,113 @@ def test_a_moved_closedesk_folder_still_finds_its_kept_files(tmp_path, settings)
     assert links.kept_file(settings, str(old)) == kept
     assert links.kept_file(settings, str(tmp_path / "elsewhere" / "b.eml")) is None
     assert links.kept_file(settings, "") is None
+
+
+def test_a_backdated_or_addressless_reply_is_still_new_to_the_conversation(store):
+    # The real thread: the vendor writes to AP, AP answers.
+    store.upsert_email(_record("root", mid="<root@northwind.com>", received="2026-10-01T09:00:00+00:00", threading={"to": ["ap@taz.com"]}))
+    store.upsert_email(_record("ours", sender="ap@taz.com", mid="<r1@taz.com>", received="2026-10-01T11:00:00+00:00",
+                               threading={"in_reply_to": "root@northwind.com", "references": ["root@northwind.com"], "to": ["priya@northwind.com"]}))
+    # A lookalike's reply, dated before the vendor's first email, copying the vendor to look at home.
+    store.upsert_email(_record("hijack", sender="priya@northwnd.com", received="2026-09-01T09:00:00+00:00",
+                               threading={"in_reply_to": "r1@taz.com", "references": ["root@northwind.com", "r1@taz.com"], "to": ["ap@taz.com", "priya@northwind.com"]}))
+    # A reply with no From address at all, only a Reply-To.
+    nobody = _record("nobody", sender="", received="2026-10-02T09:00:00+00:00", threading={"in_reply_to": "r1@taz.com"})
+    nobody.reply_to = "priya@northwnd-ap.com"
+    store.upsert_email(nobody)
+    assert links.related(store, store.get_email("ours"))["new_domains"] == {"hijack", "nobody"}
+
+
+def test_a_held_emails_number_counts_only_as_a_whole_number_of_its_text(store):
+    held = _record("held", sender="ar@nw-remit.net", flags=["fraud_risk"], invoices=["INV2291", "10482"])
+    held.subject, held.body_text = "Ref INV-22918", "Call 555 104 8221"
+    store.upsert_email(held)
+    assert not any(kind == "invoice" for kind, _value in store.link_keys("held"))
+
+
+def test_a_lookalikes_corrected_copy_is_no_version_and_a_changed_remit_line_is_flagged(store):
+    real = _record("real", files=[("Northwind invoice INV-10482.pdf", "1" * 64, 30_000, None)], received="2026-10-01T09:00:00+00:00")
+    real.attachments[0].extracted_text = "[page 1]\nInvoice INV-10482\nRemit to: First Bank account ****3333"
+    fake = _record("fake", sender="ar@nw-remit.net", files=[("Northwind invoice INV-10482 (1).pdf", "2" * 64, 30_000, None)], received="2026-10-02T09:00:00+00:00", invoices=["INV-10482"])
+    fake.attachments[0].extracted_text = "[page 1]\nInvoice INV-10482\nRemit to: Metro Bank account ****7777"
+    real.extracted.invoice_numbers = ["INV-10482"]
+    store.upsert_email(real)
+    store.upsert_email(fake)
+    assert links.trace(store, store.get_email("real"))["versions"] == [], "another sender's file is no version"
+    newer = _record("v2", files=[("Northwind invoice INV-10482 v2.pdf", "3" * 64, 30_000, None)], received="2026-10-03T09:00:00+00:00")
+    newer.attachments[0].extracted_text = "[page 1]\nInvoice INV-10482\nRemit to: Metro Bank account ****7777"
+    store.upsert_email(newer)
+    [version] = links.trace(store, store.get_email("real"))["versions"]
+    assert version["payment"] and version["new"][0].id == "v2"
+
+
+def test_the_model_is_told_which_related_email_is_from_a_new_domain_and_a_cautioned_email_loses_its_model_links(store):
+    from controller_inbox import agent
+
+    store.upsert_email(_record("root", mid="<root@northwind.com>", received="2026-10-01T09:00:00+00:00", threading={"to": ["ap@taz.com"]}))
+    store.upsert_email(_record("hijack", sender="priya@northwnd.com", received="2026-10-02T09:00:00+00:00", threading={"in_reply_to": "root@northwind.com"}))
+    ws = agent.Workspace(store, None, [store.get_email("root")])
+    lines = agent.related_lines(ws, ws.sources[0])
+    assert "priya@northwnd.com" in lines and "domain is new to the conversation" in lines
+    store.save_ai_link("root", "other", same=True, why="same quote", key="k")
+    store.upsert_email(_record("other", sender="billing@harbor-pack.net", flags=["payment_caution"]))
+    assert all(g["kind"] != "ai" for g in links.related(store, store.get_email("root"))["groups"])
+
+# --- An invoice's conversation ------------------------------------------------------------------------------------
+
+
+def _invoice_chain(settings, *, names=("1-invoice.eml", "2-colleague.eml", "3-vendor.eml")) -> None:
+    from controller_inbox.demo import make_pdf
+
+    pdf = make_pdf([["Coastal Print Co", "Invoice CP-5521", "Total due $1,840.00", "Due November 30, 2026"]])
+    _eml(settings, names[0], "Invoice CP-5521", sender="Coastal Print AR <ar@coastalprint.com>", mid="<cp1@coastalprint.com>",
+         files=[("CP-5521.pdf", pdf)], body="Please find invoice CP-5521 for $1,840.00 attached, due November 30.")
+    _eml(settings, names[1], "RE: Invoice CP-5521", sender="Maya Chen <maya@taz.com>", mid="<cp2@taz.com>",
+         reply_to_mid="<cp1@coastalprint.com>", refs="<cp1@coastalprint.com>", hours=2,
+         body="Which PO is invoice CP-5521 for? I can't find it.\n\n> Please find invoice CP-5521 for $1,840.00 attached.")
+    _eml(settings, names[2], "RE: Invoice CP-5521", sender="Coastal Print AR <ar@coastalprint.com>", mid="<cp3@coastalprint.com>",
+         reply_to_mid="<cp2@taz.com>", refs="<cp1@coastalprint.com> <cp2@taz.com>", hours=4,
+         body="Invoice CP-5521 is for PO-88012.\n\n> Which PO is invoice CP-5521 for?")
+
+
+def _invoice_tasks(store) -> list[tuple[str, str]]:
+    return sorted(
+        (email.subject, action.title)
+        for email in store.list_emails(limit=-1)
+        for action in (store.get_email(email.id).actions)
+        if action.source in {"invoice", "duplicate_rule"} and action.status.value == "open"
+    )
+
+
+@pytest.mark.parametrize("names", [("1-invoice.eml", "2-colleague.eml", "3-vendor.eml"), ("c-invoice.eml", "a-colleague.eml", "b-vendor.eml")])
+def test_replies_about_an_invoice_make_no_second_entry_or_duplicate_task(store, settings, names):
+    """Mail about an invoice in its own conversation is no second invoice, in whatever order the files are read."""
+    _invoice_chain(settings, names=names)
+    ingest_folder(store, settings, now=START + timedelta(hours=5))
+    tasks = _invoice_tasks(store)
+    assert [title for _subject, title in tasks if title.startswith("Code and enter")] and len(tasks) == 1, tasks
+    assert tasks[0][0] == "Invoice CP-5521"
+    assert not any("duplicate_invoice" in store.get_email(e.id).flags for e in store.list_emails(limit=-1))
+
+
+def test_a_lookalike_replying_in_the_thread_with_the_invoice_is_still_a_duplicate(store, settings):
+    from controller_inbox.demo import make_pdf
+
+    _invoice_chain(settings)
+    pdf = make_pdf([["Coastal Print Co", "Invoice CP-5521", "Total due $1,840.00", "New bank details enclosed"]])
+    _eml(settings, "4-lookalike.eml", "RE: Invoice CP-5521", sender="Coastal Print AR <ar@coastalprlnt.com>", mid="<cp4@coastalprlnt.com>",
+         reply_to_mid="<cp3@coastalprint.com>", refs="<cp1@coastalprint.com> <cp3@coastalprint.com>", hours=5,
+         files=[("CP-5521 corrected.pdf", pdf)], body="Corrected invoice CP-5521 attached.")
+    ingest_folder(store, settings, now=START + timedelta(hours=6))
+    fake = next(e for e in store.list_emails(limit=-1) if e.sender_email.endswith("coastalprlnt.com"))
+    assert "duplicate_invoice" in store.get_email(fake.id).flags
+
+
+def test_a_po_links_the_buyers_mail_and_the_vendors(store):
+    """Purchasing's "PO-88012 approved" and the vendor's invoice naming it are one PO; a short number stays one sender's."""
+    store.upsert_email(_record("purchasing", sender="purchasing@taz.com", pos=["88012"]))
+    store.upsert_email(_record("vendor", sender="ar@coastalprint.com", pos=["88012"], received="2026-10-06T14:00:00+00:00"))
+    store.upsert_email(_record("short-a", sender="purchasing@taz.com", pos=["4410"]))
+    store.upsert_email(_record("short-b", sender="ar@coastalprint.com", pos=["4410"]))
+    assert [e.id for g in links.related(store, store.get_email("purchasing"))["groups"] for e in g["emails"]] == ["vendor"]
+    assert not links.related(store, store.get_email("short-a"))["groups"]

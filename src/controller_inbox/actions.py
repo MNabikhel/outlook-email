@@ -55,6 +55,7 @@ def extract_actions(
     sender: str = "",
     has_invite: bool = False,
     received_on: date | None = None,
+    entered_elsewhere: bool = False,
 ) -> list[ActionItem]:
     """Tasks for a message.
 
@@ -127,7 +128,9 @@ def extract_actions(
     amount = fields.primary_amount
     invoice = fields.primary_invoice
     amount_txt = fmt_money(amount) if amount is not None else "an amount"
-    if category == DocumentType.AP_INVOICE:
+    if category == DocumentType.AP_INVOICE and entered_elsewhere:
+        pass
+    elif category == DocumentType.AP_INVOICE:
         title = _named("Code and enter", "invoice", invoice, subject)
         if amount is not None:
             title += f" ({amount_txt})"

@@ -368,11 +368,12 @@ function relatedRow(r) {
   const line = h(
     "span",
     { class: "rel-main" },
-    h("span", { class: "rel-top" }, h("b", { class: "trunc" }, r.sender), h("span", { class: "muted small rel-when", title: r.when_full }, r.when)),
+    // The sender's domain beside the name, always: a lookalike ("northwnd.com") shows at a glance.
+    h("span", { class: "rel-top" }, h("span", { class: "trunc" }, h("b", null, r.sender), h("span", { class: "muted small" }, ` · ${r.domain}`)), h("span", { class: "muted small rel-when", title: r.when_full }, r.when)),
     h("span", { class: "rel-subject trunc" }, r.subject),
     r.first_line ? h("span", { class: "muted small rel-first" }, r.first_line) : null,
     r.file_names.length ? h("span", { class: "muted small rel-files" }, icon("clip", 12), h("span", null, r.file_names.join(", "))) : null,
-    r.why ? h("span", { class: "small rel-why", title: "The local model's guess, from the two emails' text: check it" }, icon("chat", 12), h("span", null, `The model's guess: “${r.why}”`)) : null,
+    r.model_why ? h("span", { class: "small rel-why", title: "The local model's guess, from the two emails' text: check it" }, icon("chat", 12), h("span", null, `The model's guess: “${r.model_why}”`)) : null,
     mark
   );
   return h(

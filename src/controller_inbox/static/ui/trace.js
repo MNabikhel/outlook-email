@@ -34,7 +34,8 @@ function version(v) {
   return h(
     "li",
     { class: "tr-version" },
-    h("p", { class: "tr-version-h" }, fileLink(v.old), h("span", { class: "muted small" }, ` ${v.old.when} · ${v.old.sender}`), h("span", { class: "tr-arrow", "aria-hidden": "true" }, " → "), h("span", { class: "sr-only" }, " then "), fileLink(v.new), h("span", { class: "muted small" }, ` ${v.new.when} · ${v.new.sender}`)),
+    h("p", { class: "tr-version-h" }, fileLink(v.old), h("span", { class: "muted small" }, ` ${v.old.when} · ${v.old.sender} · ${v.old.domain}`), h("span", { class: "tr-arrow", "aria-hidden": "true" }, " → "), h("span", { class: "sr-only" }, " then "), fileLink(v.new), h("span", { class: "muted small" }, ` ${v.new.when} · ${v.new.sender} · ${v.new.domain}`)),
+    v.payment ? h("p", { class: "tag tag-due_soon" }, "Payment details changed between these versions: check them by phone before paying") : null,
     v.changes.length
       ? h("ul", { class: "tr-changes" }, v.changes.map((change) => h("li", null, change)), v.more ? h("li", { class: "muted" }, `and ${plural(v.more, "more change")}`) : null)
       : h("p", { class: "muted small" }, "No change in what was read from the two files (their layout or pictures may differ).")

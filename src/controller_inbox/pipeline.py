@@ -4,6 +4,7 @@ import json
 import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Protocol
 
 from controller_inbox.actions import extract_actions, keep_task_status, received_day
@@ -21,7 +22,9 @@ from controller_inbox.extract import (
 from controller_inbox.models import AttachmentRecord, DocumentType, EmailRecord, ExtractedFields, RawMessage
 from controller_inbox.fraud import assess, attachments_locked, domain_of, dropped_file_body, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
-from controller_inbox.store import Store
+from controller_inbox.store import Store, _invoice_key
+
+MAX_CONVERSATION_READ = 200  # emails of a conversation read to settle its invoice tasks
 
 VERDICT_FLAGS = {"fraud_cleared", "fraud_confirmed"}
 
@@ -131,9 +134,21 @@ def process_message(
         domain_history=store.domain_history(domain_of(raw.sender_email), exclude=raw.id),
         reply_domain_history=store.domain_history(domain_of(raw.reply_to), exclude=raw.id),
     )
+    from controller_inbox.links import conversation_members
+
+    conversation = conversation_members(store, raw.id, raw.threading, raw.internet_message_id, raw.conversation_id)
     classified_email = _classify(
         store,
         settings,
+        conversation=conversation,
+        me=SimpleNamespace(
+            id=raw.id,
+            sender_email=raw.sender_email,
+            reply_to=raw.reply_to,
+            internet_message_id=raw.internet_message_id,
+            threading=dict(raw.threading),
+            received_at=raw.received_at.astimezone(timezone.utc).isoformat(),
+        ),
         email_id=raw.id,
         subject=clean.subject,
         body=raw.body_text,
@@ -165,6 +180,13 @@ def process_message(
         sender=raw.sender_name or raw.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in att_records),
         received_on=anchor,
+        entered_elsewhere=_entered_elsewhere(
+            store,
+            merged_fields.primary_invoice,
+            conversation,
+            raw.received_at.astimezone(timezone.utc).isoformat(),
+            any(c.document_type == DocumentType.AP_INVOICE for c in att_classifications),
+        ),
     )
     if existing is not None:
         actions = keep_task_status(actions, existing.actions)
@@ -230,6 +252,7 @@ def process_message(
         else:
             save_check(store, record, check, now=now)
         cost_codes.refresh(store, settings, email_ids=[record.id])
+        _settle_conversation(store, settings, record, conversation, now=now)
     except Exception:
         # The email is stored and on the board: a fraud check or cost code that couldn't be saved is logged, and the
         # message isn't reported as one that couldn't be read.
@@ -520,6 +543,8 @@ def _classify(
     as_of,
     has_attachments: bool,
     fraud: str,
+    conversation: set[str] | None = None,
+    me=None,
 ) -> Classification:
     """Script classification, then any correction the user saved for this sender or subject.
 
@@ -529,7 +554,7 @@ def _classify(
     """
     from controller_inbox.learn import apply_learned, match_correction
 
-    duplicate = bool(fields.primary_invoice and store.find_duplicate_invoices(fields.primary_invoice, email_id))
+    duplicate = bool(fields.primary_invoice and _repeats(store, fields.primary_invoice, me or SimpleNamespace(id=email_id, sender_email=sender_email, reply_to="", internet_message_id="", threading={}, received_at=""), conversation or set(), own_file=any(c.document_type == DocumentType.AP_INVOICE for c in attachments)))
     classified = classify_email(
         subject=subject,
         body=body,
@@ -547,6 +572,77 @@ def _classify(
     )
     learned = match_correction(store, sender_email=sender_email, subject=subject, email_id=email_id)
     return apply_learned(classified, learned) if learned else classified
+
+
+def _repeats(store: Store, invoice: str, me, conversation: set[str], *, own_file: bool) -> list[str]:
+    """Other emails with this invoice number, but those of ``me``'s own conversation where one of the two only
+    writes about the invoice: a colleague's "which PO is this for?" and the vendor's answer are no second invoice. Two
+    that both bring the invoice as a file (a forward of it to AP) still are, and so is a conversation email from a
+    domain new to it, or everything when ``me``'s own sender is new to it: a lookalike slipped into the thread is how
+    a second, fraudulent copy arrives. ``me`` is the email being read (its id, sender, Reply-To and threading);
+    ``own_file``: it brings an invoice file."""
+    found = store.find_duplicate_invoices(invoice, me.id)
+    if not found or not conversation & set(found):
+        return found
+    from controller_inbox.links import new_domains
+
+    thread = [me, *(record for record in store.get_emails(sorted(conversation)[:MAX_CONVERSATION_READ]).values() if record.id != me.id)]
+    newcomers = new_domains(thread)
+    if me.id in newcomers:
+        return found
+    ours = {
+        record.id
+        for record in thread[1:]
+        if record.id not in newcomers and not (own_file and any(att.document_type == DocumentType.AP_INVOICE for att in record.attachments))
+    }
+    return [other for other in found if other not in ours]
+
+
+def _entered_elsewhere(store: Store, invoice: str | None, conversation: set[str], received_at: str, own_invoice_file: bool) -> bool:
+    """Whether an invoice is entered from another email of the same conversation: one that brought the invoice as a
+    file, or came before this one, while this one brings no invoice file. The colleague's "which PO is this for?"
+    and the vendor's answer make no second "Code and enter" task."""
+    if not invoice or own_invoice_file or not conversation:
+        return False
+    key = _invoice_key(invoice)
+    for other_id in conversation:
+        other = store.get_email(other_id)
+        if other is None or other.category != DocumentType.AP_INVOICE:
+            continue
+        if key not in {_invoice_key(n) for n in other.extracted.invoice_numbers}:
+            continue
+        if any(att.document_type == DocumentType.AP_INVOICE for att in other.attachments) or (other.received_at or "") < received_at:
+            return True
+    return False
+
+
+def _settle_conversation(store: Store, settings: Settings, record: EmailRecord, conversation: set[str], *, now: datetime) -> None:
+    """Mail about an invoice read before the invoice itself (the drop folder reads files by name, not by date) is
+    filed again now that its conversation is known: the "Code and enter" task goes to the invoice's own email, and a
+    reply flagged as a duplicate of an invoice of its own conversation is filed again without that. A task the user
+    already finished or snoozed stays."""
+    invoice = record.extracted.primary_invoice
+    if not conversation or not invoice:
+        return
+    key = _invoice_key(invoice)
+    brings_file = any(att.document_type == DocumentType.AP_INVOICE for att in record.attachments)
+    for other in store.get_emails(sorted(conversation)[:MAX_CONVERSATION_READ]).values():
+        if _invoice_key(other.extracted.primary_invoice) != key:
+            continue
+        if "duplicate_invoice" in other.flags:
+            others = links_members(store, other)
+            if not _repeats(store, invoice, other, others, own_file=any(att.document_type == DocumentType.AP_INVOICE for att in other.attachments)):
+                from controller_inbox.fraud import assess_email
+
+                other = rescore_stored(store, settings, other, assess_email(store, trust_context(store, settings), other), now=now)
+        if brings_file and not any(att.document_type == DocumentType.AP_INVOICE for att in other.attachments):
+            store.drop_open_tasks(other.id, source="invoice")
+
+
+def links_members(store: Store, email: EmailRecord) -> set[str]:
+    from controller_inbox.links import conversation_members
+
+    return conversation_members(store, email.id, email.threading, email.internet_message_id, email.conversation_id)
 
 
 def _bank_caution(check) -> list[str]:
@@ -578,9 +674,14 @@ def rescore_stored(
         )
         for att in email.attachments
     ]
+    from controller_inbox.links import conversation_members
+
+    conversation = conversation_members(store, email.id, email.threading, email.internet_message_id, email.conversation_id)
     classified = _classify(
         store,
         settings,
+        conversation=conversation,
+        me=email,
         email_id=email.id,
         subject=email.subject,
         body=email.body_text,
@@ -612,6 +713,13 @@ def rescore_stored(
         sender=email.sender_name or email.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in email.attachments),
         received_on=sent_date(email.received_at, settings, fallback=as_of),
+        entered_elsewhere=_entered_elsewhere(
+            store,
+            email.extracted.primary_invoice,
+            conversation,
+            email.received_at or "",
+            any(att.document_type == DocumentType.AP_INVOICE for att in email.attachments),
+        ),
     )
     # As when the email is read again: the new reading's tasks, keeping what the user did with each.
     email.actions = keep_task_status(fresh, email.actions)

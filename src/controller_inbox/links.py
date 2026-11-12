@@ -33,7 +33,7 @@ from email.utils import getaddresses
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
 
-KEYS_VERSION = "3"  # changed whenever keys() files emails differently, so stored mail is filed again
+KEYS_VERSION = "4"  # changed whenever keys() files emails differently, so stored mail is filed again
 COMMON = 25  # a key shared by more emails than this links none of them
 MAX_THREAD = 60  # emails shown of one conversation, around the one opened
 MAX_CONVERSATION = 1000  # emails one conversation is followed to
@@ -108,29 +108,20 @@ def threading(*, in_reply_to: str = "", references: str = "", thread_index: byte
 
 def keys(email: EmailRecord) -> list[tuple[str, str]]:
     """The keys ``email`` is filed under (see the module's docstring)."""
-    found: set[tuple[str, str]] = set()
-    info = email.threading or {}
-    # Its own Message-ID ("msg") joins a conversation only through another email naming it in a reply ("thread"):
-    # two emails that merely carry the same id (a scanner gives every scan one) are no conversation.
-    if own := norm_id(email.internet_message_id):
-        found.add(("msg", f"mid:{own}"))
-    for mid in (info.get("in_reply_to"), *(info.get("references") or [])):
-        if norm := norm_id(mid):
-            found.add(("thread", f"mid:{norm}"))
-    if info.get("conversation"):
-        found.add(("thread", f"conv:{info['conversation']}"))
-    if email.conversation_id:
-        found.add(("thread", f"graph:{email.conversation_id}"))
+    found = set(conversation_keys(email.threading, email.internet_message_id, email.conversation_id))
     domain = sender_domain(email)
     held = attachments_locked(email)
     # A held email's numbers count only where its own text names them: read from its files (which stay closed), a
     # lookalike's "invoice" would tie it to the real vendor's mail.
-    said = number_key(f"{email.subject} {email.body_text}") if held else ""
+    said = _numbers_written(f"{email.subject} {email.body_text}") if held else set()
     for kind, numbers in (("invoice", _numbers(email, "invoice_numbers")), ("po", _numbers(email, "po_numbers"))):
         for number in numbers:
             if held and number not in said:
                 continue
-            found.add((kind, f"{domain}|{number}" if number.isdigit() else number))
+            # A number of digits alone is one sender's: two vendors' invoice 10482 are two invoices. A PO is the
+            # buyer's own number, quoted back by the vendor, so one of five digits or more is one PO whoever writes it.
+            scoped = number.isdigit() and not (kind == "po" and len(number) >= 5)
+            found.add((kind, f"{domain}|{number}" if scoped else number))
     # A held email's files link to nothing, either way: a "new bank details" form sent from a lookalike domain must
     # not show up as the same file the real vendor sent.
     for att in [] if held else email.attachments:
@@ -141,6 +132,31 @@ def keys(email: EmailRecord) -> list[tuple[str, str]]:
         if stem := file_stem(att.filename):
             found.add(("stem", f"{domain}|{stem}"))  # one sender's versions: everyone's "Timesheet.xlsx" isn't one file
     return sorted(found)
+
+
+def conversation_keys(threading: dict | None, message_id: str | None, conversation_id: str | None) -> list[tuple[str, str]]:
+    """The keys that put an email in a conversation: what it replies to, its own Message-ID, Outlook's and
+    Microsoft 365's conversation."""
+    found: set[tuple[str, str]] = set()
+    info = threading or {}
+    # Its own Message-ID ("msg") joins a conversation only through another email naming it in a reply ("thread"):
+    # two emails that merely carry the same id (a scanner gives every scan one) are no conversation.
+    if own := norm_id(message_id):
+        found.add(("msg", f"mid:{own}"))
+    for mid in (info.get("in_reply_to"), *(info.get("references") or [])):
+        if norm := norm_id(mid):
+            found.add(("thread", f"mid:{norm}"))
+    if info.get("conversation"):
+        found.add(("thread", f"conv:{info['conversation']}"))
+    if conversation_id:
+        found.add(("thread", f"graph:{conversation_id}"))
+    return sorted(found)
+
+
+def conversation_members(store, email_id: str, threading: dict | None, message_id: str | None, conversation_id: str | None) -> set[str]:
+    """The stored emails in the same conversation as an email (stored or still being read), not the email itself."""
+    mine = conversation_keys(threading, message_id, conversation_id)
+    return set(_conversation(store, email_id, mine)) - {email_id} if mine else set()
 
 
 def sender_domain(email: EmailRecord) -> str:
@@ -163,6 +179,11 @@ def _numbers(email: EmailRecord, name: str) -> set[str]:
             continue
         found |= {number_key(n) for n in listed}
     return {n for n in found if len(n) >= 4 and any(ch.isdigit() for ch in n)}
+
+
+def _numbers_written(text: str) -> set[str]:
+    """The numbers a text writes, each whole, as ``number_key`` gives them ("INV-22918" is not "INV2291")."""
+    return {number_key(token) for token in re.findall(r"[A-Za-z]*[-#\s]?\d[\d-]*[A-Za-z0-9]*", text or "")}
 
 
 def _real_file(att: AttachmentRecord) -> bool:
@@ -230,7 +251,8 @@ def related(store, email: EmailRecord, *, ai: bool = True) -> dict:
                 continue
             groups.append({"kind": kind, "value": value, "ids": others[:MAX_PER_REASON]})
             shown |= set(others)
-    if ai and not locked_here:
+    # The model's links are left out for held or cautioned mail, either way, whenever the caution came.
+    if ai and not locked_here and "payment_caution" not in email.flags:
         judged = {other: why for other, why in store.ai_links_of(email.id).items() if other not in shown}
         if judged:
             groups.append({"kind": "ai", "value": "", "ids": list(judged)[:MAX_PER_REASON], "why": judged})
@@ -245,7 +267,7 @@ def related(store, email: EmailRecord, *, ai: bool = True) -> dict:
     thread = [email if i == email.id else cards[i] for i in window if i == email.id or i in cards]
     out_groups = []
     for group in groups:
-        records = [cards[i] for i in group["ids"] if i in cards and not (group["kind"] == "ai" and attachments_locked(cards[i]))]
+        records = [cards[i] for i in group["ids"] if i in cards and not (group["kind"] == "ai" and (attachments_locked(cards[i]) or "payment_caution" in cards[i].flags))]
         if records:
             label = AI_LABEL if group["kind"] == "ai" else _label(group, email, records)
             out_groups.append({"kind": group["kind"], "label": label, "emails": sorted(records, key=lambda r: r.received_at or "", reverse=True), "why": group.get("why", {})})
@@ -279,17 +301,38 @@ def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str
 
 
 def new_domains(thread: list[EmailRecord]) -> set[str]:
-    """The emails in a conversation whose sender's domain hadn't written in it before: a reply from a lookalike
-    domain slipped into a real thread is how payment-change fraud usually starts."""
-    seen: set[str] = set()
+    """The emails in a conversation whose sender's domain hadn't taken part in it: a reply from a lookalike domain
+    slipped into a real thread is how payment-change fraud usually starts.
+
+    Who has taken part is counted from the email the conversation started with (the one none of the others answer),
+    not from the earliest date: a Date header can be set to anything. Its sender and the people it went to have
+    taken part; so do the senders, and the people they wrote to, of each reply from someone who had. A sender with no
+    address is new (its Reply-To is what replies would reach)."""
+    if len(thread) < 2:
+        return set()
+    owns = {norm_id(record.internet_message_id): record for record in thread if record.internet_message_id}
+    answered = {norm_id(ref) for record in thread for ref in [(record.threading or {}).get("in_reply_to"), *((record.threading or {}).get("references") or [])] if ref}
+    roots = [record for record in thread if not ({norm_id(r) for r in [(record.threading or {}).get("in_reply_to"), *((record.threading or {}).get("references") or [])] if r} & set(owns))]
+    root = next((record for record in roots if norm_id(record.internet_message_id) in answered), None) or (roots[0] if roots else thread[0])
+    seen = {_domain_of(root)} - {""} | _to_domains(root)
     marked: set[str] = set()
-    for record in thread:
-        domain = sender_domain(record)
-        if seen and domain and domain not in seen:
+    for record in sorted(thread, key=lambda r: r.received_at or ""):
+        if record.id == root.id:
+            continue
+        domain = _domain_of(record)
+        if not domain or domain not in seen:
             marked.add(record.id)
-        # The domains a message went to are in the conversation too: the reply of someone it was sent to is not new.
-        seen |= {domain} - {""} | {address.rpartition("@")[2] for address in (record.threading or {}).get("to") or []}
+            continue  # whom a newcomer wrote to doesn't count as taking part
+        seen |= _to_domains(record)
     return marked
+
+
+def _domain_of(record: EmailRecord) -> str:
+    return sender_domain(record) or (record.reply_to or "").rpartition("@")[2].lower()
+
+
+def _to_domains(record: EmailRecord) -> set[str]:
+    return {address.rpartition("@")[2].lower() for address in (record.threading or {}).get("to") or [] if "@" in address}
 
 
 def _label(group: dict, email: EmailRecord, records: list[EmailRecord]) -> str:
@@ -431,6 +474,10 @@ def trace(store, email: EmailRecord) -> dict:
     return {"steps": [(record, reasons.get(record.id, [])) for record in steps], "versions": versions(steps)}
 
 
+# A change to payment details between two versions of a file is to be checked by phone, whoever sent it.
+_PAYMENT_WORDS = re.compile(r"(?i)\b(bank|account|acct|iban|routing|aba|swift|bic|sort code|remit|wire|ach|beneficiary)\b")
+
+
 def versions(emails: list[EmailRecord]) -> list[dict]:
     """For each file sent more than once with different contents along a matter, each version against the one
     before: its name, the emails, and what changed (``changes``). A held email's files are left out."""
@@ -439,16 +486,24 @@ def versions(emails: list[EmailRecord]) -> list[dict]:
         if attachments_locked(record):
             continue
         for att in record.attachments:
+            # One sender's versions: a lookalike's "corrected copy" with new bank details is no version of the
+            # vendor's invoice to show as an edit.
             if _real_file(att) and (stem := file_stem(att.filename)):
-                seen = by_stem.setdefault(stem, [])
+                seen = by_stem.setdefault(f"{_domain_of(record)}|{stem}", [])
                 if not any(other.sha256 == att.sha256 for _r, other in seen):
                     seen.append((record, att))
     out = []
     for stem, sent in by_stem.items():
         for (old_email, old), (new_email, new) in zip(sent, sent[1:]):
             listed, more = changes(old.extracted_text or "", new.extracted_text or "")
-            out.append({"stem": stem, "old": (old_email, old), "new": (new_email, new), "changes": listed, "more": more})
+            payment = _payment_lines(old.extracted_text) != _payment_lines(new.extracted_text)
+            out.append({"stem": stem.split("|", 1)[-1], "old": (old_email, old), "new": (new_email, new), "changes": listed, "more": more, "payment": payment})
     return out
+
+
+def _payment_lines(text: str | None) -> set[str]:
+    """The lines of a file naming a bank, an account or where to send money: any change in them is worth a call."""
+    return {" ".join(line.split()) for line in (text or "").splitlines() if _PAYMENT_WORDS.search(line)}
 
 
 _CELL_LINE = re.compile(r"^([A-Z]{1,3})(\d+)(?: \(([^)]*)\))?: (.*)$")

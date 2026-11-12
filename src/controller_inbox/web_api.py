@@ -517,12 +517,13 @@ def register_workspace(
             card = mail_card(other, settings.tz, today)
             first = " ".join((other.body_text or other.body_preview or "").split())[:160]
             return {**card, "here": other.id == email.id, "new_domain": other.id in found["new_domains"], "first_line": "" if card["locked"] else first,
+                    "domain": links._domain_of(other) or "no address",
                     "file_names": [] if card["locked"] else [att.filename.rsplit(" › ", 1)[-1] for att in other.attachments][:6]}
 
         return {
             "thread": [row(other) for other in found["thread"]],
             "groups": [
-                {"kind": group["kind"], "label": group["label"], "emails": [{**row(other), "why": group["why"].get(other.id, "")} for other in group["emails"]]}
+                {"kind": group["kind"], "label": group["label"], "emails": [{**row(other), "model_why": group["why"].get(other.id, "") if group["kind"] == "ai" else ""} for other in group["emails"]]}
                 for group in found["groups"]
             ],
             "can_look": check_model(settings).active and not fraud.attachments_locked(email),
@@ -555,7 +556,8 @@ def register_workspace(
 
         def file_ref(record: EmailRecord, att) -> dict[str, Any]:
             n = next((i for i, other in enumerate(record.attachments, start=1) if other.id == att.id), 0)
-            return {"email_id": record.id, "n": n, "name": att.filename.rsplit(" › ", 1)[-1], "when": short_when(record.received_at, settings.tz, today), "sender": record.sender_name or record.sender_email}
+            return {"email_id": record.id, "n": n, "name": att.filename.rsplit(" › ", 1)[-1], "when": short_when(record.received_at, settings.tz, today),
+                    "sender": record.sender_name or record.sender_email, "domain": links._domain_of(record) or "no address"}
 
         steps = []
         for record, reasons in found["steps"]:
@@ -571,7 +573,7 @@ def register_workspace(
             "email": {"id": email.id, "subject": email.subject or "(no subject)"},
             "steps": steps,
             "versions": [
-                {"old": file_ref(*version["old"]), "new": file_ref(*version["new"]), "changes": version["changes"], "more": version["more"]}
+                {"old": file_ref(*version["old"]), "new": file_ref(*version["new"]), "changes": version["changes"], "more": version["more"], "payment": version["payment"]}
                 for version in found["versions"]
             ],
         }
