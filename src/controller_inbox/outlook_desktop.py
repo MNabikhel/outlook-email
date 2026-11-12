@@ -90,11 +90,13 @@ class Seen:
 
 class CalendarRead(list):
     """The meetings ``OutlookSession.calendar`` read, and whether it stopped at ``MAX_CALENDAR_ITEMS`` with more
-    left (``cut_short``): the meetings past the last one read weren't looked at, so they aren't gone from Outlook."""
+    left (``cut_short``): the meetings past the last one read weren't looked at, so they aren't gone from Outlook.
+    ``unreadable``: how many meetings Outlook wouldn't hand over (they aren't gone from Outlook either)."""
 
-    def __init__(self, meetings=(), *, cut_short: bool = False) -> None:
+    def __init__(self, meetings=(), *, cut_short: bool = False, unreadable: int = 0) -> None:
         super().__init__(meetings)
         self.cut_short = cut_short
+        self.unreadable = unreadable
 
 
 def available() -> str:
@@ -316,21 +318,34 @@ class OutlookSession:
         low, high = aware_utc(start), aware_utc(end)
         found: list[dict] = []
         cut_short = False
-        item = listed.GetFirst()
-        for _ in range(MAX_CALENDAR_ITEMS):
-            if item is None:
-                break
-            meeting = _meeting(item)
-            if meeting is not None:
-                begins = meeting.pop("_starts")
-                if begins > high:
-                    break  # earliest first: the rest start later
-                if meeting.pop("_ends") >= low:
-                    found.append(meeting)
-            item = listed.GetNext()
-        else:
-            cut_short = item is not None
-        return CalendarRead(found, cut_short=cut_short)
+        unreadable = 0
+        try:
+            item = listed.GetFirst()
+            for _ in range(MAX_CALENDAR_ITEMS):
+                if item is None:
+                    break
+                try:
+                    meeting = _meeting(item)
+                except Exception:  # Outlook wouldn't hand over its details (its access prompt refused, or busy)
+                    unreadable += 1
+                    meeting = None
+                if meeting is not None:
+                    begins = meeting.pop("_starts")
+                    if begins > high:
+                        break  # earliest first: the rest start later
+                    if meeting.pop("_ends") >= low:
+                        found.append(meeting)
+                item = listed.GetNext()
+            else:
+                cut_short = item is not None
+        except Exception as exc:
+            raise OutlookError(trouble("Outlook's calendar couldn't be read just now", exc)) from None
+        if unreadable and not found:
+            raise OutlookError(
+                "Outlook didn't let CloseDesk read your calendar. If Outlook asked whether to allow access, choose Allow; "
+                "the calendar is read again with the next sync."
+            )
+        return CalendarRead(found, cut_short=cut_short, unreadable=unreadable)
 
     def save_copy(self, entry_id: str, store_id: str, dest: Path) -> None:
         """Save a copy of the message as a .msg file. The message in Outlook is not changed."""
@@ -383,35 +398,33 @@ def _walk(folder, path: str, depth: int):
 
 
 def _meeting(item) -> dict | None:
-    """One calendar item's details, or None for one that can't be read (Outlook refused, or it has no start)."""
-    try:
-        starts, ends = local_time(item.Start), local_time(item.End)
-        if starts is None:
-            return None
-        ends = ends or starts
-        all_day = bool(item.AllDayEvent)
-        people = [p.strip()[:200] for field in (item.RequiredAttendees, item.OptionalAttendees) for p in str(field or "")[:50_000].split(";") if p.strip()]
-        start = item.Start.date().isoformat() if all_day else starts.isoformat(timespec="seconds")
-        end = item.End.date().isoformat() if all_day else ends.isoformat(timespec="seconds")
-        return {
-            "uid": str(item.GlobalAppointmentID or "") or f"{item.Subject}|{start}",
-            "start": start,
-            "end": end,
-            "all_day": all_day,
-            "subject": str(item.Subject or "")[:300],
-            "location": str(item.Location or "")[:300],
-            # The name Outlook shows: asking Outlook for an address can make it warn that a program is reading
-            # e-mail addresses, and looks each one up in the directory.
-            "organizer": str(item.Organizer or "")[:200],
-            "attendees": people[:60],
-            "busy": _BUSY.get(item.BusyStatus, ""),
-            "cancelled": item.MeetingStatus in _CANCELLED,
-            "recurring": bool(item.IsRecurring),
-            "_starts": starts,
-            "_ends": ends,
-        }
-    except Exception:
+    """One calendar item's details, or None for one with no start. Raises when Outlook won't hand them over (its
+    access prompt refused, or busy): ``calendar`` counts those, so they aren't taken for deleted."""
+    starts, ends = local_time(item.Start), local_time(item.End)
+    if starts is None:
         return None
+    ends = ends or starts
+    all_day = bool(item.AllDayEvent)
+    people = [p.strip()[:200] for field in (item.RequiredAttendees, item.OptionalAttendees) for p in str(field or "")[:50_000].split(";") if p.strip()]
+    start = item.Start.date().isoformat() if all_day else starts.isoformat(timespec="seconds")
+    end = item.End.date().isoformat() if all_day else ends.isoformat(timespec="seconds")
+    return {
+        "uid": str(item.GlobalAppointmentID or "") or f"{item.Subject}|{start}",
+        "start": start,
+        "end": end,
+        "all_day": all_day,
+        "subject": str(item.Subject or "")[:300],
+        "location": str(item.Location or "")[:300],
+        # The name Outlook shows: asking Outlook for an address can make it warn that a program is reading
+        # e-mail addresses, and looks each one up in the directory.
+        "organizer": str(item.Organizer or "")[:200],
+        "attendees": people[:60],
+        "busy": _BUSY.get(item.BusyStatus, ""),
+        "cancelled": item.MeetingStatus in _CANCELLED,
+        "recurring": bool(item.IsRecurring),
+        "_starts": starts,
+        "_ends": ends,
+    }
 
 
 def _jet_date(value: datetime) -> str:

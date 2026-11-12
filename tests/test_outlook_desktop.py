@@ -49,7 +49,7 @@ COM_NAMES = set(COM_CALLS) | {
 # Python's own attributes read in the file (of datetimes, exceptions, modules and this file's classes).
 PYTHON_NAMES = PYTHON_CALLS | set(PYTHON_CALLS_ON) | {
     "__name__", "_by_path", "_folders", "_left_out", "args", "client", "cut_short", "entry_id", "ns", "parent", "path", "platform",
-    "store_id", "utc", "year",
+    "store_id", "unreadable", "utc", "year",
 }
 READ_BY_NAME = {"ExchangeStoreType", "DisplayName", "hresult", "excepinfo", "args"}  # getattr(obj, "...", default)
 # Python's own functions it calls, besides its own, and the names it imports (none from pythoncom or win32com.client,
@@ -612,3 +612,51 @@ def test_the_calendar_says_when_outlooks_limit_cut_it_short(outlook, monkeypatch
     monkeypatch.setattr(outlook_desktop, "MAX_CALENDAR_ITEMS", 3000)
     found = read()
     assert [m["subject"] for m in found] == ["AP standup", "Later"] and not found.cut_short
+
+
+class _Guarded(Appointment):
+    """A meeting whose attendees Outlook's guard won't hand over: the user clicked Deny on "A program is trying to
+    access e-mail address information stored in Outlook", or let it time out."""
+
+    def __getattribute__(self, name):
+        if name in ("RequiredAttendees", "OptionalAttendees", "Organizer"):
+            raise ComError(-2147352567, "Exception occurred.", (4096, "Microsoft Outlook", "Operation aborted", None, 0, -2147467260), None)
+        return object.__getattribute__(self, name)
+
+
+def test_meetings_outlook_wont_hand_over_are_counted_not_taken_for_none(outlook):
+    # Each was skipped as if it weren't there: an empty read, and every meeting in the window was deleted.
+    session, _items = outlook
+    window = (datetime(2026, 10, 5, tzinfo=timezone.utc), datetime(2026, 11, 30, tzinfo=timezone.utc))
+
+    def read(appointments):
+        object.__setattr__(session.ns, "_defaults", {**session.ns._defaults, 9: CalendarFolder(CalendarItems(appointments))})
+        return session.calendar(*window)
+
+    fine = Appointment("AP standup", local(2026, 10, 6, 9), local(2026, 10, 6, 9, 15), gid="G-standup")
+    guarded = _Guarded("Board call", local(2026, 10, 7, 9), local(2026, 10, 7, 10), gid="G-board")
+    found = read([fine, guarded])
+    assert [m["subject"] for m in found] == ["AP standup"] and found.unreadable == 1
+    assert read([fine]).unreadable == 0
+    with pytest.raises(OutlookError, match="choose Allow"):
+        read([guarded])
+
+
+def test_an_error_while_the_calendar_is_listed_is_outlooks_error(outlook):
+    # Only the filter was checked: an error from GetFirst or GetNext (Outlook busy) ended the whole sync after the
+    # mail had been copied.
+    session, _items = outlook
+
+    class Rejecting(Listed):
+        def GetNext(self):
+            raise ComError(-2147418111, "Call was rejected by callee.", None, None)
+
+    class Items(CalendarItems):
+        def Restrict(self, where):
+            super().Restrict(where)
+            return Rejecting([Appointment("AP standup", local(2026, 10, 6, 9), local(2026, 10, 6, 9, 15))])
+
+    object.__setattr__(session.ns, "_defaults", {**session.ns._defaults, 9: CalendarFolder(Items([]))})
+    with pytest.raises(OutlookError) as caught:
+        session.calendar(datetime(2026, 10, 5, tzinfo=timezone.utc), datetime(2026, 11, 30, tzinfo=timezone.utc))
+    assert str(caught.value) == outlook_desktop.BUSY

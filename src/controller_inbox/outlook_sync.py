@@ -20,12 +20,12 @@ import json
 import logging
 import shutil
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from controller_inbox.config import Settings
 from controller_inbox.mail_identity import content_id, find_existing, same_time
-from controller_inbox.outlook_desktop import FolderInfo, NotInOutlook, OutlookError, Seen
+from controller_inbox.outlook_desktop import FolderInfo, NotInOutlook, OutlookError, Seen, trouble
 from controller_inbox.store import Store
 
 log = logging.getLogger(__name__)
@@ -361,6 +361,9 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
             report["meetings"] = sync_calendar(store, session, now=now)
         except OutlookError as exc:
             report["failed"].append({"folder": "Calendar", "error": str(exc)[:300]})
+        except Exception as exc:  # the calendar never undoes a mail sync that worked
+            log.warning("Couldn't read Outlook's calendar", exc_info=True)
+            report["failed"].append({"folder": "Calendar", "error": trouble("Outlook's calendar couldn't be read just now", exc)[:300]})
     stamp = now.astimezone(timezone.utc).isoformat()
     with store.transaction() as conn:
         if not _connected(store, conn):
@@ -404,16 +407,25 @@ def sync_calendar(store: Store, session, *, now: datetime | None = None) -> int:
                                 source="outlook")
         for item in found
     ]
-    # Read to Outlook's limit (a very busy calendar): what wasn't read is kept as it was, not taken for deleted.
-    # Outlook says so (``cut_short``): the meetings it read and left out (ended before the window) count to its limit.
-    if getattr(found, "cut_short", False):
-        upto = max((m.start for m in meetings), default="")  # none read in the window: none removed
+    # What wasn't read is kept as it was, not taken for deleted: meetings Outlook wouldn't hand over (``unreadable``),
+    # and those past where a read of a very busy calendar stopped at Outlook's limit (``cut_short``; the meetings it
+    # read and left out, ended before the window, count to its limit).
+    if getattr(found, "unreadable", 0):
+        upto = ""  # none removed
+    elif getattr(found, "cut_short", False):
+        # Removed up to two days before the last one read: another at that time may not have been reached, and Outlook
+        # lists an all-day meeting at local midnight, up to a day away from its date in UTC.
+        last = max((m.start for m in meetings), default="")  # none read in the window: none removed
+        upto = f"{date.fromisoformat(last[:10]) - timedelta(days=2)}T23:59:59+00:00" if last else ""
     else:
         upto = end.isoformat()
     with store.transaction() as conn:
         if not calendar_on(store, conn):
             return 0
-        kept = store.replace_meetings("outlook", meetings, start=start.date().isoformat(), end=upto, conn=conn)
+        # From the window's start to the second: only meetings ending after it are read, so one that ended before it
+        # on its first day is kept, as the days before are.
+        since = start.astimezone(timezone.utc).isoformat(timespec="seconds")
+        kept = store.replace_meetings("outlook", meetings, start=since, end=upto, conn=conn)
         store.set_state(CALENDAR_LAST_KEY, now.astimezone(timezone.utc).isoformat(), conn=conn)
     return kept
 
