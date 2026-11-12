@@ -386,6 +386,24 @@ def test_files_of_a_suspected_fraud_email_are_never_sent_to_the_model(mail, stor
     assert seeing.calls == []
 
 
+def test_a_read_stops_at_the_next_page_once_its_email_is_held(store, settings, monkeypatch, seeing):
+    # Marked fraud on its page while the model reads the first of three pages: the other two aren't sent.
+    from controller_inbox.fraud import record_fraud_verdict
+
+    email = _ingest_scan(store, settings, monkeypatch, pages=3)
+    att = email.attachments[0]
+    data = agent.original_file(settings, email, att).read_bytes()
+
+    def held_after_one() -> bool:
+        if len(store.page_readings(att.id)) >= 1 and "fraud_confirmed" not in store.get_email(email.id).flags:
+            record_fraud_verdict(store, settings, email.id, verdict="fraud")
+        return False
+
+    pictures = lambda: sum(isinstance(c["messages"][-1]["content"], list) for c in seeing.calls)  # noqa: E731
+    result = vision.read_pages(store, settings, email, att, data, [1, 2, 3], should_stop=held_after_one)
+    assert result.pages == 1 and pictures() == 1
+
+
 def test_the_offer_says_why_it_cant_read(scan, store, settings, monkeypatch):
     email = store.get_email(scan.id)
     att = email.attachments[0]

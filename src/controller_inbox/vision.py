@@ -1539,6 +1539,8 @@ def read_pages(
 
 
 def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, should_stop=None) -> Result:
+    from controller_inbox import fraud
+
     result = Result()
     if not same_file(att, data):
         result.failed.append("the file kept under this name isn't this attachment")
@@ -1573,6 +1575,9 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
             if page not in stored:
                 continue
             first = stored[page]["first"]
+        current = store.get_email(email.id)
+        if current is None or fraud.attachments_locked(current):
+            break  # held since the read began (a fraud verdict, a reported domain): no more of its pages are sent
         if on_progress:
             on_progress(index - 1, len(todo), f"{att.filename}, page {page}")
         started = time.monotonic()

@@ -244,6 +244,26 @@ def test_a_lookalike_held_when_the_vendors_invoice_is_read_keeps_the_check_that_
     assert any(row.get("email_id") == lookalike and row.get("level") == "high" for row in store.fraud_log(limit=50)), "logged"
 
 
+def test_mail_held_while_the_overnight_reading_runs_isnt_read_later_in_the_batch(loaded, settings):
+    from controller_inbox.local_llm import ReaderStats
+
+    later = overnight.waiting_for_reading(loaded, 50)[2].id
+
+    class Reader:
+        model, stopped, stats = "fake", False, ReaderStats()
+        seen: list[str] = []
+
+        def read(self, packet):
+            if not self.seen:  # meanwhile the user clicks "This is fraud" on a later email of the batch
+                record_fraud_verdict(loaded, settings, later, verdict="fraud")
+            self.seen.append(packet["email_id"])
+            return None
+
+    reader = Reader()
+    overnight.read_queue(loaded, settings, reader=reader, limit=50)
+    assert len(reader.seen) > 3 and later not in reader.seen
+
+
 def test_trusting_a_taught_sender_releases_all_their_mail(store, settings):
     held = _taught_sender(store, settings)
     record_fraud_verdict(store, settings, held[0], verdict="safe", scope="sender")

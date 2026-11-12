@@ -134,6 +134,10 @@ def read_queue(
     for index, email in enumerate(waiting, start=1):
         if on_progress:
             on_progress("reading", index, len(waiting), email.subject)
+        # As it is now: an email held while earlier ones were read (a fraud verdict, a reported domain) isn't read.
+        email = store.get_email(email.id)
+        if email is None or attachments_locked(email):
+            continue
         packet = build_packet(as_model_reads(store, email), corrections)
         parsed = reader.read(packet)
         if reader.stopped:

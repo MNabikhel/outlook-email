@@ -110,6 +110,13 @@ def judge(store: Store, settings: Settings, email: EmailRecord, *, limit: int = 
         if kept and kept["key"] == key:
             out.append({"other": other.id, "same": kept["same"], "why": kept["why"]})
             continue
+        # As they are now: either may have been held (a fraud verdict, a reported domain) while the model was asked
+        # about another pair, and a run reaches emails it picked minutes before.
+        current, theirs = store.get_email(email.id), store.get_email(other.id)
+        if current is None or _suspect(current):
+            return out  # not weighed: weighed when it is cleared
+        if theirs is None or _suspect(theirs):
+            continue
         verdict = _ask(settings, email, other)
         if spent is not None:
             spent.append(other.id)
