@@ -28,6 +28,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 WINDOW_BACK = timedelta(days=90)
 WINDOW_AHEAD = timedelta(days=180)
 MAX_OCCURRENCES = 400  # of one repeating meeting in the window
+MAX_STEPS = 20_000  # occurrences of one rule looked at, however often it repeats
 
 
 @dataclass
@@ -100,6 +101,11 @@ def _occurrences(event: dict, zones: dict, overrides: dict, method: str, email_i
     rule = event.get("RRULE")
     if rule is None:
         return [first]
+    if re.search(r"FREQ=(SECONDLY|MINUTELY|HOURLY)", rule[2], re.I):
+        # No meeting repeats more often than daily: such a rule (which anyone can email, from years back) would take
+        # minutes to walk. Its first occurrence is kept, marked as repeating.
+        first.recurring = True
+        return [first]
     from dateutil.rrule import rrulestr
 
     start = _when(event["DTSTART"], zones)
@@ -118,8 +124,14 @@ def _occurrences(event: dict, zones: dict, overrides: dict, method: str, email_i
     high = now + WINDOW_AHEAD
     if all_day:
         low, high = low.replace(tzinfo=None), high.replace(tzinfo=None)
+    # Walked a step at a time from the window's start, up to its end, and at most so far: a rule every minute (or
+    # second) from years back, which anyone can email, mustn't hold the run or fill the memory.
     out = []
-    for when in rrule.between(low, high, inc=True):
+    from itertools import islice
+
+    for when in islice(rrule.xafter(low, inc=True), MAX_STEPS):
+        if when > high:
+            break
         stamp = when.date() if all_day else when
         key = _key(stamp)
         if key in excluded:
@@ -131,11 +143,11 @@ def _occurrences(event: dict, zones: dict, overrides: dict, method: str, email_i
                 meeting.recurring = True
                 out.append(meeting)
             continue
-        out.append(
-            Meeting(**{**asdict(first), "start": _iso(stamp, all_day), "end": _iso(stamp + length if not all_day else stamp + length, all_day), "recurring": True})
-        )
-        if len(out) >= MAX_OCCURRENCES:
-            break
+        out.append(Meeting(**{**asdict(first), "start": _iso(stamp, all_day), "end": _iso(stamp + length, all_day), "recurring": True}))
+    if len(out) > MAX_OCCURRENCES:
+        # More than a calendar shows: those from today on are kept first.
+        upcoming = [m for m in out if m.start >= _iso(now.date() if all_day else now, all_day)]
+        out = (upcoming[:MAX_OCCURRENCES] or out[-MAX_OCCURRENCES:])
     return out
 
 
@@ -510,7 +522,9 @@ def related_mail(store, meeting: dict, *, limit: int = 8) -> list:
     addresses = {person for person in people if "@" in person}
     when = datetime.fromisoformat(meeting["start"]) if "T" in meeting["start"] else datetime.combine(date.fromisoformat(meeting["start"][:10]), time(), tzinfo=timezone.utc)
     when = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
-    candidates = store.search_ranked(words, limit=limit * 3) if words else []
+    # Searched within the two weeks either side in the query itself: the best matches of all time may all be old.
+    low, high = (when - timedelta(days=14)).isoformat(), (when + timedelta(days=14)).isoformat()
+    candidates = store.search_ranked(words, limit=limit * 3, received_from=low, received_before=high) if words else []
     for email in candidates:
         try:
             received = datetime.fromisoformat((email.received_at or "").replace("Z", "+00:00"))

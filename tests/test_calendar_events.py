@@ -237,3 +237,40 @@ def test_an_all_day_meeting_request_keeps_its_days():
     assert cal._organizer_dates(start, end) == (datetime(2026, 10, 30).date(), datetime(2026, 10, 31).date())
     tokyo = (datetime(2026, 10, 29, 15, 0, tzinfo=timezone.utc), datetime(2026, 10, 30, 15, 0, tzinfo=timezone.utc))
     assert cal._organizer_dates(*tokyo) == (datetime(2026, 10, 30).date(), datetime(2026, 10, 31).date())
+
+
+def test_an_invitation_built_to_overload_is_read_in_a_moment_and_a_broken_one_adds_nothing(store, settings):
+    import time as clock
+
+    from controller_inbox import pipeline
+    from controller_inbox.models import RawAttachment, RawMessage
+
+    started = clock.monotonic()
+    every_minute = cal.from_ics(_ics(_event("UID:m", "DTSTART:20000101T000000Z", "DTEND:20000101T000100Z", "RRULE:FREQ=MINUTELY")), now=NOW)
+    daily_for_decades = cal.from_ics(_ics(_event("UID:d", "DTSTART:19500101T090000Z", "DTEND:19500101T091500Z", "RRULE:FREQ=DAILY")), now=NOW)
+    assert clock.monotonic() - started < 3
+    assert len(every_minute) == 1 and every_minute[0].recurring
+    assert 0 < len(daily_for_decades) <= cal.MAX_OCCURRENCES and daily_for_decades[-1].start >= "2027-03-01", "the window, ahead included"
+
+    broken = _ics(_event("UID:b", "SUMMARY:Bad", "DTSTART:20261012T999999Z"))
+    raw = RawMessage(id="e-broken", subject="Invoice INV-77 and a call", sender_name="Vendor", sender_email="ar@vendor.example",
+                     received_at=NOW, body_text="Invoice INV-77 attached, and an invitation.", body_preview="", has_attachments=True,
+                     source="folder", attachments=[RawAttachment(id="a1", filename="invite.ics", content_type="text/calendar", size_bytes=len(broken), content=broken.encode())])
+    assert pipeline.invites(raw, raw.id, NOW) == [], "the email is still read; its invitation adds nothing"
+
+
+def test_a_meetings_mail_is_found_among_a_year_of_mail_with_the_same_words(store):
+    import sys
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    for n in range(60):
+        old = _record(f"old{n}", sender="close@taz.com", received=f"2026-0{1 + n % 6}-{1 + n % 27:02d}T09:00:00+00:00")
+        old.subject = "Month-end close checklist"
+        store.upsert_email(old)
+    near = _record("near", sender="close@taz.com", received="2026-10-27T09:00:00+00:00")
+    near.subject = "Month-end close checklist for October"
+    store.upsert_email(near)
+    meeting = {"subject": "Month-end close checklist review", "start": "2026-10-30T14:00:00+00:00", "organizer": "", "attendees": [], "email_id": ""}
+    assert [e.id for e in cal.related_mail(store, meeting)] == ["near"]
