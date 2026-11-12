@@ -59,8 +59,9 @@ function header(d) {
     h(
       "p",
       { class: "rd-from" },
-      h("b", null, d.sender_name || d.sender_email),
-      d.sender_name && d.sender_email ? h("span", { class: "muted" }, ` <${d.sender_email}>`) : null,
+      h("b", null, d.sender_name || (d.sender_email || "").toLowerCase()),
+      // In lower case, as addresses are compared: a capital I in "acmesteeI-billing.com" looks like an l.
+      d.sender_name && d.sender_email ? h("span", { class: "muted" }, ` <${d.sender_email.toLowerCase()}>`) : null,
       h("span", { class: "muted" }, ` · ${d.when_full}`)
     ),
     differentReply ? h("p", { class: "rd-replyto" }, icon("alert", 13), " Replies go to ", h("b", null, d.reply_to)) : null

@@ -444,3 +444,20 @@ def test_other_websites_cannot_change_settings(client, settings):
         assert client.post(path, json=body, headers={**PAGE, "Origin": "https://evil.example"}).status_code == 403, path
         assert client.post(path, json=body).status_code == 403, path
     assert settings.timezone == "America/New_York" and settings.vision_mode == "auto" and settings.min_context_tokens == 16384
+
+
+def test_the_whole_matter_shows_each_steps_sender_domain_in_lower_case(store, settings):
+    import sys
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    first = _record("acme-1", sender="billing@AcmeSteel-billing.com", mid="<a1@acmesteel-billing.com>", invoices=["INV-5521"])
+    second = _record("acme-2", sender="Billing@AcmesteeI-Billing.com", invoices=["INV-5521"], received="2026-10-06T14:00:00+00:00",
+                     threading={"in_reply_to": "<a1@acmesteel-billing.com>", "references": ["<a1@acmesteel-billing.com>"]})
+    for record in (first, second):
+        record.sender_name = "Dana Ortiz"
+        store.upsert_email(record)
+    client = TestClient(web.create_app(settings, store))
+    steps = client.get("/api/trace/acme-2", headers=PAGE).json()["steps"]
+    assert {(step["sender"], step["domain"]) for step in steps} >= {("Dana Ortiz", "acmesteel-billing.com"), ("Dana Ortiz", "acmesteei-billing.com")}

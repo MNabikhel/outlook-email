@@ -4,7 +4,7 @@
    cited page, slide, sheet or cell). The classic chat (app.js) formats its answers with this too, through
    classic.js, and links a cited email to its classic page instead. */
 
-import { escapeHtml } from "./dom.js";
+import { escapeHtml, plural } from "./dom.js";
 import { filePath } from "./api.js";
 
 const PAGE_AT = /\b(?:page|p\.)\s?(\d{1,4})\b/i;
@@ -37,6 +37,13 @@ function calendarHref(source, context, whole) {
   };
   const meeting = named(context) || named(whole);
   return meeting ? `/app/calendar?${new URLSearchParams({ view: "day", date: meeting.day, meeting: meeting.id })}` : "/app/calendar";
+}
+
+/** What an answer looked at, for the line above its sources: "Looked at your calendar and 1 email". */
+export function lookedAt(sources) {
+  const mail = sources.filter((source) => !source.calendar).length;
+  const parts = [sources.some((source) => source.calendar) ? "your calendar" : "", mail ? plural(mail, "email") : ""].filter(Boolean);
+  return `Looked at ${parts.join(" and ")}`;
 }
 
 export const mailHref = (source, context = "", whole = "") =>

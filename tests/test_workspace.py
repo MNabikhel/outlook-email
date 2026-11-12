@@ -1093,3 +1093,90 @@ def test_an_answers_meeting_citation_opens_that_meeting_on_its_day(tmp_path):
     assert 'href="/app/calendar?view=day&amp;date=2026-09-23&amp;meeting=mtg-b"' in named
     assert 'href="/app/calendar?view=day&amp;date=2026-09-23&amp;meeting=mtg-b"' in listed, "the meeting the answer lists"
     assert 'href="/app/calendar"' in none
+
+
+# The calendar and Settings: what the end-to-end review found ------------------------------------------------
+def test_an_answer_from_the_calendar_says_it_looked_at_your_calendar(tmp_path):
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js isn't installed")
+    script = tmp_path / "looked.mjs"
+    script.write_text(
+        f"import {{ lookedAt }} from {json.dumps((UI / 'format.js').as_uri())};\n"
+        "console.log(lookedAt([{ calendar: true }, { id: 'e1' }]));\n"
+        "console.log(lookedAt([{ calendar: true }]));\n"
+        "console.log(lookedAt([{ id: 'e1' }, { id: 'e2' }]));\n"
+    )
+    both, calendar, mail = subprocess.run([node, str(script)], capture_output=True, text=True, check=True).stdout.splitlines()
+    assert (both, calendar, mail) == ("Looked at your calendar and 1 email", "Looked at your calendar", "Looked at 2 emails")
+
+
+def test_a_cancelled_meeting_reads_well_open_and_month_to_week_keeps_the_day(loaded, site, page):
+    from controller_inbox.calendar_events import Meeting
+
+    loaded.save_invites("cx-mail", [Meeting(uid="cx", start="2026-09-24T18:00:00+00:00", end="2026-09-24T18:30:00+00:00",
+                                            subject="Canceled: Vendor sync", cancelled=True, email_id="cx-mail")], sender="ap@northwind.com")
+    page.goto(f"{site}/app/calendar?view=week&date=2026-09-22")
+    page.click(".cal-block:has-text('Vendor sync')")
+    page.wait_for_selector(".cal-panel-title:has-text('Vendor sync')")
+    assert page.text_content(".cal-panel-title").startswith("Vendor sync"), "no “Canceled:” beside the Cancelled tag"
+    ratio = page.evaluate("""() => {
+        const subj = document.querySelector('.cal-chip.open.cancelled .cal-subj');
+        const rgb = (c) => c.match(/[\\d.]+/g).slice(0, 3).map(Number).map((v) => v / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+        const lum = (c) => { const [r, g, b] = rgb(c); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+        const fg = lum(getComputedStyle(subj).color), bg = lum(getComputedStyle(subj.closest('.cal-chip')).backgroundColor);
+        return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
+    }""")
+    assert ratio >= 4.5, f"the open cancelled meeting's title is readable ({ratio:.1f}:1)"
+    page.goto(f"{site}/app/calendar?view=month&date=2026-09-22")
+    page.wait_for_selector(".cal-month")
+    page.keyboard.press("ArrowRight")
+    page.wait_for_function("document.querySelector('.cal-title').textContent.includes('October 2026')")
+    page.keyboard.press("w")
+    page.wait_for_selector(".cal-week")
+    assert "October 19 – 25, 2026" in page.text_content(".cal-title"), "the week of the same day in the month moved to"
+
+
+def test_the_shortcuts_sheet_lists_the_calendar_and_todays_heading_is_only_its_name(site, page):
+    page.goto(f"{site}/app")
+    heading = page.wait_for_selector("#reader h2.rd-h:has-text('Today')")
+    assert heading.inner_text().strip().lower() == "today's meetings"
+    assert page.locator("#reader a[href='/app/calendar']:has-text('Calendar')").count() >= 1, "the link to the calendar is still there"
+    page.keyboard.press("?")
+    sheet = page.wait_for_selector(".overlay:not([hidden])")
+    text = sheet.inner_text()
+    assert re.search(r"g\s+m\s+Calendar", text) and "Day, week or month" in text and "←" in text and "Back to today" in text
+
+
+def test_settings_marks_the_section_opened_and_needs_no_terminal(site, page):
+    page.goto(f"{site}/app/settings#set-outlook")
+    page.wait_for_selector("#set-outlook")
+    page.wait_for_function("() => document.querySelector('.set-nav-link.on') && document.querySelector('.set-nav-link.on').dataset.section === 'outlook'")
+    assert page.evaluate("() => Math.abs(document.querySelector('#set-outlook').getBoundingClientRect().top) < window.innerHeight / 2"), "shown there"
+    page.wait_for_timeout(400)
+    assert page.get_attribute(".set-nav-link.on", "data-section") == "outlook", "and still marked once it is there"
+    text = page.inner_text(".settings")
+    assert "CONTROLLER_INBOX_" not in text and "python -m" not in text, "Settings asks for no terminal or setting names"
+
+
+def test_the_whole_matter_and_the_reading_pane_show_the_senders_address_in_lower_case(loaded, site, page):
+    import sys
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    first = _record("acme-1", sender="billing@AcmeSteel-billing.com", mid="<a1@acmesteel-billing.com>", invoices=["INV-5521"])
+    second = _record("acme-2", sender="Billing@AcmesteeI-Billing.com", invoices=["INV-5521"], received="2026-10-06T14:00:00+00:00",
+                     threading={"in_reply_to": "<a1@acmesteel-billing.com>", "references": ["<a1@acmesteel-billing.com>"]})
+    for record in (first, second):
+        record.sender_name = "Dana Ortiz"
+        loaded.upsert_email(record)
+    page.goto(f"{site}/app/trace/acme-2")
+    page.wait_for_selector(".tr-step")
+    tops = page.locator(".tr-step .tr-top").all_inner_texts()
+    assert any("acmesteei-billing.com" in top for top in tops) and any("acmesteel-billing.com" in top for top in tops), tops
+    page.goto(f"{site}/app/mail/acme-2")
+    assert "<billing@acmesteei-billing.com>" in page.wait_for_selector(".rd-from").inner_text()

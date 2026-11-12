@@ -568,6 +568,8 @@ def register_workspace(
             steps.append({
                 **card,
                 "here": record.id == email.id,
+                # Beside the name, as Related shows it: two senders named alike ("Dana Ortiz") from two domains.
+                "domain": (links._domain_of(record) or "no address").lower(),
                 "reasons": reasons,
                 "first_line": "" if card["locked"] else " ".join((record.body_text or record.body_preview or "").split())[:240],
                 "file_names": [] if card["locked"] else [att.filename.rsplit(" › ", 1)[-1] for att in record.attachments][:8],

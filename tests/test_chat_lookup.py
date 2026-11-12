@@ -93,6 +93,8 @@ def test_held_mail_in_the_conversation_is_not_quoted(store, settings):
     store.upsert_email(later)
     _sources, text = _events(store, settings, "What happened on this so far?", later.id)
     assert "5566778899" not in text and "wire 100%" not in text
+    assert "1 email of this conversation is held as possible payment fraud and isn't shown here." in text, "said, not left out in silence"
+    assert "Clearwater order 5521**" not in text.replace("RE: Clearwater order 5521**", ""), "nothing of it, its subject included"
     _sources, text = _events(store, settings, "what is the payment schedule?", later.id)
     assert "5566778899" not in text and "wire 100%" not in text
 
@@ -169,7 +171,7 @@ def test_held_mail_of_a_matter_or_about_a_meeting_is_no_source(store, settings):
     held.subject = "Budget review: new dial-in and bank details"
     held.category = DocumentType.PAYMENT_INSTRUCTION_CHANGE
     store.upsert_email(held)
-    sources, thread = assistant._matter(store, store.get_email("root"))
+    sources, thread, _held = assistant._matter(store, store.get_email("root"))
     assert "held" not in {email.id for email in sources} and "held" not in thread
     assert "held" not in {email.id for email in assistant._conversation(store, store.get_email("root"))}
     meeting = {"id": "m1", "uid": "u1", "subject": "Budget review", "start": "2026-10-07T15:00:00+00:00", "end": "2026-10-07T16:00:00+00:00",

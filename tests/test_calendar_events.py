@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import re
+
 from controller_inbox import calendar_events as cal
 
 NOW = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
@@ -121,8 +123,11 @@ def test_ask_closedesk_reads_the_calendar_for_a_question_about_meetings(loaded, 
     text = "".join(e["text"] for e in events if e["type"] == "delta")
     assert "Wed Sep 23, 9:30am–9:45am · AP team standup" in text and "PBC list walkthrough" in text
     assert "Northwind" not in text, "tomorrow's meetings only"
+    assert re.search(r"You have \d+ meetings on Wednesday September 23 \[1\]:", text), "the answer to the question first"
     monday = "".join(e["text"] for e in assistant.answer_stream(loaded, settings, "Am I free on Monday?", today="2026-09-22") if e["type"] == "delta")
     assert "Mon Sep 28" in monday and "Sep 23" not in monday, "the coming Monday"
+    saturday = "".join(e["text"] for e in assistant.answer_stream(loaded, settings, "Am I free on Saturday?", today="2026-09-22") if e["type"] == "delta")
+    assert "Nothing on your calendar on Saturday September 26 [1]." in saturday
 
     asked = []
 
@@ -688,3 +693,16 @@ def test_invitations_already_in_the_mailbox_reach_the_calendar_after_an_update(s
         conn.execute("DELETE FROM meetings")
     cli._link_stored_mail(settings, store)  # what CloseDesk starts in the background after an update
     assert [m["uid"] for m in store.meetings_between("2026-10-01", "2026-10-31")] == ["old1"]
+
+
+def test_a_cancelled_meeting_shows_its_title_without_canceled_and_a_moved_week_still_repeats():
+    from zoneinfo import ZoneInfo
+
+    [cancelled] = cal.from_ics(_one_week("20261019T140000Z", "20261019T140000Z", "20261019T143000Z", sequence=1, method="CANCEL", cancelled=True)
+                               .replace("SUMMARY:AP standup", "SUMMARY:Canceled: AP standup"), now=NOW)
+    shown = cal.shown(cancelled.to_row(), ZoneInfo("America/New_York"))
+    assert (shown["subject"], shown["cancelled"]) == ("AP standup", True), "the Cancelled tag says it"
+    [moved] = cal.from_ics(_one_week("20261026T140000Z", "20261027T150000Z", "20261027T153000Z", sequence=2), now=NOW)
+    assert moved.recurring and cal.shown(moved.to_row(), ZoneInfo("UTC"))["recurring"], "one week of a repeating meeting"
+    kept = cal.shown({**moved.to_row(), "subject": "Canceled: plans", "cancelled": False}, ZoneInfo("UTC"))
+    assert kept["subject"] == "Canceled: plans", "a meeting that isn't cancelled keeps its title as it is"

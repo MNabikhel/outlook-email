@@ -146,7 +146,7 @@ export function todayBrief(data) {
 function meetingsCard(meetings) {
   if (!meetings.length) return null;
   return card(
-    h("span", null, "Today's meetings ", h("a", { class: "muted small", href: "/app/calendar", dataset: { nav: "" } }, "Calendar")),
+    "Today's meetings",
     h(
       "ul",
       { class: "plain-list meetings" },
@@ -158,6 +158,9 @@ function meetingsCard(meetings) {
           h("small", null, [meetingTime(m), m.location, m.cancelled ? "cancelled" : ""].filter(Boolean).join(" · "))
         )
       )
+    ),
+    // Beside the list, not in its heading: read out, the heading said "Today's meetings Calendar".
+    h("p", { class: "small" }, h("a", { href: "/app/calendar", dataset: { nav: "" } }, "Open the calendar", icon("right", 12))
     )
   );
 }

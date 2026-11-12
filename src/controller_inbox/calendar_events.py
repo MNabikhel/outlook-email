@@ -119,6 +119,7 @@ def from_ics(
         meeting = _meeting(event, zones, method, email_id)
         if meeting is not None and (meeting.uid, meeting.start) not in seen:
             meeting.occurrence = replaces
+            meeting.recurring = True  # one occurrence of a repeating meeting
             out.append(meeting)
     return out[:limit]
 
@@ -774,9 +775,13 @@ def shown(meeting: dict, tz) -> dict:
     else:
         start_local = datetime.fromisoformat(meeting["start"]).astimezone(tz).strftime("%Y-%m-%dT%H:%M")
         end_local = datetime.fromisoformat(meeting["end"]).astimezone(tz).strftime("%Y-%m-%dT%H:%M")
+    subject = meeting["subject"] or "(no title)"
+    if meeting["cancelled"]:
+        # Outlook names a cancellation "Canceled: Weekly review": the Cancelled tag beside it says so already.
+        subject = re.sub(r"(?i)^\s*cancell?ed\s*:\s*", "", subject) or subject
     return {
         "id": meeting["id"],
-        "subject": meeting["subject"] or "(no title)",
+        "subject": subject,
         "start": start_local,
         "end": end_local,
         "all_day": meeting["all_day"],

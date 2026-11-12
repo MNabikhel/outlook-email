@@ -1422,6 +1422,8 @@ dialog.consent p { margin: 0 0 10px; line-height: 1.5; }
 .cal-panel-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .cal-chip.all-day { border-left-color: var(--ok, #2e7d4f); background: var(--ok-soft); }
 .cal-chip.cancelled .cal-subj { text-decoration: line-through; color: var(--muted); }
+/* Open, the title is struck through in the open meeting's own colour: grey on the accent couldn't be read. */
+.cal-chip.open.cancelled .cal-subj { color: inherit; }
 .cal-time { flex: none; color: var(--text-2); font-variant-numeric: tabular-nums; }
 .cal-subj { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .cal-month { width: 100%; border-collapse: collapse; table-layout: fixed; min-width: 560px; }

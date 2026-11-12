@@ -102,16 +102,18 @@ _HISTORY = re.compile(
 )
 
 
-def _matter(store: Store, current: EmailRecord) -> tuple[list[EmailRecord], list[str]]:
+def _matter(store: Store, current: EmailRecord) -> tuple[list[EmailRecord], list[str], int]:
     """The mail linked to ``current``: its conversation (oldest first), then mail sharing an invoice, a PO or a file;
-    and the ids of its conversation, ``current`` among them, oldest first."""
+    the ids of its conversation, ``current`` among them, oldest first; and how many emails of its conversation are
+    held as possible payment fraud (left out)."""
     from controller_inbox import links
 
     found = links.related(store, current)
     # Held mail of the matter is no source: it never reaches the model (the Related panel lists it, marked).
     thread = [email for email in found["thread"] if email.id != current.id and not attachments_locked(email)]
     linked = [email for group in found["groups"] for email in group["emails"] if not attachments_locked(email)]
-    return thread + linked, [email.id for email in found["thread"] if email.id == current.id or not attachments_locked(email)]
+    held = sum(1 for email in found["thread"] if email.id != current.id and attachments_locked(email))
+    return thread + linked, [email.id for email in found["thread"] if email.id == current.id or not attachments_locked(email)], held
 
 
 def _conversation(store: Store, current: EmailRecord) -> list[EmailRecord]:
@@ -180,8 +182,10 @@ def _readable_day(row: str) -> str:
     return f"{day:%a %b} {day.day}{',' if rest.startswith(' ') and not rest.startswith(' (') else ''}{rest}"
 
 
-def _meetings_for(question: str, listing: str, today: str) -> str:
-    """The calendar's lines for the day a question names (today, tomorrow, a weekday), or the next seven days."""
+def _meetings_for(question: str, listing: str, today: str, ref: str = "") -> str:
+    """The answer to "am I free Friday?" without a model: how many meetings there are on the day a question names
+    (today, tomorrow, a weekday), or in the next seven days, then the calendar's lines for them. ``ref`` cites the
+    calendar ("[1]")."""
     rows = [line for line in listing.splitlines()[1:] if line.strip()]
     try:
         day = date.fromisoformat(today) if today else date.today()
@@ -202,7 +206,18 @@ def _meetings_for(question: str, listing: str, today: str) -> str:
         days = [day + timedelta(days=i) for i in range(7)]
     wanted = {d.isoformat() for d in days}
     picked = [f"- {_readable_day(row)}" for row in rows if row[:10] in wanted]
-    return "\n".join(picked) if picked else "No meetings then."
+    if len(days) == 1:
+        when = f"on {days[0]:%A %B} {days[0].day}"
+    else:
+        when = "next week" if "next week" in lower else "in the next seven days"
+    on = sum(1 for row in rows if row[:10] in wanted and "CANCELLED" not in row)
+    if not picked:
+        return f"Nothing on your calendar {when}{ref}."
+    if not on:
+        lead = f"Nothing on your calendar {when}{ref}: what was there is cancelled."
+    else:
+        lead = f"You have {on} meeting{'' if on == 1 else 's'} {when}{ref}:"
+    return "\n".join([lead, *picked])
 
 
 def asks_about_meetings(question: str) -> bool:
@@ -472,11 +487,12 @@ def pick_sources(
     if current is not None:
         picked[current.id] = current
         if _HISTORY.search(question):
-            matter, thread = _matter(store, current)
-            if matter:
+            matter, thread, held = _matter(store, current)
+            if matter or held:
                 # "What happened on this so far?", "trace this back": the email's conversation and linked mail.
                 if report is not None:
                     report["thread"] = thread
+                    report["held"] = held
                 return [current, *matter][: MAX_SOURCES + 1], False, set()
         here = not _ELSEWHERE.search(question) and answered_here(current, question)
         if on_screen_question(question) or (here and (not about_today or _due_here(current, question))):
@@ -854,6 +870,7 @@ def offline_answer(
     tz=None,
     thread: list[str] | None = None,
     meeting: dict | None = None,
+    held: int = 0,
 ) -> str:
     """The answer with no model: the emails, lines and file passages that match, as a list.
 
@@ -870,10 +887,10 @@ def offline_answer(
         return _meeting_answer(note, question, sources, meeting, numbers, tz)
     calendar = next((email for email in sources if email.source == "calendar"), None)
     if calendar is not None:
-        return f"{note} Your meetings [{numbers[calendar.id]}]:\n" + _meetings_for(question, calendar.body_text, today)
+        return f"{note} " + _meetings_for(question, calendar.body_text, today, f" [{numbers[calendar.id]}]")
     if current is not None and not found and not about_today:
-        if thread and len(sources) > 1:
-            return _history_answer(note, sources, current, thread, numbers, tz)
+        if thread and (len(sources) > 1 or held):
+            return _history_answer(note, sources, current, thread, numbers, tz, held=held)
         tasks = [a.title for a in current.actions if a.status == ActionStatus.OPEN]
         lines = [f"{note} The email on screen [{numbers[current.id]}]:", f"**{current.subject}** from {_who(current)}."]
         if current.summary:
@@ -1002,9 +1019,12 @@ def body_lines(email: EmailRecord, question: str, *, limit: int = 2, width: int 
     return [sentence if len(sentence) <= width else sentence[:width].rsplit(" ", 1)[0] + " …" for _, _, sentence in best]
 
 
-def _history_answer(note: str, sources: list[EmailRecord], current: EmailRecord, thread: list[str], numbers: dict, tz) -> str:
+def _history_answer(
+    note: str, sources: list[EmailRecord], current: EmailRecord, thread: list[str], numbers: dict, tz, *, held: int = 0
+) -> str:
     """How the open email came about, with no model: its conversation, oldest first, one line each (when, who, the
-    subject and how it starts), then the mail linked to it by an invoice, a PO or a file. Every email looked at is listed."""
+    subject and how it starts), then the mail linked to it by an invoice, a PO or a file. Every email looked at is
+    listed, and how many of the conversation's are held as possible payment fraud (``held``), with nothing of them."""
     by_id = {email.id: email for email in sources}
     steps = [by_id[email_id] for email_id in thread if email_id in by_id]
     lines = [f"{note} How this came about, oldest first:"]
@@ -1017,6 +1037,9 @@ def _history_answer(note: str, sources: list[EmailRecord], current: EmailRecord,
         for email in linked:
             here = " (open on screen)" if email.id == current.id else ""
             lines.append(f"- {_when(email, tz)} · {_who(email)}: **{email.subject}**{here} — {first_line(email)} [{numbers[email.id]}]")
+    if held:
+        lines.append(f"{held} email{' of this conversation is' if held == 1 else 's of this conversation are'} held as possible payment fraud and "
+                     f"{'is' if held == 1 else 'are'}n't shown here.")
     if any(is_fraud(email) for email in sources):
         lines.append(FRAUD_WARNING)
     return "\n".join(lines)
@@ -1117,7 +1140,7 @@ def answer_stream(
         yield {"type": "step", "text": semantic.search_step(searched["how"], settings, searched["meaning_hits"])}
     lookup = {
         "about_today": about_today, "focus": focus, "found": found, "current_id": email_id, "today": today, "tz": settings.tz,
-        "thread": searched.get("thread"), "meeting": _shown(meeting, settings) if meeting is not None else None,
+        "thread": searched.get("thread"), "meeting": _shown(meeting, settings) if meeting is not None else None, "held": searched.get("held", 0),
     }
     if not use_model:
         yield {"type": "delta", "text": offline_answer(question, sources, **lookup)}

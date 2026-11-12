@@ -17,7 +17,8 @@ function step(s) {
     h(
       "a",
       { class: "tr-card", href: mailHref(s.id), dataset: { nav: "" } },
-      h("span", { class: "tr-top" }, h("b", { class: "trunc" }, s.sender), h("span", { class: "muted small", title: s.when_full }, s.when)),
+      // The sender's domain beside the name, as Related shows it: a lookalike ("acmesteeI-billing.com") shows at a glance.
+      h("span", { class: "tr-top" }, h("span", { class: "trunc" }, h("b", null, s.sender), h("span", { class: "muted small" }, ` · ${s.domain}`)), h("span", { class: "muted small", title: s.when_full }, s.when)),
       h("span", { class: "tr-subject" }, s.subject),
       s.first_line ? h("span", { class: "muted small tr-first" }, s.first_line) : null,
       s.file_names.length ? h("span", { class: "muted small rel-files" }, icon("clip", 12), h("span", null, s.file_names.join(", "))) : null,

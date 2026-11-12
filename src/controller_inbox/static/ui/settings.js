@@ -106,6 +106,10 @@ export function createSettings(ctx) {
     if (!root || !root.isConnected) {
       root = page();
       ctx.show(root, { keepScroll });
+      // Opened at a section (/app/settings#set-outlook, from a link elsewhere): shown there. The page is drawn after
+      // it loads, too late for the browser to go there by itself.
+      const target = !keepScroll && location.hash.startsWith("#set-") ? root.querySelector(location.hash) : null;
+      if (target) requestAnimationFrame(() => target.scrollIntoView({ block: "start" }));
     } else {
       for (const [id, build] of Object.entries(BUILDERS)) {
         const old = $(`#set-${id}`, root);
@@ -382,8 +386,7 @@ export function createSettings(ctx) {
           h("li", null, "A due date the model made up is dropped. A task due this week keeps the email in Important."),
           h("li", null, "If the server stops answering, the run stops asking and the mail stays filed from the draft.")
         ),
-        h("p", { class: "set-help" }, "Mode: ", b(m.mode), ` (${m.configured_url}). `, code("auto"), " uses a model whenever LM Studio's server is running. Set ", code("CONTROLLER_INBOX_LLM=false"), " to never use one."),
-        h("p", { class: "set-help" }, "Check speed from a terminal: ", code("python -m controller_inbox llm-check"))
+        h("p", { class: "set-help" }, "Mode: ", b(m.mode), ` (${m.configured_url}). `, m.mode === "auto" ? "A model is used whenever LM Studio's server is running; with it stopped, CloseDesk files the mail without one." : "")
       )
     );
   }
@@ -396,7 +399,7 @@ export function createSettings(ctx) {
         "div",
         { class: "set-block", id: "set-chat-model" },
         h("h3", { class: "set-sub" }, "Model that answers your questions"),
-        h("p", { class: "set-help" }, "The model that answers is set in ", code(".env"), " (", code(`CONTROLLER_INBOX_LLM_MODEL=${chat.env_model}`), "). Remove that line to choose it here.")
+        h("p", { class: "set-help" }, "The model that answers (", b(chat.env_model), ") is fixed in CloseDesk's settings file, ", code(".env"), " in its folder. Delete the line naming it there to choose it here.")
       );
     }
     const select = h(
@@ -637,7 +640,7 @@ export function createSettings(ctx) {
       "today",
       "",
       h("p", null, "Double-click ", code("CloseDesk.bat"), " (Windows) or ", code("CloseDesk.command"), " (Mac) in the project folder. It reads the drop folder, lets the model read, writes today's digest, and opens this dashboard."),
-      h("p", { class: "set-help" }, "Unattended: schedule ", code("python -m controller_inbox overnight"), " (see README), or leave ", code("python -m controller_inbox watch"), " running."),
+      h("p", { class: "set-help" }, "To have it done by itself before you start: see \u201cRun it before you wake up\u201d in the setup guide (", code("docs/SETUP.md"), " in the CloseDesk folder)."),
       facts([
         ["Last run", r.last_run || "never"],
         ["Drop folder last read", r.last_folder || "never"],
@@ -678,7 +681,7 @@ export function createSettings(ctx) {
       h("p", null, "When a category is wrong, open the message and use ", b("Wrong category?"), ". Write one sentence on why. The next email from that sender follows your correction, the model never overwrites the message you fixed, and the example is saved to ", code(data.corrections_file), "."),
       facts([["Corrections saved", String(data.corrections)]]),
       h("p", { class: "set-help" }, "A saved correction cannot clear a payment-instruction warning on a new message."),
-      h("p", null, "For fraud flags, use the ", b("Fraud check"), " on the email: “Not fraud”, trust the sender or their whole domain, or report it. See what is flagged on the ", h("a", { href: "/app/fraud", dataset: { nav: "" } }, "Fraud check page"), ", or list trusted domains (for example your own company's) in ", code("CONTROLLER_INBOX_TRUSTED_DOMAINS"), ".")
+      h("p", null, "For fraud flags, use the ", b("Fraud check"), " on the email: “Not fraud”, trust the sender or their whole domain, or report it. See what is flagged on the ", h("a", { href: "/app/fraud", dataset: { nav: "" } }, "Fraud check page"), ". To trust a whole domain (your own company's, for example), trust it from the Fraud check of any email from it.")
     );
   }
 
@@ -913,8 +916,7 @@ export function createSettings(ctx) {
             actions("sample", h("button", { type: "button", class: "btn btn-sm", onclick: load }, "Load sample mailbox")),
           ]
         : [
-            h("p", { class: "set-help" }, "Your own mail is loaded, so the sample is switched off here — loading it would erase your mail. To look at the sample, run it with a separate data folder:"),
-            h("pre", { class: "set-cmd" }, "CONTROLLER_INBOX_DATA_DIR=./data-sample python -m controller_inbox demo --serve"),
+            h("p", { class: "set-help" }, "Your own mail is loaded, so the sample is switched off here: loading it would erase your mail."),
             status("sample"),
           ]
     );
@@ -1016,21 +1018,23 @@ export function createSettings(ctx) {
     classic,
   };
 
-  // The side list marks the section being read.
+  // The side list marks the section being read: the last one whose top is above a line a third of the way down
+  // (marking the topmost one showing marked the one before it, scrolled nearly past).
   function watchSections(node) {
     if (observer) observer.disconnect();
-    if (!("IntersectionObserver" in window)) return;
     const links = new Map($$(".set-nav-link", node).map((link) => [`set-${link.dataset.section}`, link]));
-    const seen = new Map();
-    observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) seen.set(entry.target.id, entry.isIntersecting ? entry.boundingClientRect.top : null);
-        const first = [...seen.entries()].filter(([, top]) => top !== null).sort((a, b2) => a[1] - b2[1])[0];
-        if (!first) return;
-        for (const [id, link] of links) link.classList.toggle("on", id === first[0]);
-      },
-      { rootMargin: "-10% 0px -55% 0px" }
-    );
+    const mark = (id) => {
+      for (const [key, link] of links) link.classList.toggle("on", key === id);
+    };
+    const reading = () => {
+      const line = window.innerHeight / 3;
+      let id = "";
+      for (const sec of $$(".set-sec", node)) if (sec.getBoundingClientRect().top <= line) id = sec.id;
+      return id || ($(".set-sec", node) || { id: "" }).id;
+    };
+    if (links.has(location.hash.slice(1))) mark(location.hash.slice(1)); // opened at a section (#set-outlook)
+    if (!("IntersectionObserver" in window)) return;
+    observer = new IntersectionObserver(() => mark(reading()), { rootMargin: "-10% 0px -55% 0px", threshold: [0, 0.25, 0.5, 0.75, 1] });
     requestAnimationFrame(() => $$(".set-sec", node).forEach((sec) => observer.observe(sec)));
   }
 

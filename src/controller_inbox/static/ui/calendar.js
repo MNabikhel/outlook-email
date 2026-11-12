@@ -39,7 +39,9 @@ function step(view, date, by) {
   const day = parseDay(date);
   if (view === "day") return dayText(addDays(day, by));
   if (view === "week") return dayText(addDays(day, 7 * by));
-  return dayText(new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth() + by, 1)));
+  // The same day of the next or last month (its last, in a shorter one), so Week and Day from there stay on it.
+  const last = new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth() + by + 1, 0)).getUTCDate();
+  return dayText(new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth() + by, Math.min(day.getUTCDate(), last))));
 }
 
 function title(view, date) {
