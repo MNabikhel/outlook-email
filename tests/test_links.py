@@ -587,3 +587,15 @@ def test_a_new_store_needs_no_refiling(tmp_path):
     fresh = Store(tmp_path / "new.sqlite")
     with fresh.connect() as conn:
         assert conn.execute("SELECT value FROM sync_state WHERE key = 'link_keys_version'").fetchone()[0] == links.KEYS_VERSION
+
+
+def test_the_whole_matter_walks_a_conversation_once(store, monkeypatch):
+    for n in range(35):
+        threading = {"in_reply_to": f"m{n - 1}@taz.com", "references": ["m0@taz.com", *[f"m{k}@taz.com" for k in range(max(1, n - 19), n)]]} if n else {}
+        store.upsert_email(_record(f"e{n:02d}", sender="ap@taz.com", mid=f"<m{n}@taz.com>", threading=threading,
+                                   received=f"2026-10-{1 + n // 24:02d}T{n % 24:02d}:00:00+00:00"))
+    walks = []
+    real = links._conversation
+    monkeypatch.setattr(links, "_conversation", lambda *args: (walks.append(args[1]), real(*args))[1])
+    steps = links.trace(store, store.get_email("e10"))["steps"]
+    assert len(steps) == 35 and len(walks) <= 2, len(walks)

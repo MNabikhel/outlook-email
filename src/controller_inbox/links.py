@@ -242,12 +242,13 @@ REASONS = {
 AI_LABEL = "CloseDesk thinks these are about the same matter"
 
 
-def related(store, email: EmailRecord, *, ai: bool = True) -> dict:
+def related(store, email: EmailRecord, *, ai: bool = True, known_thread: list[str] | None = None) -> dict:
     """The conversation ``email`` is in, oldest first, and the other emails it shares an invoice, a PO, a file or a
     file's name with, grouped by why; with ``ai``, then those the local model said are about the same matter
-    (link_judge.py), each with its reason in the group's ``why``. Every email listed is one ``store`` still has."""
+    (link_judge.py), each with its reason in the group's ``why``. Every email listed is one ``store`` still has.
+    With ``known_thread`` (its conversation's ids, already found), the conversation isn't walked again or listed."""
     mine = store.link_keys(email.id) or keys(email)
-    thread_ids = _conversation(store, email.id, mine)
+    thread_ids = known_thread if known_thread is not None else _conversation(store, email.id, mine)
     groups: list[dict] = []
     shown = set(thread_ids) | {email.id}
     locked_here = attachments_locked(email)
@@ -276,7 +277,7 @@ def related(store, email: EmailRecord, *, ai: bool = True) -> dict:
     order = sorted((i for i in thread_ids if i in times or i == email.id), key=lambda i: (times.get(i) or email.received_at or "", i))
     at = order.index(email.id) if email.id in order else 0
     first = max(0, min(at - MAX_THREAD // 2, len(order) - MAX_THREAD))
-    window = order[first : first + MAX_THREAD]
+    window = [] if known_thread is not None else order[first : first + MAX_THREAD]
     cards = store.get_emails(list(dict.fromkeys([*window, *(i for g in groups for i in g["ids"])])))
     thread = [email if i == email.id else cards[i] for i in window if i == email.id or i in cards]
     out_groups = []
@@ -516,10 +517,16 @@ def trace(store, email: EmailRecord) -> dict:
     reasons: dict[str, list[str]] = {email.id: []}
     records: dict[str, EmailRecord] = {email.id: email}
     frontier = [email]
+    # An email whose conversation was walked already (it is one of it) isn't walked again: only its own invoices,
+    # POs and files are followed.
+    walked: dict[str, list[str]] = {}
     for _hop in range(2):
         nxt = []
         for current in frontier:
-            found = related(store, current)
+            found = related(store, current, known_thread=walked.get(current.id))
+            if current.id not in walked:
+                ids = [current.id, *(record.id for record in found["thread"])]
+                walked.update({member: ids for member in ids})
             for record in found["thread"]:
                 if record.id not in records:
                     records[record.id] = record
