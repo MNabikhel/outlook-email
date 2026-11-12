@@ -316,3 +316,22 @@ def test_a_question_about_how_an_email_came_about_reads_its_linked_mail(loaded):
     opened = agent._open_email(ws, ws.sources[0])
     assert "Related emails (open one by its number):\n[2] " in opened and "(same conversation)" in opened
     assert ws.email("2").id == "demo-inv-10482-dup", "the model opens a related email by the number it was given"
+
+
+    assert client.get("/api/mail/demo-chase-stmt").json()["related"] == {"thread": [], "groups": []}
+
+
+def test_a_held_emails_numbers_count_only_where_its_own_text_names_them(store):
+    # The lookalike's body names no invoice; the PDF it carries (held, never opened) says INV-10482. It must not
+    # show up as "Same invoice" beside the real vendor's mail.
+    store.upsert_email(_record("real", invoices=["INV-10482"]))
+    lookalike = _record("bec", sender="ap@northwind-supp1y.com", flags=["fraud_risk"],
+                        files=[("remit.pdf", "r" * 64, 30_000, ExtractedFields(invoice_numbers=["INV-10482"]))])
+    lookalike.extracted.invoice_numbers = ["INV-10482"]  # merged from its file, as the pipeline does
+    store.upsert_email(lookalike)
+    assert not any(kind == "invoice" for kind, _value in store.link_keys("bec"))
+    assert links.related(store, store.get_email("real"))["groups"] == []
+    said = _record("bec2", sender="ap@northwind-supp1y.com", flags=["fraud_risk"], invoices=["INV-10482"])
+    said.body_text = "Please pay invoice INV-10482 to our new account."
+    store.upsert_email(said)
+    assert ("invoice", "INV10482") in store.link_keys("bec2"), "named in its own words, it is linked (and shown held)"

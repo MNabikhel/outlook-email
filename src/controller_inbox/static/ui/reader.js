@@ -360,7 +360,9 @@ function fraudPanel(d, ctx) {
 function relatedRow(r) {
   const mark = r.locked
     ? h("span", { class: "tag tag-fraud", title: "Held as possible payment fraud: its files are not linked or opened" }, "Held: possible fraud")
-    : r.new_domain
+    : r.caution
+      ? h("span", { class: "tag tag-due_soon", title: "This email asks about payment details: check it by phone before acting on it" }, "Caution: payment details")
+      : r.new_domain
       ? h("span", { class: "tag tag-due_soon", title: "The first message in this conversation from this sender's domain. A reply from a lookalike domain is how payment-change fraud often starts." }, `New in this conversation: ${(r.sender_email || "").split("@")[1] || r.sender}`)
       : null;
   const line = h(
