@@ -328,7 +328,11 @@ def _participation(thread: list) -> tuple:
     stored, never by its Date header (that can be set to anything) and never one still being read. Its sender and the
     people it went to have taken part; so do the senders, and the people they wrote to, of each reply from someone
     who had, taken in the order the replies answer each other. A sender with no address is new (its Reply-To is what
-    replies would reach), and so is an email claiming the Message-ID of one from another domain."""
+    replies would reach), and so is an email claiming the Message-ID of one from another domain.
+
+    An email with no headers on record at all (stored before CloseDesk kept them, with no file left to read them
+    from: Microsoft 365 mail, or a file since deleted) went to people no one knows: once it has taken part, a later
+    sender may be one of them, and isn't marked new on its account."""
     if len(thread) < 2:
         return (thread[0] if thread else None), set()
     order = sorted(thread, key=_arrival)
@@ -370,15 +374,17 @@ def _participation(thread: list) -> tuple:
 
     root = next((record for record in tied if answered_by_another(record)), tied[0])
     seen = {_party(root)} - {""} | _to_parties(root)
+    unknown = not root.threading  # whom it went to isn't known
     marked = set(forged)
     for record in sorted(thread, key=lambda r: (depth(r), _arrival(r))):
         if record.id == root.id or record.id in forged:
             continue
         domain = _party(record)
-        if not domain or domain not in seen:
+        if not domain or (domain not in seen and not unknown):
             marked.add(record.id)
             continue  # whom a newcomer wrote to doesn't count as taking part
-        seen |= _to_parties(record)
+        seen |= {domain} | _to_parties(record)
+        unknown = unknown or not record.threading
     return root, marked
 
 

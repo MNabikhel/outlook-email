@@ -599,3 +599,17 @@ def test_the_whole_matter_walks_a_conversation_once(store, monkeypatch):
     monkeypatch.setattr(links, "_conversation", lambda *args: (walks.append(args[1]), real(*args))[1])
     steps = links.trace(store, store.get_email("e10"))["steps"]
     assert len(steps) == 35 and len(walks) <= 2, len(walks)
+
+
+def test_microsoft_365_mail_stored_before_recipients_were_kept_marks_no_one_new_on_its_account(store):
+    """Mail stored before CloseDesk kept whom it went to (Microsoft 365's has no file to read it again from): the
+    vendor it was copied to is not new when it replies. Once whom it went to is known, an outsider is new."""
+    started = _record("A", sender="colleague@ourco.com", received="2026-10-01T09:00:00+00:00")  # no recipients on record
+    started.conversation_id, started.created_at = "conv-old", "2026-10-01T09:05:00+00:00"
+    vendor = _record("B", sender="billing@northwind.com", threading={"to": ["me@ourco.com", "colleague@ourco.com"]}, received="2026-10-04T09:00:00+00:00")
+    vendor.conversation_id, vendor.created_at = "conv-old", "2026-10-04T09:05:00+00:00"
+    store.upsert_email(started)
+    store.upsert_email(vendor)
+    assert links.related(store, store.get_email("B"), ai=False)["new_domains"] == set()
+    store.save_threadings({"A": {"to": ["me@ourco.com"]}})
+    assert links.related(store, store.get_email("B"), ai=False)["new_domains"] == {"B"}
