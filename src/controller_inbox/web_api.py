@@ -370,6 +370,8 @@ def register_workspace(
                 "connected": cfg["consent"],
                 "calendar": cfg["calendar"],
                 "calendar_last": format_when(store.get_state(outlook_sync.CALENDAR_LAST_KEY) or "", settings.tz),
+                # Only the sample mailbox is loaded: its meetings are the sample calendar's, not from any invitation.
+                "sample": store.only_sample(),
             },
         }
 
