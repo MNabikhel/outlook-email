@@ -308,11 +308,6 @@ def new_domains(thread: list[EmailRecord]) -> set[str]:
     return _participation(thread)[1]
 
 
-def started_by(thread: list[EmailRecord]):
-    """The email a conversation started with, as ``new_domains`` decides it; None for an empty thread."""
-    return _participation(thread)[0] if thread else None
-
-
 def _participation(thread: list) -> tuple:
     """The email a conversation started with, and the emails in a conversation whose sender's domain hadn't taken part in it: a reply from a lookalike domain
     slipped into a real thread is how payment-change fraud usually starts.
@@ -333,7 +328,7 @@ def _participation(thread: list) -> tuple:
             continue
         if mid not in owns:
             owns[mid] = record
-        elif _domain_of(owns[mid]) != _domain_of(record):
+        elif _party(owns[mid]) != _party(record):
             forged.add(record.id)
 
     def parents(record) -> list[str]:
@@ -359,19 +354,19 @@ def _participation(thread: list) -> tuple:
 
     def answered_by_another(record) -> bool:
         mid = norm_id(record.internet_message_id)
-        return bool(mid) and any(mid in parents(other) and _domain_of(other) != _domain_of(record) for other in thread)
+        return bool(mid) and any(mid in parents(other) and _party(other) != _party(record) for other in thread)
 
     root = next((record for record in tied if answered_by_another(record)), tied[0])
-    seen = {_domain_of(root)} - {""} | _to_domains(root)
+    seen = {_party(root)} - {""} | _to_parties(root)
     marked = set(forged)
     for record in sorted(thread, key=lambda r: (depth(r), _arrival(r))):
         if record.id == root.id or record.id in forged:
             continue
-        domain = _domain_of(record)
+        domain = _party(record)
         if not domain or domain not in seen:
             marked.add(record.id)
             continue  # whom a newcomer wrote to doesn't count as taking part
-        seen |= _to_domains(record)
+        seen |= _to_parties(record)
     return root, marked
 
 
@@ -382,6 +377,28 @@ def _arrival(record) -> tuple[str, str]:
 
 def _domain_of(record: EmailRecord) -> str:
     return sender_domain(record) or (record.reply_to or "").rpartition("@")[2].lower()
+
+
+def _party(record) -> str:
+    """Who took part, as a conversation counts it: the sender's domain, or the whole address at a free mail
+    service (anyone can have an address at gmail.com)."""
+    from controller_inbox.fraud import FREEMAIL
+
+    domain = _domain_of(record)
+    if domain and domain in FREEMAIL:
+        return ((record.sender_email or record.reply_to or "").strip().lower()) or domain
+    return domain
+
+
+def _to_parties(record) -> set[str]:
+    from controller_inbox.fraud import FREEMAIL
+
+    out = set()
+    for address in (record.threading or {}).get("to") or []:
+        if "@" in address:
+            domain = address.rpartition("@")[2].lower()
+            out.add(address.strip().lower() if domain in FREEMAIL else domain)
+    return out
 
 
 def _to_domains(record: EmailRecord) -> set[str]:
