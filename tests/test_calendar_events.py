@@ -887,6 +887,51 @@ def test_invitations_from_a_newcomer_to_their_conversation_say_so_with_one_look_
     assert set(loaded) == {"own", "look1", "look2"}, loaded
 
 
+def test_a_series_updated_many_times_costs_the_calendar_no_more_to_show_or_open(store, settings, monkeypatch):
+    """Each update of a daily series by mail keeps its email's rows. A day on the calendar, with Outlook's copy of
+    the series on it, reads each email's flags once, not once per row of every update; opening the meeting reads
+    the rows of its own series only."""
+    import sys
+
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import outlook_sync, web
+    from controller_inbox import store as store_module
+    from controller_inbox.calendar_events import Meeting
+    from helpers import PAGE
+
+    def series(uid: str, version: int) -> str:
+        return _ics(_event(f"UID:{uid}", f"SUMMARY:Standup v{version}", "DTSTART:20260901T140000Z", "DTEND:20260901T141500Z",
+                           f"SEQUENCE:{version}", "ORGANIZER:mailto:lead@taz.com", "RRULE:FREQ=DAILY"))
+
+    for uid in ("S1", "S2"):
+        for version in range(15):
+            email_id = f"{uid}-v{version}"
+            store.save_invites(email_id, cal.from_ics(series(uid, version), email_id=email_id, now=NOW), sender="lead@taz.com",
+                               received=f"2026-09-{version + 1:02d}T09:00:00+00:00")
+    store.replace_meetings("outlook", [Meeting(uid="S1", start="2026-10-06T14:00:00+00:00", end="2026-10-06T14:15:00+00:00", subject="Standup",
+                                               organizer="lead@taz.com", busy="busy", source="outlook")], start=WINDOW[0], end=WINDOW[1])
+    store.set_state(outlook_sync.CONSENT_KEY, "2026-01-01T00:00:00")
+    store.set_state(outlook_sync.CALENDAR_KEY, "1")
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    for email_id in {f"{uid}-v{version}" for uid in ("S1", "S2") for version in range(15)}:
+        store.upsert_email(_record(email_id, sender="lead@taz.com"))
+    loads = []
+    real = store_module._loads
+    monkeypatch.setattr(store_module, "_loads", lambda value, default: (loads.append(value), real(value, default))[1])
+    day = store.meetings_between("2026-10-06T00:00:00+00:00", "2026-10-07T00:00:00+00:00")
+    assert [(m["source"], m["subject"]) for m in day] == [("outlook", "Standup"), ("invite", "Standup v14")]
+    assert loads.count("[]") <= 30, loads.count("[]")
+    client = TestClient(web.create_app(settings, store))
+    read = []
+    real_between = store_module.Store.meetings_between
+    monkeypatch.setattr(store_module.Store, "meetings_between", lambda self, *a, **k: (read.append(k.get("uid")), real_between(self, *a, **k))[1])
+    opened = client.get(f"/api/calendar/{day[1]['id']}", headers=PAGE).json()["meeting"]
+    assert opened["subject"] == "Standup v14" and read == ["S2"]
+
+
 def test_a_held_invitation_cleared_becomes_a_meeting_and_one_held_later_stops_being_one(store, settings):
     from controller_inbox import fraud
 

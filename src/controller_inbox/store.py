@@ -8,6 +8,7 @@ import uuid
 from types import SimpleNamespace
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import lru_cache
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -816,13 +817,14 @@ class Store:
              meeting.busy, meeting.email_id, meeting.sequence, sender, received, first_seen, meeting.occurrence, expanded),
         )
 
-    def meetings_between(self, start: str, end: str, *, limit: int = 2000, outlook: bool = True) -> list[dict]:
+    def meetings_between(self, start: str, end: str, *, limit: int = 2000, outlook: bool = True, uid: str = "") -> list[dict]:
         """The meetings that overlap ``start``..``end`` (ISO, UTC; dates for all-day ones compare by their text),
         earliest first, ``limit`` at most (Outlook's all kept). A meeting on Outlook's calendar is listed as Outlook
         has it: an invitation naming it adds nothing. One named by several emails is listed as the email that counts
         says (``_invite_winners``). An invitation on mail held as possible payment fraud is no meeting (its email may
         be held after it was read), nor is Outlook's own copy of it. ``outlook`` False leaves Outlook's calendar out
-        (not connected, or the calendar not turned on: rows a sync was still writing then aren't shown)."""
+        (not connected, or the calendar not turned on: rows a sync was still writing then aren't shown). With ``uid``,
+        only that meeting's (its series' occurrences, and other organizers' meetings with its id)."""
         try:
             low = (date.fromisoformat(start[:10]) - LONGEST_MEETING).isoformat()
         except ValueError:
@@ -830,8 +832,9 @@ class Store:
         with self.connect() as conn:
             # Meetings are kept for good (an invitation's, a year of Outlook's): only those starting near the window
             # are read, and those begun long before it that end in it, by when they end.
-            rows = conn.execute(MEETINGS_NEAR, (low, end, start, start, end)).fetchall()
-            rows += conn.execute(MEETINGS_LONG, (start, low)).fetchall()
+            one, its = (" AND m.uid = ?", (uid,)) if uid else ("", ())
+            rows = conn.execute(MEETINGS_NEAR + one, (low, end, start, start, end, *its)).fetchall()
+            rows += conn.execute(MEETINGS_LONG + one, (start, low, *its)).fetchall()
             rows.sort(key=lambda row: (row["start"], row["source"] != "outlook"))
             shown = _shown_meetings(conn, rows, outlook=outlook)
         seen: set[tuple[str, str, str]] = set()
@@ -2296,6 +2299,8 @@ def _shown_meetings(conn: sqlite3.Connection, rows: list[sqlite3.Row], *, outloo
         sql = """SELECT m.uid, m.start, m.organizer, m.sender, m.source AS kind, e.id AS email, e.sender_email, e.sender_name,
                         'invite' AS source, e.flags AS email_flags, e.category AS email_category
                  FROM meetings m LEFT JOIN emails e ON e.id = m.email_id WHERE m.source IN ('invite', 'held') AND m.uid IN ({})"""
+        # Only the rows that may be held are read (each is checked below): not every row of every update of a series.
+        sql += f""" AND (m.source = 'held' OR e.category = '{DocumentType.PAYMENT_INSTRUCTION_CHANGE.value}' OR e.flags LIKE '%"fraud_risk"%')"""
         for row in _in_chunks(conn, sql, [row["uid"] for row in rows if row["source"] == "outlook"]):
             # What a held invitation named: its email held, or gone (deleted) with only that left.
             if _held_invite(row) or (row["kind"] == "held" and row["email"] is None):
@@ -2512,10 +2517,17 @@ def _held_invite(row: sqlite3.Row) -> bool:
     """An invitation whose email is held as possible payment fraud (as fraud.attachments_locked decides)."""
     if row["source"] != "invite" or row["email_flags"] is None:
         return False
-    flags = _loads(row["email_flags"], [])
+    return _held_flags(row["email_flags"], row["email_category"])
+
+
+@lru_cache(maxsize=4096)
+def _held_flags(flags_text: str, category: str | None) -> bool:
+    """``_held_invite`` for an email's flags as stored and its category: worked out once for each, not for each of
+    the hundreds of rows a repeating invitation has."""
+    flags = _loads(flags_text, [])
     if "fraud_cleared" in flags:
         return False
-    return "fraud_risk" in flags or row["email_category"] == DocumentType.PAYMENT_INSTRUCTION_CHANGE.value
+    return "fraud_risk" in flags or category == DocumentType.PAYMENT_INSTRUCTION_CHANGE.value
 
 
 def _meeting_row(row: sqlite3.Row) -> dict[str, Any]:

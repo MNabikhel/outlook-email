@@ -382,7 +382,7 @@ def register_workspace(
         # Doubted as on the calendar: beside the other invitations with its id (a lookalike's), or for its email.
         around = date.fromisoformat(meeting["start"][:10])
         with_its_kind = store.meetings_between((around - timedelta(days=90)).isoformat(), (around + timedelta(days=90)).isoformat(),
-                                               outlook=outlook_sync.calendar_on(store))
+                                               outlook=outlook_sync.calendar_on(store), uid=meeting["uid"])
         same = [m for m in with_its_kind if m["uid"] == meeting["uid"] and m["id"] != meeting["id"]]
         meeting = calendar_events.with_cautions(store, [meeting, *same])[0]
         today = board_date()
