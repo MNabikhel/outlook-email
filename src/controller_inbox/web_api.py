@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, cost_codes, documents, fixes, fraud, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
+    agent, cost_codes, documents, fixes, fraud, links, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
     semantic, services, table_lookup, version, vision,
 )
 from controller_inbox.extract import extraction_failed
@@ -458,6 +458,22 @@ def register_workspace(
             "findings": [
                 {**row, "when": format_when(row.get("at") or "", settings.tz)} for row in store.findings(email.id, limit=20)
             ],
+            "related": related_json(email, today),
+        }
+
+    def related_json(email: EmailRecord, today: date) -> dict[str, Any]:
+        """The email's conversation and the emails it shares an invoice, a PO or a file with (links.py)."""
+        found = links.related(store, email)
+
+        def row(other: EmailRecord) -> dict[str, Any]:
+            card = mail_card(other, settings.tz, today)
+            first = " ".join((other.body_text or other.body_preview or "").split())[:160]
+            return {**card, "here": other.id == email.id, "new_domain": other.id in found["new_domains"], "first_line": "" if card["locked"] else first,
+                    "file_names": [] if card["locked"] else [att.filename.rsplit(" › ", 1)[-1] for att in other.attachments][:6]}
+
+        return {
+            "thread": [row(other) for other in found["thread"]],
+            "groups": [{"kind": group["kind"], "label": group["label"], "emails": [row(other) for other in group["emails"]]} for group in found["groups"]],
         }
 
     @api.get("/mail/{email_id}/files/{n}")

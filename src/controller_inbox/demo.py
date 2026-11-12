@@ -154,6 +154,7 @@ def demo_messages(now: datetime | None = None) -> list[RawMessage]:
             has_attachments=True,
             outlook_importance="normal",
             source="demo",
+            internet_message_id="<inv-10482@northwindsupplies.com>",
             attachments=[_att("INV-10482.pdf", invoice_pdf, "application/pdf")],
         ),
         RawMessage(
@@ -169,6 +170,8 @@ def demo_messages(now: datetime | None = None) -> list[RawMessage]:
             body_preview="Resending invoice INV-10482...",
             has_attachments=True,
             source="demo",
+            # The resend forwards the first: one conversation.
+            threading={"in_reply_to": "inv-10482@northwindsupplies.com", "references": ["inv-10482@northwindsupplies.com"]},
             attachments=[_att("INV-10482.pdf", invoice_pdf, "application/pdf")],
         ),
         RawMessage(

@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from controller_inbox import cost_codes
+from controller_inbox import cost_codes, links
 from controller_inbox.actions import local_today
 from controller_inbox.clock import parse_stamp
 from controller_inbox.config import Settings
@@ -259,6 +259,8 @@ def _run_overnight(
     reread = reread_attachments(
         store, settings, on_progress=(lambda i, n, name: on_progress("rereading", i, n, name)) if on_progress else None
     )
+    # Mail stored before emails were linked is filed under its keys (a few seconds, once).
+    links.catch_up(store, settings)
     outlook = _sync_outlook(store, settings, sync_outlook, now, on_progress)
     folder_report: dict = {}
     ingested = ingest_folder(

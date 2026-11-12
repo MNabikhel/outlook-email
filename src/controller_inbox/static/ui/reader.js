@@ -355,6 +355,44 @@ function fraudPanel(d, ctx) {
   return section("Fraud check", { id: "rd-fraud", class: `fraud-${level}`, aside: head }, ...body);
 }
 
+/* ---------- Related mail: the conversation, and mail sharing an invoice, a PO or a file ---------- */
+
+function relatedRow(r) {
+  const mark = r.locked
+    ? h("span", { class: "tag tag-fraud", title: "Held as possible payment fraud: its files are not linked or opened" }, "Held: possible fraud")
+    : r.new_domain
+      ? h("span", { class: "tag tag-due_soon", title: "The first message in this conversation from this sender's domain. A reply from a lookalike domain is how payment-change fraud often starts." }, `New in this conversation: ${(r.sender_email || "").split("@")[1] || r.sender}`)
+      : null;
+  const line = h(
+    "span",
+    { class: "rel-main" },
+    h("span", { class: "rel-top" }, h("b", { class: "trunc" }, r.sender), h("span", { class: "muted small rel-when", title: r.when_full }, r.when)),
+    h("span", { class: "rel-subject trunc" }, r.subject),
+    r.first_line ? h("span", { class: "muted small rel-first" }, r.first_line) : null,
+    r.file_names.length ? h("span", { class: "muted small rel-files" }, icon("clip", 12), h("span", null, r.file_names.join(", "))) : null,
+    mark
+  );
+  return h(
+    "li",
+    { class: `rel-row${r.here ? " here" : ""}` },
+    r.here ? h("div", { class: "rel-link", "aria-current": "true" }, line) : h("a", { class: "rel-link", href: `/app/mail/${enc(r.id)}`, dataset: { nav: "" } }, line)
+  );
+}
+
+function related(d) {
+  const rel = d.related || { thread: [], groups: [] };
+  if (!rel.thread.length && !rel.groups.length) return null;
+  const count = rel.thread.length ? rel.thread.length - 1 : 0;
+  const others = rel.groups.reduce((n, g) => n + g.emails.length, 0);
+  const aside = h("span", { class: "rd-h-aside muted small" }, [count ? plural(count, "other email") + " in this conversation" : "", others ? plural(others, "related email") : ""].filter(Boolean).join(" · "));
+  return section(
+    "Related",
+    { id: "rd-related", aside },
+    rel.thread.length ? h("div", { class: "rel-block" }, h("h3", { class: "rel-h" }, "This conversation, oldest first"), h("ol", { class: "rel-list rel-thread" }, rel.thread.map(relatedRow))) : null,
+    ...rel.groups.map((g) => h("div", { class: "rel-block" }, h("h3", { class: "rel-h" }, g.label), h("ul", { class: "rel-list" }, g.emails.map(relatedRow))))
+  );
+}
+
 /* ---------- Notes, correction, body ---------- */
 
 function findings(d, ctx) {
@@ -484,6 +522,7 @@ export function emailView(d, ctx) {
         facts(d),
         tasks(d, ctx),
         attachments(d, ctx),
+        related(d),
         coding(d, ctx),
         section("Message", { class: "rd-body-sec" }, h("div", { class: "rd-body" }, body || "(no text)")),
         fraudPanel(d, ctx),

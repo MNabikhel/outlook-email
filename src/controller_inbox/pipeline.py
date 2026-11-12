@@ -205,6 +205,7 @@ def process_message(
         reply_to=raw.reply_to,
         attachments=att_records,
         actions=actions,
+        threading=dict(raw.threading),
     )
     from controller_inbox.reading import assign_script_draft
 
