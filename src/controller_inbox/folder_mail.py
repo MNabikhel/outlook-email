@@ -485,12 +485,17 @@ def parse_msg(path: Path) -> RawMessage:
         reply_to = _reply_address(str(header.get("Reply-To") or "")) if header is not None else ""
         message_id = str(getattr(message, "messageId", None) or "").strip()
         threading = msg_threading(message)
+        meeting = str(_msg_property(message, "classType") or "").lower().startswith("ipm.schedule.meeting")
     finally:
         message.close()
     data = path.read_bytes()
     raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
     raw.reply_to = reply_to
     raw.threading = threading
+    if meeting:
+        from controller_inbox import calendar_events
+
+        raw.meetings = calendar_events.from_msg(path)
     return raw
 
 
@@ -739,9 +744,19 @@ def _standalone(path: Path) -> RawMessage:
     data = path.read_bytes()
     received = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     attachment = _file_attachment(path)
+    subject = path.stem
+    if path.suffix.lower() in (".ics", ".vcs"):
+        # An invitation dropped on its own is its meeting: titled by it ("AP standup"), not by the file's name.
+        from controller_inbox import calendar_events
+
+        try:
+            meetings = calendar_events.from_ics(data[:calendar_events.MAX_ICS_BYTES])
+        except Exception:
+            meetings = []
+        subject = next((meeting.subject for meeting in meetings if meeting.subject), subject)
     return RawMessage(
         id=file_id(data),
-        subject=path.stem,
+        subject=subject,
         sender_name="Dropped file",
         sender_email="",
         received_at=received,

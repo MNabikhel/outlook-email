@@ -20,7 +20,7 @@ import platform
 import threading
 import time
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, cost_codes, documents, fixes, fraud, link_judge, links, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
+    agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
     semantic, services, table_lookup, version, vision,
 )
 from controller_inbox.extract import extraction_failed
@@ -333,6 +333,62 @@ def register_workspace(
             "due_today": payload["due_today"],
             "due_this_week": payload["due_this_week"],
             "new_mail": {name: len(items) for name, items in payload["new_mail"].items()},
+            "meetings_today": meetings_on(today, today),
+        }
+
+    def meetings_on(first: date, last: date) -> list[dict[str, Any]]:
+        start, end = calendar_events.utc_range(first, last, settings.tz)
+        # Outlook's meetings only while it is connected with the calendar on: a sync still running at Disconnect may
+        # have written some after they were cleared.
+        meetings = calendar_events.with_cautions(store, store.meetings_between(start, end, outlook=outlook_sync.calendar_on(store)))
+        return [calendar_events.shown(meeting, settings.tz) for meeting in meetings if meeting_overlaps(meeting, first, last)]
+
+    def meeting_overlaps(meeting: dict, first: date, last: date) -> bool:
+        """All-day meetings are kept by date: they overlap the days, whatever the time zone."""
+        if not meeting["all_day"]:
+            return True
+        return meeting["start"][:10] <= last.isoformat() and meeting["end"][:10] > first.isoformat()
+
+    @api.get("/calendar")
+    def calendar(start: str = "", end: str = ""):
+        """The meetings between two days (the app's time zone), and where the calendar comes from."""
+        today = board_date()
+        try:
+            first = date.fromisoformat(start) if start else today
+            last = date.fromisoformat(end) if end else first
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Dates are written 2026-10-05.") from None
+        if last < first or (last - first).days > 62:
+            raise HTTPException(status_code=400, detail="Ask for up to two months at a time.")
+        cfg = outlook_sync.config(store)
+        return {
+            "today": today.isoformat(),
+            "tz": getattr(settings.tz, "key", str(settings.tz)),
+            "meetings": meetings_on(first, last),
+            "source": {
+                "outlook_available": not outlook_desktop.available(),
+                "connected": cfg["consent"],
+                "calendar": cfg["calendar"],
+                "calendar_last": format_when(store.get_state(outlook_sync.CALENDAR_LAST_KEY) or "", settings.tz),
+            },
+        }
+
+    @api.get("/calendar/{meeting_id}")
+    def calendar_meeting(meeting_id: str):
+        """One meeting, and the mail about it (its invitation, mail naming it or from its people near its date)."""
+        meeting = store.meeting(meeting_id, outlook=outlook_sync.calendar_on(store))
+        if meeting is None:
+            raise HTTPException(status_code=404, detail="That meeting isn't in the calendar any more.")
+        # Doubted as on the calendar: beside the other invitations with its id (a lookalike's), or for its email.
+        around = date.fromisoformat(meeting["start"][:10])
+        with_its_kind = store.meetings_between((around - timedelta(days=90)).isoformat(), (around + timedelta(days=90)).isoformat(),
+                                               outlook=outlook_sync.calendar_on(store))
+        same = [m for m in with_its_kind if m["uid"] == meeting["uid"] and m["id"] != meeting["id"]]
+        meeting = calendar_events.with_cautions(store, [meeting, *same])[0]
+        today = board_date()
+        return {
+            "meeting": calendar_events.shown(meeting, settings.tz),
+            "related": [mail_card(email, settings.tz, today) for email in calendar_events.related_mail(store, meeting)],
         }
 
     @api.get("/mail")
@@ -518,6 +574,8 @@ def register_workspace(
             steps.append({
                 **card,
                 "here": record.id == email.id,
+                # Beside the name, as Related shows it: two senders named alike ("Dana Ortiz") from two domains.
+                "domain": (links._domain_of(record) or "no address").lower(),
                 "reasons": reasons,
                 "first_line": "" if card["locked"] else " ".join((record.body_text or record.body_preview or "").split())[:240],
                 "file_names": [] if card["locked"] else [att.filename.rsplit(" › ", 1)[-1] for att in record.attachments][:8],
@@ -1203,6 +1261,7 @@ def register_workspace(
             last = json.loads(store.get_state(outlook_sync.LAST_RESULT_KEY) or "{}")
         except ValueError:
             last = {}
+        failed = outlook_sync.last_failure(store)
         return {
             **cfg,
             "available": not why,
@@ -1213,11 +1272,50 @@ def register_workspace(
             "account": store.get_state(outlook_sync.ACCOUNT_KEY) or "",
             "last_sync": format_when(store.get_state(outlook_sync.LAST_SYNC_KEY) or "", settings.tz),
             "last_result": outlook_sync.describe(last) if last else "",
+            "last_error": failed.get("error", ""),
+            "last_error_at": format_when(failed.get("at", ""), settings.tz),
             "copied": len(store.outlook_items()),
+            "calendar_last": format_when(store.get_state(outlook_sync.CALENDAR_LAST_KEY) or "", settings.tz),
+            "consented_label": format_when(cfg["consented_at"], settings.tz) if cfg["consented_at"] else "",
         }
+
+    def must_be_connected() -> None:
+        if not outlook_sync.config(store)["consent"]:
+            raise HTTPException(status_code=409, detail="Connect Outlook first: CloseDesk reads Outlook only once you agree.")
+
+    @api.post("/settings/outlook/connect")
+    async def settings_outlook_connect(request: Request):
+        """The user agreed in the prompt: CloseDesk reads their mail (and calendar, when ticked) from Outlook."""
+        data = await json_body(request)
+        why = outlook_desktop.available()
+        if why:
+            raise HTTPException(status_code=409, detail=why)
+        if not _yes(data.get("agreed")):
+            raise HTTPException(status_code=400, detail="Agree to the prompt to connect Outlook.")
+        outlook_sync.connect(store, calendar=_yes(data.get("calendar")))
+        started = job.start(outlook_job, about={"kind": "outlook"})
+        return {
+            "ok": True,
+            "message": "Connected. CloseDesk is copying your mail from Outlook now, and keeps it up to date while it's open."
+            if started else "Connected. Your mail is copied from Outlook once the run in progress finishes.",
+            "job": job.snapshot(),
+        }
+
+    @api.post("/settings/outlook/disconnect")
+    def settings_outlook_disconnect():
+        outlook_sync.disconnect(store)
+        return {"ok": True, "message": "Disconnected. CloseDesk no longer reads Outlook; the mail it copied stays here."}
+
+    @api.post("/settings/outlook/calendar")
+    async def settings_outlook_calendar(request: Request):
+        must_be_connected()
+        on = _yes((await json_body(request)).get("on"))
+        outlook_sync.set_calendar(store, on)
+        return {"ok": True, "message": "Your Outlook calendar is read with your mail, once an hour." if on else "The calendar is no longer read from Outlook."}
 
     @api.post("/settings/outlook")
     async def settings_outlook(request: Request):
+        must_be_connected()
         data = await json_body(request)
         folders = data.get("folders")
         try:
@@ -1248,6 +1346,7 @@ def register_workspace(
 
     @api.post("/settings/outlook/check")
     async def settings_outlook_check():
+        must_be_connected()
         try:
             return await run_in_threadpool(check_outlook)
         except outlook_desktop.OutlookUnavailable as exc:
@@ -1269,6 +1368,7 @@ def register_workspace(
         why = outlook_desktop.available()
         if why:
             raise HTTPException(status_code=409, detail=why)
+        must_be_connected()
         started = job.start(outlook_job, about={"kind": "outlook"})
         if not started:
             raise HTTPException(status_code=409, detail="Already processing. Sync again when it finishes.")

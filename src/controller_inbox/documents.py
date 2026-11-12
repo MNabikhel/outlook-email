@@ -1332,11 +1332,19 @@ def _sub_label(label: str, piece: str, n: int) -> str:
     return f"{label} (cont. {n})"
 
 
+# A page's layout label on a line of its own ("[notes]", "[facts]", "[table]"): where a part of the page starts, with
+# nothing in it to read.
+LAYOUT_MARK_RE = re.compile(r"^\s*\[(?:heading|facts|table|notes|columns)(?: [^\]\n]{0,40})?\]\s*$", re.I)
+
+
 def outline(text: str, *, limit: int = 40) -> list[str]:
-    """One line per section: its label and how it starts."""
+    """One line per section: its label and how it starts (its first line of text, not a layout label)."""
     rows = []
     for part in split_parts(text):
-        first = next((line.strip() for line in part.text.splitlines() if line.strip() and not line.startswith("(")), "")
+        first = next(
+            (line.strip() for line in part.text.splitlines() if line.strip() and not line.startswith("(") and not LAYOUT_MARK_RE.match(line)),
+            "",
+        )
         rows.append(f"{part.label}: {first[:90]}")
     if len(rows) > limit:
         rows = rows[:limit] + [f"… {len(rows) - limit} more sections"]

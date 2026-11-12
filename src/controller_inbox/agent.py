@@ -963,12 +963,18 @@ def earlier_findings(ws: Workspace, email: EmailRecord, limit: int = 5) -> str:
     return NOTES_HEAD + "\n" + "\n".join(f"- {row['text']}" for row in reversed(rows))
 
 
-def file_matches(email: EmailRecord, question: str, *, limit: int = 3, outline: bool = True) -> list[str]:
-    """Plain lines for the no-model answer: where the question's words appear in the email's files."""
+def file_matches(email: EmailRecord, question: str, *, limit: int = 3, outline: bool = True, tz=None, invitations: bool = True) -> list[str]:
+    """Plain lines for the no-model answer: where the question's words appear in the email's files. An invitation
+    file is the meeting it holds ("Q4 planning review, Thursday September 24, 2:00 PM–3:00 PM"), never its raw text;
+    with ``invitations=False`` (the meeting is said already) it is left out."""
     if attachments_locked(email):
         return ["Files are locked: this email is flagged as possible payment fraud."] if email.attachments else []
-    lines = []
+    lines, matched = [], False
     for att in email.attachments:
+        if is_invitation(att):
+            if invitations and (said := invitation_line(att, tz)):
+                lines.append(f"{att.filename}: {said}")
+            continue
         text = att.extracted_text or ""
         if not text.strip():
             continue
@@ -978,22 +984,93 @@ def file_matches(email: EmailRecord, question: str, *, limit: int = 3, outline: 
         for part in hits[:limit]:
             snippet = _snippet(part.text, documents.terms(question, stop=_STOP))
             lines.append(f"{att.filename} · {part.label}: {snippet}")
-    if not lines and outline:
+            matched = True
+    if not matched and outline:
         for att in email.attachments[:4]:
             text = att.extracted_text or ""
-            if text.strip():
-                sections = documents.outline(text, limit=4)
-                lines.append(f"{att.filename}: " + " / ".join(sections))
+            if text.strip() and not is_invitation(att):
+                parts = documents.split_parts(text)
+                if len(parts) == 1:  # one page: how it reads, not just its first line
+                    lines.append(f"{att.filename}: {parts[0].label}: {_snippet(parts[0].text, [])}")
+                else:
+                    lines.append(f"{att.filename}: " + " / ".join(documents.outline(text, limit=4)))
     return lines[: limit * 2]
 
 
 def _snippet(text: str, words: list[str], width: int = 180) -> str:
-    flat = " ".join(text.split())
-    low = flat.lower()
-    at = min((low.find(word) for word in words if word in low), default=0)
-    start = max(0, at - 60)
-    piece = flat[start : start + width]
-    return ("…" if start else "") + piece + ("…" if start + width < len(flat) else "")
+    """The lines of ``text`` with the question's words (or its first lines), up to ``width`` characters: text to
+    read, not the page's layout labels ("[notes]")."""
+    rows = [" ".join(line.split()) for line in text.splitlines() if line.strip() and not documents.LAYOUT_MARK_RE.match(line)]
+    hits = [row for row in rows if any(word in row.lower() for word in words)]
+    picked = hits or rows
+    if not picked:
+        return ""
+    if len(picked[0]) > width:
+        # One long line (a paragraph): the window around the first word it has.
+        flat, low = picked[0], picked[0].lower()
+        at = min((low.find(word) for word in words if word in low), default=0)
+        start = max(0, at - 60)
+        piece = flat[start : start + width]
+        return ("…" if start else "") + piece + ("…" if start + width < len(flat) else "")
+    shown = [picked[0]]
+    for row in picked[1:]:
+        if sum(len(item) + 3 for item in shown) + len(row) > width:
+            break
+        shown.append(row)
+    more = len(shown) < len(picked)
+    return " · ".join(shown) + (" …" if more else "")
+
+
+def is_invitation(att: AttachmentRecord) -> bool:
+    """A calendar invitation (.ics): what it holds is a meeting, not text to quote."""
+    return (
+        Path(att.filename or "").suffix.lower() in {".ics", ".vcs"}
+        or (att.content_type or "").lower().startswith("text/calendar")
+        or (att.extracted_text or "").lstrip().upper().startswith("BEGIN:VCALENDAR")
+    )
+
+
+def meeting_when(meeting: dict) -> str:
+    """A meeting's day and time as people say it ("Thursday September 24, 2:00 PM–3:00 PM"), from its local
+    times as ``calendar_events.shown`` gives them."""
+    try:
+        start = datetime.fromisoformat(meeting["start"])
+        end = datetime.fromisoformat(meeting["end"]) if meeting.get("end") else None
+    except (KeyError, TypeError, ValueError):
+        return ""
+    day = f"{start:%A %B} {start.day}"
+    if meeting.get("all_day"):
+        return f"{day}, all day"
+
+    def clock(value: datetime) -> str:
+        return f"{value:%I:%M %p}".lstrip("0")
+
+    if end is None:
+        return f"{day}, {clock(start)}"
+    if end.date() != start.date():
+        return f"{day}, {clock(start)} to {end:%A %B} {end.day}, {clock(end)}"
+    return f"{day}, {clock(start)}–{clock(end)}"
+
+
+def invitation_line(att: AttachmentRecord, tz=None) -> str:
+    """An invitation file as the meeting it holds: "Q4 planning review, Thursday September 24, 2:00 PM–3:00 PM",
+    in ``tz`` (UTC, said so, without one). "" when no meeting can be read from it."""
+    from controller_inbox import calendar_events
+
+    try:
+        meetings = calendar_events.from_ics(att.extracted_text or "")
+    except Exception:  # an invitation that can't be read is left out, never shown as raw text
+        return ""
+    if not meetings:
+        return ""
+    first = meetings[0]
+    shown = calendar_events.shown(first.to_row(), tz or timezone.utc)
+    said = f"{shown['subject']}, {meeting_when(shown)}" + ("" if tz is not None or shown["all_day"] else " (UTC)")
+    if first.cancelled:
+        said += " (cancelled)"
+    elif first.recurring or len(meetings) > 1:
+        said += " (repeats)"
+    return said
 
 
 # Tools --------------------------------------------------------------------------------------
@@ -1242,7 +1319,7 @@ def _note(ws: Workspace, text: str, ref) -> str:
         # A note is kept for later questions, so it may only be about an email that was actually read.
         return f"Open [{ws.number(email)}] with open_email before writing a note about it."
     ws.notes.append(text)
-    if email is not None:
+    if email is not None and email.source not in {"calendar"}:  # the calendar stand-in is no email to keep notes on
         at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         ws.store.add_finding(email.id, text, question=ws.question, at=at)
     return "Noted."

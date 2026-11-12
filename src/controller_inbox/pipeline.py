@@ -22,6 +22,7 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import AttachmentRecord, DocumentType, EmailRecord, ExtractedFields, RawMessage
+from controller_inbox.calendar_events import invitation_method
 from controller_inbox.fraud import assess, attachments_locked, domain_of, dropped_file_body, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
@@ -152,6 +153,7 @@ def process_message(
         flags=[],
         invoice_file=any(c.document_type == DocumentType.AP_INVOICE for c in att_classifications),
     )
+    invitation = invitation_method([*raw.attachments, *att_records], raw.meetings)
     holders = _holders(store, merged_fields.primary_invoice)
     classified_email = _classify(
         store,
@@ -169,6 +171,7 @@ def process_message(
         as_of=as_of,
         has_attachments=bool(att_records) or raw.has_attachments,
         fraud=check.level,
+        invitation=invitation,
     )
     classified_email.flags.extend(verdicts + _bank_caution(check))
 
@@ -195,6 +198,7 @@ def process_message(
         now=now,
         sender=raw.sender_name or raw.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in att_records),
+        invitation=invitation,
         received_on=anchor,
         entered_elsewhere=_entered_elsewhere(
             store, me, holders, conversation, own_file=me.invoice_file, fraud=check.level
@@ -247,10 +251,17 @@ def process_message(
     # Reading the files takes a while (a scan is read with OCR), and meanwhile the user may give a fraud verdict on
     # the email or snooze or finish its tasks. That is read again with the write lock held, so it is kept rather than
     # overwritten from the copy read at the start. (Done is never written here: upsert_email leaves it alone.)
+    # An invitation on mail held as possible payment fraud is no meeting: its text never reaches the calendar, only
+    # which meeting it named, so Outlook's own copy of that meeting isn't shown either. Read before the write lock is
+    # taken, so a long one keeps nobody waiting.
+    found = invites(raw, record.id, now)
     with store.transaction() as conn:
         latest = store.get_email(raw.id, conn=conn)
         verdict_changed = latest is not None and _keep_user_state(record, latest)
         store.upsert_email(record, conn=conn)
+        store.save_invites(record.id, found, sender=raw.sender_email, received=record.received_at, held=attachments_locked(record),
+                           sender_name=raw.sender_name,
+                           expanded=now.astimezone(timezone.utc).isoformat(timespec="seconds"), conn=conn)
     from controller_inbox import cost_codes
 
     try:
@@ -509,11 +520,41 @@ def _filed_from_a_file(store: Store, raw: RawMessage) -> bool:
     return stored_from(store, raw, ("folder", "outlook")) is not None
 
 
+def invites(raw: RawMessage, email_id: str, now: datetime) -> list:
+    """The meetings an email's invitations name: its .ics files, and the meeting of an Outlook meeting request, at
+    most ``calendar_events.MAX_ROWS``, read within ``calendar_events.ICS_SECONDS`` for them all."""
+    from time import monotonic
+
+    from controller_inbox import calendar_events
+
+    found = [replace(meeting, email_id=email_id) for meeting in raw.meetings]
+    deadline = monotonic() + calendar_events.ICS_SECONDS
+    for att in raw.attachments:
+        name = (att.filename or "").lower()
+        if (name.endswith(".ics") or "calendar" in (att.content_type or "").lower()) and att.content:
+            if len(found) >= calendar_events.MAX_ROWS:
+                break
+            try:
+                found += calendar_events.from_ics(att.content, email_id=email_id, now=now, limit=calendar_events.MAX_ROWS - len(found), deadline=deadline)
+            except Exception:  # an invitation that can't be read adds no meeting; the email is still read
+                log.warning("Couldn't read the invitation %s", att.filename, exc_info=True)
+    return found
+
+
 def ingest_demo(store: Store, settings: Settings, *, now: datetime | None = None) -> list[EmailRecord]:
     from controller_inbox.demo import DemoMailbox
 
+    from controller_inbox import calendar_events
+    from controller_inbox.demo import demo_meetings
+
     mailbox = DemoMailbox(now=now)
-    return ingest_mailbox(mailbox, store, settings, now=now, cursor=None)
+    records = ingest_mailbox(mailbox, store, settings, now=now, cursor=None)
+    anchor = now or datetime(2026, 9, 22, 8, 15, tzinfo=timezone.utc)
+    store.replace_meetings(
+        "demo", demo_meetings(anchor),
+        start=(anchor - calendar_events.WINDOW_BACK).isoformat(), end=(anchor + calendar_events.WINDOW_AHEAD).isoformat(),
+    )
+    return records
 
 
 def _classify(
@@ -533,6 +574,7 @@ def _classify(
     conversation: set[str] | None = None,
     holders: list[str] | None = None,
     me=None,
+    invitation: str = "",
 ) -> Classification:
     """Script classification, then any correction the user saved for this sender or subject.
 
@@ -569,6 +611,7 @@ def _classify(
         duplicate_invoice=duplicate,
         finance=is_finance(settings, store),
         fraud=fraud,
+        invitation=invitation,
     )
     learned = match_correction(store, sender_email=sender_email, subject=subject, email_id=email_id)
     return apply_learned(classified, learned) if learned else classified
@@ -727,6 +770,7 @@ def rescore_stored(
         as_of=as_of,
         has_attachments=email.has_attachments,
         fraud=check.level,
+        invitation=invitation_method(email.attachments),
     )
     kept = [flag for flag in email.flags if flag in VERDICT_FLAGS | {"model_said_bank_change"}]
     email.category = classified.document_type
@@ -747,6 +791,7 @@ def rescore_stored(
         now=now,
         sender=email.sender_name or email.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in email.attachments),
+        invitation=invitation_method(email.attachments),
         received_on=sent_date(email.received_at, settings, fallback=as_of),
         entered_elsewhere=_entered_elsewhere(store, me, holders, conversation, own_file=me.invoice_file, fraud=check.level),
     )

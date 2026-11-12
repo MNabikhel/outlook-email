@@ -146,7 +146,7 @@ class ModelStatus:
 
     def describe(self) -> str:
         if self.mode == "off":
-            return "Local model is turned off (CONTROLLER_INBOX_LLM=false)."
+            return "The local model is turned off in CloseDesk's settings file (.env)."
         if self.active:
             return f"Local model ready: {self.model} at {self.base_url}"
         if self.reachable:

@@ -59,8 +59,9 @@ function header(d) {
     h(
       "p",
       { class: "rd-from" },
-      h("b", null, d.sender_name || d.sender_email),
-      d.sender_name && d.sender_email ? h("span", { class: "muted" }, ` <${d.sender_email}>`) : null,
+      h("b", null, d.sender_name || (d.sender_email || "").toLowerCase()),
+      // In lower case, as addresses are compared: a capital I in "acmesteeI-billing.com" looks like an l.
+      d.sender_name && d.sender_email ? h("span", { class: "muted" }, ` <${d.sender_email.toLowerCase()}>`) : null,
       h("span", { class: "muted" }, ` · ${d.when_full}`)
     ),
     differentReply ? h("p", { class: "rd-replyto" }, icon("alert", 13), " Replies go to ", h("b", null, d.reply_to)) : null
@@ -767,9 +768,9 @@ function showTip(box, children, { pin = false } = {}) {
   if (!tip) {
     tip = h("div", { class: "pv-tip", role: "tooltip", id: "pv-tip", hidden: true });
     document.body.append(tip);
-    // A scroll closes a passing tip. An open fix form moves with its box instead (clicking a box scrolls it into
-    // view, and that scroll can arrive after the form opened), and closes once the box is out of sight.
-    document.addEventListener("scroll", (event) => (pinned ? !tip.contains(event.target) && follow() : hideTip(true)), true);
+    // A tip, or an open fix form, moves with its box on a scroll and closes once the box is out of sight: pointing
+    // at a box or clicking it can scroll it into view, and that scroll can arrive after the tip opened.
+    document.addEventListener("scroll", (event) => !tip.contains(event.target) && follow(), true);
     window.addEventListener("resize", () => hideTip(true));
     document.addEventListener("pointerdown", (event) => pinned && !tip.contains(event.target) && hideTip(true), true);
     document.addEventListener(

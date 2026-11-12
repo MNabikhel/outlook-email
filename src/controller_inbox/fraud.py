@@ -749,6 +749,10 @@ def reassess_email(store: "Store", settings: "Settings", email: "EmailRecord", *
         email.flags = [flag for flag in email.flags if flag not in CAUTION_FLAGS] + check.flags
         store.upsert_email(email)
     save_check(store, email, check, now=now, event=event)
+    from controller_inbox import calendar_events
+
+    # Held now, its invitation's meetings go (only which it named stays); cleared, they are read again.
+    calendar_events.follow_hold(store, settings, store.get_email(email.id) or email, now=now)
     return email, check
 
 

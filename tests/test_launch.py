@@ -362,3 +362,17 @@ def test_the_check_runs_from_settings_and_lists_what_it_found(site, page):
     page.wait_for_selector("#set-about .set-check")
     lines = page.locator("#set-about .set-check").all_inner_texts()
     assert any(line.startswith("CloseDesk: ") for line in lines) and any("Database: in order" in line for line in lines), lines
+
+
+def test_the_check_prints_in_a_windows_console_that_cant_show_every_character(here, monkeypatch):
+    # A Windows console writes cp1252: a check whose text has a character it lacks ("→") must still print, not crash
+    # the self-check (it did, in CI, with "Settings → Sync inbox").
+    import io
+
+    raw = io.BytesIO()
+    console = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", console)
+    monkeypatch.setattr(doctor, "checks", lambda: [doctor.Check(doctor.OK, "Classic Outlook: not connected (Settings → Sync inbox) ✓")])
+    assert doctor.main() == 0
+    console.flush()
+    assert "Classic Outlook: not connected" in raw.getvalue().decode("cp1252")

@@ -56,8 +56,12 @@ def extract_actions(
     has_invite: bool = False,
     received_on: date | None = None,
     entered_elsewhere: bool = False,
+    invitation: str = "",
 ) -> list[ActionItem]:
     """Tasks for a message.
+
+    ``invitation`` is what its invitation is (``calendar_events.invitation_method``): only a request (or a meeting
+    sent for the calendar) asks for an answer; a cancellation, an answer or a proposed new time doesn't.
 
     ``as_of`` is today: task priorities and "due today" are measured from it. Relative dates in
     the text ("by Friday", "tomorrow") are read from ``received_on``, the day the message arrived
@@ -213,7 +217,12 @@ def extract_actions(
     elif category == DocumentType.REPLY_NEEDED and not body_tasks:
         who = (sender or "the sender").split("<")[0].strip() or "the sender"
         add(f"Reply to {who}: {subject}", "They asked you something and are waiting on an answer.", due, _due_priority(due, as_of, importance), "reply")
-    elif category == DocumentType.MEETING and (has_invite or re.match(r"\s*(?:updated\s+)?invitation:.*\s@\s", subject or "", re.I)):
+    elif category == DocumentType.MEETING and (
+        invitation in ("REQUEST", "PUBLISH", "ADD")
+        if invitation
+        else (has_invite or re.match(r"\s*(?:updated\s+)?invitation:.*\s@\s", subject or "", re.I))
+        and not re.match(r"\s*(?:(?:re|fw|fwd):\s*)?(?:canceled|cancelled|accepted|declined|tentative\w*|new time proposed)\s*:", subject or "", re.I)
+    ):
         add(f"Accept or decline: {subject}", "Meeting invitation waiting on your answer.", due, Importance.MEDIUM, "meeting")
 
     return items
