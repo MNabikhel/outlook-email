@@ -1319,6 +1319,8 @@ def _find_in_file(ws: Workspace, email: EmailRecord, query: str, file) -> str:
     for att in targets:
         for part in documents.search_parts(att.extracted_text, query, limit=3, stop=_STOP):
             hits.append(f"{att.filename} · [{part.label}]\n{part.text}")
+    if not hits and not documents.terms(query, stop=_STOP):
+        return f"{query!r} is too short or too common to search for: give a name, a figure or a longer word, or read_file for the outline."
     if not hits:
         return f"None of the files mention {query!r}. Try other words, or read_file for the outline."
     return "\n\n".join(hits[:4])
