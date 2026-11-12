@@ -476,6 +476,36 @@ def register_workspace(
             "groups": [{"kind": group["kind"], "label": group["label"], "emails": [row(other) for other in group["emails"]]} for group in found["groups"]],
         }
 
+    @api.get("/trace/{email_id}")
+    def trace(email_id: str):
+        """The whole matter an email belongs to (links.trace), oldest first, and how its files changed."""
+        email = known(email_id)
+        today = board_date()
+        found = links.trace(store, email)
+
+        def file_ref(record: EmailRecord, att) -> dict[str, Any]:
+            n = next((i for i, other in enumerate(record.attachments, start=1) if other.id == att.id), 0)
+            return {"email_id": record.id, "n": n, "name": att.filename.rsplit(" › ", 1)[-1], "when": short_when(record.received_at, settings.tz, today), "sender": record.sender_name or record.sender_email}
+
+        steps = []
+        for record, reasons in found["steps"]:
+            card = mail_card(record, settings.tz, today)
+            steps.append({
+                **card,
+                "here": record.id == email.id,
+                "reasons": reasons,
+                "first_line": "" if card["locked"] else " ".join((record.body_text or record.body_preview or "").split())[:240],
+                "file_names": [] if card["locked"] else [att.filename.rsplit(" › ", 1)[-1] for att in record.attachments][:8],
+            })
+        return {
+            "email": {"id": email.id, "subject": email.subject or "(no subject)"},
+            "steps": steps,
+            "versions": [
+                {"old": file_ref(*version["old"]), "new": file_ref(*version["new"]), "changes": version["changes"], "more": version["more"]}
+                for version in found["versions"]
+            ],
+        }
+
     @api.get("/mail/{email_id}/files/{n}")
     def mail_file(email_id: str, n: int):
         email, att = file_of(email_id, n)

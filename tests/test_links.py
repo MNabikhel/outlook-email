@@ -247,3 +247,72 @@ def test_an_email_shows_its_conversation_and_related_mail(loaded, settings):
     assert [(row["id"], row["here"]) for row in related["thread"]] == [("demo-inv-10482", True), ("demo-inv-10482-dup", False)]
     assert related["thread"][1]["file_names"] == ["INV-10482.pdf"]
     assert client.get("/api/mail/demo-chase-stmt").json()["related"] == {"thread": [], "groups": []}
+
+
+# --- A whole matter ------------------------------------------------------------------------------------------------
+
+
+def test_a_matter_is_followed_two_links_out_with_why_each_email_is_there(store):
+    # The invoice names the PO; the PO's email names the quote's file; the quote is two links from the invoice.
+    store.upsert_email(_record("quote", sender="sales@northwind.com", files=[("Northwind quote Q-88.pdf", "q" * 64, 30_000, None)], received="2026-08-20T09:00:00+00:00"))
+    store.upsert_email(_record("po", sender="buyer@taz.com", pos=["PO-77821"], files=[("Northwind quote Q-88.pdf", "q" * 64, 30_000, None)], received="2026-09-01T09:00:00+00:00"))
+    store.upsert_email(_record("invoice", pos=["PO-77821"], invoices=["INV-10482"], mid="<inv@northwind.com>", received="2026-09-20T09:00:00+00:00"))
+    store.upsert_email(_record("reply", sender="ap@taz.com", threading={"in_reply_to": "inv@northwind.com"}, received="2026-09-21T09:00:00+00:00"))
+    store.upsert_email(_record("unrelated", sender="news@acct.com"))
+    found = links.trace(store, store.get_email("invoice"))
+    assert [(record.id, reasons) for record, reasons in found["steps"]] == [
+        ("quote", ["Same file: Northwind quote Q-88.pdf"]),
+        ("po", ["Same PO PO-77821"]),
+        ("invoice", []),
+        ("reply", ["In the conversation"]),
+    ]
+
+
+def test_what_changed_between_versions_of_a_workbook_and_a_document():
+    old = '[sheet "Budget" A1:C3]\nA1: Line | B1: Q3 | C1: Q4\nA2 (Line): Rent | B2 (Q3): 1,200 | C2 (Q4): 1,200\nA3 (Line): Travel | B3 (Q3): 400 (=SUM(D1:D4)) | C3 (Q4): 450'
+    new = '[sheet "Budget" A1:C4]\nA1: Line | B1: Q3 | C1: Q4\nA2 (Line): Rent | B2 (Q3): 1,200 | C2 (Q4): 1,450\nA3 (Line): Travel | B3 (Q3): 400 (=SUM(D1:D5)) | C3 (Q4): 450\nA4 (Line): Fees | B4 (Q3): 90'
+    assert links.changes(old, new) == (["Budget!C2 (Q4): 1,200 → 1,450", "Budget!A4 (Line): added Fees", "Budget!B4 (Q3): added 90"], 0)
+    listed, more = links.changes("[page 1]\nTerm: 12 months\nRent: $4,000", "[page 1]\nTerm: 24 months\nRent: $4,000", limit=1)
+    assert listed == ["Removed: Term: 12 months"] and more == 1
+
+
+def test_the_versions_along_a_matter_say_what_changed(store):
+    v1 = _record("v1", files=[("Lease schedule v1.xlsx", "1" * 64, 20_000, None)], received="2026-09-01T09:00:00+00:00")
+    v1.attachments[0].extracted_text = '[sheet "Lease" A1:B2]\nA1: Item | B1: Rent\nA2 (Item): Unit 4 | B2 (Rent): 4,000'
+    v2 = _record("v2", files=[("Lease schedule v2.xlsx", "2" * 64, 20_000, None)], received="2026-09-15T09:00:00+00:00")
+    v2.attachments[0].extracted_text = '[sheet "Lease" A1:B2]\nA1: Item | B1: Rent\nA2 (Item): Unit 4 | B2 (Rent): 4,250'
+    store.upsert_email(v1)
+    store.upsert_email(v2)
+    found = links.trace(store, store.get_email("v2"))
+    [version] = found["versions"]
+    assert (version["old"][0].id, version["new"][0].id, version["changes"]) == ("v1", "v2", ["Lease!B2 (Rent): 4,000 → 4,250"])
+
+
+def test_the_trace_page_s_data(loaded, settings):
+    from fastapi.testclient import TestClient
+    from helpers import PAGE
+
+    from controller_inbox.web import create_app
+
+    client = TestClient(create_app(settings, loaded), headers=PAGE)
+    data = client.get("/api/trace/demo-inv-10482").json()
+    assert data["email"]["id"] == "demo-inv-10482"
+    assert [(step["id"], step["here"], step["reasons"]) for step in data["steps"]] == [
+        ("demo-inv-10482", True, []), ("demo-inv-10482-dup", False, ["In the conversation"])
+    ]
+    assert client.get("/api/trace/nope").status_code == 404
+
+
+def test_a_question_about_how_an_email_came_about_reads_its_linked_mail(loaded):
+    from controller_inbox import agent
+    from controller_inbox.assistant import pick_sources
+
+    for question in ("What happened on this so far?", "Trace this back to where it started", "show me the whole thread"):
+        sources, about_today, _found = pick_sources(loaded, question, email_id="demo-inv-10482")
+        assert [email.id for email in sources] == ["demo-inv-10482", "demo-inv-10482-dup"] and not about_today, question
+    sources, _today, _found = pick_sources(loaded, "What is the amount due?", email_id="demo-inv-10482")
+    assert [email.id for email in sources] == ["demo-inv-10482"], "a question about the email itself stays on it"
+    ws = agent.Workspace(loaded, None, [loaded.get_email("demo-inv-10482")])
+    opened = agent._open_email(ws, ws.sources[0])
+    assert "Related emails (open one by its number):\n[2] " in opened and "(same conversation)" in opened
+    assert ws.email("2").id == "demo-inv-10482-dup", "the model opens a related email by the number it was given"

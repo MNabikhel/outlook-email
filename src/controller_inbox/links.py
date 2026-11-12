@@ -342,3 +342,118 @@ def _file_threading(path) -> dict:
         return folder_mail.msg_threading(message)
     finally:
         message.close()
+
+
+# --- A whole matter, and what changed in its files ------------------------------------------------------------------
+
+MAX_TRACE = 40
+MAX_CHANGES = 25
+
+
+def trace(store, email: EmailRecord) -> dict:
+    """Everything that belongs with ``email``, followed two links out (the invoice's PO, the PO's quote), oldest
+    first: each email with why it is here, and what changed between the versions of each file sent along the way."""
+    reasons: dict[str, list[str]] = {email.id: []}
+    records: dict[str, EmailRecord] = {email.id: email}
+    frontier = [email]
+    for _hop in range(2):
+        nxt = []
+        for current in frontier:
+            found = related(store, current)
+            for record in found["thread"]:
+                if record.id not in records:
+                    records[record.id] = record
+                    reasons[record.id] = ["In the conversation"]
+                    nxt.append(record)
+            for group in found["groups"]:
+                for record in group["emails"]:
+                    if record.id not in records:
+                        records[record.id] = record
+                        reasons[record.id] = []
+                        nxt.append(record)
+                    if group["label"] not in reasons[record.id] and record.id != email.id:
+                        reasons[record.id].append(group["label"])
+            if len(records) >= MAX_TRACE:
+                break
+        frontier = nxt
+        if len(records) >= MAX_TRACE:
+            break
+    steps = sorted(records.values(), key=lambda record: record.received_at or "")[-MAX_TRACE:]
+    return {"steps": [(record, reasons.get(record.id, [])) for record in steps], "versions": versions(steps)}
+
+
+def versions(emails: list[EmailRecord]) -> list[dict]:
+    """For each file sent more than once with different contents along a matter, each version against the one
+    before: its name, the emails, and what changed (``changes``). A held email's files are left out."""
+    by_stem: dict[str, list[tuple[EmailRecord, AttachmentRecord]]] = {}
+    for record in sorted(emails, key=lambda r: r.received_at or ""):
+        if attachments_locked(record):
+            continue
+        for att in record.attachments:
+            if _real_file(att) and (stem := file_stem(att.filename)):
+                seen = by_stem.setdefault(stem, [])
+                if not any(other.sha256 == att.sha256 for _r, other in seen):
+                    seen.append((record, att))
+    out = []
+    for stem, sent in by_stem.items():
+        for (old_email, old), (new_email, new) in zip(sent, sent[1:]):
+            listed, more = changes(old.extracted_text or "", new.extracted_text or "")
+            out.append({"stem": stem, "old": (old_email, old), "new": (new_email, new), "changes": listed, "more": more})
+    return out
+
+
+_CELL_LINE = re.compile(r"^([A-Z]{1,3})(\d+)(?: \(([^)]*)\))?: (.*)$")
+
+
+def changes(old: str, new: str, *, limit: int = MAX_CHANGES) -> tuple[list[str], int]:
+    """What changed from ``old`` to ``new`` (two versions of a file as read): a workbook cell by cell ("Budget!C7
+    (Q3): 1,200 → 1,450"), other files line by line ("Removed: …", "Added: …"). At most ``limit``, with how many more."""
+    if "[sheet " in old and "[sheet " in new:
+        before, after = _cells(old), _cells(new)
+        found = []
+        for key in sorted(before.keys() | after.keys(), key=_cell_order):
+            was, now = before.get(key), after.get(key)
+            if was == now:
+                continue
+            sheet, ref, heading = key[0], key[1], (after.get(key) or before.get(key))[1]
+            place = f"{sheet}!{ref}" + (f" ({heading})" if heading else "")
+            if was is None:
+                found.append(f"{place}: added {now[0]}")
+            elif now is None:
+                found.append(f"{place}: removed (was {was[0]})")
+            elif was[0] != now[0]:
+                found.append(f"{place}: {was[0]} → {now[0]}")
+        return found[:limit], max(0, len(found) - limit)
+    import difflib
+
+    lines = lambda text: [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("[")]  # noqa: E731
+    found = []
+    for line in difflib.unified_diff(lines(old), lines(new), lineterm="", n=0):
+        if line.startswith(("---", "+++", "@@")):
+            continue
+        if line.startswith("-"):
+            found.append(f"Removed: {line[1:][:200]}")
+        elif line.startswith("+"):
+            found.append(f"Added: {line[1:][:200]}")
+    return found[:limit], max(0, len(found) - limit)
+
+
+def _cells(text: str) -> dict[tuple[str, str], tuple[str, str]]:
+    """A workbook as read: (sheet, cell) → (value without its formula, heading)."""
+    cells: dict[tuple[str, str], tuple[str, str]] = {}
+    sheet = ""
+    for line in text.splitlines():
+        if line.startswith('[sheet "'):
+            sheet = line.split('"')[1]
+            continue
+        for piece in line.split(" | "):
+            if match := _CELL_LINE.match(piece.strip()):
+                value = re.sub(r"\s*\(=.*\)$", "", match.group(4)).strip()
+                cells[(sheet, match.group(1) + match.group(2))] = (value, match.group(3) or "")
+    return cells
+
+
+def _cell_order(key: tuple[str, str]) -> tuple:
+    sheet, ref = key
+    letters = re.match(r"[A-Z]+", ref).group(0)
+    return (sheet, int(ref[len(letters):]), len(letters), letters)

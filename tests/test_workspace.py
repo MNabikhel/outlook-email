@@ -23,14 +23,14 @@ UI = Path(web.__file__).parent / "static" / "ui"
 
 
 def test_the_workspace_page_loads_at_every_address_with_versioned_scripts(client):
-    for path in ("/app", "/app/folder/important", "/app/mail/demo-payroll", "/app/mail/demo-payroll/file/1?tab=tables", "/app/digest"):
+    for path in ("/app", "/app/folder/important", "/app/mail/demo-payroll", "/app/mail/demo-payroll/file/1?tab=tables", "/app/digest", "/app/trace/demo-inv-10482"):
         page = client.get(path)
         assert page.status_code == 200, path
         assert '<script type="importmap">' in page.text and "/static/ui/main.js?v=" in page.text
         assert page.headers["cache-control"] == "no-store"
     page = client.get("/app").text
     assert '"/static/ui/api.js": "/static/ui/api.js?v=' in page.replace("\\u002f", "/")
-    for name in ("main.js", "api.js", "dom.js", "lists.js", "reader.js", "chat.js", "format.js", "pages.js", "settings.js", "palette.js", "theme.js", "app.css"):
+    for name in ("main.js", "api.js", "dom.js", "lists.js", "reader.js", "chat.js", "format.js", "pages.js", "settings.js", "palette.js", "theme.js", "trace.js", "app.css"):
         assert client.get(f"/static/ui/{name}").status_code == 200, name
     # Nothing is fetched from outside this computer.
     assert not re.search(r"""(src|href)=["']?(https?:)?//""", page)
@@ -846,3 +846,16 @@ def test_an_email_shows_its_conversation_and_moves_along_it(site, page):
     page.click('#rd-related a[href="/app/mail/demo-inv-10482-dup"]')
     page.wait_for_selector('.rd[data-email="demo-inv-10482-dup"] #rd-related')
     assert page.url.endswith("/app/mail/demo-inv-10482-dup")
+
+
+def test_the_whole_matter_is_one_page_and_esc_goes_back(site, page):
+    page.goto(f"{site}/app/mail/demo-inv-10482")
+    page.wait_for_selector("#rd-related")
+    page.click("#rd-related a:has-text('Whole matter')")
+    page.wait_for_selector(".trace .tr-steps")
+    assert page.url.endswith("/app/trace/demo-inv-10482")
+    steps = page.locator(".tr-step")
+    assert steps.count() == 2 and page.locator(".tr-step.here").count() == 1
+    assert "In the conversation" in page.text_content(".tr-steps")
+    page.keyboard.press("Escape")
+    page.wait_for_selector('.rd[data-email="demo-inv-10482"]')

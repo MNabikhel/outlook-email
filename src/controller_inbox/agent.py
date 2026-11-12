@@ -1134,10 +1134,32 @@ def _open_email(ws: Workspace, email: EmailRecord) -> str:
             for att in email.attachments:
                 if (att.extracted_text or "").strip():
                     lines.append(f"Outline of {att.filename}: " + " / ".join(documents.outline(att.extracted_text, limit=10)))
+    if related := related_lines(ws, email):
+        lines.append(related)
     notes = earlier_findings(ws, email)
     if notes:
         lines.append(notes)
     return "\n".join(lines)
+
+
+MAX_RELATED = 6
+
+
+def related_lines(ws: Workspace, email: EmailRecord) -> str:
+    """The emails linked to ``email`` (links.py), numbered so the model can open them: its conversation, then the
+    mail sharing an invoice, a PO or a file with it, each with why."""
+    from controller_inbox import links
+
+    found = links.related(ws.store, email)
+    rows: list[str] = []
+    for other in found["thread"]:
+        if other.id != email.id and len(rows) < MAX_RELATED:
+            rows.append(f"[{ws.number(other)}] {other.received_at[:10]} · {other.sender_name or other.sender_email} · “{other.subject}” (same conversation)")
+    for group in found["groups"]:
+        for other in group["emails"]:
+            if len(rows) < MAX_RELATED:
+                rows.append(f"[{ws.number(other)}] {other.received_at[:10]} · {other.sender_name or other.sender_email} · “{other.subject}” ({group['label'].lower()})")
+    return "Related emails (open one by its number):\n" + "\n".join(rows) if rows else ""
 
 
 def _read_file(att: AttachmentRecord, label: str) -> str:

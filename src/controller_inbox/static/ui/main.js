@@ -10,6 +10,7 @@ import { todayView, fraudView, codingView, digestView, emptyReader } from "./pag
 import { createSettings } from "./settings.js";
 import { createChat } from "./chat.js";
 import { createOverlays } from "./palette.js";
+import { traceView } from "./trace.js";
 
 const enc = encodeURIComponent;
 const root = document.documentElement;
@@ -57,6 +58,10 @@ function parse() {
   else if (first === "fraud") route.list = "fraud";
   else if (first === "coding") route.list = `coding:${q.get("status") || "review"}`;
   else if (first === "digest" || first === "settings") route.list = null;
+  else if (first === "trace" && second) {
+    route.list = null;
+    route.traceId = second;
+  }
   else if (first === "mail") {
     route.emailId = second;
     route.list = q.get("in") || null;
@@ -780,6 +785,23 @@ const settings = createSettings({
   },
 });
 
+function showTrace(id) {
+  const key = `trace:${id}`;
+  if (S.shown !== key) setReader(skeletonReader(), "", { animate: false });
+  const wanted = () => S.route.view === "trace" && S.route.traceId === id;
+  getJSON(`/api/trace/${enc(id)}`)
+    .then((data) => {
+      if (!wanted()) return;
+      document.title = `The whole matter: ${data.email.subject} · CloseDesk`;
+      // The chat answers about the email the matter was traced from.
+      chat.setScope({ id: data.email.id, subject: data.email.subject });
+      setReader(traceView(data), key);
+    })
+    .catch((error) => {
+      if (wanted()) setReader(errorView(error.message), "error");
+    });
+}
+
 function showSettings() {
   document.title = "Settings · CloseDesk";
   settings.open();
@@ -791,7 +813,7 @@ async function sync() {
   const route = parse();
   const before = S.route;
   S.route = route;
-  const doc = route.view === "digest" || route.view === "settings";
+  const doc = route.view === "digest" || route.view === "settings" || route.view === "trace";
   ws.classList.toggle("doc", doc);
   ws.classList.toggle("wide", Boolean(route.file));
   ws.classList.toggle("reading", Boolean(route.emailId) || doc);
@@ -800,6 +822,7 @@ async function sync() {
     S.email = null;
     chat.setScope(null);
     updateRail(route.view);
+    if (route.view === "trace") return showTrace(route.traceId);
     return route.view === "digest" ? showDigest(route.date) : showSettings();
   }
   if (before && (before.view === "digest" || before.view === "settings") && S.list) {
@@ -1206,6 +1229,11 @@ document.addEventListener("keydown", (event) => {
     if (isTyping(event.target, { text: true })) {
       event.preventDefault();
       event.target.blur();
+      return;
+    }
+    if (S.route && S.route.view === "trace") {
+      event.preventDefault();
+      navigate(`/app/mail/${enc(S.route.traceId)}`);
       return;
     }
     if (S.route && (S.route.emailId || S.route.file)) {

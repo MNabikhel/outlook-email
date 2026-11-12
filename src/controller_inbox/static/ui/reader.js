@@ -384,7 +384,12 @@ function related(d) {
   if (!rel.thread.length && !rel.groups.length) return null;
   const count = rel.thread.length ? rel.thread.length - 1 : 0;
   const others = rel.groups.reduce((n, g) => n + g.emails.length, 0);
-  const aside = h("span", { class: "rd-h-aside muted small" }, [count ? plural(count, "other email") + " in this conversation" : "", others ? plural(others, "related email") : ""].filter(Boolean).join(" · "));
+  const aside = h(
+    "span",
+    { class: "rd-h-aside" },
+    h("span", { class: "muted small" }, [count ? plural(count, "other email") + " in this conversation" : "", others ? plural(others, "related email") : ""].filter(Boolean).join(" · ")),
+    h("a", { class: "btn btn-sm btn-quiet", href: `/app/trace/${enc(d.id)}`, dataset: { nav: "" }, title: "Every email linked to this one, two links out, and what changed in their files" }, icon("route", 14), "Whole matter")
+  );
   return section(
     "Related",
     { id: "rd-related", aside },
