@@ -235,7 +235,8 @@ def related(store, email: EmailRecord, *, ai: bool = True) -> dict:
                 continue
             groups.append({"kind": kind, "value": value, "ids": others[:MAX_PER_REASON]})
             shown |= set(others)
-    if ai and not locked_here:
+    # The model's links are left out for held or cautioned mail, either way, whenever the caution came.
+    if ai and not locked_here and "payment_caution" not in email.flags:
         judged = {other: why for other, why in store.ai_links_of(email.id).items() if other not in shown}
         if judged:
             groups.append({"kind": "ai", "value": "", "ids": list(judged)[:MAX_PER_REASON], "why": judged})
@@ -250,7 +251,7 @@ def related(store, email: EmailRecord, *, ai: bool = True) -> dict:
     thread = [email if i == email.id else cards[i] for i in window if i == email.id or i in cards]
     out_groups = []
     for group in groups:
-        records = [cards[i] for i in group["ids"] if i in cards and not (group["kind"] == "ai" and attachments_locked(cards[i]))]
+        records = [cards[i] for i in group["ids"] if i in cards and not (group["kind"] == "ai" and (attachments_locked(cards[i]) or "payment_caution" in cards[i].flags))]
         if records:
             label = AI_LABEL if group["kind"] == "ai" else _label(group, email, records)
             out_groups.append({"kind": group["kind"], "label": label, "emails": sorted(records, key=lambda r: r.received_at or "", reverse=True), "why": group.get("why", {})})
@@ -457,6 +458,10 @@ def trace(store, email: EmailRecord) -> dict:
     return {"steps": [(record, reasons.get(record.id, [])) for record in steps], "versions": versions(steps)}
 
 
+# A change to payment details between two versions of a file is to be checked by phone, whoever sent it.
+_PAYMENT_WORDS = re.compile(r"(?i)\b(bank|account|acct|iban|routing|aba|swift|bic|sort code|remit|wire|ach|beneficiary)\b")
+
+
 def versions(emails: list[EmailRecord]) -> list[dict]:
     """For each file sent more than once with different contents along a matter, each version against the one
     before: its name, the emails, and what changed (``changes``). A held email's files are left out."""
@@ -465,16 +470,24 @@ def versions(emails: list[EmailRecord]) -> list[dict]:
         if attachments_locked(record):
             continue
         for att in record.attachments:
+            # One sender's versions: a lookalike's "corrected copy" with new bank details is no version of the
+            # vendor's invoice to show as an edit.
             if _real_file(att) and (stem := file_stem(att.filename)):
-                seen = by_stem.setdefault(stem, [])
+                seen = by_stem.setdefault(f"{_domain_of(record)}|{stem}", [])
                 if not any(other.sha256 == att.sha256 for _r, other in seen):
                     seen.append((record, att))
     out = []
     for stem, sent in by_stem.items():
         for (old_email, old), (new_email, new) in zip(sent, sent[1:]):
             listed, more = changes(old.extracted_text or "", new.extracted_text or "")
-            out.append({"stem": stem, "old": (old_email, old), "new": (new_email, new), "changes": listed, "more": more})
+            payment = _payment_lines(old.extracted_text) != _payment_lines(new.extracted_text)
+            out.append({"stem": stem.split("|", 1)[-1], "old": (old_email, old), "new": (new_email, new), "changes": listed, "more": more, "payment": payment})
     return out
+
+
+def _payment_lines(text: str | None) -> set[str]:
+    """The lines of a file naming a bank, an account or where to send money: any change in them is worth a call."""
+    return {" ".join(line.split()) for line in (text or "").splitlines() if _PAYMENT_WORDS.search(line)}
 
 
 _CELL_LINE = re.compile(r"^([A-Z]{1,3})(\d+)(?: \(([^)]*)\))?: (.*)$")

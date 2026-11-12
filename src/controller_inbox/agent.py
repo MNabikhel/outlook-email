@@ -1156,9 +1156,13 @@ def related_lines(ws: Workspace, email: EmailRecord) -> str:
     rows: list[str] = []
 
     def row(other: EmailRecord, why: str) -> str:
-        # Marked as anywhere else the model sees it: a held or cautioned email is never taken at its word.
+        # Marked as anywhere else the model sees it: a held or cautioned email is never taken at its word, and a
+        # sender new to the conversation (a lookalike's reply) is named by address, to be checked.
         warn = " — Warning: payment-detail change, verify by phone" if is_fraud(other) or "payment_caution" in other.flags else ""
-        return f"[{ws.number(other)}] {other.received_at[:10]} · {other.sender_name or other.sender_email} · “{other.subject}” ({why}){warn}"
+        if other.id in found["new_domains"]:
+            warn += " — Warning: this sender's domain is new to the conversation; check it is who it claims"
+        who = f"{other.sender_name} <{other.sender_email}>" if other.sender_name and other.sender_email else other.sender_name or other.sender_email or "(no address)"
+        return f"[{ws.number(other)}] {other.received_at[:10]} · {who} · “{other.subject}” ({why}){warn}"
 
     for other in found["thread"]:
         if other.id != email.id and len(rows) < MAX_RELATED:

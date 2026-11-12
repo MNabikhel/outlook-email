@@ -401,3 +401,32 @@ def test_a_held_emails_number_counts_only_as_a_whole_number_of_its_text(store):
     held.subject, held.body_text = "Ref INV-22918", "Call 555 104 8221"
     store.upsert_email(held)
     assert not any(kind == "invoice" for kind, _value in store.link_keys("held"))
+
+
+def test_a_lookalikes_corrected_copy_is_no_version_and_a_changed_remit_line_is_flagged(store):
+    real = _record("real", files=[("Northwind invoice INV-10482.pdf", "1" * 64, 30_000, None)], received="2026-10-01T09:00:00+00:00")
+    real.attachments[0].extracted_text = "[page 1]\nInvoice INV-10482\nRemit to: First Bank account ****3333"
+    fake = _record("fake", sender="ar@nw-remit.net", files=[("Northwind invoice INV-10482 (1).pdf", "2" * 64, 30_000, None)], received="2026-10-02T09:00:00+00:00", invoices=["INV-10482"])
+    fake.attachments[0].extracted_text = "[page 1]\nInvoice INV-10482\nRemit to: Metro Bank account ****7777"
+    real.extracted.invoice_numbers = ["INV-10482"]
+    store.upsert_email(real)
+    store.upsert_email(fake)
+    assert links.trace(store, store.get_email("real"))["versions"] == [], "another sender's file is no version"
+    newer = _record("v2", files=[("Northwind invoice INV-10482 v2.pdf", "3" * 64, 30_000, None)], received="2026-10-03T09:00:00+00:00")
+    newer.attachments[0].extracted_text = "[page 1]\nInvoice INV-10482\nRemit to: Metro Bank account ****7777"
+    store.upsert_email(newer)
+    [version] = links.trace(store, store.get_email("real"))["versions"]
+    assert version["payment"] and version["new"][0].id == "v2"
+
+
+def test_the_model_is_told_which_related_email_is_from_a_new_domain_and_a_cautioned_email_loses_its_model_links(store):
+    from controller_inbox import agent
+
+    store.upsert_email(_record("root", mid="<root@northwind.com>", received="2026-10-01T09:00:00+00:00", threading={"to": ["ap@taz.com"]}))
+    store.upsert_email(_record("hijack", sender="priya@northwnd.com", received="2026-10-02T09:00:00+00:00", threading={"in_reply_to": "root@northwind.com"}))
+    ws = agent.Workspace(store, None, [store.get_email("root")])
+    lines = agent.related_lines(ws, ws.sources[0])
+    assert "priya@northwnd.com" in lines and "domain is new to the conversation" in lines
+    store.save_ai_link("root", "other", same=True, why="same quote", key="k")
+    store.upsert_email(_record("other", sender="billing@harbor-pack.net", flags=["payment_caution"]))
+    assert all(g["kind"] != "ai" for g in links.related(store, store.get_email("root"))["groups"])

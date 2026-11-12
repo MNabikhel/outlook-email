@@ -509,7 +509,8 @@ def register_workspace(
 
         def file_ref(record: EmailRecord, att) -> dict[str, Any]:
             n = next((i for i, other in enumerate(record.attachments, start=1) if other.id == att.id), 0)
-            return {"email_id": record.id, "n": n, "name": att.filename.rsplit(" › ", 1)[-1], "when": short_when(record.received_at, settings.tz, today), "sender": record.sender_name or record.sender_email}
+            return {"email_id": record.id, "n": n, "name": att.filename.rsplit(" › ", 1)[-1], "when": short_when(record.received_at, settings.tz, today),
+                    "sender": record.sender_name or record.sender_email, "domain": links._domain_of(record) or "no address"}
 
         steps = []
         for record, reasons in found["steps"]:
@@ -525,7 +526,7 @@ def register_workspace(
             "email": {"id": email.id, "subject": email.subject or "(no subject)"},
             "steps": steps,
             "versions": [
-                {"old": file_ref(*version["old"]), "new": file_ref(*version["new"]), "changes": version["changes"], "more": version["more"]}
+                {"old": file_ref(*version["old"]), "new": file_ref(*version["new"]), "changes": version["changes"], "more": version["more"], "payment": version["payment"]}
                 for version in found["versions"]
             ],
         }
