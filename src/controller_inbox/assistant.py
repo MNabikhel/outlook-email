@@ -1992,6 +1992,8 @@ def _read_material(ws: agent.Workspace, *, history, today: str, focus: list[dict
         material.append(_source_block(0, email, len(email.body_text or "") + 1, on_screen=False, tz=ws.settings.tz))
         if not agent.attachments_locked(email):
             files += [(att.filename, att.extracted_text) for att in email.attachments if att.extracted_text]
+            # An invitation is shown to the model as the meeting it holds, in the app's time zone.
+            material += [agent.invitation_text(att, getattr(ws.settings, "tz", None)) for att in email.attachments if agent.is_invitation(att)]
     return {"material": material, "files": files}
 
 

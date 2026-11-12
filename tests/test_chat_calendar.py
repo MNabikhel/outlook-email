@@ -127,3 +127,15 @@ def test_the_model_reads_the_day_asked_about_however_full_the_calendar(store, se
     assert "Client call 9-24" not in tomorrow.body_text and "Client call 9-23-13" in tomorrow.body_text
     ahead = assistant.calendar_source(store, settings, TODAY, "What meetings do I have?")
     assert "2026-09-15" not in ahead.body_text, "from today on, not a week back"
+
+
+def test_an_invitation_file_reaches_the_model_as_the_meeting_not_its_raw_text(loaded, settings, monkeypatch):
+    from controller_inbox import agent
+
+    prompt = _model_prompt(loaded, settings, monkeypatch, "what does the attachment say?", "demo-meeting")
+    assert "DTSTART:" not in prompt and "BEGIN:VCALENDAR" not in prompt, prompt[-1500:]
+    assert "Q4 planning review, Thursday September 24, 2:00 PM–3:00 PM" in prompt and "Times are America/New_York" in prompt
+    ws = agent.Workspace(loaded, settings, [loaded.get_email("demo-meeting")], question="q")
+    for name, args in (("read_file", {"email": 1}), ("find_in_file", {"email": 1, "query": "Q4 planning"}), ("open_email", {"email": 1})):
+        said = agent.run_tool(ws, name, args, limit=3000)
+        assert "DTSTART" not in said and "2:00 PM" in said, (name, said)

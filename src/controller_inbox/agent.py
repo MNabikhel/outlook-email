@@ -600,6 +600,12 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         used += prompt_size(worked)
     per_file = max(600, (room - used) // len(readable))
     for att in readable:
+        if is_invitation(att):
+            # The meeting it holds, in the app's time zone: its raw text gives UTC times.
+            lines.append(f"── File: {att.filename} (calendar invitation)\n{invitation_text(att, _zone(ws))}")
+            ws.reads.append(f"Read {att.filename} as the meeting it holds")
+            files_shown += 1
+            continue
         text = att.extracted_text
         parts = ws.memo(("parts", text), lambda: documents.split_parts(text))
         head = (
@@ -1073,6 +1079,30 @@ def invitation_line(att: AttachmentRecord, tz=None) -> str:
     return said
 
 
+def invitation_text(att: AttachmentRecord, tz=None) -> str:
+    """An invitation file as the model reads it: the meeting it holds in the app's time zone, where it is and who is
+    in it. Not the file's own text, whose times are UTC and which a small model reads wrongly."""
+    from controller_inbox import calendar_events
+
+    try:
+        meetings = calendar_events.from_ics(att.extracted_text or "")
+    except Exception:  # an invitation that can't be read is left out, never shown as raw text
+        meetings = []
+    said = invitation_line(att, tz) if meetings else ""
+    if not said:
+        return "A calendar invitation; no meeting could be read from it."
+    shown = calendar_events.shown(meetings[0].to_row(), tz or timezone.utc)
+    lines = [f"Meeting: {said}"]
+    if shown["location"]:
+        lines.append(f"Where: {shown['location']}")
+    if shown["organizer"]:
+        lines.append(f"Organized by: {shown['organizer']}")
+    if shown["attendees"]:
+        lines.append("Invited: " + ", ".join(shown["attendees"][:12]))
+    lines.append(f"Times are {getattr(tz, 'key', str(tz)) if tz is not None else 'UTC'}.")
+    return "\n".join(lines)
+
+
 # Tools --------------------------------------------------------------------------------------
 
 
@@ -1156,6 +1186,8 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
         return f"No file like {args.get('file')!r} on [{ws.number(email)}]. " + (files_line(email) or "It has no files.")
     ws.read_files = True
     if name == "read_file":
+        if is_invitation(att):
+            return f"{att.filename} (calendar invitation):\n{invitation_text(att, _zone(ws))}"
         return _read_file(att, str(args.get("part") or ""))
     if name in {"read_cells", "trace_cell", "compare_columns"}:
         if not att.filename.lower().endswith(documents.SPREADSHEET_SUFFIXES):
@@ -1226,7 +1258,9 @@ def _open_email(ws: Workspace, email: EmailRecord) -> str:
         lines.append(files_line(email))
         if not attachments_locked(email):
             for att in email.attachments:
-                if (att.extracted_text or "").strip():
+                if is_invitation(att):
+                    lines.append(f"{att.filename} (calendar invitation): " + invitation_text(att, _zone(ws)).replace("\n", " · "))
+                elif (att.extracted_text or "").strip():
                     lines.append(f"Outline of {att.filename}: " + " / ".join(documents.outline(att.extracted_text, limit=10)))
     if related := related_lines(ws, email):
         lines.append(related)
@@ -1316,10 +1350,16 @@ def _find_in_file(ws: Workspace, email: EmailRecord, query: str, file) -> str:
         return "No readable file to search. " + (files_line(email) or "")
     ws.read_files = True
     hits = []
+    words = documents.terms(query, stop=_STOP)
     for att in targets:
+        if is_invitation(att):
+            said = invitation_text(att, _zone(ws))
+            if any(word in said.lower() for word in words):
+                hits.append(f"{att.filename} · [the meeting]\n{said}")
+            continue
         for part in documents.search_parts(att.extracted_text, query, limit=3, stop=_STOP):
             hits.append(f"{att.filename} · [{part.label}]\n{part.text}")
-    if not hits and not documents.terms(query, stop=_STOP):
+    if not hits and not words:
         return f"{query!r} is too short or too common to search for: give a name, a figure or a longer word, or read_file for the outline."
     if not hits:
         return f"None of the files mention {query!r}. Try other words, or read_file for the outline."
