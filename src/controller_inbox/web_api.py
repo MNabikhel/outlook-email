@@ -1250,6 +1250,7 @@ def register_workspace(
             last = json.loads(store.get_state(outlook_sync.LAST_RESULT_KEY) or "{}")
         except ValueError:
             last = {}
+        failed = outlook_sync.last_failure(store)
         return {
             **cfg,
             "available": not why,
@@ -1260,6 +1261,8 @@ def register_workspace(
             "account": store.get_state(outlook_sync.ACCOUNT_KEY) or "",
             "last_sync": format_when(store.get_state(outlook_sync.LAST_SYNC_KEY) or "", settings.tz),
             "last_result": outlook_sync.describe(last) if last else "",
+            "last_error": failed.get("error", ""),
+            "last_error_at": format_when(failed.get("at", ""), settings.tz),
             "copied": len(store.outlook_items()),
             "calendar_last": format_when(store.get_state(outlook_sync.CALENDAR_LAST_KEY) or "", settings.tz),
             "consented_label": format_when(cfg["consented_at"], settings.tz) if cfg["consented_at"] else "",

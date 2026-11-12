@@ -3,10 +3,11 @@
    about it. Keys: t today, d / w / m day, week, month, ← / → back and on. */
 
 import { h, icon, plural } from "./dom.js";
+import { clockTime as timeLabel, meetingTime } from "./format.js";
 
 const enc = encodeURIComponent;
 const DAY_MS = 86400000;
-const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const WEEKDAYS = [["Monday", "Mon"], ["Tuesday", "Tue"], ["Wednesday", "Wed"], ["Thursday", "Thu"], ["Friday", "Fri"], ["Saturday", "Sat"], ["Sunday", "Sun"]];
 const VIEWS = [["day", "Day"], ["week", "Week"], ["month", "Month"]];
 
 /* ---------- Dates, as the app's time zone writes them ("2026-10-05", "2026-10-05T09:30") ---------- */
@@ -20,11 +21,6 @@ const addDays = (date, n) => new Date(date.getTime() + n * DAY_MS);
 const mondayOf = (date) => addDays(date, -((date.getUTCDay() + 6) % 7));
 const minutesOf = (stamp) => Number(stamp.slice(11, 13)) * 60 + Number(stamp.slice(14, 16));
 const fmt = (date, options) => date.toLocaleDateString(undefined, { timeZone: "UTC", ...options });
-const timeLabel = (stamp) => {
-  const [hh, mm] = [Number(stamp.slice(11, 13)), stamp.slice(14, 16)];
-  const h12 = ((hh + 11) % 12) + 1;
-  return `${h12}${mm === "00" ? "" : `:${mm}`}${hh < 12 ? "am" : "pm"}`;
-};
 
 /** The days a view shows around ``date``: its first and last. */
 export function rangeOf(view, date) {
@@ -67,8 +63,19 @@ export function calendarView(data, route, ctx) {
   const view = VIEWS.some(([v]) => v === route.calView) ? route.calView : "week";
   const date = route.date || data.today;
   const go = (nextView, nextDate) => ctx.navigate(`/app/calendar?${new URLSearchParams({ view: nextView, date: nextDate })}`);
-  const panel = h("aside", { class: "cal-panel", "aria-live": "polite" }, h("p", { class: "muted small" }, "Choose a meeting to see its details and the mail about it."));
-  const open = (meeting) => showMeeting(panel, meeting, ctx);
+  const panel = h("aside", { class: "cal-panel", "aria-live": "polite", "aria-label": "Meeting" }, h("p", { class: "muted small" }, "Choose a meeting to see its details and the mail about it."));
+  // The open meeting is in the address, so coming back from its mail (Esc, Back) opens it again.
+  const open = (meeting) => {
+    for (const chipEl of page.querySelectorAll(".cal-chip")) {
+      const on = chipEl.dataset.id === meeting.id;
+      chipEl.classList.toggle("open", on);
+      if (on) chipEl.setAttribute("aria-current", "true");
+      else chipEl.removeAttribute("aria-current");
+    }
+    if (ctx.remember) ctx.remember(`/app/calendar?${new URLSearchParams({ view, date, meeting: meeting.id })}`);
+    showMeeting(panel, meeting, ctx);
+  };
+  let page = null;
   const bar = h(
     "div",
     { class: "rd-bar cal-bar" },
@@ -84,7 +91,7 @@ export function calendarView(data, route, ctx) {
     )
   );
   const body = view === "month" ? monthGrid(data, date, open, (day) => go("day", dayText(day))) : timeGrid(data, view, date, open);
-  const page = h("article", { class: "rd cal" }, bar, sourceNote(data.source), h("div", { class: "cal-main" }, h("div", { class: "cal-body" }, body), panel));
+  page = h("article", { class: "rd cal" }, bar, sourceNote(data.source), h("div", { class: "cal-main" }, h("div", { class: "cal-body" }, body), panel));
   page.keys = (event) => {
     const keys = { t: () => go(view, data.today), d: () => go("day", date), w: () => go("week", date), m: () => go("month", date), ArrowLeft: () => go(view, step(view, date, -1)), ArrowRight: () => go(view, step(view, date, 1)) };
     if (!keys[event.key]) return false;
@@ -92,23 +99,33 @@ export function calendarView(data, route, ctx) {
     keys[event.key]();
     return true;
   };
-  if (route.meeting) {
-    const meeting = data.meetings.find((m) => m.id === route.meeting);
-    if (meeting) open(meeting);
-  }
+  // Arriving with a meeting in the address (from Today, an answer, or back from its mail): it opens, and keys go to
+  // it once the page is on screen.
+  const meeting = route.meeting ? data.meetings.find((m) => m.id === route.meeting) : null;
+  if (meeting) open(meeting);
+  page.focusMeeting = () => {
+    const heading = meeting && panel.querySelector(".cal-panel-title");
+    if (!heading) return false;
+    heading.focus({ preventScroll: true });
+    panel.scrollIntoView({ block: "nearest" });
+    return true;
+  };
   return page;
 }
 
 function sourceNote(source) {
+  if (source.calendar && !source.calendar_last) {
+    return h("p", { class: "cal-note muted small" }, icon("info", 13), " Your Outlook calendar hasn't been read yet: it's read with the next sync. Meeting invitations in your mail show here meanwhile.");
+  }
   if (source.calendar) {
-    return h("p", { class: "cal-note muted small" }, icon("ok", 13), ` Your Outlook calendar, read only${source.calendar_last ? `; read ${source.calendar_last}` : ""}. Meeting invitations in your mail show here too.`);
+    return h("p", { class: "cal-note muted small" }, icon("ok", 13), ` Your Outlook calendar, read only; read ${source.calendar_last}. Meeting invitations in your mail show here too.`);
   }
   if (source.outlook_available) {
     return h(
       "p",
       { class: "cal-note muted small" },
       "Showing the meetings from invitations in your mail. ",
-      h("a", { href: "/app/settings#set-outlook", dataset: { nav: "" } }, source.connected ? "Turn on Read my calendar" : "Connect Outlook"),
+      h("a", { href: "/app/settings#set-outlook", dataset: { nav: "" } }, source.connected ? "Turn on Read my calendar too" : "Connect Outlook"),
       " to see your whole Outlook calendar here."
     );
   }
@@ -116,12 +133,16 @@ function sourceNote(source) {
 }
 
 function chip(meeting, open, { time = true } = {}) {
+  const said = `${meetingTime(meeting)} · ${meeting.subject}${meeting.location ? ` · ${meeting.location}` : ""}${meeting.cancelled ? " (cancelled)" : ""}`;
   return h(
     "button",
     {
       type: "button",
       class: `cal-chip${meeting.cancelled ? " cancelled" : ""}${meeting.all_day ? " all-day" : ""}`,
-      title: `${meeting.all_day ? "All day" : `${timeLabel(meeting.start)}–${timeLabel(meeting.end)}`} · ${meeting.subject}${meeting.location ? ` · ${meeting.location}` : ""}${meeting.cancelled ? " (cancelled)" : ""}`,
+      title: said,
+      // Its whole name, also where a phone's month shows the meeting as a dot.
+      "aria-label": said,
+      dataset: { id: meeting.id },
       onclick: () => open(meeting),
     },
     time && !meeting.all_day ? h("span", { class: "cal-time" }, timeLabel(meeting.start)) : null,
@@ -152,7 +173,9 @@ function monthGrid(data, date, open, showDay) {
     }
     rows.push(h("tr", null, ...cells));
   }
-  return h("table", { class: "cal-month" }, h("thead", null, h("tr", null, WEEKDAYS.map((d) => h("th", { scope: "col" }, d)))), h("tbody", null, ...rows));
+  // A phone shows the weekdays as one letter.
+  const head = WEEKDAYS.map(([long, short]) => h("th", { scope: "col", abbr: long }, h("span", { class: "cal-wd" }, short), h("span", { class: "cal-wd-1", "aria-hidden": "true" }, short[0])));
+  return h("table", { class: "cal-month" }, h("thead", null, h("tr", null, head)), h("tbody", null, ...rows));
 }
 
 function timeGrid(data, view, date, open) {
@@ -183,20 +206,21 @@ function timeGrid(data, view, date, open) {
   const columns = days.map((day) => {
     const meetings = onDay(timed, day);
     const lanes = layout(meetings);
+    // A list of the day's meetings, each a button in its place on the day.
     return h(
-      "div",
-      { class: `cal-col${dayText(day) === data.today ? " today" : ""}`, style: { height: `${((to - from) / 60) * hourPx}px` }, role: "list", "aria-label": fmt(day, { weekday: "long", month: "long", day: "numeric" }) },
+      "ul",
+      { class: `cal-col${dayText(day) === data.today ? " today" : ""}`, style: { height: `${((to - from) / 60) * hourPx}px` }, "aria-label": fmt(day, { weekday: "long", month: "long", day: "numeric" }) },
       ...meetings.map((m) => {
         const top = ((minutesOf(m.start) - from) / 60) * hourPx;
         const end = m.end.slice(0, 10) > m.start.slice(0, 10) ? to : minutesOf(m.end);
         const height = Math.max(20, ((end - minutesOf(m.start)) / 60) * hourPx - 2);
         const { lane, of } = lanes.get(m.id);
         const block = chip(m, open, { time: true });
-        block.setAttribute("role", "listitem");
         block.classList.add("cal-block");
         if (height < 40) block.classList.add("short"); // time and title on one line
-        Object.assign(block.style, { top: `${top}px`, height: `${height}px`, left: `calc(${(lane / of) * 100}% + 2px)`, width: `calc(${100 / of}% - 4px)` });
-        return block;
+        // Lines of title that fit the block's height; the last one ends in "…".
+        else block.style.setProperty("--cal-lines", String(Math.max(1, Math.floor((height - 22) / 15))));
+        return h("li", { class: "cal-slot", style: { top: `${top}px`, height: `${height}px`, left: `calc(${(lane / of) * 100}% + 2px)`, width: `calc(${100 / of}% - 4px)` } }, block);
       })
     );
   });
@@ -238,9 +262,7 @@ function layout(meetings) {
 /* ---------- One meeting, and its mail ---------- */
 
 async function showMeeting(panel, meeting, ctx) {
-  const when = meeting.all_day
-    ? `${fmt(parseDay(meeting.start), { weekday: "long", month: "long", day: "numeric" })} · all day`
-    : `${fmt(parseDay(meeting.start), { weekday: "long", month: "long", day: "numeric" })} · ${timeLabel(meeting.start)}–${timeLabel(meeting.end)}`;
+  const when = `${fmt(parseDay(meeting.start), { weekday: "long", month: "long", day: "numeric" })} · ${meeting.all_day ? "all day" : meetingTime(meeting)}`;
   const facts = [
     ["When", when],
     meeting.location ? ["Where", meeting.location] : null,
@@ -256,7 +278,7 @@ async function showMeeting(panel, meeting, ctx) {
     "Ask about this meeting"
   );
   panel.replaceChildren(
-    h("h2", { class: "cal-panel-title" }, meeting.subject, meeting.cancelled ? h("span", { class: "tag tag-fraud" }, "Cancelled") : null, meeting.recurring ? h("span", { class: "tag" }, "Repeats") : null),
+    h("h2", { class: "cal-panel-title", tabindex: "-1" }, meeting.subject, meeting.cancelled ? h("span", { class: "tag tag-fraud" }, "Cancelled") : null, meeting.recurring ? h("span", { class: "tag" }, "Repeats") : null),
     h("dl", { class: "cal-facts" }, ...facts.flatMap(([k, v]) => [h("dt", null, k), h("dd", null, v)])),
     ask,
     h("h3", { class: "rel-h" }, "Mail about it"),

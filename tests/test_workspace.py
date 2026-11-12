@@ -881,7 +881,7 @@ def test_connecting_outlook_asks_first_and_cancel_reads_nothing(loaded, settings
         page.click("#set-outlook button:has-text('Connect to Outlook')")
         dialog = page.wait_for_selector("dialog.consent[open]")
         text = dialog.inner_text()
-        assert "It only reads." in text and "deleted or sent" in text and "Also read my calendar" in text
+        assert "It only reads." in text and "deleted or sent" in text and "Read my calendar too" in text
         page.click("dialog.consent button:has-text('Cancel')")
         page.wait_for_selector("dialog.consent", state="detached")
         assert not outlook_sync.config(loaded)["consent"], "cancelled: nothing agreed, nothing read"
@@ -911,3 +911,154 @@ def test_the_calendar_shows_a_week_a_meeting_with_its_mail_and_moves_by_keys(sit
     page.keyboard.press("d")
     page.wait_for_selector(".cal-week.view-day")
     assert page.locator(".seg-btn.on").text_content() == "Day"
+
+
+# Sync inbox: what happened shows on the card --------------------------------------------------------
+def test_sync_inbox_says_what_happened_on_the_card_and_keeps_advanced_open(loaded, settings, page, monkeypatch):
+    # The card's only status line was in the closed Advanced part, and each change drew the page again with
+    # Advanced closed; a sync that didn't work wasn't shown at all.
+    from contextlib import contextmanager
+
+    from liveserver import serving
+
+    from controller_inbox import outlook_desktop, outlook_sync
+
+    @contextmanager
+    def closed(**_options):
+        raise outlook_desktop.OutlookUnavailable("Outlook isn't open, so it wasn't synced. It syncs once Outlook is open.")
+        yield
+
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    monkeypatch.setattr(outlook_desktop, "connect", closed)
+    outlook_sync.connect(loaded, calendar=False)
+    outlook_sync.note_failure(loaded, "Outlook couldn't be read this time (the MAPI store is offline).")
+    page.on("dialog", lambda dialog: dialog.accept())
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/app/settings#set-outlook")
+        banner = page.wait_for_selector("#set-outlook-banner.error")
+        assert "Last sync didn't work" in banner.inner_text() and "the MAPI store is offline" in banner.inner_text()
+        page.click("#set-outlook-more > summary")
+        page.click("#set-outlook-more button:has-text('Check Outlook')")
+        line = page.wait_for_selector('#set-outlook-more [data-status="outlook-more"].error')
+        assert page.is_visible("#set-outlook-more form"), "Advanced stays open after the page is drawn again"
+        assert line.is_visible() and "Outlook isn't open" in line.inner_text()
+        page.check("#set-outlook-calendar")
+        said = page.wait_for_selector('#set-outlook .src-card.on [data-status="outlook"].ok')
+        assert said.is_visible() and "calendar is read" in said.inner_text()
+        assert page.is_visible("#set-outlook-more form")
+        page.goto(f"{base}/app/calendar")
+        note = page.wait_for_selector(".cal-note")
+        assert "hasn't been read yet" in note.inner_text() and "read only;" not in note.inner_text()
+        page.goto(f"{base}/app/settings#set-outlook")
+        page.click("#set-outlook button:has-text('Disconnect')")
+        gone = page.wait_for_selector('#set-outlook .src-card [data-status="outlook"].ok')
+        assert gone.is_visible() and "Disconnected" in gone.inner_text(), "the card not connected says it too"
+        page.click("#set-outlook-more > summary")
+        advanced = page.inner_text("#set-outlook-more")
+        assert "Ask IT" in advanced and "python -m" not in advanced and "AZURE_CLIENT_ID" not in advanced
+
+
+# The calendar and the mail about a meeting ----------------------------------------------------------
+_FOCUS = "() => { const e = document.activeElement; return e ? `${e.tagName}.${e.className}|${e.textContent.trim().slice(0, 60)}|${e.getAttribute('href') || ''}` : ''; }"
+
+
+def test_a_meeting_from_today_opens_marked_and_its_mail_closes_back_to_it(site, page):
+    page.goto(f"{site}/app")
+    page.click("#reader .meetings a:has-text('Northwind invoice INV-10482 review')")
+    page.wait_for_selector(".cal-panel-title:has-text('Northwind')")
+    assert "meeting=mtg-" in page.url
+    assert page.evaluate(_FOCUS).startswith("H2.cal-panel-title"), "keys go to the meeting opened"
+    assert page.locator(".cal-chip.open").count() == 1 and "Northwind" in page.text_content(".cal-chip.open")
+    page.wait_for_selector('.cal-related a[href="/app/mail/demo-inv-10482"]')
+    page.focus('.cal-related a[href="/app/mail/demo-inv-10482"]')
+    page.keyboard.press("Enter")
+    page.wait_for_selector('.rd[data-email="demo-inv-10482"]')
+    page.wait_for_function("() => document.activeElement && document.activeElement.classList.contains('rd-subject')")
+    page.keyboard.press("Escape")
+    page.wait_for_selector(".cal-panel-title:has-text('Northwind')")
+    assert "/app/calendar" in page.url and "meeting=mtg-" in page.url
+    assert page.evaluate(_FOCUS).startswith("H2.cal-panel-title")
+    # Another meeting chosen in the grid goes into the address too.
+    page.click(".cal-block:has-text('AP team standup')")
+    page.wait_for_selector(".cal-panel-title:has-text('AP team standup')")
+    standup = page.get_attribute(".cal-chip.open", "data-id")
+    assert page.url.endswith(f"meeting={standup}")
+
+
+def test_enter_on_a_related_email_and_esc_from_its_whole_matter_keep_the_keys_on_it(site, page):
+    page.goto(f"{site}/app/mail/demo-inv-10482")
+    page.wait_for_selector("#rd-related")
+    page.focus('#rd-related a[href="/app/mail/demo-inv-10482-dup"]')
+    page.keyboard.press("Enter")
+    page.wait_for_selector('.rd[data-email="demo-inv-10482-dup"]')
+    page.wait_for_function("() => document.activeElement && document.activeElement.closest('.rd[data-email=\"demo-inv-10482-dup\"] .rd-subject')")
+    page.click("#rd-related a:has-text('Whole matter')")
+    page.wait_for_selector(".trace .tr-steps")
+    page.keyboard.press("Escape")
+    page.wait_for_selector('.rd[data-email="demo-inv-10482-dup"]')
+    page.wait_for_function("() => document.activeElement && document.activeElement.matches('#rd-related a[href^=\"/app/trace/\"]')")
+
+
+def test_meetings_in_the_week_are_buttons_with_their_titles_cut_with_an_ellipsis(site, page):
+    page.goto(f"{site}/app/calendar?view=week&date=2026-09-22")
+    page.wait_for_selector(".cal-week")
+    assert page.locator("[role=listitem]").count() == 0, "a meeting is a button, not a list item"
+    assert page.locator("ul.cal-col > li > button.cal-block").count() == page.locator(".cal-block").count() > 5
+    pbc = page.locator(".cal-block:has-text('PBC list walkthrough')")
+    assert pbc.evaluate("b => getComputedStyle(b.querySelector('.cal-subj')).webkitLineClamp") == "1", "an hour holds one line, then …"
+    assert "11am–12pm" in pbc.get_attribute("aria-label")
+
+
+def test_the_calendar_fits_a_phone_and_the_desktop_keeps_its_week(browser, serve, loaded):
+    base = serve()
+    page = _page(browser, width=390, height=844)
+    page.goto(f"{base}/app/calendar?view=month&date=2026-09-22")
+    page.wait_for_selector(".cal-month")
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390
+    assert page.evaluate("(() => { const b = document.querySelector('.cal-body'); return b.scrollWidth <= b.clientWidth + 1; })()"), "Fri to Sun in view"
+    assert page.inner_text(".cal-month thead").split() == ["M", "T", "W", "T", "F", "S", "S"]
+    page.goto(f"{base}/app/calendar?view=week&date=2026-09-22")
+    page.wait_for_selector(".cal-week")
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390, "the week scrolls in its own box, not the page"
+    assert page.evaluate("Math.min(...[...document.querySelectorAll('.cal-block')].map(b => b.getBoundingClientRect().width))") >= 100
+    wide = _page(browser, width=1280)
+    wide.goto(f"{base}/app/calendar?view=month&date=2026-09-22")
+    wide.wait_for_selector(".cal-month")
+    assert wide.inner_text(".cal-month thead").split() == ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    assert wide.locator(".cal-month .cal-subj:visible").count() > 5, "the desktop month shows titles"
+
+
+def test_a_phone_shows_todays_warnings_and_meetings_above_the_list(browser, serve, loaded):
+    base = serve()
+    page = _page(browser, width=390, height=844)
+    page.goto(f"{base}/app")
+    page.wait_for_selector(".items")
+    brief = page.wait_for_selector(".list-brief")
+    assert brief.is_visible() and "Do not process — verify by phone" in brief.text_content() and "Today's meetings" in brief.text_content()
+    wide = _page(browser, width=1280)
+    wide.goto(f"{base}/app")
+    wide.wait_for_selector(".items")
+    assert not wide.is_visible(".list-brief"), "beside the list on a wide screen, not twice"
+
+
+def test_an_answers_meeting_citation_opens_that_meeting_on_its_day(tmp_path):
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js isn't installed")
+    sources = [{"n": 1, "id": "calendar", "subject": "Your calendar", "calendar": True, "files": [],
+                "meetings": [{"id": "mtg-a", "day": "2026-09-22", "subject": "AP team standup"}, {"id": "mtg-b", "day": "2026-09-23", "subject": "PBC list walkthrough with the auditors"}]}]
+    script = tmp_path / "answer.mjs"
+    script.write_text(
+        f"import {{ formatAnswer }} from {json.dumps((UI / 'format.js').as_uri())};\n"
+        f"const sources = {json.dumps(sources)};\n"
+        "console.log(formatAnswer('The PBC list walkthrough with the auditors is at 11am [1].', sources));\n"
+        "console.log(formatAnswer('Your meetings [1]:\\n- Wed Sep 23, 11am–12pm · PBC list walkthrough with the auditors', sources));\n"
+        "console.log(formatAnswer('Nothing then [1].', [{ ...sources[0], meetings: [] }]));\n"
+    )
+    named, listed, none = subprocess.run([node, str(script)], capture_output=True, text=True, check=True).stdout.splitlines()
+    assert 'href="/app/calendar?view=day&amp;date=2026-09-23&amp;meeting=mtg-b"' in named
+    assert 'href="/app/calendar?view=day&amp;date=2026-09-23&amp;meeting=mtg-b"' in listed, "the meeting the answer lists"
+    assert 'href="/app/calendar"' in none

@@ -20,6 +20,7 @@ import logging
 import re
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -147,6 +148,35 @@ CALENDAR_DAYS_BACK = 7
 CALENDAR_DAYS_AHEAD = 21
 
 
+# A line of the calendar's listing starts "2026-09-23 09:30–09:45"; on screen it is "9:30am–9:45am", as the
+# calendar writes it.
+_LISTED_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})(?:–(\d{2}):(\d{2}))?")
+
+
+def clock_time(hour: int, minute: str) -> str:
+    """``9:30am``, ``2pm``: a time as the calendar page writes it."""
+    return f"{(hour + 11) % 12 + 1}{'' if minute == '00' else f':{minute}'}{'am' if hour < 12 else 'pm'}"
+
+
+def _calendar_times(line: str) -> str:
+    def said(match: re.Match) -> str:
+        start = clock_time(int(match.group(2)), match.group(3))
+        end = f"–{clock_time(int(match.group(4)), match.group(5))}" if match.group(4) else ""
+        return f"{match.group(1)} {start}{end}"
+
+    return _LISTED_TIME.sub(said, line, count=1)
+
+
+def _readable_day(row: str) -> str:
+    """"2026-09-23 9:30am–9:45am · …" as "Wed Sep 23, 9:30am–9:45am · …" for an answer on screen."""
+    try:
+        day = date.fromisoformat(row[:10])
+    except ValueError:
+        return row
+    rest = row[10:]
+    return f"{day:%a %b} {day.day}{',' if rest.startswith(' ') and not rest.startswith(' (') else ''}{rest}"
+
+
 def _meetings_for(question: str, listing: str, today: str) -> str:
     """The calendar's lines for the day a question names (today, tomorrow, a weekday), or the next seven days."""
     rows = [line for line in listing.splitlines()[1:] if line.strip()]
@@ -168,12 +198,19 @@ def _meetings_for(question: str, listing: str, today: str) -> str:
     else:
         days = [day + timedelta(days=i) for i in range(7)]
     wanted = {d.isoformat() for d in days}
-    picked = [f"- {row}" for row in rows if row[:10] in wanted]
+    picked = [f"- {_readable_day(row)}" for row in rows if row[:10] in wanted]
     return "\n".join(picked) if picked else "No meetings then."
 
 
 def asks_about_meetings(question: str) -> bool:
     return bool(_MEETINGS.search(question or ""))
+
+
+@dataclass
+class CalendarSource(EmailRecord):
+    """The calendar as a source, with its meetings (id, day, subject) so a citation opens the one it names."""
+
+    meetings: list[dict] = field(default_factory=list)
 
 
 def calendar_source(store: Store, settings: Settings, today: str = "") -> EmailRecord | None:
@@ -191,16 +228,19 @@ def calendar_source(store: Store, settings: Settings, today: str = "") -> EmailR
     if not meetings:
         return None
     zone = getattr(settings.tz, "key", str(settings.tz))
+    lines = "\n".join(_calendar_times(line) for line in calendar_events.listing(meetings).splitlines())
     body = (
         f"Meetings from {first:%A %B} {first.day} to {last:%A %B} {last.day}, {last.year}; today is {day:%A %B} {day.day}. "
-        f"Times are {zone}.\n" + calendar_events.listing(meetings)
+        f"Times are {zone}.\n" + lines
     )
-    return _calendar_record(body)
+    return _calendar_record(body, meetings)
 
 
-def _calendar_record(body: str) -> EmailRecord:
-    """The calendar as a numbered source: ``body`` is its lines."""
-    return EmailRecord(
+def _calendar_record(body: str, meetings: list[dict]) -> CalendarSource:
+    """The calendar as a numbered source: ``body`` is its lines, ``meetings`` (as calendar_events.shown gives
+    them) the ones a citation can open."""
+    return CalendarSource(
+        meetings=[{"id": m["id"], "day": m["start"][:10], "subject": m["subject"]} for m in meetings],
         id="calendar",
         subject="Your calendar",
         sender_name="Calendar",
@@ -268,7 +308,8 @@ def meeting_sources(store: Store, settings: Settings, meeting: dict, email_id: s
 
     shown = calendar_events.shown(meeting, settings.tz)
     zone = getattr(settings.tz, "key", str(settings.tz))
-    calendar = _calendar_record(f"The meeting asked about. Times are {zone}.\n" + calendar_events.listing([shown]))
+    lines = "\n".join(_calendar_times(line) for line in calendar_events.listing([shown]).splitlines())
+    calendar = _calendar_record(f"The meeting asked about. Times are {zone}.\n" + lines, [shown])
     mail = calendar_events.related_mail(store, meeting, limit=MAX_SOURCES)
     if email_id and email_id not in {email.id for email in mail} and (current := store.get_email(email_id)) is not None:
         mail = [current, *mail]
@@ -727,6 +768,7 @@ def source_cards(sources: list[EmailRecord], settings: Settings | None = None) -
             "fraud": is_fraud(email),
             "chat": email.source == "chat",
             "calendar": email.source == "calendar",
+            **({"meetings": email.meetings} if isinstance(email, CalendarSource) else {}),
             "files": [] if attachments_locked(email) else [
                 {
                     "n": number,

@@ -29,7 +29,7 @@ const SECTIONS = [
 
 const STATE_LABELS = { on: "Ready", fallback: "Older method", off: "Off" };
 // The section a change's message shows in, when it isn't the change's own name.
-const SECTION_OF = { chat: "model" };
+const SECTION_OF = { chat: "model", "outlook-more": "outlook" };
 const b = (text) => h("b", null, text);
 const code = (text) => h("code", null, text);
 
@@ -113,6 +113,11 @@ export function createSettings(ctx) {
         const kept = dirty.has(id) && id === "model" ? $("#set-chat-model", old) : null;
         if (dirty.has(id) && !kept) continue;
         const fresh = build();
+        // A part opened here (Advanced) stays open when the section is drawn again after a change.
+        for (const part of $$("details[id]", old)) {
+          const again = part.open ? $(`#${CSS.escape(part.id)}`, fresh) : null;
+          if (again) again.open = true;
+        }
         const slot = kept ? $("#set-chat-model", fresh) : null;
         if (slot) slot.replaceWith(kept);
         else if (kept) dirty.delete(id); // no choice to make any more
@@ -677,18 +682,13 @@ export function createSettings(ctx) {
 
   function outlook() {
     const o = data.outlook;
+    // Signing in to Microsoft 365 needs an app IT registers; nobody is asked to type commands for it.
     const graph = h(
       "p",
       { class: "set-help" },
-      "Microsoft 365 connection instead (needs IT): if IT approves a Microsoft Entra app with delegated ",
-      code("Mail.Read"),
-      ", set ",
-      code("AZURE_CLIENT_ID"),
-      ", then run ",
-      code("python -m controller_inbox auth"),
-      " and ",
-      code("sync"),
-      `. ${data.graph_configured ? "Configured" : "Not configured"}; last sync ${data.runs.last_sync || "never"}.`
+      data.graph_configured
+        ? `Microsoft 365 sign-in is set up on this computer and only reads your mail. Last read ${data.runs.last_sync || "never"}.`
+        : "Microsoft 365 sign-in (for new Outlook or Outlook on the web) isn't set up on this computer: it needs an app your IT team registers for CloseDesk, and it would only read your mail. Ask IT if you need it. The drop folder works without it."
     );
     const dropFolder = h(
       "div",
@@ -709,7 +709,7 @@ export function createSettings(ctx) {
           h("div", { class: "src-head" }, icon("mail", 16), b("Classic Outlook"), h("span", { class: "tag" }, "Not on this computer")),
           h("p", { class: "set-help" }, o.why)
         ),
-        h("details", { class: "set-more" }, h("summary", null, "Advanced"), graph)
+        h("details", { class: "set-more", id: "set-outlook-more" }, h("summary", null, "Advanced"), graph)
       );
     }
     if (!o.consent) {
@@ -724,15 +724,16 @@ export function createSettings(ctx) {
           { class: "src-card" },
           h("div", { class: "src-head" }, icon("mail", 16), b("Classic Outlook"), h("span", { class: "tag" }, "Not connected")),
           h("p", { class: "set-help" }, "Copies your mail and its attachments from classic Outlook on this computer, and keeps them up to date. It only reads: nothing in Outlook is changed."),
-          h("div", { class: "set-actions" }, h("button", { type: "button", class: "btn btn-primary btn-sm", onclick: (event) => askToConnect(event.currentTarget) }, icon("external", 14), "Connect to Outlook"))
+          actions("outlook", h("button", { type: "button", class: "btn btn-primary btn-sm", onclick: (event) => askToConnect(event.currentTarget) }, icon("external", 14), "Connect to Outlook"))
         ),
-        h("details", { class: "set-more" }, h("summary", null, "Advanced"), graph)
+        h("details", { class: "set-more", id: "set-outlook-more" }, h("summary", null, "Advanced"), graph)
       );
     }
     const now = ctx.job();
     const running = now.state === "running";
     const syncing = running && now.about && now.about.kind === "outlook";
-    const check = (event) => save("outlook", "/api/settings/outlook/check", {}, event.currentTarget, { busyText: "Checking…" });
+    // Advanced's own changes say what happened beside its buttons; the card's, on the card.
+    const check = (event) => save("outlook-more", "/api/settings/outlook/check", {}, event.currentTarget, { busyText: "Checking…" });
     const folders = o.folder_list.filter((f) => !f.trash);
     const chosen = (f) => (o.folders.length ? o.folders.includes(f.path) : f.inbox);
     const auto = h("input", { type: "checkbox", id: "set-outlook-auto", checked: o.auto });
@@ -759,7 +760,7 @@ export function createSettings(ctx) {
           event.preventDefault();
           const ticked = $$("input[name=outlook-folder]:checked:not(:disabled)", form).map((input) => input.value);
           const body = { auto: auto.checked, interval: Number(interval.value), days: Number(days.value), folders: ticked, subfolders: subfolders.checked };
-          save("outlook", "/api/settings/outlook", body, $("button[type=submit]", form));
+          save("outlook-more", "/api/settings/outlook", body, $("button[type=submit]", form));
         },
       },
       h("label", { class: "set-check" }, auto, h("span", { class: "set-check-text" }, b("Sync automatically"), h("span", null, "When CloseDesk starts, then on the schedule below while it's open. Off: only when you click Sync now."))),
@@ -781,7 +782,7 @@ export function createSettings(ctx) {
         : h("p", { class: "set-help" }, "Click ", b("Check Outlook"), " to list your folders. Until then the Inbox is copied."),
       h("label", { class: "set-check" }, subfolders, h("span", { class: "set-check-text" }, "Include the subfolders of the folders picked")),
       actions(
-        "outlook",
+        "outlook-more",
         h("button", { type: "submit", class: "btn btn-primary btn-sm" }, "Save"),
         h("button", { type: "button", class: "btn btn-sm", onclick: check }, icon("refresh", 14), folders.length ? "Check Outlook again" : "Check Outlook")
       )
@@ -809,13 +810,14 @@ export function createSettings(ctx) {
         h("div", { class: "src-head" }, icon("mail", 16), b("Classic Outlook"), h("span", { class: "tag tag-ok" }, "Connected")),
         h(
           "div",
-          { class: `set-banner ${o.auto ? "on" : "off"}` },
+          { class: `set-banner ${o.last_error ? "error" : o.auto ? "on" : "off"}`, id: "set-outlook-banner" },
           h("span", { class: "dot", "aria-hidden": "true" }),
           h(
             "div",
             null,
             h("p", null, o.auto ? `Automatic: syncs when CloseDesk starts, then every ${o.interval} minutes while CloseDesk and Outlook are both open.` : "Manual: syncs when you click Sync now."),
-            h("p", { class: "set-help" }, o.last_sync ? `Last sync ${o.last_sync}: ${o.last_result}.` : "Not synced yet.")
+            o.last_error ? h("p", { class: "set-banner-error" }, icon("alert", 14), h("span", null, `Last sync didn't work (${o.last_error_at}): ${o.last_error}`)) : null,
+            h("p", { class: "set-help" }, o.last_sync ? `${o.last_error ? "Last sync that worked" : "Last sync"} ${o.last_sync}: ${o.last_result}.` : o.last_error ? "No sync has worked yet." : "Not synced yet.")
           )
         ),
         h("p", { class: "set-help" }, icon("ok", 14), " Read only: CloseDesk copies each email and its attachments into its own folder. Nothing in Outlook is moved, marked read, flagged, changed, deleted or sent."),
@@ -825,16 +827,15 @@ export function createSettings(ctx) {
           ["Connected", o.consented_label || "Before this version asked"],
         ]),
         h("label", { class: "set-check" }, calendar, h("span", { class: "set-check-text" }, b("Read my calendar too"), h("span", null, o.calendar ? (o.calendar_last ? `Meetings read ${o.calendar_last}, then once an hour. Their notes aren't read.` : "Read with the next sync, then once an hour. Their notes aren't read.") : "Shows your meetings in CloseDesk's calendar, beside the mail about them. Only read; their notes aren't read."))),
-        h(
-          "div",
-          { class: "set-actions" },
+        actions(
+          "outlook",
           h("button", { type: "button", class: "btn btn-primary btn-sm", disabled: running, onclick: () => ctx.syncOutlook() }, icon("refresh", 13), syncing ? "Syncing…" : "Sync now"),
           h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: disconnect }, "Disconnect")
         )
       ),
       h(
         "details",
-        { class: "set-more" },
+        { class: "set-more", id: "set-outlook-more" },
         h("summary", null, "Advanced: folders, schedule, how far back"),
         h(
           "p",
@@ -864,7 +865,7 @@ export function createSettings(ctx) {
         h("li", null, icon("info", 14), h("span", null, "Mail you delete in Outlook is removed from CloseDesk too; mail you move to a folder that isn't copied stays.")),
         h("li", null, icon("info", 14), h("span", null, "Outlook may ask whether to allow access: choose ", b("Allow"), "."))
       ),
-      h("label", { class: "set-check" }, calendar, h("span", { class: "set-check-text" }, b("Also read my calendar"), h("span", null, "Meetings only (when, where, who), not their notes."))),
+      h("label", { class: "set-check" }, calendar, h("span", { class: "set-check-text" }, b("Read my calendar too"), h("span", null, "Meetings only (when, where, who), not their notes."))),
       h(
         "div",
         { class: "consent-actions" },
