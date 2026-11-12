@@ -668,18 +668,44 @@ def sheet_row_lines(rows: list[SheetRow], *, first_names_columns: bool = False) 
     from openpyxl.utils import get_column_letter
 
     header = _sheet_header(rows, first_names_columns=first_names_columns)
-    labels = {c: _label(v) for c, v in rows[header].cells.items()} if header is not None else {}
-    second = _second_heading_row(rows, header)
-    if second is not None:
-        labels = _two_row_labels(labels, rows[second].cells)
-        header = second
-    # Tables stacked on one sheet (an aging per entity) repeat the heading row over each; the one-cell row just
-    # above each heading row is that table's title, not one of the rows of the table before it.
-    repeats = {index for index, row in enumerate(rows) if header is not None and index > header and row.cells == rows[header].cells}
-    titles = {index - 1 for index in repeats | ({header} if header is not None else set()) if index > 0 and len(rows[index - 1].cells) == 1}
+    # Each table's heading rows, by the index of its first: (the index of its last, its labels). Tables stacked on one
+    # sheet (an aging per entity, open invoices over credits) each have their own.
+    heads: dict[int, tuple[int, dict[int, str]]] = {}
+    if header is not None:
+        heads[header] = _headings(rows, header)
+        top, (last, labels) = header, heads[header]
+        index = last + 1
+        while index < len(rows):
+            # The same heading rows again (both of a two-row heading) start another table with the same columns.
+            same = all(index + step < len(rows) and rows[index + step].cells == rows[top + step].cells for step in range(last - top + 1))
+            if same:
+                heads[index] = (index + last - top, labels)
+                index += last - top + 1
+                continue
+            # After a blank row, other headings over rows of their own (a one-cell title above them or not) start
+            # another table with other columns: the credits under the open invoices.
+            start = index + 1 if _title_row(rows[index]) and index + 1 < len(rows) else index
+            gap = rows[index].number > rows[index - 1].number + 1
+            if gap and len(rows[start].cells) >= 2 and _heads_at(rows, start):
+                own = _headings(rows, start)
+                if set(own[1].values()) != set(labels.values()):
+                    heads[start] = own
+                    top, (last, labels) = start, own
+                    index = last + 1
+                    continue
+            index += 1
+    heading_rows = {row for first, (last, _labels) in heads.items() for row in range(first, last + 1)}
+    stacked = len(heads) > 1
+    # The title just above each table's heading rows ("Canada entity (CAD)", "Entity: | CA02 (CAD)") is its title,
+    # not one of the rows of the table before it.
+    titles = {first - 1 for first in heads if first > 0 and first - 1 not in heading_rows and _title_row(rows[first - 1])}
     out = []
+    labels: dict[int, str] = {}
+    end = len(rows)
     for index, row in enumerate(rows):
-        named = header is not None and index > header and index not in repeats and index not in titles
+        if index in heads:
+            end, labels = heads[index]
+        named = index > end and index not in heading_rows and index not in titles
         columns = sorted(row.cells)
         if named and len(columns) >= 2:
             columns = sorted(set(columns) | {c for c in labels if columns[0] < c < columns[-1]})
@@ -696,8 +722,24 @@ def sheet_row_lines(rows: list[SheetRow], *, first_names_columns: bool = False) 
         line = " | ".join(cells)
         # Each stacked table's title is a heading over its rows, so its rows are a table of their own, told apart
         # by the title ("Canada entity (CAD)"), not added to the table above.
-        out.extend(["[heading]", line, ""] if repeats and index in titles else [line])
+        out.extend(["[heading]", line, ""] if stacked and index in titles else [line])
     return out
+
+
+def _headings(rows: list[SheetRow], header: int) -> tuple[int, dict[int, str]]:
+    """The heading rows starting at ``header``: the index of the last (a second row under "Actual" merged over Jul,
+    Aug, Sep), and each column's label."""
+    labels = {c: _label(v) for c, v in rows[header].cells.items()}
+    second = _second_heading_row(rows, header)
+    if second is None:
+        return header, labels
+    return second, _two_row_labels(labels, rows[second].cells)
+
+
+def _title_row(row: SheetRow) -> bool:
+    """A table's title over its headings: one cell ("Credits"), or a label and its value ("Entity: | CA02 (CAD)")."""
+    values = [str(value) for _column, value in sorted(row.cells.items())]
+    return len(values) == 1 or (len(values) == 2 and values[0].rstrip().endswith(":"))
 
 
 def _second_heading_row(rows: list[SheetRow], header: int | None) -> int | None:
@@ -767,12 +809,7 @@ def _sheet_header(rows: list[SheetRow], *, first_names_columns: bool = False) ->
     in A1, "As of 10/31/2026" in D1) is not the header when a row of more labels under it is."""
 
     def heads(index: int) -> bool:
-        row = rows[index]
-        below = rows[index + 1 : index + 31]
-        columns = range(min(row.cells), max(max(r.cells) for r in [row, *below]) + 1)
-        grid = [[r.cells.get(c, "") for c in columns] for r in [row, *below]]
-        bold = row.bold and not all(r.bold for r in below)
-        return tables.has_header(grid, bold_first=bold, marked=first_names_columns and index == 0 and row.number == 1)
+        return _heads_at(rows, index, marked=first_names_columns and index == 0 and rows[index].number == 1)
 
     for index, row in enumerate(rows[:_HEADER_SEARCH]):
         if len(row.cells) < 2 or not heads(index):
@@ -786,6 +823,16 @@ def _sheet_header(rows: list[SheetRow], *, first_names_columns: bool = False) ->
                 return wider
         return index
     return None
+
+
+def _heads_at(rows: list[SheetRow], index: int, *, marked: bool = False) -> bool:
+    """Whether the row at ``index`` names the columns of the rows under it (``tables.has_header``)."""
+    row = rows[index]
+    below = rows[index + 1 : index + 31]
+    columns = range(min(row.cells), max(max(r.cells) for r in [row, *below]) + 1)
+    grid = [[r.cells.get(c, "") for c in columns] for r in [row, *below]]
+    bold = row.bold and not all(r.bold for r in below)
+    return tables.has_header(grid, bold_first=bold, marked=marked)
 
 
 def _sheet_lines(formula_sheet, value_sheet) -> list[str]:

@@ -475,3 +475,59 @@ def test_formulas_saved_without_results_are_not_read_as_zeros():
         assert "D2 (Total): =B2+C2" in text and "0 (=B2+C2)" not in text
         tables = _tables(text, "What is the total for Acme?", "pack.xlsx")
         assert "saved without their results" in tables.schema()
+
+
+# Tables stacked on one sheet -------------------------------------------------------------------
+
+
+def test_a_second_table_under_other_headings_is_a_table_of_its_own():
+    rows = [("Open invoices",), ("Vendor", "Invoice", "Amount"), ("Acme", "A-1", 100.25), ("Beta", "B-2", 200.5), ("Gamma", "G-3", 300.75), (),
+            ("Credits",), ("Credit memo", "Customer", "Date", "Credit"), ("CM-1", "Acme", "2026-10-01", -50.5),
+            ("CM-2", "Beta", "2026-10-02", -20.25), ("CM-3", "Delta", "2026-10-03", -10.0)]
+    text = _xlsx_text(rows)
+    assert "B9 (Customer): Acme | C9 (Date): 2026-10-01 | D9 (Credit): -50.5" in text
+    tables = _tables(text)
+    assert tables.run("SELECT ROUND(SUM(amount), 2) FROM t1")[1] == [(601.5,)]
+    assert tables.run("SELECT ROUND(SUM(credit), 2) FROM t2")[1] == [(-80.75,)]
+    assert "-80.75" in table_lookup.lookup(text, "What is the total of the credits?")
+
+
+def test_stacked_tables_under_two_heading_rows_stay_apart():
+    wb = Workbook()
+    ws = wb.active
+    for entity, rows in (("US entity (USD)", [("Acme", 100, 200, 300), ("Beta", 10, 20, 30)]),
+                         ("Canada entity (CAD)", [("Maple", 5, 6, 11), ("Loon", 7, 8, 15)])):
+        ws.append([entity])
+        ws.append(["Vendor", "Actual", None, "Total"])
+        ws.append([None, "Jul", "Aug", None])
+        for row in rows:
+            ws.append(list(row))
+        ws.append([])
+    ws.merge_cells("B2:C2")
+    out = io.BytesIO()
+    wb.save(out)
+    text = documents.extract_document("aging.xlsx", XLSX, out.getvalue())
+    assert "(Vendor): Canada entity" not in text and "A10 (Vendor): Maple | B10 (Actual Jul): 5" in text
+    tables = _tables(text, "What is the total?", "aging.xlsx")
+    assert tables.run("SELECT SUM(total) FROM t1")[1] == [(330.0,)]
+    assert tables.run("SELECT SUM(total) FROM t2")[1] == [(26.0,)]
+
+
+def test_a_label_and_value_title_names_its_stacked_table():
+    wb = Workbook()
+    ws = wb.active
+    for entity, rows in ((["Entity:", "US01 (USD)"], [("Acme", 100, 200), ("Beta", 10, 20)]),
+                         (["Entity:", "CA02 (CAD)"], [("Maple", 5, 6), ("Loon", 7, 8)])):
+        ws.append(entity)
+        ws.append(["Vendor", "Current", "Over 30"])
+        for cell in ws[ws.max_row]:
+            cell.font = Font(bold=True)
+        for row in rows:
+            ws.append(list(row))
+        ws.append([])
+    out = io.BytesIO()
+    wb.save(out)
+    text = documents.extract_document("aging.xlsx", XLSX, out.getvalue())
+    assert "(Vendor): Entity:" not in text and "[heading]\nA6: Entity: | B6: CA02 (CAD)" in text
+    tables = _tables(text, "What is the current balance?", "aging.xlsx")
+    assert [(sheet.rows, "CA02" in sheet.title) for sheet in tables.sheets if not sheet.of] == [(2, False), (2, True)]
