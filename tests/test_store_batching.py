@@ -70,7 +70,10 @@ def _old_counts(store: Store) -> dict[str, int]:
             "important": one(folder, "important"),
             "informational": one(folder, "informational"),
             "reference": one(folder, "reference"),
-            "waiting_on_bionic": one("SELECT COUNT(*) FROM emails WHERE model_status = 'script_draft'"),
+            "waiting_on_bionic": one(
+                "SELECT COUNT(*) FROM emails WHERE model_status = 'script_draft' AND NOT ((flags LIKE '%\"fraud_risk\"%' "
+                "OR category = 'payment_instruction_change') AND flags NOT LIKE '%\"fraud_cleared\"%')"
+            ),
             "read_by_bionic": one("SELECT COUNT(*) FROM emails WHERE model_status = 'bionic'"),
         }
 

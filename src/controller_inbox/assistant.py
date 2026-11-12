@@ -612,6 +612,22 @@ def locked_files_answer(email: EmailRecord) -> str:
     )
 
 
+def held_answer(store: Store, email: EmailRecord) -> str:
+    """The answer about an email held as possible payment fraud, whatever was asked: why it is held (the check's own
+    reasons, nothing the email says) and what to do. Neither the email nor its files are read to answer it."""
+    check = store.fraud_check(email.id) or {}
+    reasons = list(dict.fromkeys(signal.get("label") for signal in check.get("signals", []) if signal.get("label")))[:5]
+    why = ("It was held because: " + "; ".join(reasons) + ".\n\n") if reasons else ""
+    return (
+        "This email is held as possible payment fraud [1], so I don't read it or its files, and I won't answer "
+        "questions about what it says.\n\n"
+        + why
+        + "Don't pay anything, change any bank details, open its files or follow its links because of it. Call the "
+        "sender on a phone number you already have, not one from this email. If they confirm it is genuine, click "
+        "**Not fraud** on the email page (or trust the sender in Settings) and ask me again."
+    )
+
+
 def answered_here(email: EmailRecord, question: str) -> bool:
     """Most of the question's words are in this email or its files ("when can we cancel before renewal?" on a contract)."""
     terms = keywords(question)
@@ -797,6 +813,9 @@ def _source_block(number: int, email: EmailRecord, limit: int, *, on_screen: boo
         f"[{number}] {email.received_at[:10]} · from {email.sender_name or email.sender_email} · "
         f"\"{email.subject}\" · {label} · {email.folder or 'unfiled'}" + (" · (open on screen)" if on_screen else "")
     )
+    if attachments_locked(email):
+        # Held as possible payment fraud: that it is here, never what it says or what its files hold.
+        return head + "\nWarning: held as possible payment fraud — verify by phone, on a number the user already has, before anything is paid or changed. Its text and files aren't shown."
     bits = [head]
     if email.summary and not brief:
         bits.append(f"Summary: {email.summary}")
@@ -1179,6 +1198,15 @@ def answer_stream(
         else:
             sources = sources[:1] + [uploads] + sources[1:]
         found = found | {uploads.id}
+    # Mail held as possible payment fraud: its text and files never reach the model. Asked about while it is open,
+    # the answer is a fixed one (why it is held, and what to do); among other mail, the model is told only that it
+    # is there (who sent it, when, its subject) and that it is held (``_source_block``).
+    held_open = next((email for email in sources if email.id == email_id and attachments_locked(email)), None)
+    if held_open is not None:
+        yield {"type": "sources", "sources": source_cards([held_open], settings), "mode": "lookup", "warning": FRAUD_WARNING}
+        yield {"type": "delta", "text": held_answer(store, held_open)}
+        yield {"type": "done"}
+        return
     if asks_for_help(question, found, next((email for email in sources if email.id == email_id), None)):
         yield {"type": "sources", "sources": [], "mode": "help"}
         yield {"type": "delta", "text": HELP_TEXT}

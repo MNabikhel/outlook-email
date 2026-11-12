@@ -101,7 +101,7 @@ def test_file_passages_are_sized_to_the_model_and_the_fraud_email_is_locked(stor
     assert "C4: 1,800 (=SUM(C2:C3))" not in blocks[budget.id], "openpyxl-made files have no cached values"
     assert "C4 (Q4): =SUM(C2:C3)" in blocks[budget.id]
     assert blocks[scam.id] == agent.LOCKED
-    assert agent.run_tool(ws, "read_file", {"email": "2", "file": "1"}, limit=2000) == agent.LOCKED
+    assert agent.run_tool(ws, "read_file", {"email": "2", "file": "1"}, limit=2000) == agent.HELD
     assert "5566778899" not in json.dumps(blocks)
     assert "locked: possible payment fraud" in agent.files_line(scam)
 
@@ -149,7 +149,7 @@ def test_asking_about_a_locked_file_never_reaches_the_model(store, settings, mai
     monkeypatch.setattr(assistant, "_model_answer", lambda *a, **k: (_ for _ in ()).throw(AssertionError("model called")))
     events = list(answer_stream(store, settings, 'Summarize the attachment "new bank letter.pdf"', email_id=scam.id))
     text = _text(events)
-    assert "won't open the files on this email (new bank letter.pdf)" in text and "Not fraud" in text
+    assert "held as possible payment fraud" in text and "don't read it or its files" in text and "Not fraud" in text
     assert events[0]["warning"] and events[0]["mode"] == "lookup"
     assert "5566778899" not in text and "****8899" not in text
 

@@ -1281,7 +1281,7 @@ class Store:
                     {n("folder = 'important' AND COALESCE(done_at, '') = ''")} AS important,
                     {n("folder = 'informational' AND COALESCE(done_at, '') = ''")} AS informational,
                     {n("folder = 'reference' AND COALESCE(done_at, '') = ''")} AS reference,
-                    {n("model_status = 'script_draft'")} AS waiting_on_bionic,
+                    {n("model_status = 'script_draft' AND NOT " + _HELD_SQL)} AS waiting_on_bionic,
                     {n("model_status = 'bionic'")} AS read_by_bionic,
                     (SELECT COUNT(*) FROM action_items WHERE status = 'open') AS open_actions,
                     (SELECT COUNT(*) FROM attachments) AS attachments
@@ -2498,6 +2498,12 @@ def _address_domain(text: str | None) -> str:
     if "<" in value:
         value = value.rpartition("<")[2].partition(">")[0]
     return value.strip().rpartition("@")[2].lower() if "@" in value else ""
+
+
+# Mail held as possible payment fraud, as fraud.attachments_locked decides it, in SQL over the emails table.
+_HELD_SQL = (
+    "((flags LIKE '%\"fraud_risk\"%' OR category = 'payment_instruction_change') AND flags NOT LIKE '%\"fraud_cleared\"%')"
+)
 
 
 def _held_invite(row: sqlite3.Row) -> bool:

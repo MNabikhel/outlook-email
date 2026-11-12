@@ -501,8 +501,9 @@ def register_workspace(
                 for action in email.actions
             ],
             "attachments": files,
-            "has_original": original_path(email) is not None,
-            "original_downloads": original_downloads(original_path(email)),
+            # Held as possible fraud: no way to open it in a mail app, where its links and files would work.
+            "has_original": original_path(email) is not None and not fraud.attachments_locked(email),
+            "original_downloads": original_downloads(original_path(email)) and not fraud.attachments_locked(email),
             "fraud": {
                 **check,
                 "sender_domain": sender_domain,
