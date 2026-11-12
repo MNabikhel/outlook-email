@@ -232,7 +232,7 @@ def _sync_outlook(
         note = str(exc)  # written to be read as it is
     except Exception as exc:  # the drop folder and the digest still happen
         log.warning("Syncing Outlook failed", exc_info=True)
-        note = f"Outlook couldn't be read this time ({str(exc)[:200]})."
+        note = outlook_desktop.trouble("Outlook couldn't be read this time", exc)
     # Settings → Sync inbox says so until a sync works again.
     outlook_sync.note_failure(store, note, now)
     return {"note": note}

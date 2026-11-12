@@ -462,6 +462,27 @@ def test_a_sync_that_didnt_work_shows_on_settings_until_one_does(store, settings
     assert client.get("/api/settings", headers=PAGE).json()["outlook"]["last_error"] == "", "connecting again starts afresh"
 
 
+class ComError(Exception):
+    """Like pywintypes.com_error: (hresult, text, excepinfo, arg), and str() is that tuple."""
+
+
+def test_outlook_busy_on_the_card_is_said_in_plain_words(store, settings, outlook, monkeypatch):
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+
+    def busy():
+        raise ComError(-2147418111, "Call was rejected by callee.", None, None)  # a window or prompt open in Outlook
+
+    outlook.folders = busy
+
+    @contextmanager
+    def connect(**_options):
+        yield outlook
+
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    assert outlook_run(store, settings, now=NOW)["message"] == outlook_desktop.BUSY
+    assert TestClient(web.create_app(settings, store)).get("/api/settings", headers=PAGE).json()["outlook"]["last_error"] == outlook_desktop.BUSY
+
+
 def test_outlooks_own_error_is_said_once_not_wrapped_again(store, settings, monkeypatch):
     monkeypatch.setattr(outlook_desktop, "available", lambda: "")
     said = "Outlook couldn't find a message just now (The server is busy.)."
@@ -556,6 +577,8 @@ def test_a_first_message_that_cant_be_read_brings_the_sample_back(store, setting
     monkeypatch.setattr(pipeline, "process_message", broken)
     report = sync(store, settings, outlook)
     assert report["failed"] and len(store.list_emails(limit=100)) == sample, "the board isn't left empty"
+    # Said in words on Settings → Sync inbox ("1 couldn't be read: ..."), not as the bare error.
+    assert report["failed"][0]["error"] == "A message in Inbox couldn't be copied (unreadable)."
 
 
 def test_outlook_message_without_message_id_synced_and_dropped_is_stored_twice(store, settings):

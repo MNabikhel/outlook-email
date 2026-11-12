@@ -245,7 +245,7 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
             report["failed"].append({"folder": path, "error": str(exc)[:300]})
         except Exception as exc:  # one folder Outlook trips on must not stop the others
             log.warning("Couldn't read the Outlook folder %s", path, exc_info=True)
-            report["failed"].append({"folder": path, "error": str(exc)[:300]})
+            report["failed"].append({"folder": path, "error": f"The folder {path} couldn't be read just now ({str(exc)[:200]})."})
     if not read and report["failed"]:
         # Not one of the folders could be read: said as a sync that didn't work, not as one that found nothing new.
         report["note"] = report["failed"][0]["error"]
@@ -290,7 +290,8 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
             email_id, owned, added = _copy_in(store, settings, session, item, now=now, report=report)
         except Exception as exc:
             log.warning("Couldn't copy an Outlook message from %s", item.folder, exc_info=True)
-            report["failed"].append({"folder": item.folder, "error": str(exc)[:300]})
+            said = str(exc) if isinstance(exc, OutlookError) else f"A message in {item.folder} couldn't be copied ({str(exc)[:200]})."
+            report["failed"].append({"folder": item.folder, "error": said[:300]})
             continue
         store.save_outlook_item(
             {

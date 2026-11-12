@@ -32,12 +32,12 @@ COM_CALLS = {
 # Python's own methods on Python values (strings, dates, lists, sets, this file's own), each on what it is called on:
 # a Python method's name on an Outlook object ("item.replace()", "items.get()") would reach whatever Outlook has by it.
 PYTHON_CALLS_ON = {
-    "append": {"binned", "found", "seen"}, "astimezone": {"aware_utc(value)", "naive"}, "date": {"item.End", "item.Start"},
+    "append": {"binned", "found", "seen", "stores"}, "astimezone": {"aware_utc(value)", "naive"}, "date": {"item.End", "item.Start"},
     "get": {"_BUSY", "_IMPORTANCE", "self._by_path"}, "group": {"m"}, "isoformat": {"ends", "item.End.date()", "item.Start.date()", "starts"},
     "lower": {"str(folder.Name)"}, "mkdir": {"dest.parent"}, "now": {"datetime"}, "pop": {"meeting"}, "replace": {"message_id", "value"},
     "split": {"str(field or '')[:50000]"}, "startswith": {"path", "str(message_class or '')"}, "strftime": {"local"},
-    "strip": {"p", "str(info[2])", "str(message_id or '')", "str(mid or '')"}, "sub": {"re"},
-    "add": {"bins", "codes", "names", "trash"}, "sort": {"stores"}, "_item": {"self"}, "folders": {"self"}, "__init__": {"super()"},
+    "strip": {"args[1]", "p", "str(info[2])", "str(message_id or '')", "str(mid or '')"}, "sub": {"re"},
+    "add": {"bins", "codes", "names", "trash"}, "sort": {"stores"}, "_item": {"self"}, "_scan": {"self"}, "folders": {"self"}, "__init__": {"super()"},
 }
 PYTHON_CALLS = set(PYTHON_CALLS_ON)
 # What Outlook's objects are read for (and the methods above): any other name is something new of Outlook's.
@@ -48,7 +48,7 @@ COM_NAMES = set(COM_CALLS) | {
 }
 # Python's own attributes read in the file (of datetimes, exceptions, modules and this file's classes).
 PYTHON_NAMES = PYTHON_CALLS | set(PYTHON_CALLS_ON) | {
-    "__name__", "_by_path", "_folders", "args", "client", "cut_short", "entry_id", "ns", "parent", "path", "platform",
+    "__name__", "_by_path", "_folders", "_left_out", "args", "client", "cut_short", "entry_id", "ns", "parent", "path", "platform",
     "store_id", "utc", "year",
 }
 READ_BY_NAME = {"ExchangeStoreType", "DisplayName", "hresult", "excepinfo", "args"}  # getattr(obj, "...", default)
@@ -422,6 +422,72 @@ def test_find_message_looks_in_every_folder_by_message_id(outlook):
     session, _ = outlook
     assert [(s.entry_id, s.folder) for s in session.find_message("<new@x.com>")] == [("E-new", "Inbox")]
     assert session.find_message("<nobody@x.com>") == [] and session.find_message("") == []
+
+
+class _Offline(Folder):
+    """A folder of the Online Archive that can't be opened just now."""
+
+    def GetTable(self, where, kind):
+        raise ComError(-2147221219, "Exception occurred.", (4096, "Microsoft Outlook", "The archive is offline.", None, 0, -2147221219), None)
+
+
+class _OfflineStore:
+    """A mailbox or data file Outlook lists but can't open (a missing .pst, a shared mailbox removed): even its id
+    can't be read."""
+
+    DisplayName = "Old archive.pst"
+
+    @property
+    def StoreID(self):
+        raise ComError(-2147352567, "Exception occurred.", (4096, "Microsoft Outlook", "The file C:\\old.pst cannot be found.", None, 0, -2147221219), None)
+
+    def GetRootFolder(self):
+        raise AssertionError("not asked for once its id can't be read")
+
+
+def _archive(offline_folder: bool, offline_store: bool) -> OutlookSession:
+    row = ("E-moved", local(2026, 10, 20, 9), False, "IPM.Note", 1, "<inv@x.com>", 0)
+    inbox = Folder("Inbox", "F-inbox")
+    root = Folder("maya@taz.com", "F-root", children=[inbox, Folder("Deleted Items", "F-del")])
+    archive_inbox = (_Offline if offline_folder else Folder)("Inbox", "F-arch-inbox", store="S9", rows=[row])
+    archive_root = Folder("Online Archive", "F-arch", store="S9", children=[archive_inbox])
+    stores = [Store("S1", "maya@taz.com", root), *([_OfflineStore()] if offline_store else []), Store("S9", "Online Archive", archive_root)]
+    return OutlookSession(Namespace(stores, {6: inbox}, {}))
+
+
+def test_find_message_says_when_it_couldnt_look_everywhere():
+    # It answered "not anywhere" when a folder (or a whole mailbox) couldn't be looked in, and the sync took a
+    # message moved to the Online Archive for deleted, and removed CloseDesk's copy with its tasks.
+    assert [s.folder for s in _archive(False, False).find_message("<inv@x.com>")] == ["Online Archive/Inbox"]
+    assert _archive(False, False).find_message("<gone@x.com>") == [], "looked everywhere: not anywhere"
+    # Found where it could look: found, whatever couldn't be looked in.
+    assert [s.folder for s in _archive(False, True).find_message("<inv@x.com>")] == ["Online Archive/Inbox"]
+    for offline_folder, offline_store, message_id in ((True, False, "<inv@x.com>"), (False, True, "<gone@x.com>")):
+        with pytest.raises(OutlookError) as caught:
+            _archive(offline_folder, offline_store).find_message(message_id)
+        assert not isinstance(caught.value, NotInOutlook)
+
+
+def test_a_mailbox_whose_id_cant_be_read_is_left_out():
+    # Its id was read to put the default mailbox first, outside the check that leaves such a mailbox out, so one
+    # missing data file stopped every sync, the Inbox's too.
+    session = _archive(False, True)
+    assert [f.path for f in session.folders()] == ["Inbox", "Deleted Items", "Online Archive/Inbox"]
+
+
+def test_outlook_busy_is_said_in_plain_words():
+    # Outlook with a window or prompt open rejects calls; the card showed "(-2147418111, 'Call was rejected by
+    # callee.', None, None)".
+    class Busy(Namespace):
+        def GetDefaultFolder(self, kind):
+            raise ComError(-2147418111, "Call was rejected by callee.", None, None)
+
+    with pytest.raises(OutlookError) as caught:
+        OutlookSession(Busy([], {}, {})).folders()
+    assert str(caught.value) == outlook_desktop.BUSY and "Allow" in outlook_desktop.BUSY
+    other = ComError(-2147467259, "Unspecified error", None, None)
+    assert outlook_desktop.trouble("Outlook couldn't be read this time", other) == "Outlook couldn't be read this time (Unspecified error)."
+    assert outlook_desktop.trouble("Outlook couldn't be read this time", RuntimeError("offline")) == "Outlook couldn't be read this time (offline)."
 
 
 def test_the_automatic_sync_never_starts_outlook(monkeypatch):
