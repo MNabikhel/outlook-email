@@ -155,12 +155,16 @@ _WEEKDAY = re.compile(r"^(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*\.
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9&]*|#|%")
 _CELL_REF = re.compile(r"^([A-Z]{1,3}\d{1,7})(?: \((.+)\))?$")
 _DASHES = frozenset({"-", "–", "—", "$ -", "$-"})
-# Commas group the thousands ("1,250.00"); in European style dots do and a comma marks the decimals ("1.234,56",
-# "447,15").
-_EUROPEAN = re.compile(r"\d{1,3}(?:\.\d{3})+,\d+|\d{1,3},\d{1,2}(?![\d,])")
+# Commas group the thousands ("1,250.00"); in European style dots or spaces do and a comma marks the decimals
+# ("1.234,56", "1 234,56", "1234,56", "447,15").
+_EUROPEAN = re.compile(r"\d{1,3}(?:\.\d{3})+,\d+|\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:,\d+)?|\d+,\d{1,2}(?![\d,])")
+# A currency's code before or after the figure ("EUR 1.234,56", "1,234.56 USD"), or its sign after it ("1.250,00 €").
+_CURRENCY_CODE = r"(?:EUR|USD|GBP|CHF|CAD|AUD|NZD|JPY|SEK|NOK|DKK|PLN|CZK|HUF|MXN|INR|CNY|HKD|SGD|ZAR)"
+_CURRENCY_AFTER = re.compile(r"[$€£¥]|" + _CURRENCY_CODE, re.I)
 _LEADING_FIGURE = re.compile(
-    r"\s*([(\-−–])?\s*([$€£¥])?\s*([(\-−–])?\s*"
-    r"(\d{1,3}(?:\.\d{3})+,\d+|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{1,3},\d{1,2}(?![\d,])|\d+(?:\.\d+)?|\.\d+)"
+    r"\s*(?:\+\s*)?([(\-−–])?\s*(?:" + _CURRENCY_CODE + r"\s*)?([$€£¥])?\s*([(\-−–])?\s*"
+    r"(\d{1,3}(?:\.\d{3})+,\d+|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:,\d+)?(?![\d.])"
+    r"|\d+,\d{1,2}(?![\d,])|\d+(?:\.\d+)?|\.\d+)"
 )
 # The line a sheet too long to read whole ends with ("[501 more rows not shown; ask for a range ...]").
 _LEFT_OUT = re.compile(r"^\[(\d+) more rows not shown\b")
@@ -802,6 +806,8 @@ def _row(line: str, page: str) -> Row | None:
     # look like references ("US01", "CA02" entity codes, "Q1" ... "Q4") are names.
     named = [_CELL_REF.match(part.partition(": ")[0].strip()) for part in parts if ": " in part]
     workbook = bool(named) and all(named) and len({re.sub(r"^[A-Z]+", "", ref.group(1)) for ref in named}) == 1
+    if workbook and not any(ref.group(2) for ref in named):
+        return None
     group: list[str] = []
     cells: list[tuple[str, str]] = []
     refs: list[str] = []
@@ -815,7 +821,11 @@ def _row(line: str, page: str) -> Row | None:
             ref = ""
             if workbook and (cell := _CELL_REF.match(label)):
                 if not cell.group(2):
-                    return None
+                    # A cell in a column with no heading: before the named cells it is the row's label ("Revenue"
+                    # under a blank A1, as a PDF's row labels are); after them, a note ("Disputed"), left in the line.
+                    if not cells:
+                        group.append(value.strip())
+                    continue
                 ref, label = cell.group(1), cell.group(2)
             # Two columns headed alike ("Date | Amount | Date | Amount"): the second is "Amount (2)", so it is read too.
             seen[label] = seen.get(label, 0) + 1
@@ -823,8 +833,6 @@ def _row(line: str, page: str) -> Row | None:
             refs.append(ref)
         elif not cells:
             group.append(part)
-        # A cell in a column with no heading ("Disputed" in an unheaded notes column) has no name to go by. It stays
-        # in the row's line; the row keeps its named cells, so its figures still count.
     if len(cells) < 2:
         return None
     return Row(page, " > ".join(group), cells, line, refs)
@@ -1791,6 +1799,8 @@ def _number(value: str) -> Decimal | None:
     if not match:
         return None
     rest = text[match.end():].strip()
+    if after := _CURRENCY_AFTER.match(rest):
+        rest = rest[after.end():].strip()
     # SAP and Oracle reports print a negative with its minus last ("1,234.56-").
     minus_last = rest[:1] in {"-", "−"} and not (match.group(1) or match.group(3))
     if minus_last:
@@ -1803,6 +1813,7 @@ def _number(value: str) -> Decimal | None:
         return None
     figure = match.group(4)
     figure = figure.replace(".", "").replace(",", ".") if _EUROPEAN.fullmatch(figure) else figure.replace(",", "")
+    figure = re.sub(r"[ \u00a0\u202f]", "", figure)
     try:
         number = Decimal(figure)
     except InvalidOperation:
@@ -1827,7 +1838,7 @@ def _places(sample: str) -> int:
     """The decimals a cell writes: 2 for "1,250.00", "447,15" and "1.234,56"."""
     figure = _LEADING_FIGURE.match(sample)
     if figure and _EUROPEAN.fullmatch(figure.group(4)):
-        return len(figure.group(4).rsplit(",", 1)[1])
+        return len(figure.group(4).rsplit(",", 1)[1]) if "," in figure.group(4) else 0
     m = re.search(r"\.(\d+)", sample)
     return len(m.group(1)) if m else 0
 

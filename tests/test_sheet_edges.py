@@ -4,6 +4,7 @@ the file says: long sheets cut short, title rows over the headings, code columns
 from __future__ import annotations
 
 import io
+from decimal import Decimal
 
 from openpyxl import Workbook
 from openpyxl.styles import Font
@@ -126,3 +127,64 @@ def test_numbers_typed_into_an_id_or_year_column_are_written_as_excel_shows_them
     text = _xlsx_text(rows)
     assert "A2 (Invoice No): 100235" in text and "B2 (Fiscal Year): 2026" in text and "D3 (Amount): 1,200" in text
     assert "800" in table_lookup.lookup(text, "What is the amount on invoice 100235?")
+
+
+# Cells with no heading -------------------------------------------------------------------------
+
+
+def test_row_labels_under_a_blank_a1_heading_make_a_table():
+    rows = [(None, "Q3 2026", "Q3 2025"), ("Revenue", 1250000, 1100000), ("Cost of sales", -610000, -560000),
+            ("Gross profit", 640000, 540000), ("Opex", -410000, -395000)]
+    text = _xlsx_text(rows, bold=(1,))
+    tables = _tables(text, "What was revenue in Q3 2026?")
+    assert tables.schema()
+    assert "1,250,000" in table_lookup.lookup(text, "What was revenue in Q3 2026?")
+
+
+def test_a_note_past_the_last_heading_keeps_its_row():
+    rows = [("Vendor", "Invoice", "Amount"), ("Northwind", "INV-1", 4500), ("Granite", "INV-2", 12500, "Disputed"),
+            ("Bluebird", "INV-3", 980), ("Kessler", "INV-4", 7300)]
+    text = _xlsx_text(rows)
+    assert _tables(text, "What is the total amount?").run("SELECT SUM(amount), COUNT(*) FROM t1")[1] == [(25280.0, 4)]
+    assert "12,500" in table_lookup.lookup(text, "How much do we owe Granite?")
+
+
+def test_an_unheaded_row_number_column_keeps_the_table():
+    rows = [(None, "Vendor", "Invoice", "Amount")] + [
+        (i, *row) for i, row in enumerate([("Northwind", "INV-100", 4500), ("Granite", "INV-200", 12500.5), ("Bluebird", "INV-300", 980)], start=1)
+    ]
+    text = _xlsx_text(rows)
+    assert _tables(text, "What is the total amount?").run("SELECT SUM(amount) FROM t1")[1] == [(17980.5,)]
+
+
+# Figures written other ways --------------------------------------------------------------------
+
+
+def test_comma_decimals_without_thousands_separators_are_figures():
+    assert table_lookup._number("1234,56") == Decimal("1234.56")
+    assert table_lookup._number("-1234,56") == Decimal("-1234.56")
+    assert table_lookup._number("12500,00") == Decimal("12500.00")
+    assert table_lookup._number("1 234,56") == Decimal("1234.56")
+    assert table_lookup._number("1 234,56") == Decimal("1234.56")
+    text = _csv_text("Datum;Text;Betrag\n01.10.2026;Miete;1234,56\n02.10.2026;Strom;987,00\n03.10.2026;Server;12500,00\n"
+                     "04.10.2026;Porto;45,10\n05.10.2026;Beratung;2000,00\n", "konto.csv")
+    assert _tables(text, "Summe Betrag?", "konto.csv").run("SELECT ROUND(SUM(betrag), 2) FROM t1")[1] == [(16766.66,)]
+    text = _csv_text("Date;Libelle;Montant\n1;Loyer;1 234,56\n2;Eau;45,75\n3;Serveur;1 455,00\n", "fr.csv")
+    assert _tables(text, "Total montant?", "fr.csv").run("SELECT ROUND(SUM(montant), 2) FROM t1")[1] == [(2735.31,)]
+
+
+def test_a_plus_sign_marks_money_in():
+    assert table_lookup._number("+4500.00") == Decimal("4500.00")
+    assert table_lookup._number("+$1,200.00") == Decimal("1200.00")
+    text = _csv_text("Date,Description,Amount\n10/01/2026,Payroll,+4500.00\n10/02/2026,Rent,-950.00\n10/03/2026,Refund,+20.00\n"
+                     "10/04/2026,Fees,-25.20\n10/05/2026,Supplies,-25.00\n", "bank.csv")
+    tables = _tables(text, "What is the total amount?", "bank.csv")
+    assert tables.run("SELECT ROUND(SUM(amount), 2), COUNT(amount) FROM t1")[1] == [(3519.8, 5)]
+
+
+def test_a_currency_after_the_figure_or_a_code_before_it_is_still_a_figure():
+    for written, value in (("1.250,00 €", "1250.00"), ("89,90 €", "89.90"), ("1,234.56 USD", "1234.56"), ("EUR 1.234,56", "1234.56"),
+                           ("USD 1,200.00", "1200.00"), ("1,234.56 USD-", "-1234.56")):
+        assert table_lookup._number(written) == Decimal(value), written
+    text = _csv_text("Datum;Beschreibung;Betrag\n01.10.2026;Miete;1.250,00 €\n02.10.2026;Strom;89,90 €\n03.10.2026;Server;4.500,00 €\n", "k.csv")
+    assert _tables(text, "Summe?", "k.csv").run("SELECT ROUND(SUM(betrag), 2) FROM t1")[1] == [(5839.9,)]
