@@ -117,8 +117,8 @@ def test_keys_leave_out_what_links_everything():
     assert ("file", "a" * 64) in found and ("file", "e" * 64) in found
     assert not {("file", "b" * 64), ("file", "c" * 64), ("file", "d" * 64)} & found
     assert not any(kind == "invoice" and value.endswith(("1001", "1002")) for kind, value in found)
-    assert ("thread", "mid:abc@northwind.com") in found
-    assert ("stem", "inv 10482.pdf") in found and ("stem", "ap aging.xlsx") in found
+    assert ("msg", "mid:abc@northwind.com") in found, "its own id, linked only through a reply naming it"
+    assert ("stem", "northwind.com|inv 10482.pdf") in found and ("stem", "northwind.com|ap aging.xlsx") in found
 
 
 @pytest.mark.parametrize(
@@ -216,7 +216,7 @@ def test_deleting_an_email_removes_its_keys_and_old_mail_is_filed_in_batches(sto
     assert store.link_keys("a") == []
     assert store.file_link_keys(batch=1) == 1
     assert store.file_link_keys(batch=1) == 0
-    assert ("thread", "mid:a@n.com") in store.link_keys("a")
+    assert ("msg", "mid:a@n.com") in store.link_keys("a")
 
 
 def test_mail_read_by_an_older_version_gets_its_conversation_from_its_kept_file(store, settings):
@@ -263,3 +263,17 @@ def test_a_held_emails_numbers_count_only_where_its_own_text_names_them(store):
     said.body_text = "Please pay invoice INV-10482 to our new account."
     store.upsert_email(said)
     assert ("invoice", "INV10482") in store.link_keys("bec2"), "named in its own words, it is linked (and shown held)"
+
+
+def test_emails_that_only_share_a_message_id_are_no_conversation(store):
+    # A scanner gives every scan the same Message-ID: the scans are not one thread.
+    for n in range(3):
+        store.upsert_email(_record(f"scan{n}", sender="scanner@taz.com", mid="<scan@printer.local>", received=f"2026-10-0{n + 1}T09:00:00+00:00"))
+    assert links.related(store, store.get_email("scan0"))["thread"] == []
+
+
+def test_a_files_versions_are_one_senders(store):
+    # Everyone's "Timesheet.xlsx" is not one file.
+    store.upsert_email(_record("a", sender="pat@contractor-a.com", files=[("Timesheet week 40.xlsx", "1" * 64, 20_000, None)]))
+    store.upsert_email(_record("b", sender="lee@contractor-b.com", files=[("Timesheet week 40.xlsx", "2" * 64, 20_000, None)]))
+    assert links.related(store, store.get_email("a"))["groups"] == []
