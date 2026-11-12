@@ -33,7 +33,7 @@ from email.utils import getaddresses
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
 
-KEYS_VERSION = "2"  # changed whenever keys() files emails differently, so stored mail is filed again
+KEYS_VERSION = "3"  # changed whenever keys() files emails differently, so stored mail is filed again
 COMMON = 25  # a key shared by more emails than this links none of them
 MAX_THREAD = 60  # emails shown in one conversation (the newest kept)
 MAX_PER_REASON = 12
@@ -109,7 +109,11 @@ def keys(email: EmailRecord) -> list[tuple[str, str]]:
     """The keys ``email`` is filed under (see the module's docstring)."""
     found: set[tuple[str, str]] = set()
     info = email.threading or {}
-    for mid in (email.internet_message_id, info.get("in_reply_to"), *(info.get("references") or [])):
+    # Its own Message-ID ("msg") joins a conversation only through another email naming it in a reply ("thread"):
+    # two emails that merely carry the same id (a scanner gives every scan one) are no conversation.
+    if own := norm_id(email.internet_message_id):
+        found.add(("msg", f"mid:{own}"))
+    for mid in (info.get("in_reply_to"), *(info.get("references") or [])):
         if norm := norm_id(mid):
             found.add(("thread", f"mid:{norm}"))
     if info.get("conversation"):
@@ -134,7 +138,7 @@ def keys(email: EmailRecord) -> list[tuple[str, str]]:
         if att.sha256:
             found.add(("file", att.sha256))
         if stem := file_stem(att.filename):
-            found.add(("stem", stem))
+            found.add(("stem", f"{domain}|{stem}"))  # one sender's versions: everyone's "Timesheet.xlsx" isn't one file
     return sorted(found)
 
 
@@ -207,7 +211,7 @@ def related(store, email: EmailRecord, *, ai: bool = True) -> dict:
     file's name with, grouped by why; with ``ai``, then those the local model said are about the same matter
     (link_judge.py), each with its reason in the group's ``why``. Every email listed is one ``store`` still has."""
     mine = store.link_keys(email.id) or keys(email)
-    thread_ids = _conversation(store, email.id, [value for kind, value in mine if kind == "thread"])
+    thread_ids = _conversation(store, email.id, mine)
     groups: list[dict] = []
     shown = set(thread_ids) | {email.id}
     locked_here = attachments_locked(email)
@@ -244,21 +248,29 @@ def related(store, email: EmailRecord, *, ai: bool = True) -> dict:
     return {"thread": thread[-MAX_THREAD:] if len(thread) > 1 else [], "groups": out_groups, "new_domains": new_domains(thread)}
 
 
-def _conversation(store, email_id: str, values: list[str]) -> list[str]:
-    """The emails sharing a thread key with ``email_id``, and those sharing one with them, a few rounds out."""
+def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str]:
+    """The emails in ``email_id``'s conversation, a few rounds out: those replying to it or to what it replies to
+    (their In-Reply-To / References name the same Message-ID), those it replies to, and those sharing Outlook's or
+    Microsoft 365's conversation."""
     found = {email_id}
-    frontier = list(values)
-    seen_values: set[str] = set()
+    refs = [value for kind, value in mine if kind == "thread"]
+    owns = [value for kind, value in mine if kind == "msg"]
+    seen: set[tuple[str, str]] = set()
     for _round in range(4):
-        frontier = [value for value in frontier if value not in seen_values]
-        if not frontier or len(found) > MAX_THREAD * 2:
+        refs = [value for value in refs if ("thread", value) not in seen]
+        owns = [value for value in owns if ("msg", value) not in seen]
+        if (not refs and not owns) or len(found) > MAX_THREAD * 2:
             break
-        seen_values |= set(frontier)
-        new_ids = {other for ids in store.emails_with_keys("thread", frontier, exclude="", common=MAX_THREAD * 2).values() for other in ids} - found
+        seen |= {("thread", value) for value in refs} | {("msg", value) for value in owns}
+        cap = MAX_THREAD * 2
+        hits = store.emails_with_keys("thread", refs + owns, exclude="", common=cap)  # replies to these, or siblings
+        hits.update({f"msg:{k}": v for k, v in store.emails_with_keys("msg", refs, exclude="", common=cap).items()})  # what they reply to
+        new_ids = {other for ids in hits.values() for other in ids} - found
         if not new_ids:
             break
         found |= new_ids
-        frontier = [value for other in new_ids for value in store.link_values(other, "thread")]
+        refs = [value for other in new_ids for value in store.link_values(other, "thread")]
+        owns = [value for other in new_ids for value in store.link_values(other, "msg")]
     return sorted(found)
 
 
@@ -287,7 +299,7 @@ def _label(group: dict, email: EmailRecord, records: list[EmailRecord]) -> str:
     if kind == "file":
         name = next((att.filename for att in email.attachments if att.sha256 == value), "")
         return f"{REASONS[kind]}: {name.rsplit(' › ', 1)[-1]}" if name else REASONS[kind]
-    name = next((att.filename for att in email.attachments if file_stem(att.filename) == value), value)
+    name = next((att.filename for att in email.attachments if file_stem(att.filename) == value.split("|", 1)[-1]), value.split("|", 1)[-1])
     return f"{REASONS[kind]} {name.rsplit(' › ', 1)[-1]}"
 
 
