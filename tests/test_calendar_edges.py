@@ -514,3 +514,17 @@ def test_an_invitation_file_is_described_by_its_next_meeting():
                            extracted_text=data, document_type=DocumentType.OTHER, document_confidence=0, extracted_fields=ExtractedFields())
     line = agent.invitation_line(att, ZoneInfo("America/New_York"), now=datetime(2026, 11, 12, 12, tzinfo=timezone.utc))
     assert line.startswith("AP standup, Monday November 16") and line.endswith("(repeats)"), line
+
+
+def test_todays_meetings_card_says_to_check_who_sent_a_doubtful_invitation(page, site, loaded, settings):
+    from controller_inbox.calendar_events import Meeting
+
+    noon = datetime.now(settings.tz).replace(hour=12, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    loaded.upsert_email(_record("doubtful", sender="ap@vendor.example", flags=["payment_caution"]))
+    loaded.save_invites("doubtful", [Meeting(uid="T1", start=noon.isoformat(timespec="seconds"), end=(noon + timedelta(hours=1)).isoformat(timespec="seconds"),
+                                             subject="Payment run call", email_id="doubtful")], sender="ap@vendor.example")
+    page.goto(f"{site}/app")
+    item = page.locator(".meetings li:has-text('Payment run call'):visible").first
+    item.wait_for()
+    assert "Check who sent this before joining or paying" in item.text_content()
+    assert "Check who sent this" in (item.locator("a").get_attribute("aria-label") or "")

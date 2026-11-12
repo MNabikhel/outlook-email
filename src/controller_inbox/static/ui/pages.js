@@ -142,7 +142,8 @@ export function todayBrief(data) {
   ].filter(Boolean);
 }
 
-/* Today's meetings, each opening in the calendar beside the mail about it. */
+/* Today's meetings, each opening in the calendar beside the mail about it. A doubtful invitation's (a lookalike's,
+   or with a payment caution) says to check who sent it, as the calendar does: this is where people click to join. */
 function meetingsCard(meetings) {
   if (!meetings.length) return null;
   return card(
@@ -154,8 +155,17 @@ function meetingsCard(meetings) {
         h(
           "li",
           { class: m.cancelled ? "cancelled" : "" },
-          h("a", { href: `/app/calendar?${new URLSearchParams({ view: "day", date: m.start.slice(0, 10), meeting: m.id })}`, dataset: { nav: "" } }, m.subject),
-          h("small", null, [meetingTime(m), m.location, m.cancelled ? "cancelled" : ""].filter(Boolean).join(" · "))
+          h(
+            "a",
+            {
+              href: `/app/calendar?${new URLSearchParams({ view: "day", date: m.start.slice(0, 10), meeting: m.id })}`,
+              dataset: { nav: "" },
+              ...(m.caution ? { "aria-label": `${m.subject}. ${m.caution}` } : {}),
+            },
+            m.subject
+          ),
+          h("small", null, [meetingTime(m), m.location, m.cancelled ? "cancelled" : ""].filter(Boolean).join(" · ")),
+          m.caution ? h("p", { class: "tag tag-due_soon cal-caution-note", "aria-hidden": "true" }, icon("alert", 13), " ", m.caution) : null
         )
       )
     ),
