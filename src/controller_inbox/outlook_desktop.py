@@ -8,23 +8,32 @@ it as a .msg file (``SaveAs``, which writes the file and leaves the message as i
 state, flag and categories in Outlook stay exactly as they were. ``tests/test_outlook_desktop.py`` checks this file
 for those calls.
 
+The calendar is read the same way (``calendar``): the meetings in a window, each property read off the item, nothing
+saved. The one thing set is ``IncludeRecurrences`` on the list of calendar items CloseDesk asked for, which tells
+Outlook to list each occurrence of a repeating meeting; it is a setting of that list, held only while it is read,
+and changes nothing in Outlook. The meeting's text (where Teams links and dial-in PINs are) isn't read.
+
 Outlook for Windows must be the classic one (the "New Outlook" has no such interface). If Outlook isn't running,
 Windows starts it in the background when CloseDesk asks for it.
 """
 
 from __future__ import annotations
 
+import re
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
 from controller_inbox.clock import aware_utc
 
 # Outlook's numbers for what is read here.
-_INBOX, _DELETED, _JUNK = 6, 3, 23
+_INBOX, _DELETED, _JUNK, _CALENDAR = 6, 3, 23, 9
+_BUSY = {0: "free", 1: "tentative", 2: "busy", 3: "away", 4: "working elsewhere"}
+_CANCELLED = {5, 7}  # olMeetingCanceled, olMeetingReceivedAndCanceled
+MAX_CALENDAR_ITEMS = 3000  # read at most, however the window's filter was understood
 _MAIL_FOLDER = 0  # Folder.DefaultItemType for mail
 _PUBLIC_FOLDERS = 2  # Store.ExchangeStoreType for Exchange Public Folders
 _SAVE_AS_MSG_UNICODE = 9  # olMSGUnicode
@@ -256,6 +265,34 @@ class OutlookSession:
             )
         return seen
 
+    def calendar(self, start: datetime, end: datetime) -> list[dict]:
+        """The meetings in the default calendar between ``start`` and ``end``, each occurrence of a repeating one,
+        earliest first: subject, times (UTC; dates for all-day ones), place, organizer, attendees, busy, cancelled,
+        and the series id. The meeting's text isn't read."""
+        try:
+            items = self.ns.GetDefaultFolder(_CALENDAR).Items
+            items.Sort("[Start]")
+            # Must be set after Sort and before Restrict for Outlook to list each occurrence.
+            items.IncludeRecurrences = True
+            listed = items.Restrict(f"[End] >= '{_jet_date(start - timedelta(days=1))}' AND [Start] <= '{_jet_date(end + timedelta(days=1))}'")
+        except Exception as exc:
+            raise OutlookError(f"Outlook's calendar couldn't be read just now ({_said(exc)}).") from None
+        low, high = aware_utc(start), aware_utc(end)
+        found: list[dict] = []
+        item = listed.GetFirst()
+        for _ in range(MAX_CALENDAR_ITEMS):
+            if item is None:
+                break
+            meeting = _meeting(item)
+            if meeting is not None:
+                begins = meeting.pop("_starts")
+                if begins > high:
+                    break  # earliest first: the rest start later
+                if meeting.pop("_ends") >= low:
+                    found.append(meeting)
+            item = listed.GetNext()
+        return found
+
     def save_copy(self, entry_id: str, store_id: str, dest: Path) -> None:
         """Save a copy of the message as a .msg file. The message in Outlook is not changed."""
         item = self._item(entry_id, store_id)
@@ -304,6 +341,58 @@ def _walk(folder, path: str, depth: int):
             continue
         yield child, child_path, depth + 1
         yield from _walk(child, child_path, depth + 1)
+
+
+def _meeting(item) -> dict | None:
+    """One calendar item's details, or None for one that can't be read (Outlook refused, or it has no start)."""
+    try:
+        starts, ends = local_time(item.Start), local_time(item.End)
+        if starts is None:
+            return None
+        ends = ends or starts
+        all_day = bool(item.AllDayEvent)
+        people = [p.strip() for field in (item.RequiredAttendees, item.OptionalAttendees) for p in str(field or "").split(";") if p.strip()]
+        start = item.Start.date().isoformat() if all_day else starts.isoformat(timespec="seconds")
+        end = item.End.date().isoformat() if all_day else ends.isoformat(timespec="seconds")
+        return {
+            "uid": str(item.GlobalAppointmentID or "") or f"{item.Subject}|{start}",
+            "start": start,
+            "end": end,
+            "all_day": all_day,
+            "subject": str(item.Subject or "")[:300],
+            "location": str(item.Location or "")[:300],
+            "organizer": str(item.Organizer or "")[:200],
+            "attendees": people[:60],
+            "busy": _BUSY.get(item.BusyStatus, ""),
+            "cancelled": item.MeetingStatus in _CANCELLED,
+            "recurring": bool(item.IsRecurring),
+            "_starts": starts,
+            "_ends": ends,
+        }
+    except Exception:
+        return None
+
+
+def _jet_date(value: datetime) -> str:
+    """A date the way Outlook's item filter reads it: in this computer's short date format (dd/MM/yyyy in much of
+    the world), else as Outlook in the US writes it."""
+    pattern = "%m/%d/%Y"
+    try:
+        import win32api
+
+        written = win32api.GetLocaleInfo(0x0400, 0x1F)  # LOCALE_USER_DEFAULT, LOCALE_SSHORTDATE ("M/d/yyyy")
+        pattern = _strftime_pattern(str(written)) or pattern
+    except Exception:
+        pass
+    local = aware_utc(value).astimezone()
+    return local.strftime(pattern)
+
+
+def _strftime_pattern(windows: str) -> str:
+    """Windows' short date pattern ("dd/MM/yyyy", "M/d/yyyy", "yyyy-MM-dd") as a strftime one, leading zeros kept
+    (Outlook reads "05/10/2026" as well as "5/10/2026")."""
+    out = re.sub(r"yyyy|yy|MM|M|dd|d", lambda m: {"yyyy": "%Y", "yy": "%y", "MM": "%m", "M": "%m", "dd": "%d", "d": "%d"}[m.group(0)], windows)
+    return out if "%Y" in out or "%y" in out else ""
 
 
 def local_time(value) -> datetime | None:

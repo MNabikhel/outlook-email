@@ -311,6 +311,7 @@ class RawMessage:
     reply_to: str = ""
     attachments: list[RawAttachment] = field(default_factory=list)
     threading: dict = field(default_factory=dict)  # as EmailRecord.threading
+    meetings: list = field(default_factory=list)  # an Outlook meeting request's meeting (calendar_events.Meeting)
     # What a dropped .eml or .msg doesn't say itself and was taken from its file: "subject" (the file's name)
     # or "sent" (the file's date).
     from_file: tuple[str, ...] = ()

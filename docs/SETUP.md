@@ -55,7 +55,7 @@ To see the check without starting, run `CloseDesk.command --check` (Mac) or `Clo
 
 ## Every morning
 
-1. **Classic Outlook on Windows: let CloseDesk copy it.** Open **Settings → Outlook (classic)**, click **Check Outlook**, tick the folders to copy (the Inbox is ticked), and either turn on **Sync automatically** or click **Sync now** when you want. It copies mail and attachments and never changes anything in Outlook; mail you delete in Outlook disappears from CloseDesk on the next sync. If you use this, skip the dragging below.
+1. **Classic Outlook on Windows: connect it once.** Open **Settings → Sync inbox** and click **Connect to Outlook**. CloseDesk says what it will do and asks first: it copies your mail and attachments, and your calendar if you leave **Also read my calendar** ticked, and keeps them up to date while it's open. It only reads: nothing in Outlook is changed, moved, marked read, flagged, deleted or sent. Mail you delete in Outlook disappears from CloseDesk on the next sync. Which folders, how often and how far back are under **Advanced** (the Inbox, every 15 minutes, the last 30 days, until you change them). **Disconnect** stops it; what was copied stays. If you use this, skip the dragging below.
 
    **Otherwise, get yesterday's mail out of Outlook** into the project's `inbox/incoming` folder:
    - **Classic Outlook (Windows):** click the first message, Shift+click the last, and drag the selection onto `inbox\incoming` in File Explorer. Each becomes a `.msg` with its attachments inside.
@@ -84,6 +84,8 @@ Every day's digest is kept under **Past digests**, so you can look back at what 
 - **Ask about an email and its files:** open the email and ask, for example *summarize the draft*, *what does the contract say about renewal?*, or *does the total on the Summary sheet add up?* It reads the attachments (PDF pages, every sheet with its formulas, Word drafts with tracked changes, slides), and can open other emails if the answer is there. On the email page each file has **Read text**, **Summarize**, and **Ask…**.
 - **Fraud check:** a flagged email shows why, signal by signal. If it is wrong, click **Not fraud**, **Trust** the sender, or **Trust everyone at @yourco.com**; if it is right, **This is fraud**. It learns from each answer, and the **Fraud check** page (left menu) keeps the log. Add your own company's domain there first.
 - **Search:** press `/` anywhere and type a name, company, invoice number, or a phrase from an attachment.
+- **Related mail:** each email shows its conversation, oldest first, and the other emails that share an invoice number, a PO, a file, or another version of a file with it, each with why. **Whole matter** shows everything linked to it on one page, with what changed between versions of its files. With a local model, **Look for more** has it suggest emails about the same matter that nothing else ties together, with its reason. Mail held as possible fraud is marked and its files link to nothing.
+- **Calendar:** the left menu (or `g` then `m`). Day, week and month; `t` today, `d`/`w`/`m` to switch, ←/→ to move. Click a meeting to see where, who, and the mail about it. Meetings come from your Outlook calendar when it is connected with the calendar ticked, and from meeting invitations in your mail either way. Ask CloseDesk *what's on tomorrow?* or *am I free Friday?*
 
 ## Try it first with sample mail
 
@@ -128,7 +130,8 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 | "The local model read 0" or "three messages in a row failed" | Update CloseDesk (double-click `CloseDesk-Update`). Reasoning models such as Qwen3.5 used to come back empty; they now work, with thinking turned off for filing. The message ends with what the model actually sent, and `python -m controller_inbox llm-check` shows the same for one sample. |
 | Which LM Studio address? | CloseDesk uses the OpenAI-compatible one, `http://localhost:1234/v1`, and adds `/chat/completions` itself. Pasting `…/v1/chat/completions` or `…/api/v1/chat` into `CONTROLLER_INBOX_LLM_BASE_URL` works too. |
 | Summaries look generic | Those came from the fast scripts. Start the model and process again; the model reads everything that is still waiting. |
-| **Outlook (classic)** says it isn't available | It works on Windows with classic Outlook only. On New Outlook, use the drop folder. |
+| **Sync inbox** says classic Outlook isn't on this computer | It works on Windows with classic Outlook only. On New Outlook or a Mac, use the drop folder; meeting invitations in that mail still show in the calendar. |
+| The calendar shows only some meetings | Without Outlook connected, it shows the meetings from invitations in your mail. Connect Outlook in **Settings → Sync inbox** with **Read my calendar** on for the whole calendar; it is read once an hour. |
 | Outlook asks "A program is trying to access…" | Choose **Allow**. If IT blocks programs from reading Outlook, the sync says so; use the drop folder instead. |
 | A file landed in `inbox/failed` | Open the `.why.txt` next to it. Usually re-saving the message from Outlook fixes it. |
 | A category is wrong | Open the message, use **Wrong category?**, and write one sentence on why. That sender is learned. |

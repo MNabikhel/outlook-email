@@ -217,6 +217,7 @@ def process_message(
         latest = store.get_email(raw.id, conn=conn)
         verdict_changed = latest is not None and _keep_user_state(record, latest)
         store.upsert_email(record, conn=conn)
+        store.save_invites(record.id, invites(raw, record.id, now), conn=conn)
     from controller_inbox import cost_codes
 
     try:
@@ -471,11 +472,32 @@ def _filed_from_a_file(store: Store, raw: RawMessage) -> bool:
     return stored_from(store, raw, ("folder", "outlook")) is not None
 
 
+def invites(raw: RawMessage, email_id: str, now: datetime) -> list:
+    """The meetings an email's invitations name: its .ics files, and the meeting of an Outlook meeting request."""
+    from controller_inbox import calendar_events
+
+    found = [replace(meeting, email_id=email_id) for meeting in raw.meetings]
+    for att in raw.attachments:
+        name = (att.filename or "").lower()
+        if (name.endswith(".ics") or "calendar" in (att.content_type or "").lower()) and att.content:
+            found += calendar_events.from_ics(att.content, email_id=email_id, now=now)
+    return found
+
+
 def ingest_demo(store: Store, settings: Settings, *, now: datetime | None = None) -> list[EmailRecord]:
     from controller_inbox.demo import DemoMailbox
 
+    from controller_inbox import calendar_events
+    from controller_inbox.demo import demo_meetings
+
     mailbox = DemoMailbox(now=now)
-    return ingest_mailbox(mailbox, store, settings, now=now, cursor=None)
+    records = ingest_mailbox(mailbox, store, settings, now=now, cursor=None)
+    anchor = now or datetime(2026, 9, 22, 8, 15, tzinfo=timezone.utc)
+    store.replace_meetings(
+        "demo", demo_meetings(anchor),
+        start=(anchor - calendar_events.WINDOW_BACK).isoformat(), end=(anchor + calendar_events.WINDOW_AHEAD).isoformat(),
+    )
+    return records
 
 
 def _classify(

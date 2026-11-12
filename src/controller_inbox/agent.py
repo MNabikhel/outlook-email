@@ -1205,7 +1205,7 @@ def _note(ws: Workspace, text: str, ref) -> str:
         # A note is kept for later questions, so it may only be about an email that was actually read.
         return f"Open [{ws.number(email)}] with open_email before writing a note about it."
     ws.notes.append(text)
-    if email is not None:
+    if email is not None and email.source not in {"calendar"}:  # the calendar stand-in is no email to keep notes on
         at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         ws.store.add_finding(email.id, text, question=ws.question, at=at)
     return "Noted."

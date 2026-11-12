@@ -215,14 +215,15 @@ def _sync_outlook(
     ``note`` says why Outlook couldn't be read."""
     from controller_inbox import outlook_desktop, outlook_sync
 
+    cfg = outlook_sync.config(store)
     if wanted is None:
-        wanted = outlook_sync.config(store)["auto"] and not outlook_desktop.available()
+        wanted = cfg["auto"] and cfg["consent"] and not outlook_desktop.available()
     if not wanted:
         return {}
     try:
         with outlook_desktop.connect(start=start) as session:
             return outlook_sync.sync(store, settings, session, now=now, on_progress=on_progress)
-    except outlook_desktop.OutlookUnavailable as exc:
+    except (outlook_desktop.OutlookUnavailable, outlook_sync.NotConnected) as exc:
         return {"note": str(exc)}
     except Exception as exc:  # the drop folder and the digest still happen
         log.warning("Syncing Outlook failed", exc_info=True)

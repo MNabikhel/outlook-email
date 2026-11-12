@@ -18,7 +18,7 @@ import logging
 import re
 import time
 from collections.abc import Iterator
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -44,7 +44,7 @@ from controller_inbox.local_llm import (
     reply_budget,
     stream_text,
 )
-from controller_inbox.models import DOCUMENT_LABELS, ActionStatus, DocumentType, EmailRecord
+from controller_inbox.models import DOCUMENT_LABELS, ActionStatus, DocumentType, EmailRecord, Importance
 from controller_inbox.money import fmt_money
 from controller_inbox.reading import ungrounded_amounts
 from controller_inbox.store import Store
@@ -105,6 +105,83 @@ def _matter(store: Store, current: EmailRecord) -> list[EmailRecord]:
     found = links.related(store, current)
     thread = [email for email in found["thread"] if email.id != current.id]
     return thread + [email for group in found["groups"] for email in group["emails"]]
+
+
+# A question about meetings: the calendar is one of its sources.
+_MEETINGS = re.compile(
+    r"\b(meetings?|calendar|schedule[ds]?|appointments?|agenda|invite[sd]?|invitations?|calls? with|"
+    r"(?:am i|are we) (?:free|busy)|free (?:on|at|this|tomorrow|today)|what'?s on (?:today|tomorrow|my)|stand-?up|1:1|one on one)\b",
+    re.I,
+)
+CALENDAR_DAYS_BACK = 7
+CALENDAR_DAYS_AHEAD = 21
+
+
+def _meetings_for(question: str, listing: str, today: str) -> str:
+    """The calendar's lines for the day a question names (today, tomorrow, a weekday), or the next seven days."""
+    rows = [line for line in listing.splitlines()[1:] if line.strip()]
+    try:
+        day = date.fromisoformat(today) if today else date.today()
+    except ValueError:
+        day = date.today()
+    lower = question.lower()
+    names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    if "tomorrow" in lower:
+        days = [day + timedelta(days=1)]
+    elif "today" in lower:
+        days = [day]
+    elif (named := next((i for i, name in enumerate(names) if name in lower), None)) is not None:
+        days = [day + timedelta(days=(named - day.weekday()) % 7)]
+    elif "next week" in lower:
+        monday = day + timedelta(days=7 - day.weekday())
+        days = [monday + timedelta(days=i) for i in range(7)]
+    else:
+        days = [day + timedelta(days=i) for i in range(7)]
+    wanted = {d.isoformat() for d in days}
+    picked = [f"- {row}" for row in rows if row[:10] in wanted]
+    return "\n".join(picked) if picked else "No meetings then."
+
+
+def asks_about_meetings(question: str) -> bool:
+    return bool(_MEETINGS.search(question or ""))
+
+
+def calendar_source(store: Store, settings: Settings, today: str = "") -> EmailRecord | None:
+    """The calendar as one numbered source for the chat: the meetings from a week back to three weeks on, as lines
+    the model reads (times in the app's time zone). None when there are none."""
+    from controller_inbox import calendar_events
+
+    try:
+        day = date.fromisoformat(today) if today else datetime.now(settings.tz).date()
+    except ValueError:
+        day = datetime.now(settings.tz).date()
+    first, last = day - timedelta(days=CALENDAR_DAYS_BACK), day + timedelta(days=CALENDAR_DAYS_AHEAD)
+    start, end = calendar_events.utc_range(first, last, settings.tz)
+    meetings = [calendar_events.shown(meeting, settings.tz) for meeting in store.meetings_between(start, end)]
+    if not meetings:
+        return None
+    zone = getattr(settings.tz, "key", str(settings.tz))
+    body = (
+        f"Meetings from {first:%A %B} {first.day} to {last:%A %B} {last.day}, {last.year}; today is {day:%A %B} {day.day}. "
+        f"Times are {zone}.\n" + calendar_events.listing(meetings)
+    )
+    return EmailRecord(
+        id="calendar",
+        subject="Your calendar",
+        sender_name="Calendar",
+        sender_email="",
+        received_at=datetime.now(timezone.utc).isoformat(),
+        body_text=body,
+        body_preview=body[:200],
+        has_attachments=False,
+        outlook_importance="normal",
+        is_read=True,
+        category=DocumentType.OTHER,
+        category_confidence=0,
+        importance=Importance.LOW,
+        importance_score=0,
+        source="calendar",
+    )
 
 
 _HELP = re.compile(
@@ -547,6 +624,7 @@ def source_cards(sources: list[EmailRecord], settings: Settings | None = None) -
             "sender": email.sender_name or email.sender_email,
             "fraud": is_fraud(email),
             "chat": email.source == "chat",
+            "calendar": email.source == "calendar",
             "files": [] if attachments_locked(email) else [
                 {
                     "n": number,
@@ -625,6 +703,9 @@ def offline_answer(
     if asks_for_help(question, found, current):
         return HELP_TEXT
     note = "Here's a straight lookup instead." if model_failed else "The local model isn't running, so this is a straight lookup."
+    calendar = next((email for email in sources if email.source == "calendar"), None)
+    if calendar is not None:
+        return f"{note} Your meetings [{numbers[calendar.id]}]:\n" + _meetings_for(question, calendar.body_text, today)
     if current is not None and not found and not about_today:
         tasks = [a.title for a in current.actions if a.status == ActionStatus.OPEN]
         lines = [f"{note} The email on screen [1]:", f"**{current.subject}** from {current.sender_name or current.sender_email}."]
@@ -704,6 +785,11 @@ def answer_stream(
     focus = focus or []
     searched: dict[str, Any] = {}
     sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings, report=searched)
+    if asks_about_meetings(question) and (calendar := calendar_source(store, settings, today)) is not None:
+        # "What meetings do I have tomorrow?": the calendar answers it, beside the mail it may name.
+        current_first = sources[:1] if email_id and sources and sources[0].id == email_id else []
+        sources = current_first + [calendar] + [email for email in sources if email not in current_first][: MAX_SOURCES - 1]
+        found = found | {calendar.id}
     if uploads is not None:
         sources = [email for email in sources if email.id != uploads.id]
         screen = next((email for email in sources if email.id == email_id), None)

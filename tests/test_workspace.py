@@ -868,3 +868,46 @@ def test_a_link_the_model_made_shows_with_its_reason(loaded, site, page):
     text = related.inner_text()
     assert "CloseDesk thinks these are about the same matter" in text and "Both are about the Senior Analyst hire." in text
     assert page.locator("#rd-related button:has-text('Look for more')").count() == 0, "no model running: no button"
+
+
+def test_connecting_outlook_asks_first_and_cancel_reads_nothing(loaded, settings, page, monkeypatch):
+    from liveserver import serving
+
+    from controller_inbox import outlook_desktop, outlook_sync
+
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")  # as on a Windows computer with classic Outlook
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/app/settings#set-outlook")
+        page.click("#set-outlook button:has-text('Connect to Outlook')")
+        dialog = page.wait_for_selector("dialog.consent[open]")
+        text = dialog.inner_text()
+        assert "It only reads." in text and "deleted or sent" in text and "Also read my calendar" in text
+        page.click("dialog.consent button:has-text('Cancel')")
+        page.wait_for_selector("dialog.consent", state="detached")
+        assert not outlook_sync.config(loaded)["consent"], "cancelled: nothing agreed, nothing read"
+        page.click("#set-outlook button:has-text('Connect to Outlook')")
+        page.uncheck("#consent-calendar")
+        page.click("dialog.consent button:has-text('Connect')")
+        page.wait_for_selector("#set-outlook .src-card.on")
+        cfg = outlook_sync.config(loaded)
+        assert cfg["consent"] and cfg["auto"] and not cfg["calendar"]
+        assert page.is_visible("#set-outlook button:has-text('Disconnect')")
+
+
+def test_the_calendar_shows_a_week_a_meeting_with_its_mail_and_moves_by_keys(site, page):
+    page.goto(f"{site}/app/calendar?view=week&date=2026-09-22")
+    page.wait_for_selector(".cal-week")
+    assert "September 21 – 27, 2026" in page.text_content(".cal-title")
+    assert page.locator(".cal-block:has-text('AP team standup')").count() == 5
+    page.click(".cal-block:has-text('Northwind invoice INV-10482 review')")
+    page.wait_for_selector(".cal-related .rel-link")
+    assert page.locator('.cal-related a[href="/app/mail/demo-inv-10482"]').count() == 1
+    assert "Conference room B" in page.text_content(".cal-facts")
+    page.keyboard.press("m")
+    page.wait_for_selector(".cal-month")
+    assert "September 2026" in page.text_content(".cal-title")
+    page.keyboard.press("ArrowRight")
+    page.wait_for_function("document.querySelector('.cal-title') && document.querySelector('.cal-title').textContent.includes('October 2026')")
+    page.keyboard.press("d")
+    page.wait_for_selector(".cal-week.view-day")
+    assert page.locator(".seg-btn.on").text_content() == "Day"

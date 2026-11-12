@@ -570,7 +570,7 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None)
             return 1
         print(f"CloseDesk is at http://{settings.host}:{port}/  (press Ctrl+C to stop)")
     app = create_app(settings, store)
-    # Automatic Outlook sync while the dashboard is open (Settings → Outlook).
+    # Automatic Outlook sync while the dashboard is open (Settings → Sync inbox).
     app.state.start_outlook_sync()
     # Mail stored by an older version is linked to its conversations in the background, once.
     threading.Thread(target=_link_stored_mail, args=(settings, store), name="link-mail", daemon=True).start()

@@ -61,7 +61,7 @@ function getStarted(meta, actions) {
         { class: "set-steps" },
         h("li", null, "Drag messages from Outlook into the drop folder: ", h("code", { class: "path" }, meta.drop_folder || "inbox/incoming"), ". Classic Outlook saves ", h("code", null, ".msg"), " files; the new Outlook and Outlook on the web save ", h("code", null, ".eml"), "."),
         h("li", null, "Click ", h("b", null, "Process new mail"), ". Each message is sorted, summarized and searchable, with or without a local model."),
-        meta.outlook_ready ? h("li", null, "Or let CloseDesk copy your mail from Outlook, read only: ", h("a", { href: "/app/settings#set-outlook", dataset: { nav: "" } }, "Settings → Outlook (classic)"), ".") : null
+        meta.outlook_ready ? h("li", null, "Or let CloseDesk copy your mail from Outlook, read only: ", h("a", { href: "/app/settings#set-outlook", dataset: { nav: "" } }, "Settings → Sync inbox"), ".") : null
       ),
       h(
         "div",
@@ -103,6 +103,7 @@ export function todayView(data, meta, actions) {
             itemList(data.alerts, "", (item) => [mailLink(item.id, item.subject, "today"), h("small", null, `${item.sender} · ${item.summary || ""}`)])
           )
         : null,
+      meetingsCard(data.meetings_today || []),
       h(
         "div",
         { class: "cards2" },
@@ -128,6 +129,36 @@ export function todayView(data, meta, actions) {
         )
       ),
       h("p", { class: "muted small keys" }, "Work down the focus list: ", h("kbd", null, "j"), "/", h("kbd", null, "k"), " to move, ", h("kbd", null, "Enter"), " to open, ", h("kbd", null, "e"), " to mark done.")
+    )
+  );
+}
+
+function meetingTime(m) {
+  if (m.all_day) return "All day";
+  const label = (stamp) => {
+    const hh = Number(stamp.slice(11, 13));
+    const mm = stamp.slice(14, 16);
+    return `${((hh + 11) % 12) + 1}${mm === "00" ? "" : `:${mm}`}${hh < 12 ? "am" : "pm"}`;
+  };
+  return `${label(m.start)}–${label(m.end)}`;
+}
+
+/* Today's meetings, each opening in the calendar beside the mail about it. */
+function meetingsCard(meetings) {
+  if (!meetings.length) return null;
+  return card(
+    h("span", null, "Today's meetings ", h("a", { class: "muted small", href: "/app/calendar", dataset: { nav: "" } }, "Calendar")),
+    h(
+      "ul",
+      { class: "plain-list meetings" },
+      meetings.map((m) =>
+        h(
+          "li",
+          { class: m.cancelled ? "cancelled" : "" },
+          h("a", { href: `/app/calendar?${new URLSearchParams({ view: "day", date: m.start.slice(0, 10), meeting: m.id })}`, dataset: { nav: "" } }, m.subject),
+          h("small", null, [meetingTime(m), m.location, m.cancelled ? "cancelled" : ""].filter(Boolean).join(" · "))
+        )
+      )
     )
   );
 }

@@ -18,7 +18,7 @@ const SENTENCE_END = /(?<!\b(?:p|pp|no|e\.g|i\.e|vs))[.!?](?=\s)|\n/gi;
 const LOCATION = new RegExp([PAGE_AT, SLIDE_AT, SHEET_AT, /\bcells?\s+[A-Z]{1,3}\d/, /!\$?[A-Z]{1,3}\$?\d/].map((re) => re.source).join("|"), "i");
 
 export const mailHref = (source) =>
-  source.chat && (source.files || []).length ? filePath(source.id, 1) : `/app/mail/${encodeURIComponent(source.id)}`;
+  source.calendar ? "/app/calendar" : source.chat && (source.files || []).length ? filePath(source.id, 1) : `/app/mail/${encodeURIComponent(source.id)}`;
 
 function sentences(text) {
   const out = [];

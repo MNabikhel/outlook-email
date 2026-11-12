@@ -485,12 +485,17 @@ def parse_msg(path: Path) -> RawMessage:
         reply_to = _reply_address(str(header.get("Reply-To") or "")) if header is not None else ""
         message_id = str(getattr(message, "messageId", None) or "").strip()
         threading = msg_threading(message)
+        meeting = str(_msg_property(message, "classType") or "").lower().startswith("ipm.schedule.meeting")
     finally:
         message.close()
     data = path.read_bytes()
     raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
     raw.reply_to = reply_to
     raw.threading = threading
+    if meeting:
+        from controller_inbox import calendar_events
+
+        raw.meetings = calendar_events.from_msg(path)
     return raw
 
 

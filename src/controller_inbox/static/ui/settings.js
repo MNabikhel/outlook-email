@@ -23,7 +23,7 @@ const SHORTCUTS = [
 const SECTIONS = [
   ["Workspace", [["appearance", "Appearance"], ["profile", "Inbox profile"], ["timezone", "Time zone"]]],
   ["Local model", [["model", "Model and status"], ["context", "Context length"], ["vision", "Reading scans"], ["search", "Search by meaning"]]],
-  ["Mail", [["mail-in", "Getting mail in"], ["schedule", "Every morning"], ["cost-codes", "AP cost codes"], ["teaching", "Teaching it"], ["outlook", "Outlook connection"], ["sample", "Sample mailbox"]]],
+  ["Mail", [["mail-in", "Getting mail in"], ["schedule", "Every morning"], ["cost-codes", "AP cost codes"], ["teaching", "Teaching it"], ["outlook", "Sync inbox"], ["sample", "Sample mailbox"]]],
   ["Help", [["about", "This copy and its check"], ["keys", "Keyboard"], ["classic", "Classic view"]]],
 ];
 
@@ -609,7 +609,7 @@ export function createSettings(ctx) {
         h("li", null, "Then click ", b("Process new mail"), " here or at the top of the page, or double-click ", code("CloseDesk"), " in the project folder.")
       ),
       h("p", { class: "set-help" }, "A desktop shortcut to the drop folder makes this a ten-second job. Dropping the same email twice is fine — it is recognized and not filed twice."),
-      data.outlook.available ? h("p", { class: "set-help" }, "Using classic Outlook on this computer? ", h("a", { href: "#set-outlook" }, "Outlook (classic)"), " below copies your mail in by itself, read only.") : null,
+      data.outlook.available ? h("p", { class: "set-help" }, "Using classic Outlook on this computer? ", h("a", { href: "#set-outlook" }, "Sync inbox"), " below connects it once and copies your mail in by itself, read only.") : null,
       facts([
         pathRow("Drop folder", f.incoming),
         pathRow("Read files move to", f.processed),
@@ -690,14 +690,43 @@ export function createSettings(ctx) {
       code("sync"),
       `. ${data.graph_configured ? "Configured" : "Not configured"}; last sync ${data.runs.last_sync || "never"}.`
     );
+    const dropFolder = h(
+      "div",
+      { class: "src-card" },
+      h("div", { class: "src-head" }, icon("folder", 16), b("Drop folder"), h("span", { class: "tag tag-ok" }, "Always on")),
+      h("p", { class: "set-help" }, "Save or drag messages into the drop folder and CloseDesk reads them. ", h("a", { href: "#set-mail-in" }, "How"), ".")
+    );
     if (!o.available) {
       return section(
         "outlook",
-        "Outlook (classic)",
+        "Sync inbox",
         "external",
-        "Copy mail straight from classic Outlook on this computer, without dragging it to the drop folder.",
-        h("div", { class: "set-banner off" }, h("span", { class: "dot", "aria-hidden": "true" }), h("div", null, h("p", null, o.why))),
-        graph
+        "Where your mail comes from. The drop folder always works; classic Outlook on Windows can also be connected.",
+        dropFolder,
+        h(
+          "div",
+          { class: "src-card" },
+          h("div", { class: "src-head" }, icon("mail", 16), b("Classic Outlook"), h("span", { class: "tag" }, "Not on this computer")),
+          h("p", { class: "set-help" }, o.why)
+        ),
+        h("details", { class: "set-more" }, h("summary", null, "Advanced"), graph)
+      );
+    }
+    if (!o.consent) {
+      return section(
+        "outlook",
+        "Sync inbox",
+        "external",
+        "Where your mail comes from. The drop folder always works; connect classic Outlook to have your mail, and your calendar if you like, come in by itself.",
+        dropFolder,
+        h(
+          "div",
+          { class: "src-card" },
+          h("div", { class: "src-head" }, icon("mail", 16), b("Classic Outlook"), h("span", { class: "tag" }, "Not connected")),
+          h("p", { class: "set-help" }, "Copies your mail and its attachments from classic Outlook on this computer, and keeps them up to date. It only reads: nothing in Outlook is changed."),
+          h("div", { class: "set-actions" }, h("button", { type: "button", class: "btn btn-primary btn-sm", onclick: (event) => askToConnect(event.currentTarget) }, icon("external", 14), "Connect to Outlook"))
+        ),
+        h("details", { class: "set-more" }, h("summary", null, "Advanced"), graph)
       );
     }
     const now = ctx.job();
@@ -758,36 +787,100 @@ export function createSettings(ctx) {
       )
     );
     follow();
+    const calendar = h("input", {
+      type: "checkbox",
+      id: "set-outlook-calendar",
+      checked: o.calendar,
+      onchange: (event) => save("outlook", "/api/settings/outlook/calendar", { on: event.currentTarget.checked }, event.currentTarget),
+    });
+    const disconnect = (event) => {
+      if (!window.confirm("Stop reading Outlook? The mail CloseDesk copied stays here; connecting again asks again.")) return;
+      save("outlook", "/api/settings/outlook/disconnect", {}, event.currentTarget, { busyText: "Disconnecting…" });
+    };
     return section(
       "outlook",
-      "Outlook (classic)",
+      "Sync inbox",
       "external",
-      "Copies mail straight from classic Outlook on this computer: no dragging, no IT approval, nothing leaves the computer.",
+      "Where your mail comes from. The drop folder always works; classic Outlook is connected.",
+      dropFolder,
       h(
         "div",
-        { class: `set-banner ${o.auto ? "on" : "off"}` },
-        h("span", { class: "dot", "aria-hidden": "true" }),
+        { class: "src-card on" },
+        h("div", { class: "src-head" }, icon("mail", 16), b("Classic Outlook"), h("span", { class: "tag tag-ok" }, "Connected")),
         h(
           "div",
-          null,
-          h("p", null, o.auto ? `Automatic: syncs when CloseDesk starts, then every ${o.interval} minutes while CloseDesk and Outlook are both open.` : "Manual: syncs when you click Sync now."),
-          h("p", { class: "set-help" }, o.last_sync ? `Last sync ${o.last_sync}: ${o.last_result}.` : "Not synced yet.")
+          { class: `set-banner ${o.auto ? "on" : "off"}` },
+          h("span", { class: "dot", "aria-hidden": "true" }),
+          h(
+            "div",
+            null,
+            h("p", null, o.auto ? `Automatic: syncs when CloseDesk starts, then every ${o.interval} minutes while CloseDesk and Outlook are both open.` : "Manual: syncs when you click Sync now."),
+            h("p", { class: "set-help" }, o.last_sync ? `Last sync ${o.last_sync}: ${o.last_result}.` : "Not synced yet.")
+          )
+        ),
+        h("p", { class: "set-help" }, icon("ok", 14), " Read only: CloseDesk copies each email and its attachments into its own folder. Nothing in Outlook is moved, marked read, flagged, changed, deleted or sent."),
+        facts([
+          ["Outlook", o.account || "Not checked yet"],
+          ["Copied so far", plural(o.copied, "email")],
+          ["Connected", o.consented_label || "Before this version asked"],
+        ]),
+        h("label", { class: "set-check" }, calendar, h("span", { class: "set-check-text" }, b("Read my calendar too"), h("span", null, o.calendar ? (o.calendar_last ? `Meetings read ${o.calendar_last}, then once an hour. Their notes aren't read.` : "Read with the next sync, then once an hour. Their notes aren't read.") : "Shows your meetings in CloseDesk's calendar, beside the mail about them. Only read; their notes aren't read."))),
+        h(
+          "div",
+          { class: "set-actions" },
+          h("button", { type: "button", class: "btn btn-primary btn-sm", disabled: running, onclick: () => ctx.syncOutlook() }, icon("refresh", 13), syncing ? "Syncing…" : "Sync now"),
+          h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: disconnect }, "Disconnect")
         )
       ),
-      h("p", { class: "set-help" }, icon("ok", 14), " Read only: CloseDesk copies each email and its attachments into its own folder. Nothing in Outlook is moved, marked read, flagged, changed or deleted."),
-      facts([
-        ["Outlook", o.account || "Not checked yet"],
-        ["Copied so far", plural(o.copied, "email")],
-      ]),
       h(
-        "p",
-        { class: "set-help" },
-        "Each sync copies new mail, follows what changed in Outlook (read, flagged, moved), and removes CloseDesk's copy of mail you deleted in Outlook. Mail moved to a folder that isn't copied stays here. Your corrections and the fraud log are kept either way."
-      ),
-      h("div", { class: "set-actions" }, h("button", { type: "button", class: "btn btn-primary btn-sm", disabled: running, onclick: () => ctx.syncOutlook() }, icon("refresh", 13), syncing ? "Syncing…" : "Sync now")),
-      form,
-      graph
+        "details",
+        { class: "set-more" },
+        h("summary", null, "Advanced: folders, schedule, how far back"),
+        h(
+          "p",
+          { class: "set-help" },
+          "Each sync copies new mail, follows what changed in Outlook (read, flagged, moved), and removes CloseDesk's copy of mail you deleted in Outlook. Mail moved to a folder that isn't copied stays here. Your corrections and the fraud log are kept either way."
+        ),
+        form,
+        graph
+      )
     );
+  }
+
+  // The prompt before CloseDesk first reads Outlook: what it will do, that it only reads, and the calendar as its
+  // own choice. Nothing is read until Connect.
+  function askToConnect(opener) {
+    const calendar = h("input", { type: "checkbox", id: "consent-calendar", checked: true });
+    const dialog = h(
+      "dialog",
+      { class: "consent", "aria-labelledby": "consent-title" },
+      h("h2", { id: "consent-title" }, "Connect CloseDesk to Outlook?"),
+      h("p", null, "CloseDesk will copy your mail and its attachments from classic Outlook on this computer, and keep them up to date while CloseDesk is open."),
+      h(
+        "ul",
+        { class: "consent-list" },
+        h("li", null, icon("ok", 14), h("span", null, b("It only reads."), " Nothing in Outlook is changed, moved, marked read, flagged, deleted or sent.")),
+        h("li", null, icon("ok", 14), h("span", null, "Everything stays on this computer.")),
+        h("li", null, icon("info", 14), h("span", null, "Mail you delete in Outlook is removed from CloseDesk too; mail you move to a folder that isn't copied stays.")),
+        h("li", null, icon("info", 14), h("span", null, "Outlook may ask whether to allow access: choose ", b("Allow"), "."))
+      ),
+      h("label", { class: "set-check" }, calendar, h("span", { class: "set-check-text" }, b("Also read my calendar"), h("span", null, "Meetings only (when, where, who), not their notes."))),
+      h(
+        "div",
+        { class: "consent-actions" },
+        h("button", { type: "button", class: "btn btn-sm", value: "cancel", onclick: () => dialog.close("cancel") }, "Cancel"),
+        h("button", { type: "button", class: "btn btn-primary btn-sm", value: "connect", onclick: () => dialog.close("connect") }, "Connect")
+      )
+    );
+    dialog.addEventListener("close", () => {
+      const yes = dialog.returnValue === "connect";
+      dialog.remove();
+      if (yes) save("outlook", "/api/settings/outlook/connect", { agreed: true, calendar: calendar.checked }, opener, { busyText: "Connecting…" });
+      else opener.focus();
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    $("button[value=connect]", dialog).focus();
   }
 
   function sample() {

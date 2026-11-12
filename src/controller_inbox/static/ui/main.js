@@ -11,6 +11,7 @@ import { createSettings } from "./settings.js";
 import { createChat } from "./chat.js";
 import { createOverlays } from "./palette.js";
 import { traceView } from "./trace.js";
+import { calendarView, rangeOf } from "./calendar.js";
 
 const enc = encodeURIComponent;
 const root = document.documentElement;
@@ -58,7 +59,11 @@ function parse() {
   else if (first === "fraud") route.list = "fraud";
   else if (first === "coding") route.list = `coding:${q.get("status") || "review"}`;
   else if (first === "digest" || first === "settings") route.list = null;
-  else if (first === "trace" && second) {
+  else if (first === "calendar") {
+    route.list = null;
+    route.calView = q.get("view") || "week";
+    route.meeting = q.get("meeting") || "";
+  } else if (first === "trace" && second) {
     route.list = null;
     route.traceId = second;
   }
@@ -86,6 +91,7 @@ window.addEventListener("popstate", () => sync());
 const NAV = [
   { id: "today", label: "Today", icon: "today", url: "/app", count: () => (S.cache.get("today") ? S.cache.get("today").items.length : "") },
   { id: "tasks", label: "Tasks", icon: "tasks", url: "/app/tasks", count: (m) => m.counts.open_actions },
+  { id: "calendar", label: "Calendar", icon: "calendar", url: "/app/calendar" },
   { heading: "Mail" },
   { id: "folder:important", label: "Important", icon: "important", url: "/app/folder/important", count: (m) => m.counts.important },
   { id: "folder:informational", label: "Informational", icon: "informational", url: "/app/folder/informational", count: (m) => m.counts.informational },
@@ -487,7 +493,7 @@ function loadMore(spec) {
   return ensureList(spec.key, { force: true, quiet: true });
 }
 
-const navId = () => (S.route && !S.route.list && (S.route.view === "digest" || S.route.view === "settings") ? S.route.view : S.list ? listSpec(S.list.spec.key).nav : "");
+const navId = () => (S.route && !S.route.list && ["digest", "settings", "calendar"].includes(S.route.view) ? S.route.view : S.list ? listSpec(S.list.spec.key).nav : "");
 
 /* ---------- Moving and opening ---------- */
 
@@ -802,6 +808,30 @@ function showTrace(id) {
     });
 }
 
+let calendarPage = null;
+
+function showCalendar(route) {
+  document.title = "Calendar · CloseDesk";
+  const key = `calendar:${route.calView}:${route.date}:${route.meeting}`;
+  if (!S.shown.startsWith("calendar:")) setReader(skeletonReader(), "", { animate: false });
+  const wanted = () => S.route.view === "calendar" && S.route.calView === route.calView && S.route.date === route.date;
+  const [first, last] = rangeOf(route.calView, route.date || new Date().toISOString().slice(0, 10));
+  const span = { start: first.toISOString().slice(0, 10), end: last.toISOString().slice(0, 10) };
+  getJSON(`/api/calendar?${new URLSearchParams(span)}`)
+    .then((data) => {
+      if (!wanted()) return;
+      if (!route.date && (data.today < span.start || data.today > span.end)) {
+        // The board's day (its time zone, or the sample's date) isn't in this browser's week: show the board's.
+        return navigate(`/app/calendar?${new URLSearchParams({ view: route.calView, date: data.today })}`, { replace: true });
+      }
+      calendarPage = calendarView(data, route, { navigate, ask: (question, emailId) => chat.ask(question, emailId), getJSON });
+      setReader(calendarPage, key, { animate: !S.shown.startsWith("calendar:") });
+    })
+    .catch((error) => {
+      if (wanted()) setReader(errorView(error.message), "error");
+    });
+}
+
 function showSettings() {
   document.title = "Settings · CloseDesk";
   settings.open();
@@ -813,7 +843,7 @@ async function sync() {
   const route = parse();
   const before = S.route;
   S.route = route;
-  const doc = route.view === "digest" || route.view === "settings" || route.view === "trace";
+  const doc = route.view === "digest" || route.view === "settings" || route.view === "trace" || route.view === "calendar";
   ws.classList.toggle("doc", doc);
   ws.classList.toggle("wide", Boolean(route.file));
   ws.classList.toggle("reading", Boolean(route.emailId) || doc);
@@ -823,6 +853,7 @@ async function sync() {
     chat.setScope(null);
     updateRail(route.view);
     if (route.view === "trace") return showTrace(route.traceId);
+    if (route.view === "calendar") return showCalendar(route);
     return route.view === "digest" ? showDigest(route.date) : showSettings();
   }
   if (before && (before.view === "digest" || before.view === "settings") && S.list) {
@@ -1199,7 +1230,7 @@ document.addEventListener("click", (event) => {
 });
 
 let goPending = 0;
-const GO = { t: "/app", i: "/app/folder/important", n: "/app/folder/informational", r: "/app/folder/reference", a: "/app/all", k: "/app/tasks", f: "/app/fraud", c: "/app/coding", d: "/app/digest", s: "/app/settings" };
+const GO = { t: "/app", m: "/app/calendar", i: "/app/folder/important", n: "/app/folder/informational", r: "/app/folder/reference", a: "/app/all", k: "/app/tasks", f: "/app/fraud", c: "/app/coding", d: "/app/digest", s: "/app/settings" };
 
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
@@ -1252,6 +1283,8 @@ document.addEventListener("keydown", (event) => {
     }
     return;
   }
+  // The calendar's own keys: t today, d / w / m the view, ← / → back and on.
+  if (S.route && S.route.view === "calendar" && calendarPage && calendarPage.isConnected && calendarPage.keys(event)) return;
   // On a full page (the digest, Setup), the list behind it is hidden: its keys mustn't act on it.
   if (ws.classList.contains("doc") && ["j", "k", "ArrowDown", "ArrowUp", "Enter", "o", "e"].includes(event.key)) return;
   const inList = listPane.contains(document.activeElement) || document.activeElement === document.body;

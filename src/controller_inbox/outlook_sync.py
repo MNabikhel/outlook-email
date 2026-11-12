@@ -39,6 +39,11 @@ FOLDER_LIST_KEY = "outlook_folder_list"
 ACCOUNT_KEY = "outlook_account"
 LAST_SYNC_KEY = "outlook_last_sync"
 LAST_RESULT_KEY = "outlook_last_result"
+# Settings → Sync inbox: when the user agreed that CloseDesk reads Outlook (and the calendar, a separate yes).
+CONSENT_KEY = "outlook_consent"
+CALENDAR_KEY = "outlook_calendar"
+CALENDAR_LAST_KEY = "outlook_calendar_last"
+CALENDAR_EVERY = timedelta(minutes=60)
 
 INTERVALS = (5, 15, 30, 60)  # minutes between automatic syncs while CloseDesk is open
 DAYS = (7, 30, 90, 365)  # how far back mail is copied
@@ -49,20 +54,47 @@ Progress = Callable[[str, int, int, str], None]
 
 
 def config(store: Store) -> dict:
-    """The sync settings saved from Settings → Outlook."""
+    """The sync settings saved from Settings → Sync inbox."""
     interval = _int(store.get_state(INTERVAL_KEY), DEFAULT_INTERVAL)
     days = _int(store.get_state(DAYS_KEY), DEFAULT_DAYS)
     try:
         folders = [str(path) for path in json.loads(store.get_state(FOLDERS_KEY) or "[]")]
     except ValueError:
         folders = []
+    consented = store.get_state(CONSENT_KEY) or ""
     return {
         "auto": store.get_state(AUTO_KEY) == "1",
         "interval": interval if interval in INTERVALS else DEFAULT_INTERVAL,
         "days": days if days in DAYS else DEFAULT_DAYS,
         "folders": folders,
         "subfolders": store.get_state(SUBFOLDERS_KEY) != "0",
+        # Someone who turned the sync on (or synced) before Settings asked had agreed to it: they aren't asked again.
+        "consent": bool(consented) or store.get_state(AUTO_KEY) == "1" or bool(store.get_state(LAST_SYNC_KEY)),
+        "consented_at": consented,
+        "calendar": store.get_state(CALENDAR_KEY) == "1",
     }
+
+
+def connect(store: Store, *, calendar: bool, now: datetime | None = None) -> None:
+    """The user agreed, in the prompt, that CloseDesk reads their mail (and, with ``calendar``, their calendar) from
+    Outlook and keeps it up to date: automatic sync goes on with the settings as they are (the Inbox, the last 30
+    days, every 15 minutes, unless changed)."""
+    store.set_state(CONSENT_KEY, (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"))
+    store.set_state(AUTO_KEY, "1")
+    store.set_state(CALENDAR_KEY, "1" if calendar else "0")
+
+
+def disconnect(store: Store) -> None:
+    """Stop reading Outlook. What was copied stays; connecting again asks again."""
+    for key in (CONSENT_KEY, CALENDAR_KEY, CALENDAR_LAST_KEY, LAST_SYNC_KEY):
+        store.set_state(key, "")
+    store.set_state(AUTO_KEY, "0")
+
+
+def set_calendar(store: Store, on: bool) -> None:
+    store.set_state(CALENDAR_KEY, "1" if on else "0")
+    if not on:
+        store.set_state(CALENDAR_LAST_KEY, "")
 
 
 def save_config(store: Store, *, auto: bool, interval: int, days: int, folders: list[str], subfolders: bool) -> None:
@@ -114,7 +146,7 @@ def chosen_paths(cfg: dict, infos: list[FolderInfo]) -> list[str]:
 def due(store: Store, now: datetime | None = None) -> bool:
     """Whether automatic sync is on and its interval has passed since the last sync."""
     cfg = config(store)
-    if not cfg["auto"]:
+    if not cfg["auto"] or not cfg["consent"]:
         return False
     last = store.get_state(LAST_SYNC_KEY)
     if not last:
@@ -127,10 +159,17 @@ def due(store: Store, now: datetime | None = None) -> bool:
     return now - then >= timedelta(minutes=cfg["interval"])
 
 
+class NotConnected(RuntimeError):
+    """The user hasn't agreed (Settings → Sync inbox) that CloseDesk reads Outlook."""
+
+
 def sync(store: Store, settings: Settings, session, *, now: datetime | None = None, on_progress: Progress | None = None) -> dict:
-    """One sync. Returns what changed: ``new``, ``updated``, ``moved``, ``removed``, ``already``, ``failed``."""
+    """One sync. Returns what changed: ``new``, ``updated``, ``moved``, ``removed``, ``already``, ``failed``, and
+    ``meetings`` when the calendar was read. Raises ``NotConnected`` unless the user agreed to it."""
     now = now or datetime.now(timezone.utc)
     cfg = config(store)
+    if not cfg["consent"]:
+        raise NotConnected("Connect Outlook in Settings → Sync inbox first: CloseDesk reads Outlook only once you agree.")
     infos = remember_folders(store, session)
     bins = [f.path for f in infos if f.trash]
     # A folder deleted in Outlook is moved into Deleted Items with its mail: everything under a bin is in the bin.
@@ -142,7 +181,7 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
     for path in cfg["folders"]:
         if path not in known:
             # Renamed or deleted in Outlook since it was picked: said, rather than syncing nothing in silence.
-            report["failed"].append({"folder": path, "error": f"The folder {path} isn't in Outlook any more. Pick it again in Settings → Outlook."})
+            report["failed"].append({"folder": path, "error": f"The folder {path} isn't in Outlook any more. Pick it again in Settings → Sync inbox → Advanced."})
     if on_progress:
         on_progress("outlook", 0, 0, "Reading Outlook's folders")
 
@@ -253,6 +292,11 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
         if _remove(store, settings, row):
             report["removed"] += 1
 
+    if cfg["calendar"] and calendar_due(store, now):
+        try:
+            report["meetings"] = sync_calendar(store, session, now=now)
+        except OutlookError as exc:
+            report["failed"].append({"folder": "Calendar", "error": str(exc)[:300]})
     stamp = now.astimezone(timezone.utc).isoformat()
     store.set_state(LAST_SYNC_KEY, stamp)
     store.set_state(
@@ -260,6 +304,29 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
         json.dumps({key: report[key] for key in ("new", "updated", "moved", "removed", "already")} | {"failed": len(report["failed"]), "at": stamp}),
     )
     return report
+
+
+def calendar_due(store: Store, now: datetime) -> bool:
+    """The calendar is read at most once an hour: reading it takes Outlook's attention while Outlook is in use."""
+    last = store.get_state(CALENDAR_LAST_KEY)
+    try:
+        return not last or now - datetime.fromisoformat(last) >= CALENDAR_EVERY
+    except ValueError:
+        return True
+
+
+def sync_calendar(store: Store, session, *, now: datetime | None = None) -> int:
+    """Read Outlook's calendar for the window around now and keep it: a meeting moved or deleted in Outlook
+    follows. Returns how many meetings are kept."""
+    from controller_inbox import calendar_events
+
+    now = now or datetime.now(timezone.utc)
+    start, end = now - calendar_events.WINDOW_BACK, now + calendar_events.WINDOW_AHEAD
+    found = session.calendar(start, end)
+    meetings = [calendar_events.Meeting(**item, source="outlook") for item in found]
+    kept = store.replace_meetings("outlook", meetings, start=start.date().isoformat(), end=end.isoformat())
+    store.set_state(CALENDAR_LAST_KEY, now.astimezone(timezone.utc).isoformat())
+    return kept
 
 
 def _same_time(stamp: str, when: datetime) -> bool:

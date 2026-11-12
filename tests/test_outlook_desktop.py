@@ -21,6 +21,7 @@ WRITES = {
     "SetProperty", "SetProperties", "DeleteProperty", "DeleteProperties", "MarkAsTask", "ClearTaskFlag", "PrintOut",
     "ShowCategoriesDialog", "AddMember", "Remove", "Add",  # Columns.Add is checked apart: it only shapes the table read
     "Respond", "Accept", "Decline", "ClearConversationIndex", "Undelete", "Empty",
+    "GetAssociatedAppointment",  # with True, it adds the meeting to the calendar
 }
 
 
@@ -42,7 +43,18 @@ def test_the_reader_sets_no_property_on_an_outlook_object():
         targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign)) else []
         for target in targets:
             if isinstance(target, ast.Attribute):
+                # The one exception: the calendar's list of items is told to list each occurrence of a repeating
+                # meeting. It is a setting of the list CloseDesk asked for, not of anything kept in Outlook.
+                if ast.unparse(target) == "items.IncludeRecurrences":
+                    continue
                 assert ast.unparse(target.value) == "self", f"sets {ast.unparse(target)} (line {node.lineno})"
+
+
+def test_only_the_reader_talks_to_outlook():
+    # The read-only checks above read outlook_desktop.py: any other file reaching Outlook would escape them.
+    package = SOURCE.parent
+    users = sorted(path.name for path in package.rglob("*.py") if re.search(r"\bwin32com\b", path.read_text(encoding="utf-8")))
+    assert users == ["outlook_desktop.py"], users
 
 
 # Fake Outlook objects: reading works, any write raises -------------------------------------------------
@@ -303,3 +315,88 @@ def test_the_automatic_sync_never_starts_outlook(monkeypatch):
         with outlook_desktop.connect(start=False):
             pass
     assert calls == [], "Outlook wasn't started in the background"
+
+
+# The calendar ---------------------------------------------------------------------------------------------------
+
+
+class Appointment(ReadOnly):
+    def __init__(self, subject, start, end, *, all_day=False, recurring=False, status=1, gid="G1", busy=2):
+        self.Subject, self.Start, self.End, self.AllDayEvent = subject, start, end, all_day
+        self.Location, self.Organizer = "Board room", "Maya Chen"
+        self.RequiredAttendees, self.OptionalAttendees = "Maya Chen; Priya Raman", ""
+        self.BusyStatus, self.MeetingStatus, self.IsRecurring, self.GlobalAppointmentID = busy, status, recurring, gid
+        self.freeze()
+
+    @property
+    def Body(self):
+        raise AssertionError("the meeting's text is not read")
+
+
+class CalendarItems:
+    """Outlook's Items of a calendar: Sort, then IncludeRecurrences, then Restrict, in that order."""
+
+    def __init__(self, appointments):
+        self._all = appointments
+        self.IncludeRecurrences = False
+        self.sorted = False
+
+    def Sort(self, column):
+        assert column == "[Start]" and not self.IncludeRecurrences, "sorted before IncludeRecurrences is set"
+        self.sorted = True
+
+    def Restrict(self, where):
+        assert self.sorted and self.IncludeRecurrences, "IncludeRecurrences set before Restrict"
+        self.where = where
+        return Listed(sorted(self._all, key=lambda a: a.Start))
+
+
+class Listed:
+    def __init__(self, items):
+        self._items, self._at = items, 0
+
+    def GetFirst(self):
+        self._at = 0
+        return self.GetNext()
+
+    def GetNext(self):
+        if self._at >= len(self._items):
+            return None
+        self._at += 1
+        return self._items[self._at - 1]
+
+
+class CalendarFolder(ReadOnly):
+    def __init__(self, items):
+        self.Items = items
+        self.freeze()
+
+
+def test_the_calendar_lists_each_meeting_in_the_window_without_its_text(outlook):
+    session, _items = outlook
+    day = datetime(2026, 10, 5)
+    appointments = [
+        Appointment("Long ago", local(2026, 1, 5, 9), local(2026, 1, 5, 10)),
+        Appointment("AP standup", local(2026, 10, 6, 9), local(2026, 10, 6, 9, 15), recurring=True, gid="G-standup"),
+        Appointment("AP standup", local(2026, 10, 13, 9), local(2026, 10, 13, 9, 15), recurring=True, gid="G-standup"),
+        Appointment("Close day", local(2026, 10, 30, 0), local(2026, 10, 31, 0), all_day=True, gid="G-close", busy=3),
+        Appointment("Cancelled review", local(2026, 10, 8, 14), local(2026, 10, 8, 15), status=5, gid="G-x"),
+        Appointment("Next year", local(2027, 6, 1, 9), local(2027, 6, 1, 10)),
+    ]
+    items = CalendarItems(appointments)
+    object.__setattr__(session.ns, "_defaults", {**session.ns._defaults, 9: CalendarFolder(items)})
+    found = session.calendar(day.replace(tzinfo=timezone.utc), datetime(2026, 11, 30, tzinfo=timezone.utc))
+    assert [(m["subject"], m["uid"]) for m in found] == [
+        ("AP standup", "G-standup"), ("Cancelled review", "G-x"), ("AP standup", "G-standup"), ("Close day", "G-close")
+    ]
+    close = found[-1]
+    assert (close["start"], close["end"], close["all_day"], close["busy"]) == ("2026-10-30", "2026-10-31", True, "away")
+    assert found[1]["cancelled"] and found[0]["recurring"] and found[0]["attendees"] == ["Maya Chen", "Priya Raman"]
+    assert re.search(r"\[End\] >= '\d\d/\d\d/\d{4}' AND \[Start\] <= '\d\d/\d\d/\d{4}'", items.where)
+
+
+def test_windows_short_date_patterns_become_outlooks_filter_dates():
+    assert outlook_desktop._strftime_pattern("dd/MM/yyyy") == "%d/%m/%Y"
+    assert outlook_desktop._strftime_pattern("M/d/yyyy") == "%m/%d/%Y"
+    assert outlook_desktop._strftime_pattern("yyyy-MM-dd") == "%Y-%m-%d"
+    assert outlook_desktop._strftime_pattern("") == ""

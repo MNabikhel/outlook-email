@@ -289,6 +289,27 @@ CREATE TABLE IF NOT EXISTS ai_link_checks (
     version TEXT NOT NULL
 );
 
+-- Meetings (calendar_events.py): one row per occurrence, from classic Outlook's calendar, from invitations that
+-- came by mail (email_id), or the sample's. Times in UTC; an all-day meeting's start and end are dates.
+CREATE TABLE IF NOT EXISTS meetings (
+    id TEXT PRIMARY KEY,
+    uid TEXT NOT NULL,
+    source TEXT NOT NULL,
+    start TEXT NOT NULL,
+    "end" TEXT NOT NULL,
+    all_day INTEGER DEFAULT 0,
+    subject TEXT DEFAULT '',
+    location TEXT DEFAULT '',
+    organizer TEXT DEFAULT '',
+    attendees TEXT DEFAULT '[]',
+    cancelled INTEGER DEFAULT 0,
+    recurring INTEGER DEFAULT 0,
+    busy TEXT DEFAULT '',
+    email_id TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_meetings_start ON meetings(start);
+CREATE INDEX IF NOT EXISTS idx_meetings_email ON meetings(email_id);
+
 CREATE TABLE IF NOT EXISTS outlook_items (
     entry_id TEXT PRIMARY KEY,
     store_id TEXT NOT NULL DEFAULT '',
@@ -314,9 +335,11 @@ CREATE INDEX IF NOT EXISTS idx_att_hash ON attachments(sha256);
 SETTING_KEYS = frozenset(
     {
         "timezone", "profile", "min_context_tokens", "vision_mode", "vision_model",
-        # Settings → Outlook (outlook_sync.py)
+        # Settings → Sync inbox (outlook_sync.py)
         "outlook_auto", "outlook_interval", "outlook_days", "outlook_folders", "outlook_subfolders",
         "outlook_folder_list", "outlook_account",
+        # Settings → Sync inbox: what the user agreed to
+        "outlook_consent", "outlook_calendar",
     }
 )
 
@@ -335,6 +358,7 @@ EMAIL_ROWS = (
     ("ai_links", "a"),
     ("ai_links", "b"),
     ("ai_link_checks", "email_id"),
+    ("meetings", "email_id"),
     ("findings", "email_id"),
     ("action_items", "email_id"),
     ("fraud_checks", "email_id"),
@@ -434,6 +458,7 @@ class Store:
             conn.execute("DELETE FROM emails")
             conn.execute("DELETE FROM digests")
             conn.execute("DELETE FROM outlook_items")
+            conn.execute("DELETE FROM meetings")  # Outlook's calendar comes back on its next sync
             keep = ", ".join("?" for _ in SETTING_KEYS)
             conn.execute(f"DELETE FROM sync_state WHERE key NOT IN ({keep})", sorted(SETTING_KEYS))
         return removed
@@ -622,6 +647,60 @@ class Store:
             ids = [row[0] for row in conn.execute("SELECT id FROM emails WHERE received_at >= ? ORDER BY received_at DESC LIMIT ?", (since, limit))]
         found = self.get_emails(ids)
         return [found[i] for i in ids if i in found]
+
+    def save_invites(self, email_id: str, meetings: list, *, conn: sqlite3.Connection | None = None) -> None:
+        """The meetings an email's invitations name (calendar_events), replacing what it named before. A
+        cancellation that comes by mail also cancels the meeting where it was kept from an earlier invitation."""
+        with self._use(conn) as conn:
+            conn.execute("DELETE FROM meetings WHERE email_id = ? AND source = 'invite'", (email_id,))
+            for meeting in meetings:
+                if meeting.cancelled:
+                    conn.execute("UPDATE meetings SET cancelled = 1 WHERE uid = ? AND start = ? AND source = 'invite'", (meeting.uid, meeting.start))
+                self._put_meeting(conn, meeting)
+
+    def replace_meetings(self, source: str, meetings: list, *, start: str, end: str) -> int:
+        """Keep ``meetings`` as ``source``'s between ``start`` and ``end`` (ISO, UTC), dropping that source's others in
+        the window: a meeting deleted in Outlook goes. Returns how many are kept."""
+        with self.transaction() as conn:
+            conn.execute('DELETE FROM meetings WHERE source = ? AND start >= ? AND start <= ?', (source, start, end))
+            for meeting in meetings:
+                self._put_meeting(conn, meeting)
+        return len(meetings)
+
+    def _put_meeting(self, conn: sqlite3.Connection, meeting) -> None:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO meetings (id, uid, source, start, "end", all_day, subject, location, organizer,
+                attendees, cancelled, recurring, busy, email_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (meeting.id, meeting.uid, meeting.source, meeting.start, meeting.end, int(meeting.all_day), meeting.subject,
+             meeting.location, meeting.organizer, _dumps(meeting.attendees), int(meeting.cancelled), int(meeting.recurring),
+             meeting.busy, meeting.email_id),
+        )
+
+    def meetings_between(self, start: str, end: str, *, limit: int = 2000) -> list[dict]:
+        """The meetings that overlap ``start``..``end`` (ISO, UTC; dates for all-day ones compare by their text),
+        earliest first. One meeting known from Outlook and from its invitation is listed once, as Outlook's."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                'SELECT * FROM meetings WHERE start < ? AND "end" > ? OR (start >= ? AND start < ?) ORDER BY start, source = \'outlook\' DESC LIMIT ?',
+                (end, start, start, end, limit),
+            ).fetchall()
+        seen: set[tuple[str, str]] = set()
+        out = []
+        for row in rows:
+            key = (row["uid"], row["start"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({**dict(row), "attendees": _loads(row["attendees"], []), "all_day": bool(row["all_day"]), "cancelled": bool(row["cancelled"]), "recurring": bool(row["recurring"])})
+        return out
+
+    def meeting(self, meeting_id: str) -> dict | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+        return {**dict(row), "attendees": _loads(row["attendees"], []), "all_day": bool(row["all_day"]), "cancelled": bool(row["cancelled"]), "recurring": bool(row["recurring"])} if row else None
 
     def link_keys(self, email_id: str) -> list[tuple[str, str]]:
         with self.connect() as conn:
@@ -1197,6 +1276,7 @@ class Store:
                 return 0
             _delete_email_rows(conn, sample)
             conn.execute("DELETE FROM emails WHERE source = 'demo'")
+            conn.execute("DELETE FROM meetings WHERE source = 'demo'")
             if not conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]:
                 conn.execute("DELETE FROM digests")
         return removed
