@@ -89,6 +89,7 @@ def process_message(
 
         files = unique_attachments(files)
         write_extracted(settings, replace(raw, attachments=files))
+    came_with = files  # its files, with those a mailbox (Microsoft 365) gave: an invitation among them is read
     attachments_raw = explode_archives(files)
     # Another copy of a stored message: the files stored from earlier copies are kept, and this copy adds
     # only files they don't hold. A re-saved .eml often comes without the files dropped beside the first.
@@ -244,7 +245,7 @@ def process_message(
     # An invitation on mail held as possible payment fraud is no meeting: its text never reaches the calendar, only
     # which meeting it named, so Outlook's own copy of that meeting isn't shown either. Read before the write lock is
     # taken, so a long one keeps nobody waiting.
-    found = invites(raw, record.id, now)
+    found = invites(replace(raw, attachments=came_with), record.id, now)
     with store.transaction() as conn:
         latest = store.get_email(raw.id, conn=conn)
         verdict_changed = latest is not None and _keep_user_state(record, latest)

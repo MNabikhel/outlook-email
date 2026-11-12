@@ -247,3 +247,50 @@ def test_a_whole_series_cancelled_after_one_week_moved_cancels_that_week_too(sto
     _save(store, "cancel", _weekly(1, method="CANCEL"), "maya@taz.com", received="2026-10-03T09:00:00+00:00")
     shown = store.meetings_between("2026-10-01", "2026-11-30")
     assert len(shown) == 6 and all(m["cancelled"] for m in shown)
+
+
+class _EventClient:
+    """Microsoft 365 as it gives a meeting request: an eventMessage with no file attached, its calendar only in its
+    MIME (``$value``)."""
+
+    def __init__(self, mime: bytes):
+        self.mime, self.asked = mime, []
+
+    def _user_root(self) -> str:
+        return "/me"
+
+    def get_json(self, path, params=None):
+        self.asked.append(path)
+        if path.endswith("/attachments"):
+            return {"value": []}
+        return {"value": [{
+            "@odata.type": "#microsoft.graph.eventMessageRequest", "id": "EV1", "subject": "Q3 close review",
+            "receivedDateTime": "2026-10-05T14:00:00Z", "from": {"emailAddress": {"name": "Maya Chen", "address": "maya@taz.com"}},
+            "body": {"contentType": "text", "content": "Let's review the close."}, "hasAttachments": False,
+            "importance": "normal", "isRead": False,
+        }]}
+
+    def get_bytes(self, path):
+        self.asked.append(path)
+        assert path == "/me/messages/EV1/$value"
+        return self.mime
+
+
+def test_a_meeting_request_read_from_microsoft_365_reaches_the_calendar_and_asks_for_an_answer(store, settings):
+    from email.message import EmailMessage
+
+    from controller_inbox.graph import GraphMailbox
+    from controller_inbox.models import DocumentType
+    from controller_inbox.pipeline import ingest_mailbox
+
+    message = EmailMessage()
+    message["From"], message["Subject"] = "Maya Chen <maya@taz.com>", "Q3 close review"
+    message.set_content("Let's review the close.")
+    message.add_alternative(_invite("Q3", "20261008T150000Z", subject="Q3 close review", end="20261008T160000Z"),
+                            subtype="calendar", params={"method": "REQUEST"})
+    settings.ensure_data_dir()
+    [record] = ingest_mailbox(GraphMailbox(_EventClient(bytes(message))), store, settings, now=NOW)
+    assert [m["subject"] for m in store.meetings_between("2026-10-08", "2026-10-09")] == ["Q3 close review"]
+    email = store.get_email(record.id)
+    assert email.category == DocumentType.MEETING
+    assert any(action.source == "meeting" for action in email.actions)
