@@ -48,6 +48,15 @@ LOCKED = (
 )
 
 SUMMARY_RE = re.compile(r"\b(summar\w*|overview|gist|tl;?dr|walk me through|what(?:'s| is| does) (?:it|this|the \w+) (?:say|about|cover))\b", re.I)
+# "Summary" naming a place in the file ("on the summary", "the summary tab"), not asking for one.
+_SUMMARY_PLACE = re.compile(
+    r"\b(?:on|in|from|of|per|under)\s+the\s+summar(?:y|ies)\b|\bsummar(?:y|ies)\s+(?:sheet|tab|page|row|line|column|table|section|schedule)s?\b", re.I
+)
+
+
+def asks_summary(question: str) -> bool:
+    """Whether the question asks for a file to be summarized, not about a figure on its summary sheet."""
+    return bool(SUMMARY_RE.search(_SUMMARY_PLACE.sub(" ", question or "")))
 
 # A question's filler, past what every question has (``documents.STOP_WORDS``), and the words for a file itself.
 _STOP = documents.STOP_WORDS | set(
@@ -529,7 +538,7 @@ def query_tables(ws: Workspace, question: str, complete) -> Iterator[dict]:
     email = ws.primary()
     if not ws.settings.table_queries or email is None or email.id in ws.worked or not email.attachments:
         return
-    if attachments_locked(email) or SUMMARY_RE.search(question):
+    if attachments_locked(email) or asks_summary(question):
         return
     ws.worked[email.id] = ""
     readable = [att for att in email.attachments if (att.extracted_text or "").strip()]
@@ -560,7 +569,7 @@ def file_context(ws: Workspace, question: str, room: int) -> dict[str, str]:
     primary = ws.primary()
     if primary is not None and primary.attachments:
         targets = [primary] + [email for email in targets if email.id != primary.id][:1]
-    whole = bool(SUMMARY_RE.search(question))
+    whole = bool(asks_summary(question))
     for position, email in enumerate(targets):
         share = room if len(targets) == 1 else (room * 2 // 3 if position == 0 else room // 3)
         if attachments_locked(email):
@@ -678,7 +687,7 @@ def question_points(ws: Workspace, question: str) -> list[tuple[str, str]]:
     """What the question asks of the open email's file tables (``Workspace.points``), worked out before the prompt
     is built so the reply can be given room for every point."""
     primary = ws.primary()
-    if primary is None or attachments_locked(primary) or SUMMARY_RE.search(question):
+    if primary is None or attachments_locked(primary) or asks_summary(question):
         return []
     readable = [att for att in primary.attachments if (att.extracted_text or "").strip()]
     for att in named_files(readable, question) or readable:
@@ -899,7 +908,7 @@ def overnight_summary(store: Store, att: AttachmentRecord) -> str:
 def summary_request(ws: Workspace, question: str) -> tuple[AttachmentRecord, str] | None:
     """The one file a "summarize the file" question is about and its overnight summary, when there is one."""
     email = ws.primary()
-    if email is None or not SUMMARY_RE.search(question) or attachments_locked(email):
+    if email is None or not asks_summary(question) or attachments_locked(email):
         return None
     readable = [att for att in email.attachments if (att.extracted_text or "").strip()]
     named = named_files(readable, question)

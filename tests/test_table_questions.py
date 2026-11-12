@@ -211,3 +211,44 @@ def test_compare_columns_prefers_a_header_over_column_letters():
     out = documents.compare_columns(buffer.getvalue(), "P", "Jan", "Feb")
     assert "Rent (row 2): 100 → 120" in out
     assert "Rent (row 2): 100 → 120" in documents.compare_columns(buffer.getvalue(), "P", "B", "C")
+
+
+OPEX = """[sheet "Summary" A1:F8]
+A3: Department | B3: Actual Jul | C3: Actual Aug | D3: Q3 | E3: Budget
+A4 (Department): Marketing | B4 (Actual Jul): 100 | C4 (Actual Aug): 200 | D4 (Q3): 300 | E4 (Budget): 320
+A5 (Department): IT | B5 (Actual Jul): 10 | C5 (Actual Aug): 20 | D5 (Q3): 30 | E5 (Budget): 40
+A6 (Department): Sales | B6 (Actual Jul): 50 | C6 (Actual Aug): 60 | D6 (Q3): 110 | E6 (Budget): 100
+A7 (Department): Total | B7 (Actual Jul): 160 | C7 (Actual Aug): 280 | D7 (Q3): 440 | E7 (Budget): 460
+[sheet "Detail" A1:D7]
+A1: Dept | B1: Account name | C1: Month | D1: Amount
+A2 (Dept): Sales | B2 (Account name): Travel | C2 (Month): Jul | D2 (Amount): 7
+A3 (Dept): Sales | B3 (Account name): Travel | C3 (Month): Aug | D3 (Amount): 8
+A4 (Dept): Sales | B4 (Account name): Rent | C4 (Month): Jul | D4 (Amount): 43
+A5 (Dept): IT | B5 (Account name): Travel | C5 (Month): Jul | D5 (Amount): 9
+A6 (Dept): Marketing | B6 (Account name): Rent | C6 (Month): Aug | D6 (Amount): 99
+"""
+
+
+def test_a_department_named_by_its_capitals_is_a_word_of_the_question():
+    found = table_lookup.answer(OPEX, "How much did IT spend in Aug on the summary?")
+    assert found is not None and found.points[0][1].startswith("20")
+
+
+def test_the_table_naming_more_of_the_questions_rows_answers():
+    # "Sales" and "travel" are both rows' names on the detail tab; only "Sales" is on the summary.
+    found = table_lookup.answer(OPEX, "How much did Sales spend on travel?")
+    assert found is not None and all("Travel" in name for name, _value in found.points)
+
+
+def test_all_departments_names_the_rows_not_every_column():
+    found = table_lookup.answer(OPEX, "What is the total Q3 actual across all departments?")
+    assert found is not None and found.points == [("Total of Q3", "440")]
+
+
+def test_the_summary_sheet_is_no_request_for_a_summary():
+    from controller_inbox import agent
+
+    for question in ("What is Marketing's Q3 on the summary?", "Which line of the summary tab is over budget?", "Per the summary, what's IT?"):
+        assert not agent.asks_summary(question), question
+    for question in ("Summarize this workbook", "Give me a summary of the attachment", "What's the gist?"):
+        assert agent.asks_summary(question), question

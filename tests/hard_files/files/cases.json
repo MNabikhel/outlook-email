@@ -39,6 +39,28 @@
    "61,532.87"
   ],
   "where": "Detail",
+  "held_out": false,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Q3 Opex Pack.xlsx",
+  "question": "What did Finance spend in September?",
+  "answers": [
+   "127,189.74"
+  ],
+  "where": "Summary!D8",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Q3 Opex Pack.xlsx",
+  "question": "What is HR's Q3 budget?",
+  "answers": [
+   "539,900.00"
+  ],
+  "where": "Summary!F10",
   "held_out": true,
   "sql": "",
   "needs": ""
@@ -70,6 +92,17 @@
   "question": "Which vendor has the largest over-90 balance in the UK entity?",
   "answers": [
    "Granite Movers"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "AP Aging by entity 10-31-26.xlsx",
+  "question": "What is the UK entity's total current balance?",
+  "answers": [
+   "18,706.37"
   ],
   "where": "",
   "held_out": true,
@@ -241,6 +274,17 @@
   "question": "What is total gross pay for department 520?",
   "answers": [
    "403,516.47"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Payroll journal 10-15-26.xlsx",
+  "question": "How many employees are in department 320?",
+  "answers": [
+   "74"
   ],
   "where": "",
   "held_out": true,

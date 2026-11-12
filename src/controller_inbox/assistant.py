@@ -351,7 +351,7 @@ def _distinctive(term: str, question: str) -> bool:
 def on_screen_question(question: str) -> bool:
     """"Summarize this draft", "what does the attachment say": about the open email, not the inbox."""
     text = re.sub(r"\b(?:this|that)\s+(?:week|morning|afternoon|month|quarter|year)\b", " ", question, flags=re.I)
-    summary_only = bool(agent.SUMMARY_RE.search(text)) and not keywords(agent.SUMMARY_RE.sub(" ", text))
+    summary_only = agent.asks_summary(text) and not keywords(agent.SUMMARY_RE.sub(" ", text))
     pointed = bool(_ON_SCREEN.search(text)) or summary_only
     if _ELSEWHERE.search(text) or (_TODAY.search(text) and not pointed):
         return False

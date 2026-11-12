@@ -136,7 +136,10 @@ def opex_pack() -> None:
     case("Q3 Opex Pack.xlsx", "How much did IT spend in August?", [money(it_aug)], where="Summary!C7",
          sql="SELECT actual_aug FROM {Summary} WHERE department = 'IT'")
     case("Q3 Opex Pack.xlsx", "What is the total Q3 actual across all departments?", [money(grand)], where="Summary!E11")
-    case("Q3 Opex Pack.xlsx", "How much did Sales spend on travel in Q3?", [money(sales_travel)], where="Detail", held_out=True)
+    # Looked at while fixing the stacked-table and summary-sheet readings, so no longer held out.
+    case("Q3 Opex Pack.xlsx", "How much did Sales spend on travel in Q3?", [money(sales_travel)], where="Detail")
+    case("Q3 Opex Pack.xlsx", "What did Finance spend in September?", [money(totals[("Finance", "Sep")])], where="Summary!D8", held_out=True)
+    case("Q3 Opex Pack.xlsx", "What is HR's Q3 budget?", [money(budgets["HR"])], where="Summary!F10", held_out=True)
     case(
         "Q3 Opex Pack.xlsx",
         "Which department is furthest over its Q3 budget, and by how much?",
@@ -193,6 +196,7 @@ def stacked_aging() -> None:
     uk = found["UK entity (GBP)"]
     worst = max(uk, key=lambda v: uk[v][4])
     case("AP Aging by entity 10-31-26.xlsx", "Which vendor has the largest over-90 balance in the UK entity?", [worst], held_out=True)
+    case("AP Aging by entity 10-31-26.xlsx", "What is the UK entity's total current balance?", [money(sum(v[0] for v in uk.values()))], held_out=True)
     us = found["US entity (USD)"]
     vendor = sorted(us)[0]
     case("AP Aging by entity 10-31-26.xlsx", f"What do we owe {vendor} in total in the US entity?", [money(sum(us[vendor]))],
@@ -444,6 +448,7 @@ def payroll_journal() -> None:
             "Dental", "Vision", "HSA", "Net pay"] + extra
     ws.append(head)
     match_410 = 0.0
+    count_320 = 0
     gross_by_dept: dict[str, float] = {}
     for i in range(300):
         dept = rng.choice(["210", "320", "410", "520"])
@@ -455,12 +460,14 @@ def payroll_journal() -> None:
         ws.append(values)
         if dept == "410":
             match_410 += er
+        count_320 += dept == "320"
         gross_by_dept[dept] = gross_by_dept.get(dept, 0) + gross
     path = OUT / "Payroll journal 10-15-26.xlsx"
     wb.save(path)
     case(path.name, "What is the total employer 401k match for department 410 in the payroll journal?", [money(match_410)],
          sql="SELECT SUM(c_401k_er) FROM {26} WHERE dept = 410")
     case(path.name, "What is total gross pay for department 520?", [money(gross_by_dept["520"])], held_out=True)
+    case(path.name, "How many employees are in department 320?", [str(count_320)], held_out=True)
 
 
 def main() -> None:
