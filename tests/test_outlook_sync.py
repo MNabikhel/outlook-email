@@ -846,3 +846,14 @@ def test_a_calendar_read_cut_short_by_outlooks_limit_keeps_the_meetings_past_it(
 
     outlook_sync.sync_calendar(store, CutShort(), now=now)
     assert [m["subject"] for m in store.meetings_between("2026-10-01", "2027-01-01")] == ["AP standup", "Later"]
+
+
+def test_the_self_check_says_when_outlook_was_synced_in_the_apps_time_zone(store, settings):
+    from controller_inbox import doctor
+
+    outlook_sync.connect(store, calendar=True, now=NOW)
+    store.set_state(outlook_sync.LAST_SYNC_KEY, "2026-10-20T15:00:00+00:00")
+    store.set_state(outlook_sync.CALENDAR_LAST_KEY, "2026-10-20T14:30:00+00:00")
+    store.set_state("timezone", "Europe/Berlin")  # chosen in Setup, over the settings file's New York
+    said = doctor._outlook_sync(settings).text
+    assert "17:00" in said and "16:30" in said and "UTC" not in said, said

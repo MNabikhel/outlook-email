@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -320,6 +320,7 @@ CREATE TABLE IF NOT EXISTS meetings (
 );
 CREATE INDEX IF NOT EXISTS idx_meetings_start ON meetings(start);
 CREATE INDEX IF NOT EXISTS idx_meetings_uid ON meetings(uid);
+CREATE INDEX IF NOT EXISTS idx_meetings_end ON meetings("end");
 CREATE INDEX IF NOT EXISTS idx_meetings_email ON meetings(email_id);
 
 CREATE TABLE IF NOT EXISTS outlook_items (
@@ -385,6 +386,19 @@ EMAIL_ROWS = (
 # Kept when an email is deleted in Outlook: what the user taught, the fraud log, and the meetings its invitation
 # named (Outlook deletes a meeting request once it is answered; the meeting is still on).
 HISTORY_TABLES = frozenset({"corrections", "fraud_log", "meetings"})
+# The calendar's meetings for a window (meetings_between): those starting from ``LONGEST_MEETING`` before it, read by
+# their start; and the few begun before that which end in the window, read by their end.
+LONGEST_MEETING = timedelta(days=31)
+MEETINGS_NEAR = """
+    SELECT m.*, e.flags AS email_flags, e.category AS email_category FROM meetings m
+    LEFT JOIN emails e ON e.id = m.email_id AND m.source = 'invite'
+    WHERE m.start >= ? AND ((m.start < ? AND m."end" > ?) OR (m.start >= ? AND m.start < ?)) AND m.source != 'held'
+"""
+MEETINGS_LONG = """
+    SELECT m.*, e.flags AS email_flags, e.category AS email_category FROM meetings m INDEXED BY idx_meetings_end
+    LEFT JOIN emails e ON e.id = m.email_id AND m.source = 'invite'
+    WHERE m."end" > ? AND m.start < ? AND m.source != 'held'
+"""
 MAX_INVITE_ROWS = 2000  # meetings kept from one email's invitations
 
 
@@ -790,16 +804,16 @@ class Store:
         says (``_invite_winners``). An invitation on mail held as possible payment fraud is no meeting (its email may
         be held after it was read), nor is Outlook's own copy of it. ``outlook`` False leaves Outlook's calendar out
         (not connected, or the calendar not turned on: rows a sync was still writing then aren't shown)."""
+        try:
+            low = (date.fromisoformat(start[:10]) - LONGEST_MEETING).isoformat()
+        except ValueError:
+            low = ""
         with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT m.*, e.flags AS email_flags, e.category AS email_category FROM meetings m
-                LEFT JOIN emails e ON e.id = m.email_id AND m.source = 'invite'
-                WHERE ((m.start < ? AND m."end" > ?) OR (m.start >= ? AND m.start < ?)) AND m.source != 'held'
-                ORDER BY m.start, m.source = 'outlook' DESC
-                """,
-                (end, start, start, end),
-            ).fetchall()
+            # Meetings are kept for good (an invitation's, a year of Outlook's): only those starting near the window
+            # are read, and those begun long before it that end in it, by when they end.
+            rows = conn.execute(MEETINGS_NEAR, (low, end, start, start, end)).fetchall()
+            rows += conn.execute(MEETINGS_LONG, (start, low)).fetchall()
+            rows.sort(key=lambda row: (row["start"], row["source"] != "outlook"))
             shown = _shown_meetings(conn, rows, outlook=outlook)
         seen: set[tuple[str, str, str]] = set()
         out = []
@@ -2661,6 +2675,19 @@ def _add_column(conn: sqlite3.Connection, sql: str) -> bool:
     return True
 
 
+def _schema_columns(table: str) -> list[tuple[str, str]]:
+    """The columns ``SCHEMA`` gives ``table`` that a column can be added as (each with a default): (name, its
+    definition)."""
+    block = re.search(rf"CREATE TABLE IF NOT EXISTS {table} \((.*?)\n\);", SCHEMA, re.S)
+    out = []
+    for line in (block.group(1) if block else "").splitlines():
+        definition = line.strip().rstrip(",")
+        if not definition or definition.startswith("--") or "PRIMARY KEY" in definition or ("NOT NULL" in definition and "DEFAULT" not in definition):
+            continue
+        out.append((definition.split()[0].strip('"'), definition))
+    return out
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(emails)")}
     if "folder" not in cols:
@@ -2680,13 +2707,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_column(conn, "ALTER TABLE emails ADD COLUMN reply_to TEXT DEFAULT ''")
     if "threading" not in cols:
         _add_column(conn, "ALTER TABLE emails ADD COLUMN threading TEXT DEFAULT ''")
+    # Every column of the meetings table the schema has and an older database doesn't (a calendar build kept fewer).
     meeting_cols = {row[1] for row in conn.execute("PRAGMA table_info(meetings)")}
-    if "first_seen" not in meeting_cols:
-        _add_column(conn, "ALTER TABLE meetings ADD COLUMN first_seen TEXT DEFAULT ''")
-    if "occurrence" not in meeting_cols:
-        _add_column(conn, "ALTER TABLE meetings ADD COLUMN occurrence TEXT DEFAULT ''")
-    if "expanded" not in meeting_cols:
-        _add_column(conn, "ALTER TABLE meetings ADD COLUMN expanded TEXT DEFAULT ''")
+    for name, definition in _schema_columns("meetings"):
+        if name not in meeting_cols:
+            _add_column(conn, f"ALTER TABLE meetings ADD COLUMN {definition}")
     if "model" not in {row[1] for row in conn.execute("PRAGMA table_info(page_failures)")}:
         _add_column(conn, "ALTER TABLE page_failures ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if not conn.execute("SELECT 1 FROM sync_state WHERE key = 'attachment_text_without_nul'").fetchone():

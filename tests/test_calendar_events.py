@@ -706,3 +706,45 @@ def test_a_cancelled_meeting_shows_its_title_without_canceled_and_a_moved_week_s
     assert moved.recurring and cal.shown(moved.to_row(), ZoneInfo("UTC"))["recurring"], "one week of a repeating meeting"
     kept = cal.shown({**moved.to_row(), "subject": "Canceled: plans", "cancelled": False}, ZoneInfo("UTC"))
     assert kept["subject"] == "Canceled: plans", "a meeting that isn't cancelled keeps its title as it is"
+
+
+def test_a_database_from_the_first_calendar_build_gets_every_meeting_column(tmp_path):
+    import sqlite3
+
+    from controller_inbox.store import Store
+
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """CREATE TABLE meetings (id TEXT PRIMARY KEY, uid TEXT NOT NULL, source TEXT NOT NULL, start TEXT NOT NULL, "end" TEXT NOT NULL,
+               all_day INTEGER DEFAULT 0, subject TEXT DEFAULT '', location TEXT DEFAULT '', organizer TEXT DEFAULT '', attendees TEXT DEFAULT '[]',
+               cancelled INTEGER DEFAULT 0, recurring INTEGER DEFAULT 0, busy TEXT DEFAULT '', email_id TEXT DEFAULT '')"""
+        )
+        conn.execute("""INSERT INTO meetings (id, uid, source, start, "end", subject, email_id) VALUES
+                        ('m1', 'U1', 'invite', '2026-10-09T14:00:00+00:00', '2026-10-09T15:00:00+00:00', 'Budget review', 'e1')""")
+    conn.close()
+    store = Store(path)
+    with store.connect() as conn:
+        have = {row[1] for row in conn.execute("PRAGMA table_info(meetings)")}
+    assert {"sequence", "sender", "received", "first_seen", "occurrence", "expanded"} <= have
+    assert [m["subject"] for m in store.meetings_between("2026-10-09", "2026-10-10")] == ["Budget review"]
+
+
+def test_the_calendar_reads_only_the_meetings_near_its_window_and_still_shows_a_long_one_begun_before(store):
+    from controller_inbox.calendar_events import Meeting
+    from controller_inbox.store import LONGEST_MEETING
+
+    window = ("2026-10-12T00:00:00+00:00", "2026-10-19T00:00:00+00:00")
+    long_one = Meeting(uid="L", start="2026-09-20", end="2026-10-14", subject="Audit fieldwork", all_day=True, source="demo")
+    timed = Meeting(uid="T", start="2026-10-10T08:00:00+00:00", end="2026-10-13T17:00:00+00:00", subject="Offsite", source="demo")
+    old = [Meeting(uid=f"o{n}", start=f"2025-0{1 + n % 9}-0{1 + n % 9}T09:00:00+00:00", end=f"2025-0{1 + n % 9}-0{1 + n % 9}T10:00:00+00:00",
+                   subject="Old", source="demo") for n in range(50)]
+    store.replace_meetings("demo", [long_one, timed, *old], start="2025-01-01", end="2027-01-01")
+    assert sorted(m["subject"] for m in store.meetings_between(*window)) == ["Audit fieldwork", "Offsite"]
+    assert LONGEST_MEETING.days >= 31
+    from controller_inbox.store import MEETINGS_LONG, MEETINGS_NEAR
+
+    with store.connect() as conn:
+        near = " ".join(row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + MEETINGS_NEAR, ("2026-09-11", window[1], window[0], window[0], window[1])))
+        long = " ".join(row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + MEETINGS_LONG, (window[0], "2026-09-11")))
+    assert "SCAN m" not in near and "SCAN m" not in long, (near, long)
