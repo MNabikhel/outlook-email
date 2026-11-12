@@ -1150,15 +1150,23 @@ def related_lines(ws: Workspace, email: EmailRecord) -> str:
     mail sharing an invoice, a PO or a file with it, each with why."""
     from controller_inbox import links
 
+    from controller_inbox.assistant import is_fraud
+
     found = links.related(ws.store, email)
     rows: list[str] = []
+
+    def row(other: EmailRecord, why: str) -> str:
+        # Marked as anywhere else the model sees it: a held or cautioned email is never taken at its word.
+        warn = " — Warning: payment-detail change, verify by phone" if is_fraud(other) or "payment_caution" in other.flags else ""
+        return f"[{ws.number(other)}] {other.received_at[:10]} · {other.sender_name or other.sender_email} · “{other.subject}” ({why}){warn}"
+
     for other in found["thread"]:
         if other.id != email.id and len(rows) < MAX_RELATED:
-            rows.append(f"[{ws.number(other)}] {other.received_at[:10]} · {other.sender_name or other.sender_email} · “{other.subject}” (same conversation)")
+            rows.append(row(other, "same conversation"))
     for group in found["groups"]:
         for other in group["emails"]:
             if len(rows) < MAX_RELATED:
-                rows.append(f"[{ws.number(other)}] {other.received_at[:10]} · {other.sender_name or other.sender_email} · “{other.subject}” ({group['label'].lower()})")
+                rows.append(row(other, group["label"].lower()))
     return "Related emails (open one by its number):\n" + "\n".join(rows) if rows else ""
 
 

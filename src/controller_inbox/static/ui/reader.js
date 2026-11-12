@@ -372,7 +372,7 @@ function relatedRow(r) {
     h("span", { class: "rel-subject trunc" }, r.subject),
     r.first_line ? h("span", { class: "muted small rel-first" }, r.first_line) : null,
     r.file_names.length ? h("span", { class: "muted small rel-files" }, icon("clip", 12), h("span", null, r.file_names.join(", "))) : null,
-    r.why ? h("span", { class: "small rel-why" }, icon("chat", 12), h("span", null, r.why)) : null,
+    r.why ? h("span", { class: "small rel-why", title: "The local model's guess, from the two emails' text: check it" }, icon("chat", 12), h("span", null, `The model's guess: “${r.why}”`)) : null,
     mark
   );
   return h(
@@ -391,7 +391,8 @@ function lookButton(d, ctx) {
       const reply = await postJSON(`/api/mail/${enc(d.id)}/related/look`);
       d.related = reply.related;
       toast(reply.message, { tone: "ok" });
-      const old = document.getElementById("rd-related");
+      // The model can take a while: put its result in only if this email is still the one on screen.
+      const old = document.querySelector(`.rd[data-email="${CSS.escape(d.id)}"] #rd-related`);
       const fresh = related(d, ctx);
       if (old && fresh) old.replaceWith(fresh);
     } catch (error) {

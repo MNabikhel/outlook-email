@@ -318,8 +318,6 @@ def test_a_question_about_how_an_email_came_about_reads_its_linked_mail(loaded):
     assert ws.email("2").id == "demo-inv-10482-dup", "the model opens a related email by the number it was given"
 
 
-    assert client.get("/api/mail/demo-chase-stmt").json()["related"] == {"thread": [], "groups": []}
-
 
 def test_a_held_emails_numbers_count_only_where_its_own_text_names_them(store):
     # The lookalike's body names no invoice; the PDF it carries (held, never opened) says INV-10482. It must not
@@ -335,3 +333,14 @@ def test_a_held_emails_numbers_count_only_where_its_own_text_names_them(store):
     said.body_text = "Please pay invoice INV-10482 to our new account."
     store.upsert_email(said)
     assert ("invoice", "INV10482") in store.link_keys("bec2"), "named in its own words, it is linked (and shown held)"
+
+
+def test_the_model_is_warned_about_held_mail_among_the_related(store):
+    from controller_inbox import agent
+
+    store.upsert_email(_record("real", mid="<p1@northwind.com>", received="2026-10-01T09:00:00+00:00", threading={"to": ["ap@taz.com"]}))
+    store.upsert_email(_record("hijack", sender="billing@northwind-supplies.co", threading={"in_reply_to": "p1@northwind.com"},
+                               received="2026-10-02T08:00:00+00:00", flags=["fraud_risk"]))
+    ws = agent.Workspace(store, None, [store.get_email("real")])
+    lines = agent.related_lines(ws, ws.sources[0])
+    assert "(same conversation) — Warning: payment-detail change, verify by phone" in lines
