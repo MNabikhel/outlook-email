@@ -13,6 +13,12 @@ from test_outlook_desktop import Collection, ComError, Folder, Namespace, Store 
 from test_outlook_sync import STORE, FakeOutlook, emails, sync
 
 
+@pytest.fixture(autouse=True)
+def _agreed(store):
+    """These tests are about syncing itself: the user has agreed to it (Settings → Sync inbox, tested apart)."""
+    store.set_state(outlook_sync.CONSENT_KEY, "2026-09-01T00:00:00+00:00")
+
+
 @pytest.fixture
 def outlook():
     return FakeOutlook()

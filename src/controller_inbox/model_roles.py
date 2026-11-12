@@ -24,7 +24,7 @@ def _loaded(status: ModelStatus, model: str) -> bool:
 def chat_row(status: ModelStatus) -> dict:
     row = {"role": "Answers your questions", "model": "", "state": "off", "status": "", "note": ""}
     if status.mode == "off":
-        row["status"] = "Turned off (CONTROLLER_INBOX_LLM=false): answers come from looking things up."
+        row["status"] = "Turned off in CloseDesk's settings file (.env): answers come from looking things up."
     elif status.active:
         row["model"], row["state"] = status.model, "on"
         context = f" with a {status.context_length:,}-token context" if status.context_length else ""

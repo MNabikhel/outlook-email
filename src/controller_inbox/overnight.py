@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from controller_inbox import cost_codes
+from controller_inbox import calendar_events, cost_codes, link_judge, links
 from controller_inbox.actions import local_today
 from controller_inbox.clock import parse_stamp
 from controller_inbox.config import Settings
@@ -28,6 +28,7 @@ from controller_inbox.store import Store
 from controller_inbox.vision import Result, read_waiting
 
 log = logging.getLogger(__name__)
+CATCH_UP_SECONDS = 5.0  # of linking stored mail at the start of a run
 
 Progress = Callable[[str, int, int, str], None]
 
@@ -215,18 +216,26 @@ def _sync_outlook(
     ``note`` says why Outlook couldn't be read."""
     from controller_inbox import outlook_desktop, outlook_sync
 
+    cfg = outlook_sync.config(store)
     if wanted is None:
-        wanted = outlook_sync.config(store)["auto"] and not outlook_desktop.available()
+        wanted = cfg["auto"] and cfg["consent"] and not outlook_desktop.available()
     if not wanted:
         return {}
+    if not cfg["consent"]:  # not even attached to Outlook before the user agrees
+        return {"note": "Connect Outlook in Settings → Sync inbox first: CloseDesk reads Outlook only once you agree."}
     try:
         with outlook_desktop.connect(start=start) as session:
             return outlook_sync.sync(store, settings, session, now=now, on_progress=on_progress)
-    except outlook_desktop.OutlookUnavailable as exc:
+    except outlook_sync.NotConnected as exc:  # disconnected while it started: nothing to show on the card
         return {"note": str(exc)}
+    except (outlook_desktop.OutlookUnavailable, outlook_desktop.OutlookError) as exc:
+        note = str(exc)  # written to be read as it is
     except Exception as exc:  # the drop folder and the digest still happen
         log.warning("Syncing Outlook failed", exc_info=True)
-        return {"note": f"Outlook couldn't be read this time ({str(exc)[:200]})."}
+        note = f"Outlook couldn't be read this time ({str(exc)[:200]})."
+    # Settings → Sync inbox says so until a sync works again.
+    outlook_sync.note_failure(store, note, now)
+    return {"note": note}
 
 
 def _outlook_message(report: dict) -> str:
@@ -259,6 +268,16 @@ def _run_overnight(
     reread = reread_attachments(
         store, settings, on_progress=(lambda i, n, name: on_progress("rereading", i, n, name)) if on_progress else None
     )
+    # Mail stored before emails were linked is filed under its keys: a few seconds here, so the dashboard isn't kept
+    # waiting, and the rest in the background (cli._link_stored_mail) or the next run. A failure here stops nothing.
+    try:
+        links.catch_up(store, settings, seconds=CATCH_UP_SECONDS)
+    except Exception:
+        log.warning("Linking stored mail stopped; the next run carries on", exc_info=True)
+    try:
+        calendar_events.catch_up_invites(store, settings, now=now)  # once, after an update: stored invitations
+    except Exception:
+        log.warning("Couldn't read the stored invitations yet", exc_info=True)
     outlook = _sync_outlook(store, settings, sync_outlook, now, on_progress)
     folder_report: dict = {}
     ingested = ingest_folder(
@@ -272,6 +291,12 @@ def _run_overnight(
     graph_count = 0
     if sync_graph and settings.graph_configured:
         graph_count, graph_note = _sync_graph(store, settings, now)
+    # Repeating meetings from invitations read a month or more ago, worked out again for the months ahead.
+    meetings_refreshed = 0
+    try:
+        meetings_refreshed = calendar_events.refresh_invites(store, settings, now=now)
+    except Exception:  # the rest of the run still happens
+        log.warning("Reading invitations again failed", exc_info=True)
 
     reading = read_queue(store, settings, limit=limit, now=now, reader=reader, on_progress=on_progress)
     # After reading: the model may have filed more mail as AP invoices, and the workbook may have changed.
@@ -298,6 +323,11 @@ def _run_overnight(
         )
     # Runs whenever an embedding model answers, even with no chat model loaded.
     indexed = max(0, index_mail(store, settings, on_progress=(lambda i, n, _name: on_progress("indexing", i, n, "")) if on_progress else None))
+    ai_linked = 0
+    if reading["model"] and not (stats and stats.stopped_reason) and settings.overnight_ai_links:
+        if on_progress:
+            on_progress("linking", 1, 1, "Looking for related mail")
+        ai_linked = link_judge.judge_recent(store, settings, limit=settings.overnight_ai_links, now=now)
 
     if on_progress:
         on_progress("digest", 1, 1, "Writing the digest")
@@ -324,8 +354,10 @@ def _run_overnight(
         "outlook_message": _outlook_message(outlook),
         "read_by_bionic": len(reading["read_ids"]),
         "files_summarized": summarized,
+        "ai_linked": ai_linked,
         "pages_seen": looked.pages,
         "files_reread": reread,
+        "meetings_refreshed": meetings_refreshed,
         "invoices_coded": coded,
         "indexed_for_search": indexed,
         "waiting_on_bionic": counts["waiting_on_bionic"],

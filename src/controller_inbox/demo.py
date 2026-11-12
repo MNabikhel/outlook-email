@@ -154,6 +154,7 @@ def demo_messages(now: datetime | None = None) -> list[RawMessage]:
             has_attachments=True,
             outlook_importance="normal",
             source="demo",
+            internet_message_id="<inv-10482@northwindsupplies.com>",
             attachments=[_att("INV-10482.pdf", invoice_pdf, "application/pdf")],
         ),
         RawMessage(
@@ -169,6 +170,8 @@ def demo_messages(now: datetime | None = None) -> list[RawMessage]:
             body_preview="Resending invoice INV-10482...",
             has_attachments=True,
             source="demo",
+            # The resend forwards the first: one conversation.
+            threading={"in_reply_to": "inv-10482@northwindsupplies.com", "references": ["inv-10482@northwindsupplies.com"]},
             attachments=[_att("INV-10482.pdf", invoice_pdf, "application/pdf")],
         ),
         RawMessage(
@@ -460,3 +463,33 @@ class DemoMailbox:
         if message_id not in self._messages:
             return "missing"
         return "demo-not-written"
+
+
+def demo_meetings(now: datetime | None = None) -> list:
+    """The sample calendar, around ``now``: a daily standup, a review of the Northwind invoice in the sample mail,
+    the auditors' walkthrough of the PBC list, and month-end close as a day of its own."""
+    from controller_inbox.calendar_events import Meeting
+
+    now = now or datetime(2026, 9, 22, 8, 15, tzinfo=timezone.utc)
+    day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def at(days: int, hour: int, minute: int = 0) -> str:
+        return (day + timedelta(days=days, hours=hour, minutes=minute)).isoformat(timespec="seconds")
+
+    out = []
+    for offset in range(-7, 15):
+        weekday = (day + timedelta(days=offset)).weekday()
+        if weekday < 5:
+            out.append(Meeting(uid="demo-standup", start=at(offset, 13, 30), end=at(offset, 13, 45), subject="AP team standup",
+                               location="Teams", organizer="Maya Chen <maya@horizon-goods.com>", attendees=["AP Team <ap@horizon-goods.com>"],
+                               recurring=True, source="demo", busy="busy"))
+    out.append(Meeting(uid="demo-northwind", start=at(0, 18), end=at(0, 18, 30), subject="Northwind invoice INV-10482 review",
+                       location="Conference room B", organizer="Maya Chen <maya@horizon-goods.com>",
+                       attendees=["Northwind Billing <billing@northwindsupplies.com>", "AP Team <ap@horizon-goods.com>"], source="demo", busy="busy"))
+    out.append(Meeting(uid="demo-pbc", start=at(1, 15), end=at(1, 16), subject="PBC list walkthrough with the auditors",
+                       location="Teams", organizer="Priya Raman <priya@horizon-goods.com>", attendees=["Audit team <audit@kpmg-example.com>"],
+                       source="demo", busy="busy"))
+    month_end = (day.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+    out.append(Meeting(uid="demo-close", start=month_end.date().isoformat(), end=(month_end + timedelta(days=1)).date().isoformat(),
+                       subject="Month-end close", all_day=True, source="demo", busy="away"))
+    return out

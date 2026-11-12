@@ -130,6 +130,7 @@ class ModelStatus:
     # LM Studio answered its own model routes (it loads and unloads models when asked). Each loaded instance's
     # model key and the context it was loaded with.
     lm_studio: bool = False
+    server: str = ""  # "lm_studio", "ollama", "llama.cpp" or "" (another OpenAI-compatible server), for advice
     instances: dict[str, tuple[str, int]] = field(default_factory=dict)
     # LM Studio's downloaded models that can answer (not document readers) by key, with the longest context each
     # supports (0 when it doesn't say): the ones Setup offers to load.
@@ -145,7 +146,7 @@ class ModelStatus:
 
     def describe(self) -> str:
         if self.mode == "off":
-            return "Local model is turned off (CONTROLLER_INBOX_LLM=false)."
+            return "The local model is turned off in CloseDesk's settings file (.env)."
         if self.active:
             return f"Local model ready: {self.model} at {self.base_url}"
         if self.reachable:
@@ -195,6 +196,7 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         )
         status.loaded = loaded
         status.lm_studio = listing.route == "v1"
+        status.server = "lm_studio" if listing.route else ""
         # LM Studio (or a server that didn't say what it has loaded) lists every model it could load.
         knows_loaded = bool(listing.route) or listing.busy
         status.model = _pick_model(
@@ -235,6 +237,14 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
             # Older llama.cpp builds put only n_ctx_train on the model; /props has the context each request gets.
             if not status.context_length and isinstance(props.get("default_generation_settings"), dict):
                 status.context_length = _int(props["default_generation_settings"].get("n_ctx"))
+            if props:
+                status.server = "llama.cpp"
+        if not listing.route and status.model and not status.context_length:
+            # Ollama cuts a prompt longer than the context it loaded the model with, from the start and without a
+            # word: that length, not the one the model was trained with, is what a prompt has to fit.
+            status.context_length = _ollama_context(settings, base, timeout, status.model)
+            if status.context_length:
+                status.server = "ollama"
     except (httpx.HTTPError, ValueError, AttributeError, TypeError) as exc:
         if isinstance(exc, httpx.TimeoutException) and cached and cached[1].reachable and time.monotonic() - cached[0] < BUSY_GRACE_SECONDS:
             # It answered a moment ago: a model server loading a model or reading a long prompt can take longer than
@@ -334,6 +344,19 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
                     downloaded.append(str(item["id"]))
             return _Listing("v0", loaded, reasoning, contexts, reloadable, seeing, downloaded)
     return _Listing(busy=busy)
+
+
+def _ollama_context(settings: Settings, base: str, timeout: float, model: str) -> int:
+    """The context Ollama loaded ``model`` with (``/api/ps``), or 0 from other servers or when it isn't loaded."""
+    try:
+        response = http_method("get")(lm_studio_root(base) + "/api/ps", headers=auth_headers(settings), timeout=timeout)
+        data = response.json() if response.status_code == 200 else None
+    except (httpx.HTTPError, ValueError):
+        return 0
+    for item in (data or {}).get("models") or [] if isinstance(data, dict) else []:
+        if isinstance(item, dict) and model in {str(item.get("name")), str(item.get("model"))}:
+            return _int(item.get("context_length"))
+    return 0
 
 
 def _llama_cpp_props(settings: Settings, base: str, timeout: float) -> dict:

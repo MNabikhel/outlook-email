@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from controller_inbox import table_query
+from controller_inbox import table_lookup, table_query
 from controller_inbox.documents import extract_document
 from controller_inbox.table_query import Tables, _like, parse
 
@@ -583,3 +583,103 @@ def test_a_plan_that_works_out_a_missing_column_is_an_answer():
 
     found = table_query.ask(None, tables, "what is Q4 payroll", complete=reply)
     assert found is not None and found.rows == [("Payroll", 123000.0)]
+
+
+def test_a_sheets_heading_row_is_not_a_detail_beside_its_table():
+    # A workbook's cells are written "A1: Emp ID | B1: Name": the heading row of its table is no "Name: value"
+    # detail, while a label cell beside its value ("Pay date" | 10/15/2026) and a cell that reads as one are.
+    text = """[sheet "Journal" A1:C5]
+A1: Pay date | B1: 10/15/2026
+A2: Prepared by: L. Wei
+A3: Emp ID | B3: Dept | C3: Gross
+A4 (Emp ID): E1000 | B4 (Dept): 410 | C4 (Gross): 4,100.00
+A5 (Emp ID): E1001 | B5 (Dept): 210 | C5 (Gross): 3,250.00
+A6 (Emp ID): E1002 | B6 (Dept): 410 | C6 (Gross): 2,000.00
+"""
+    tables = Tables([("Journal.xlsx", text)])
+    assert [(name, value) for _file, name, value in tables.facts] == [("Pay date", "10/15/2026"), ("Prepared by", "L. Wei")]
+
+
+def test_a_column_of_codes_is_a_label_with_its_codes_listed():
+    # "Dept" holding 210, 320, 410 names the rows' department: the model is shown the codes and picks rows by them,
+    # as text, rather than seeing an amount it could add up.
+    rows = "\n".join(
+        f"A{n} (Emp ID): E{n} | B{n} (Dept): {dept} | C{n} (Gross): {gross:,.2f}"
+        for n, (dept, gross) in enumerate([(410, 4100), (210, 3250), (410, 2000), (320, 1500), (210, 900)], start=2)
+    )
+    tables = Tables([("Journal.xlsx", '[sheet "Journal" A1:C6]\nA1: Emp ID | B1: Dept | C1: Gross\n' + rows)])
+    schema = tables.schema()
+    assert 'dept TEXT COLLATE NOCASE,  -- "Dept": 410, 210, 320' in schema
+    assert tables.run("SELECT SUM(gross) FROM t1 WHERE dept = 410")[1] == [(6100.0,)]
+    assert tables.run("SELECT SUM(gross) FROM t1 WHERE dept LIKE '%410%'")[1] == [(6100.0,)]
+    # A count or a quantity is still a figure.
+    counted = Tables([("Stock.xlsx", '[sheet "Stock" A1:B4]\nA1: Item | B1: Qty\nA2 (Item): Bolts | B2 (Qty): 40\nA3 (Item): Nuts | B3 (Qty): 410\nA4 (Item): Pins | B4 (Qty): 40')])
+    assert "qty REAL" in counted.schema()
+
+
+def test_a_column_of_debits_and_credits_says_which_rows_are_below_zero():
+    # A bank export writes debits as negative amounts: "the total of debits" is the rows below zero.
+    rows = "\n".join(
+        f"A{n} (Date): 2026-10-0{n} | B{n} (Payee): {payee} | C{n} (Amount): {amount}"
+        for n, (payee, amount) in enumerate([("UPS", "-372,42"), ("WIRE IN", "8.057,29"), ("STAPLES", "-1.204,10")], start=2)
+    )
+    schema = Tables([("bank.csv", '[sheet "bank.csv" A1:C4]\nA1: Date | B1: Payee | C1: Amount\n' + rows)]).schema()
+    assert '"Amount" figure, below 0 on 2 of its 3 rows' in schema
+
+
+AGING = """[sheet "Aging" A1:C12]
+A1: Accounts payable aging
+[heading]
+A3: US entity (USD)
+
+A4: Vendor | B4: 61-90 | C4: Total
+A5 (Vendor): Harbor Steel | B5 (61-90): 500 | C5 (Total): 900
+A6 (Vendor): Apex Electric | B6 (61-90): 100 | C6 (Total): 300
+[heading]
+A8: Canada entity (CAD)
+
+A9: Vendor | B9: 61-90 | C9: Total
+A10 (Vendor): Harbor Steel | B10 (61-90): 70 | C10 (Total): 80
+A11 (Vendor): Delta Office | B11 (61-90): 30 | C11 (Total): 60
+[sheet "Old draft" A1:B3 hidden]
+A1: Vendor | B1: 61-90
+A2 (Vendor): Harbor Steel | B2 (61-90): 999
+A3 (Vendor): Delta Office | B3 (61-90): 888
+"""
+
+
+def test_a_table_the_question_names_by_its_title_is_the_one_asked_about():
+    # "the Canada entity" names one table by its title: the query is offered that one alone, and the lookup answers
+    # from it, not from the US table with the same columns.
+    tables = Tables([("Aging.xlsx", AGING)], "What is the Canada entity's total 61-90 balance?")
+    assert [sheet.title.rsplit(" / ", 1)[-1] for sheet in tables.sheets if not sheet.of] == ["A8: Canada entity (CAD)"]
+    found = table_lookup.answer(AGING, "What is the Canada entity's 61-90 balance for Harbor Steel?")
+    assert found is not None and "70" in "\n".join(found.lines) and "500" not in "\n".join(found.lines)
+
+
+def test_a_hidden_sheet_is_left_out_unless_the_question_names_it():
+    titles = lambda question: sorted(sheet.title for sheet in Tables([("Aging.xlsx", AGING)], question).sheets if not sheet.of)  # noqa: E731
+    assert not any("Old draft" in title for title in titles("What do we owe Harbor Steel over 60 days?"))
+    assert any("Old draft" in title for title in titles("What did the old draft say for Harbor Steel?"))
+
+
+def test_counts_and_balances_stay_figures_whatever_their_heading_names():
+    rows = "\n".join(
+        f"A{n} (Team): {team} | B{n} (Employee count): {count} | C{n} (Customer balance): {balance}"
+        for n, (team, count, balance) in enumerate([("AP", 8, 350), ("AR", 12, 1200), ("Tax", 8, 90)], start=2)
+    )
+    tables = Tables([("Teams.csv", '[sheet "Teams.csv" A1:C4]\nA1: Team | B1: Employee count | C1: Customer balance\n' + rows)])
+    schema = tables.schema()
+    assert "employee_count REAL" in schema and "customer_balance REAL" in schema
+    assert tables.run("SELECT MAX(employee_count) FROM t1")[1] == [(12.0,)]
+    assert tables.run("SELECT team FROM t1 WHERE customer_balance > 1000")[1] == [("AR",)]
+
+
+@pytest.mark.parametrize("heading", ["Cost Center", "Cost centre", "Budget code", "Sales region", "Business units", "Dept", "Account"])
+def test_a_heading_that_names_codes_keeps_them_codes(heading):
+    assert table_query._codes(heading, ["410", "520", "610", "410", "520"])
+
+
+@pytest.mark.parametrize("heading", ["Employee count", "Customer balance", "No. of invoices", "Vendor total"])
+def test_a_heading_that_names_a_quantity_keeps_it_a_figure(heading):
+    assert not table_query._codes(heading, ["8", "12", "8", "3", "12"])

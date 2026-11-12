@@ -17,7 +17,7 @@ from email.parser import BytesParser
 from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 
-from controller_inbox import tnef
+from controller_inbox import links, tnef
 from controller_inbox.config import Settings
 from controller_inbox.documents import decode_text
 from controller_inbox.extract import _rtf_text, explode_archives, html_to_text, sha256_bytes
@@ -293,7 +293,18 @@ def _parse_eml(path: Path) -> RawMessage:
     message_id = _header(parsed, "message-id").strip()
     raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
     raw.reply_to = _reply_address(_address_header(parsed, "reply-to"))
+    raw.threading = eml_threading(parsed)
     return raw
+
+
+def eml_threading(message) -> dict:
+    """What a MIME message's headers say about its conversation (``links.threading``)."""
+    return links.threading(
+        in_reply_to=_header(message, "in-reply-to"),
+        references=_header(message, "references"),
+        thread_index=_header(message, "thread-index"),
+        to=links.addresses(_address_header(message, "to"), _address_header(message, "cc")),
+    )
 
 
 def _address_header(message, name: str) -> str:
@@ -473,12 +484,58 @@ def parse_msg(path: Path) -> RawMessage:
         header = getattr(message, "header", None)
         reply_to = _reply_address(str(header.get("Reply-To") or "")) if header is not None else ""
         message_id = str(getattr(message, "messageId", None) or "").strip()
+        threading = msg_threading(message)
+        meeting = str(_msg_property(message, "classType") or "").lower().startswith("ipm.schedule.meeting")
     finally:
         message.close()
     data = path.read_bytes()
     raw = _raw_message(path, data, subject, sender_name, sender_email, received, body, attachments, message_id)
     raw.reply_to = reply_to
+    raw.threading = threading
+    if meeting:
+        from controller_inbox import calendar_events
+
+        raw.meetings = calendar_events.from_msg(path)
     return raw
+
+
+def msg_threading(message) -> dict:
+    """What a .msg says about its conversation (``links.threading``). Mail inside one Exchange organization often
+    has no internet headers, so the message's own properties are read when the headers don't say."""
+    header = getattr(message, "header", None)
+
+    def from_header(name: str) -> str:
+        try:
+            return str(header.get(name) or "") if header is not None else ""
+        except Exception:
+            return ""
+
+    def stream(name: str):
+        try:
+            return message.getStream(name)
+        except Exception:
+            return None
+
+    def text(name: str) -> str:
+        try:
+            return str(message.getStringStream(name) or "")
+        except Exception:
+            return ""
+
+    in_reply_to = from_header("In-Reply-To") or str(_msg_property(message, "inReplyTo") or "")
+    references = from_header("References") or text("__substg1.0_1039")  # PR_INTERNET_REFERENCES
+    index = from_header("Thread-Index") or stream("__substg1.0_00710102")  # PR_CONVERSATION_INDEX
+    to = links.addresses(from_header("To"), from_header("Cc"))
+    if not to:
+        for recipient in _msg_property(message, "recipients") or []:
+            try:
+                address = str(getattr(recipient, "email", "") or "")
+                kind = int(getattr(recipient, "type", 1) or 1)
+            except (TypeError, ValueError):
+                continue
+            if "@" in address and kind in (1, 2):  # To, Cc (not Bcc)
+                to.append(address.lower())
+    return links.threading(in_reply_to=in_reply_to, references=references, thread_index=index, to=to)
 
 
 MAX_NESTING = 3
@@ -687,9 +744,19 @@ def _standalone(path: Path) -> RawMessage:
     data = path.read_bytes()
     received = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     attachment = _file_attachment(path)
+    subject = path.stem
+    if path.suffix.lower() in (".ics", ".vcs"):
+        # An invitation dropped on its own is its meeting: titled by it ("AP standup"), not by the file's name.
+        from controller_inbox import calendar_events
+
+        try:
+            meetings = calendar_events.from_ics(data[:calendar_events.MAX_ICS_BYTES])
+        except Exception:
+            meetings = []
+        subject = next((meeting.subject for meeting in meetings if meeting.subject), subject)
     return RawMessage(
         id=file_id(data),
-        subject=path.stem,
+        subject=subject,
         sender_name="Dropped file",
         sender_email="",
         received_at=received,

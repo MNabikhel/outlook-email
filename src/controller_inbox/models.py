@@ -258,6 +258,9 @@ class EmailRecord:
     reply_to: str = ""
     attachments: list[AttachmentRecord] = field(default_factory=list)
     actions: list[ActionItem] = field(default_factory=list)
+    # How the message ties to others (links.py): "in_reply_to" and "references" (Message-IDs), "conversation"
+    # (Outlook's conversation, from its Thread-Index), "to" (the addresses it went to, To and Cc).
+    threading: dict = field(default_factory=dict)
 
 
 EVERYDAY_CATEGORIES = frozenset(
@@ -307,6 +310,8 @@ class RawMessage:
     source: str = "graph"
     reply_to: str = ""
     attachments: list[RawAttachment] = field(default_factory=list)
+    threading: dict = field(default_factory=dict)  # as EmailRecord.threading
+    meetings: list = field(default_factory=list)  # an Outlook meeting request's meeting (calendar_events.Meeting)
     # What a dropped .eml or .msg doesn't say itself and was taken from its file: "subject" (the file's name)
     # or "sent" (the file's date).
     from_file: tuple[str, ...] = ()

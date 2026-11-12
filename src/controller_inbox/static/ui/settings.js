@@ -23,13 +23,13 @@ const SHORTCUTS = [
 const SECTIONS = [
   ["Workspace", [["appearance", "Appearance"], ["profile", "Inbox profile"], ["timezone", "Time zone"]]],
   ["Local model", [["model", "Model and status"], ["context", "Context length"], ["vision", "Reading scans"], ["search", "Search by meaning"]]],
-  ["Mail", [["mail-in", "Getting mail in"], ["schedule", "Every morning"], ["cost-codes", "AP cost codes"], ["teaching", "Teaching it"], ["outlook", "Outlook connection"], ["sample", "Sample mailbox"]]],
+  ["Mail", [["mail-in", "Getting mail in"], ["schedule", "Every morning"], ["cost-codes", "AP cost codes"], ["teaching", "Teaching it"], ["outlook", "Sync inbox"], ["sample", "Sample mailbox"]]],
   ["Help", [["about", "This copy and its check"], ["keys", "Keyboard"], ["classic", "Classic view"]]],
 ];
 
 const STATE_LABELS = { on: "Ready", fallback: "Older method", off: "Off" };
 // The section a change's message shows in, when it isn't the change's own name.
-const SECTION_OF = { chat: "model" };
+const SECTION_OF = { chat: "model", "outlook-more": "outlook" };
 const b = (text) => h("b", null, text);
 const code = (text) => h("code", null, text);
 
@@ -56,6 +56,7 @@ export function createSettings(ctx) {
   let flash = null; // { id, tone, text }: the line under the last change
   let token = 0;
   let wasRunning = false;
+  let lastFinished = ""; // when the last run ended, as the page last saw it
   let observer = null;
   let root = null; // the page drawn now
   const dirty = new Set(); // sections changed here and not saved yet: drawing again leaves them as they are
@@ -83,6 +84,7 @@ export function createSettings(ctx) {
     dirty.clear();
     root = null;
     wasRunning = ctx.job().state === "running";
+    lastFinished = ctx.job().finished_at || "";
     if (data) draw({ keepScroll: false });
     else ctx.show(skeletonReader(), {});
     load({ keepScroll: Boolean(data) });
@@ -104,6 +106,10 @@ export function createSettings(ctx) {
     if (!root || !root.isConnected) {
       root = page();
       ctx.show(root, { keepScroll });
+      // Opened at a section (/app/settings#set-outlook, from a link elsewhere): shown there. The page is drawn after
+      // it loads, too late for the browser to go there by itself.
+      const target = !keepScroll && location.hash.startsWith("#set-") ? root.querySelector(location.hash) : null;
+      if (target) requestAnimationFrame(() => target.scrollIntoView({ block: "start" }));
     } else {
       for (const [id, build] of Object.entries(BUILDERS)) {
         const old = $(`#set-${id}`, root);
@@ -113,6 +119,11 @@ export function createSettings(ctx) {
         const kept = dirty.has(id) && id === "model" ? $("#set-chat-model", old) : null;
         if (dirty.has(id) && !kept) continue;
         const fresh = build();
+        // A part opened here (Advanced) stays open when the section is drawn again after a change.
+        for (const part of $$("details[id]", old)) {
+          const again = part.open ? $(`#${CSS.escape(part.id)}`, fresh) : null;
+          if (again) again.open = true;
+        }
         const slot = kept ? $("#set-chat-model", fresh) : null;
         if (slot) slot.replaceWith(kept);
         else if (kept) dirty.delete(id); // no choice to make any more
@@ -375,8 +386,7 @@ export function createSettings(ctx) {
           h("li", null, "A due date the model made up is dropped. A task due this week keeps the email in Important."),
           h("li", null, "If the server stops answering, the run stops asking and the mail stays filed from the draft.")
         ),
-        h("p", { class: "set-help" }, "Mode: ", b(m.mode), ` (${m.configured_url}). `, code("auto"), " uses a model whenever LM Studio's server is running. Set ", code("CONTROLLER_INBOX_LLM=false"), " to never use one."),
-        h("p", { class: "set-help" }, "Check speed from a terminal: ", code("python -m controller_inbox llm-check"))
+        h("p", { class: "set-help" }, "Mode: ", b(m.mode), ` (${m.configured_url}). `, m.mode === "auto" ? "A model is used whenever LM Studio's server is running; with it stopped, CloseDesk files the mail without one." : "")
       )
     );
   }
@@ -389,7 +399,7 @@ export function createSettings(ctx) {
         "div",
         { class: "set-block", id: "set-chat-model" },
         h("h3", { class: "set-sub" }, "Model that answers your questions"),
-        h("p", { class: "set-help" }, "The model that answers is set in ", code(".env"), " (", code(`CONTROLLER_INBOX_LLM_MODEL=${chat.env_model}`), "). Remove that line to choose it here.")
+        h("p", { class: "set-help" }, "The model that answers (", b(chat.env_model), ") is fixed in CloseDesk's settings file, ", code(".env"), " in its folder. Delete the line naming it there to choose it here.")
       );
     }
     const select = h(
@@ -609,7 +619,7 @@ export function createSettings(ctx) {
         h("li", null, "Then click ", b("Process new mail"), " here or at the top of the page, or double-click ", code("CloseDesk"), " in the project folder.")
       ),
       h("p", { class: "set-help" }, "A desktop shortcut to the drop folder makes this a ten-second job. Dropping the same email twice is fine — it is recognized and not filed twice."),
-      data.outlook.available ? h("p", { class: "set-help" }, "Using classic Outlook on this computer? ", h("a", { href: "#set-outlook" }, "Outlook (classic)"), " below copies your mail in by itself, read only.") : null,
+      data.outlook.available ? h("p", { class: "set-help" }, "Using classic Outlook on this computer? ", h("a", { href: "#set-outlook" }, "Sync inbox"), " below connects it once and copies your mail in by itself, read only.") : null,
       facts([
         pathRow("Drop folder", f.incoming),
         pathRow("Read files move to", f.processed),
@@ -630,7 +640,7 @@ export function createSettings(ctx) {
       "today",
       "",
       h("p", null, "Double-click ", code("CloseDesk.bat"), " (Windows) or ", code("CloseDesk.command"), " (Mac) in the project folder. It reads the drop folder, lets the model read, writes today's digest, and opens this dashboard."),
-      h("p", { class: "set-help" }, "Unattended: schedule ", code("python -m controller_inbox overnight"), " (see README), or leave ", code("python -m controller_inbox watch"), " running."),
+      h("p", { class: "set-help" }, "To have it done by itself before you start: see \u201cRun it before you wake up\u201d in the setup guide (", code("docs/SETUP.md"), " in the CloseDesk folder)."),
       facts([
         ["Last run", r.last_run || "never"],
         ["Drop folder last read", r.last_folder || "never"],
@@ -671,39 +681,64 @@ export function createSettings(ctx) {
       h("p", null, "When a category is wrong, open the message and use ", b("Wrong category?"), ". Write one sentence on why. The next email from that sender follows your correction, the model never overwrites the message you fixed, and the example is saved to ", code(data.corrections_file), "."),
       facts([["Corrections saved", String(data.corrections)]]),
       h("p", { class: "set-help" }, "A saved correction cannot clear a payment-instruction warning on a new message."),
-      h("p", null, "For fraud flags, use the ", b("Fraud check"), " on the email: “Not fraud”, trust the sender or their whole domain, or report it. See what is flagged on the ", h("a", { href: "/app/fraud", dataset: { nav: "" } }, "Fraud check page"), ", or list trusted domains (for example your own company's) in ", code("CONTROLLER_INBOX_TRUSTED_DOMAINS"), ".")
+      h("p", null, "For fraud flags, use the ", b("Fraud check"), " on the email: “Not fraud”, trust the sender or their whole domain, or report it. See what is flagged on the ", h("a", { href: "/app/fraud", dataset: { nav: "" } }, "Fraud check page"), ". To trust a whole domain (your own company's, for example), trust it from the Fraud check of any email from it.")
     );
   }
 
   function outlook() {
     const o = data.outlook;
+    // Signing in to Microsoft 365 needs an app IT registers; nobody is asked to type commands for it.
     const graph = h(
       "p",
       { class: "set-help" },
-      "Microsoft 365 connection instead (needs IT): if IT approves a Microsoft Entra app with delegated ",
-      code("Mail.Read"),
-      ", set ",
-      code("AZURE_CLIENT_ID"),
-      ", then run ",
-      code("python -m controller_inbox auth"),
-      " and ",
-      code("sync"),
-      `. ${data.graph_configured ? "Configured" : "Not configured"}; last sync ${data.runs.last_sync || "never"}.`
+      data.graph_configured
+        ? `Microsoft 365 sign-in is set up on this computer and only reads your mail. Last read ${data.runs.last_sync || "never"}.`
+        : "Microsoft 365 sign-in (for new Outlook or Outlook on the web) isn't set up on this computer: it needs an app your IT team registers for CloseDesk, and it would only read your mail. Ask IT if you need it. The drop folder works without it."
+    );
+    const dropFolder = h(
+      "div",
+      { class: "src-card" },
+      h("div", { class: "src-head" }, icon("folder", 16), b("Drop folder"), h("span", { class: "tag tag-ok" }, "Always on")),
+      h("p", { class: "set-help" }, "Save or drag messages into the drop folder and CloseDesk reads them. ", h("a", { href: "#set-mail-in" }, "How"), ".")
     );
     if (!o.available) {
       return section(
         "outlook",
-        "Outlook (classic)",
+        "Sync inbox",
         "external",
-        "Copy mail straight from classic Outlook on this computer, without dragging it to the drop folder.",
-        h("div", { class: "set-banner off" }, h("span", { class: "dot", "aria-hidden": "true" }), h("div", null, h("p", null, o.why))),
-        graph
+        "Where your mail comes from. The drop folder always works; classic Outlook on Windows can also be connected.",
+        dropFolder,
+        h(
+          "div",
+          { class: "src-card" },
+          h("div", { class: "src-head" }, icon("mail", 16), b("Classic Outlook"), h("span", { class: "tag" }, "Not on this computer")),
+          h("p", { class: "set-help" }, o.why)
+        ),
+        h("details", { class: "set-more", id: "set-outlook-more" }, h("summary", null, "Advanced"), graph)
+      );
+    }
+    if (!o.consent) {
+      return section(
+        "outlook",
+        "Sync inbox",
+        "external",
+        "Where your mail comes from. The drop folder always works; connect classic Outlook to have your mail, and your calendar if you like, come in by itself.",
+        dropFolder,
+        h(
+          "div",
+          { class: "src-card" },
+          h("div", { class: "src-head" }, icon("mail", 16), b("Classic Outlook"), h("span", { class: "tag" }, "Not connected")),
+          h("p", { class: "set-help" }, "Copies your mail and its attachments from classic Outlook on this computer, and keeps them up to date. It only reads: nothing in Outlook is changed."),
+          actions("outlook", h("button", { type: "button", class: "btn btn-primary btn-sm", onclick: (event) => askToConnect(event.currentTarget) }, icon("external", 14), "Connect to Outlook"))
+        ),
+        h("details", { class: "set-more", id: "set-outlook-more" }, h("summary", null, "Advanced"), graph)
       );
     }
     const now = ctx.job();
     const running = now.state === "running";
     const syncing = running && now.about && now.about.kind === "outlook";
-    const check = (event) => save("outlook", "/api/settings/outlook/check", {}, event.currentTarget, { busyText: "Checking…" });
+    // Advanced's own changes say what happened beside its buttons; the card's, on the card.
+    const check = (event) => save("outlook-more", "/api/settings/outlook/check", {}, event.currentTarget, { busyText: "Checking…" });
     const folders = o.folder_list.filter((f) => !f.trash);
     const chosen = (f) => (o.folders.length ? o.folders.includes(f.path) : f.inbox);
     const auto = h("input", { type: "checkbox", id: "set-outlook-auto", checked: o.auto });
@@ -730,7 +765,7 @@ export function createSettings(ctx) {
           event.preventDefault();
           const ticked = $$("input[name=outlook-folder]:checked:not(:disabled)", form).map((input) => input.value);
           const body = { auto: auto.checked, interval: Number(interval.value), days: Number(days.value), folders: ticked, subfolders: subfolders.checked };
-          save("outlook", "/api/settings/outlook", body, $("button[type=submit]", form));
+          save("outlook-more", "/api/settings/outlook", body, $("button[type=submit]", form));
         },
       },
       h("label", { class: "set-check" }, auto, h("span", { class: "set-check-text" }, b("Sync automatically"), h("span", null, "When CloseDesk starts, then on the schedule below while it's open. Off: only when you click Sync now."))),
@@ -752,42 +787,113 @@ export function createSettings(ctx) {
         : h("p", { class: "set-help" }, "Click ", b("Check Outlook"), " to list your folders. Until then the Inbox is copied."),
       h("label", { class: "set-check" }, subfolders, h("span", { class: "set-check-text" }, "Include the subfolders of the folders picked")),
       actions(
-        "outlook",
+        "outlook-more",
         h("button", { type: "submit", class: "btn btn-primary btn-sm" }, "Save"),
         h("button", { type: "button", class: "btn btn-sm", onclick: check }, icon("refresh", 14), folders.length ? "Check Outlook again" : "Check Outlook")
       )
     );
     follow();
+    const calendar = h("input", {
+      type: "checkbox",
+      id: "set-outlook-calendar",
+      checked: o.calendar,
+      onchange: (event) => save("outlook", "/api/settings/outlook/calendar", { on: event.currentTarget.checked }, event.currentTarget),
+    });
+    const disconnect = (event) => {
+      if (!window.confirm("Stop reading Outlook? The mail CloseDesk copied stays here; connecting again asks again.")) return;
+      save("outlook", "/api/settings/outlook/disconnect", {}, event.currentTarget, { busyText: "Disconnecting…" });
+    };
     return section(
       "outlook",
-      "Outlook (classic)",
+      "Sync inbox",
       "external",
-      "Copies mail straight from classic Outlook on this computer: no dragging, no IT approval, nothing leaves the computer.",
+      "Where your mail comes from. The drop folder always works; classic Outlook is connected.",
+      dropFolder,
       h(
         "div",
-        { class: `set-banner ${o.auto ? "on" : "off"}` },
-        h("span", { class: "dot", "aria-hidden": "true" }),
+        { class: "src-card on" },
+        h("div", { class: "src-head" }, icon("mail", 16), b("Classic Outlook"), h("span", { class: "tag tag-ok" }, "Connected")),
         h(
           "div",
-          null,
-          h("p", null, o.auto ? `Automatic: syncs when CloseDesk starts, then every ${o.interval} minutes while CloseDesk and Outlook are both open.` : "Manual: syncs when you click Sync now."),
-          h("p", { class: "set-help" }, o.last_sync ? `Last sync ${o.last_sync}: ${o.last_result}.` : "Not synced yet.")
+          { class: `set-banner ${o.last_error ? "error" : o.auto ? "on" : "off"}`, id: "set-outlook-banner" },
+          h("span", { class: "dot", "aria-hidden": "true" }),
+          h(
+            "div",
+            null,
+            h("p", null, o.auto ? `Automatic: syncs when CloseDesk starts, then every ${o.interval} minutes while CloseDesk and Outlook are both open.` : "Manual: syncs when you click Sync now."),
+            o.last_error ? h("p", { class: "set-banner-error" }, icon("alert", 14), h("span", null, `Last sync didn't work (${o.last_error_at}): ${o.last_error}`)) : null,
+            h("p", { class: "set-help" }, o.last_sync ? `${o.last_error ? "Last sync that worked" : "Last sync"} ${o.last_sync}: ${o.last_result}.` : o.last_error ? "No sync has worked yet." : "Not synced yet.")
+          )
+        ),
+        h("p", { class: "set-help" }, icon("ok", 14), " Read only: CloseDesk copies each email and its attachments into its own folder. Nothing in Outlook is moved, marked read, flagged, changed, deleted or sent."),
+        facts([
+          ["Outlook", o.account || "Not checked yet"],
+          ["Copied so far", plural(o.copied, "email")],
+          ["Connected", o.consented_label || "Before this version asked"],
+        ]),
+        h("label", { class: "set-check" }, calendar, h("span", { class: "set-check-text" }, b("Read my calendar too"), h("span", null, o.calendar ? (o.calendar_last ? `Meetings read ${o.calendar_last}, then once an hour. Their notes aren't read.` : "Read with the next sync, then once an hour. Their notes aren't read.") : "Shows your meetings in CloseDesk's calendar, beside the mail about them. Only read; their notes aren't read."))),
+        actions(
+          "outlook",
+          h("button", { type: "button", class: "btn btn-primary btn-sm", disabled: running, onclick: () => ctx.syncOutlook() }, icon("refresh", 13), syncing ? "Syncing…" : "Sync now"),
+          h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: disconnect }, "Disconnect")
         )
       ),
-      h("p", { class: "set-help" }, icon("ok", 14), " Read only: CloseDesk copies each email and its attachments into its own folder. Nothing in Outlook is moved, marked read, flagged, changed or deleted."),
-      facts([
-        ["Outlook", o.account || "Not checked yet"],
-        ["Copied so far", plural(o.copied, "email")],
-      ]),
       h(
-        "p",
-        { class: "set-help" },
-        "Each sync copies new mail, follows what changed in Outlook (read, flagged, moved), and removes CloseDesk's copy of mail you deleted in Outlook. Mail moved to a folder that isn't copied stays here. Your corrections and the fraud log are kept either way."
-      ),
-      h("div", { class: "set-actions" }, h("button", { type: "button", class: "btn btn-primary btn-sm", disabled: running, onclick: () => ctx.syncOutlook() }, icon("refresh", 13), syncing ? "Syncing…" : "Sync now")),
-      form,
-      graph
+        "details",
+        { class: "set-more", id: "set-outlook-more" },
+        h("summary", null, "Advanced: folders, schedule, how far back"),
+        h(
+          "p",
+          { class: "set-help" },
+          "Each sync copies new mail, follows what changed in Outlook (read, flagged, moved), and removes CloseDesk's copy of mail you deleted in Outlook. Mail moved to a folder that isn't copied stays here. Your corrections and the fraud log are kept either way."
+        ),
+        form,
+        graph
+      )
     );
+  }
+
+  // The prompt before CloseDesk first reads Outlook: what it will do, that it only reads, and the calendar as its
+  // own choice. Nothing is read until Connect.
+  function askToConnect(opener) {
+    const calendar = h("input", { type: "checkbox", id: "consent-calendar", checked: true });
+    const dialog = h(
+      "dialog",
+      { class: "consent", "aria-labelledby": "consent-title" },
+      h("h2", { id: "consent-title" }, "Connect CloseDesk to Outlook?"),
+      h("p", null, "CloseDesk will copy your mail and its attachments from classic Outlook on this computer, and keep them up to date while CloseDesk is open."),
+      h(
+        "ul",
+        { class: "consent-list" },
+        h("li", null, icon("ok", 14), h("span", null, b("It only reads."), " Nothing in Outlook is changed, moved, marked read, flagged, deleted or sent.")),
+        h("li", null, icon("ok", 14), h("span", null, "Everything stays on this computer.")),
+        h("li", null, icon("info", 14), h("span", null, "Mail you delete in Outlook is removed from CloseDesk too; mail you move to a folder that isn't copied stays.")),
+        h("li", null, icon("info", 14), h("span", null, "Outlook may ask whether to allow access: choose ", b("Allow"), "."))
+      ),
+      h("label", { class: "set-check" }, calendar, h("span", { class: "set-check-text" }, b("Read my calendar too"), h("span", null, "Meetings only (when, where, who), not their notes."))),
+      h(
+        "div",
+        { class: "consent-actions" },
+        h("button", { type: "button", class: "btn btn-sm", value: "cancel", onclick: () => dialog.close("cancel") }, "Cancel"),
+        h("button", { type: "button", class: "btn btn-primary btn-sm", value: "connect", onclick: () => dialog.close("connect") }, "Connect")
+      )
+    );
+    dialog.addEventListener("close", () => {
+      const yes = dialog.returnValue === "connect";
+      dialog.remove();
+      if (yes) {
+        save("outlook", "/api/settings/outlook/connect", { agreed: true, calendar: calendar.checked }, opener, {
+          busyText: "Connecting…",
+          after: (reply) => {
+            if (reply.job && reply.job.state === "running") flash.untilDone = true;
+          },
+        });
+      }
+      else opener.focus();
+    });
+    document.body.append(dialog);
+    dialog.showModal();
+    $("button[value=connect]", dialog).focus();
   }
 
   function sample() {
@@ -810,8 +916,7 @@ export function createSettings(ctx) {
             actions("sample", h("button", { type: "button", class: "btn btn-sm", onclick: load }, "Load sample mailbox")),
           ]
         : [
-            h("p", { class: "set-help" }, "Your own mail is loaded, so the sample is switched off here — loading it would erase your mail. To look at the sample, run it with a separate data folder:"),
-            h("pre", { class: "set-cmd" }, "CONTROLLER_INBOX_DATA_DIR=./data-sample python -m controller_inbox demo --serve"),
+            h("p", { class: "set-help" }, "Your own mail is loaded, so the sample is switched off here: loading it would erase your mail."),
             status("sample"),
           ]
     );
@@ -913,21 +1018,23 @@ export function createSettings(ctx) {
     classic,
   };
 
-  // The side list marks the section being read.
+  // The side list marks the section being read: the last one whose top is above a line a third of the way down
+  // (marking the topmost one showing marked the one before it, scrolled nearly past).
   function watchSections(node) {
     if (observer) observer.disconnect();
-    if (!("IntersectionObserver" in window)) return;
     const links = new Map($$(".set-nav-link", node).map((link) => [`set-${link.dataset.section}`, link]));
-    const seen = new Map();
-    observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) seen.set(entry.target.id, entry.isIntersecting ? entry.boundingClientRect.top : null);
-        const first = [...seen.entries()].filter(([, top]) => top !== null).sort((a, b2) => a[1] - b2[1])[0];
-        if (!first) return;
-        for (const [id, link] of links) link.classList.toggle("on", id === first[0]);
-      },
-      { rootMargin: "-10% 0px -55% 0px" }
-    );
+    const mark = (id) => {
+      for (const [key, link] of links) link.classList.toggle("on", key === id);
+    };
+    const reading = () => {
+      const line = window.innerHeight / 3;
+      let id = "";
+      for (const sec of $$(".set-sec", node)) if (sec.getBoundingClientRect().top <= line) id = sec.id;
+      return id || ($(".set-sec", node) || { id: "" }).id;
+    };
+    if (links.has(location.hash.slice(1))) mark(location.hash.slice(1)); // opened at a section (#set-outlook)
+    if (!("IntersectionObserver" in window)) return;
+    observer = new IntersectionObserver(() => mark(reading()), { rootMargin: "-10% 0px -55% 0px", threshold: [0, 0.25, 0.5, 0.75, 1] });
     requestAnimationFrame(() => $$(".set-sec", node).forEach((sec) => observer.observe(sec)));
   }
 
@@ -936,8 +1043,13 @@ export function createSettings(ctx) {
   function job(now) {
     if (!data || !ctx.isShown()) return;
     const running = now.state === "running";
-    if (running !== wasRunning) {
+    // A run that ended (a sync that didn't work ends before the page sees it running): the cards say what it did.
+    const ended = !running && (now.finished_at || "") !== lastFinished;
+    if (!running) lastFinished = now.finished_at || "";
+    if (running !== wasRunning || ended) {
       wasRunning = running;
+      // "Copying your mail now" is said until the copy is done.
+      if (ended && flash && flash.untilDone) flash = null;
       return load({ keepScroll: true });
     }
     const bar = running ? $("#set-index-progress") : null;

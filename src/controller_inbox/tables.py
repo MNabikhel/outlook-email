@@ -46,6 +46,15 @@ def is_value(cell: str) -> bool:
     return bool(_VALUE_RE.fullmatch((cell or "").strip()))
 
 
+# A workbook cell with its formula written after its value ("1,200.00 (=SUM(B2:B5))"), or the formula alone.
+_FORMULA_RE = re.compile(r"(?:^|\s\()=[A-Z]")
+_BUCKET_RE = re.compile(r"(?i)(?:\d{1,3}\s*(?:-|–|to)\s*\d{1,3}|(?:over|>)\s*\d{1,3}|\d{1,3}\s*\+)(?:\s*days?)?")
+
+
+def _value_of(cell: str) -> str:
+    return re.sub(r"\s*\(=.*\)$", "", cell)
+
+
 def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first: bool = False) -> bool:
     """Whether the first row names the columns.
 
@@ -63,7 +72,15 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
         return False
     # A year or a month over each column ("2026", "Oct 2026") names it when the file marks the row as headings.
     periods = marked or bold_first
-    if any((is_value(cell) and not (periods and _PERIOD_RE.fullmatch(cell))) or cell.endswith(":") for cell in filled):
+    # An aging's buckets ("1-30", "61-90", "Over 90") head their columns beside words ("Vendor", "Current").
+    words = sum(1 for cell in filled if not is_value(_value_of(cell)) and not _BUCKET_RE.fullmatch(cell))
+    buckets = words >= 2
+    if any(
+        (is_value(_value_of(cell)) and not (periods and _PERIOD_RE.fullmatch(cell)) and not (buckets and _BUCKET_RE.fullmatch(cell)))
+        or cell.endswith(":")
+        or _FORMULA_RE.search(cell)
+        for cell in filled
+    ):
         return False
     if marked or bold_first:
         return True

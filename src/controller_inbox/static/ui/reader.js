@@ -59,8 +59,9 @@ function header(d) {
     h(
       "p",
       { class: "rd-from" },
-      h("b", null, d.sender_name || d.sender_email),
-      d.sender_name && d.sender_email ? h("span", { class: "muted" }, ` <${d.sender_email}>`) : null,
+      h("b", null, d.sender_name || (d.sender_email || "").toLowerCase()),
+      // In lower case, as addresses are compared: a capital I in "acmesteeI-billing.com" looks like an l.
+      d.sender_name && d.sender_email ? h("span", { class: "muted" }, ` <${d.sender_email.toLowerCase()}>`) : null,
       h("span", { class: "muted" }, ` · ${d.when_full}`)
     ),
     differentReply ? h("p", { class: "rd-replyto" }, icon("alert", 13), " Replies go to ", h("b", null, d.reply_to)) : null
@@ -355,6 +356,79 @@ function fraudPanel(d, ctx) {
   return section("Fraud check", { id: "rd-fraud", class: `fraud-${level}`, aside: head }, ...body);
 }
 
+/* ---------- Related mail: the conversation, and mail sharing an invoice, a PO or a file ---------- */
+
+function relatedRow(r) {
+  const mark = r.locked
+    ? h("span", { class: "tag tag-fraud", title: "Held as possible payment fraud: its files are not linked or opened" }, "Held: possible fraud")
+    : r.caution
+      ? h("span", { class: "tag tag-due_soon", title: "This email asks about payment details: check it by phone before acting on it" }, "Caution: payment details")
+      : r.new_domain
+      ? h("span", { class: "tag tag-due_soon", title: "The first message in this conversation from this sender's domain. A reply from a lookalike domain is how payment-change fraud often starts." }, `New in this conversation: ${(r.sender_email || "").split("@")[1] || r.sender}`)
+      : null;
+  const line = h(
+    "span",
+    { class: "rel-main" },
+    // The sender's domain beside the name, always: a lookalike ("northwnd.com") shows at a glance.
+    h("span", { class: "rel-top" }, h("span", { class: "trunc" }, h("b", null, r.sender), h("span", { class: "muted small" }, ` · ${r.domain}`)), h("span", { class: "muted small rel-when", title: r.when_full }, r.when)),
+    h("span", { class: "rel-subject trunc" }, r.subject),
+    r.first_line ? h("span", { class: "muted small rel-first" }, r.first_line) : null,
+    r.file_names.length ? h("span", { class: "muted small rel-files" }, icon("clip", 12), h("span", null, r.file_names.join(", "))) : null,
+    r.model_why ? h("span", { class: "small rel-why", title: "The local model's guess, from the two emails' text: check it" }, icon("chat", 12), h("span", null, `The model's guess: “${r.model_why}”`)) : null,
+    mark
+  );
+  return h(
+    "li",
+    { class: `rel-row${r.here ? " here" : ""}` },
+    r.here ? h("div", { class: "rel-link", "aria-current": "true" }, line) : h("a", { class: "rel-link", href: `/app/mail/${enc(r.id)}`, dataset: { nav: "" } }, line)
+  );
+}
+
+function lookButton(d, ctx) {
+  const button = h("button", { type: "button", class: "btn btn-sm btn-quiet", title: "Have the local model weigh the few emails most likely about the same matter" }, icon("search", 14), "Look for more");
+  button.addEventListener("click", async () => {
+    button.disabled = true;
+    button.lastChild.textContent = "Looking…";
+    try {
+      const reply = await postJSON(`/api/mail/${enc(d.id)}/related/look`);
+      d.related = reply.related;
+      toast(reply.message, { tone: "ok" });
+      // The model can take a while: put its result in only if this email is still the one on screen.
+      const old = document.querySelector(`.rd[data-email="${CSS.escape(d.id)}"] #rd-related`);
+      const fresh = related(d, ctx);
+      if (old && fresh) old.replaceWith(fresh);
+    } catch (error) {
+      toast(error.message, { tone: "error" });
+      button.disabled = false;
+      button.lastChild.textContent = "Look for more";
+    }
+  });
+  return button;
+}
+
+function related(d, ctx) {
+  const rel = d.related || { thread: [], groups: [] };
+  if (!rel.thread.length && !rel.groups.length) {
+    // Nothing links it yet: the model can still look, when one is running.
+    return rel.can_look ? section("Related", { id: "rd-related", aside: h("span", { class: "rd-h-aside" }, lookButton(d, ctx)) }, h("p", { class: "muted small" }, "Nothing in this email ties it to others: no conversation, invoice, PO or file in common.")) : null;
+  }
+  const count = rel.thread.length ? rel.thread.length - 1 : 0;
+  const others = rel.groups.reduce((n, g) => n + g.emails.length, 0);
+  const aside = h(
+    "span",
+    { class: "rd-h-aside" },
+    h("span", { class: "muted small" }, [count ? plural(count, "other email") + " in this conversation" : "", others ? plural(others, "related email") : ""].filter(Boolean).join(" · ")),
+    rel.can_look ? lookButton(d, ctx) : null,
+    h("a", { class: "btn btn-sm btn-quiet", href: `/app/trace/${enc(d.id)}`, dataset: { nav: "" }, title: "Every email linked to this one, two links out, and what changed in their files" }, icon("route", 14), "Whole matter")
+  );
+  return section(
+    "Related",
+    { id: "rd-related", aside },
+    rel.thread.length ? h("div", { class: "rel-block" }, h("h3", { class: "rel-h" }, "This conversation, oldest first"), h("ol", { class: "rel-list rel-thread" }, rel.thread.map(relatedRow))) : null,
+    ...rel.groups.map((g) => h("div", { class: "rel-block" }, h("h3", { class: "rel-h" }, g.label), h("ul", { class: "rel-list" }, g.emails.map(relatedRow))))
+  );
+}
+
 /* ---------- Notes, correction, body ---------- */
 
 function findings(d, ctx) {
@@ -484,6 +558,7 @@ export function emailView(d, ctx) {
         facts(d),
         tasks(d, ctx),
         attachments(d, ctx),
+        related(d, ctx),
         coding(d, ctx),
         section("Message", { class: "rd-body-sec" }, h("div", { class: "rd-body" }, body || "(no text)")),
         fraudPanel(d, ctx),
@@ -680,6 +755,8 @@ let pageUrl = "";
 // A card opened to fix a box stays open while the pointer moves to it, until it is saved, cancelled or left.
 let pinned = false;
 
+let anchor = null; // the box the tip is for
+
 function hideTip(force = false) {
   if (!tip || (pinned && force !== true)) return;
   pinned = false;
@@ -691,7 +768,9 @@ function showTip(box, children, { pin = false } = {}) {
   if (!tip) {
     tip = h("div", { class: "pv-tip", role: "tooltip", id: "pv-tip", hidden: true });
     document.body.append(tip);
-    document.addEventListener("scroll", (event) => (!pinned || !tip.contains(event.target)) && hideTip(true), true);
+    // A tip, or an open fix form, moves with its box on a scroll and closes once the box is out of sight: pointing
+    // at a box or clicking it can scroll it into view, and that scroll can arrive after the tip opened.
+    document.addEventListener("scroll", (event) => !tip.contains(event.target) && follow(), true);
     window.addEventListener("resize", () => hideTip(true));
     document.addEventListener("pointerdown", (event) => pinned && !tip.contains(event.target) && hideTip(true), true);
     document.addEventListener(
@@ -708,10 +787,21 @@ function showTip(box, children, { pin = false } = {}) {
   }
   if (pinned && !pin) return;
   pinned = pin;
+  anchor = box;
   tip.classList.toggle("pinned", pin);
   tip.setAttribute("role", pin ? "dialog" : "tooltip");
   replace(tip, children);
   tip.hidden = false;
+  place(box);
+}
+
+function follow() {
+  const at = anchor && anchor.isConnected ? anchor.getBoundingClientRect() : null;
+  if (!at || at.bottom < 0 || at.top > window.innerHeight || at.right < 0 || at.left > window.innerWidth) return hideTip(true);
+  place(anchor);
+}
+
+function place(box) {
   // Below the box when it fits, else above it; never past the edges of the window.
   const at = box.getBoundingClientRect();
   const { offsetWidth: w, offsetHeight: tall } = tip;

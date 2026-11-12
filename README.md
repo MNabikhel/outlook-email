@@ -17,7 +17,7 @@ Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get
      It puts CloseDesk in a `CloseDesk` folder in your home folder and starts it. Downloaded this way, macOS doesn't ask an administrator to approve it.
    - **Windows:** green **Code** button → **Download ZIP**, unzip it somewhere permanent (for example `Documents`), and double-click **`CloseDesk.bat`**. If Windows shows "Windows protected your PC", click **More info → Run anyway**.
 3. **The first start sets itself up** in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around. From then on, double-click `CloseDesk.command` (Mac) or `CloseDesk.bat` (Windows): every start checks the set-up and puts right what isn't, so after an update, or after moving the folder, you just open it. **`CloseDesk-Update`** fetches the newest version and keeps your mail and settings.
-4. **Add your mail:** on Windows with classic Outlook, open **Settings → Outlook (classic)**, click **Check Outlook**, pick your folders and click **Sync now** (or turn on **Sync automatically**). It copies your mail and attachments in and never changes anything in Outlook. Otherwise drag emails from Outlook into the `inbox/incoming` folder and click **Process new mail**. ([New Outlook, web, and Mac](docs/SETUP.md#every-morning))
+4. **Add your mail:** on Windows with classic Outlook, open **Settings → Sync inbox** and click **Connect to Outlook**. After you agree, it copies your mail and attachments (and your calendar, if you like) and keeps them up to date, and never changes anything in Outlook. Otherwise drag emails from Outlook into the `inbox/incoming` folder and click **Process new mail**. ([New Outlook, web, and Mac](docs/SETUP.md#every-morning))
 5. **Optional local AI:** in [LM Studio](https://lmstudio.ai/), load a small instruct model (3B–8B) and start the server (Developer tab → **Start server**). CloseDesk finds it on its own.
 
 **Using it:**
@@ -39,7 +39,7 @@ The full guide and troubleshooting are in [docs/SETUP.md](docs/SETUP.md). Prefer
 | Sorting into Needs you / Worth knowing / Reference | Yes (rules) | Yes (the model decides, with guard rails) |
 | One-line summaries | The email's key sentence | Written by the model |
 | Tasks, due dates, fraud warnings, digest | Yes | Yes |
-| **Ask CloseDesk** | Finds the emails, today's focus list, and the matching passages in their files | Reads the email and its files (and other emails if needed), notes what it finds, checks its answer, and cites the emails |
+| **Ask CloseDesk** | Finds the emails, today's focus list, and the matching lines in them and their files; on an open email, its conversation step by step; for a meeting, the mail about it | Reads the email and its files (and other emails if needed), notes what it finds, checks its answer, and cites the emails |
 | **Draft a reply** | A starter template | A written draft; payment-change emails get safety advice instead |
 
 </details>
@@ -85,7 +85,7 @@ Every address is a link you can keep, such as `/app/mail/<id>` for an email or `
 
 ## Classic Outlook sync (Windows)
 
-**Settings → Outlook (classic)** copies mail straight from classic Outlook on this computer, through Outlook's own programming interface: no Microsoft 365 app, no IT approval, nothing leaves the computer.
+**Settings → Sync inbox** copies mail straight from classic Outlook on this computer, through Outlook's own programming interface: no Microsoft 365 app, no IT approval, nothing leaves the computer.
 
 - **Read only.** CloseDesk lists Outlook's folders, reads each folder's list of messages, and saves a `.msg` copy of each new one into `inbox/processed/outlook/`. It never moves, marks read, flags, categorizes, changes or deletes anything in Outlook (`tests/test_outlook_desktop.py` checks the code for any such call).
 - **What it follows.** Each sync copies new mail from the folders you pick (the Inbox by default, with subfolders if you like) received in the last 7, 30, 90 or 365 days. Read/unread, flags and moves between folders follow Outlook. Mail you delete in Outlook (in Deleted Items, Junk, or gone for good) is removed from CloseDesk; your corrections and the fraud log are kept. Mail moved to a folder that isn't synced stays.
@@ -421,6 +421,9 @@ src/controller_inbox/
   outlook_sync.py   Copies mail from classic Outlook in, and keeps the copies in step with it
   folder_mail.py    Drop folder: .msg / .eml / loose files, inbox/failed
   mail_identity.py  Whether a message is already stored, however it came in, and the id it is filed under
+  links.py          Which emails belong together (one conversation, the same invoice, PO or file), a whole matter, what changed
+  link_judge.py     The local model's view of which emails are about the same matter where nothing they carry says so
+  calendar_events.py Meetings from Outlook's calendar and from invitations in mail, for the calendar page and the chat
   tnef.py           The files inside a winmail.dat
   demo.py           Sample mailbox
   pipeline.py       Ingest → classify → store (scripts only, fast)

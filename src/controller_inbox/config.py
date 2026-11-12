@@ -80,6 +80,8 @@ class Settings(BaseSettings):
     overnight_batch: int = 40
     # Long attachments the model summarizes per overnight run, so "summarize this file" answers at once. 0 = none.
     overnight_file_summaries: int = 20
+    # Pairs of emails the local model is asked about per run, to link mail nothing else ties together (link_judge.py).
+    overnight_ai_links: int = 30
     # Search by meaning uses an embedding model on the local server (LM Studio ships nomic-embed-text).
     # Empty = find one there; "off" = keyword search only. The URL defaults to the chat server's.
     embedding_model: str = ""

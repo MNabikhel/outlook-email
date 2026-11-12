@@ -744,6 +744,12 @@ def score_rules(
 
 # Categories that say little about what an email asks for: a clearer one found in its words replaces them.
 _LOOSE_TYPES = {DocumentType.OTHER, DocumentType.INTERNAL_FYI, DocumentType.REPLY_NEEDED, DocumentType.NOTIFICATION, DocumentType.MIXED}
+_INVITATION_REASONS = {
+    "CANCEL": "Meeting cancellation",
+    "REPLY": "An answer to a meeting invitation",
+    "COUNTER": "A new time proposed for a meeting",
+    "DECLINECOUNTER": "An answer to a proposed new time",
+}
 
 INVOICE_DOCUMENTS = {DocumentType.AP_INVOICE, DocumentType.AR_INVOICE, DocumentType.CREDIT_MEMO}
 DATA_FILE_EXTENSIONS = (".xlsx", ".xlsm", ".xls", ".csv", ".tsv")
@@ -818,12 +824,16 @@ def classify_email(
     duplicate_invoice: bool = False,
     finance: bool = True,
     fraud: str | None = None,
+    invitation: str = "",
 ) -> Classification:
     """Pick the email's category and importance.
 
     ``fraud`` is the level from ``fraud.assess``. When it is given, only a
     ``high`` check makes the email a payment-instruction change; without it the
-    bank-change wording rule decides on its own.
+    bank-change wording rule decides on its own. ``invitation`` is what the email's
+    invitation is (its METHOD, ``calendar_events.invitation_method``): an email with
+    one is about a meeting, whatever its subject says, unless it is mail of a kind
+    that matters more (an invoice with an invitation for the call about it).
     """
     if fraud is not None:
         attachments = [item for item in attachments if item.document_type != DocumentType.PAYMENT_INSTRUCTION_CHANGE]
@@ -857,7 +867,15 @@ def classify_email(
         category = email_type
         confidence = min(0.9, 0.3 + weight / 180) if weight else 0.25
 
-    if fields.mentions_attachment and not has_attachments:
+    if invitation and category in _LOOSE_TYPES | {DocumentType.MEETING}:
+        category = DocumentType.MEETING
+        confidence = max(confidence, 0.8)
+        reasons.append(_INVITATION_REASONS.get(invitation, "Meeting invitation"))
+
+    # "Please find attached" in the quoted email a reply carries is no file this one forgot.
+    from controller_inbox.extract import ATTACHMENT_MENTION_RE
+
+    if fields.mentions_attachment and not has_attachments and ATTACHMENT_MENTION_RE.search(f"{subject}\n{own_words(body)}"):
         combined_flags.append("missing_attachment")
         reasons.append("Email says something is attached, but no attachment was found")
 

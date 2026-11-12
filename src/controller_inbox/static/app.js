@@ -228,7 +228,9 @@
   };
 
   const mailHref = (source) =>
-    source.chat && (source.files || []).length
+    source.calendar
+      ? "/app/calendar"
+      : source.chat && (source.files || []).length
       ? `/inbox/${encodeURIComponent(source.id)}/files/1`
       : `/inbox/${encodeURIComponent(source.id)}`;
 

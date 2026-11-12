@@ -15,34 +15,172 @@ from controller_inbox.outlook_desktop import NotInOutlook, OutlookError, Outlook
 
 SOURCE = Path(outlook_desktop.__file__)
 
-# Everything in Outlook's object model that changes, sends, opens or moves an item or folder.
+# What outlook_desktop.py may call, and on what. Outlook's object model is reached through COM, where a name is matched
+# whatever its case ("item.delete()" calls Delete), so the names used are listed, as spelled, rather than the ones
+# that change something (which none may match in any case): a name that isn't listed here fails the test until someone
+# has checked that it only reads.
+COM_CALLS = {
+    "Dispatch": {"win32com.client"}, "GetActiveObject": {"win32com.client"},
+    "CoInitialize": {"pythoncom"}, "CoUninitialize": {"pythoncom"}, "GetLocaleInfo": {"win32api"},
+    "GetNamespace": {"app"}, "GetDefaultFolder": {"self.ns", "store"}, "GetRootFolder": {"store"}, "GetItemFromID": {"self.ns"},
+    "Item": {"children", "self.ns.Stores"}, "GetTable": {"folder"}, "GetNextRow": {"table"}, "GetValues": {"table.GetNextRow()"},
+    # Columns.Add and RemoveAll shape the table CloseDesk asked for; Sort and Restrict order and filter a list of items.
+    "RemoveAll": {"table.Columns"}, "Add": {"table.Columns"}, "Sort": {"table", "items"}, "Restrict": {"items"},
+    "GetFirst": {"listed"}, "GetNext": {"listed"},
+    "SaveAs": {"item"},  # writes a .msg file and leaves the message as it is: the only way a copy is made
+}
+# Python's own methods on Python values (strings, dates, lists, sets, this file's own), each on what it is called on:
+# a Python method's name on an Outlook object ("item.replace()", "items.get()") would reach whatever Outlook has by it.
+PYTHON_CALLS_ON = {
+    "append": {"binned", "found", "seen"}, "astimezone": {"aware_utc(value)", "naive"}, "date": {"item.End", "item.Start"},
+    "get": {"_BUSY", "_IMPORTANCE", "self._by_path"}, "group": {"m"}, "isoformat": {"ends", "item.End.date()", "item.Start.date()", "starts"},
+    "lower": {"str(folder.Name)"}, "mkdir": {"dest.parent"}, "now": {"datetime"}, "pop": {"meeting"}, "replace": {"message_id", "value"},
+    "split": {"str(field or '')[:50000]"}, "startswith": {"path", "str(message_class or '')"}, "strftime": {"local"},
+    "strip": {"p", "str(info[2])", "str(message_id or '')", "str(mid or '')"}, "sub": {"re"},
+    "add": {"bins", "codes", "names", "trash"}, "sort": {"stores"}, "_item": {"self"}, "folders": {"self"}, "__init__": {"super()"},
+}
+PYTHON_CALLS = set(PYTHON_CALLS_ON)
+# What Outlook's objects are read for (and the methods above): any other name is something new of Outlook's.
+COM_NAMES = set(COM_CALLS) | {
+    "AllDayEvent", "BusyStatus", "Columns", "Count", "DefaultItemType", "End", "EndOfTable", "EntryID", "Folders",
+    "GlobalAppointmentID", "IncludeRecurrences", "IsRecurring", "Items", "Location", "MeetingStatus", "Name", "OptionalAttendees",
+    "Organizer", "Parent", "RequiredAttendees", "Start", "StoreID", "Stores", "Subject",
+}
+# Python's own attributes read in the file (of datetimes, exceptions, modules and this file's classes).
+PYTHON_NAMES = PYTHON_CALLS | set(PYTHON_CALLS_ON) | {
+    "__name__", "_by_path", "_folders", "args", "client", "cut_short", "entry_id", "ns", "parent", "path", "platform",
+    "store_id", "utc", "year",
+}
+READ_BY_NAME = {"ExchangeStoreType", "DisplayName", "hresult", "excepinfo", "args"}  # getattr(obj, "...", default)
+# Python's own functions it calls, besides its own, and the names it imports (none from pythoncom or win32com.client,
+# whose CastTo or CoCreateInstance reach Outlook past these lists).
+BUILTINS = {"any", "bool", "getattr", "isinstance", "len", "range", "set", "str", "super", "type"}
+IMPORTED = {"annotations", "contextmanager", "dataclass", "datetime", "timedelta", "timezone", "Path", "Iterator", "aware_utc"}
+DECORATORS = {"contextmanager", "dataclass", "property", "staticmethod"}
+# The modules it may import: none that reach a method by a name made up at run time (operator.methodcaller,
+# functools.partial, importlib).
+IMPORTS = {"__future__", "contextlib", "controller_inbox.clock", "dataclasses", "datetime", "pathlib", "pythoncom", "re", "sys", "typing",
+           "win32api", "win32com.client"}
+# Outlook's methods that change, send, open or close something: none may be on the lists above, in any case.
 WRITES = {
-    "Save", "Delete", "Move", "MoveTo", "Copy", "CopyTo", "Display", "Send", "Close", "Reply", "ReplyAll", "Forward",
-    "SetProperty", "SetProperties", "DeleteProperty", "DeleteProperties", "MarkAsTask", "ClearTaskFlag", "PrintOut",
-    "ShowCategoriesDialog", "AddMember", "Remove", "Add",  # Columns.Add is checked apart: it only shapes the table read
-    "Respond", "Accept", "Decline", "ClearConversationIndex", "Undelete", "Empty",
+    "Save", "Delete", "Move", "MoveTo", "Copy", "CopyTo", "Display", "Send", "Close", "Reply", "ReplyAll", "Forward", "Quit",
+    "SetProperty", "SetProperties", "DeleteProperty", "DeleteProperties", "MarkAsTask", "ClearTaskFlag", "PrintOut", "Import",
+    "Execute", "ShowCategoriesDialog", "AddMember", "Remove", "Respond", "Accept", "Decline", "ClearConversationIndex", "Undelete",
+    "Empty", "GetAssociatedAppointment", "CreateItem", "CreateItemFromTemplate", "AddStore", "RemoveStore", "Logoff", "InvokeTypes",
 }
 
 
-def test_the_reader_makes_no_call_that_changes_outlook():
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
-    calls = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            calls.append((node.func.attr, ast.unparse(node.func.value)))
-    bad = [(name, on) for name, on in calls if name in WRITES and not (name == "Add" and on == "table.Columns")]
-    assert not bad, f"outlook_desktop.py must only read Outlook: {bad}"
-    # SaveAs writes a file and leaves the message as it is; it's the only way a copy is made.
-    assert [on for name, on in calls if name == "SaveAs"] == ["item"]
+def _targets(node) -> list:
+    """What a statement writes to: assignment targets (each part of a tuple unpacked), loop and comprehension
+    variables, ``with ... as`` names, ``:=`` names and what ``del`` removes."""
+    if isinstance(node, ast.Assign):
+        found = list(node.targets)
+    elif isinstance(node, (ast.AugAssign, ast.AnnAssign, ast.For, ast.AsyncFor, ast.comprehension, ast.NamedExpr)):
+        found = [node.target]
+    elif isinstance(node, ast.withitem):
+        found = [node.optional_vars] if node.optional_vars is not None else []
+    elif isinstance(node, ast.Delete):
+        found = list(node.targets)
+    else:
+        return []
+    out = []
+    while found:
+        target = found.pop()
+        if isinstance(target, (ast.Tuple, ast.List)):
+            found.extend(target.elts)
+        elif isinstance(target, ast.Starred):
+            found.append(target.value)
+        else:
+            out.append(target)
+    return out
 
 
-def test_the_reader_sets_no_property_on_an_outlook_object():
-    tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
+def _not_read_only(source: str) -> list[str]:
+    """What in this source isn't on the lists of reads above, by line: a call or a name of Outlook's not listed (in
+    any case), a call of something that isn't a listed function, an import not listed, and a property set on
+    anything but this file's own objects."""
+    tree = ast.parse(source)
+    known = COM_NAMES | PYTHON_NAMES  # as spelled here: "item.UNREAD" or "item.delete" isn't
+    writes = {name.lower() for name in WRITES}
+    own = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+    functions = own | BUILTINS | IMPORTED
+    found = []
     for node in ast.walk(tree):
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, (ast.AugAssign, ast.AnnAssign)) else []
-        for target in targets:
-            if isinstance(target, ast.Attribute):
-                assert ast.unparse(target.value) == "self", f"sets {ast.unparse(target)} (line {node.lineno})"
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Attribute) and (node.attr not in known or node.attr.lower() in writes):
+            found.append(f"line {line}: .{node.attr}")
+        if isinstance(node, ast.Import):
+            found += [f"line {line}: import {alias.name}" for alias in node.names if alias.name not in IMPORTS]
+        if isinstance(node, ast.ImportFrom):
+            if node.module not in IMPORTS:
+                found.append(f"line {line}: from {node.module} import")
+            found += [f"line {line}: imports {alias.name}" for alias in node.names if alias.name not in IMPORTED or alias.asname]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # A decorator is called with what it decorates: "@folder.Folders.Add".
+            found += [f"line {line}: @{ast.unparse(d)}" for d in node.decorator_list if not (isinstance(d, ast.Name) and d.id in DECORATORS)]
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            # "with" calls what it is given back when the block ends: "with closing(item)" calls item.Close().
+            for item in node.items:
+                call = item.context_expr
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in own):
+                    found.append(f"line {line}: with {ast.unparse(call)}")
+        for target in _targets(node):
+            # The one property set: the calendar's list of items is told to list each occurrence of a repeating
+            # meeting. It is a setting of the list CloseDesk asked for, not of anything kept in Outlook.
+            if isinstance(target, ast.Attribute) and ast.unparse(target.value) != "self" and ast.unparse(target) != "items.IncludeRecurrences":
+                found.append(f"line {line}: sets {ast.unparse(target)}")
+            # An item of an Outlook collection set ("item.Items[1] = ..."): only this file's own lists and maps.
+            if isinstance(target, ast.Subscript) and not ast.unparse(target.value).startswith("self."):
+                found.append(f"line {line}: sets {ast.unparse(target)}")
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute):
+            on = ast.unparse(func.value)
+            if not (on in COM_CALLS.get(func.attr, ()) or on in PYTHON_CALLS_ON.get(func.attr, ())):
+                found.append(f"line {line}: {on}.{func.attr}()")
+        elif isinstance(func, ast.Name):
+            if func.id not in functions:
+                found.append(f"line {line}: {func.id}()")  # setattr, eval, or a method kept in a variable first
+            elif func.id == "getattr":
+                named = node.args[1] if len(node.args) > 1 else None
+                if not (isinstance(named, ast.Constant) and named.value in READ_BY_NAME):
+                    found.append(f"line {line}: {ast.unparse(node)}")
+        else:
+            found.append(f"line {line}: {ast.unparse(node)}")  # getattr(item, "Delete")(), a call of a call
+    return found
+
+
+def test_the_reader_only_reads_outlook():
+    assert _not_read_only(SOURCE.read_text(encoding="utf-8")) == [], "outlook_desktop.py must only read Outlook"
+    writes = {name.lower() for name in WRITES}
+    assert not writes & {name.lower() for name in [*COM_CALLS, *PYTHON_CALLS, *PYTHON_CALLS_ON, *COM_NAMES, *PYTHON_NAMES]}
+
+
+def test_the_read_only_check_catches_what_isnt_a_read():
+    for bad in (
+        "item.Delete()", "app.Quit()", "self.ns.Application.Session.Logoff()", "folder.Items.Add(1)", "item.delete()",
+        "namespace.Import(path)", "explorer.CommandBars.ExecuteMso('x')", "getattr(item, 'Delete')()", "getattr(item, name)",
+        "setattr(item, 'UnRead', False)", "move = item.Move", "item.Parent.Folders.add('New')", "item._oleobj_.InvokeTypes(1)",
+        "move = item.delete\n    move()", "move = item.Display\n    move()", "item.subject", "item.UNREAD",
+        "import operator\n    operator.methodcaller('Delete')(item)", "from operator import attrgetter", "from functools import partial",
+        "for item.UnRead in [False]:\n        pass", "with open(name) as item.Subject:\n        pass", "item.UnRead, x = False, 1",
+        "[0 for item.UnRead in [False]]", "del item.Categories", "item.FlagStatus += 1", "item.Subject: str = ''",
+        "item.Items[1] = 2", "item.Recipients[0] += 1", "@folder.Folders.Add\n    def g():\n        pass",
+        "with contextlib.closing(item):\n        pass", "from contextlib import closing\n    with closing(item):\n        pass",
+        "with item:\n        pass", "from pythoncom import CoCreateInstance\n    CoCreateInstance(name)",
+        "from win32com.client import CastTo\n    CastTo(item, 'MailItem')", "from datetime import datetime as Delete",
+        "item.replace('a', 'b')", "items.get(1)", "folder.Items.sort()",
+    ):
+        assert _not_read_only(f"def f(item, app, folder, namespace, explorer, name):\n    {bad}\n"), bad
+    assert _not_read_only("def f(self):\n    self._folders = []\n    self._by_path['x'] = 1\n    for self.path in []:\n        pass\n") == []
+
+
+def test_only_the_reader_talks_to_outlook():
+    # The read-only checks above read outlook_desktop.py: any other file reaching Outlook would escape them.
+    package = SOURCE.parent
+    users = sorted(path.name for path in package.rglob("*.py") if re.search(r"\bwin32com\b", path.read_text(encoding="utf-8")))
+    assert users == ["outlook_desktop.py"], users
 
 
 # Fake Outlook objects: reading works, any write raises -------------------------------------------------
@@ -303,3 +441,108 @@ def test_the_automatic_sync_never_starts_outlook(monkeypatch):
         with outlook_desktop.connect(start=False):
             pass
     assert calls == [], "Outlook wasn't started in the background"
+
+
+# The calendar ---------------------------------------------------------------------------------------------------
+
+
+class Appointment(ReadOnly):
+    def __init__(self, subject, start, end, *, all_day=False, recurring=False, status=1, gid="G1", busy=2):
+        self.Subject, self.Start, self.End, self.AllDayEvent = subject, start, end, all_day
+        self.Location, self.Organizer = "Board room", "Maya Chen"
+        self.RequiredAttendees, self.OptionalAttendees = "Maya Chen; Priya Raman", ""
+        self.BusyStatus, self.MeetingStatus, self.IsRecurring, self.GlobalAppointmentID = busy, status, recurring, gid
+        self.freeze()
+
+    @property
+    def Body(self):
+        raise AssertionError("the meeting's text is not read")
+
+
+class CalendarItems:
+    """Outlook's Items of a calendar: Sort, then IncludeRecurrences, then Restrict, in that order."""
+
+    def __init__(self, appointments):
+        self._all = appointments
+        self.IncludeRecurrences = False
+        self.sorted = False
+
+    def Sort(self, column):
+        assert column == "[Start]" and not self.IncludeRecurrences, "sorted before IncludeRecurrences is set"
+        self.sorted = True
+
+    def Restrict(self, where):
+        assert self.sorted and self.IncludeRecurrences, "IncludeRecurrences set before Restrict"
+        self.where = where
+        return Listed(sorted(self._all, key=lambda a: a.Start))
+
+
+class Listed:
+    def __init__(self, items):
+        self._items, self._at = items, 0
+
+    def GetFirst(self):
+        self._at = 0
+        return self.GetNext()
+
+    def GetNext(self):
+        if self._at >= len(self._items):
+            return None
+        self._at += 1
+        return self._items[self._at - 1]
+
+
+class CalendarFolder(ReadOnly):
+    def __init__(self, items):
+        self.Items = items
+        self.freeze()
+
+
+def test_the_calendar_lists_each_meeting_in_the_window_without_its_text(outlook):
+    session, _items = outlook
+    day = datetime(2026, 10, 5)
+    appointments = [
+        Appointment("Long ago", local(2026, 1, 5, 9), local(2026, 1, 5, 10)),
+        Appointment("AP standup", local(2026, 10, 6, 9), local(2026, 10, 6, 9, 15), recurring=True, gid="G-standup"),
+        Appointment("AP standup", local(2026, 10, 13, 9), local(2026, 10, 13, 9, 15), recurring=True, gid="G-standup"),
+        Appointment("Close day", local(2026, 10, 30, 0), local(2026, 10, 31, 0), all_day=True, gid="G-close", busy=3),
+        Appointment("Cancelled review", local(2026, 10, 8, 14), local(2026, 10, 8, 15), status=5, gid="G-x"),
+        Appointment("Next year", local(2027, 6, 1, 9), local(2027, 6, 1, 10)),
+    ]
+    items = CalendarItems(appointments)
+    object.__setattr__(session.ns, "_defaults", {**session.ns._defaults, 9: CalendarFolder(items)})
+    found = session.calendar(day.replace(tzinfo=timezone.utc), datetime(2026, 11, 30, tzinfo=timezone.utc))
+    assert [(m["subject"], m["uid"]) for m in found] == [
+        ("AP standup", "G-standup"), ("Cancelled review", "G-x"), ("AP standup", "G-standup"), ("Close day", "G-close")
+    ]
+    close = found[-1]
+    assert (close["start"], close["end"], close["all_day"], close["busy"]) == ("2026-10-30", "2026-10-31", True, "away")
+    assert found[1]["cancelled"] and found[0]["recurring"] and found[0]["attendees"] == ["Maya Chen", "Priya Raman"]
+    assert re.search(r"\[End\] >= '\d\d/\d\d/\d{4}' AND \[Start\] <= '\d\d/\d\d/\d{4}'", items.where)
+
+
+def test_windows_short_date_patterns_become_outlooks_filter_dates():
+    assert outlook_desktop._strftime_pattern("dd/MM/yyyy") == "%d/%m/%Y"
+    assert outlook_desktop._strftime_pattern("M/d/yyyy") == "%m/%d/%Y"
+    assert outlook_desktop._strftime_pattern("yyyy-MM-dd") == "%Y-%m-%d"
+    assert outlook_desktop._strftime_pattern("") == ""
+
+
+def test_the_calendar_says_when_outlooks_limit_cut_it_short(outlook, monkeypatch):
+    session, _items = outlook
+    # Long meetings that ended before the window come first (Outlook lists them by start) and are left out.
+    old = [Appointment(f"Old {n}", local(2026, 1, 1, 9), local(2026, 1, 2, 9), gid=f"G-old{n}") for n in range(5)]
+    kept = [Appointment("AP standup", local(2026, 10, 6, 9), local(2026, 10, 6, 9, 15), gid="G-standup")]
+    later = [Appointment("Later", local(2026, 11, 6, 9), local(2026, 11, 6, 10), gid="G-later")]
+    window = (datetime(2026, 10, 5, tzinfo=timezone.utc), datetime(2026, 11, 30, tzinfo=timezone.utc))
+
+    def read():
+        object.__setattr__(session.ns, "_defaults", {**session.ns._defaults, 9: CalendarFolder(CalendarItems(old + kept + later))})
+        return session.calendar(*window)
+
+    monkeypatch.setattr(outlook_desktop, "MAX_CALENDAR_ITEMS", 6)
+    found = read()
+    assert [m["subject"] for m in found] == ["AP standup"] and found.cut_short
+    monkeypatch.setattr(outlook_desktop, "MAX_CALENDAR_ITEMS", 3000)
+    found = read()
+    assert [m["subject"] for m in found] == ["AP standup", "Later"] and not found.cut_short

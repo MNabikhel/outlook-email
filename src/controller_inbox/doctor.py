@@ -161,7 +161,7 @@ def _optional(settings) -> list[Check]:
         found.append(Check(NOTE, "PDF tables: read by the built-in reader only (the second reader, Camelot, isn't installed)"))
     if sys.platform == "win32":
         why = outlook_desktop.available()
-        found.append(Check(NOTE, f"Classic Outlook: {why}") if why else Check(OK, "Classic Outlook: can be read on this computer"))
+        found.append(Check(NOTE, f"Classic Outlook: {why}") if why else _outlook_sync(settings))
     try:
         from controller_inbox.local_llm import check_model
 
@@ -176,6 +176,29 @@ def _optional(settings) -> list[Check]:
     except OSError:
         pass
     return found
+
+
+def _outlook_sync(settings) -> Check:
+    """Classic Outlook can be read here: whether it is connected (Settings → Sync inbox), its calendar too, and when
+    it was last synced."""
+    from controller_inbox import outlook_sync
+    from controller_inbox.clock import apply_saved_timezone, format_when
+    from controller_inbox.store import Store
+
+    try:
+        store = Store(settings.db_path)
+        apply_saved_timezone(settings, store)  # the time zone chosen in Setup, as the app shows times
+        cfg = outlook_sync.config(store)
+        last = store.get_state(outlook_sync.LAST_SYNC_KEY) or ""
+        calendar = store.get_state(outlook_sync.CALENDAR_LAST_KEY) or ""
+    except Exception:
+        return Check(OK, "Classic Outlook: can be read on this computer")
+    if not cfg["consent"]:
+        return Check(OK, "Classic Outlook: can be read on this computer; not connected (Settings, Sync inbox)")
+    said = f"connected, last synced {format_when(last, settings.tz)}" if last else "connected, not synced yet"
+    if cfg["calendar"]:
+        said += f"; calendar read {format_when(calendar, settings.tz)}" if calendar else "; calendar on, not read yet"
+    return Check(OK, f"Classic Outlook: {said}")
 
 
 def checks(*, port: bool = True, settings=None) -> list[Check]:
@@ -214,5 +237,13 @@ def report(found: list[Check]) -> str:
 
 def main() -> int:
     found = checks()
+    # A Windows console writes in its own code page: a character it lacks is shown as "?" rather than stopping the
+    # check with an error.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
+            pass
     print(report(found))
     return 1 if any(check.state == PROBLEM for check in found) else 0

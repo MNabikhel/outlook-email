@@ -470,6 +470,35 @@ def test_an_older_llama_cpp_says_its_context_on_props(settings, monkeypatch):
     assert (status.model, status.context_length, status.vision) == ("qwen2.5-3b-instruct", 8192, False)
 
 
+def test_the_advice_names_where_each_model_server_sets_its_context():
+    assert "LM Studio with Context Length 16,384" in agent.context_advice(4096, ["Q3 pack.xlsx"])
+    assert "OLLAMA_CONTEXT_LENGTH=16384" in agent.context_advice(4096, ["Q3 pack.xlsx"], "ollama")
+    assert "-c 16384" in agent.context_advice(8192, ["Q3 pack.xlsx"], "llama.cpp")
+    assert "in your model server" in agent.context_advice(4096, ["Q3 pack.xlsx"], "")
+
+
+def test_ollama_says_the_context_it_loaded_the_model_with(settings, monkeypatch):
+    # Ollama loads a model with a short context unless told otherwise (4,096 tokens) and cuts a longer prompt
+    # from the start without a word: the length it loaded the model with (/api/ps) is what the prompt fits.
+    asked = []
+
+    def fake_get(url, **_kwargs):
+        request = httpx.Request("GET", url)
+        asked.append(request.url.path)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, request=request, json={"data": [{"id": "qwen3:8b", "object": "model", "owned_by": "library"}]})
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, request=request, json={"models": [{"name": "qwen3:8b", "model": "qwen3:8b", "context_length": 4096}]})
+        return httpx.Response(404, request=request)
+
+    monkeypatch.setattr(local_llm.httpx, "get", fake_get)
+    settings.llm = True
+    settings.llm_base_url = "http://127.0.0.1:11434/v1"
+    status = local_llm.check_model(settings, use_cache=False)
+    assert (status.model, status.context_length, status.server) == ("qwen3:8b", 4096, "ollama")
+    assert "/api/show" not in asked, "the length a model was trained with is not the one it was loaded with"
+
+
 def test_lm_studio_context_length_and_tool_replies_are_read(settings, monkeypatch):
     def fake_get(url, **_kwargs):
         request = httpx.Request("GET", url)
@@ -994,3 +1023,27 @@ def test_an_original_file_is_hashed_once_until_it_changes(tmp_path, monkeypatch)
     assert len(reads) == 1
     path.write_bytes(b"two!")
     assert agent._file_sha256(path) == hashlib.sha256(b"two!").hexdigest()
+
+
+def test_a_held_related_email_is_listed_to_the_model_without_its_words(store):
+    from controller_inbox import agent
+    from controller_inbox.models import DocumentType
+    from test_links import _record
+
+    store.upsert_email(_record("root", sender="ar@northwind.com", mid="<root@northwind.com>", threading={"to": ["ap@taz.com"]}))
+    held = _record("held", sender="ar@northwlnd.com", threading={"in_reply_to": "root@northwind.com"}, received="2026-10-06T09:00:00+00:00",
+                   flags=["fraud_risk"])
+    held.subject = "Updated bank details: account 9988776612"
+    held.category = DocumentType.PAYMENT_INSTRUCTION_CHANGE
+    store.upsert_email(held)
+    ws = agent.Workspace(store, None, [store.get_email("root")])
+    lines = agent.related_lines(ws, ws.sources[0])
+    assert "held as possible payment fraud" in lines and "9988776612" not in lines and "Updated bank details" not in lines
+
+
+def test_an_ordinary_question_naming_an_original_is_no_history_question():
+    from controller_inbox.assistant import _HISTORY
+
+    assert not _HISTORY.search("What was the original due date?")
+    assert not _HISTORY.search("Which version of the template is this?")
+    assert _HISTORY.search("What happened on this so far?") and _HISTORY.search("How did this start? Show the earlier emails")

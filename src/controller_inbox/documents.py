@@ -657,9 +657,17 @@ def sheet_row_lines(rows: list[SheetRow], *, first_names_columns: bool = False) 
 
     header = _sheet_header(rows, first_names_columns=first_names_columns)
     labels = {c: v.replace("|", "/") for c, v in rows[header].cells.items()} if header is not None else {}
+    second = _second_heading_row(rows, header)
+    if second is not None:
+        labels = _two_row_labels(labels, rows[second].cells)
+        header = second
+    # Tables stacked on one sheet (an aging per entity) repeat the heading row over each; the one-cell row just
+    # above each heading row is that table's title, not one of the rows of the table before it.
+    repeats = {index for index, row in enumerate(rows) if header is not None and index > header and row.cells == rows[header].cells}
+    titles = {index - 1 for index in repeats | ({header} if header is not None else set()) if index > 0 and len(rows[index - 1].cells) == 1}
     out = []
     for index, row in enumerate(rows):
-        named = header is not None and index > header
+        named = header is not None and index > header and index not in repeats and index not in titles
         columns = sorted(row.cells)
         if named and len(columns) >= 2:
             columns = sorted(set(columns) | {c for c in labels if columns[0] < c < columns[-1]})
@@ -668,8 +676,50 @@ def sheet_row_lines(rows: list[SheetRow], *, first_names_columns: bool = False) 
             ref = f"{get_column_letter(column)}{row.number}"
             label = f" ({labels[column]})" if named and column in labels else ""
             cells.append(f"{ref}{label}: {row.cells.get(column) or tables.BLANK}")
-        out.append(" | ".join(cells))
+        line = " | ".join(cells)
+        # Each stacked table's title is a heading over its rows, so its rows are a table of their own, told apart
+        # by the title ("Canada entity (CAD)"), not added to the table above.
+        out.extend(["[heading]", line, ""] if repeats and index in titles else [line])
     return out
+
+
+def _second_heading_row(rows: list[SheetRow], header: int | None) -> int | None:
+    """The row under the header row that finishes its headings: "Actual" merged over three columns, with "Jul",
+    "Aug", "Sep" under it. It holds labels only, and only under a label of the row above or in the empty cells to
+    a label's right (the columns the label is merged over)."""
+    if header is None or header + 1 >= len(rows):
+        return None
+    top, under = rows[header].cells, rows[header + 1]
+    if under.number != rows[header].number + 1 or len(under.cells) < 2 or not top:
+        return None
+    values = [str(value) for value in under.cells.values()]
+    if any(tables.is_value(value) and not _MONTH_HEADING.fullmatch(value) for value in values) or len(set(values)) != len(values):
+        return None
+    # Its own columns sit under a heading merged across them ("Actual" over Jul, Aug, Sep). Told from a list's first
+    # row with a note past the last heading ("Called twice"): a heading row leaves a heading merged down empty under
+    # it ("Department", "Q3"), or has its own cells between two headings; that row fills every heading's column.
+    spanned = [column for column in under.cells if column not in top]
+    if not spanned or any(not any(c < column for c in top) for column in spanned):
+        return None
+    merged_down = any(column not in under.cells for column in top)
+    between = any(any(c > column for c in top) for column in spanned)
+    if not merged_down and not between:
+        return None
+    return header + 1
+
+
+_MONTH_HEADING = re.compile(r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?(\s*[-' ]?\s*\d{2,4})?|q[1-4](\s*\d{2,4})?|(19|20)\d\d")
+
+
+def _two_row_labels(top: dict[int, str], under: dict[int, object]) -> dict[int, str]:
+    """Each column's heading from both rows: the label over it (or the nearest one to its left, merged across)
+    and its own ("Actual Jul"). A column with nothing under its label keeps the label alone ("Q3", "Budget")."""
+    labels = dict(top)
+    for column in sorted(under):
+        own = str(under[column]).replace("|", "/")
+        over = top.get(column) or top[max(c for c in top if c < column)]
+        labels[column] = f"{over} {own}" if over != own else own
+    return labels
 
 
 def _sheet_header(rows: list[SheetRow], *, first_names_columns: bool = False) -> int | None:
@@ -1282,11 +1332,19 @@ def _sub_label(label: str, piece: str, n: int) -> str:
     return f"{label} (cont. {n})"
 
 
+# A page's layout label on a line of its own ("[notes]", "[facts]", "[table]"): where a part of the page starts, with
+# nothing in it to read.
+LAYOUT_MARK_RE = re.compile(r"^\s*\[(?:heading|facts|table|notes|columns)(?: [^\]\n]{0,40})?\]\s*$", re.I)
+
+
 def outline(text: str, *, limit: int = 40) -> list[str]:
-    """One line per section: its label and how it starts."""
+    """One line per section: its label and how it starts (its first line of text, not a layout label)."""
     rows = []
     for part in split_parts(text):
-        first = next((line.strip() for line in part.text.splitlines() if line.strip() and not line.startswith("(")), "")
+        first = next(
+            (line.strip() for line in part.text.splitlines() if line.strip() and not line.startswith("(") and not LAYOUT_MARK_RE.match(line)),
+            "",
+        )
         rows.append(f"{part.label}: {first[:90]}")
     if len(rows) > limit:
         rows = rows[:limit] + [f"… {len(rows) - limit} more sections"]

@@ -182,6 +182,7 @@ class Column:
     most: bool = False  # its formula holds on most rows, not every one (a footer row or two works otherwise)
     same_as: str = ""  # in a _cells table: the table whose column this repeats
     running: str = ""  # a running balance: what each row adds to the row above's ("+ charges - payments")
+    below: tuple[int, int] = (0, 0)  # figures: how many of its rows are below zero, of how many with a figure
 
 
 @dataclass
@@ -226,7 +227,11 @@ class Tables:
         self._db.create_function("like", 3, lambda pattern, value, escape: _like(pattern, value, escape, deadline=self._deadline), deterministic=True)
         self.facts: list[tuple[str, str, str]] = []
         count = small = 0
-        read = [(source, (text or "").splitlines(), table_lookup.tables_in(text)) for source, text in files]
+        # The tables the question names by their title (an entity, a sheet), else all but a hidden sheet's.
+        read = [
+            (source, (text or "").splitlines(), table_lookup.asked_tables(text or "", table_lookup.tables_in(text), question) if question else table_lookup.tables_in(text))
+            for source, text in files
+        ]
         loaded: set[str] = set()
         for source, lines, found in read:
             for table in found:
@@ -284,6 +289,9 @@ class Tables:
         section = any(row.group for row in table.body)
         columns = [Column("Section", _ident("section", taken), "text")] if section else []
         columns += [Column(label, _ident(label, taken), table.kinds.get(label, "text")) for label in table.labels]
+        for index, column in enumerate(columns[1 if section else 0 :]):
+            if column.kind == "figure" and _codes(column.label, [row.cells[index][1] for row in table.body if index < len(row.cells)]):
+                column.kind = "text"
         values: list[list] = []
         for row in table.body:
             cells = [row.group or None] if section else []
@@ -301,6 +309,10 @@ class Tables:
             columns[0].samples = [row.group for row in table.body if row.group]
         _formulas(columns, values)
         _running_balances(columns, values)
+        for index, column in enumerate(columns):
+            if column.kind == "figure":
+                figures = [row[index] for row in values if isinstance(row[index], float)]
+                column.below = (sum(1 for figure in figures if figure < 0), len(figures))
         self._db.execute(
             f"CREATE TABLE {name} ({', '.join(f'{c.name} {_sql_type(c.kind)}' for c in columns)})"
         )
@@ -718,6 +730,37 @@ def _ident(label: str, taken: set[str]) -> str:
     return name
 
 
+# Headings of a column that names its rows by a number (a department, an account, a store), rather than counting.
+_CODE_HEADING = re.compile(
+    r"\b(dept|department|div|division|code|id|no|nbr|num|number|#|entity|co|company|acct|account|gl|cost cent(er|re)|"
+    r"cc|store|branch|location|loc|site|region|units?|bu|class|fund|project|job|vendor|customer|emp|employee)\b\.?",
+    re.I,
+)
+# Headings that say outright they hold codes, whatever else they say ("Cost center", "Budget code", "Sales region").
+_CODE_PHRASE = re.compile(
+    r"\b(cost cent(er|re)s?|codes?|id|ids|region|regions|business units?|dept|department|division|entity|gl|"
+    r"(acct|account)\s*(no|nbr|num|number|#))\b|#",
+    re.I,
+)
+# Headings of a quantity, however they start ("Employee count", "Customer balance", "No. of invoices"): figures.
+_QUANTITY_HEADING = re.compile(
+    r"\b(count|counts|balance|total|amount|amt|cost|costs|sales|qty|quantity|units|hours|hrs|days|price|rate|revenue|"
+    r"spend|budget|actual|value|paid|due|owed|headcount|fte|items|invoices|orders)\b|\b(no|number)\.?\s+of\b",
+    re.I,
+)
+
+
+def _codes(label: str, cells: list[str]) -> bool:
+    """A figure column that is really a list of codes: headed like one, every cell a whole number as written
+    (no separators, decimals or signs), and few of them repeated over the rows (210, 320, 410)."""
+    if not _CODE_HEADING.search(label) or (_QUANTITY_HEADING.search(label) and not _CODE_PHRASE.search(label)):
+        return False
+    written = [cell.strip() for cell in cells if cell and cell != tables.BLANK]
+    if not written or not all(re.fullmatch(r"\d{1,10}", cell) for cell in written):
+        return False
+    return len(set(written)) <= max(40, len(written) // 3) and (len(written) < 4 or len(set(written)) < len(written))
+
+
 def _sql_type(kind: str) -> str:
     return "REAL" if kind == "figure" else "TEXT COLLATE NOCASE"
 
@@ -756,6 +799,10 @@ def _describe(column: Column, names: int = MAX_NAMES) -> str:
             note += ", a percent (6.3 means 6.3%)"
         if column.running:
             return f"{note}, a running balance: each row's is the row above's {column.running}; the last row's is the balance, never add it up"
+        below, of = column.below
+        if 0 < below < of and not column.formula:
+            # Debits and credits in one column (a bank export): the rows below zero are one side.
+            note += f", below 0 on {below} of its {of} rows"
         return f"{note} = {column.formula} on {'most rows' if column.most else 'every row'}" if column.formula else note
     if column.kind == "date":
         stored = next((_stored(s, "date") for s in column.samples if table_lookup.cell_date(s)), "")
@@ -949,6 +996,10 @@ def _over(headings: list[str], columns: list[Column], family: list[int]) -> str:
 
 
 _FACT = re.compile(r"^([A-Z][\w .&/()#'-]{1,40}?):\s+(\S.{0,100})$")
+# A workbook cell as documents.py writes it: "B3: text", or "B3 (heading): text" under a heading.
+_CELL = re.compile(r"^([A-Z]{1,3}\d+)( \([^)]*\))?: ?(.*)$")
+# A cell that labels the one beside it: words, not a figure or a date.
+_LABEL = re.compile(r"^[A-Za-z][\w .&/()#'-]{1,40}:?$")
 
 
 def _facts_in(lines: list[str], rows: set[int] = frozenset()) -> list[tuple[str, str]]:
@@ -966,6 +1017,23 @@ def _facts_in(lines: list[str], rows: set[int] = frozenset()) -> list[tuple[str,
             block = line.strip()
             continue
         pieces = [piece.strip() for piece in line.strip().split(" | ")]
+        cells = [_CELL.match(piece) for piece in pieces]
+        if all(cells):
+            # A workbook's cells ("A1: Pay date | B1: 10/15/2026"): a label beside its value, or one cell that reads
+            # as a detail ("Prepared by: L. Wei"). More cells across are a heading row or a row of their own.
+            values = [cell.group(3).strip() for cell in cells]
+            headed = any(cell.group(2) for cell in cells)
+            if headed:
+                continue
+            if len(values) == 1 and (match := _FACT.match(values[0])):
+                pair = (match.group(1).strip(), match.group(2).strip())
+            elif len(values) == 2 and _LABEL.match(values[0]) and values[1]:
+                pair = (values[0].rstrip(":").strip(), values[1])
+            else:
+                continue
+            if pair not in found:
+                found.append(pair)
+            continue
         named = [piece for piece in pieces if ": " in piece]
         # In a table, a line of several "Name: value" pieces is a row; elsewhere it is several details
         # ("Prepared by: R. Delgado | Date: 10/12/2026").

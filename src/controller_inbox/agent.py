@@ -48,6 +48,15 @@ LOCKED = (
 )
 
 SUMMARY_RE = re.compile(r"\b(summar\w*|overview|gist|tl;?dr|walk me through|what(?:'s| is| does) (?:it|this|the \w+) (?:say|about|cover))\b", re.I)
+# "Summary" naming a place in the file ("on the summary", "the summary tab"), not asking for one.
+_SUMMARY_PLACE = re.compile(
+    r"\b(?:on|in|from|of|per|under)\s+the\s+summar(?:y|ies)\b|\bsummar(?:y|ies)\s+(?:sheet|tab|page|row|line|column|table|section|schedule)s?\b", re.I
+)
+
+
+def asks_summary(question: str) -> bool:
+    """Whether the question asks for a file to be summarized, not about a figure on its summary sheet."""
+    return bool(SUMMARY_RE.search(_SUMMARY_PLACE.sub(" ", question or "")))
 
 # A question's filler, past what every question has (``documents.STOP_WORDS``), and the words for a file itself.
 _STOP = documents.STOP_WORDS | set(
@@ -307,18 +316,26 @@ def context_capacity(tokens: int, reply_tokens: int = 500) -> dict[str, object]:
     return {"tokens": tokens, "label": f"{tokens:,} tokens", "text": f"{fits}; needs {memory}. {note}", "tier": tier}
 
 
-def context_advice(context_tokens: int, left_out: list[str]) -> str:
+# Where each model server sets the context length, for the advice when a file didn't fit.
+_RAISE_CONTEXT = {
+    "lm_studio": f"reload the model in LM Studio with Context Length {RECOMMENDED_CONTEXT:,} or more "
+    "(My Models → the model's settings → Context Length)",
+    "ollama": f"start Ollama with a longer context (in its Settings, Context length {RECOMMENDED_CONTEXT:,} or more; "
+    f"or set OLLAMA_CONTEXT_LENGTH={RECOMMENDED_CONTEXT})",
+    "llama.cpp": f"start llama.cpp's server with a longer context (-c {RECOMMENDED_CONTEXT})",
+    "": f"load the model with a context length of {RECOMMENDED_CONTEXT:,} tokens or more in your model server",
+}
+
+
+def context_advice(context_tokens: int, left_out: list[str], server: str = "lm_studio") -> str:
     if not left_out:
         return ""
     named = [item for item in left_out if not item.startswith("the ")]
     what = ", ".join(dict.fromkeys(named or left_out))
     if (context_tokens or DEFAULT_CONTEXT) < RECOMMENDED_CONTEXT:
         known = f"{context_tokens:,}-token" if context_tokens else "small (probably 4,096-token)"
-        return (
-            f"Your model has a {known} context window, so I only read parts of {what}. "
-            f"For whole documents, reload the model in LM Studio with Context Length {RECOMMENDED_CONTEXT:,} or more "
-            "(My Models → the model's settings → Context Length), then ask again."
-        )
+        raise_it = _RAISE_CONTEXT.get(server, _RAISE_CONTEXT[""])
+        return f"Your model has a {known} context window, so I only read parts of {what}. For whole documents, {raise_it}, then ask again."
     several = len(dict.fromkeys(named)) > 1 or not named
     return (
         f"{what[0].upper()}{what[1:]} {'are' if several else 'is'} long, so I read only part of {'them' if several else 'it'}. "
@@ -521,7 +538,7 @@ def query_tables(ws: Workspace, question: str, complete) -> Iterator[dict]:
     email = ws.primary()
     if not ws.settings.table_queries or email is None or email.id in ws.worked or not email.attachments:
         return
-    if attachments_locked(email) or SUMMARY_RE.search(question):
+    if attachments_locked(email) or asks_summary(question):
         return
     ws.worked[email.id] = ""
     readable = [att for att in email.attachments if (att.extracted_text or "").strip()]
@@ -552,7 +569,7 @@ def file_context(ws: Workspace, question: str, room: int) -> dict[str, str]:
     primary = ws.primary()
     if primary is not None and primary.attachments:
         targets = [primary] + [email for email in targets if email.id != primary.id][:1]
-    whole = bool(SUMMARY_RE.search(question))
+    whole = bool(asks_summary(question))
     for position, email in enumerate(targets):
         share = room if len(targets) == 1 else (room * 2 // 3 if position == 0 else room // 3)
         if attachments_locked(email):
@@ -670,7 +687,7 @@ def question_points(ws: Workspace, question: str) -> list[tuple[str, str]]:
     """What the question asks of the open email's file tables (``Workspace.points``), worked out before the prompt
     is built so the reply can be given room for every point."""
     primary = ws.primary()
-    if primary is None or attachments_locked(primary) or SUMMARY_RE.search(question):
+    if primary is None or attachments_locked(primary) or asks_summary(question):
         return []
     readable = [att for att in primary.attachments if (att.extracted_text or "").strip()]
     for att in named_files(readable, question) or readable:
@@ -891,7 +908,7 @@ def overnight_summary(store: Store, att: AttachmentRecord) -> str:
 def summary_request(ws: Workspace, question: str) -> tuple[AttachmentRecord, str] | None:
     """The one file a "summarize the file" question is about and its overnight summary, when there is one."""
     email = ws.primary()
-    if email is None or not SUMMARY_RE.search(question) or attachments_locked(email):
+    if email is None or not asks_summary(question) or attachments_locked(email):
         return None
     readable = [att for att in email.attachments if (att.extracted_text or "").strip()]
     named = named_files(readable, question)
@@ -946,12 +963,18 @@ def earlier_findings(ws: Workspace, email: EmailRecord, limit: int = 5) -> str:
     return NOTES_HEAD + "\n" + "\n".join(f"- {row['text']}" for row in reversed(rows))
 
 
-def file_matches(email: EmailRecord, question: str, *, limit: int = 3, outline: bool = True) -> list[str]:
-    """Plain lines for the no-model answer: where the question's words appear in the email's files."""
+def file_matches(email: EmailRecord, question: str, *, limit: int = 3, outline: bool = True, tz=None, invitations: bool = True) -> list[str]:
+    """Plain lines for the no-model answer: where the question's words appear in the email's files. An invitation
+    file is the meeting it holds ("Q4 planning review, Thursday September 24, 2:00 PM–3:00 PM"), never its raw text;
+    with ``invitations=False`` (the meeting is said already) it is left out."""
     if attachments_locked(email):
         return ["Files are locked: this email is flagged as possible payment fraud."] if email.attachments else []
-    lines = []
+    lines, matched = [], False
     for att in email.attachments:
+        if is_invitation(att):
+            if invitations and (said := invitation_line(att, tz)):
+                lines.append(f"{att.filename}: {said}")
+            continue
         text = att.extracted_text or ""
         if not text.strip():
             continue
@@ -961,22 +984,93 @@ def file_matches(email: EmailRecord, question: str, *, limit: int = 3, outline: 
         for part in hits[:limit]:
             snippet = _snippet(part.text, documents.terms(question, stop=_STOP))
             lines.append(f"{att.filename} · {part.label}: {snippet}")
-    if not lines and outline:
+            matched = True
+    if not matched and outline:
         for att in email.attachments[:4]:
             text = att.extracted_text or ""
-            if text.strip():
-                sections = documents.outline(text, limit=4)
-                lines.append(f"{att.filename}: " + " / ".join(sections))
+            if text.strip() and not is_invitation(att):
+                parts = documents.split_parts(text)
+                if len(parts) == 1:  # one page: how it reads, not just its first line
+                    lines.append(f"{att.filename}: {parts[0].label}: {_snippet(parts[0].text, [])}")
+                else:
+                    lines.append(f"{att.filename}: " + " / ".join(documents.outline(text, limit=4)))
     return lines[: limit * 2]
 
 
 def _snippet(text: str, words: list[str], width: int = 180) -> str:
-    flat = " ".join(text.split())
-    low = flat.lower()
-    at = min((low.find(word) for word in words if word in low), default=0)
-    start = max(0, at - 60)
-    piece = flat[start : start + width]
-    return ("…" if start else "") + piece + ("…" if start + width < len(flat) else "")
+    """The lines of ``text`` with the question's words (or its first lines), up to ``width`` characters: text to
+    read, not the page's layout labels ("[notes]")."""
+    rows = [" ".join(line.split()) for line in text.splitlines() if line.strip() and not documents.LAYOUT_MARK_RE.match(line)]
+    hits = [row for row in rows if any(word in row.lower() for word in words)]
+    picked = hits or rows
+    if not picked:
+        return ""
+    if len(picked[0]) > width:
+        # One long line (a paragraph): the window around the first word it has.
+        flat, low = picked[0], picked[0].lower()
+        at = min((low.find(word) for word in words if word in low), default=0)
+        start = max(0, at - 60)
+        piece = flat[start : start + width]
+        return ("…" if start else "") + piece + ("…" if start + width < len(flat) else "")
+    shown = [picked[0]]
+    for row in picked[1:]:
+        if sum(len(item) + 3 for item in shown) + len(row) > width:
+            break
+        shown.append(row)
+    more = len(shown) < len(picked)
+    return " · ".join(shown) + (" …" if more else "")
+
+
+def is_invitation(att: AttachmentRecord) -> bool:
+    """A calendar invitation (.ics): what it holds is a meeting, not text to quote."""
+    return (
+        Path(att.filename or "").suffix.lower() in {".ics", ".vcs"}
+        or (att.content_type or "").lower().startswith("text/calendar")
+        or (att.extracted_text or "").lstrip().upper().startswith("BEGIN:VCALENDAR")
+    )
+
+
+def meeting_when(meeting: dict) -> str:
+    """A meeting's day and time as people say it ("Thursday September 24, 2:00 PM–3:00 PM"), from its local
+    times as ``calendar_events.shown`` gives them."""
+    try:
+        start = datetime.fromisoformat(meeting["start"])
+        end = datetime.fromisoformat(meeting["end"]) if meeting.get("end") else None
+    except (KeyError, TypeError, ValueError):
+        return ""
+    day = f"{start:%A %B} {start.day}"
+    if meeting.get("all_day"):
+        return f"{day}, all day"
+
+    def clock(value: datetime) -> str:
+        return f"{value:%I:%M %p}".lstrip("0")
+
+    if end is None:
+        return f"{day}, {clock(start)}"
+    if end.date() != start.date():
+        return f"{day}, {clock(start)} to {end:%A %B} {end.day}, {clock(end)}"
+    return f"{day}, {clock(start)}–{clock(end)}"
+
+
+def invitation_line(att: AttachmentRecord, tz=None) -> str:
+    """An invitation file as the meeting it holds: "Q4 planning review, Thursday September 24, 2:00 PM–3:00 PM",
+    in ``tz`` (UTC, said so, without one). "" when no meeting can be read from it."""
+    from controller_inbox import calendar_events
+
+    try:
+        meetings = calendar_events.from_ics(att.extracted_text or "")
+    except Exception:  # an invitation that can't be read is left out, never shown as raw text
+        return ""
+    if not meetings:
+        return ""
+    first = meetings[0]
+    shown = calendar_events.shown(first.to_row(), tz or timezone.utc)
+    said = f"{shown['subject']}, {meeting_when(shown)}" + ("" if tz is not None or shown["all_day"] else " (UTC)")
+    if first.cancelled:
+        said += " (cancelled)"
+    elif first.recurring or len(meetings) > 1:
+        said += " (repeats)"
+    return said
 
 
 # Tools --------------------------------------------------------------------------------------
@@ -1134,10 +1228,52 @@ def _open_email(ws: Workspace, email: EmailRecord) -> str:
             for att in email.attachments:
                 if (att.extracted_text or "").strip():
                     lines.append(f"Outline of {att.filename}: " + " / ".join(documents.outline(att.extracted_text, limit=10)))
+    if related := related_lines(ws, email):
+        lines.append(related)
     notes = earlier_findings(ws, email)
     if notes:
         lines.append(notes)
     return "\n".join(lines)
+
+
+MAX_RELATED = 6
+
+
+def related_lines(ws: Workspace, email: EmailRecord) -> str:
+    """The emails linked to ``email`` (links.py), numbered so the model can open them: its conversation, then the
+    mail sharing an invoice, a PO or a file with it, each with why."""
+    from controller_inbox import links
+
+    from controller_inbox.assistant import is_fraud
+
+    found = links.related(ws.store, email)
+    rows: list[str] = []
+
+    def row(other: EmailRecord, why: str) -> str:
+        # A held email is listed without its words or a number to open it by. A cautioned one is never taken at its
+        # word, and a sender new to the conversation (a lookalike's reply) is named by address, to be checked.
+        if attachments_locked(other):
+            return f"- {other.received_at[:10]} · an email held as possible payment fraud ({why}): not shown — Warning: verify by phone"
+        warn = " — Warning: payment-detail change, verify by phone" if is_fraud(other) or "payment_caution" in other.flags else ""
+        if other.id in found["new_domains"]:
+            warn += " — Warning: this sender's domain is new to the conversation; check it is who it claims"
+        who = f"{other.sender_name} <{other.sender_email}>" if other.sender_name and other.sender_email else other.sender_name or other.sender_email or "(no address)"
+        return f"[{ws.number(other)}] {other.received_at[:10]} · {who} · “{other.subject}” ({why}){warn}"
+
+    # The conversation's emails nearest the one open, not its oldest: the window ``related`` gives is centred on it.
+    thread = [other for other in found["thread"] if other.id != email.id]
+    if len(thread) > MAX_RELATED:
+        times = [abs((links.when(other) or datetime.min.replace(tzinfo=timezone.utc)) - (links.when(email) or datetime.min.replace(tzinfo=timezone.utc))) for other in thread]
+        keep = {other.id for _gap, other in sorted(zip(times, thread), key=lambda pair: pair[0])[:MAX_RELATED]}
+        thread = [other for other in thread if other.id in keep]
+    for other in thread:
+        if len(rows) < MAX_RELATED:
+            rows.append(row(other, "same conversation"))
+    for group in found["groups"]:
+        for other in group["emails"]:
+            if len(rows) < MAX_RELATED:
+                rows.append(row(other, group["label"].lower()))
+    return "Related emails (open one by its number):\n" + "\n".join(rows) if rows else ""
 
 
 def _read_file(att: AttachmentRecord, label: str) -> str:
@@ -1183,7 +1319,7 @@ def _note(ws: Workspace, text: str, ref) -> str:
         # A note is kept for later questions, so it may only be about an email that was actually read.
         return f"Open [{ws.number(email)}] with open_email before writing a note about it."
     ws.notes.append(text)
-    if email is not None:
+    if email is not None and email.source not in {"calendar"}:  # the calendar stand-in is no email to keep notes on
         at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         ws.store.add_finding(email.id, text, question=ws.question, at=at)
     return "Noted."

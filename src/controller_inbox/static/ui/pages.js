@@ -2,6 +2,7 @@
    and the daily digest. The Settings page is settings.js. */
 
 import { h, icon, plural, toast } from "./dom.js";
+import { meetingTime } from "./format.js";
 
 const enc = encodeURIComponent;
 const mailLink = (id, text, listKey) => h("a", { href: `/app/mail/${enc(id)}${listKey ? `?in=${enc(listKey)}` : ""}`, dataset: { nav: "" } }, text);
@@ -61,7 +62,7 @@ function getStarted(meta, actions) {
         { class: "set-steps" },
         h("li", null, "Drag messages from Outlook into the drop folder: ", h("code", { class: "path" }, meta.drop_folder || "inbox/incoming"), ". Classic Outlook saves ", h("code", null, ".msg"), " files; the new Outlook and Outlook on the web save ", h("code", null, ".eml"), "."),
         h("li", null, "Click ", h("b", null, "Process new mail"), ". Each message is sorted, summarized and searchable, with or without a local model."),
-        meta.outlook_ready ? h("li", null, "Or let CloseDesk copy your mail from Outlook, read only: ", h("a", { href: "/app/settings#set-outlook", dataset: { nav: "" } }, "Settings → Outlook (classic)"), ".") : null
+        meta.outlook_ready ? h("li", null, "Or let CloseDesk copy your mail from Outlook, read only: ", h("a", { href: "/app/settings#set-outlook", dataset: { nav: "" } }, "Settings → Sync inbox"), ".") : null
       ),
       h(
         "div",
@@ -95,14 +96,7 @@ export function todayView(data, meta, actions) {
         kpi("Fraud flags", meta.counts.fraud_alerts, meta.counts.fraud_alerts ? "danger" : "", "/app/fraud"),
         meta.coding.review ? kpi("AP to code", meta.coding.review, "", "/app/coding") : null
       ),
-      data.alerts.length
-        ? h(
-            "section",
-            { class: "card card-danger" },
-            h("h2", { class: "rd-h" }, icon("alert", 14), " Do not process — verify by phone"),
-            itemList(data.alerts, "", (item) => [mailLink(item.id, item.subject, "today"), h("small", null, `${item.sender} · ${item.summary || ""}`)])
-          )
-        : null,
+      ...todayBrief(data),
       h(
         "div",
         { class: "cards2" },
@@ -128,6 +122,45 @@ export function todayView(data, meta, actions) {
         )
       ),
       h("p", { class: "muted small keys" }, "Work down the focus list: ", h("kbd", null, "j"), "/", h("kbd", null, "k"), " to move, ", h("kbd", null, "Enter"), " to open, ", h("kbd", null, "e"), " to mark done.")
+    )
+  );
+}
+
+/** The top of Today: the payment warnings and today's meetings. A phone, which shows the list on its own, shows
+    these above it (main.js). */
+export function todayBrief(data) {
+  return [
+    data.alerts && data.alerts.length
+      ? h(
+          "section",
+          { class: "card card-danger" },
+          h("h2", { class: "rd-h" }, icon("alert", 14), " Do not process — verify by phone"),
+          itemList(data.alerts, "", (item) => [mailLink(item.id, item.subject, "today"), h("small", null, `${item.sender} · ${item.summary || ""}`)])
+        )
+      : null,
+    meetingsCard(data.meetings_today || []),
+  ].filter(Boolean);
+}
+
+/* Today's meetings, each opening in the calendar beside the mail about it. */
+function meetingsCard(meetings) {
+  if (!meetings.length) return null;
+  return card(
+    "Today's meetings",
+    h(
+      "ul",
+      { class: "plain-list meetings" },
+      meetings.map((m) =>
+        h(
+          "li",
+          { class: m.cancelled ? "cancelled" : "" },
+          h("a", { href: `/app/calendar?${new URLSearchParams({ view: "day", date: m.start.slice(0, 10), meeting: m.id })}`, dataset: { nav: "" } }, m.subject),
+          h("small", null, [meetingTime(m), m.location, m.cancelled ? "cancelled" : ""].filter(Boolean).join(" · "))
+        )
+      )
+    ),
+    // Beside the list, not in its heading: read out, the heading said "Today's meetings Calendar".
+    h("p", { class: "small" }, h("a", { href: "/app/calendar", dataset: { nav: "" } }, "Open the calendar", icon("right", 12))
     )
   );
 }

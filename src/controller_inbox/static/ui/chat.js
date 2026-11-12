@@ -4,7 +4,7 @@
 
 import { h, icon, append, replace, toast, plural, reducedMotion } from "./dom.js";
 import { getJSON, postJSON, postStream } from "./api.js";
-import { formatAnswer, mailHref, fileHref } from "./format.js";
+import { formatAnswer, mailHref, fileHref, lookedAt } from "./format.js";
 
 const CHAT_KEY = "closedesk-chat-id";
 const OPEN_KEY = "closedesk-ws-chat";
@@ -75,7 +75,7 @@ export function createChat({ root, onToggle, visionRead }) {
     return h(
       "details",
       { class: "msg-sources-all" },
-      h("summary", null, `Looked at ${plural(sources.length, "email")}`),
+      h("summary", null, lookedAt(sources)),
       h(
         "ul",
         null,

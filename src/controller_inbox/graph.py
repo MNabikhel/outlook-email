@@ -20,6 +20,7 @@ import msal
 from controller_inbox.clock import parse_stamp
 from controller_inbox.extract import html_to_text
 from controller_inbox.models import RawAttachment, RawMessage
+from controller_inbox import links
 
 
 GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -141,7 +142,7 @@ class GraphMailbox:
             "$orderby": "receivedDateTime desc",
             "$select": (
                 "id,subject,from,replyTo,receivedDateTime,body,bodyPreview,hasAttachments,"
-                "importance,isRead,conversationId,internetMessageId"
+                "importance,isRead,conversationId,internetMessageId,toRecipients,ccRecipients"
             ),
             "$filter": " and ".join(filters),
         }
@@ -237,7 +238,20 @@ class GraphMailbox:
             source="graph",
             reply_to=_reply_to(item, sender.get("address") or ""),
             attachments=[],
+            # Who it went to: Microsoft 365 gives no reply headers here, so who took part in a conversation is
+            # told from its senders and recipients (links.new_domains).
+            threading=links.threading(to=_recipients(item)),
         )
+
+
+def _recipients(item: dict[str, Any]) -> list[str]:
+    found = []
+    for field in ("toRecipients", "ccRecipients"):
+        for entry in item.get(field) or []:
+            address = ((entry or {}).get("emailAddress") or {}).get("address") or ""
+            if "@" in address:
+                found.append(address.strip().lower())
+    return list(dict.fromkeys(found))
 
 
 def _reply_to(item: dict[str, Any], sender: str) -> str:

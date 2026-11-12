@@ -6,10 +6,12 @@ import { $, h, icon, replace, toast, plural, isTyping, reducedMotion, skeletonLi
 import { getJSON, postJSON } from "./api.js";
 import { MAIL_PAGE, listSpec, loadList, rowEl } from "./lists.js";
 import { emailView, fileView, errorView } from "./reader.js";
-import { todayView, fraudView, codingView, digestView, emptyReader } from "./pages.js";
+import { todayView, todayBrief, fraudView, codingView, digestView, emptyReader } from "./pages.js";
 import { createSettings } from "./settings.js";
 import { createChat } from "./chat.js";
 import { createOverlays } from "./palette.js";
+import { traceView } from "./trace.js";
+import { calendarView, rangeOf } from "./calendar.js";
 
 const enc = encodeURIComponent;
 const root = document.documentElement;
@@ -36,6 +38,7 @@ const S = {
   polling: false, // a status check is on its way
   jobSeq: 0, // bumped when this page starts a job, so a status fetched before that doesn't undo it
   topJob: "", // what the job bar shows
+  focus: null, // { emailId, at: "heading" | "matter" }: where keys go once that email is drawn
 };
 
 /* ---------- Addresses ---------- */
@@ -57,6 +60,14 @@ function parse() {
   else if (first === "fraud") route.list = "fraud";
   else if (first === "coding") route.list = `coding:${q.get("status") || "review"}`;
   else if (first === "digest" || first === "settings") route.list = null;
+  else if (first === "calendar") {
+    route.list = null;
+    route.calView = q.get("view") || "week";
+    route.meeting = q.get("meeting") || "";
+  } else if (first === "trace" && second) {
+    route.list = null;
+    route.traceId = second;
+  }
   else if (first === "mail") {
     route.emailId = second;
     route.list = q.get("in") || null;
@@ -70,9 +81,13 @@ const mailUrl = (id, key = currentKey()) => `/app/mail/${enc(id)}${key ? `?in=${
 const fileUrl = (id, n, tab, key = currentKey()) => `/app/mail/${enc(id)}/file/${n}?${new URLSearchParams({ ...(key ? { in: key } : {}), tab })}`;
 
 function navigate(url, { replace: swap = false } = {}) {
-  if (url !== location.pathname + location.search) history[swap ? "replaceState" : "pushState"]({}, "", url);
+  const here = location.pathname + location.search;
+  // Each address keeps the one it was opened from: closing an email opened from the calendar goes back there.
+  if (url !== here) history[swap ? "replaceState" : "pushState"](swap ? history.state || {} : { from: here }, "", url);
   sync();
 }
+
+const openedFrom = () => (history.state && typeof history.state.from === "string" ? history.state.from : "");
 
 window.addEventListener("popstate", () => sync());
 
@@ -81,6 +96,7 @@ window.addEventListener("popstate", () => sync());
 const NAV = [
   { id: "today", label: "Today", icon: "today", url: "/app", count: () => (S.cache.get("today") ? S.cache.get("today").items.length : "") },
   { id: "tasks", label: "Tasks", icon: "tasks", url: "/app/tasks", count: (m) => m.counts.open_actions },
+  { id: "calendar", label: "Calendar", icon: "calendar", url: "/app/calendar" },
   { heading: "Mail" },
   { id: "folder:important", label: "Important", icon: "important", url: "/app/folder/important", count: (m) => m.counts.important },
   { id: "folder:informational", label: "Informational", icon: "informational", url: "/app/folder/informational", count: (m) => m.counts.informational },
@@ -377,8 +393,11 @@ function renderItems() {
   }
   const count = $(".list-count", listPane);
   if (count) count.textContent = shown.length === items.length ? String(items.length) : `${shown.length} of ${items.length}`;
+  // A phone shows Today's list without the overview beside it: its warnings and meetings come first here.
+  const brief = spec.kind === "focus" && S.list.data ? todayBrief(S.list.data) : [];
+  const top = brief.length ? h("div", { class: "list-brief" }, ...brief) : null;
   if (!shown.length) {
-    replace(body, h("div", { class: "list-empty" }, icon(spec.kind === "focus" ? "ok" : "all", 24), h("p", null, items.length ? "Nothing matches this filter." : spec.empty)));
+    replace(body, top, h("div", { class: "list-empty" }, icon(spec.kind === "focus" ? "ok" : "all", 24), h("p", null, items.length ? "Nothing matches this filter." : spec.empty)));
     return;
   }
   const openId = S.email && S.route && S.route.emailId ? S.email.id : null;
@@ -406,7 +425,7 @@ function renderItems() {
       : null;
   const hadFocus = body.contains(document.activeElement);
   const scrolled = body.scrollTop;
-  replace(body, ul, more);
+  replace(body, top, ul, more);
   body.scrollTop = scrolled;
   if (hadFocus) ul.focus({ preventScroll: true });
   updateSelection(false);
@@ -482,7 +501,7 @@ function loadMore(spec) {
   return ensureList(spec.key, { force: true, quiet: true });
 }
 
-const navId = () => (S.route && !S.route.list && (S.route.view === "digest" || S.route.view === "settings") ? S.route.view : S.list ? listSpec(S.list.spec.key).nav : "");
+const navId = () => (S.route && !S.route.list && ["digest", "settings", "calendar"].includes(S.route.view) ? S.route.view : S.list ? listSpec(S.list.spec.key).nav : "");
 
 /* ---------- Moving and opening ---------- */
 
@@ -515,9 +534,25 @@ function closeEmail() {
   if (!S.route) return;
   if (S.route.file && S.email) return navigate(mailUrl(S.email.id));
   if (S.route.emailId) {
+    // Opened from a meeting: back to the calendar, with the meeting open.
+    if (openedFrom().startsWith("/app/calendar")) return navigate(openedFrom());
     navigate(S.list ? S.list.spec.url : "/app");
     focusList();
   }
+}
+
+/* Keys go to the email just opened from a link in the reading pane (a Related row, a meeting's mail): its
+   heading, or back from its whole matter, the link that opened it. */
+function focusOpened(id) {
+  const want = S.focus;
+  S.focus = null;
+  if (!want || want.emailId !== id) return;
+  const view = [...reader.querySelectorAll(".rd[data-email]")].find((el) => el.dataset.email === id);
+  if (!view) return;
+  const target = (want.at === "matter" && ($('#rd-related a[href^="/app/trace/"]', view) || $("#rd-related", view))) || $(".rd-subject", view);
+  if (!target) return;
+  if (!target.matches("a, button")) target.setAttribute("tabindex", "-1");
+  target.focus({ preventScroll: want.at !== "matter" });
 }
 
 /* ---------- The reading pane ---------- */
@@ -697,6 +732,7 @@ async function showEmail(id, file, tab) {
   } else {
     document.title = `${d.subject} · CloseDesk`;
     if (S.shown !== `email:${d.id}`) drawEmail();
+    focusOpened(d.id);
   }
   return d;
 }
@@ -780,6 +816,58 @@ const settings = createSettings({
   },
 });
 
+function showTrace(id) {
+  const key = `trace:${id}`;
+  if (S.shown !== key) setReader(skeletonReader(), "", { animate: false });
+  const wanted = () => S.route.view === "trace" && S.route.traceId === id;
+  getJSON(`/api/trace/${enc(id)}`)
+    .then((data) => {
+      if (!wanted()) return;
+      document.title = `The whole matter: ${data.email.subject} · CloseDesk`;
+      // The chat answers about the email the matter was traced from.
+      chat.setScope({ id: data.email.id, subject: data.email.subject });
+      setReader(traceView(data), key);
+    })
+    .catch((error) => {
+      if (wanted()) setReader(errorView(error.message), "error");
+    });
+}
+
+let calendarPage = null;
+
+function showCalendar(route) {
+  document.title = "Calendar · CloseDesk";
+  const key = `calendar:${route.calView}:${route.date}:${route.meeting}`;
+  if (!S.shown.startsWith("calendar:")) setReader(skeletonReader(), "", { animate: false });
+  const wanted = () => S.route.view === "calendar" && S.route.calView === route.calView && S.route.date === route.date;
+  const [first, last] = rangeOf(route.calView, route.date || new Date().toISOString().slice(0, 10));
+  const span = { start: first.toISOString().slice(0, 10), end: last.toISOString().slice(0, 10) };
+  getJSON(`/api/calendar?${new URLSearchParams(span)}`)
+    .then((data) => {
+      if (!wanted()) return;
+      if (!route.date && (data.today < span.start || data.today > span.end)) {
+        // The board's day (its time zone, or the sample's date) isn't in this browser's week: show the board's.
+        return navigate(`/app/calendar?${new URLSearchParams({ view: route.calView, date: data.today })}`, { replace: true });
+      }
+      calendarPage = calendarView(data, route, {
+        navigate,
+        // A meeting opened here goes into the address without drawing the calendar again.
+        remember(url) {
+          if (url === location.pathname + location.search) return;
+          history.replaceState(history.state || {}, "", url);
+          S.route = parse();
+        },
+        ask: (question, emailId) => chat.ask(question, emailId),
+        getJSON,
+      });
+      setReader(calendarPage, key, { animate: !S.shown.startsWith("calendar:") });
+      if (route.meeting) calendarPage.focusMeeting();
+    })
+    .catch((error) => {
+      if (wanted()) setReader(errorView(error.message), "error");
+    });
+}
+
 function showSettings() {
   document.title = "Settings · CloseDesk";
   settings.open();
@@ -791,7 +879,7 @@ async function sync() {
   const route = parse();
   const before = S.route;
   S.route = route;
-  const doc = route.view === "digest" || route.view === "settings";
+  const doc = route.view === "digest" || route.view === "settings" || route.view === "trace" || route.view === "calendar";
   ws.classList.toggle("doc", doc);
   ws.classList.toggle("wide", Boolean(route.file));
   ws.classList.toggle("reading", Boolean(route.emailId) || doc);
@@ -800,6 +888,8 @@ async function sync() {
     S.email = null;
     chat.setScope(null);
     updateRail(route.view);
+    if (route.view === "trace") return showTrace(route.traceId);
+    if (route.view === "calendar") return showCalendar(route);
     return route.view === "digest" ? showDigest(route.date) : showSettings();
   }
   if (before && (before.view === "digest" || before.view === "settings") && S.list) {
@@ -1020,6 +1110,9 @@ function refreshData() {
 }
 
 function finished(job) {
+  // "Syncing Outlook…" goes once the run has ended, however it ended: what it found (or why not) is said next.
+  if (S.syncing) S.syncing();
+  S.syncing = null;
   if (job.state === "error" && job.about && job.about.kind === "vision") {
     return visionDone({ ...job.about, pages: 0, message: `The read stopped: ${job.error}` });
   }
@@ -1044,7 +1137,9 @@ function finished(job) {
 async function syncOutlook() {
   try {
     const result = await postJSON("/api/outlook/sync");
-    toast(result.message);
+    // "Syncing Outlook…" goes when the sync ends, whatever it says then (finished).
+    if (S.syncing) S.syncing();
+    S.syncing = toast(result.message, { ms: result.started ? 120000 : 4000 });
     if (S.meta && result.started) {
       S.jobSeq += 1;
       S.meta.job = { ...result.job, stage_label: "Copying mail from Outlook" };
@@ -1172,11 +1267,16 @@ document.addEventListener("click", (event) => {
   if (url.origin !== location.origin || !url.pathname.startsWith("/app")) return;
   event.preventDefault();
   if (anchor.dataset.key) S.sel = anchor.dataset.key;
+  const mail = url.pathname.match(/^\/app\/mail\/([^/]+)$/);
+  if (mail && reader.contains(anchor)) {
+    const id = decodeURIComponent(mail[1]);
+    S.focus = { emailId: id, at: S.route && S.route.view === "trace" && S.route.traceId === id ? "matter" : "heading" };
+  }
   navigate(url.pathname + url.search, { replace: "replace" in anchor.dataset });
 });
 
 let goPending = 0;
-const GO = { t: "/app", i: "/app/folder/important", n: "/app/folder/informational", r: "/app/folder/reference", a: "/app/all", k: "/app/tasks", f: "/app/fraud", c: "/app/coding", d: "/app/digest", s: "/app/settings" };
+const GO = { t: "/app", m: "/app/calendar", i: "/app/folder/important", n: "/app/folder/informational", r: "/app/folder/reference", a: "/app/all", k: "/app/tasks", f: "/app/fraud", c: "/app/coding", d: "/app/digest", s: "/app/settings" };
 
 document.addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
@@ -1208,6 +1308,12 @@ document.addEventListener("keydown", (event) => {
       event.target.blur();
       return;
     }
+    if (S.route && S.route.view === "trace") {
+      event.preventDefault();
+      S.focus = { emailId: S.route.traceId, at: "matter" };
+      navigate(`/app/mail/${enc(S.route.traceId)}`);
+      return;
+    }
     if (S.route && (S.route.emailId || S.route.file)) {
       event.preventDefault();
       closeEmail();
@@ -1224,6 +1330,8 @@ document.addEventListener("keydown", (event) => {
     }
     return;
   }
+  // The calendar's own keys: t today, d / w / m the view, ← / → back and on.
+  if (S.route && S.route.view === "calendar" && calendarPage && calendarPage.isConnected && calendarPage.keys(event)) return;
   // On a full page (the digest, Setup), the list behind it is hidden: its keys mustn't act on it.
   if (ws.classList.contains("doc") && ["j", "k", "ArrowDown", "ArrowUp", "Enter", "o", "e"].includes(event.key)) return;
   const inList = listPane.contains(document.activeElement) || document.activeElement === document.body;

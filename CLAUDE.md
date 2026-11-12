@@ -19,6 +19,8 @@ terminal, so set-up, updates and error messages have to work without one.
   which checks the set-up on every start, installs what is missing, and starts the app. `--check` runs the
   self-check (`doctor.py`), `--update` fetches the newest version, and `--get-python` downloads a Python for
   CloseDesk alone into the user's folder, for someone without the rights to install one.
+- Outlook is read only, and only after the user agrees in Settings → Sync inbox (`outlook_sync.connect`); the
+  calendar is a separate yes.
 - `tests/`: pytest. `tests/launcher_smoke.py` runs the real launchers end to end (CI does, on macOS, Windows
   and Linux).
 - `docs/SETUP.md`: the guide users read.

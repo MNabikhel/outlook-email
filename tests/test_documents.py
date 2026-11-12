@@ -1376,3 +1376,99 @@ def test_a_damaged_pdf_keeps_its_email_but_offers_no_page_or_text(store, setting
     assert card["download"] is True
     view = client.get(f"/api/mail/{record.id}/files/1", headers=PAGE).json()
     assert view["file"]["preview"] is False and view["parts"] == []
+
+
+def test_tables_stacked_on_one_sheet_each_read_under_their_own_heading_row():
+    # An aging with each entity's table under the last: "Vendor | Current | 1-30 | 31-60 | 61-90 | Over 90 | Total"
+    # heads every one, a title names it, a subtotal closes it. Each row reads under the headings, never under a
+    # subtotal row's figures, and an entity's title is no vendor.
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Aging"
+    sheet.append(["Accounts payable aging as of 10/31/2026"])
+    sheet.append([])
+    for entity, rows in (("US entity", [("Harbor Steel", 100, 0, 50, 0, 0)]), ("Canada entity", [("Apex Electric", 0, 20, 0, 70, 5), ("Delta Office", 1, 0, 0, 30, 0)])):
+        sheet.append([entity])
+        sheet.append(["Vendor", "Current", "1-30", "31-60", "61-90", "Over 90", "Total"])
+        first = sheet.max_row + 1
+        for name, *figures in rows:
+            r = sheet.max_row + 1
+            sheet.append([name, *figures, f"=SUM(B{r}:F{r})"])
+        sheet.append(["Subtotal"] + [f"=SUM({c}{first}:{c}{sheet.max_row})" for c in "BCDEFG"])
+        sheet.append([])
+    buf = io.BytesIO()
+    book.save(buf)
+    text = xlsx_text(buf.getvalue())
+    assert "A5 (Vendor): Harbor Steel | B5 (Current): 100 | C5 (1-30): 0" in text
+    assert "A10 (Vendor): Apex Electric | B10 (Current): 0 | C10 (1-30): 20 | D10 (31-60): 0 | E10 (61-90): 70" in text
+    assert "A8: Canada entity" in text, "a table's title is not one of the rows above it"
+    assert "(=SUM(B5:B5))):" not in text, "a subtotal row heads nothing"
+    from controller_inbox.table_query import Tables
+
+    tables = Tables([("Aging.xlsx", text)])
+    titles = [sheet.title for sheet in tables.sheets if not sheet.of]
+    assert sorted(title.rsplit(" / ", 1)[-1] for title in titles) == ["A3: US entity", "A8: Canada entity"]
+    canada = next(sheet.name for sheet in tables.sheets if sheet.title.endswith("Canada entity"))
+    assert tables.run(f"SELECT SUM(c_61_90) FROM {canada}")[1] == [(100.0,)]
+
+
+def test_a_two_row_heading_names_each_column_by_both_rows():
+    # "Actual" merged over Jul, Aug and Sep, with Department, Q3 and Budget merged down both rows: each month's
+    # column is "Actual Jul", "Actual Aug", ..., and the rows under read as one table.
+    book = Workbook()
+    sheet = book.active
+    sheet["A1"] = "Opex by department"
+    sheet["A3"], sheet["B3"], sheet["E3"], sheet["F3"] = "Department", "Actual", "Q3", "Budget"
+    sheet.merge_cells("B3:D3")
+    for cells in ("A3:A4", "E3:E4", "F3:F4"):
+        sheet.merge_cells(cells)
+    sheet["B4"], sheet["C4"], sheet["D4"] = "Jul", "Aug", "Sep"
+    for r, (dept, figures) in enumerate((("Marketing", (10, 20, 30)), ("IT", (1, 2, 3)), ("HR", (5, 5, 5))), start=5):
+        sheet[f"A{r}"] = dept
+        for col, value in zip("BCD", figures):
+            sheet[f"{col}{r}"] = value
+        sheet[f"E{r}"] = sum(figures)
+        sheet[f"F{r}"] = 100
+    buf = io.BytesIO()
+    book.save(buf)
+    text = xlsx_text(buf.getvalue())
+    assert "A5 (Department): Marketing | B5 (Actual Jul): 10 | C5 (Actual Aug): 20 | D5 (Actual Sep): 30 | E5 (Q3): 60 | F5 (Budget): 100" in text
+    from controller_inbox.table_query import Tables
+
+    tables = Tables([("Opex.xlsx", text)])
+    assert tables.sheets and tables.sheets[0].rows == 3
+
+
+def test_a_lists_first_row_with_a_note_past_its_headings_is_a_row_not_a_heading():
+    from openpyxl.styles import Font
+
+    book = Workbook()
+    sheet = book.active
+    sheet.append(["Vendor", "Contact", "Status"])
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+    sheet.append(["Acme Supply", "Joe Smith", "Open", "Called twice"])
+    sheet.append(["Harbor Steel", "Ann Lee", "Closed"])
+    sheet.append(["Delta Office", "Raj Patel", "Open"])
+    buf = io.BytesIO()
+    book.save(buf)
+    text = xlsx_text(buf.getvalue())
+    assert "A2 (Vendor): Acme Supply | B2 (Contact): Joe Smith | C2 (Status): Open" in text
+    assert "A3 (Vendor): Harbor Steel" in text
+
+
+def test_a_two_row_heading_whose_merged_heading_comes_last():
+    book = Workbook()
+    sheet = book.active
+    sheet["A1"], sheet["B1"], sheet["C1"] = "Department", "Budget", "Actual"
+    sheet.merge_cells("C1:E1")
+    for cells in ("A1:A2", "B1:B2"):
+        sheet.merge_cells(cells)
+    sheet["C2"], sheet["D2"], sheet["E2"] = "Jul", "Aug", "Sep"
+    for r, (dept, budget, figures) in enumerate((("Marketing", 100, (10, 20, 30)), ("IT", 50, (1, 2, 3))), start=3):
+        sheet[f"A{r}"], sheet[f"B{r}"] = dept, budget
+        for col, value in zip("CDE", figures):
+            sheet[f"{col}{r}"] = value
+    buf = io.BytesIO()
+    book.save(buf)
+    assert "A3 (Department): Marketing | B3 (Budget): 100 | C3 (Actual Jul): 10 | D3 (Actual Aug): 20 | E3 (Actual Sep): 30" in xlsx_text(buf.getvalue())

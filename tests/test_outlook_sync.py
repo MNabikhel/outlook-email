@@ -27,6 +27,12 @@ NOW = datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc)
 STORE = "store-1"
 
 
+@pytest.fixture(autouse=True)
+def _agreed(store):
+    """These tests are about syncing itself: the user has agreed to it (Settings → Sync inbox, tested apart)."""
+    store.set_state(outlook_sync.CONSENT_KEY, "2026-09-01T00:00:00+00:00")
+
+
 class FakeOutlook:
     """Outlook with folders and messages, offering only what ``OutlookSession`` reads."""
 
@@ -310,14 +316,14 @@ def test_one_message_outlook_wont_copy_doesnt_stop_the_others(store, settings, o
 
 
 def test_settings_are_checked_and_survive_loading_the_sample(store, settings, outlook, as_of_now):
-    assert outlook_sync.config(store) == {"auto": False, "interval": 15, "days": 30, "folders": [], "subfolders": True}
+    assert outlook_sync.config(store) == {"auto": False, "interval": 15, "days": 30, "folders": [], "subfolders": True, "consent": True, "consented_at": "2026-09-01T00:00:00+00:00", "calendar": False}
     outlook_sync.remember_folders(store, outlook)
     with pytest.raises(ValueError):
         outlook_sync.save_config(store, auto=True, interval=7, days=30, folders=[], subfolders=True)
     with pytest.raises(ValueError):
         outlook_sync.save_config(store, auto=True, interval=15, days=12, folders=[], subfolders=True)
     outlook_sync.save_config(store, auto=True, interval=30, days=90, folders=["Inbox/Vendors", "Nope"], subfolders=False)
-    assert outlook_sync.config(store) == {"auto": True, "interval": 30, "days": 90, "folders": ["Inbox/Vendors"], "subfolders": False}
+    assert outlook_sync.config(store) == {"auto": True, "interval": 30, "days": 90, "folders": ["Inbox/Vendors"], "subfolders": False, "consent": True, "consented_at": "2026-09-01T00:00:00+00:00", "calendar": False}
     store.clear_mail()
     assert outlook_sync.config(store)["auto"] is True and outlook_sync.folder_list(store)
 
@@ -380,6 +386,49 @@ def test_outlook_missing_is_said_and_the_rest_of_the_run_happens(store, settings
     result = run_overnight(store, settings, sync_graph=False, now=NOW)
     assert result["outlook"] == {"note": "Classic Outlook didn't answer."} and result["ok"]
     assert outlook_run(store, settings, now=NOW)["message"] == "Classic Outlook didn't answer."
+
+
+def test_a_sync_that_didnt_work_shows_on_settings_until_one_does(store, settings, outlook, monkeypatch):
+    # A failed sync wasn't kept anywhere: the card stayed green and said "Not synced yet".
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    broken = True
+
+    @contextmanager
+    def connect(**_options):
+        if broken:
+            raise RuntimeError("the MAPI store is offline")
+        yield outlook
+
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    client = TestClient(web.create_app(settings, store))
+    outlook_run(store, settings, now=NOW)
+    data = client.get("/api/settings", headers=PAGE).json()["outlook"]
+    assert data["last_error"] == "Outlook couldn't be read this time (the MAPI store is offline)."
+    assert data["last_error_at"] and data["last_sync"] == ""
+    broken = False
+    outlook.add("e1", "Invoice INV-7741 from Northwind", minutes=1)
+    outlook_run(store, settings, now=NOW + timedelta(minutes=15))
+    data = client.get("/api/settings", headers=PAGE).json()["outlook"]
+    assert data["last_error"] == "" and data["last_result"] == "1 new"
+    broken = True
+    outlook_run(store, settings, now=NOW + timedelta(minutes=30))
+    assert client.get("/api/settings", headers=PAGE).json()["outlook"]["last_error"].startswith("Outlook couldn't be read")
+    outlook_sync.disconnect(store)
+    assert client.get("/api/settings", headers=PAGE).json()["outlook"]["last_error"] == "", "connecting again starts afresh"
+
+
+def test_outlooks_own_error_is_said_once_not_wrapped_again(store, settings, monkeypatch):
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    said = "Outlook couldn't find a message just now (The server is busy.)."
+
+    @contextmanager
+    def connect(**_options):
+        raise outlook_desktop.OutlookError(said)
+        yield
+
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    result = outlook_run(store, settings, now=NOW)
+    assert result["message"] == said and outlook_sync.last_failure(store)["error"] == said
 
 
 # The Settings page ---------------------------------------------------------------------------------------
@@ -604,3 +653,207 @@ def test_outlook_removal_that_fails_keeps_following_the_message(store, settings,
     monkeypatch.undo()
     report = sync(store, settings, outlook, now=NOW + timedelta(minutes=30))
     assert report["removed"] == 1 and not store.list_emails(limit=10)
+
+
+
+# Settings → Sync inbox: nothing is read from Outlook until the user agrees -------------------------------------
+
+
+def test_nothing_is_read_from_outlook_until_the_user_agrees(store, settings):
+    store.set_state(outlook_sync.CONSENT_KEY, "")
+    assert not outlook_sync.config(store)["consent"]
+
+    class Refuses:
+        def __getattr__(self, name):
+            raise AssertionError(f"Outlook was read ({name}) before the user agreed")
+
+    with pytest.raises(outlook_sync.NotConnected):
+        outlook_sync.sync(store, settings, Refuses())
+    assert not outlook_sync.due(store), "the automatic sync waits for the user's yes"
+
+
+def test_someone_who_already_synced_is_not_asked_again(store):
+    store.set_state(outlook_sync.CONSENT_KEY, "")
+    store.set_state(outlook_sync.AUTO_KEY, "1")
+    assert outlook_sync.config(store)["consent"], "they turned the sync on themselves before Settings asked"
+    store.set_state(outlook_sync.AUTO_KEY, "0")
+    store.set_state(outlook_sync.LAST_SYNC_KEY, "2026-09-01T00:00:00+00:00")
+    assert outlook_sync.config(store)["consent"], "they synced by hand"
+    assert not outlook_sync.config(store)["calendar"], "the calendar is a separate yes"
+
+
+def test_connecting_turns_the_sync_on_and_disconnecting_keeps_the_copies(store):
+    store.set_state(outlook_sync.CONSENT_KEY, "")
+    outlook_sync.connect(store, calendar=True, now=datetime(2026, 10, 1, tzinfo=timezone.utc))
+    cfg = outlook_sync.config(store)
+    assert cfg["consent"] and cfg["auto"] and cfg["calendar"] and cfg["consented_at"].startswith("2026-10-01")
+    store.clear_sample()
+    assert outlook_sync.config(store)["consent"], "kept when the sample mailbox is loaded or cleared"
+    outlook_sync.disconnect(store)
+    cfg = outlook_sync.config(store)
+    assert not cfg["consent"] and not cfg["auto"] and not cfg["calendar"]
+
+
+def test_the_calendar_is_read_hourly_and_follows_outlook(store, settings):
+    from controller_inbox import calendar_events
+
+    now = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+    calendar = [
+        {"uid": "G1", "start": "2026-10-06T13:00:00+00:00", "end": "2026-10-06T13:15:00+00:00", "all_day": False, "subject": "AP standup",
+         "location": "", "organizer": "Maya Chen", "attendees": [], "busy": "busy", "cancelled": False, "recurring": True},
+        {"uid": "G2", "start": "2026-10-30", "end": "2026-10-31", "all_day": True, "subject": "Close day", "location": "", "organizer": "",
+         "attendees": [], "busy": "away", "cancelled": False, "recurring": False},
+    ]
+
+    class Calendar:
+        def calendar(self, start, end):
+            assert start == now - calendar_events.WINDOW_BACK and end == now + calendar_events.WINDOW_AHEAD
+            return [dict(item) for item in calendar]
+
+    outlook_sync.set_calendar(store, True)
+
+    assert outlook_sync.sync_calendar(store, Calendar(), now=now) == 2
+    assert [m["subject"] for m in store.meetings_between("2026-10-01", "2026-11-01")] == ["AP standup", "Close day"]
+    calendar.pop(0)  # deleted in Outlook
+    outlook_sync.sync_calendar(store, Calendar(), now=now)
+    assert [m["subject"] for m in store.meetings_between("2026-10-01", "2026-11-01")] == ["Close day"]
+    assert not outlook_sync.calendar_due(store, now + timedelta(minutes=30))
+    assert outlook_sync.calendar_due(store, now + timedelta(minutes=61))
+
+
+def test_disconnecting_while_a_sync_runs_ends_it_there_and_is_final(store, settings):
+    from controller_inbox import calendar_events
+
+    outlook_sync.connect(store, calendar=True, now=datetime(2026, 10, 1, tzinfo=timezone.utc))
+    store.replace_meetings("outlook", [calendar_events.Meeting(uid="G1", start="2026-10-06T13:00:00+00:00", end="2026-10-06T13:15:00+00:00",
+                                                               subject="Standup", source="outlook")], start="2026-01-01", end="2027-01-01")
+
+    class DisconnectsMidway:
+        """Outlook with no mail: the user clicks Disconnect while its folders are being read."""
+
+        def folders(self):
+            outlook_sync.disconnect(store)
+            return []
+
+        def account(self):
+            return ""
+
+        def calendar(self, start, end):
+            raise AssertionError("the calendar was read after Disconnect")
+
+    outlook_sync.sync(store, settings, DisconnectsMidway())
+    cfg = outlook_sync.config(store)
+    assert not cfg["consent"] and not cfg["auto"] and not cfg["calendar"]
+    assert not store.get_state(outlook_sync.LAST_SYNC_KEY), "no stamp that would read as a past sync"
+    assert store.meetings_between("2026-01-01", "2027-01-01") == [], "Outlook's meetings go with Disconnect"
+
+
+def test_saving_the_sync_settings_is_no_yes(store):
+    store.set_state(outlook_sync.CONSENT_KEY, "")
+    assert not outlook_sync.config(store)["consent"]
+    outlook_sync.save_config(store, auto=True, interval=15, days=30, folders=[], subfolders=True)
+    cfg = outlook_sync.config(store)
+    assert not cfg["consent"] and not cfg["auto"] and not outlook_sync.due(store)
+
+
+def test_turning_the_calendar_off_removes_outlooks_meetings_and_keeps_invitations(store):
+    from controller_inbox import calendar_events
+
+    outlook_sync.connect(store, calendar=True)
+    store.replace_meetings("outlook", [calendar_events.Meeting(uid="G1", start="2026-10-06T13:00:00+00:00", end="2026-10-06T14:00:00+00:00", subject="Standup", source="outlook")],
+                           start="2026-01-01", end="2027-01-01")
+    store.save_invites("e1", [calendar_events.Meeting(uid="X", start="2026-10-07T13:00:00+00:00", end="2026-10-07T14:00:00+00:00", subject="Review", email_id="e1")])
+    outlook_sync.set_calendar(store, False)
+    assert [m["subject"] for m in store.meetings_between("2026-01-01", "2027-01-01")] == ["Review"]
+
+
+def test_disconnecting_while_mail_is_copied_stops_the_copying(store, settings):
+    fake = FakeOutlook()
+    for n in range(5):
+        fake.add(f"e{n}", f"Message {n}", minutes=n)
+    copy = fake.save_copy
+    asked = []
+
+    def save_copy(entry_id, store_id, dest):
+        asked.append(entry_id)
+        copy(entry_id, store_id, dest)
+        outlook_sync.disconnect(store)  # the user clicks Disconnect while the first message is copied
+
+    fake.save_copy = save_copy
+    report = outlook_sync.sync(store, settings, fake, now=NOW)
+    assert len(asked) == 1, "no message is copied from Outlook after Disconnect"
+    assert report["new"] <= 1 and not report["failed"]
+    assert not store.get_state(outlook_sync.LAST_SYNC_KEY) and not store.get_state(outlook_sync.LAST_RESULT_KEY)
+
+
+def test_disconnecting_or_turning_the_calendar_off_while_it_is_read_keeps_none_of_it(store, settings):
+    for stop in (outlook_sync.disconnect, lambda store: outlook_sync.set_calendar(store, False)):
+        outlook_sync.connect(store, calendar=True, now=NOW)
+        store.set_state(outlook_sync.LAST_SYNC_KEY, "")
+        fake = FakeOutlook()
+
+        def calendar(start, end, stop=stop):
+            stop(store)  # clicked while Outlook's calendar is being read
+            return [{"uid": "abcd", "start": NOW.isoformat(), "end": NOW.isoformat(), "subject": "Board call", "all_day": False, "location": "",
+                     "organizer": "", "attendees": [], "busy": "busy", "cancelled": False, "recurring": False}]
+
+        fake.calendar = calendar
+        outlook_sync.sync(store, settings, fake, now=NOW)
+        with store.connect() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM meetings WHERE source = 'outlook'").fetchone()[0] == 0
+        assert not store.get_state(outlook_sync.CALENDAR_LAST_KEY)
+        if stop is outlook_sync.disconnect:
+            assert not store.get_state(outlook_sync.LAST_SYNC_KEY), "nothing stamped after Disconnect"
+
+
+def test_the_calendar_page_and_the_chat_show_outlooks_meetings_only_while_it_is_connected(store, settings):
+    from controller_inbox import assistant, calendar_events
+
+    outlook_sync.connect(store, calendar=True, now=NOW)
+    store.replace_meetings("outlook", [calendar_events.Meeting(uid="G1", start="2026-10-21T13:00:00+00:00", end="2026-10-21T13:15:00+00:00",
+                                                               subject="Standup", source="outlook")], start="2026-10-01", end="2026-11-01")
+    client = TestClient(web.create_app(settings, store))
+
+    def shown():
+        meetings = client.get("/api/calendar", params={"start": "2026-10-21", "end": "2026-10-21"}, headers=PAGE).json()["meetings"]
+        source = assistant.calendar_source(store, settings, "2026-10-21")
+        return [m["subject"] for m in meetings], bool(source and "Standup" in source.body_text)
+
+    meeting_id = calendar_events.Meeting(uid="G1", start="2026-10-21T13:00:00+00:00", end="", source="outlook").id
+    assert shown() == (["Standup"], True) and client.get(f"/api/calendar/{meeting_id}", headers=PAGE).status_code == 200
+    # Left behind by a sync that was still running at Disconnect: not shown all the same.
+    store.set_state(outlook_sync.CALENDAR_KEY, "0")
+    assert shown() == ([], False) and client.get(f"/api/calendar/{meeting_id}", headers=PAGE).status_code == 404
+    store.set_state(outlook_sync.CALENDAR_KEY, "1")
+    store.set_state(outlook_sync.CONSENT_KEY, "revoked")
+    assert shown() == ([], False)
+
+
+def test_a_calendar_read_cut_short_by_outlooks_limit_keeps_the_meetings_past_it(store, settings):
+    from controller_inbox import calendar_events, outlook_desktop
+
+    now = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+    outlook_sync.connect(store, calendar=True, now=now)
+    later = calendar_events.Meeting(uid="G9", start="2026-12-01T13:00:00+00:00", end="2026-12-01T14:00:00+00:00", subject="Later", source="outlook")
+    store.replace_meetings("outlook", [later], start="2026-01-01", end="2027-06-01")
+
+    class CutShort:
+        def calendar(self, start, end):
+            # Outlook listed its limit, most of them meetings that ended before the window (left out), and stopped.
+            return outlook_desktop.CalendarRead([{"uid": "G1", "start": "2026-10-06T13:00:00+00:00", "end": "2026-10-06T13:15:00+00:00",
+                                                  "all_day": False, "subject": "AP standup", "location": "", "organizer": "", "attendees": [],
+                                                  "busy": "busy", "cancelled": False, "recurring": True}], cut_short=True)
+
+    outlook_sync.sync_calendar(store, CutShort(), now=now)
+    assert [m["subject"] for m in store.meetings_between("2026-10-01", "2027-01-01")] == ["AP standup", "Later"]
+
+
+def test_the_self_check_says_when_outlook_was_synced_in_the_apps_time_zone(store, settings):
+    from controller_inbox import doctor
+
+    outlook_sync.connect(store, calendar=True, now=NOW)
+    store.set_state(outlook_sync.LAST_SYNC_KEY, "2026-10-20T15:00:00+00:00")
+    store.set_state(outlook_sync.CALENDAR_LAST_KEY, "2026-10-20T14:30:00+00:00")
+    store.set_state("timezone", "Europe/Berlin")  # chosen in Setup, over the settings file's New York
+    said = doctor._outlook_sync(settings).text
+    assert "17:00" in said and "16:30" in said and "UTC" not in said, said
