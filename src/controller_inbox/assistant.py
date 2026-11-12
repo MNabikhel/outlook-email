@@ -8,7 +8,9 @@ email. Replies cite them as [1], [2], and the page turns those into links.
 When the question is about attached files, the model reads them (see
 ``agent.py``): passages sized to its context window, then tools to read more,
 then one pass that checks the answer against what it read. With no model
-running, the same emails and the matching file passages come back as a list.
+running, the same emails and the matching lines of their text and files come
+back as a list: a question about how the open email came about walks its
+conversation, and "Ask about this meeting" lists the mail about that meeting.
 """
 
 from __future__ import annotations
@@ -98,13 +100,40 @@ _HISTORY = re.compile(
 )
 
 
-def _matter(store: Store, current: EmailRecord) -> list[EmailRecord]:
-    """The mail linked to ``current``: its conversation (oldest first), then mail sharing an invoice, a PO or a file."""
+def _matter(store: Store, current: EmailRecord) -> tuple[list[EmailRecord], list[str]]:
+    """The mail linked to ``current``: its conversation (oldest first), then mail sharing an invoice, a PO or a file;
+    and the ids of its conversation, ``current`` among them, oldest first."""
     from controller_inbox import links
 
     found = links.related(store, current)
     thread = [email for email in found["thread"] if email.id != current.id]
-    return thread + [email for group in found["groups"] for email in group["emails"]]
+    return thread + [email for group in found["groups"] for email in group["emails"]], [email.id for email in found["thread"]]
+
+
+def _conversation(store: Store, current: EmailRecord) -> list[EmailRecord]:
+    """The other emails of ``current``'s conversation, oldest first."""
+    from controller_inbox import links
+
+    return [email for email in links.related(store, current, ai=False)["thread"] if email.id != current.id]
+
+
+def _stays_on(store: Store, current: EmailRecord, question: str, *, about_today: bool) -> list[EmailRecord] | None:
+    """The open email and its conversation, for a question their words answer and that asks about no other mail:
+    "what is the payment schedule?" on a vendor's reply. None when it points elsewhere ("any other emails about
+    it?", "what's due today?"), names someone or something they don't ("anything from Priya?"), or none of its
+    words are in them."""
+    if _ELSEWHERE.search(question) or (about_today and not _due_here(current, question)):
+        return None
+    terms = keywords(question)
+    if not terms:
+        return None
+    conversation = _conversation(store, current)
+    # Held mail's words don't keep the question here: its text isn't read.
+    found = {term for email in [current, *conversation] if not attachments_locked(email) for term in _found_in(email, terms)}
+    named = [term for term in terms if _distinctive(term, question)]
+    if not found or any(term not in found for term in named):
+        return None
+    return [current, *conversation][: MAX_SOURCES + 1]
 
 
 # A question about meetings: the calendar is one of its sources.
@@ -166,6 +195,11 @@ def calendar_source(store: Store, settings: Settings, today: str = "") -> EmailR
         f"Meetings from {first:%A %B} {first.day} to {last:%A %B} {last.day}, {last.year}; today is {day:%A %B} {day.day}. "
         f"Times are {zone}.\n" + calendar_events.listing(meetings)
     )
+    return _calendar_record(body)
+
+
+def _calendar_record(body: str) -> EmailRecord:
+    """The calendar as a numbered source: ``body`` is its lines."""
     return EmailRecord(
         id="calendar",
         subject="Your calendar",
@@ -183,6 +217,63 @@ def calendar_source(store: Store, settings: Settings, today: str = "") -> EmailR
         importance_score=0,
         source="calendar",
     )
+
+
+# The title of a meeting in quotes, as the calendar's "Ask about this meeting" asks: "What do I need to know before
+# “Q4 planning review” (Thursday, September 24 · 2:00 PM–3:00 PM)?"
+_QUOTED = re.compile(r"[“\"]([^”\"\n]{2,200})[”\"]")
+_MONTHS_ALL = "january february march april may june july august september october november december".split()
+_MONTH_DAY = re.compile(r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b", re.I)
+
+
+def asked_meeting(store: Store, settings: Settings, question: str, today: str = "", email_id: str | None = None) -> dict | None:
+    """The meeting a question names by its title in quotes, as the store keeps it: the one on the day the question
+    names, else the next one, else the latest. With ``email_id``, the one that invitation holds comes first. None
+    when no meeting in the calendar's weeks has that title."""
+    from controller_inbox import calendar_events
+
+    titles = {" ".join(title.split()).lower() for title in _QUOTED.findall(question or "")}
+    if not titles:
+        return None
+    try:
+        day = date.fromisoformat(today) if today else datetime.now(settings.tz).date()
+    except ValueError:
+        day = datetime.now(settings.tz).date()
+    start, end = calendar_events.utc_range(day - timedelta(days=CALENDAR_DAYS_BACK), day + timedelta(days=CALENDAR_DAYS_AHEAD), settings.tz)
+    rows = [row for row in store.meetings_between(start, end) if " ".join((row["subject"] or "").split()).lower() in titles]
+    if not rows:
+        return None
+    if email_id and (own := [row for row in rows if row["email_id"] == email_id]):
+        rows = own
+    shown = [(row, calendar_events.shown(row, settings.tz)) for row in rows]
+    if named := _MONTH_DAY.search(question):
+        month = _MONTHS_ALL.index(named.group(1).lower()) + 1
+        on_day = [pair for pair in shown if pair[1]["start"][5:10] == f"{month:02d}-{int(named.group(2)):02d}"]
+        if on_day:
+            return on_day[0][0]
+    ahead = [pair for pair in shown if pair[1]["start"][:10] >= day.isoformat()]
+    return (ahead[0] if ahead else shown[-1])[0]
+
+
+def _shown(meeting: dict, settings: Settings) -> dict:
+    from controller_inbox import calendar_events
+
+    return calendar_events.shown(meeting, settings.tz)
+
+
+def meeting_sources(store: Store, settings: Settings, meeting: dict, email_id: str | None = None) -> list[EmailRecord]:
+    """The sources for a question about one meeting: the meeting itself (as a calendar source), and the mail about
+    it (its invitation, then mail near its date naming its title or from its people). The open email leads."""
+    from controller_inbox import calendar_events
+
+    shown = calendar_events.shown(meeting, settings.tz)
+    zone = getattr(settings.tz, "key", str(settings.tz))
+    calendar = _calendar_record(f"The meeting asked about. Times are {zone}.\n" + calendar_events.listing([shown]))
+    mail = calendar_events.related_mail(store, meeting, limit=MAX_SOURCES)
+    if email_id and email_id not in {email.id for email in mail} and (current := store.get_email(email_id)) is not None:
+        mail = [current, *mail]
+    lead = [email for email in mail if email.id == email_id]
+    return lead + [calendar] + [email for email in mail if email.id != email_id][: MAX_SOURCES - len(lead)]
 
 
 _HELP = re.compile(
@@ -317,19 +408,29 @@ def pick_sources(
     """The emails the answer may use, best first; whether the question is about today; the search hits.
 
     With ``settings`` and an embedding model, emails close in meaning join the keyword matches. When the
-    mail was searched, ``report`` gets how ("how") and how many emails only meaning found ("meaning_hits").
+    mail was searched, ``report`` gets how ("how") and how many emails only meaning found ("meaning_hits"); for a
+    question about how the open email came about, the ids of its conversation, oldest first ("thread").
+
+    With an email open, a question stays on it unless it asks about other mail: on the email alone when it points
+    there or the email answers it, on the email and its conversation when their words do.
     """
     about_today = bool(_TODAY.search(question) or _MY_DAY.search(question))
     picked: dict[str, EmailRecord] = {}
     current = store.get_email(email_id) if email_id else None
     if current is not None:
         picked[current.id] = current
-        if _HISTORY.search(question) and (matter := _matter(store, current)):
-            # "What happened on this so far?", "trace this back": the email's conversation and linked mail.
-            return [current, *matter][: MAX_SOURCES + 1], False, set()
+        if _HISTORY.search(question):
+            matter, thread = _matter(store, current)
+            if matter:
+                # "What happened on this so far?", "trace this back": the email's conversation and linked mail.
+                if report is not None:
+                    report["thread"] = thread
+                return [current, *matter][: MAX_SOURCES + 1], False, set()
         here = not _ELSEWHERE.search(question) and answered_here(current, question)
         if on_screen_question(question) or (here and (not about_today or _due_here(current, question))):
             return [current], False, set()
+        if (stay := _stays_on(store, current, question, about_today=about_today)) is not None:
+            return stay, False, set()
     stripped = _TODAY.sub(" ", question) if about_today else question
     by_kind: list[EmailRecord] = []
     for pattern, categories in _INTENTS:
@@ -697,35 +798,63 @@ def offline_answer(
     current_id: str | None = None,
     model_failed: bool = False,
     today: str = "",
+    tz=None,
+    thread: list[str] | None = None,
+    meeting: dict | None = None,
 ) -> str:
+    """The answer with no model: the emails, lines and file passages that match, as a list.
+
+    ``tz``: the app's time zone, for when each email came and when a meeting is. ``thread``: the open email's
+    conversation, oldest first, for a question about how it came about. ``meeting``: the meeting asked about (as
+    ``calendar_events.shown`` gives it), whose mail ``sources`` are."""
     found = found or set()
     current = next((email for email in sources if email.id == current_id), None)
     numbers = {email.id: index for index, email in enumerate(sources, start=1)}
     if asks_for_help(question, found, current):
         return HELP_TEXT
     note = "Here's a straight lookup instead." if model_failed else "The local model isn't running, so this is a straight lookup."
+    if meeting is not None:
+        return _meeting_answer(note, question, sources, meeting, numbers, tz)
     calendar = next((email for email in sources if email.source == "calendar"), None)
     if calendar is not None:
         return f"{note} Your meetings [{numbers[calendar.id]}]:\n" + _meetings_for(question, calendar.body_text, today)
     if current is not None and not found and not about_today:
+        if thread and len(sources) > 1:
+            return _history_answer(note, sources, current, thread, numbers, tz)
         tasks = [a.title for a in current.actions if a.status == ActionStatus.OPEN]
-        lines = [f"{note} The email on screen [1]:", f"**{current.subject}** from {current.sender_name or current.sender_email}."]
+        lines = [f"{note} The email on screen [{numbers[current.id]}]:", f"**{current.subject}** from {_who(current)}."]
         if current.summary:
             lines.append(current.summary)
         if tasks:
             lines.append("Open tasks: " + "; ".join(t.rstrip(".") for t in tasks[:3]) + ".")
         if is_fraud(current):
             lines.append(FRAUD_WARNING)
+        if said := body_lines(current, question):
+            lines.append("In the email:")
+            lines += [f"- {line}" for line in said]
         if not agent.attachments_locked(current):
             for att in current.attachments:
                 rows = table_lookup.lookup(att.extracted_text or "", question)
                 if rows:
                     lines.append(f"From the table in {att.filename}:")
                     lines += rows.splitlines()[1:]
-        matches = agent.file_matches(current, question)
+        matches = agent.file_matches(current, question, tz=tz)
         if matches:
             lines.append("In the files:")
             lines += [f"- {line}" for line in matches]
+        others = [email for email in sources if email.id != current.id]
+        if others:
+            # The rest of its conversation: what each says on the question, or that it was looked at.
+            lines.append("In its conversation:")
+            for email in others:
+                said = body_lines(email, question, limit=1)
+                if not said and not agent.attachments_locked(email):
+                    said = agent.file_matches(email, question, limit=1, outline=False, tz=tz)[:1]
+                head = f"{_when(email, tz)} · {_who(email)}"
+                if said:
+                    lines.append(f"- {head}: {said[0]} [{numbers[email.id]}]")
+                else:
+                    lines.append(f"- {head}: **{email.subject}** — doesn't mention it [{numbers[email.id]}]")
         return "\n".join(lines)
     if not found and not about_today and not keywords(question):
         return (
@@ -765,6 +894,111 @@ def offline_answer(
     )
 
 
+def _who(email: EmailRecord) -> str:
+    return email.sender_name or email.sender_email or "unknown sender"
+
+
+def _when(email: EmailRecord, tz) -> str:
+    from controller_inbox.clock import format_when
+
+    return format_when(email.received_at or "", tz)
+
+
+# A greeting or a name on a line of its own ("Hi Dan,", "Hello AP team,"): no first line to tell an email by.
+_GREETING = re.compile(r"^(?:(?:hi|hello|hey|dear|greetings|good (?:morning|afternoon|evening))\b[^.!?]{0,40}|\w+(?: \w+)?,)$", re.I)
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9$])")
+
+
+def _sentences(email: EmailRecord) -> list[str]:
+    """The email's own text as sentences, without quoted replies (lines starting ">"), greetings or empty lines."""
+    out = []
+    for line in (email.body_text or "").splitlines():
+        line = " ".join(line.split())
+        if not line or line.startswith(">"):
+            continue
+        if re.match(r"^(?:On .{4,80} wrote:|-{2,} ?Original Message ?-{2,}|From: .+)$", line, re.I):
+            break  # the email it replies to, quoted below: it has its own place in the conversation
+        if _GREETING.match(line):
+            continue
+        out += [piece for piece in _SENTENCE_END.split(line) if piece]
+    return out
+
+
+def first_line(email: EmailRecord, width: int = 160) -> str:
+    """How an email starts, past its greeting: "Resending invoice INV-10482 in case the first note was missed." Held
+    mail's text isn't shown."""
+    if attachments_locked(email):
+        return "held as possible payment fraud, so its text isn't shown"
+    said = next(iter(_sentences(email)), "") or (email.summary or email.body_preview or "").strip()
+    return said if len(said) <= width else said[:width].rsplit(" ", 1)[0] + " …"
+
+
+def body_lines(email: EmailRecord, question: str, *, limit: int = 2, width: int = 240) -> list[str]:
+    """The sentences of the email's own text with the question's words, the ones with most of them first, in the
+    email's order: "Payment schedule: 50% on December 1, 50% on December 15." None from held mail."""
+    terms = keywords(question)
+    if not terms or attachments_locked(email):
+        return []
+    scored = []
+    for index, sentence in enumerate(_sentences(email)):
+        low = _spaced(sentence)
+        hits = sum(1 for term in terms if _spaced(term) in low)
+        if hits:
+            scored.append((-hits, index, sentence))
+    best = sorted(sorted(scored)[:limit], key=lambda item: item[1])
+    return [sentence if len(sentence) <= width else sentence[:width].rsplit(" ", 1)[0] + " …" for _, _, sentence in best]
+
+
+def _history_answer(note: str, sources: list[EmailRecord], current: EmailRecord, thread: list[str], numbers: dict, tz) -> str:
+    """How the open email came about, with no model: its conversation, oldest first, one line each (when, who, the
+    subject and how it starts), then the mail linked to it by an invoice, a PO or a file. Every email looked at is listed."""
+    by_id = {email.id: email for email in sources}
+    steps = [by_id[email_id] for email_id in thread if email_id in by_id]
+    lines = [f"{note} How this came about, oldest first:"]
+    for step in steps:
+        here = " (open on screen)" if step.id == current.id else ""
+        lines.append(f"- {_when(step, tz)} · {_who(step)}: **{step.subject}**{here} — {first_line(step)} [{numbers[step.id]}]")
+    linked = [email for email in sources if email.id not in {step.id for step in steps}]
+    if linked:
+        lines.append("Linked to it by an invoice, a PO or a file:" if steps else "Linked to it:")
+        for email in linked:
+            here = " (open on screen)" if email.id == current.id else ""
+            lines.append(f"- {_when(email, tz)} · {_who(email)}: **{email.subject}**{here} — {first_line(email)} [{numbers[email.id]}]")
+    if any(is_fraud(email) for email in sources):
+        lines.append(FRAUD_WARNING)
+    return "\n".join(lines)
+
+
+def _meeting_answer(note: str, question: str, sources: list[EmailRecord], meeting: dict, numbers: dict, tz) -> str:
+    """A meeting asked about, with no model: when and where it is, then the mail about it (its invitation, mail
+    naming it or from its people). An invitation's file is the meeting, already said, so it isn't quoted."""
+    calendar = next((email for email in sources if email.source == "calendar"), None)
+    ref = f" [{numbers[calendar.id]}]" if calendar is not None else ""
+    facts = [f"**{meeting['subject']}**, {agent.meeting_when(meeting)}"]
+    if meeting.get("location"):
+        facts.append(f"at {meeting['location']}")
+    if meeting.get("organizer"):
+        facts.append(f"organized by {meeting['organizer']}")
+    if meeting.get("cancelled"):
+        facts.append("cancelled")
+    lines = [f"{note} The meeting{ref}:", " · ".join(facts) + "."]
+    mail = [email for email in sources if email.source != "calendar"]
+    if not mail:
+        lines.append("No mail about it turned up: nothing near its date names it or comes from its people.")
+        return "\n".join(lines)
+    lines.append("Mail about it:")
+    for email in mail:
+        summary = f" — {email.summary}" if email.summary else ""
+        lines.append(f"- **{email.subject}** · {_who(email)} · {_when(email, tz)}{summary} [{numbers[email.id]}]")
+        said = body_lines(email, question, limit=1)
+        if not agent.attachments_locked(email):
+            said += agent.file_matches(email, question, limit=1, outline=False, tz=tz, invitations=False)[:1]
+        lines += [f"  - {line}" for line in said[:2]]
+    if any(is_fraud(email) for email in mail):
+        lines.append(FRAUD_WARNING)
+    return "\n".join(lines)
+
+
 def answer_stream(
     store: Store,
     settings: Settings,
@@ -785,8 +1019,15 @@ def answer_stream(
     question = (question or "").strip()[:MAX_QUESTION]
     focus = focus or []
     searched: dict[str, Any] = {}
-    sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings, report=searched)
-    if asks_about_meetings(question) and (calendar := calendar_source(store, settings, today)) is not None:
+    meeting = asked_meeting(store, settings, question, today, email_id)
+    if meeting is not None:
+        # "Ask about this meeting": the meeting and the mail about it, not every email that shares a word with its
+        # day and time.
+        sources, about_today = meeting_sources(store, settings, meeting, email_id), False
+        found = {email.id for email in sources}
+    else:
+        sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings, report=searched)
+    if meeting is None and asks_about_meetings(question) and (calendar := calendar_source(store, settings, today)) is not None:
         # "What meetings do I have tomorrow?": the calendar answers it, beside the mail it may name.
         current_first = sources[:1] if email_id and sources and sources[0].id == email_id else []
         sources = current_first + [calendar] + [email for email in sources if email not in current_first][: MAX_SOURCES - 1]
@@ -819,10 +1060,14 @@ def answer_stream(
         yield {"type": "done"}
         return
     yield event
-    if searched:
+    if "how" in searched:
         yield {"type": "step", "text": semantic.search_step(searched["how"], settings, searched["meaning_hits"])}
+    lookup = {
+        "about_today": about_today, "focus": focus, "found": found, "current_id": email_id, "today": today, "tz": settings.tz,
+        "thread": searched.get("thread"), "meeting": _shown(meeting, settings) if meeting is not None else None,
+    }
     if not use_model:
-        yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, today=today)}
+        yield {"type": "delta", "text": offline_answer(question, sources, **lookup)}
         yield {"type": "done"}
         return
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id, past=past)
@@ -866,11 +1111,11 @@ def answer_stream(
                     context_length(settings), ["the emails and files"]
                 )
             yield {"type": "mode", "mode": "lookup", "note": note}
-            yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True, today=today)}
+            yield {"type": "delta", "text": offline_answer(question, sources, model_failed=True, **lookup)}
     else:
         if not state["wrote"]:
             yield {"type": "mode", "mode": "lookup", "note": "The local model sent an empty answer."}
-            yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True, today=today)}
+            yield {"type": "delta", "text": offline_answer(question, sources, model_failed=True, **lookup)}
         else:
             if ws.shown and (missing := agent.missing_points(ws.points, state["text"], exact=ws.exact)):
                 # The answer left out figures the question asks for: they are added from the table, as read.

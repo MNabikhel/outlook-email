@@ -39,7 +39,7 @@ The full guide and troubleshooting are in [docs/SETUP.md](docs/SETUP.md). Prefer
 | Sorting into Needs you / Worth knowing / Reference | Yes (rules) | Yes (the model decides, with guard rails) |
 | One-line summaries | The email's key sentence | Written by the model |
 | Tasks, due dates, fraud warnings, digest | Yes | Yes |
-| **Ask CloseDesk** | Finds the emails, today's focus list, and the matching passages in their files | Reads the email and its files (and other emails if needed), notes what it finds, checks its answer, and cites the emails |
+| **Ask CloseDesk** | Finds the emails, today's focus list, and the matching lines in them and their files; on an open email, its conversation step by step; for a meeting, the mail about it | Reads the email and its files (and other emails if needed), notes what it finds, checks its answer, and cites the emails |
 | **Draft a reply** | A starter template | A written draft; payment-change emails get safety advice instead |
 
 </details>
