@@ -145,7 +145,11 @@ _LIMIT = re.compile(r"\b(over|above|under|below|exceed(?:s|ed|ing)?)\s+(?:their|
 _GROUP = re.compile(r"\b(?:by|per|for each|for every|each)\s+([a-z][a-z#&-]*)", re.I)
 _RANGE = re.compile(r"^\s*(?:through|thru|to|until|-|–)\s*$", re.I)
 _DATE = re.compile(r"(?<![\d/])(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?![\d/])")
-_ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+_ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})(?:\b|(?=T\d))")
+# A date written day first with dots (01.10.2026), as in Germany and much of Europe.
+_DOTTED = re.compile(r"(?<![\d.])(\d{1,2})\.(\d{1,2})\.(\d{4}|\d{2})(?![\d.])")
+# A time after a date ("10/31/2026 04:05 PM", "2026-10-01T00:00:00.000").
+_TIME = re.compile(r"(?:T|\s+)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[ap]\.?m\.?)?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?", re.I)
 _MONTH_DAY = re.compile(
     rf"\b({_MONTH_NAMES})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:\s*(?:-|–|to|and|&)\s*(\d{{1,2}})(?:st|nd|rd|th)?)?(?:,?\s+(\d{{4}}))?\b",
     re.I,
@@ -208,6 +212,12 @@ class Table:
     kinds: dict[str, str] = field(default_factory=dict)
     # Rows of the sheet past the last one read ("[501 more rows not shown ...]"): the table is not the whole sheet.
     left_out: int = 0
+    # The columns whose dates are written day first (31/10/2026), as some of their cells can only be read.
+    day_first: set[str] = field(default_factory=set)
+
+    def date(self, label: str, value: str) -> When | None:
+        """The date in a cell of column ``label``, read the way that column writes its dates."""
+        return cell_date(value, day_first=label in self.day_first)
 
     @property
     def body(self) -> list[Row]:
@@ -920,13 +930,22 @@ def _kinds(table: Table) -> dict[str, str]:
         if not values:
             kinds[label] = "text"
             continue
-        dates = sum(cell_date(value) is not None for value in values)
+        if _day_first(values):
+            table.day_first.add(label)
+        dates = sum(table.date(label, value) is not None for value in values)
         figures = sum(_number(value) is not None for value in values)
         kinds[label] = "date" if dates >= 0.6 * len(values) else "figure" if figures >= 0.6 * len(values) else "text"
         if kinds[label] == "figure" and codes(label, cells):
             # A department, an account or a store named by a number picks rows; it is never added up.
             kinds[label] = "text"
     return kinds
+
+
+def _day_first(values: list[str]) -> bool:
+    """Whether a column writes its dates day first (31/10/2026, as in the UK and Europe): one of them can only be
+    read that way, and none only month first. A column that can be read either way is read month first."""
+    parts = [(int(match.group(1)), int(match.group(2))) for value in values if (match := _DATE.search(value))]
+    return any(first > 12 and second <= 12 for first, second in parts) and not any(second > 12 for _first, second in parts)
 
 
 # The question ----------------------------------------------------------------------------------
@@ -1205,7 +1224,7 @@ def _whole_years(span: tuple[When, When]) -> bool:
 
 
 def _dated_with_years(table: Table, label: str) -> bool:
-    return any((when := cell_date(row.value(label))) is not None and when[0] is not None for row in table.rows)
+    return any((when := table.date(label, row.value(label))) is not None and when[0] is not None for row in table.rows)
 
 
 def _in_heading(condition: Condition, table: Table) -> bool:
@@ -1236,7 +1255,7 @@ def _meets(row: Row, condition: Condition, table: Table) -> bool:
         return {
             ">": number > target, ">=": number >= target, "<": number < target, "<=": number <= target, "=": number == target,
         }[condition.op]
-    when = cell_date(value)
+    when = table.date(condition.column, value)
     if when is None:
         return False
     low, high = condition.value
@@ -1322,8 +1341,8 @@ def _worked(
             label for label in table.labels if table.kinds.get(label) == "date"
         ]
         # Among the rows with a date: an undated one ("Opening balance") is neither the first nor the last.
-        order = [row for row in body if cell_date(row.value(dated[0]))] if dated else []
-        order = sorted(order, key=lambda row: _date_key(cell_date(row.value(dated[0])))) if order else body
+        order = [row for row in body if table.date(dated[0], row.value(dated[0]))] if dated else []
+        order = sorted(order, key=lambda row: _date_key(table.date(dated[0], row.value(dated[0])))) if order else body
         row = order[0] if op == "first" else order[-1]
         shown = [label for label in columns] or figures
         lines = [f"- The {op} row{where}{reading}" + (f", by {dated[0]}" if dated else "") + ":"]
@@ -1843,23 +1862,31 @@ def _places(sample: str) -> int:
     return len(m.group(1)) if m else 0
 
 
-def cell_date(value: str) -> When | None:
-    """The date a cell holds ("01/15/2026", "Mon 09/28", "10/14", "2026-10-14", "Oct 14, 2026"), or None."""
+def cell_date(value: str, *, day_first: bool = False) -> When | None:
+    """The date a cell holds ("01/15/2026", "Mon 09/28", "10/14", "2026-10-14", "Oct 14, 2026", "03.10.2026", with
+    a time after it or not), or None. ``day_first``: its column writes 31/10/2026, so 03/11/2026 is 3 November."""
     text = (value or "").strip()
     if not text or len(text) > 40:
         return None
-    for pattern in (_ISO, _DATE, _MONTH_DAY, _DAY_MONTH):
+    for pattern in (_ISO, _DATE, _DOTTED, _MONTH_DAY, _DAY_MONTH):
         match = pattern.search(text)
         if not match:
             continue
-        rest = (text[: match.start()] + text[match.end():]).strip()
+        after = text[match.end():]
+        if (time := _TIME.match(after)) and not after[time.end():].strip():
+            after = ""
+        rest = (text[: match.start()] + after).strip()
         if rest and not _WEEKDAY.match(rest):
             return None
         if pattern is _ISO:
             year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
         elif pattern is _DATE:
             month, day = int(match.group(1)), int(match.group(2))
+            if day_first:
+                month, day = day, month
             year = _year(match.group(3))
+        elif pattern is _DOTTED:
+            day, month, year = int(match.group(1)), int(match.group(2)), _year(match.group(3))
         elif pattern is _MONTH_DAY:
             if match.group(3):
                 return None

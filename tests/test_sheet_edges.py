@@ -235,3 +235,58 @@ def test_a_currency_after_the_figure_or_a_code_before_it_is_still_a_figure():
         assert table_lookup._number(written) == Decimal(value), written
     text = _csv_text("Datum;Beschreibung;Betrag\n01.10.2026;Miete;1.250,00 €\n02.10.2026;Strom;89,90 €\n03.10.2026;Server;4.500,00 €\n", "k.csv")
     assert _tables(text, "Summe?", "k.csv").run("SELECT ROUND(SUM(betrag), 2) FROM t1")[1] == [(5839.9,)]
+
+
+# Dates -----------------------------------------------------------------------------------------
+
+
+def test_a_column_of_day_first_dates_is_read_day_first():
+    text = _csv_text("Date,Description,Amount\n03/11/2026,Card payment Tesco,45.20\n05/11/2026,Direct debit BT,60.00\n"
+                     "19/11/2026,Transfer in,1500.00\n02/12/2026,Standing order rent,950.00\n", "uk.csv")
+    table = table_lookup.tables_in(text)[0]
+    assert table.kinds["Date"] == "date"
+    tables = _tables(text, "What was paid in November?", "uk.csv")
+    sql = "SELECT COUNT(*), ROUND(SUM(amount), 2) FROM t1 WHERE date BETWEEN '2026-11-01' AND '2026-11-30'"
+    assert tables.run(sql)[1] == [(3, 1605.2)]
+    answer = table_lookup.lookup(text, "What was the total amount in November?")
+    assert "1,605.20" in answer
+    # A column that can be read month first still is (10/03 is October 3).
+    us = _csv_text("Date,Amount\n10/03/2026,5.00\n10/15/2026,7.00\n11/02/2026,1.00\n", "us.csv")
+    assert _tables(us, "October?", "us.csv").run("SELECT COUNT(*) FROM t1 WHERE date BETWEEN '2026-10-01' AND '2026-10-31'")[1] == [(2,)]
+
+
+def test_dotted_dates_are_dates():
+    assert table_lookup.cell_date("03.10.2026") == (2026, 10, 3)
+    text = _csv_text("Datum;Text;Betrag\n01.10.2026;Miete;1234,56\n15.10.2026;Strom;987,00\n02.11.2026;Server;100,00\n", "k.csv")
+    tables = _tables(text, "Oktober?", "k.csv")
+    assert tables.run("SELECT COUNT(*) FROM t1 WHERE datum BETWEEN '2026-10-01' AND '2026-10-31'")[1] == [(2,)]
+
+
+def test_a_date_with_a_time_is_a_date():
+    for written, when in (("10/15/2026 02:30:00 PM", (2026, 10, 15)), ("10/31/2026 04:05 PM", (2026, 10, 31)),
+                          ("2026-10-01T00:00:00", (2026, 10, 1)), ("2026-10-01T00:00:00.000", (2026, 10, 1)), ("2026-10-31 16:05", (2026, 10, 31))):
+        assert table_lookup.cell_date(written) == when, written
+    text = _csv_text("Posted,Description,Amount\n10/15/2026 02:30:00 PM,Card,500.10\n10/31/2026 04:05 PM,Wire,500.10\n"
+                     "11/02/2026 09:00 AM,Fee,12.00\n10/20/2026 01:00 PM,Refund,0.00\n", "bank.csv")
+    tables = _tables(text, "What was posted in October?", "bank.csv")
+    sql = "SELECT ROUND(SUM(amount), 2) FROM t1 WHERE posted BETWEEN '2026-10-01' AND '2026-10-31'"
+    assert tables.run(sql)[1] == [(1000.2,)]
+    assert "1,000.20" in table_lookup.lookup(text, "What was the total amount posted in October?")
+
+
+def test_a_column_of_months_is_stored_as_months():
+    from datetime import datetime
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Month", "Account", "Accrual"])
+    for number, value in enumerate((100.5, 110.25, 120.75, 90.5, 80.0), start=1):
+        ws.append([datetime(2026, number, 1), "Rent", value])
+        ws.cell(number + 1, 1).number_format = "mmm-yy"
+    out = io.BytesIO()
+    wb.save(out)
+    text = documents.extract_document("acc.xlsx", XLSX, out.getvalue())
+    tables = _tables(text, "What was the March accrual?", "acc.xlsx")
+    assert tables.run("SELECT accrual FROM t1 WHERE month = '2026-03'")[1] == [(120.75,)]
+    assert tables.run("SELECT month FROM t1 ORDER BY month DESC LIMIT 1")[1] == [("2026-05",)]
+    assert "YYYY-MM" in tables.schema()

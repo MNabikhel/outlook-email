@@ -183,6 +183,7 @@ class Column:
     same_as: str = ""  # in a _cells table: the table whose column this repeats
     running: str = ""  # a running balance: what each row adds to the row above's ("+ charges - payments")
     below: tuple[int, int] = (0, 0)  # figures: how many of its rows are below zero, of how many with a figure
+    day_first: bool = False  # dates: written day first (31/10/2026)
 
 
 @dataclass
@@ -291,8 +292,14 @@ class Tables:
         columns = [Column("Section", _ident("section", taken), "text")] if section else []
         columns += [Column(label, _ident(label, taken), table.kinds.get(label, "text")) for label in table.labels]
         for index, column in enumerate(columns[1 if section else 0 :]):
-            if column.kind == "figure" and _codes(column.label, [row.cells[index][1] for row in table.body if index < len(row.cells)]):
+            cells = [row.cells[index][1] for row in table.body if index < len(row.cells)]
+            if column.kind == "figure" and _codes(column.label, cells):
                 column.kind = "text"
+            column.day_first = column.label in table.day_first
+            written = [cell for cell in cells if cell and cell != tables.BLANK]
+            if column.kind == "text" and written and all(_MONTH_CELL.fullmatch(cell) and _month(cell) for cell in written):
+                # A column of months ("Jan-26", "Mar 2026") is stored as months, 2026-03, to filter and sort.
+                column.kind = "month"
         values: list[list] = []
         for row in table.body:
             cells = [row.group or None] if section else []
@@ -301,8 +308,10 @@ class Tables:
                 raw = "" if raw == tables.BLANK else raw
                 if raw:
                     column.samples.append(raw)
-                stored = _stored(raw, column.kind)
-                if column.kind == "date" and isinstance(stored, str):
+                stored = _stored(raw, column.kind, day_first=column.day_first)
+                if column.kind in {"date", "month"} and isinstance(stored, str) and not _HAS_TIME.search(raw):
+                    # Shown as the sheet writes it; a date with a time is shown as its date, the row's own time
+                    # being one of several on that day.
                     column.written.setdefault(stored, raw)
                 cells.append(stored)
             values.append(cells)
@@ -750,14 +759,21 @@ def _sql_type(kind: str) -> str:
     return "REAL" if kind == "figure" else "TEXT COLLATE NOCASE"
 
 
-def _stored(raw: str, kind: str):
+_HAS_TIME = re.compile(r"\d:\d\d")
+# A cell that is a month and nothing else ("Jan-26", "March 2026").
+_MONTH_CELL = re.compile(r"\s*[A-Za-z]{3,9}\.?[\s\-'/]*\d{2,4}\s*")
+
+
+def _stored(raw: str, kind: str, *, day_first: bool = False):
     raw = raw[:MAX_CELL_CHARS]
+    if kind == "month":
+        return _month(raw) or raw or None
     if kind == "figure":
         # A "-" is the accounting format's zero; a blank cell is no figure at all (MIN and AVG skip it).
         number = table_lookup._number(raw)
         return float(number) if number is not None else None
     if kind == "date":
-        when = table_lookup.cell_date(raw)
+        when = table_lookup.cell_date(raw, day_first=day_first)
         if when:
             year, month, day = when
             return f"{year:04d}-{month:02d}-{day:02d}" if year else f"{month:02d}-{day:02d}"
@@ -790,7 +806,7 @@ def _describe(column: Column, names: int = MAX_NAMES) -> str:
             note += f", below 0 on {below} of its {of} rows"
         return f"{note} = {column.formula} on {'most rows' if column.most else 'every row'}" if column.formula else note
     if column.kind == "date":
-        stored = next((_stored(s, "date") for s in column.samples if table_lookup.cell_date(s)), "")
+        stored = next((_stored(s, "date", day_first=column.day_first) for s in column.samples if table_lookup.cell_date(s, day_first=column.day_first)), "")
         shape = "YYYY-MM-DD" if len(stored or "") == 10 else "MM-DD"
         return f'"{column.label}" date as text {shape}' + (f", e.g. {stored}" if stored else "")
     listed = list(dict.fromkeys(column.samples))
