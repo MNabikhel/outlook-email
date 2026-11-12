@@ -958,6 +958,37 @@ def test_sync_inbox_says_what_happened_on_the_card_and_keeps_advanced_open(loade
         assert "Ask IT" in advanced and "python -m" not in advanced and "AZURE_CLIENT_ID" not in advanced
 
 
+def test_a_sync_that_didnt_work_turns_the_card_red_and_connecting_says_copying_only_until_done(loaded, settings, page, monkeypatch):
+    # The card stayed green until the page was opened again; "copying your mail now" stayed after the copy ended.
+    from contextlib import contextmanager
+
+    from liveserver import serving
+
+    from controller_inbox import outlook_desktop, outlook_sync
+
+    @contextmanager
+    def offline(**_options):
+        raise outlook_desktop.OutlookError("Outlook couldn't find a message just now (The server is busy.).")
+        yield
+
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    monkeypatch.setattr(outlook_desktop, "connect", offline)
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/app/settings#set-outlook")
+        page.click("#set-outlook button:has-text('Connect to Outlook')")
+        page.click("dialog.consent button:has-text('Connect')")
+        page.wait_for_selector("#set-outlook .src-card.on")
+        banner = page.wait_for_selector("#set-outlook-banner.error", timeout=20000)
+        assert banner.inner_text().count("couldn't find a message just now") == 1
+        page.wait_for_function("() => !document.querySelector('#set-outlook').innerText.includes('is copying your mail')", timeout=20000)
+        outlook_sync.note_failure(loaded, "")
+        loaded.set_state(outlook_sync.LAST_ERROR_KEY, "")
+        page.goto(f"{base}/app/settings#set-outlook")
+        page.wait_for_selector("#set-outlook-banner:not(.error)")
+        page.click("#set-outlook button:has-text('Sync now')")
+        page.wait_for_selector("#set-outlook-banner.error", timeout=20000)
+
+
 # The calendar and the mail about a meeting ----------------------------------------------------------
 _FOCUS = "() => { const e = document.activeElement; return e ? `${e.tagName}.${e.className}|${e.textContent.trim().slice(0, 60)}|${e.getAttribute('href') || ''}` : ''; }"
 

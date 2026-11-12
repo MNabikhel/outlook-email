@@ -227,8 +227,8 @@ def _sync_outlook(
             return outlook_sync.sync(store, settings, session, now=now, on_progress=on_progress)
     except outlook_sync.NotConnected as exc:  # disconnected while it started: nothing to show on the card
         return {"note": str(exc)}
-    except outlook_desktop.OutlookUnavailable as exc:
-        note = str(exc)
+    except (outlook_desktop.OutlookUnavailable, outlook_desktop.OutlookError) as exc:
+        note = str(exc)  # written to be read as it is
     except Exception as exc:  # the drop folder and the digest still happen
         log.warning("Syncing Outlook failed", exc_info=True)
         note = f"Outlook couldn't be read this time ({str(exc)[:200]})."

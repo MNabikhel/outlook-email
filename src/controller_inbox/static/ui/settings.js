@@ -56,6 +56,7 @@ export function createSettings(ctx) {
   let flash = null; // { id, tone, text }: the line under the last change
   let token = 0;
   let wasRunning = false;
+  let lastFinished = ""; // when the last run ended, as the page last saw it
   let observer = null;
   let root = null; // the page drawn now
   const dirty = new Set(); // sections changed here and not saved yet: drawing again leaves them as they are
@@ -83,6 +84,7 @@ export function createSettings(ctx) {
     dirty.clear();
     root = null;
     wasRunning = ctx.job().state === "running";
+    lastFinished = ctx.job().finished_at || "";
     if (data) draw({ keepScroll: false });
     else ctx.show(skeletonReader(), {});
     load({ keepScroll: Boolean(data) });
@@ -876,7 +878,14 @@ export function createSettings(ctx) {
     dialog.addEventListener("close", () => {
       const yes = dialog.returnValue === "connect";
       dialog.remove();
-      if (yes) save("outlook", "/api/settings/outlook/connect", { agreed: true, calendar: calendar.checked }, opener, { busyText: "Connecting…" });
+      if (yes) {
+        save("outlook", "/api/settings/outlook/connect", { agreed: true, calendar: calendar.checked }, opener, {
+          busyText: "Connecting…",
+          after: (reply) => {
+            if (reply.job && reply.job.state === "running") flash.untilDone = true;
+          },
+        });
+      }
       else opener.focus();
     });
     document.body.append(dialog);
@@ -1030,8 +1039,13 @@ export function createSettings(ctx) {
   function job(now) {
     if (!data || !ctx.isShown()) return;
     const running = now.state === "running";
-    if (running !== wasRunning) {
+    // A run that ended (a sync that didn't work ends before the page sees it running): the cards say what it did.
+    const ended = !running && (now.finished_at || "") !== lastFinished;
+    if (!running) lastFinished = now.finished_at || "";
+    if (running !== wasRunning || ended) {
       wasRunning = running;
+      // "Copying your mail now" is said until the copy is done.
+      if (ended && flash && flash.untilDone) flash = null;
       return load({ keepScroll: true });
     }
     const bar = running ? $("#set-index-progress") : null;

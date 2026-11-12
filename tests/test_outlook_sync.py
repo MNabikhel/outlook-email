@@ -417,6 +417,20 @@ def test_a_sync_that_didnt_work_shows_on_settings_until_one_does(store, settings
     assert client.get("/api/settings", headers=PAGE).json()["outlook"]["last_error"] == "", "connecting again starts afresh"
 
 
+def test_outlooks_own_error_is_said_once_not_wrapped_again(store, settings, monkeypatch):
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    said = "Outlook couldn't find a message just now (The server is busy.)."
+
+    @contextmanager
+    def connect(**_options):
+        raise outlook_desktop.OutlookError(said)
+        yield
+
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    result = outlook_run(store, settings, now=NOW)
+    assert result["message"] == said and outlook_sync.last_failure(store)["error"] == said
+
+
 # The Settings page ---------------------------------------------------------------------------------------
 
 
