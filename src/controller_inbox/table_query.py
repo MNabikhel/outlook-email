@@ -227,7 +227,11 @@ class Tables:
         self._db.create_function("like", 3, lambda pattern, value, escape: _like(pattern, value, escape, deadline=self._deadline), deterministic=True)
         self.facts: list[tuple[str, str, str]] = []
         count = small = 0
-        read = [(source, (text or "").splitlines(), table_lookup.tables_in(text)) for source, text in files]
+        # The tables the question names by their title (an entity, a sheet), else all but a hidden sheet's.
+        read = [
+            (source, (text or "").splitlines(), table_lookup.asked_tables(text or "", table_lookup.tables_in(text), question) if question else table_lookup.tables_in(text))
+            for source, text in files
+        ]
         loaded: set[str] = set()
         for source, lines, found in read:
             for table in found:

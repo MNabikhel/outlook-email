@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from controller_inbox import table_query
+from controller_inbox import table_lookup, table_query
 from controller_inbox.documents import extract_document
 from controller_inbox.table_query import Tables, _like, parse
 
@@ -625,3 +625,39 @@ def test_a_column_of_debits_and_credits_says_which_rows_are_below_zero():
     )
     schema = Tables([("bank.csv", '[sheet "bank.csv" A1:C4]\nA1: Date | B1: Payee | C1: Amount\n' + rows)]).schema()
     assert '"Amount" figure, below 0 on 2 of its 3 rows' in schema
+
+
+AGING = """[sheet "Aging" A1:C12]
+A1: Accounts payable aging
+[heading]
+A3: US entity (USD)
+
+A4: Vendor | B4: 61-90 | C4: Total
+A5 (Vendor): Harbor Steel | B5 (61-90): 500 | C5 (Total): 900
+A6 (Vendor): Apex Electric | B6 (61-90): 100 | C6 (Total): 300
+[heading]
+A8: Canada entity (CAD)
+
+A9: Vendor | B9: 61-90 | C9: Total
+A10 (Vendor): Harbor Steel | B10 (61-90): 70 | C10 (Total): 80
+A11 (Vendor): Delta Office | B11 (61-90): 30 | C11 (Total): 60
+[sheet "Old draft" A1:B3 hidden]
+A1: Vendor | B1: 61-90
+A2 (Vendor): Harbor Steel | B2 (61-90): 999
+A3 (Vendor): Delta Office | B3 (61-90): 888
+"""
+
+
+def test_a_table_the_question_names_by_its_title_is_the_one_asked_about():
+    # "the Canada entity" names one table by its title: the query is offered that one alone, and the lookup answers
+    # from it, not from the US table with the same columns.
+    tables = Tables([("Aging.xlsx", AGING)], "What is the Canada entity's total 61-90 balance?")
+    assert [sheet.title.rsplit(" / ", 1)[-1] for sheet in tables.sheets if not sheet.of] == ["A8: Canada entity (CAD)"]
+    found = table_lookup.answer(AGING, "What is the Canada entity's 61-90 balance for Harbor Steel?")
+    assert found is not None and "70" in "\n".join(found.lines) and "500" not in "\n".join(found.lines)
+
+
+def test_a_hidden_sheet_is_left_out_unless_the_question_names_it():
+    titles = lambda question: sorted(sheet.title for sheet in Tables([("Aging.xlsx", AGING)], question).sheets if not sheet.of)  # noqa: E731
+    assert not any("Old draft" in title for title in titles("What do we owe Harbor Steel over 60 days?"))
+    assert any("Old draft" in title for title in titles("What did the old draft say for Harbor Steel?"))

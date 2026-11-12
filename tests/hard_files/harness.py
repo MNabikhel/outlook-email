@@ -96,9 +96,9 @@ def evidence(store, settings, email, question: str, monkeypatch, *, sql: str = "
     return {"prompts": prompts, "first": prompts[0] if prompts else "", "answer": answer, "events": events}
 
 
-def live(store, settings, email, question: str) -> str:
-    events = list(assistant.answer_stream(store, settings, question, email_id=email.id))
-    return "".join(e["text"] for e in events if e["type"] == "delta")
+def live(store, settings, email, question: str) -> list[dict]:
+    """The chat box's events for ``question``, answered by the real model ``settings`` points at."""
+    return list(assistant.answer_stream(store, settings, question, email_id=email.id))
 
 
 def resolved(sql: str, filename: str) -> str:

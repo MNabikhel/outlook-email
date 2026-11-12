@@ -98,9 +98,11 @@ def test_a_real_model_answers(case, store, settings):
         settings.llm_model = model
     settings.llm_timeout = float(os.environ.get("CLOSEDESK_EVAL_TIMEOUT", "900"))
     email = mail_with(store, settings, case["file"])
-    answer = live(store, settings, email, case["question"])
+    events = live(store, settings, email, case["question"])
+    answer = "".join(e["text"] for e in events if e["type"] == "delta")
     path = os.environ.get("CLOSEDESK_EVAL_REPORT")
     if path:
         with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"id": case_id(case), "right": found(answer, case["answers"]), "answers": case["answers"], "answer": answer}) + "\n")
+            steps = [e["text"] for e in events if e["type"] == "step"]
+            handle.write(json.dumps({"id": case_id(case), "right": found(answer, case["answers"]), "answers": case["answers"], "answer": answer, "steps": steps}) + "\n")
     assert found(answer, case["answers"]), f"{case['question']!r}: wanted {case['answers'][0]}, got: {answer[:400]}"

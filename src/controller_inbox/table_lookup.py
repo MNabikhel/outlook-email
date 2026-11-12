@@ -257,11 +257,60 @@ def answer(text: str, question: str) -> Answer | None:
     if not asked.words and not asked.conditions:
         return None
     best: Answer | None = None
-    for table in tables_in(text):
+    for table in asked_tables(text, tables_in(text), question):
         found = _answer(table, asked)
         if found and (best is None or found.weight > best.weight):
             best = found
     return best
+
+
+# Words in a table's title that say nothing about which table it is.
+_TITLE_NOISE = frozenset({"sheet", "table", "page", "the", "and", "for", "with", "from", "total", "totals"})
+
+
+def asked_tables(text: str, tables: list[Table], question: str) -> list[Table]:
+    """The tables a question is about. When it names one by a word only some tables' titles have ("the Canada
+    entity", "on the summary", "the UK"), those; otherwise every one but a hidden sheet's (an old draft, a lookup
+    list), unless the question names that sheet."""
+    if len(tables) < 2:
+        return tables
+    lines = text.splitlines()
+    words = [_title_words(lines, table) for table in tables]
+    asked = _title_words_in(question)
+    common = set.intersection(*words) if words else set()
+    named = [table for table, own in zip(tables, words) if (own - common) & asked]
+    if named:
+        return named
+    shown = [table for table in tables if not table.where.endswith(" hidden")]
+    return shown or tables
+
+
+def _title_words(lines: list[str], table: Table) -> set[str]:
+    """The words of a table's sheet name and the headings above it."""
+    where = table.where
+    sheet = where.split('"')[1] if where.startswith('sheet "') else ""
+    heads: list[str] = []
+    at = table.rows[0].at if table.rows else 0
+    for index in range(min(at, len(lines)) - 1, -1, -1):
+        line = lines[index].strip()
+        if line.startswith("[sheet ") or line.startswith("[page "):
+            break
+        if line == "[heading]":
+            heads = [text for text in lines[index + 1 : at] if text.strip() and not text.startswith("[")][:3]
+            break
+    return _title_words_in(" ".join([sheet, *heads]))
+
+
+def _title_words_in(text: str) -> set[str]:
+    """Words that can name a table: three letters or more, or a two-letter code in capitals (US, UK, IT); not a
+    workbook's cell reference."""
+    found = set()
+    for word in re.findall(r"[A-Za-z][A-Za-z0-9&'-]*", re.sub(r"\b[A-Z]{1,3}\d+:", " ", text)):
+        if len(word) >= 3 and word.lower() not in _TITLE_NOISE:
+            found.add(word.lower())
+        elif len(word) == 2 and word.isupper():
+            found.add(word)
+    return found
 
 
 def render(found: Answer, limit: int = MAX_CHARS) -> str:
