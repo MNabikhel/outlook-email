@@ -438,3 +438,21 @@ def test_a_repeating_meeting_at_a_floating_time_keeps_its_local_time_after_the_c
     finally:
         monkeypatch.delenv("TZ")
         time.tzset()
+
+
+def test_the_update_catch_up_reads_outlook_meeting_requests_an_older_version_filed_by_their_subject(store):
+    from controller_inbox.models import DocumentType
+
+    for email_id, category in (("as_meeting", DocumentType.MEETING), ("as_other", DocumentType.OTHER),
+                               ("as_reply", DocumentType.REPLY_NEEDED), ("an_invoice", DocumentType.AP_INVOICE)):
+        record = _record(email_id)
+        record.source_path, record.category = f"/drop/{email_id}.msg", category
+        store.upsert_email(record)
+        store.set_source_path(email_id, record.source_path)
+    assert sorted(email_id for _rowid, email_id in store.emails_without_meetings(0, batch=50)) == ["as_meeting", "as_other", "as_reply"]
+
+
+def test_a_vcalendar_file_sent_as_any_kind_of_file_reaches_the_calendar(store, settings):
+    data = _invite("V1", "20261020T140000Z", subject="Year-end close planning", end="20261020T150000Z").encode()
+    _read_invitation(store, settings, data, filename="meeting.vcs", content_type="application/octet-stream", subject="Year-end close planning")
+    assert [m["subject"] for m in store.meetings_between("2026-10-20", "2026-10-21")] == ["Year-end close planning"]

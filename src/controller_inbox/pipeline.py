@@ -528,7 +528,8 @@ def invites(raw: RawMessage, email_id: str, now: datetime) -> list:
     deadline = monotonic() + calendar_events.ICS_SECONDS
     for att in raw.attachments:
         name = (att.filename or "").lower()
-        if (name.endswith(".ics") or "calendar" in (att.content_type or "").lower()) and att.content:
+        # As ``invitation_method`` tells an invitation: an .ics or .vcs file, or a calendar sent as one.
+        if (name.endswith((".ics", ".vcs")) or "calendar" in (att.content_type or "").lower()) and att.content:
             if len(found) >= calendar_events.MAX_ROWS:
                 break
             try:

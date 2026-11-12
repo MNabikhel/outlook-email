@@ -817,7 +817,8 @@ class Store:
 
     def emails_without_meetings(self, after: int, *, batch: int) -> list[tuple[int, str]]:
         """(rowid, id) of stored emails after ``after`` with an invitation (an .ics file, or read from a .msg that may
-        be a meeting request) and no meeting saved from it, ``batch`` at a time in the order stored."""
+        be a meeting request: an older version filed one by its subject, as a meeting, "Other" or a reply needed) and
+        no meeting saved from it, ``batch`` at a time in the order stored."""
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -825,7 +826,7 @@ class Store:
                 WHERE e.rowid > ? AND COALESCE(e.source, '') != 'demo'
                   AND (EXISTS (SELECT 1 FROM attachments a WHERE a.email_id = e.id
                                AND (lower(a.filename) LIKE '%.ics' OR lower(a.filename) LIKE '%.vcs' OR lower(a.content_type) LIKE 'text/calendar%'))
-                       OR (lower(COALESCE(e.source_path, '')) LIKE '%.msg' AND e.category = 'meeting'))
+                       OR (lower(COALESCE(e.source_path, '')) LIKE '%.msg' AND e.category IN ('meeting', 'other', 'reply_needed')))
                   AND NOT EXISTS (SELECT 1 FROM meetings m WHERE m.email_id = e.id)
                 ORDER BY e.rowid LIMIT ?
                 """,
