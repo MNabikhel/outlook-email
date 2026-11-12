@@ -96,7 +96,8 @@ def threading(*, in_reply_to: str = "", references: str = "", thread_index: byte
     if parents := message_ids(in_reply_to):
         out["in_reply_to"] = parents[-1]
     if refs := message_ids(references):
-        out["references"] = refs[-20:]
+        # The first is the conversation's first email, which every reply names: kept, with the latest 19.
+        out["references"] = refs if len(refs) <= 20 else [refs[0], *refs[-19:]]
     if conversation := conversation_of(thread_index):
         out["conversation"] = conversation
     if recipients := list(dict.fromkeys(to)):
@@ -190,7 +191,8 @@ def _numbers(email: EmailRecord, name: str) -> set[str]:
 
 def _numbers_written(text: str) -> set[str]:
     """The numbers a text writes, each whole, as ``number_key`` gives them ("INV-22918" is not "INV2291")."""
-    tokens = re.findall(r"[A-Za-z]*[-#\s]?\d[\d-]*[A-Za-z0-9]*", text or "")
+    # Each run of letters is tried from its start only: tried from each of its letters, a long one takes seconds.
+    tokens = re.findall(r"(?<![A-Za-z])[A-Za-z]*[-#\s]?\d[\d-]*[A-Za-z0-9]*", text or "")
     # "Invoice 22918" names 22918 (the word before it is no part of the number), and "PO-77821" the PO 77821.
     bare = re.findall(r"(?<![A-Za-z0-9])\d[\d-]*[A-Za-z0-9]*", text or "")
     return {number_key(token) for token in tokens + bare} | {po_key(token) for token in tokens}
@@ -302,7 +304,17 @@ def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str
 
 
 def new_domains(thread: list[EmailRecord]) -> set[str]:
-    """The emails in a conversation whose sender's domain hadn't taken part in it: a reply from a lookalike domain
+    """The emails in a conversation whose sender's domain hadn't taken part in it (``_participation``)."""
+    return _participation(thread)[1]
+
+
+def started_by(thread: list[EmailRecord]):
+    """The email a conversation started with, as ``new_domains`` decides it; None for an empty thread."""
+    return _participation(thread)[0] if thread else None
+
+
+def _participation(thread: list) -> tuple:
+    """The email a conversation started with, and the emails in a conversation whose sender's domain hadn't taken part in it: a reply from a lookalike domain
     slipped into a real thread is how payment-change fraud usually starts.
 
     Who has taken part is counted from the email the conversation started with: the one the others answer, first
@@ -311,7 +323,7 @@ def new_domains(thread: list[EmailRecord]) -> set[str]:
     who had, taken in the order the replies answer each other. A sender with no address is new (its Reply-To is what
     replies would reach), and so is an email claiming the Message-ID of one from another domain."""
     if len(thread) < 2:
-        return set()
+        return (thread[0] if thread else None), set()
     order = sorted(thread, key=_arrival)
     owns: dict[str, EmailRecord] = {}
     forged: set[str] = set()
@@ -340,9 +352,16 @@ def new_domains(thread: list[EmailRecord]) -> set[str]:
             steps, current = steps + 1, parent
         return steps
 
-    answered = {ref for record in thread for ref in parents(record)}
-    roots = [record for record in order if record.id not in forged and not (set(parents(record)) & set(owns))]
-    root = next((record for record in roots if norm_id(record.internet_message_id) in answered), None) or (roots[0] if roots else order[0])
+    roots = [record for record in order if record.id not in forged and not (set(parents(record)) & set(owns))] or order
+    # The first stored started it. Only among those stored at the same moment does it count which one someone else,
+    # from another domain, answered: two emails answering each other, from one sender, prove nothing.
+    tied = [record for record in roots if _arrival(record)[0] == _arrival(roots[0])[0]]
+
+    def answered_by_another(record) -> bool:
+        mid = norm_id(record.internet_message_id)
+        return bool(mid) and any(mid in parents(other) and _domain_of(other) != _domain_of(record) for other in thread)
+
+    root = next((record for record in tied if answered_by_another(record)), tied[0])
     seen = {_domain_of(root)} - {""} | _to_domains(root)
     marked = set(forged)
     for record in sorted(thread, key=lambda r: (depth(r), _arrival(r))):
@@ -353,7 +372,7 @@ def new_domains(thread: list[EmailRecord]) -> set[str]:
             marked.add(record.id)
             continue  # whom a newcomer wrote to doesn't count as taking part
         seen |= _to_domains(record)
-    return marked
+    return root, marked
 
 
 def _arrival(record) -> tuple[str, str]:
@@ -394,14 +413,18 @@ def when(record: EmailRecord) -> datetime | None:
 # --- Mail stored before this version -------------------------------------------------------------------------------
 
 
-def catch_up(store, settings, *, limit: int = 20_000) -> dict:
+def catch_up(store, settings, *, limit: int = 20_000, seconds: float | None = None) -> dict:
     """File mail stored before links were kept: its keys from what is stored, then its conversation headers from
     the .eml or .msg it was read from (kept in the inbox folder), a batch at a time. Runs with the run lock held, so
-    a dropped email isn't read twice over. Returns how many emails each step did."""
+    a dropped email isn't read twice over. Stops after ``seconds`` when given; the next call carries on. Returns how
+    many emails each step did."""
+    import time
+
+    deadline = time.monotonic() + seconds if seconds is not None else None
     filed = headers = 0
-    while filed < limit and (done := store.file_link_keys(batch=500)):
+    while filed < limit and (deadline is None or time.monotonic() < deadline) and (done := store.file_link_keys(batch=500)):
         filed += done
-    while headers < limit and (done := _headers_from_files(store, settings, batch=200)):
+    while headers < limit and (deadline is None or time.monotonic() < deadline) and (done := _headers_from_files(store, settings, batch=200)):
         headers += done
     return {"filed": filed, "headers": headers}
 

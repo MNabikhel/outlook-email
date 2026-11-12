@@ -452,3 +452,20 @@ def test_microsoft_365_mail_keeps_who_it_went_to():
             "receivedDateTime": "2026-10-01T10:00:00Z", "body": {"contentType": "text", "content": "Which PO?"}, "conversationId": "conv-1"}
     raw = GraphMailbox.__new__(GraphMailbox)._to_raw(item)
     assert raw.threading == {"to": ["ar@coastalprint.com", "ap@taz.com"]}
+
+
+def test_a_run_links_stored_mail_for_a_few_seconds_and_a_failure_stops_nothing(store, settings, monkeypatch):
+    from controller_inbox import overnight
+
+    calls = []
+    monkeypatch.setattr(links, "catch_up", lambda _store, _settings, **kw: (calls.append(kw), (_ for _ in ()).throw(RuntimeError("database is locked")))[1])
+    overnight.run_overnight(store, settings, sync_graph=False, sync_outlook=False)
+    assert calls and calls[0].get("seconds") == overnight.CATCH_UP_SECONDS
+
+
+def test_a_new_store_needs_no_refiling(tmp_path):
+    from controller_inbox.store import Store
+
+    fresh = Store(tmp_path / "new.sqlite")
+    with fresh.connect() as conn:
+        assert conn.execute("SELECT value FROM sync_state WHERE key = 'link_keys_version'").fetchone()[0] == links.KEYS_VERSION
