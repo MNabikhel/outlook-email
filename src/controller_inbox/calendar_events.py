@@ -697,6 +697,34 @@ def refresh_invites(store, settings, *, now: datetime | None = None, limit: int 
     return done
 
 
+def follow_hold(store, settings, email, *, now: datetime | None = None) -> None:
+    """An email's meetings after a fraud verdict or check changed it: held, its invitation's meetings become only
+    which meetings it named (``store.hold_invites``); cleared, an invitation kept only as that is read again from
+    what was kept of the email, and its meetings are saved."""
+    from controller_inbox.fraud import attachments_locked
+
+    if email is None:
+        return
+    if attachments_locked(email):
+        store.hold_invites(email.id)
+        return
+    if not store.held_markers(email.id):
+        return
+    now = now or datetime.now(timezone.utc)
+    try:
+        found = _kept_invitations(email, settings, now)
+    except Exception:  # read again at the next verdict; the markers stay
+        return
+    if found is None:
+        return
+    with store.transaction() as conn:
+        current = store.get_email(email.id, conn=conn)
+        if current is None or attachments_locked(current):  # held again meanwhile
+            return
+        store.save_invites(email.id, found, sender=current.sender_email, received=current.received_at,
+                           expanded=now.astimezone(timezone.utc).isoformat(timespec="seconds"), conn=conn)
+
+
 CATCH_UP_KEY = "invites_catch_up"  # how far reading the invitations of mail stored before meetings were kept got
 
 
@@ -729,7 +757,7 @@ def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int
                     current = store.get_email(email_id, conn=conn)
                     if current is not None and not store.has_meetings(email_id, conn=conn):  # read meanwhile: as it was read
                         store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp,
-                                           held=attachments_locked(current), conn=conn)
+                                           held=attachments_locked(current), sender_name=current.sender_name, conn=conn)
         looked += len(rows)
         store.set_state(CATCH_UP_KEY, str(rows[-1][0]))
     return looked

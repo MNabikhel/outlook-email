@@ -253,6 +253,7 @@ def process_message(
         verdict_changed = latest is not None and _keep_user_state(record, latest)
         store.upsert_email(record, conn=conn)
         store.save_invites(record.id, found, sender=raw.sender_email, received=record.received_at, held=attachments_locked(record),
+                           sender_name=raw.sender_name,
                            expanded=now.astimezone(timezone.utc).isoformat(timespec="seconds"), conn=conn)
     from controller_inbox import cost_codes
 

@@ -203,7 +203,9 @@ def record_correction(
     assign_script_draft(email)
     email.model_status = "corrected"
     store.upsert_email(email)
-    from controller_inbox import cost_codes
+    from controller_inbox import calendar_events, cost_codes
+
+    calendar_events.follow_hold(store, settings, email)  # held or cleared by the correction: its meetings follow
 
     cost_codes.refresh(store, settings, email_ids=[email.id])
     return row

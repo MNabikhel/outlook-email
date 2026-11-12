@@ -29,12 +29,17 @@ COM_CALLS = {
     "GetFirst": {"listed"}, "GetNext": {"listed"},
     "SaveAs": {"item"},  # writes a .msg file and leaves the message as it is: the only way a copy is made
 }
-# Python's own methods on Python values (strings, dates, lists, sets), and this file's own.
-PYTHON_CALLS = {
-    "append", "astimezone", "date", "get", "group", "isoformat", "lower", "mkdir", "now", "pop", "replace", "split",
-    "startswith", "strftime", "strip", "sub",
+# Python's own methods on Python values (strings, dates, lists, sets, this file's own), each on what it is called on:
+# a Python method's name on an Outlook object ("item.replace()", "items.get()") would reach whatever Outlook has by it.
+PYTHON_CALLS_ON = {
+    "append": {"binned", "found", "seen"}, "astimezone": {"aware_utc(value)", "naive"}, "date": {"item.End", "item.Start"},
+    "get": {"_BUSY", "_IMPORTANCE", "self._by_path"}, "group": {"m"}, "isoformat": {"ends", "item.End.date()", "item.Start.date()", "starts"},
+    "lower": {"str(folder.Name)"}, "mkdir": {"dest.parent"}, "now": {"datetime"}, "pop": {"meeting"}, "replace": {"message_id", "value"},
+    "split": {"str(field or '')[:50000]"}, "startswith": {"path", "str(message_class or '')"}, "strftime": {"local"},
+    "strip": {"p", "str(info[2])", "str(message_id or '')", "str(mid or '')"}, "sub": {"re"},
+    "add": {"bins", "codes", "names", "trash"}, "sort": {"stores"}, "_item": {"self"}, "folders": {"self"}, "__init__": {"super()"},
 }
-PYTHON_CALLS_ON = {"add": {"bins", "codes", "names", "trash"}, "sort": {"stores"}, "_item": {"self"}, "folders": {"self"}, "__init__": {"super()"}}
+PYTHON_CALLS = set(PYTHON_CALLS_ON)
 # What Outlook's objects are read for (and the methods above): any other name is something new of Outlook's.
 COM_NAMES = set(COM_CALLS) | {
     "AllDayEvent", "BusyStatus", "Columns", "Count", "DefaultItemType", "End", "EndOfTable", "EntryID", "Folders",
@@ -47,8 +52,11 @@ PYTHON_NAMES = PYTHON_CALLS | set(PYTHON_CALLS_ON) | {
     "store_id", "utc", "year",
 }
 READ_BY_NAME = {"ExchangeStoreType", "DisplayName", "hresult", "excepinfo", "args"}  # getattr(obj, "...", default)
-# Python's own functions it calls, besides its own and those it imports by name.
+# Python's own functions it calls, besides its own, and the names it imports (none from pythoncom or win32com.client,
+# whose CastTo or CoCreateInstance reach Outlook past these lists).
 BUILTINS = {"any", "bool", "getattr", "isinstance", "len", "range", "set", "str", "super", "type"}
+IMPORTED = {"annotations", "contextmanager", "dataclass", "datetime", "timedelta", "timezone", "Path", "Iterator", "aware_utc"}
+DECORATORS = {"contextmanager", "dataclass", "property", "staticmethod"}
 # The modules it may import: none that reach a method by a name made up at run time (operator.methodcaller,
 # functools.partial, importlib).
 IMPORTS = {"__future__", "contextlib", "controller_inbox.clock", "dataclasses", "datetime", "pathlib", "pythoncom", "re", "sys", "typing",
@@ -94,8 +102,8 @@ def _not_read_only(source: str) -> list[str]:
     tree = ast.parse(source)
     known = COM_NAMES | PYTHON_NAMES  # as spelled here: "item.UNREAD" or "item.delete" isn't
     writes = {name.lower() for name in WRITES}
-    functions = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))} | BUILTINS
-    functions |= {alias.asname or alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names}
+    own = {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))}
+    functions = own | BUILTINS | IMPORTED
     found = []
     for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
@@ -103,19 +111,33 @@ def _not_read_only(source: str) -> list[str]:
             found.append(f"line {line}: .{node.attr}")
         if isinstance(node, ast.Import):
             found += [f"line {line}: import {alias.name}" for alias in node.names if alias.name not in IMPORTS]
-        if isinstance(node, ast.ImportFrom) and node.module not in IMPORTS:
-            found.append(f"line {line}: from {node.module} import")
+        if isinstance(node, ast.ImportFrom):
+            if node.module not in IMPORTS:
+                found.append(f"line {line}: from {node.module} import")
+            found += [f"line {line}: imports {alias.name}" for alias in node.names if alias.name not in IMPORTED or alias.asname]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            # A decorator is called with what it decorates: "@folder.Folders.Add".
+            found += [f"line {line}: @{ast.unparse(d)}" for d in node.decorator_list if not (isinstance(d, ast.Name) and d.id in DECORATORS)]
+        if isinstance(node, (ast.With, ast.AsyncWith)):
+            # "with" calls what it is given back when the block ends: "with closing(item)" calls item.Close().
+            for item in node.items:
+                call = item.context_expr
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id in own):
+                    found.append(f"line {line}: with {ast.unparse(call)}")
         for target in _targets(node):
             # The one property set: the calendar's list of items is told to list each occurrence of a repeating
             # meeting. It is a setting of the list CloseDesk asked for, not of anything kept in Outlook.
             if isinstance(target, ast.Attribute) and ast.unparse(target.value) != "self" and ast.unparse(target) != "items.IncludeRecurrences":
+                found.append(f"line {line}: sets {ast.unparse(target)}")
+            # An item of an Outlook collection set ("item.Items[1] = ..."): only this file's own lists and maps.
+            if isinstance(target, ast.Subscript) and not ast.unparse(target.value).startswith("self."):
                 found.append(f"line {line}: sets {ast.unparse(target)}")
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         if isinstance(func, ast.Attribute):
             on = ast.unparse(func.value)
-            if not (on in COM_CALLS.get(func.attr, ()) or func.attr in PYTHON_CALLS or on in PYTHON_CALLS_ON.get(func.attr, ())):
+            if not (on in COM_CALLS.get(func.attr, ()) or on in PYTHON_CALLS_ON.get(func.attr, ())):
                 found.append(f"line {line}: {on}.{func.attr}()")
         elif isinstance(func, ast.Name):
             if func.id not in functions:
@@ -144,9 +166,14 @@ def test_the_read_only_check_catches_what_isnt_a_read():
         "import operator\n    operator.methodcaller('Delete')(item)", "from operator import attrgetter", "from functools import partial",
         "for item.UnRead in [False]:\n        pass", "with open(name) as item.Subject:\n        pass", "item.UnRead, x = False, 1",
         "[0 for item.UnRead in [False]]", "del item.Categories", "item.FlagStatus += 1", "item.Subject: str = ''",
+        "item.Items[1] = 2", "item.Recipients[0] += 1", "@folder.Folders.Add\n    def g():\n        pass",
+        "with contextlib.closing(item):\n        pass", "from contextlib import closing\n    with closing(item):\n        pass",
+        "with item:\n        pass", "from pythoncom import CoCreateInstance\n    CoCreateInstance(name)",
+        "from win32com.client import CastTo\n    CastTo(item, 'MailItem')", "from datetime import datetime as Delete",
+        "item.replace('a', 'b')", "items.get(1)", "folder.Items.sort()",
     ):
         assert _not_read_only(f"def f(item, app, folder, namespace, explorer, name):\n    {bad}\n"), bad
-    assert _not_read_only("def f(self):\n    self._folders = []\n    for self.path in []:\n        pass\n") == []
+    assert _not_read_only("def f(self):\n    self._folders = []\n    self._by_path['x'] = 1\n    for self.path in []:\n        pass\n") == []
 
 
 def test_only_the_reader_talks_to_outlook():

@@ -702,14 +702,14 @@ class Store:
 
     def save_invites(
         self, email_id: str, meetings: list, *, sender: str = "", received: str = "", expanded: str = "", held: bool = False,
-        conn: sqlite3.Connection | None = None,
+        sender_name: str = "", conn: sqlite3.Connection | None = None,
     ) -> None:
         """The meetings an email's invitations name (calendar_events), replacing what it named before, at most
         ``MAX_INVITE_ROWS``, their repeats worked out at ``expanded`` (now when not given). Which email's word on a
         meeting counts (an update, a cancellation, a forward of it) is decided when the calendar is read
         (``_invite_winners``): an email never removes another's rows, so one arriving out of order, or later deleted,
-        can't lose the meeting. For ``held`` mail only which meetings it named is kept, so Outlook's own copy of one
-        isn't shown either; nothing of what the invitation says is."""
+        can't lose the meeting. For ``held`` mail only which meetings it named is kept (``_hold``), so Outlook's own
+        copy of one isn't shown either; nothing of what the invitation says is."""
         with self._use(conn) as conn:
             first = {
                 row[0]: row[1]
@@ -719,20 +719,30 @@ class Store:
             }
             conn.execute("DELETE FROM meetings WHERE email_id = ? AND source IN ('invite', 'held')", (email_id,))
             if held:
-                # Which meeting it named, and who it says organized it (to tell Outlook's own copy of this invitation
-                # from another meeting with its UID): nothing it says about the meeting.
-                named = {meeting.uid: meeting.organizer for meeting in reversed(meetings)}
-                conn.executemany(
-                    """INSERT OR REPLACE INTO meetings (id, uid, source, start, "end", email_id, organizer, sender)
-                       VALUES (?, ?, 'held', '', '', ?, ?, ?)""",
-                    [("held-" + hashlib.sha256(f"{email_id}|{uid}".encode()).hexdigest()[:20], uid, email_id, organizer, sender)
-                     for uid, organizer in list(named.items())[:MAX_INVITE_ROWS]],
-                )
+                _hold(conn, email_id, [(meeting.uid, meeting.start, meeting.organizer) for meeting in meetings], _named(sender_name, sender))
                 return
             stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
             expanded = expanded or datetime.now(timezone.utc).isoformat(timespec="seconds")
             for meeting in meetings[:MAX_INVITE_ROWS]:
                 self._put_meeting(conn, meeting, sender=sender, received=received, first_seen=first.get(meeting.uid) or stamp, expanded=expanded)
+
+    def hold_invites(self, email_id: str, *, conn: sqlite3.Connection | None = None) -> int:
+        """An email held as possible payment fraud after its invitation was read: its meetings become only which
+        meetings it named (``_hold``), as for mail held as it arrives. Returns how many it named."""
+        with self._use(conn) as conn:
+            rows = conn.execute("SELECT uid, start, organizer, sender FROM meetings WHERE email_id = ? AND source = 'invite'", (email_id,)).fetchall()
+            if not rows:
+                return 0
+            email = conn.execute("SELECT sender_name, sender_email FROM emails WHERE id = ?", (email_id,)).fetchone()
+            sender = _named(email["sender_name"], email["sender_email"]) if email else rows[0]["sender"]
+            conn.execute("DELETE FROM meetings WHERE email_id = ? AND source = 'invite'", (email_id,))
+            _hold(conn, email_id, [(row["uid"], row["start"], row["organizer"]) for row in rows], sender)
+            return len(rows)
+
+    def held_markers(self, email_id: str) -> int:
+        """How many meetings an email's invitation named while it was held (``_hold``)."""
+        with self.connect() as conn:
+            return conn.execute("SELECT COUNT(*) FROM meetings WHERE email_id = ? AND source = 'held'", (email_id,)).fetchone()[0]
 
     def invites_to_expand(self, before: str, *, limit: int) -> list[str]:
         """The emails (still here) whose repeating invitations were last worked out before ``before``, the longest
@@ -820,7 +830,7 @@ class Store:
         out = []
         for row in shown:
             # Another organizer's invitation with the same UID is a meeting of its own, even at the same time.
-            key = (row["uid"], row["start"], _owner(row["sender"], row["organizer"])[0] if row["source"] == "invite" else "")
+            key = (row["uid"], row["start"], _meeting_of(row["sender"], row["organizer"]) if row["source"] == "invite" else "")
             if key in seen:
                 continue
             seen.add(key)
@@ -1509,7 +1519,8 @@ class Store:
             return 0
         marks = ", ".join("?" for _ in ids)
         with self._use(conn) as conn:
-            # A held email's meetings go with it: kept, with no email left to say it is held, they would show.
+            # A held email's invitation keeps only which meetings it named, and those stay after it goes: Outlook keeps
+            # its tentative copy of a scam invitation, which is hidden by them (``_shown_meetings``).
             held = [
                 row["id"]
                 for row in conn.execute(
@@ -1517,8 +1528,8 @@ class Store:
                 )
                 if _held_invite(row)
             ]
-            if held:
-                conn.execute(f"DELETE FROM meetings WHERE email_id IN ({', '.join('?' * len(held))})", held)
+            for email_id in held:
+                self.hold_invites(email_id, conn=conn)
             _delete_email_rows(conn, marks, ids, keep=HISTORY_TABLES)
             return conn.execute(f"DELETE FROM emails WHERE id IN ({marks})", ids).rowcount
 
@@ -2270,25 +2281,26 @@ def _shown_meetings(conn: sqlite3.Connection, rows: list[sqlite3.Row], *, outloo
     invited = [row["uid"] for row in rows if row["source"] == "invite"]
     word = _invite_winners(conn, invited)
     on_outlook: set[str] = set()
-    held: dict[str, set[str]] = {}
+    held: dict[tuple[str, str], set[str]] = {}
     if outlook:
         sql = "SELECT DISTINCT uid FROM meetings WHERE source = 'outlook' AND uid IN ({})"
         on_outlook = {row["uid"] for row in _in_chunks(conn, sql, invited)}
-        sql = """SELECT m.uid, m.organizer, m.sender, e.sender_email, e.sender_name, 'invite' AS source, e.flags AS email_flags,
-                        e.category AS email_category
-                 FROM meetings m JOIN emails e ON e.id = m.email_id WHERE m.source IN ('invite', 'held') AND m.uid IN ({})"""
+        sql = """SELECT m.uid, m.start, m.organizer, m.sender, m.source AS kind, e.id AS email, e.sender_email, e.sender_name,
+                        'invite' AS source, e.flags AS email_flags, e.category AS email_category
+                 FROM meetings m LEFT JOIN emails e ON e.id = m.email_id WHERE m.source IN ('invite', 'held') AND m.uid IN ({})"""
         for row in _in_chunks(conn, sql, [row["uid"] for row in rows if row["source"] == "outlook"]):
-            if _held_invite(row):
+            # What a held invitation named: its email held, or gone (deleted) with only that left.
+            if _held_invite(row) or (row["kind"] == "held" and row["email"] is None):
                 # Outlook's copy of an invitation is organized by whoever it names as organizer, or by its sender:
                 # Outlook gives that person's name (or address), which is matched.
-                held.setdefault(row["uid"], set()).update(
+                held.setdefault((row["uid"], row["start"]), set()).update(
                     _who(row["organizer"]) | _who(row["sender"]) | _who(row["sender_email"]) | _who(row["sender_name"])
                 )
     out = []
     for row in rows:
         if row["source"] == "held":
             continue
-        if row["source"] == "outlook" and (not outlook or _who(row["organizer"]) & held.get(row["uid"], set())):
+        if row["source"] == "outlook" and (not outlook or _held_copy(row, held)):
             continue
         if row["source"] == "invite" and (_held_invite(row) or row["uid"] in on_outlook or not word.counts(row)):
             continue
@@ -2299,9 +2311,9 @@ def _shown_meetings(conn: sqlite3.Connection, rows: list[sqlite3.Row], *, outloo
 @dataclass
 class _Word:
     """Whose invitation counts for each meeting (``_invite_winners``). A meeting is a UID and the domain of its
-    organizer: another domain's invitation with the same UID is a meeting of its own."""
+    organizer (``_meeting_of``): another domain's invitation with the same UID is a meeting of its own."""
 
-    group: dict[tuple[str, str], str] = field(default_factory=dict)  # (uid, email): the organizer's domain its word is about
+    group: dict[tuple[str, str], str] = field(default_factory=dict)  # (uid, email): the meeting its word is about
     series: dict[tuple[str, str], str] = field(default_factory=dict)  # (uid, domain): the email whose series counts
     series_emails: dict[str, set[str]] = field(default_factory=dict)  # uid: the emails naming its series
     occurrences: dict[tuple[str, str, str], str] = field(default_factory=dict)  # (uid, domain, occurrence): whose word counts
@@ -2341,15 +2353,24 @@ def _owner(sender: str | None, organizer: str | None) -> tuple[str, bool]:
     return named, sent == named
 
 
+def _meeting_of(sender: str | None, organizer: str | None) -> str:
+    """Which meeting an invitation's word is about: its organizer's domain when it is that domain's own, else that
+    domain and the domain that forwarded it ("vendor.com|taz.com"). A forward only updates the forwards from its own
+    sending domain: someone else claiming the same organizer (a forged ORGANIZER) is a meeting of their own."""
+    domain, theirs = _owner(sender, organizer)
+    return domain if theirs else f"{domain}|{_address_domain(sender)}"
+
+
 def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:
     """For each meeting, the email whose invitation counts, and for each occurrence of a repeating one an update to
     that occurrence alone (a RECURRENCE-ID: one week moved or cancelled) replaces.
 
-    A meeting is its UID and its organizer's domain (``_owner``): the invitations whose ORGANIZER is in one domain are
-    one meeting, decided among themselves, and another domain's invitation with the same UID (a lookalike's, however
-    dated and however many) is a meeting of its own that never moves, renames or cancels it. A forward (sent from
-    another domain than its ORGANIZER's) counts for its organizer's meeting only while none of that domain's own
-    invitations is here. Of the invitations that count, the highest SEQUENCE, then the latest, decides the series;
+    A meeting is its UID and its organizer's domain (``_meeting_of``): the invitations whose ORGANIZER is in one domain
+    and sent from it are one meeting, decided among themselves, and another domain's invitation with the same UID (a
+    lookalike's, however dated and however many) is a meeting of its own that never moves, renames or cancels it. A
+    forward (sent from another domain than its ORGANIZER's) is its organizer's meeting as that forwarding domain has it:
+    another domain's "forward" of it (a forged ORGANIZER) is a meeting of its own, and all of them give way once the
+    organizer's own invitation is here. Of the invitations that count, the highest SEQUENCE, then the latest, decides the series;
     likewise for each occurrence, from invitations naming that occurrence alone, when not older than the series (the
     whole series sent again since carries its weeks moved or cancelled itself). Held mail never counts."""
     rows = _in_chunks(
@@ -2367,7 +2388,6 @@ def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:
     )
     word = _Word()
     groups: dict[tuple[str, str], list[sqlite3.Row]] = {}
-    own: dict[tuple[str, str], bool] = {}
     for row in rows:
         uid, email_id = row["uid"], row["email_id"]
         if not row["occurrence"]:
@@ -2375,15 +2395,15 @@ def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:
         if _held_invite(row):
             continue
         if (uid, email_id) not in word.group:
-            # One email's word is about one organizer: the one its series (or its first row) names.
-            domain, theirs = _owner(row["sender"], row["organizer"])
-            word.group[(uid, email_id)] = domain
-            own[(uid, email_id)] = theirs
+            # One email's word is about one meeting: the one its series (or its first row) names.
+            word.group[(uid, email_id)] = _meeting_of(row["sender"], row["organizer"])
         groups.setdefault((uid, word.group[(uid, email_id)]), []).append(row)
+    # The organizers whose own invitation of a meeting is here: forwards of it no longer count.
+    present = {(uid, meeting) for uid, meeting in groups if "|" not in meeting}
     for key, said in groups.items():
-        if any(own[(row["uid"], row["email_id"])] for row in said):
-            said = [row for row in said if own[(row["uid"], row["email_id"])]]  # the organizer's own: forwards no longer count
         uid = key[0]
+        if "|" in key[1] and (uid, key[1].partition("|")[0]) in present:
+            continue
         series = [row for row in said if not row["occurrence"]]
         owner = _latest(series) if series else None
         if owner is not None:
@@ -2403,6 +2423,36 @@ def _latest(rows: list[sqlite3.Row]) -> sqlite3.Row:
     """Of one organizer's invitations of a meeting, the one that counts: the highest SEQUENCE (an update or a
     cancellation), then the latest."""
     return max(rows, key=lambda row: (row["sequence"] or 0, row["received"] or "", row["first_seen"] or "", row["email_id"]))
+
+
+def _held_copy(row: sqlite3.Row, held: dict[tuple[str, str], set[str]]) -> bool:
+    """Whether an Outlook meeting is Outlook's own copy of a held invitation: tentative (as Outlook adds a meeting
+    request it was sent), at the time the invitation gave, and organized by the name or address it gave. Another
+    meeting with the same UID (a spoof naming the CEO's real board meeting) stays. (A marker kept before its time
+    was, "", stands for any time.)"""
+    if (row["busy"] or "") != "tentative":
+        return False
+    named = held.get((row["uid"], row["start"]), set()) | held.get((row["uid"], ""), set())
+    return bool(_who(row["organizer"]) & named)
+
+
+def _named(name: str | None, address: str | None) -> str:
+    """"Dana Ortiz <dana@taz.com>" from a name and an address, either of which may be missing."""
+    name, address = " ".join((name or "").split()), (address or "").strip()
+    return f"{name} <{address}>" if name and address else name or address
+
+
+def _hold(conn: sqlite3.Connection, email_id: str, named: list[tuple[str, str, str]], sender: str) -> None:
+    """Keep only which meetings a held email's invitation named: each one's UID and start, who it says organized it,
+    and who sent it (to tell Outlook's own tentative copy of it from another meeting with its UID). Nothing it says
+    about the meeting. They stay when the email is deleted (``delete_emails``)."""
+    seen = list(dict.fromkeys((uid, start, organizer or "") for uid, start, organizer in named))[:MAX_INVITE_ROWS]
+    conn.executemany(
+        """INSERT OR REPLACE INTO meetings (id, uid, source, start, "end", email_id, organizer, sender)
+           VALUES (?, ?, 'held', ?, '', ?, ?, ?)""",
+        [("held-" + hashlib.sha256(f"{email_id}|{uid}|{start}".encode()).hexdigest()[:20], uid, start, email_id, organizer, sender)
+         for uid, start, organizer in seen],
+    )
 
 
 def _who(text: str | None) -> set[str]:

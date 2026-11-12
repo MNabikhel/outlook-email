@@ -536,7 +536,7 @@ def test_outlooks_copy_of_an_invitation_held_as_it_arrived_is_not_shown(store, s
     record = pipeline.process_message(raw, store, settings, now=NOW)
     assert pipeline.attachments_locked(record), "the sample scam is held"
     store.replace_meetings("outlook", [Meeting(uid="U5", start="2026-10-06T14:00:00+00:00", end="2026-10-06T15:00:00+00:00", subject="Bank change call",
-                                               organizer="billing@acme-payments.net", source="outlook")], start=window[0], end=window[1])
+                                               organizer="Acme Billing", busy="tentative", source="outlook")], start=window[0], end=window[1])
     assert store.meetings_between(*window) == []
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM meetings WHERE email_id = 'scam' AND subject != ''").fetchone()[0] == 0, "nothing of what it says"
@@ -775,3 +775,120 @@ def test_the_calendar_reads_only_the_meetings_near_its_window_and_still_shows_a_
         near = " ".join(row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + MEETINGS_NEAR, ("2026-09-11", window[1], window[0], window[0], window[1])))
         long = " ".join(row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + MEETINGS_LONG, (window[0], "2026-09-11")))
     assert "SCAN m" not in near and "SCAN m" not in long, (near, long)
+
+
+def _held_scam(store, settings, uid="U6", subject="Urgent wire approval call"):
+    from controller_inbox import pipeline
+
+    data = _invite(uid, "20261006T140000Z", subject=subject, organizer="mailto:ceo@taz-corp.co")
+    raw = _mail_with_invitation("scam", "Updated remittance details", data, sender="ceo@taz-corp.co")
+    raw.sender_name = "Dana Ortiz"
+    raw.body_text = "Our bank details have changed. Please use the following account for all payments from today: account 5566778899 routing 021000021."
+    record = pipeline.process_message(raw, store, settings, now=NOW)
+    assert pipeline.attachments_locked(record)
+    return record
+
+
+def _copy(uid="U6", start="2026-10-06T14:00:00+00:00", organizer="Dana Ortiz", busy="tentative", subject="Urgent wire approval call +1 555 0100"):
+    from controller_inbox.calendar_events import Meeting
+
+    return Meeting(uid=uid, start=start, end=start.replace("T14", "T15"), subject=subject, organizer=organizer, busy=busy, source="outlook")
+
+
+def _record_held(email_id):
+    import sys
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    return _record(email_id, sender="ceo@taz-corp.co", flags=["fraud_risk"])
+
+
+WINDOW = ("2026-10-01T00:00:00+00:00", "2026-10-20T00:00:00+00:00")
+
+
+def test_outlooks_copy_of_a_held_invitation_stays_hidden_after_the_email_is_deleted(store, settings):
+    """Outlook keeps its tentative copy of a scam invitation after the email itself is deleted (in Outlook, or the
+    drop folder's copy): what the held invitation named is kept, without its email, so the copy stays hidden."""
+    from controller_inbox import assistant, outlook_sync
+
+    _held_scam(store, settings)
+    # Held after it was read: its invitation's rows are turned into the same markers when it is deleted.
+    store.upsert_email(_record_held("later"))
+    store.save_invites("later", cal.from_ics(_invite("U7", "20261008T140000Z", subject="Call me now", organizer="mailto:ceo@taz-corp.co"),
+                                             email_id="later", now=NOW), sender="ceo@taz-corp.co")
+    store.replace_meetings("outlook", [_copy(), _copy("U7", "2026-10-08T14:00:00+00:00", organizer="ceo@taz-corp.co", subject="Call me now")],
+                           start=WINDOW[0], end=WINDOW[1])
+    assert store.meetings_between(*WINDOW) == []
+    store.delete_emails(["scam", "later"])
+    assert store.meetings_between(*WINDOW) == []
+    outlook_sync.connect(store, calendar=True, now=NOW)
+    source = assistant.calendar_source(store, settings, "2026-10-06")
+    assert source is None or "555 0100" not in source.body_text
+    with store.connect() as conn:
+        kept = conn.execute("SELECT source, subject, location FROM meetings WHERE uid IN ('U6', 'U7') AND source != 'outlook'").fetchall()
+    assert kept and {(row[0], row[1], row[2]) for row in kept} == {("held", "", "")}, "nothing of what it said"
+
+
+def test_a_held_invitation_hides_only_outlooks_tentative_copy_at_its_own_time(store, settings):
+    """A held display-name spoof ("Dana Ortiz <dana.ortiz.office@gmail.com>") naming the UID of Dana's real board
+    meeting doesn't hide it: Outlook's copy of a held invitation is the tentative one at the invitation's time."""
+    import sys
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    real = _copy("REAL", "2026-10-06T14:00:00+00:00", busy="busy", subject="Board meeting")
+    store.replace_meetings("outlook", [real], start=WINDOW[0], end=WINDOW[1])
+    spoof = _record("held", sender="dana.ortiz.office@gmail.com", flags=["fraud_risk"])
+    spoof.sender_name = "Dana Ortiz"
+    store.upsert_email(spoof)
+
+    def held_at(start):
+        store.save_invites("held", cal.from_ics(_invite("REAL", start, subject="whatever", organizer="mailto:dana.ortiz.office@gmail.com"),
+                                                email_id="held", now=NOW), sender="dana.ortiz.office@gmail.com", sender_name="Dana Ortiz", held=True)
+
+    held_at("20261009T140000Z")
+    assert [m["subject"] for m in store.meetings_between(*WINDOW)] == ["Board meeting"], "another time, and accepted: Dana's own"
+    held_at("20261006T140000Z")
+    assert [m["subject"] for m in store.meetings_between(*WINDOW)] == ["Board meeting"], "the same time, but not tentative"
+    store.replace_meetings("outlook", [_copy("REAL", "2026-10-06T14:00:00+00:00", subject="whatever")], start=WINDOW[0], end=WINDOW[1])
+    assert store.meetings_between(*WINDOW) == [], "tentative, at its time, organized by the name it gave: Outlook's copy of it"
+
+
+def test_a_held_invitation_cleared_becomes_a_meeting_and_one_held_later_stops_being_one(store, settings):
+    from controller_inbox import fraud
+
+    _held_scam(store, settings, uid="U8", subject="Quarterly vendor review")
+    assert store.meetings_between(*WINDOW) == []
+    fraud.record_fraud_verdict(store, settings, "scam", verdict="safe", now=NOW)
+    assert [m["subject"] for m in store.meetings_between(*WINDOW)] == ["Quarterly vendor review"], "cleared: its invitation is read again"
+    fraud.record_fraud_verdict(store, settings, "scam", verdict="fraud", now=NOW)
+    assert fraud.attachments_locked(store.get_email("scam"))
+    with store.connect() as conn:
+        rows = conn.execute("SELECT source, subject FROM meetings WHERE email_id = 'scam'").fetchall()
+    assert rows and {(row[0], row[1]) for row in rows} == {("held", "")}, "held again: only which meeting it named"
+    assert store.meetings_between(*WINDOW) == []
+
+
+def test_a_forged_organizer_from_a_third_domain_doesnt_move_a_forwarded_meeting(store):
+    """A meeting known only from a colleague's forward: someone else claiming the same organizer (x@evil.example
+    sending UID X with ORGANIZER pat@vendor.com) is a meeting of their own, never moving or cancelling the forward's."""
+    def mine():
+        return [(m["start"], m["subject"], m["cancelled"]) for m in store.meetings_between(*WINDOW) if m["sender"] == "maya@taz.com"]
+
+    store.save_invites("e1", cal.from_ics(_invite("X", "20261009T140000Z", organizer="mailto:pat@vendor.com"), email_id="e1", now=NOW),
+                       sender="maya@taz.com", received="2026-10-01T09:00:00+00:00")
+    store.save_invites("e2", cal.from_ics(_invite("X", "20261010T180000Z", subject="Moved: call +1 555 0100", sequence=5, organizer="mailto:pat@vendor.com"),
+                                          email_id="e2", now=NOW), sender="x@evil.example", received="2026-10-02T09:00:00+00:00")
+    store.save_invites("e3", cal.from_ics(_invite("X", "20261009T140000Z", method="CANCEL", sequence=9, organizer="mailto:pat@vendor.com"),
+                                          email_id="e3", now=NOW), sender="x@evil.example", received="2026-10-03T09:00:00+00:00")
+    assert mine() == [("2026-10-09T14:00:00+00:00", "Budget review", False)], "the forward's meeting as it was"
+    assert {m["sender"] for m in store.meetings_between(*WINDOW)} == {"maya@taz.com", "x@evil.example"}, "the other is a meeting of its own"
+    # A colleague's update of their own forward still counts; once the organizer's own invitation is here, it does.
+    store.save_invites("e4", cal.from_ics(_invite("X", "20261009T150000Z", sequence=1, organizer="mailto:pat@vendor.com"), email_id="e4", now=NOW),
+                       sender="ann@taz.com", received="2026-10-04T09:00:00+00:00")
+    assert [m["start"] for m in store.meetings_between(*WINDOW) if m["sender"].endswith("@taz.com")] == ["2026-10-09T15:00:00+00:00"]
+    store.save_invites("own", cal.from_ics(_invite("X", "20261009T160000Z", sequence=2, organizer="mailto:pat@vendor.com"), email_id="own", now=NOW),
+                       sender="pat@vendor.com", received="2026-10-05T09:00:00+00:00")
+    assert [(m["start"], m["sender"]) for m in store.meetings_between(*WINDOW)] == [("2026-10-09T16:00:00+00:00", "pat@vendor.com")]
