@@ -469,8 +469,7 @@ def ingest_mailbox(
         received = aware_utc(raw.received_at)
         if read_before and received < read_before and raw.id not in tries and store.has_email(raw.id):
             continue  # listed again only because the cursor waited for a message that failed
-        if not store.has_email(raw.id) and store.email_with_message_id(raw.internet_message_id, raw.source):
-            # Outlook gives a message a new id when it is moved to another folder; it was read under the old one.
+        if not store.has_email(raw.id) and _moved_in_outlook(store, raw):
             continue
         if not store.has_email(raw.id) and _filed_from_a_file(store, raw):
             continue
@@ -499,6 +498,16 @@ def ingest_mailbox(
         store.set_state(cursor, mark)
         store.set_state(retry_key, json.dumps({"cursor": mark, "until": started.isoformat(), "tries": failed}) if failed else "")
     return processed
+
+
+def _moved_in_outlook(store: Store, raw: RawMessage) -> bool:
+    """Whether this message was read already under another id: Outlook gives a message a new id when it is moved
+    to another folder. Only when a stored one with its Message-ID is this message (the same subject, sender and
+    time): a copier gives every scan the same Message-ID, and a lookalike can copy the real vendor's."""
+    from controller_inbox.mail_identity import another_message
+
+    stored = store.get_emails(store.emails_with_message_id(raw.internet_message_id, raw.source))
+    return any(not another_message(email, raw) for email in stored.values())
 
 
 def _filed_from_a_file(store: Store, raw: RawMessage) -> bool:

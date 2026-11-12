@@ -1499,6 +1499,18 @@ class Store:
             ).fetchone()
         return row["id"] if row else None
 
+    def emails_with_message_id(self, message_id: str, source: str, *, limit: int = 50) -> list[str]:
+        """The ids of the emails from ``source`` with this Internet message ID (a copier gives every scan one), the
+        first stored first, at most ``limit``."""
+        if not message_id:
+            return []
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM emails WHERE internet_message_id = ? AND source = ? ORDER BY rowid LIMIT ?",
+                (message_id, source, limit),
+            ).fetchall()
+        return [row["id"] for row in rows]
+
     def clear_sample(self) -> int:
         """Remove the sample mailbox (and its digests) so real mail starts on a clean board."""
         sample = "SELECT id FROM emails WHERE source = 'demo'"

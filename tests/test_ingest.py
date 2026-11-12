@@ -101,6 +101,28 @@ def test_moved_message_is_not_a_second_email(store, settings):
     assert len(emails) == 1, [(e.id, e.flags) for e in emails]
 
 
+def _mid_raw(graph_id, subject, sender, when, message_id):
+    return RawMessage(id=graph_id, subject=subject, sender_name="", sender_email=sender, received_at=when, body_text=subject,
+                      body_preview=subject, has_attachments=False, internet_message_id=message_id, source="graph")
+
+
+# Guards against: a Microsoft 365 message whose Message-ID another stored message already had was skipped as
+# "moved in Outlook", whatever it said. A copier gives every scan the same Message-ID, so the second scan never
+# showed up; and a lookalike that reused the vendor's Message-ID (read first, being backdated) hid the vendor's
+# real invoice, leaving only the fake one on the board.
+def test_a_second_message_sharing_a_message_id_is_still_read(store, settings):
+    now = datetime(2026, 11, 12, 8, tzinfo=timezone.utc)
+    scans = [_mid_raw(f"g{n}", f"Scan from KM-C300 - invoice {n}", "scanner@taz.com",
+                        datetime(2026, 11, 10, 8 + n, tzinfo=timezone.utc), "<scan@km-c300>") for n in (1, 2)]
+    ingest_mailbox(FakeGraph(scans), store, settings, now=now)
+    assert len(store.list_emails(limit=-1)) == 2
+
+    fake = _mid_raw("g3", "Invoice CP-5521 new bank", "ar@coastalprlnt.com", datetime(2026, 9, 1, 9, tzinfo=timezone.utc), "<cp1@coastalprint.com>")
+    real = _mid_raw("g4", "Invoice CP-5521", "ar@coastalprint.com", datetime(2026, 11, 10, 10, tzinfo=timezone.utc), "<cp1@coastalprint.com>")
+    ingest_mailbox(FakeGraph([real, fake]), store, settings, now=now)
+    assert "Invoice CP-5521" in {email.subject for email in store.list_emails(limit=-1)}
+
+
 class WritebackGraph:
     """Keeps what CloseDesk wrote to each message, as Outlook would."""
 
