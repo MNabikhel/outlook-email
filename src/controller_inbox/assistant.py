@@ -1145,7 +1145,8 @@ def _meeting_answer(note: str, question: str, sources: list[EmailRecord], meetin
     for email in mail:
         summary = f" — {email.summary}" if email.summary else ""
         lines.append(f"- **{email.subject}** · {_who(email)} · {_when(email, tz)}{summary} [{numbers[email.id]}]")
-        said = body_lines(email, question, limit=1)
+        # What the summary above already says isn't said again: an invitation's summary is often its first line.
+        said = [line for line in body_lines(email, question, limit=2) if line not in (email.summary or "")][:1]
         if not agent.attachments_locked(email):
             said += agent.file_matches(email, question, limit=1, outline=False, tz=tz, invitations=False)[:1]
         lines += [f"  - {line}" for line in said[:2]]
