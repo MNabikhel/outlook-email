@@ -560,6 +560,60 @@ def test_the_automatic_sync_says_outlook_is_closed_once(store, settings, monkeyp
     assert first["quiet"] is False and again["quiet"] is True
 
 
+def test_the_scheduled_morning_run_never_starts_outlook(store, settings, outlook, monkeypatch):
+    # The 6:30 task ("overnight") started Outlook unseen, with CloseDesk closed, where a sign-in prompt could wait.
+    from controller_inbox import cli
+
+    asked = []
+
+    @contextmanager
+    def connect(**options):
+        asked.append(options)
+        yield outlook
+
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    monkeypatch.setattr(cli, "load_settings", lambda *a, **k: settings)
+    store.set_state(outlook_sync.AUTO_KEY, "1")
+    settings.ensure_data_dir()
+    assert cli.main(["overnight", "--no-graph"]) == 0
+    run_overnight(store, settings, sync_graph=False, now=NOW)  # CloseDesk starting: Outlook is started for it
+    assert asked == [{"start": False}, {"start": True}]
+
+
+def test_an_error_from_a_sync_ended_by_disconnect_isnt_shown_after_connecting_again(store, settings, monkeypatch):
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+
+    @contextmanager
+    def connect(**_options):
+        outlook_sync.disconnect(store)  # clicked while Outlook was being started
+        raise outlook_desktop.OutlookUnavailable("Classic Outlook didn't answer.")
+        yield
+
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    outlook_run(store, settings, now=NOW)
+    assert outlook_sync.last_failure(store) == {}, "kept after Disconnect"
+    outlook_sync.note_failure(store, "Outlook isn't open, so it wasn't synced.", NOW)
+    outlook_sync.connect(store, calendar=False)
+    assert outlook_sync.last_failure(store) == {}, "connecting again starts afresh"
+
+
+def test_disconnecting_while_the_folders_are_read_stops_the_reading(store, settings):
+    # The folders' tables went on being read from Outlook, one after another, after the user said stop.
+    fake = FakeOutlook(folders=("Inbox", *(f"Inbox/F{n}" for n in range(5)), "Deleted Items"))
+    scan = fake.scan
+    read = []
+
+    def scanning(path, since):
+        read.append(path)
+        outlook_sync.disconnect(store)
+        return scan(path, since)
+
+    fake.scan = scanning
+    outlook_sync.sync(store, settings, fake, now=NOW)
+    assert read == ["Inbox"] and not store.get_state(outlook_sync.LAST_SYNC_KEY)
+
+
 def test_a_first_message_that_cant_be_read_brings_the_sample_back(store, settings, outlook, as_of_now, monkeypatch):
     from controller_inbox import pipeline
 
@@ -925,6 +979,20 @@ def test_the_self_check_says_when_outlook_was_synced_in_the_apps_time_zone(store
     store.set_state("timezone", "Europe/Berlin")  # chosen in Setup, over the settings file's New York
     said = doctor._outlook_sync(settings).text
     assert "17:00" in said and "16:30" in said and "UTC" not in said, said
+
+
+def test_the_self_check_says_when_outlooks_syncs_dont_work(store, settings):
+    # It said "connected, last synced Nov 01" in green while every sync since had failed.
+    from controller_inbox import doctor
+
+    outlook_sync.connect(store, calendar=False, now=NOW)
+    store.set_state(outlook_sync.LAST_SYNC_KEY, "2026-10-20T15:00:00+00:00")
+    outlook_sync.note_failure(store, "Outlook isn't open, so it wasn't synced. It syncs once Outlook is open.", NOW + timedelta(days=2))
+    check = doctor._outlook_sync(settings)
+    assert check.state == doctor.NOTE and "Outlook isn't open" in check.text and "last sync didn't work" in check.text
+    assert "Sync now" in check.todo
+    store.set_state(outlook_sync.LAST_ERROR_KEY, "")
+    assert doctor._outlook_sync(settings).state == doctor.OK
 
 
 def _meeting(uid, subject, start, end, *, all_day=False):

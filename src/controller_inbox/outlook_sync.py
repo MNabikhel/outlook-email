@@ -112,6 +112,7 @@ def connect(store: Store, *, calendar: bool, now: datetime | None = None) -> Non
     store.set_state(CONSENT_KEY, (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"))
     store.set_state(AUTO_KEY, "1")
     store.set_state(CALENDAR_KEY, "1" if calendar else "0")
+    store.set_state(LAST_ERROR_KEY, "")  # a sync that ended after Disconnect isn't this connection's
 
 
 def disconnect(store: Store) -> None:
@@ -238,6 +239,8 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
     seen: list[Seen] = []
     read: set[str] = set()
     for path in paths:
+        if not _connected(store):
+            return report  # Disconnected while the folders were read: no more is read from Outlook
         try:
             seen.extend(session.scan(path, since))
             read.add(path)

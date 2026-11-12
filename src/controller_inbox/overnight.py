@@ -153,17 +153,19 @@ def run_overnight(
     on_progress: Progress | None = None,
     vision_minutes: float | None = None,
     should_stop: Callable[[], bool] | None = None,
+    start_outlook: bool = True,
 ) -> dict:
     """One full pass. Raises ``RunBusy`` instead of racing another run over the same drop folder. ``vision_minutes``:
     how long it may spend reading scanned pages with the vision model (default ``Settings.vision_minutes_per_run``);
     ``should_stop``: the reading of scans ends after the page being read when it says so. ``sync_outlook``: copy new
-    mail from classic Outlook first; None does when automatic sync is on in Settings."""
+    mail from classic Outlook first; None does when automatic sync is on in Settings. ``start_outlook``: start Outlook
+    for it when it isn't running (CloseDesk starting); the scheduled morning run passes False, as nobody is there."""
     with run_lock(settings) as locked:
         if not locked:
             raise RunBusy()
         return _run_overnight(
             store, settings, now=now, limit=limit, sync_graph=sync_graph, sync_outlook=sync_outlook, reader=reader,
-            on_progress=on_progress, vision_minutes=vision_minutes, should_stop=should_stop,
+            on_progress=on_progress, vision_minutes=vision_minutes, should_stop=should_stop, start_outlook=start_outlook,
         )
 
 
@@ -233,8 +235,10 @@ def _sync_outlook(
     except Exception as exc:  # the drop folder and the digest still happen
         log.warning("Syncing Outlook failed", exc_info=True)
         note = outlook_desktop.trouble("Outlook couldn't be read this time", exc)
-    # Settings → Sync inbox says so until a sync works again.
-    outlook_sync.note_failure(store, note, now)
+    # Settings → Sync inbox says so until a sync works again; unless the user disconnected while it ran (connecting
+    # again starts afresh).
+    if outlook_sync.config(store)["consent"]:
+        outlook_sync.note_failure(store, note, now)
     return {"note": note}
 
 
@@ -260,6 +264,7 @@ def _run_overnight(
     vision_minutes: float | None = None,
     should_stop: Callable[[], bool] | None = None,
     sync_outlook: bool | None = None,
+    start_outlook: bool = True,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     settings.ensure_data_dir()
@@ -278,7 +283,7 @@ def _run_overnight(
         calendar_events.catch_up_invites(store, settings, now=now)  # once, after an update: stored invitations
     except Exception:
         log.warning("Couldn't read the stored invitations yet", exc_info=True)
-    outlook = _sync_outlook(store, settings, sync_outlook, now, on_progress)
+    outlook = _sync_outlook(store, settings, sync_outlook, now, on_progress, start=start_outlook)
     folder_report: dict = {}
     ingested = ingest_folder(
         store,
