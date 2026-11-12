@@ -588,13 +588,13 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None)
 
 
 def _link_stored_mail(settings: Settings, store: Store) -> None:
+    """File mail stored by an older version under its conversation keys, in the background. Without the run lock:
+    it only writes link keys and conversation headers, a batch at a time, so Process new mail and the Outlook sync
+    aren't kept waiting on the first start after an update."""
     from controller_inbox import links
-    from controller_inbox.overnight import run_lock
 
     try:
-        with run_lock(settings) as locked:
-            if locked:
-                links.catch_up(store, settings)
+        links.catch_up(store, settings)
     except Exception:  # the next run catches up instead
         log.warning("Couldn't link the stored mail yet", exc_info=True)
 

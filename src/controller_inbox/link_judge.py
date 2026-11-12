@@ -73,8 +73,15 @@ def candidates(store: Store, settings: Settings | None, email: EmailRecord, *, l
     if not terms:
         return []
     query = _subject(email) or " ".join(terms)
-    found, _meaning, _how = semantic.find_mail(store, settings, query, terms, limit=limit * 4)
     when = links.when(email)
+    # Searched within the window around it: the best matches of all time may all be too old to weigh.
+    if when is not None:
+        low, high = (when - timedelta(days=WINDOW_DAYS)).isoformat(), (when + timedelta(days=WINDOW_DAYS)).isoformat()
+        found = store.search_ranked(terms, limit=limit * 4, received_from=low, received_before=high)
+        if settings is not None and semantic.embedding_model(settings) and store.has_embeddings():
+            found += [other for other in semantic.search(store, settings, query, limit=limit * 4) if other.id not in {e.id for e in found}]
+    else:
+        found, _meaning, _how = semantic.find_mail(store, settings, query, terms, limit=limit * 4)
     out = []
     for other in found:
         if other.id in known or _suspect(other) or not _near(when, links.when(other)):
