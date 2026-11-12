@@ -246,7 +246,7 @@ async function showMeeting(panel, meeting, ctx) {
     meeting.location ? ["Where", meeting.location] : null,
     meeting.organizer ? ["Organizer", meeting.organizer] : null,
     meeting.attendees.length ? ["With", meeting.attendees.join(", ")] : null,
-    ["From", meeting.source === "outlook" ? "Your Outlook calendar" : meeting.source === "demo" ? "The sample calendar" : "An invitation in your mail"],
+    ["From", meeting.source === "outlook" ? "Your Outlook calendar" : meeting.source === "demo" ? "The sample calendar" : `An invitation emailed by ${meeting.sender || "someone"}`],
   ].filter(Boolean);
   const list = h("div", { class: "cal-related" }, h("p", { class: "muted small" }, "Looking for the mail about it…"));
   const ask = h(

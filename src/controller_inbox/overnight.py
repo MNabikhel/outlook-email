@@ -220,6 +220,8 @@ def _sync_outlook(
         wanted = cfg["auto"] and cfg["consent"] and not outlook_desktop.available()
     if not wanted:
         return {}
+    if not cfg["consent"]:  # not even attached to Outlook before the user agrees
+        return {"note": "Connect Outlook in Settings → Sync inbox first: CloseDesk reads Outlook only once you agree."}
     try:
         with outlook_desktop.connect(start=start) as session:
             return outlook_sync.sync(store, settings, session, now=now, on_progress=on_progress)

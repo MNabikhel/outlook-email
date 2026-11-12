@@ -305,9 +305,13 @@ CREATE TABLE IF NOT EXISTS meetings (
     cancelled INTEGER DEFAULT 0,
     recurring INTEGER DEFAULT 0,
     busy TEXT DEFAULT '',
-    email_id TEXT DEFAULT ''
+    email_id TEXT DEFAULT '',
+    sequence INTEGER DEFAULT 0,
+    sender TEXT DEFAULT '',
+    received TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_meetings_start ON meetings(start);
+CREATE INDEX IF NOT EXISTS idx_meetings_uid ON meetings(uid);
 CREATE INDEX IF NOT EXISTS idx_meetings_email ON meetings(email_id);
 
 CREATE TABLE IF NOT EXISTS outlook_items (
@@ -648,15 +652,28 @@ class Store:
         found = self.get_emails(ids)
         return [found[i] for i in ids if i in found]
 
-    def save_invites(self, email_id: str, meetings: list, *, conn: sqlite3.Connection | None = None) -> None:
-        """The meetings an email's invitations name (calendar_events), replacing what it named before. A
-        cancellation that comes by mail also cancels the meeting where it was kept from an earlier invitation."""
+    def save_invites(self, email_id: str, meetings: list, *, sender: str = "", received: str = "", conn: sqlite3.Connection | None = None) -> None:
+        """The meetings an email's invitations name (calendar_events), replacing what it named before.
+
+        An update or cancellation of a meeting (the same uid) replaces an earlier invitation's rows of it when it is
+        the later one (its SEQUENCE, then when it came) and comes from the same sender's domain: anyone who knows a
+        meeting's uid could otherwise move or cancel it by email."""
+        domain = sender.rpartition("@")[2].lower()
         with self._use(conn) as conn:
             conn.execute("DELETE FROM meetings WHERE email_id = ? AND source = 'invite'", (email_id,))
-            for meeting in meetings:
-                if meeting.cancelled:
-                    conn.execute("UPDATE meetings SET cancelled = 1 WHERE uid = ? AND start = ? AND source = 'invite'", (meeting.uid, meeting.start))
-                self._put_meeting(conn, meeting)
+            for uid in dict.fromkeys(meeting.uid for meeting in meetings):
+                mine = max((meeting.sequence, received) for meeting in meetings if meeting.uid == uid)
+                rows = conn.execute(
+                    "SELECT email_id, sequence, received, sender FROM meetings WHERE uid = ? AND source = 'invite'", (uid,)
+                ).fetchall()
+                same = [row for row in rows if (row["sender"] or "").rpartition("@")[2].lower() == domain]
+                if same and max((row["sequence"] or 0, row["received"] or "") for row in same) > mine:
+                    continue  # an older invitation than the one kept
+                for row in same:
+                    conn.execute("DELETE FROM meetings WHERE uid = ? AND email_id = ? AND source = 'invite'", (uid, row["email_id"]))
+                for meeting in meetings:
+                    if meeting.uid == uid:
+                        self._put_meeting(conn, meeting, sender=sender, received=received)
 
     def replace_meetings(self, source: str, meetings: list, *, start: str, end: str) -> int:
         """Keep ``meetings`` as ``source``'s between ``start`` and ``end`` (ISO, UTC), dropping that source's others in
@@ -667,40 +684,54 @@ class Store:
                 self._put_meeting(conn, meeting)
         return len(meetings)
 
-    def _put_meeting(self, conn: sqlite3.Connection, meeting) -> None:
+    def _put_meeting(self, conn: sqlite3.Connection, meeting, *, sender: str = "", received: str = "") -> None:
         conn.execute(
             """
             INSERT OR REPLACE INTO meetings (id, uid, source, start, "end", all_day, subject, location, organizer,
-                attendees, cancelled, recurring, busy, email_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                attendees, cancelled, recurring, busy, email_id, sequence, sender, received)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (meeting.id, meeting.uid, meeting.source, meeting.start, meeting.end, int(meeting.all_day), meeting.subject,
              meeting.location, meeting.organizer, _dumps(meeting.attendees), int(meeting.cancelled), int(meeting.recurring),
-             meeting.busy, meeting.email_id),
+             meeting.busy, meeting.email_id, meeting.sequence, sender, received),
         )
 
     def meetings_between(self, start: str, end: str, *, limit: int = 2000) -> list[dict]:
         """The meetings that overlap ``start``..``end`` (ISO, UTC; dates for all-day ones compare by their text),
-        earliest first. One meeting known from Outlook and from its invitation is listed once, as Outlook's."""
+        earliest first. One meeting known from Outlook and from its invitation is listed once, as Outlook's. An
+        invitation on mail held as possible payment fraud is no meeting (its email may be held after it was read)."""
         with self.connect() as conn:
             rows = conn.execute(
-                'SELECT * FROM meetings WHERE start < ? AND "end" > ? OR (start >= ? AND start < ?) ORDER BY start, source = \'outlook\' DESC LIMIT ?',
+                """
+                SELECT m.*, e.flags AS email_flags, e.category AS email_category FROM meetings m
+                LEFT JOIN emails e ON e.id = m.email_id AND m.source = 'invite'
+                WHERE (m.start < ? AND m."end" > ?) OR (m.start >= ? AND m.start < ?)
+                ORDER BY m.start, m.source = 'outlook' DESC, m.received LIMIT ?
+                """,
                 (end, start, start, end, limit),
             ).fetchall()
         seen: set[tuple[str, str]] = set()
         out = []
         for row in rows:
             key = (row["uid"], row["start"])
-            if key in seen:
+            if key in seen or _held_invite(row):
                 continue
             seen.add(key)
-            out.append({**dict(row), "attendees": _loads(row["attendees"], []), "all_day": bool(row["all_day"]), "cancelled": bool(row["cancelled"]), "recurring": bool(row["recurring"])})
+            out.append(_meeting_row(row))
         return out
 
     def meeting(self, meeting_id: str) -> dict | None:
         with self.connect() as conn:
-            row = conn.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
-        return {**dict(row), "attendees": _loads(row["attendees"], []), "all_day": bool(row["all_day"]), "cancelled": bool(row["cancelled"]), "recurring": bool(row["recurring"])} if row else None
+            row = conn.execute(
+                """SELECT m.*, e.flags AS email_flags, e.category AS email_category FROM meetings m
+                   LEFT JOIN emails e ON e.id = m.email_id AND m.source = 'invite' WHERE m.id = ?""",
+                (meeting_id,),
+            ).fetchone()
+        return _meeting_row(row) if row is not None and not _held_invite(row) else None
+
+    def forget_meetings(self, source: str) -> None:
+        with self.connect() as conn:
+            conn.execute("DELETE FROM meetings WHERE source = ?", (source,))
 
     def link_keys(self, email_id: str) -> list[tuple[str, str]]:
         with self.connect() as conn:
@@ -2018,6 +2049,22 @@ def _delete_email_rows(conn: sqlite3.Connection, emails: str, params: list | tup
     for table, key in EMAIL_ROWS:
         if table not in keep:
             conn.execute(f"DELETE FROM {table} WHERE {key} IN ({files if key == 'attachment_id' else emails})", params)
+
+
+def _held_invite(row: sqlite3.Row) -> bool:
+    """An invitation whose email is held as possible payment fraud (as fraud.attachments_locked decides)."""
+    if row["source"] != "invite" or row["email_flags"] is None:
+        return False
+    flags = _loads(row["email_flags"], [])
+    if "fraud_cleared" in flags:
+        return False
+    return "fraud_risk" in flags or row["email_category"] == DocumentType.PAYMENT_INSTRUCTION_CHANGE.value
+
+
+def _meeting_row(row: sqlite3.Row) -> dict[str, Any]:
+    out = {key: row[key] for key in row.keys() if key not in {"email_flags", "email_category"}}
+    out.update(attendees=_loads(row["attendees"], []), all_day=bool(row["all_day"]), cancelled=bool(row["cancelled"]), recurring=bool(row["recurring"]))
+    return out
 
 
 def _coding_from_row(row: sqlite3.Row) -> dict[str, Any]:

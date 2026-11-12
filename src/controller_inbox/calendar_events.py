@@ -45,11 +45,14 @@ class Meeting:
     source: str = "invite"  # "outlook", "invite" or "demo"
     email_id: str = ""  # the email an invitation came on
     busy: str = ""  # "busy", "tentative", "free", "away" (Outlook's)
+    sequence: int = 0  # an invitation's SEQUENCE: a later update has a higher one
 
     @property
     def id(self) -> str:
-        """One occurrence: the series and its start (a weekly meeting's weeks share the series' uid)."""
-        return "mtg-" + hashlib.sha256(f"{self.source}|{self.uid}|{self.start}".encode()).hexdigest()[:20]
+        """One occurrence: the series and its start (a weekly meeting's weeks share the series' uid). An invitation's
+        rows are its email's own, so another email naming the same uid can't overwrite them."""
+        own = f"|{self.email_id}" if self.source == "invite" else ""
+        return "mtg-" + hashlib.sha256(f"{self.source}|{self.uid}|{self.start}{own}".encode()).hexdigest()[:20]
 
     def to_row(self) -> dict:
         return {"id": self.id, **asdict(self)}
@@ -66,7 +69,7 @@ def from_ics(data: bytes | str, *, email_id: str = "", now: datetime | None = No
     method = next((value.upper() for name, _params, value in lines if name == "METHOD"), "")
     if method == "REPLY":
         return []
-    zones = _vtimezones(lines)
+    zones = _vtimezones(lines, text)
     events = _blocks(lines, "VEVENT")
     now = now or datetime.now(timezone.utc)
     overrides: dict[tuple[str, str], dict] = {}
@@ -106,7 +109,7 @@ def _occurrences(event: dict, zones: dict, overrides: dict, method: str, email_i
     length = _parse(first.end, first.all_day) - _parse(first.start, first.all_day)
     try:
         anchor = begin if not all_day else datetime.combine(begin, time())
-        rrule = rrulestr(rule[2], dtstart=anchor.replace(tzinfo=None) if all_day else anchor, ignoretz=all_day)
+        rrule = rrulestr(_until_in_utc(rule[2], begin, all_day), dtstart=anchor.replace(tzinfo=None) if all_day else anchor, ignoretz=all_day)
     except (ValueError, TypeError):
         first.recurring = True
         return [first]
@@ -134,6 +137,20 @@ def _occurrences(event: dict, zones: dict, overrides: dict, method: str, email_i
         if len(out) >= MAX_OCCURRENCES:
             break
     return out
+
+
+def _until_in_utc(rule: str, begin, all_day: bool) -> str:
+    """A rule's UNTIL as dateutil needs it beside a start with a zone: in UTC ("...Z"). Invitations also write it as
+    a date, or a time with no zone (the start's), which dateutil refuses; an all-day series' UNTIL is a date."""
+    match = re.search(r"UNTIL=(\d{8})(T(\d{6}))?(Z?)", rule, re.I)
+    if not match or match.group(4) or all_day:
+        if match and all_day:
+            return rule.replace(match.group(0), f"UNTIL={match.group(1)}")
+        return rule
+    day = datetime.strptime(match.group(1), "%Y%m%d")
+    until = datetime.strptime(match.group(1) + match.group(3), "%Y%m%d%H%M%S") if match.group(3) else day.replace(hour=23, minute=59, second=59)
+    until = until.replace(tzinfo=begin.tzinfo).astimezone(timezone.utc)
+    return rule.replace(match.group(0), f"UNTIL={until:%Y%m%dT%H%M%SZ}")
 
 
 def _meeting(event: dict, zones: dict, method: str, email_id: str) -> Meeting | None:
@@ -165,7 +182,15 @@ def _meeting(event: dict, zones: dict, method: str, email_id: str) -> Meeting | 
         recurring="RRULE" in event,
         source="invite",
         email_id=email_id,
+        sequence=_int(event.get("SEQUENCE", ("", {}, "0"))[2]),
     )
+
+
+def _int(value: str) -> int:
+    try:
+        return int(str(value).strip() or 0)
+    except ValueError:
+        return 0
 
 
 def _unfolded(text: str) -> list[tuple[str, dict, str]]:
@@ -175,7 +200,11 @@ def _unfolded(text: str) -> list[tuple[str, dict, str]]:
     for line in raw.split("\n"):
         if ":" not in line:
             continue
-        head, value = _split_value(line)
+        if line.upper().startswith(("DTSTART", "DTEND", "RECURRENCE-ID", "EXDATE", "RDATE")):
+            # A date never holds a colon, but an unquoted zone name may ("TZID=(UTC+01:00) Berlin:2026...").
+            head, _sep, value = line.rpartition(":")
+        else:
+            head, value = _split_value(line)
         name, *params = head.split(";")
         parsed = {}
         for param in params:
@@ -223,13 +252,25 @@ def _blocks(lines: list[tuple[str, dict, str]], kind: str) -> list[dict]:
     return blocks
 
 
-def _vtimezones(lines) -> dict[str, ZoneInfo]:
-    """The zones an invitation names, by its TZID: an IANA name, a Windows name ("Eastern Standard Time"), or
-    Outlook's long form ("(UTC-05:00) Eastern Time (US & Canada)") read by its offset when nothing else fits."""
-    zones: dict[str, ZoneInfo] = {}
+def _vtimezones(lines, text: str = ""):
+    """The zones an invitation names, by its TZID: an IANA name, a Windows name ("Eastern Standard Time"), else the
+    zone the invitation itself defines (its VTIMEZONE block: Outlook's "(UTC-05:00) Eastern Time (US & Canada)" or
+    "Customized Time Zone", with its own daylight saving rules), else the "(UTC-05:00)" offset in its name."""
+    zones: dict = {}
+    defined = {}
+    if "BEGIN:VTIMEZONE" in text:
+        try:
+            import io
+
+            from dateutil.tz import tzical
+
+            calendar = tzical(io.StringIO(re.sub(r"\r?\n", "\r\n", text)))
+            defined = {key: calendar.get(key) for key in calendar.keys()}
+        except Exception:  # a block dateutil can't read: the names and offsets below still apply
+            defined = {}
     for name, params, value in lines:
         tzid = params.get("TZID") or (value if name == "TZID" else "")
-        if tzid and tzid not in zones and (zone := zone_named(tzid)) is not None:
+        if tzid and tzid not in zones and (zone := zone_named(tzid) or defined.get(tzid) or _offset_zone(tzid)) is not None:
             zones[tzid] = zone
     return zones
 
@@ -237,7 +278,7 @@ def _vtimezones(lines) -> dict[str, ZoneInfo]:
 def zone_named(name: str) -> ZoneInfo | None:
     from tzlocal import windows_tz
 
-    candidates = [name, windows_tz.win_tz.get(name, ""), windows_tz.win_tz.get(re.sub(r"^\(UTC[^)]*\)\s*", "", name), "")]
+    candidates = [name, windows_tz.win_tz.get(name, "")]
     for candidate in candidates:
         if not candidate:
             continue
@@ -246,6 +287,15 @@ def zone_named(name: str) -> ZoneInfo | None:
         except (ZoneInfoNotFoundError, ValueError):
             continue
     return None
+
+
+def _offset_zone(name: str):
+    """The fixed offset a zone's name gives ("(UTC+01:00) Amsterdam, Berlin"), when nothing better is known."""
+    match = re.search(r"\(UTC([+-])(\d{1,2}):(\d{2})\)", name)
+    if not match:
+        return timezone.utc if re.match(r"\(UTC\)", name) else None
+    span = timedelta(hours=int(match.group(2)), minutes=int(match.group(3)))
+    return timezone(span if match.group(1) == "+" else -span)
 
 
 def _when(prop, zones) -> tuple[datetime | date, bool] | None:
@@ -273,9 +323,10 @@ def _whens(prop, zones) -> list[tuple[datetime | date, bool]]:
         if match.group(3):
             out.append((stamp.replace(tzinfo=timezone.utc), False))
             continue
-        zone = zones.get(params.get("TZID", "")) or (zone_named(params["TZID"]) if params.get("TZID") else None)
-        local = stamp.replace(tzinfo=zone) if zone else stamp.astimezone()  # no zone: this computer's local time
-        out.append((local.astimezone(timezone.utc), False))
+        tzid = params.get("TZID", "")
+        zone = zones.get(tzid) or (zone_named(tzid) or _offset_zone(tzid) if tzid else None)
+        # Kept in its own zone, so a repeating meeting stays at its local time across daylight saving changes.
+        out.append((stamp.replace(tzinfo=zone) if zone else stamp.astimezone(), False))  # no zone: this computer's
     return out
 
 
@@ -345,13 +396,17 @@ def from_msg(path, *, email_id: str = "") -> list[Meeting]:
         uid = str(getattr(message, "cleanGlobalObjectID", None) or b"").strip() or str(getattr(message, "subject", "") or "")
         if isinstance(getattr(message, "cleanGlobalObjectID", None), (bytes, bytearray)):
             uid = invitation_uid(message.cleanGlobalObjectID)
-        all_day = (end - start) >= timedelta(days=1) and start.time() == time() and end.time() == time()
+        # Outlook's own all-day flag: the times are UTC, so a New York all-day meeting doesn't start at midnight here.
+        all_day = bool(getattr(message, "appointmentSubType", False))
+        if all_day:
+            local = _organizer_dates(start, end)
+            start, end = local
         attendees = [part.strip() for part in str(getattr(message, "allAttendeesString", "") or "").split(";") if part.strip()]
         return [
             Meeting(
                 uid=uid,
-                start=_iso(start.date() if all_day else start, all_day),
-                end=_iso(end.date() if all_day else end, all_day),
+                start=_iso(start, all_day),
+                end=_iso(end, all_day),
                 subject=str(getattr(message, "subject", "") or "")[:300],
                 all_day=all_day,
                 location=str(getattr(message, "location", "") or "")[:300],
@@ -367,6 +422,24 @@ def from_msg(path, *, email_id: str = "") -> list[Meeting]:
         return []
     finally:
         message.close()
+
+
+def _organizer_dates(start: datetime, end: datetime) -> tuple[date, date]:
+    """An all-day meeting's days from its UTC times: midnight where it was set up is a few hours either side of
+    midnight UTC, so the nearest midnight gives the day (12:00 UTC or later rounds to the next day)."""
+    def day(value: datetime) -> date:
+        return (value + timedelta(hours=12)).date()
+    first, last = day(start), day(end)
+    return first, max(last, first + timedelta(days=1))
+
+
+def series_uid(global_id: str) -> str:
+    """Outlook's GlobalAppointmentID (hex) as the series id invitations use: a meeting from another calendar keeps
+    that calendar's UID, so the meeting and its invitation are one."""
+    try:
+        return invitation_uid(bytes.fromhex(global_id))
+    except ValueError:
+        return global_id
 
 
 def invitation_uid(global_id: bytes) -> str:
@@ -410,6 +483,7 @@ def shown(meeting: dict, tz) -> dict:
         "source": meeting["source"],
         "email_id": meeting["email_id"],
         "busy": meeting.get("busy") or "",
+        "sender": meeting.get("sender") or "",  # who emailed the invitation: its organizer is what the file says
     }
 
 
@@ -470,5 +544,8 @@ def listing(meetings: list[dict]) -> str:
             parts.append("with " + ", ".join(meeting["attendees"][:8]))
         if meeting["cancelled"]:
             parts.append("CANCELLED")
+        if meeting["source"] == "invite":
+            # Not the user's own calendar: what an emailed invitation says, from whoever sent it.
+            parts.append(f"from an invitation emailed by {meeting.get('sender') or 'someone'}")
         lines.append(" · ".join(parts))
     return "\n".join(lines)

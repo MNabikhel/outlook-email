@@ -19,7 +19,7 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import AttachmentRecord, DocumentType, EmailRecord, ExtractedFields, RawMessage
-from controller_inbox.fraud import assess, domain_of, dropped_file_body, reassess_email, save_check, trust_context
+from controller_inbox.fraud import assess, attachments_locked, domain_of, dropped_file_body, reassess_email, save_check, trust_context
 from controller_inbox.profile import is_finance
 from controller_inbox.store import Store
 
@@ -217,7 +217,9 @@ def process_message(
         latest = store.get_email(raw.id, conn=conn)
         verdict_changed = latest is not None and _keep_user_state(record, latest)
         store.upsert_email(record, conn=conn)
-        store.save_invites(record.id, invites(raw, record.id, now), conn=conn)
+        # An invitation on mail held as possible payment fraud is no meeting: its text never reaches the calendar.
+        found = [] if attachments_locked(record) else invites(raw, record.id, now)
+        store.save_invites(record.id, found, sender=raw.sender_email, received=record.received_at, conn=conn)
     from controller_inbox import cost_codes
 
     try:

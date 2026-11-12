@@ -674,3 +674,49 @@ def test_the_calendar_is_read_hourly_and_follows_outlook(store, settings):
     assert [m["subject"] for m in store.meetings_between("2026-10-01", "2026-11-01")] == ["Close day"]
     assert not outlook_sync.calendar_due(store, now + timedelta(minutes=30))
     assert outlook_sync.calendar_due(store, now + timedelta(minutes=61))
+
+
+def test_disconnecting_while_a_sync_runs_ends_it_there_and_is_final(store, settings):
+    from controller_inbox import calendar_events
+
+    outlook_sync.connect(store, calendar=True, now=datetime(2026, 10, 1, tzinfo=timezone.utc))
+    store.replace_meetings("outlook", [calendar_events.Meeting(uid="G1", start="2026-10-06T13:00:00+00:00", end="2026-10-06T13:15:00+00:00",
+                                                               subject="Standup", source="outlook")], start="2026-01-01", end="2027-01-01")
+
+    class DisconnectsMidway:
+        """Outlook with no mail: the user clicks Disconnect while its folders are being read."""
+
+        def folders(self):
+            outlook_sync.disconnect(store)
+            return []
+
+        def account(self):
+            return ""
+
+        def calendar(self, start, end):
+            raise AssertionError("the calendar was read after Disconnect")
+
+    outlook_sync.sync(store, settings, DisconnectsMidway())
+    cfg = outlook_sync.config(store)
+    assert not cfg["consent"] and not cfg["auto"] and not cfg["calendar"]
+    assert not store.get_state(outlook_sync.LAST_SYNC_KEY), "no stamp that would read as a past sync"
+    assert store.meetings_between("2026-01-01", "2027-01-01") == [], "Outlook's meetings go with Disconnect"
+
+
+def test_saving_the_sync_settings_is_no_yes(store):
+    store.set_state(outlook_sync.CONSENT_KEY, "")
+    assert not outlook_sync.config(store)["consent"]
+    outlook_sync.save_config(store, auto=True, interval=15, days=30, folders=[], subfolders=True)
+    cfg = outlook_sync.config(store)
+    assert not cfg["consent"] and not cfg["auto"] and not outlook_sync.due(store)
+
+
+def test_turning_the_calendar_off_removes_outlooks_meetings_and_keeps_invitations(store):
+    from controller_inbox import calendar_events
+
+    outlook_sync.connect(store, calendar=True)
+    store.replace_meetings("outlook", [calendar_events.Meeting(uid="G1", start="2026-10-06T13:00:00+00:00", end="2026-10-06T14:00:00+00:00", subject="Standup", source="outlook")],
+                           start="2026-01-01", end="2027-01-01")
+    store.save_invites("e1", [calendar_events.Meeting(uid="X", start="2026-10-07T13:00:00+00:00", end="2026-10-07T14:00:00+00:00", subject="Review", email_id="e1")])
+    outlook_sync.set_calendar(store, False)
+    assert [m["subject"] for m in store.meetings_between("2026-01-01", "2027-01-01")] == ["Review"]

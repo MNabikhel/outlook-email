@@ -61,18 +61,34 @@ def config(store: Store) -> dict:
         folders = [str(path) for path in json.loads(store.get_state(FOLDERS_KEY) or "[]")]
     except ValueError:
         folders = []
-    consented = store.get_state(CONSENT_KEY) or ""
+    consented = decided(store)
     return {
         "auto": store.get_state(AUTO_KEY) == "1",
         "interval": interval if interval in INTERVALS else DEFAULT_INTERVAL,
         "days": days if days in DAYS else DEFAULT_DAYS,
         "folders": folders,
         "subfolders": store.get_state(SUBFOLDERS_KEY) != "0",
-        # Someone who turned the sync on (or synced) before Settings asked had agreed to it: they aren't asked again.
-        "consent": bool(consented) or store.get_state(AUTO_KEY) == "1" or bool(store.get_state(LAST_SYNC_KEY)),
-        "consented_at": consented,
+        "consent": consented not in NO_CONSENT,
+        "consented_at": consented if consented[:1].isdigit() else "",
         "calendar": store.get_state(CALENDAR_KEY) == "1",
     }
+
+
+# What CONSENT_KEY holds: "" not decided yet; "none" never agreed; "revoked" disconnected; "before" agreed before
+# Settings asked (it was turned on, or used); else when the user agreed (an ISO time).
+NO_CONSENT = ("", "none", "revoked")
+
+
+def decided(store: Store) -> str:
+    """Whether the user agreed, decided once: someone who had turned the sync on, or synced, before this version
+    asked had agreed to it and isn't asked again; anyone else hasn't. Recorded the first time it is asked (when
+    CloseDesk starts after the update), so turning automatic sync on later never counts as a yes."""
+    value = store.get_state(CONSENT_KEY) or ""
+    if value:
+        return value
+    value = "before" if store.get_state(AUTO_KEY) == "1" or store.get_state(LAST_SYNC_KEY) else "none"
+    store.set_state(CONSENT_KEY, value)
+    return value
 
 
 def connect(store: Store, *, calendar: bool, now: datetime | None = None) -> None:
@@ -85,16 +101,20 @@ def connect(store: Store, *, calendar: bool, now: datetime | None = None) -> Non
 
 
 def disconnect(store: Store) -> None:
-    """Stop reading Outlook. What was copied stays; connecting again asks again."""
-    for key in (CONSENT_KEY, CALENDAR_KEY, CALENDAR_LAST_KEY, LAST_SYNC_KEY):
+    """Stop reading Outlook. The mail copied stays; the meetings read from its calendar go (they would only go
+    stale); connecting again asks again."""
+    store.set_state(CONSENT_KEY, "revoked")
+    for key in (CALENDAR_KEY, CALENDAR_LAST_KEY, LAST_SYNC_KEY):
         store.set_state(key, "")
     store.set_state(AUTO_KEY, "0")
+    store.forget_meetings("outlook")
 
 
 def set_calendar(store: Store, on: bool) -> None:
     store.set_state(CALENDAR_KEY, "1" if on else "0")
     if not on:
         store.set_state(CALENDAR_LAST_KEY, "")
+        store.forget_meetings("outlook")
 
 
 def save_config(store: Store, *, auto: bool, interval: int, days: int, folders: list[str], subfolders: bool) -> None:
@@ -104,7 +124,8 @@ def save_config(store: Store, *, auto: bool, interval: int, days: int, folders: 
         raise ValueError(f"Choose how far back to copy: {', '.join(map(str, DAYS))} days.")
     known = {row["path"] for row in folder_list(store)}
     picked = [path for path in dict.fromkeys(folders) if not known or path in known]
-    store.set_state(AUTO_KEY, "1" if auto else "0")
+    # Automatic sync goes on only once the user has agreed (Connect): saving these settings is no yes.
+    store.set_state(AUTO_KEY, "1" if auto and config(store)["consent"] else "0")
     store.set_state(INTERVAL_KEY, str(interval))
     store.set_state(DAYS_KEY, str(days))
     store.set_state(FOLDERS_KEY, json.dumps(picked))
@@ -292,6 +313,10 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
         if _remove(store, settings, row):
             report["removed"] += 1
 
+    # Disconnected (or the calendar turned off) while this sync ran: nothing more is read, and nothing is stamped.
+    cfg = config(store)
+    if not cfg["consent"]:
+        return report
     if cfg["calendar"] and calendar_due(store, now):
         try:
             report["meetings"] = sync_calendar(store, session, now=now)
@@ -304,6 +329,12 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
         json.dumps({key: report[key] for key in ("new", "updated", "moved", "removed", "already")} | {"failed": len(report["failed"]), "at": stamp}),
     )
     return report
+
+
+def outlook_desktop_limit() -> int:
+    from controller_inbox.outlook_desktop import MAX_CALENDAR_ITEMS
+
+    return MAX_CALENDAR_ITEMS
 
 
 def calendar_due(store: Store, now: datetime) -> bool:
@@ -323,8 +354,10 @@ def sync_calendar(store: Store, session, *, now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
     start, end = now - calendar_events.WINDOW_BACK, now + calendar_events.WINDOW_AHEAD
     found = session.calendar(start, end)
-    meetings = [calendar_events.Meeting(**item, source="outlook") for item in found]
-    kept = store.replace_meetings("outlook", meetings, start=start.date().isoformat(), end=end.isoformat())
+    meetings = [calendar_events.Meeting(**{**item, "uid": calendar_events.series_uid(item["uid"])}, source="outlook") for item in found]
+    # Read to Outlook's limit (a very busy calendar): what wasn't read is kept as it was, not taken for deleted.
+    upto = max((m.start for m in meetings), default=end.isoformat()) if len(found) >= outlook_desktop_limit() else end.isoformat()
+    kept = store.replace_meetings("outlook", meetings, start=start.date().isoformat(), end=upto)
     store.set_state(CALENDAR_LAST_KEY, now.astimezone(timezone.utc).isoformat())
     return kept
 

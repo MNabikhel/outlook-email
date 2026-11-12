@@ -137,3 +137,103 @@ def test_ask_closedesk_reads_the_calendar_for_a_question_about_meetings(loaded, 
     assert any("Times are America/New_York" in prompt and "PBC list walkthrough with the auditors" in prompt for prompt in asked)
     assert loaded.findings("calendar") == []
     assert not assistant.asks_about_meetings("What is the amount due on INV-10482?")
+
+
+def _invite(uid, start, *, subject="Budget review", method="REQUEST", sequence=0, organizer="mailto:maya@taz.com"):
+    return _ics(_event(f"UID:{uid}", f"SUMMARY:{subject}", f"DTSTART:{start}", f"SEQUENCE:{sequence}", f"ORGANIZER:{organizer}"), method=method)
+
+
+def test_an_update_moves_a_meeting_and_a_cancellation_cancels_it_from_the_same_sender_only(store):
+    store.save_invites("e1", cal.from_ics(_invite("X", "20261009T140000Z"), email_id="e1", now=NOW), sender="maya@taz.com", received="2026-10-01T09:00:00+00:00")
+    store.save_invites("e2", cal.from_ics(_invite("X", "20261009T180000Z", sequence=1), email_id="e2", now=NOW), sender="maya@taz.com", received="2026-10-02T09:00:00+00:00")
+    assert [m["start"] for m in store.meetings_between("2026-10-09", "2026-10-10")] == ["2026-10-09T18:00:00+00:00"], "moved, not shown twice"
+    # Someone outside who knows the uid can't cancel or move it.
+    store.save_invites("e3", cal.from_ics(_invite("X", "20261009T180000Z", method="CANCEL", sequence=5), email_id="e3", now=NOW), sender="x@evil.example", received="2026-10-03T09:00:00+00:00")
+    kept = store.meetings_between("2026-10-09", "2026-10-10")
+    assert [(m["start"], m["cancelled"], m["sender"]) for m in kept] == [("2026-10-09T18:00:00+00:00", False, "maya@taz.com")]
+    store.save_invites("e4", cal.from_ics(_invite("X", "20261009T180000Z", method="CANCEL", sequence=2), email_id="e4", now=NOW), sender="maya@taz.com", received="2026-10-04T09:00:00+00:00")
+    assert [m["cancelled"] for m in store.meetings_between("2026-10-09", "2026-10-10")] == [True]
+    # Read again later, the first invitation doesn't bring the old time back.
+    store.save_invites("e1", cal.from_ics(_invite("X", "20261009T140000Z"), email_id="e1", now=NOW), sender="maya@taz.com", received="2026-10-01T09:00:00+00:00")
+    assert [m["start"] for m in store.meetings_between("2026-10-09", "2026-10-10")] == ["2026-10-09T18:00:00+00:00"]
+
+
+def test_an_invitation_on_held_mail_is_no_meeting(loaded, settings):
+    from controller_inbox import assistant
+
+    held = loaded.get_email("demo-bec-wire")
+    loaded.save_invites(held.id, cal.from_ics(_invite("H", "20260923T150000Z", subject="Confirm new Apex account 9988776612"), email_id=held.id, now=NOW),
+                        sender=held.sender_email, received=held.received_at)
+    assert not any("Apex" in m["subject"] for m in loaded.meetings_between("2026-09-20", "2026-09-30"))
+    source = assistant.calendar_source(loaded, settings, "2026-09-22")
+    assert "9988776612" not in source.body_text
+    assert "from an invitation emailed by" in source.body_text, "an invitation's meeting is the sender's words"
+
+
+def test_a_weekly_meeting_keeps_its_local_time_across_the_clock_change_with_its_skipped_and_moved_weeks():
+    data = _ics(
+        _event("UID:ny", "SUMMARY:Close sync", "DTSTART;TZID=America/New_York:20261019T090000", "DTEND;TZID=America/New_York:20261019T093000",
+               "RRULE:FREQ=WEEKLY;COUNT=5", "EXDATE;TZID=America/New_York:20261109T090000"),
+        _event("UID:ny", "RECURRENCE-ID;TZID=America/New_York:20261102T090000", "SUMMARY:Close sync (moved)",
+               "DTSTART;TZID=America/New_York:20261103T090000", "DTEND;TZID=America/New_York:20261103T093000"),
+    )
+    got = [(m.start, m.subject) for m in cal.from_ics(data, now=NOW)]
+    assert got == [
+        ("2026-10-19T13:00:00+00:00", "Close sync"),  # 9:00 daylight time
+        ("2026-10-26T13:00:00+00:00", "Close sync"),
+        ("2026-11-03T14:00:00+00:00", "Close sync (moved)"),  # 9:00 standard time, the next day
+        ("2026-11-16T14:00:00+00:00", "Close sync"),  # Nov 9 skipped
+    ]
+
+
+def test_a_monday_evening_in_los_angeles_stays_on_monday():
+    data = _ics(_event("UID:la", "SUMMARY:Pacific review", "DTSTART;TZID=America/Los_Angeles:20261005T200000",
+                       "DTEND;TZID=America/Los_Angeles:20261005T210000", "RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=3"))
+    from zoneinfo import ZoneInfo
+
+    local = [datetime.fromisoformat(m.start).astimezone(ZoneInfo("America/Los_Angeles")) for m in cal.from_ics(data, now=NOW)]
+    assert [(d.strftime("%a"), d.hour) for d in local] == [("Mon", 20)] * 3
+
+
+def test_outlooks_own_zone_name_is_read_from_the_invitation():
+    london = (
+        "BEGIN:VTIMEZONE\r\nTZID:(UTC+00:00) Dublin, Edinburgh, Lisbon, London\r\n"
+        "BEGIN:STANDARD\r\nDTSTART:16010101T020000\r\nTZOFFSETFROM:+0100\r\nTZOFFSETTO:+0000\r\nRRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=10\r\nEND:STANDARD\r\n"
+        "BEGIN:DAYLIGHT\r\nDTSTART:16010101T010000\r\nTZOFFSETFROM:+0000\r\nTZOFFSETTO:+0100\r\nRRULE:FREQ=YEARLY;BYDAY=-1SU;BYMONTH=3\r\nEND:DAYLIGHT\r\n"
+        "END:VTIMEZONE\r\n"
+    )
+    tzid = "(UTC+00:00) Dublin, Edinburgh, Lisbon, London"
+    data = _ics(_event("UID:ldn", f'DTSTART;TZID="{tzid}":20261008T150000', f'DTEND;TZID="{tzid}":20261008T160000'), zones=london)
+    [meeting] = cal.from_ics(data, now=NOW)
+    assert meeting.start == "2026-10-08T14:00:00+00:00", "15:00 British Summer Time"
+    [plain] = cal.from_ics(_ics(_event("UID:off", "DTSTART;TZID=(UTC+01:00) Amsterdam, Berlin:20261208T150000")), now=NOW)
+    assert plain.start == "2026-12-08T14:00:00+00:00", "no definition in the file: the offset its name gives"
+
+
+def test_a_repeat_ending_on_a_date_or_a_time_without_zone_keeps_its_occurrences():
+    for until in ("20261102", "20261102T090000"):
+        data = _ics(_event("UID:u", "DTSTART;TZID=America/New_York:20261005T090000", "DTEND;TZID=America/New_York:20261005T100000",
+                           f"RRULE:FREQ=WEEKLY;UNTIL={until}"))
+        assert len(cal.from_ics(data, now=NOW)) == 5, until
+
+
+def test_an_accounting_schedule_is_no_question_about_meetings():
+    from controller_inbox.assistant import asks_about_meetings
+
+    for question in ("What is the payment schedule in the MSA?", "Show the depreciation schedule", "Did they invite us to bid?", "What's the amortization schedule?"):
+        assert not asks_about_meetings(question), question
+    for question in ("What meetings do I have tomorrow?", "What's on my calendar Friday?", "Am I free on Monday?", "When is my 1:1 with Priya?", "What's on my schedule today?"):
+        assert asks_about_meetings(question), question
+
+
+def test_outlooks_id_for_a_meeting_from_another_calendar_is_its_invitations_uid():
+    wrapped = bytes.fromhex("040000008200E00074C5B7101A82E008") + b"\x00" * 20 + b"vCal-Uid\x01\x00\x00\x00abc-123@google.com\x00"
+    assert cal.series_uid(wrapped.hex().upper()) == "abc-123@google.com"
+    assert cal.series_uid("not-hex") == "not-hex"
+
+
+def test_an_all_day_meeting_request_keeps_its_days():
+    start, end = datetime(2026, 10, 30, 4, 0, tzinfo=timezone.utc), datetime(2026, 10, 31, 4, 0, tzinfo=timezone.utc)
+    assert cal._organizer_dates(start, end) == (datetime(2026, 10, 30).date(), datetime(2026, 10, 31).date())
+    tokyo = (datetime(2026, 10, 29, 15, 0, tzinfo=timezone.utc), datetime(2026, 10, 30, 15, 0, tzinfo=timezone.utc))
+    assert cal._organizer_dates(*tokyo) == (datetime(2026, 10, 30).date(), datetime(2026, 10, 31).date())

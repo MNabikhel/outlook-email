@@ -109,8 +109,9 @@ def _matter(store: Store, current: EmailRecord) -> list[EmailRecord]:
 
 # A question about meetings: the calendar is one of its sources.
 _MEETINGS = re.compile(
-    r"\b(meetings?|calendar|schedule[ds]?|appointments?|agenda|invite[sd]?|invitations?|calls? with|"
-    r"(?:am i|are we) (?:free|busy)|free (?:on|at|this|tomorrow|today)|what'?s on (?:today|tomorrow|my)|stand-?up|1:1|one on one)\b",
+    r"\b(meetings?|calendar|appointments?|agenda|calls? with|(?:my|our) schedule|scheduled (?:for|with|on|at)|"
+    r"(?:meeting|calendar) invite[sd]?|invitations? to|(?:am i|are we) (?:free|busy)|free (?:on|at|this|tomorrow|today)|"
+    r"what'?s on (?:today|tomorrow|my)|stand-?up|1:1|one on one)\b",
     re.I,
 )
 CALENDAR_DAYS_BACK = 7

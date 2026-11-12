@@ -1299,6 +1299,7 @@ def register_workspace(
 
     @api.post("/settings/outlook")
     async def settings_outlook(request: Request):
+        must_be_connected()
         data = await json_body(request)
         folders = data.get("folders")
         try:
