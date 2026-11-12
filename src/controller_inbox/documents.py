@@ -695,10 +695,15 @@ def _second_heading_row(rows: list[SheetRow], header: int | None) -> int | None:
     values = [str(value) for value in under.cells.values()]
     if any(tables.is_value(value) and not _MONTH_HEADING.fullmatch(value) for value in values) or len(set(values)) != len(values):
         return None
-    # Each of its own columns sits under a heading merged across it: between two headings of the row above
-    # ("Actual" over Jul, Aug, Sep, then "Q3"). A cell past the last heading is a row's note, not a heading.
+    # Its own columns sit under a heading merged across them ("Actual" over Jul, Aug, Sep). Told from a list's first
+    # row with a note past the last heading ("Called twice"): a heading row leaves a heading merged down empty under
+    # it ("Department", "Q3"), or has its own cells between two headings; that row fills every heading's column.
     spanned = [column for column in under.cells if column not in top]
-    if not spanned or any(not (any(c < column for c in top) and any(c > column for c in top)) for column in spanned):
+    if not spanned or any(not any(c < column for c in top) for column in spanned):
+        return None
+    merged_down = any(column not in under.cells for column in top)
+    between = any(any(c > column for c in top) for column in spanned)
+    if not merged_down and not between:
         return None
     return header + 1
 

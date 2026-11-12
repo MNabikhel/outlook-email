@@ -673,3 +673,13 @@ def test_counts_and_balances_stay_figures_whatever_their_heading_names():
     assert "employee_count REAL" in schema and "customer_balance REAL" in schema
     assert tables.run("SELECT MAX(employee_count) FROM t1")[1] == [(12.0,)]
     assert tables.run("SELECT team FROM t1 WHERE customer_balance > 1000")[1] == [("AR",)]
+
+
+@pytest.mark.parametrize("heading", ["Cost Center", "Cost centre", "Budget code", "Sales region", "Business units", "Dept", "Account"])
+def test_a_heading_that_names_codes_keeps_them_codes(heading):
+    assert table_query._codes(heading, ["410", "520", "610", "410", "520"])
+
+
+@pytest.mark.parametrize("heading", ["Employee count", "Customer balance", "No. of invoices", "Vendor total"])
+def test_a_heading_that_names_a_quantity_keeps_it_a_figure(heading):
+    assert not table_query._codes(heading, ["8", "12", "8", "3", "12"])

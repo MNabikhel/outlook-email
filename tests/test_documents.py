@@ -1455,3 +1455,20 @@ def test_a_lists_first_row_with_a_note_past_its_headings_is_a_row_not_a_heading(
     text = xlsx_text(buf.getvalue())
     assert "A2 (Vendor): Acme Supply | B2 (Contact): Joe Smith | C2 (Status): Open" in text
     assert "A3 (Vendor): Harbor Steel" in text
+
+
+def test_a_two_row_heading_whose_merged_heading_comes_last():
+    book = Workbook()
+    sheet = book.active
+    sheet["A1"], sheet["B1"], sheet["C1"] = "Department", "Budget", "Actual"
+    sheet.merge_cells("C1:E1")
+    for cells in ("A1:A2", "B1:B2"):
+        sheet.merge_cells(cells)
+    sheet["C2"], sheet["D2"], sheet["E2"] = "Jul", "Aug", "Sep"
+    for r, (dept, budget, figures) in enumerate((("Marketing", 100, (10, 20, 30)), ("IT", 50, (1, 2, 3))), start=3):
+        sheet[f"A{r}"], sheet[f"B{r}"] = dept, budget
+        for col, value in zip("CDE", figures):
+            sheet[f"{col}{r}"] = value
+    buf = io.BytesIO()
+    book.save(buf)
+    assert "A3 (Department): Marketing | B3 (Budget): 100 | C3 (Actual Jul): 10 | D3 (Actual Aug): 20 | E3 (Actual Sep): 30" in xlsx_text(buf.getvalue())

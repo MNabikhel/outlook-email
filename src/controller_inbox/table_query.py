@@ -733,7 +733,13 @@ def _ident(label: str, taken: set[str]) -> str:
 # Headings of a column that names its rows by a number (a department, an account, a store), rather than counting.
 _CODE_HEADING = re.compile(
     r"\b(dept|department|div|division|code|id|no|nbr|num|number|#|entity|co|company|acct|account|gl|cost cent(er|re)|"
-    r"cc|store|branch|location|loc|site|region|unit|bu|class|fund|project|job|vendor|customer|emp|employee)\b\.?",
+    r"cc|store|branch|location|loc|site|region|units?|bu|class|fund|project|job|vendor|customer|emp|employee)\b\.?",
+    re.I,
+)
+# Headings that say outright they hold codes, whatever else they say ("Cost center", "Budget code", "Sales region").
+_CODE_PHRASE = re.compile(
+    r"\b(cost cent(er|re)s?|codes?|id|ids|region|regions|business units?|dept|department|division|entity|gl|"
+    r"(acct|account)\s*(no|nbr|num|number|#))\b|#",
     re.I,
 )
 # Headings of a quantity, however they start ("Employee count", "Customer balance", "No. of invoices"): figures.
@@ -747,7 +753,7 @@ _QUANTITY_HEADING = re.compile(
 def _codes(label: str, cells: list[str]) -> bool:
     """A figure column that is really a list of codes: headed like one, every cell a whole number as written
     (no separators, decimals or signs), and few of them repeated over the rows (210, 320, 410)."""
-    if not _CODE_HEADING.search(label) or _QUANTITY_HEADING.search(label):
+    if not _CODE_HEADING.search(label) or (_QUANTITY_HEADING.search(label) and not _CODE_PHRASE.search(label)):
         return False
     written = [cell.strip() for cell in cells if cell and cell != tables.BLANK]
     if not written or not all(re.fullmatch(r"\d{1,10}", cell) for cell in written):
