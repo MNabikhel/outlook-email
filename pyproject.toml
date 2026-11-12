@@ -65,6 +65,7 @@ testpaths = ["tests"]
 addopts = "-q"
 markers = [
   "browser: drives a real Chromium through Playwright (needs the browser extra); deselect with -m \"not browser\"",
+  "live_model: asks a real model server the hard-file questions; skipped unless CLOSEDESK_EVAL_URL is set",
 ]
 
 [tool.ruff]

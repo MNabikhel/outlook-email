@@ -307,18 +307,26 @@ def context_capacity(tokens: int, reply_tokens: int = 500) -> dict[str, object]:
     return {"tokens": tokens, "label": f"{tokens:,} tokens", "text": f"{fits}; needs {memory}. {note}", "tier": tier}
 
 
-def context_advice(context_tokens: int, left_out: list[str]) -> str:
+# Where each model server sets the context length, for the advice when a file didn't fit.
+_RAISE_CONTEXT = {
+    "lm_studio": f"reload the model in LM Studio with Context Length {RECOMMENDED_CONTEXT:,} or more "
+    "(My Models → the model's settings → Context Length)",
+    "ollama": f"start Ollama with a longer context (in its Settings, Context length {RECOMMENDED_CONTEXT:,} or more; "
+    f"or set OLLAMA_CONTEXT_LENGTH={RECOMMENDED_CONTEXT})",
+    "llama.cpp": f"start llama.cpp's server with a longer context (-c {RECOMMENDED_CONTEXT})",
+    "": f"load the model with a context length of {RECOMMENDED_CONTEXT:,} tokens or more in your model server",
+}
+
+
+def context_advice(context_tokens: int, left_out: list[str], server: str = "lm_studio") -> str:
     if not left_out:
         return ""
     named = [item for item in left_out if not item.startswith("the ")]
     what = ", ".join(dict.fromkeys(named or left_out))
     if (context_tokens or DEFAULT_CONTEXT) < RECOMMENDED_CONTEXT:
         known = f"{context_tokens:,}-token" if context_tokens else "small (probably 4,096-token)"
-        return (
-            f"Your model has a {known} context window, so I only read parts of {what}. "
-            f"For whole documents, reload the model in LM Studio with Context Length {RECOMMENDED_CONTEXT:,} or more "
-            "(My Models → the model's settings → Context Length), then ask again."
-        )
+        raise_it = _RAISE_CONTEXT.get(server, _RAISE_CONTEXT[""])
+        return f"Your model has a {known} context window, so I only read parts of {what}. For whole documents, {raise_it}, then ask again."
     several = len(dict.fromkeys(named)) > 1 or not named
     return (
         f"{what[0].upper()}{what[1:]} {'are' if several else 'is'} long, so I read only part of {'them' if several else 'it'}. "

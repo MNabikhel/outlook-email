@@ -33,6 +33,7 @@ from controller_inbox.local_llm import (
     EmptyReply,
     ToolsUnsupported,
     chat_with_tools,
+    check_model,
     complete_text,
     context_length,
     context_target,
@@ -755,7 +756,7 @@ def answer_stream(
             note = failure_note(exc)
             if isinstance(exc, ContextOverflow):
                 note = "The question and its files didn't fit the model's context window. " + agent.context_advice(
-                    context_length(settings), ["the emails and files"]
+                    context_length(settings), ["the emails and files"], model_server(settings)
                 )
             yield {"type": "mode", "mode": "lookup", "note": note}
             yield {"type": "delta", "text": offline_answer(question, sources, about_today=about_today, focus=focus, found=found, current_id=email_id, model_failed=True, today=today)}
@@ -772,7 +773,7 @@ def answer_stream(
                 yield {"type": "delta", "text": added}
                 yield {"type": "step", "text": f"Added {len(missing)} figure{'s' if len(missing) != 1 else ''} the answer left out"}
             yield from _checked(ws, state["text"], history=history, today=today, focus=state.get("focus"))
-    advice = agent.context_advice(context_length(settings), ws.left_out)
+    advice = agent.context_advice(context_length(settings), ws.left_out, model_server(settings))
     if advice:
         yield {"type": "context", "text": advice}
     if offer:
@@ -1051,6 +1052,12 @@ def _model_answer(ws: agent.Workspace, question: str, state: dict, *, history, f
                 # Emails the tools found before the overflow keep their numbers in the next prompt: the answer may cite them.
                 yield {"type": "sources", "sources": source_cards(ws.sources, settings), "mode": "model"}
             yield {"type": "step", "text": "That was more than the model can take at once; trying again with less text."}
+
+
+def model_server(settings: Settings) -> str:
+    """Which model server answers ("lm_studio", "ollama", "llama.cpp", or "" for another), for advice."""
+    status = check_model(settings)
+    return status.server if status.reachable else "lm_studio"
 
 
 def _budget(settings: Settings, *, tools: bool) -> int:
