@@ -1011,6 +1011,7 @@ class Store:
         oldest_first: bool = False,
         received_from: str | None = None,
         received_before: str | None = None,
+        held: bool | None = None,
         order: str | None = None,
         limit: int = 200,
         offset: int = 0,
@@ -1020,11 +1021,12 @@ class Store:
         ``order`` is ``newest`` (default), ``oldest``, ``score`` (most important
         first), or ``queue`` (the order the local model should read: Important
         first, then by score, oldest first within a tie). ``offset`` skips that
-        many for the next page; ``count_emails`` gives the total.
+        many for the next page; ``count_emails`` gives the total. ``held=False`` leaves out mail held as possible
+        payment fraud (``held=True`` gives only that).
         """
         clauses, params = self._email_filters(
             importance=importance, category=category, flag=flag, q=q, folder=folder, model_status=model_status,
-            done=done, received_from=received_from, received_before=received_before,
+            done=done, received_from=received_from, received_before=received_before, held=held,
         )
         order = order or ("oldest" if oldest_first else "newest")
         order_sql = {
@@ -1061,9 +1063,12 @@ class Store:
         done: bool | None = None,
         received_from: str | None = None,
         received_before: str | None = None,
+        held: bool | None = None,
     ) -> tuple[list[str], list[Any]]:
         clauses = ["1=1"]
         params: list[Any] = []
+        if held is not None:
+            clauses.append(_HELD_SQL if held else f"NOT {_HELD_SQL}")
         if received_from:
             clauses.append("received_at >= ?")
             params.append(received_from)

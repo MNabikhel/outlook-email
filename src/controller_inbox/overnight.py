@@ -99,11 +99,9 @@ def waiting_for_reading(store: Store, limit: int) -> list:
     """The next ``limit`` emails the model is to read, most important first: not mail held as possible fraud."""
     if limit <= 0:
         return []
-    found = store.list_emails(model_status="script_draft", order="queue", limit=limit + HELD_SLACK)
-    return [email for email in found if not attachments_locked(email)][:limit]
-
-
-HELD_SLACK = 500  # held emails looked past to fill a batch
+    # Left out in the query, as Store.counts leaves it out of what is waiting: held mail is never read, so it waits
+    # for good, and it is filed first in this order.
+    return store.list_emails(model_status="script_draft", held=False, order="queue", limit=limit)
 
 
 def read_queue(
@@ -127,8 +125,7 @@ def read_queue(
     result["model"] = reader.model
     batch = limit if limit is not None else settings.overnight_batch
     # 0 means read none (SQLite would read everything for a negative LIMIT).
-    # Held mail is never read by the model, its text no more than its files; it is filed first, so the batch is
-    # taken from past it.
+    # Held mail is never read by the model, its text no more than its files (waiting_for_reading leaves it out).
     waiting = waiting_for_reading(store, batch)
     corrections = store.list_corrections()
     for index, email in enumerate(waiting, start=1):

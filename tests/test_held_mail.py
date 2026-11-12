@@ -322,6 +322,17 @@ def test_the_model_keeps_no_note_on_it(loaded, settings):
     assert HELD not in ws.opened
 
 
+def test_however_much_mail_is_held_the_overnight_reading_reaches_the_rest(loaded):
+    # Held mail is never read, so it waits for good, and it is filed Important: it sorts first in the queue.
+    from dataclasses import replace
+
+    held = loaded.get_email(HELD)
+    for n in range(520):
+        loaded.upsert_email(replace(held, id=f"held-{n}", internet_message_id=f"<held-{n}@example.com>", actions=[]))
+    waiting = overnight.waiting_for_reading(loaded, 10)
+    assert len(waiting) == min(10, loaded.counts()["waiting_on_bionic"]) > 0
+
+
 def test_trusting_a_taught_sender_releases_all_their_mail(store, settings):
     held = _taught_sender(store, settings)
     record_fraud_verdict(store, settings, held[0], verdict="safe", scope="sender")
