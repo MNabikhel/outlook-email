@@ -183,6 +183,22 @@ def test_only_the_reader_talks_to_outlook():
     assert users == ["outlook_desktop.py"], users
 
 
+# OutlookSession's own handles on Outlook's objects: reached from another file, a write there
+# ("session.ns.GetItemFromID(...).UnRead = False") would escape the checks above, which read only outlook_desktop.py.
+COM_HANDLES = {"ns", "_by_path", "_item", "_scan", "_folders"}
+
+
+def _reaches_outlook_objects(source: str) -> list[str]:
+    return [f"line {node.lineno}: .{node.attr}" for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Attribute) and node.attr in COM_HANDLES]
+
+
+def test_no_other_file_reaches_outlooks_objects_through_the_reader():
+    assert _reaches_outlook_objects("session.ns.GetItemFromID(e, s).UnRead = False\nsession._item(e, s).Move(f)\n")
+    package = SOURCE.parent
+    found = {path.name: _reaches_outlook_objects(path.read_text(encoding="utf-8")) for path in package.rglob("*.py") if path != SOURCE}
+    assert {name: lines for name, lines in found.items() if lines} == {}, "only OutlookSession's reads may be used outside outlook_desktop.py"
+
+
 # Fake Outlook objects: reading works, any write raises -------------------------------------------------
 
 
