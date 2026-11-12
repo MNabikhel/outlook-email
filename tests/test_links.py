@@ -430,3 +430,62 @@ def test_the_model_is_told_which_related_email_is_from_a_new_domain_and_a_cautio
     store.save_ai_link("root", "other", same=True, why="same quote", key="k")
     store.upsert_email(_record("other", sender="billing@harbor-pack.net", flags=["payment_caution"]))
     assert all(g["kind"] != "ai" for g in links.related(store, store.get_email("root"))["groups"])
+
+# --- An invoice's conversation ------------------------------------------------------------------------------------
+
+
+def _invoice_chain(settings, *, names=("1-invoice.eml", "2-colleague.eml", "3-vendor.eml")) -> None:
+    from controller_inbox.demo import make_pdf
+
+    pdf = make_pdf([["Coastal Print Co", "Invoice CP-5521", "Total due $1,840.00", "Due November 30, 2026"]])
+    _eml(settings, names[0], "Invoice CP-5521", sender="Coastal Print AR <ar@coastalprint.com>", mid="<cp1@coastalprint.com>",
+         files=[("CP-5521.pdf", pdf)], body="Please find invoice CP-5521 for $1,840.00 attached, due November 30.")
+    _eml(settings, names[1], "RE: Invoice CP-5521", sender="Maya Chen <maya@taz.com>", mid="<cp2@taz.com>",
+         reply_to_mid="<cp1@coastalprint.com>", refs="<cp1@coastalprint.com>", hours=2,
+         body="Which PO is invoice CP-5521 for? I can't find it.\n\n> Please find invoice CP-5521 for $1,840.00 attached.")
+    _eml(settings, names[2], "RE: Invoice CP-5521", sender="Coastal Print AR <ar@coastalprint.com>", mid="<cp3@coastalprint.com>",
+         reply_to_mid="<cp2@taz.com>", refs="<cp1@coastalprint.com> <cp2@taz.com>", hours=4,
+         body="Invoice CP-5521 is for PO-88012.\n\n> Which PO is invoice CP-5521 for?")
+
+
+def _invoice_tasks(store) -> list[tuple[str, str]]:
+    return sorted(
+        (email.subject, action.title)
+        for email in store.list_emails(limit=-1)
+        for action in (store.get_email(email.id).actions)
+        if action.source in {"invoice", "duplicate_rule"} and action.status.value == "open"
+    )
+
+
+@pytest.mark.parametrize("names", [("1-invoice.eml", "2-colleague.eml", "3-vendor.eml"), ("c-invoice.eml", "a-colleague.eml", "b-vendor.eml")])
+def test_replies_about_an_invoice_make_no_second_entry_or_duplicate_task(store, settings, names):
+    """Mail about an invoice in its own conversation is no second invoice, in whatever order the files are read."""
+    _invoice_chain(settings, names=names)
+    ingest_folder(store, settings, now=START + timedelta(hours=5))
+    tasks = _invoice_tasks(store)
+    assert [title for _subject, title in tasks if title.startswith("Code and enter")] and len(tasks) == 1, tasks
+    assert tasks[0][0] == "Invoice CP-5521"
+    assert not any("duplicate_invoice" in store.get_email(e.id).flags for e in store.list_emails(limit=-1))
+
+
+def test_a_lookalike_replying_in_the_thread_with_the_invoice_is_still_a_duplicate(store, settings):
+    from controller_inbox.demo import make_pdf
+
+    _invoice_chain(settings)
+    pdf = make_pdf([["Coastal Print Co", "Invoice CP-5521", "Total due $1,840.00", "New bank details enclosed"]])
+    _eml(settings, "4-lookalike.eml", "RE: Invoice CP-5521", sender="Coastal Print AR <ar@coastalprlnt.com>", mid="<cp4@coastalprlnt.com>",
+         reply_to_mid="<cp3@coastalprint.com>", refs="<cp1@coastalprint.com> <cp3@coastalprint.com>", hours=5,
+         files=[("CP-5521 corrected.pdf", pdf)], body="Corrected invoice CP-5521 attached.")
+    ingest_folder(store, settings, now=START + timedelta(hours=6))
+    fake = next(e for e in store.list_emails(limit=-1) if e.sender_email.endswith("coastalprlnt.com"))
+    assert "duplicate_invoice" in store.get_email(fake.id).flags
+
+
+def test_a_po_links_the_buyers_mail_and_the_vendors(store):
+    """Purchasing's "PO-88012 approved" and the vendor's invoice naming it are one PO; a short number stays one sender's."""
+    store.upsert_email(_record("purchasing", sender="purchasing@taz.com", pos=["88012"]))
+    store.upsert_email(_record("vendor", sender="ar@coastalprint.com", pos=["88012"], received="2026-10-06T14:00:00+00:00"))
+    store.upsert_email(_record("short-a", sender="purchasing@taz.com", pos=["4410"]))
+    store.upsert_email(_record("short-b", sender="ar@coastalprint.com", pos=["4410"]))
+    assert [e.id for g in links.related(store, store.get_email("purchasing"))["groups"] for e in g["emails"]] == ["vendor"]
+    assert not links.related(store, store.get_email("short-a"))["groups"]

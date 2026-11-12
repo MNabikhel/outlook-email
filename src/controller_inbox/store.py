@@ -963,6 +963,13 @@ class Store:
             rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
+    def drop_open_tasks(self, email_id: str, *, source: str) -> int:
+        """Remove an email's open tasks of one kind (``source``); finished and snoozed ones stay."""
+        with self.connect() as conn:
+            return conn.execute(
+                "DELETE FROM action_items WHERE email_id = ? AND source = ? AND status = 'open'", (email_id, source)
+            ).rowcount
+
     def find_duplicate_invoices(self, invoice_number: str, exclude_email_id: str) -> list[str]:
         if not invoice_number:
             return []
