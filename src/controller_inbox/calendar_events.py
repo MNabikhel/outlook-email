@@ -864,6 +864,7 @@ def with_cautions(store, meetings: list[dict]) -> list[dict]:
         senders.setdefault(meeting["uid"], set()).add(_meeting_of(meeting.get("sender"), meeting.get("organizer")))
     emails = store.get_emails(list(dict.fromkeys(m["email_id"] for m in invites))) if invites else {}
     newcomer: dict[str, bool] = {}
+    walked: dict = {}  # the conversations looked at, shared by their invitations
     for meeting in meetings:
         meeting["caution"] = ""
     for meeting in invites:
@@ -876,7 +877,7 @@ def with_cautions(store, meetings: list[dict]) -> list[dict]:
         elif email is not None and email.threading:
             if email.id not in newcomer:
                 try:
-                    newcomer[email.id] = email.id in links.related(store, email, ai=False)["new_domains"]
+                    newcomer[email.id] = links.is_newcomer(store, email, seen=walked)
                 except Exception:  # the conversation can't be read just now: no warning rather than no calendar
                     newcomer[email.id] = False
             if newcomer[email.id]:

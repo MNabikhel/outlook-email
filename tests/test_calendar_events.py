@@ -856,6 +856,37 @@ def test_a_held_invitation_hides_only_outlooks_tentative_copy_at_its_own_time(st
     assert store.meetings_between(*WINDOW) == [], "tentative, at its time, organized by the name it gave: Outlook's copy of it"
 
 
+def test_invitations_from_a_newcomer_to_their_conversation_say_so_with_one_look_at_it(store, monkeypatch):
+    """An invitation whose sender's domain is new to the conversation it came in says to check who sent it. The
+    invitations of one conversation share one look at it, and only the invitations' own emails are loaded whole."""
+    import sys
+
+    from controller_inbox import links
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    store.upsert_email(_record("root", sender="pat@vendor.com", mid="<root@vendor.com>", threading={"to": ["ap@taz.com"]},
+                               received="2026-10-01T09:00:00+00:00"))
+    store.upsert_email(_record("ours", sender="ap@taz.com", mid="<ours@taz.com>", threading={"in_reply_to": "root@vendor.com", "to": ["pat@vendor.com"]},
+                               received="2026-10-01T10:00:00+00:00"))
+    for n, (email_id, sender) in enumerate((("own", "pat@vendor.com"), ("look1", "pat@vendor-mail.com"), ("look2", "pat@vendor-mail.com"))):
+        store.upsert_email(_record(email_id, sender=sender, mid=f"<{email_id}@x>", threading={"in_reply_to": "ours@taz.com", "to": ["ap@taz.com"]},
+                                   received=f"2026-10-02T0{n + 1}:00:00+00:00"))
+        store.save_invites(email_id, cal.from_ics(_invite(f"N{n}", f"2026100{n + 6}T140000Z", organizer=f"mailto:{sender}"), email_id=email_id, now=NOW),
+                           sender=sender)
+    walks, loaded = [], []
+    real_walk, real_load = links._conversation, store.get_emails
+    monkeypatch.setattr(links, "_conversation", lambda *args: (walks.append(args[1]), real_walk(*args))[1])
+    monkeypatch.setattr(store, "get_emails", lambda ids, **kw: (loaded.extend(ids), real_load(ids, **kw))[1])
+    meetings = cal.with_cautions(store, store.meetings_between(*WINDOW))
+    cautions = {m["email_id"]: m["caution"] for m in meetings}
+    assert cautions["own"] == ""
+    assert cautions["look1"] == cautions["look2"] == f"{cal.CAUTION}: its sender is new to the conversation it came in."
+    assert len(walks) == 1, walks
+    assert set(loaded) == {"own", "look1", "look2"}, loaded
+
+
 def test_a_held_invitation_cleared_becomes_a_meeting_and_one_held_later_stops_being_one(store, settings):
     from controller_inbox import fraud
 

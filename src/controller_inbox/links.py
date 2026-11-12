@@ -273,11 +273,8 @@ def related(store, email: EmailRecord, *, ai: bool = True, known_thread: list[st
             groups.append({"kind": "ai", "value": "", "ids": list(judged)[:MAX_PER_REASON], "why": judged})
             shown |= set(judged)
     # A long conversation is shown around the email opened (it is always in it), its emails loaded only there.
-    times = store.received_times(thread_ids)
-    order = sorted((i for i in thread_ids if i in times or i == email.id), key=lambda i: (times.get(i) or email.received_at or "", i))
-    at = order.index(email.id) if email.id in order else 0
-    first = max(0, min(at - MAX_THREAD // 2, len(order) - MAX_THREAD))
-    window = [] if known_thread is not None else order[first : first + MAX_THREAD]
+    window, size = _around(store, email, thread_ids)
+    window = [] if known_thread is not None else window
     cards = store.get_emails(list(dict.fromkeys([*window, *(i for g in groups for i in g["ids"])])))
     thread = [email if i == email.id else cards[i] for i in window if i == email.id or i in cards]
     out_groups = []
@@ -286,7 +283,33 @@ def related(store, email: EmailRecord, *, ai: bool = True, known_thread: list[st
         if records:
             label = AI_LABEL if group["kind"] == "ai" else _label(group, email, records)
             out_groups.append({"kind": group["kind"], "label": label, "emails": sorted(records, key=lambda r: r.received_at or "", reverse=True), "why": group.get("why", {})})
-    return {"thread": thread if len(thread) > 1 else [], "groups": out_groups, "new_domains": new_domains(thread), "thread_size": len(order)}
+    return {"thread": thread if len(thread) > 1 else [], "groups": out_groups, "new_domains": new_domains(thread), "thread_size": size}
+
+
+def _around(store, email: EmailRecord, thread_ids: list[str]) -> tuple[list[str], int]:
+    """The ``MAX_THREAD`` emails of a conversation around ``email`` (always one of them), in the order received,
+    and how many emails the conversation has."""
+    times = store.received_times(thread_ids)
+    order = sorted((i for i in thread_ids if i in times or i == email.id), key=lambda i: (times.get(i) or email.received_at or "", i))
+    at = order.index(email.id) if email.id in order else 0
+    first = max(0, min(at - MAX_THREAD // 2, len(order) - MAX_THREAD))
+    return order[first : first + MAX_THREAD], len(order)
+
+
+def is_newcomer(store, email: EmailRecord, *, seen: dict | None = None) -> bool:
+    """Whether ``email``'s sender is new to its conversation, as ``related`` says (its ``new_domains``), told from
+    the other emails' headers alone: what the calendar asks of each invitation it shows. ``seen``, shared by the
+    calls for one page, lets the emails of one conversation share one walk of it."""
+    seen = {} if seen is None else seen
+    thread_ids = seen.get(("thread", email.id))
+    if thread_ids is None:
+        thread_ids = _conversation(store, email.id, store.link_keys(email.id) or keys(email))
+        seen.update({("thread", member): thread_ids for member in thread_ids})
+    window, _size = _around(store, email, thread_ids)
+    if ("marked", *window) not in seen:
+        heads = {head.id: head for head in store.email_heads([i for i in window if i != email.id])}
+        seen[("marked", *window)] = new_domains([email if i == email.id else heads[i] for i in window if i == email.id or i in heads])
+    return email.id in seen[("marked", *window)]
 
 
 def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str]:
