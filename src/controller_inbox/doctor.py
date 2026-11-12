@@ -191,10 +191,16 @@ def _outlook_sync(settings) -> Check:
         cfg = outlook_sync.config(store)
         last = store.get_state(outlook_sync.LAST_SYNC_KEY) or ""
         calendar = store.get_state(outlook_sync.CALENDAR_LAST_KEY) or ""
+        failed = outlook_sync.last_failure(store)
     except Exception:
         return Check(OK, "Classic Outlook: can be read on this computer")
     if not cfg["consent"]:
         return Check(OK, "Classic Outlook: can be read on this computer; not connected (Settings, Sync inbox)")
+    if failed:
+        # As Settings, Sync inbox says it: the syncs keep not working, and the time given is of the last that did.
+        worked = f"last worked {format_when(last, settings.tz)}" if last else "no sync has worked yet"
+        return Check(NOTE, f"Classic Outlook: connected, but the last sync didn't work ({failed['error']}); {worked}",
+                     "Open classic Outlook, then click Sync now in Settings, Sync inbox.")
     said = f"connected, last synced {format_when(last, settings.tz)}" if last else "connected, not synced yet"
     if cfg["calendar"]:
         said += f"; calendar read {format_when(calendar, settings.tz)}" if calendar else "; calendar on, not read yet"
