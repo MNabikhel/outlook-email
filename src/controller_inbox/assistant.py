@@ -1715,10 +1715,11 @@ def _read_material(ws: agent.Workspace, *, history, today: str, focus: list[dict
     material += [" · ".join(str(value) for value in row.values() if isinstance(value, (str, int, float))) for row in focus or []]
     files = []
     for email in ws.sources:
-        material.append(f"{email.subject}\n{email.body_text}")
-        material.append(_source_block(0, email, len(email.body_text or "") + 1, on_screen=False))
+        # Of held mail the model is shown its header only (``_source_block``), never its text or files.
         if not agent.attachments_locked(email):
+            material.append(f"{email.subject}\n{email.body_text}")
             files += [(att.filename, att.extracted_text) for att in email.attachments if att.extracted_text]
+        material.append(_source_block(0, email, len(email.body_text or "") + 1, on_screen=False))
     return {"material": material, "files": files}
 
 

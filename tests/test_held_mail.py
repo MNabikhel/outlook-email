@@ -264,6 +264,16 @@ def test_mail_held_while_the_overnight_reading_runs_isnt_read_later_in_the_batch
     assert len(reader.seen) > 3 and later not in reader.seen
 
 
+def test_the_answer_check_doesnt_count_its_text_as_read(loaded, settings):
+    # The model is given only its header, so a figure only its text holds is no figure the model read.
+    ws = agent.Workspace(loaded, settings, [loaded.get_email("demo-inv-10482"), loaded.get_email(HELD)], question="how much is the Apex wire?")
+    assert "48,500" not in str(assistant.build_messages("how much is the Apex wire?", ws.sources, today="2026-09-22"))
+    draft = "The Apex wire is $48,500.00 [2]."
+    review = assistant.answer_check.review(draft, **assistant._read_material(ws, history=None, today="2026-09-22"))
+    assert review.checks, "flagged as not in what was read"
+    assert not assistant._grounded(ws, draft, history=None, today="2026-09-22")
+
+
 def test_trusting_a_taught_sender_releases_all_their_mail(store, settings):
     held = _taught_sender(store, settings)
     record_fraud_verdict(store, settings, held[0], verdict="safe", scope="sender")
