@@ -851,7 +851,23 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
     out = [head, note, *rows_text]
     if more:
         out.append(f"[{more} more rows not shown; ask for a range such as rows {MAX_ROWS + 1}–{MAX_ROWS + 200}.]")
+    try:
+        widest = range_boundaries(declared)[2] or 0
+    except (ValueError, TypeError):
+        widest = 0
+    if widest > MAX_COLUMNS:
+        out.append(_columns_left_out(MAX_COLUMNS + 1, widest))
     return out
+
+
+def _columns_left_out(first: int, last: int, *, workbook: bool = True) -> str:
+    """The note for a sheet wider than is read: its last columns (often its totals) are not in the text."""
+    from openpyxl.utils import get_column_letter
+
+    left, right = get_column_letter(first), get_column_letter(last)
+    if not workbook:
+        return f"[Columns {left}–{right} not shown.]"
+    return f"[Columns {left}–{right} not shown; ask read_cells for them, such as {left}1:{right}40.]"
 
 
 _MERGE_CELL = re.compile(rb'<(?:\w+:)?mergeCell\b[^>]*?\bref="([A-Z]{1,3})(\d+):([A-Z]{1,3})(\d+)"')
@@ -951,6 +967,8 @@ def xls_text(data: bytes) -> str:
         lines.extend(sheet_row_lines(rows))
         if rows_left:
             lines.append(f"[{rows_left} more rows not shown.]")
+        if sheet.ncols > MAX_COLUMNS:
+            lines.append(_columns_left_out(MAX_COLUMNS + 1, sheet.ncols))
     return "\n".join(lines).strip()
 
 
@@ -1190,6 +1208,8 @@ def _rows_text(rows: list[list[str]], filename: str) -> str:
     lines.extend(sheet_row_lines([row for row in sheet if row.cells], first_names_columns=True))
     if len(rows) > MAX_ROWS:
         lines.append(f"[{len(rows) - MAX_ROWS} more rows not shown.]")
+    if width > MAX_COLUMNS:
+        lines.append(_columns_left_out(MAX_COLUMNS + 1, width, workbook=False))
     return "\n".join(lines)
 
 
@@ -1668,9 +1688,12 @@ def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200, books: 
         except (ValueError, TypeError):
             return f"{cells!r} isn't a cell range. Use something like A1:F20."
         min_col, min_row = min_col or 1, min_row or 1
-        max_col = min(max_col or ws.max_column, min_col + MAX_COLUMNS - 1)
+        asked = max_col or ws.max_column
+        max_col = min(asked, min_col + MAX_COLUMNS - 1)
         max_row = min(max_row or ws.max_row, ws.max_row)
         lines = [f'Sheet "{ws.title}" {get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}']
+        if asked > max_col:
+            lines.append(_columns_left_out(max_col + 1, asked))
         shown = 0
         held = _held(ws, min_col, min_row, max_col, max_row)
         held_values = _held(vs, min_col, min_row, max_col, max_row)

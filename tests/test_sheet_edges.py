@@ -365,3 +365,67 @@ def test_small_rates_and_formatted_decimals_keep_their_digits():
 def test_a_zero_padded_format_keeps_its_zeros():
     text = _formatted_book([("Vendor ID", "Vendor", "Balance"), (417, "Northwind", 4500.0), (418, "Granite", 12500.5)], {1: "00000"})
     assert "A2 (Vendor ID): 00417" in text and "A3 (Vendor ID): 00418" in text
+
+
+# What reaches the query ------------------------------------------------------------------------
+
+
+def test_tables_past_the_ones_loaded_are_named_in_the_schema():
+    wb = Workbook()
+    wb.remove(wb.active)
+    for month in ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"):
+        ws = wb.create_sheet(f"{month} 2026")
+        ws.append(["Vendor", "Category", "Amount"])
+        for row in (("Delta", "Travel", 1000), ("Hilton", "Travel", 500), ("Staples", "Supplies", 75)):
+            ws.append(row)
+    out = io.BytesIO()
+    wb.save(out)
+    text = documents.extract_document("E.xlsx", XLSX, out.getvalue())
+    schema = _tables(text, "What was the total travel spend for the year?", "E.xlsx").schema()
+    assert "not loaded" in schema and '"Jul 2026"' in schema and '"Dec 2026"' in schema
+
+
+def test_a_variance_worked_out_as_actual_less_budget_is_the_worked_out_column():
+    rows = [("Department", "Budget", "Actual", "Variance"), ("Sales", 1000, 1100, 100), ("IT", 5000, 4500, -500), ("HR", 300, 320, 20),
+            ("Legal", 400, 400, 0), ("Ops", 700, 650, -50)]
+    schema = _tables(_xlsx_text(rows), "Which departments are over budget?").schema()
+    assert "= - budget + actual on every row" in schema
+    lines = {line.split()[0]: line for line in schema.splitlines() if line.startswith("  ")}
+    assert " = " not in lines["budget"] and " = " not in lines["actual"]
+
+
+def test_header_rows_and_the_sheet_list_are_not_facts():
+    text = _csv_text("Region,Region Revenue\nEast,300\nWest,1200\nNorth,300\nSouth,450\n", "r.csv")
+    assert _tables(text, "Which region sold most?", "r.csv").facts == []
+    rows = [("Pay date", "10/15/2026"), (), ("Employee", "Dept", "Gross"), ("Ann", "Sales", 4100), ("Bob", "IT", 3250), ("Cy", "IT", 2000)]
+    facts = [(name, value) for _file, name, value in _tables(_xlsx_text(rows), "Gross for IT?").facts]
+    assert facts == [("Pay date", "10/15/2026")]
+
+
+def test_a_running_balance_listed_newest_first_is_marked():
+    lines, balance, rows = ["Posting Date,Description,Amount,Balance"], 10000.0, []
+    for day, amount in enumerate([-120.5, 400.0, -75.25, 1200.0, -980.0, 310.0], start=1):
+        balance = round(balance + amount, 2)
+        rows.append(f"10/{day:02d}/2026,Item {day},{amount:.2f},{balance:.2f}")
+    text = _csv_text("\n".join(lines + rows[::-1]), "chase.csv")
+    tables = _tables(text, "What is the ending balance?", "chase.csv")
+    assert "running balance listed newest first" in tables.schema() and "the first row's is the latest balance" in tables.schema()
+    try:
+        tables.run("SELECT SUM(balance) FROM t1")
+    except ValueError as refused:
+        assert "first row's" in str(refused)
+    else:
+        raise AssertionError("a sum over a running balance runs")
+
+
+# Wide sheets -----------------------------------------------------------------------------------
+
+
+def test_columns_past_the_sixtieth_are_said_to_be_left_out():
+    heading = ["Account"] + [f"M{n}" for n in range(1, 71)] + ["FY Total"]
+    rows = [heading] + [[name] + [100] * 70 + [7000] for name in ("Rent", "Payroll", "Travel")]
+    data = _book(rows)
+    text = documents.extract_document("wide.xlsx", XLSX, data)
+    assert "[Columns BI–BT not shown" in text
+    cells = documents.read_cells(data, "Sheet", "A2:BT2")
+    assert "Columns BI–BT not shown" in cells
