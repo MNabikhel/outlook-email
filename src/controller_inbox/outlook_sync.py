@@ -124,10 +124,10 @@ def disconnect(store: Store) -> None:
     store.forget_meetings("outlook")
 
 
-def note_failure(store: Store, error: str, now: datetime | None = None) -> None:
+def note_failure(store: Store, error: str, now: datetime | None = None, *, conn=None) -> None:
     """Keep why this sync didn't work, for Settings → Sync inbox (until the next one works)."""
     stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-    store.set_state(LAST_ERROR_KEY, json.dumps({"at": stamp, "error": error}))
+    store.set_state(LAST_ERROR_KEY, json.dumps({"at": stamp, "error": error}), conn=conn)
 
 
 def last_failure(store: Store) -> dict:
@@ -246,6 +246,9 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
         except Exception as exc:  # one folder Outlook trips on must not stop the others
             log.warning("Couldn't read the Outlook folder %s", path, exc_info=True)
             report["failed"].append({"folder": path, "error": str(exc)[:300]})
+    if not read and report["failed"]:
+        # Not one of the folders could be read: said as a sync that didn't work, not as one that found nothing new.
+        report["note"] = report["failed"][0]["error"]
 
     tracked = store.outlook_items()
     by_message = {row["message_id"]: row for row in tracked.values() if row["message_id"]}
@@ -361,11 +364,17 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
     with store.transaction() as conn:
         if not _connected(store, conn):
             return report  # disconnected while the calendar was read
+        if report.get("note"):
+            # Shown on Settings → Sync inbox until a sync works; the last one that worked stays as it was.
+            note_failure(store, report["note"], now, conn=conn)
+            return report
         store.set_state(LAST_SYNC_KEY, stamp, conn=conn)
         store.set_state(LAST_ERROR_KEY, "", conn=conn)
+        # What couldn't be read is kept as a count and the first reason, for the card's "Last sync" line.
+        failed = {"failed": len(report["failed"]), "problem": report["failed"][0]["error"] if report["failed"] else ""}
         store.set_state(
             LAST_RESULT_KEY,
-            json.dumps({key: report[key] for key in ("new", "updated", "moved", "removed", "already")} | {"failed": len(report["failed"]), "at": stamp}),
+            json.dumps({key: report[key] for key in ("new", "updated", "moved", "removed", "already")} | failed | {"at": stamp}),
             conn=conn,
         )
     return report
@@ -433,7 +442,8 @@ def changed(report: dict) -> bool:
 
 
 def describe(report: dict) -> str:
-    """"3 new, 1 removed in Outlook" — what a sync did, for a message on screen."""
+    """"3 new, 1 removed in Outlook" — what a sync did, for a message on screen. ``report`` is a sync's own (its
+    ``failed`` a list) or the one kept for Settings (``failed`` a count, ``problem`` the first reason)."""
     parts = [
         f"{report['new']} new" if report.get("new") else "",
         f"{report['removed']} deleted in Outlook" if report.get("removed") else "",
@@ -441,8 +451,13 @@ def describe(report: dict) -> str:
         f"{report['updated']} updated" if report.get("updated") else "",
     ]
     said = ", ".join(part for part in parts if part) or "nothing new"
-    if report.get("failed"):
-        said += f"; {len(report['failed'])} couldn't be read"
+    failed = report.get("failed") or 0
+    count = failed if isinstance(failed, int) else len(failed)
+    if count:
+        first = str(report.get("problem") or "")
+        if not first and isinstance(failed, list) and isinstance(failed[0], dict):
+            first = str(failed[0].get("error") or "")
+        said += f"; {count} couldn't be read" + (f": {first.rstrip('.')}" if first else "")
     return said
 
 

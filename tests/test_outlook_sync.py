@@ -340,6 +340,51 @@ def test_due_follows_the_interval(store):
 def test_describe():
     assert outlook_sync.describe({"new": 3, "removed": 1}) == "3 new, 1 deleted in Outlook"
     assert outlook_sync.describe({"failed": [{}]}) == "nothing new; 1 couldn't be read"
+    busy = {"folder": "Inbox/AP", "error": "Outlook is busy (try again)."}
+    assert outlook_sync.describe({"new": 1, "failed": [busy]}) == "1 new; 1 couldn't be read: Outlook is busy (try again)"
+    # As kept for Settings (a count and the first reason), and as kept before there was a reason.
+    assert outlook_sync.describe({"failed": 2, "problem": "Outlook is busy."}) == "nothing new; 2 couldn't be read: Outlook is busy"
+    assert outlook_sync.describe({"failed": 1}) == "nothing new; 1 couldn't be read"
+
+
+def test_settings_still_open_after_a_sync_where_something_couldnt_be_read(store, settings, outlook):
+    # The last result kept "failed" as a count and the card ran len() on it: the whole Settings page answered 500.
+    outlook.add("e1", "Invoice INV-7741 from Northwind", minutes=1)
+    outlook.add("v1", "Vendor statement", folder="Inbox/Vendors", minutes=2)
+    outlook.broken.add("Inbox/Vendors")
+    sync(store, settings, outlook)
+    client = TestClient(web.create_app(settings, store))
+    reply = client.get("/api/settings", headers=PAGE)
+    assert reply.status_code == 200
+    data = reply.json()["outlook"]
+    assert data["last_result"] == "1 new; 1 couldn't be read: Outlook is busy" and data["last_error"] == ""
+
+
+def test_a_picked_folder_gone_from_outlook_says_why_and_isnt_a_sync_that_worked(store, settings, outlook, monkeypatch):
+    # Only the count was kept ("1 couldn't be read"), and a sync that read no folder at all stamped itself as one
+    # that worked and cleared the banner.
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+
+    @contextmanager
+    def connect(**_options):
+        yield outlook
+
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    outlook.add("e1", "Invoice INV-7741 from Northwind", minutes=1)
+    outlook_run(store, settings, now=NOW)
+    store.set_state(outlook_sync.FOLDERS_KEY, json.dumps(["Inbox/AP"]))  # picked, then renamed in Outlook
+    result = outlook_run(store, settings, now=NOW + timedelta(minutes=15))
+    said = "The folder Inbox/AP isn't in Outlook any more. Pick it again in Settings → Sync inbox → Advanced."
+    assert result["message"] == said
+    data = TestClient(web.create_app(settings, store)).get("/api/settings", headers=PAGE).json()["outlook"]
+    assert data["last_error"] == said and data["last_result"] == "1 new", "the last sync that worked is still the one shown"
+    assert store.get_state(outlook_sync.LAST_SYNC_KEY) == NOW.isoformat()
+    # Picked along with the Inbox: the sync works, and the card says what couldn't be read.
+    store.set_state(outlook_sync.FOLDERS_KEY, json.dumps(["Inbox", "Inbox/AP"]))
+    result = outlook_run(store, settings, now=NOW + timedelta(minutes=30))
+    assert result["message"] == f"Outlook synced: nothing new; 1 couldn't be read: {said}"
+    data = TestClient(web.create_app(settings, store)).get("/api/settings", headers=PAGE).json()["outlook"]
+    assert data["last_error"] == "" and data["last_result"] == f"nothing new; 1 couldn't be read: {said[:-1]}"
 
 
 @pytest.fixture
