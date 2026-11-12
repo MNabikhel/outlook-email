@@ -112,7 +112,7 @@ def from_ics(
     for event in series:
         if len(out) >= limit:
             break
-        out += _occurrences(event, zones, overrides, method, email_id, now, rows=limit - len(out), expand=monotonic() < deadline)
+        out += _occurrences(event, zones, overrides, method, email_id, now, rows=limit - len(out), deadline=deadline)
     # A moved occurrence whose series isn't in this file (an update to one week only) is a meeting of its own.
     seen = {(m.uid, m.start) for m in out}
     for (uid, _start), (event, replaces) in overrides.items():
@@ -124,20 +124,24 @@ def from_ics(
 
 
 def _occurrences(
-    event: dict, zones: dict, overrides: dict, method: str, email_id: str, now: datetime, *, rows: int = MAX_ROWS, expand: bool = True
+    event: dict, zones: dict, overrides: dict, method: str, email_id: str, now: datetime, *, rows: int = MAX_ROWS,
+    deadline: float | None = None,
 ) -> list[Meeting]:
-    """One meeting's occurrences in the window, ``rows`` at most. With ``expand`` False (the file's time is up), a
-    repeating meeting is its first occurrence, marked as repeating."""
+    """One meeting's occurrences in the window, ``rows`` at most. Once ``deadline`` has passed (the file's time is
+    up), a repeating meeting is its first occurrence, marked as repeating; one being walked then keeps what was found."""
     first = _meeting(event, zones, method, email_id)
     if first is None:
         return []
     rule = event.get("RRULE")
     if rule is None:
         return [first]
-    if not expand:
+    # The rule alone: dateutil reads what follows a space on the line as more rules and dates ("... RDATE:..."), as a
+    # set of rules none of the limits below would reach.
+    rule_text = (rule[2].split() or [""])[0]
+    if deadline is not None and monotonic() >= deadline:
         first.recurring = True
         return [first]
-    if _too_often(rule[2]):
+    if _too_often(rule_text):
         # No meeting repeats more often than a few times a day: such a rule (which anyone can email, from years back)
         # would take minutes to walk. Its first occurrence is kept, marked as repeating.
         first.recurring = True
@@ -151,7 +155,7 @@ def _occurrences(
     length = _parse(first.end, first.all_day) - _parse(first.start, first.all_day)
     try:
         anchor = begin if not all_day else datetime.combine(begin, time())
-        rrule = rrulestr(_until_in_utc(rule[2], begin, all_day), dtstart=anchor.replace(tzinfo=None) if all_day else anchor, ignoretz=all_day)
+        rrule = rrulestr(_until_in_utc(rule_text, begin, all_day), dtstart=anchor.replace(tzinfo=None) if all_day else anchor, ignoretz=all_day)
     except (ValueError, TypeError):
         first.recurring = True
         return [first]
@@ -166,7 +170,7 @@ def _occurrences(
     out = []
     from itertools import islice
 
-    for when in islice(_walk(rrule, high), MAX_STEPS):
+    for when in islice(_walk(rrule, high, deadline), MAX_STEPS):
         if when < low:
             continue
         stamp = when.date() if all_day else when
@@ -194,22 +198,33 @@ class _PastTheWindow(Exception):
     """dateutil started on a year past the window's: what it finds from there is no occurrence to keep."""
 
 
-def _walk(rule, high):
-    """The rule's occurrences from its first up to ``high``. dateutil looks for a rule's next occurrence day by day,
-    with no end, until year 9999: a rule no day meets ("every day in February that is the 31st"), which anyone can
-    email, would take seconds each. So the rule is stopped once dateutil reaches a year past ``high``'s: it reads
-    which weeks of the year a rule names (``_byweekno``) as it starts each year, and that read ends the walk."""
+def _walk(rule, high, deadline: float | None = None):
+    """The rule's occurrences from its first up to ``high``, until ``deadline`` (``time.monotonic()``). dateutil looks
+    for a rule's next occurrence day by day, with no end, until year 9999: a rule no day meets ("every day in February
+    that is the 31st"), which anyone can email, would take seconds each. So the rule is stopped once dateutil reaches
+    a year past ``high``'s, or the deadline has passed: it reads which weeks of the year a rule names (``_byweekno``)
+    as it starts each year, and that read ends the walk. The rules of a set (``rruleset``) are stopped alike."""
     from dateutil.rrule import rrule as dateutil_rule
+    from dateutil.rrule import rruleset
 
-    if type(rule) is dateutil_rule:
+    def stopping(one):
+        if type(one) is not dateutil_rule:
+            return one
         kind = _stops_after_year()
-        stopping = kind.__new__(kind)
-        stopping.__dict__.update(rule.__dict__)
-        stopping._years_left = high.year - rule._dtstart.year + 3  # the start's year, the window's, and dateutil's first look
-        rule = stopping
+        bounded = kind.__new__(kind)
+        bounded.__dict__.update(one.__dict__)
+        bounded._years_left = high.year - one._dtstart.year + 3  # the start's year, the window's, and dateutil's first look
+        bounded._deadline = deadline
+        return bounded
+
+    if isinstance(rule, rruleset):
+        rule._rrule = [stopping(one) for one in rule._rrule]
+        rule._exrule = [stopping(one) for one in rule._exrule]
+    else:
+        rule = stopping(rule)
     try:
-        for when in rule:
-            if when > high:
+        for count, when in enumerate(rule):
+            if when > high or (deadline is not None and count % 64 == 63 and monotonic() >= deadline):
                 return
             yield when
     except _PastTheWindow:
@@ -226,7 +241,7 @@ def _stops_after_year():
         @property
         def _byweekno(self):
             self._years_left -= 1
-            if self._years_left < 0:
+            if self._years_left < 0 or (self._deadline is not None and monotonic() >= self._deadline):
                 raise _PastTheWindow
             return self.__dict__["_byweekno"]
 
@@ -580,13 +595,30 @@ def _organizer_dates(start: datetime, end: datetime, zone=None) -> tuple[date, d
     return first, max(last, first + timedelta(days=1))
 
 
+_GLOBAL_ID_HEAD = bytes.fromhex("040000008200E00074C5B7101A82E008")  # how every Outlook GlobalObjectID starts
+
+
 def series_uid(global_id: str) -> str:
     """Outlook's GlobalAppointmentID (hex) as the series id invitations use: a meeting from another calendar keeps
-    that calendar's UID, so the meeting and its invitation are one."""
+    that calendar's UID, so the meeting and its invitation are one. An occurrence moved or changed on its own
+    carries its original day in the id (bytes 16 to 19); without it, it is its series' id (as cleanGlobalObjectID is)."""
     try:
-        return invitation_uid(bytes.fromhex(global_id))
+        data = bytes.fromhex(global_id)
     except ValueError:
         return global_id
+    if data.startswith(_GLOBAL_ID_HEAD) and len(data) >= 20:
+        data = data[:16] + b"\x00\x00\x00\x00" + data[20:]
+    return invitation_uid(data)
+
+
+def outlook_occurrence(global_id: str) -> str:
+    """The day an occurrence changed on its own replaces ("2026-10-19"), from Outlook's GlobalAppointmentID; "" for
+    a series or a meeting that doesn't repeat."""
+    try:
+        data = bytes.fromhex(global_id)
+    except ValueError:
+        return ""
+    return _exception_day(data) if data.startswith(_GLOBAL_ID_HEAD) else ""
 
 
 def invitation_uid(global_id: bytes) -> str:

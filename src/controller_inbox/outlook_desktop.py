@@ -374,7 +374,7 @@ def _meeting(item) -> dict | None:
             "all_day": all_day,
             "subject": str(item.Subject or "")[:300],
             "location": str(item.Location or "")[:300],
-            "organizer": str(item.Organizer or "")[:200],
+            "organizer": _organizer(item),
             "attendees": people[:60],
             "busy": _BUSY.get(item.BusyStatus, ""),
             "cancelled": item.MeetingStatus in _CANCELLED,
@@ -384,6 +384,27 @@ def _meeting(item) -> dict | None:
         }
     except Exception:
         return None
+
+
+def _organizer(item) -> str:
+    """Who organized a meeting, "Maya Chen <maya@taz.com>" when Outlook can say the address (an emailed invitation's
+    own copy is organized by whoever sent it), else the name Outlook shows. Read off the item's organizer entry, as
+    any reading of its properties; an Outlook too old for it gives the name."""
+    name = str(item.Organizer or "")[:200]
+    address = ""
+    try:
+        entry = item.GetOrganizer()
+        if entry is not None:
+            address = str(entry.Address or "")
+            if "@" not in address:  # someone in the same Exchange organization: an "/o=..." address
+                user = entry.GetExchangeUser()
+                address = str(user.PrimarySmtpAddress or "") if user is not None else ""
+    except Exception:
+        address = ""
+    address = address.strip()[:200]
+    if "@" not in address:
+        return name
+    return f"{name} <{address}>" if name and name.lower() != address.lower() else address
 
 
 def _jet_date(value: datetime) -> str:

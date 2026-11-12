@@ -389,7 +389,11 @@ def sync_calendar(store: Store, session, *, now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
     start, end = now - calendar_events.WINDOW_BACK, now + calendar_events.WINDOW_AHEAD
     found = session.calendar(start, end)
-    meetings = [calendar_events.Meeting(**{**item, "uid": calendar_events.series_uid(item["uid"])}, source="outlook") for item in found]
+    meetings = [
+        calendar_events.Meeting(**{**item, "uid": calendar_events.series_uid(item["uid"]), "occurrence": calendar_events.outlook_occurrence(item["uid"])},
+                                source="outlook")
+        for item in found
+    ]
     # Read to Outlook's limit (a very busy calendar): what wasn't read is kept as it was, not taken for deleted.
     # Outlook says so (``cut_short``): the meetings it read and left out (ended before the window) count to its limit.
     if getattr(found, "cut_short", False):

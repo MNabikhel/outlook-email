@@ -160,7 +160,8 @@ def test_an_update_moves_a_meeting_and_a_cancellation_cancels_it_from_the_same_s
 
 def test_which_invitation_counts_is_decided_when_the_calendar_is_read(store):
     """An update read before the invitation it replaces still counts; the organizer's word beats a forward of it,
-    and neither removes the other's rows; a lookalike's "update" never counts once the organizer has written."""
+    and neither removes the other's rows; a lookalike's "update" never changes the organizer's meeting: it is a
+    meeting of its own, from its sender."""
     window = ("2026-10-09", "2026-10-10")
     vendor = "mailto:priya@northwind.com"
     store.save_invites("upd", cal.from_ics(_invite("Y", "20261009T180000Z", sequence=1, organizer=vendor), email_id="upd", now=NOW),
@@ -178,8 +179,8 @@ def test_which_invitation_counts_is_decided_when_the_calendar_is_read(store):
     assert [m["email_id"] for m in store.meetings_between(*window) if m["uid"] == "Z"] == ["own"]
     store.save_invites("fake", cal.from_ics(_invite("Z", "20261009T200000Z", method="CANCEL", sequence=9, organizer="mailto:priya@northwlnd.com"),
                                             email_id="fake", now=NOW), sender="priya@northwlnd.com", received="2026-10-03T09:00:00+00:00")
-    assert [(m["email_id"], m["cancelled"]) for m in store.meetings_between(*window) if m["uid"] == "Z"] == [("own", False)]
-    assert store.meeting(next(m["id"] for m in store.meetings_between(*window) if m["uid"] == "Z")) is not None
+    assert [(m["email_id"], m["cancelled"]) for m in store.meetings_between(*window) if m["uid"] == "Z"] == [("own", False), ("fake", True)]
+    assert all(store.meeting(m["id"]) is not None for m in store.meetings_between(*window) if m["uid"] == "Z")
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(DISTINCT email_id) FROM meetings WHERE uid = 'Z'").fetchone()[0] == 3, "nothing removed"
 
@@ -385,13 +386,15 @@ def test_cancelling_or_moving_one_week_of_a_weekly_meeting_keeps_the_other_weeks
     assert {m.occurrence for m in cal.from_ics(WEEKLY, now=NOW)} == {""}
     save("cancel", cancel, "maya@taz.com", "2026-10-02T09:00:00+00:00")
     save("move", _one_week("20261026T140000Z", "20261027T150000Z", "20261027T153000Z", sequence=2), "maya@taz.com", "2026-10-03T09:00:00+00:00")
-    # Someone outside, or a lookalike of the organizer's domain, can't cancel a week of it.
+    # Someone outside, or a lookalike of the organizer's domain, can't cancel a week of it (the lookalike's word is a
+    # meeting of its own, from its sender).
     save("outsider", _one_week("20261102T140000Z", "20261102T140000Z", "20261102T143000Z", sequence=9, method="CANCEL", cancelled=True),
          "x@evil.example", "2026-10-04T09:00:00+00:00")
     save("lookalike", _one_week("20261109T140000Z", "20261109T140000Z", "20261109T143000Z", sequence=9, method="CANCEL", cancelled=True,
                                 organizer="mailto:maya@taz-c0rp.com"), "maya@taz-c0rp.com", "2026-10-04T09:00:00+00:00")
     shown = store.meetings_between("2026-10-01", "2026-11-30")
-    assert [(m["start"][:16], m["cancelled"]) for m in shown] == [
+    assert [(m["start"][:16], m["cancelled"], m["email_id"]) for m in shown if m["sender"] != "maya@taz.com"] == [("2026-11-09T14:00", True, "lookalike")]
+    assert [(m["start"][:16], m["cancelled"]) for m in shown if m["sender"] == "maya@taz.com"] == [
         ("2026-10-05T14:00", False), ("2026-10-12T14:00", False), ("2026-10-19T14:00", True), ("2026-10-27T15:00", False),
         ("2026-11-02T14:00", False), ("2026-11-09T14:00", False), ("2026-11-16T14:00", False), ("2026-11-23T14:00", False),
     ]
@@ -404,7 +407,7 @@ def test_cancelling_or_moving_one_week_of_a_weekly_meeting_keeps_the_other_weeks
     # cancelled since inside it): the earlier word on one week no longer stands beside it.
     save("again", _ics(_event("UID:wk", "SUMMARY:AP standup", "DTSTART:20261005T150000Z", "DTEND:20261005T153000Z", "RRULE:FREQ=WEEKLY;COUNT=10",
                               "SEQUENCE:3", "ORGANIZER:mailto:maya@taz.com")), "maya@taz.com", "2026-10-04T10:00:00+00:00")
-    assert {m["start"][11:16] for m in store.meetings_between("2026-10-01", "2026-11-30")} == {"15:00"}
+    assert {m["start"][11:16] for m in store.meetings_between("2026-10-01", "2026-11-30") if m["sender"] == "maya@taz.com"} == {"15:00"}
 
 
 def test_a_proposed_new_time_and_the_answers_to_one_add_no_meeting(store):
@@ -414,24 +417,35 @@ def test_a_proposed_new_time_and_the_answers_to_one_add_no_meeting(store):
     assert len(cal.from_ics(_ics(event, method="PUBLISH"), now=NOW)) == 1
 
 
-def test_the_organizers_own_invitations_decide_a_meeting_whichever_is_read_first(store):
-    """A lookalike's invitation with the meeting's UID, read first (the drop folder reads by file name), doesn't
-    take the meeting over: the domain whose own invitations name it as organizer does."""
+def test_an_invitation_from_another_domain_with_the_meetings_uid_is_a_meeting_of_its_own(store):
+    """A meeting is its organizer's: another domain's invitation with its UID (a lookalike's, read first, dated
+    earlier, or several of them) never moves, renames or cancels it. It shows as a meeting of its own, from its
+    sender. Nothing is decided by the date an email says it was sent: its sender sets that."""
     window = ("2026-10-01T00:00:00+00:00", "2026-10-20T00:00:00+00:00")
-    store.save_invites("fake", cal.from_ics(_invite("U2", "20261007T140000Z", organizer="mailto:maya@taz-c0rp.com"), email_id="fake", now=NOW),
-                       sender="maya@taz-c0rp.com", received="2026-10-02T09:00:00+00:00")
-    store.save_invites("real", cal.from_ics(_invite("U2", "20261006T140000Z", sequence=1), email_id="real", now=NOW),
-                       sender="maya@taz.com", received="2026-10-01T09:00:00+00:00")
-    assert [(m["start"], m["email_id"]) for m in store.meetings_between(*window)] == [("2026-10-06T14:00:00+00:00", "real")]
 
-    # Read first and dated earliest, one lookalike email is outnumbered by the organizer's invitation and update.
-    store.save_invites("fake2", cal.from_ics(_invite("U4", "20261008T140000Z", organizer="mailto:maya@taz-c0rp.com"), email_id="fake2", now=NOW),
-                       sender="maya@taz-c0rp.com", received="2026-09-30T09:00:00+00:00")
-    store.save_invites("orig4", cal.from_ics(_invite("U4", "20261009T140000Z"), email_id="orig4", now=NOW),
+    def mine(uid):
+        return [(m["start"], m["subject"], m["cancelled"], m["email_id"]) for m in store.meetings_between(*window) if m["uid"] == uid]
+
+    store.save_invites("real", cal.from_ics(_invite("U2", "20261006T140000Z"), email_id="real", now=NOW),
                        sender="maya@taz.com", received="2026-10-01T09:00:00+00:00")
-    store.save_invites("upd4", cal.from_ics(_invite("U4", "20261009T160000Z", sequence=1), email_id="upd4", now=NOW),
-                       sender="maya@taz.com", received="2026-10-02T09:00:00+00:00")
-    assert [m["email_id"] for m in store.meetings_between(*window) if m["uid"] == "U4"] == ["upd4"]
+    store.save_invites("fake", cal.from_ics(_invite("U2", "20261007T140000Z", subject="Moved: call +1 555 0100", organizer="mailto:maya@taz-c0rp.com"),
+                                            email_id="fake", now=NOW), sender="maya@taz-c0rp.com", received="2026-09-30T09:00:00+00:00")
+    assert mine("U2") == [("2026-10-06T14:00:00+00:00", "Budget review", False, "real"),
+                          ("2026-10-07T14:00:00+00:00", "Moved: call +1 555 0100", False, "fake")]
+    assert [m["sender"] for m in store.meetings_between(*window) if m["uid"] == "U2"] == ["maya@taz.com", "maya@taz-c0rp.com"]
+
+    store.save_invites("vendor", cal.from_ics(_invite("U4", "20261006T140000Z", organizer="mailto:priya@northwind.com"), email_id="vendor", now=NOW),
+                       sender="priya@northwind.com", received="2026-10-01T09:00:00+00:00")
+    for n in (1, 2):
+        store.save_invites(f"other{n}", cal.from_ics(_invite("U4", "20261006T140000Z", sequence=1, method="CANCEL", organizer="mailto:priya@other-co.example"),
+                                                     email_id=f"other{n}", now=NOW), sender="priya@other-co.example", received=f"2026-10-0{2 + n}T09:00:00+00:00")
+    assert [(email_id, cancelled) for _start, _subject, cancelled, email_id in mine("U4")] == [("vendor", False), ("other2", True)]
+
+    # Within the organizer's own domain the latest word counts, read in any order.
+    store.save_invites("upd4", cal.from_ics(_invite("U4", "20261009T160000Z", sequence=1, organizer="mailto:priya@northwind.com"), email_id="upd4", now=NOW),
+                       sender="ap@northwind.com", received="2026-10-02T09:00:00+00:00")
+    assert [(start, email_id) for start, _subject, _cancelled, email_id in mine("U4")] == [
+        ("2026-10-06T14:00:00+00:00", "other2"), ("2026-10-09T16:00:00+00:00", "upd4")]
 
 
 def test_an_invitation_for_a_meeting_on_the_outlook_calendar_adds_no_meeting_of_its_own(store):
@@ -464,9 +478,10 @@ def test_outlooks_copy_of_a_meeting_whose_invitation_is_on_held_mail_is_not_show
     store.upsert_email(_record("held", sender="ceo@taz-corp.co", flags=["fraud_risk"]))
     store.save_invites("held", cal.from_ics(_invite("U1", "20261006T140000Z", subject="Urgent wire approval call"), email_id="held", now=NOW),
                        sender="ceo@taz-corp.co")
-    # Outlook adds a meeting request to the calendar as tentative by itself; the next calendar read brings it in.
+    # Outlook adds a meeting request to the calendar as tentative by itself, organized by whoever sent it; the next
+    # calendar read brings it in.
     outlook = [Meeting(uid="U1", start="2026-10-06T14:00:00+00:00", end="2026-10-06T15:00:00+00:00", subject="Urgent wire approval call",
-                       location="call +1 555 0100", busy="tentative", source="outlook"),
+                       location="call +1 555 0100", organizer="CEO <ceo@taz-corp.co>", busy="tentative", source="outlook"),
                Meeting(uid="U9", start="2026-10-07T14:00:00+00:00", end="2026-10-07T15:00:00+00:00", subject="Mine", source="outlook")]
     store.replace_meetings("outlook", outlook, start=window[0], end=window[1])
     assert [m["subject"] for m in store.meetings_between(*window)] == ["Mine"]
@@ -489,7 +504,7 @@ def test_outlooks_copy_of_an_invitation_held_as_it_arrived_is_not_shown(store, s
     record = pipeline.process_message(raw, store, settings, now=NOW)
     assert pipeline.attachments_locked(record), "the sample scam is held"
     store.replace_meetings("outlook", [Meeting(uid="U5", start="2026-10-06T14:00:00+00:00", end="2026-10-06T15:00:00+00:00", subject="Bank change call",
-                                               source="outlook")], start=window[0], end=window[1])
+                                               organizer="billing@acme-payments.net", source="outlook")], start=window[0], end=window[1])
     assert store.meetings_between(*window) == []
     with store.connect() as conn:
         assert conn.execute("SELECT COUNT(*) FROM meetings WHERE email_id = 'scam' AND subject != ''").fetchone()[0] == 0, "nothing of what it says"
@@ -554,3 +569,50 @@ def test_an_outlook_request_for_one_occurrence_names_the_occurrence(monkeypatch)
         [found[name]] = cal.from_msg("x.msg")
     assert found["exception"].occurrence == "2026-10-19" and found["series"].occurrence == ""
     assert found["exception"].uid == found["series"].uid == goid().toBytes().hex().upper(), "the same meeting, whichever .msg it came on"
+
+
+def test_a_held_invitation_naming_someone_elses_meeting_doesnt_hide_it(store):
+    """Outlook's copy of a held invitation is hidden; a real meeting whose UID a held email also names (from another
+    organizer) stays on the calendar."""
+    import sys
+
+    from controller_inbox.calendar_events import Meeting
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    window = ("2026-10-01T00:00:00+00:00", "2026-10-20T00:00:00+00:00")
+    real = Meeting(uid="REAL", start="2026-10-06T14:00:00+00:00", end="2026-10-06T15:00:00+00:00", subject="Board meeting",
+                   organizer="Dana CEO <ceo@taz.com>", busy="busy", source="outlook")
+    copy = Meeting(uid="BAIT", start="2026-10-07T14:00:00+00:00", end="2026-10-07T15:00:00+00:00", subject="Urgent wire approval call",
+                   organizer="CEO <ceo@taz-corp.co>", busy="tentative", source="outlook")
+    store.replace_meetings("outlook", [real, copy], start=window[0], end=window[1])
+    store.upsert_email(_record("held", sender="x@evil.example", flags=["fraud_risk"]))
+    store.save_invites("held", cal.from_ics(_invite("REAL", "20261009T140000Z", subject="whatever"), email_id="held", now=NOW),
+                       sender="x@evil.example", held=True)
+    store.upsert_email(_record("held2", sender="ceo@taz-corp.co", flags=["fraud_risk"]))
+    store.save_invites("held2", cal.from_ics(_invite("BAIT", "20261007T140000Z", organizer="mailto:ceo@taz-corp.co"), email_id="held2", now=NOW),
+                       sender="ceo@taz-corp.co", held=True)
+    assert [m["subject"] for m in store.meetings_between(*window)] == ["Board meeting"]
+
+
+def test_a_rule_with_more_after_it_on_its_line_is_walked_within_limits():
+    import time as clock
+
+    padded = _ics(*[_event(f"UID:p{n}", "DTSTART:20261005T090000Z", "DTEND:20261005T100000Z",
+                           "RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=31 RDATE:20261006T090000Z") for n in range(5)])
+    ancient = _ics(_event("UID:a", "DTSTART:00010101T090000Z", "DTEND:00010101T100000Z", "RRULE:FREQ=DAILY;BYMONTH=2;BYMONTHDAY=31"))
+    started = clock.monotonic()
+    cal.from_ics(padded, now=NOW)
+    assert clock.monotonic() - started < 0.5
+    started = clock.monotonic()
+    cal.from_ics(ancient, now=NOW, deadline=clock.monotonic() + 0.1)
+    assert clock.monotonic() - started < 0.3, "the time left is looked at while a rule is walked, not only between meetings"
+
+
+def test_an_outlook_exception_occurrence_keeps_its_series_id():
+    head = "040000008200E00074C5B7101A82E008"
+    series = head + "00000000" + "00" * 8 + "00" * 8 + "10000000" + "AB" * 16
+    exception = head + "07EA0A13" + "00" * 8 + "00" * 8 + "10000000" + "AB" * 16
+    assert cal.series_uid(exception) == cal.series_uid(series) == series.upper()
+    assert cal.outlook_occurrence(exception) == "2026-10-19" and cal.outlook_occurrence(series) == ""

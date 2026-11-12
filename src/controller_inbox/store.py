@@ -704,10 +704,14 @@ class Store:
             }
             conn.execute("DELETE FROM meetings WHERE email_id = ? AND source IN ('invite', 'held')", (email_id,))
             if held:
-                uids = list(dict.fromkeys(meeting.uid for meeting in meetings))[:MAX_INVITE_ROWS]
+                # Which meeting it named, and who it says organized it (to tell Outlook's own copy of this invitation
+                # from another meeting with its UID): nothing it says about the meeting.
+                named = {meeting.uid: meeting.organizer for meeting in reversed(meetings)}
                 conn.executemany(
-                    """INSERT OR REPLACE INTO meetings (id, uid, source, start, "end", email_id) VALUES (?, ?, 'held', '', '', ?)""",
-                    [("held-" + hashlib.sha256(f"{email_id}|{uid}".encode()).hexdigest()[:20], uid, email_id) for uid in uids],
+                    """INSERT OR REPLACE INTO meetings (id, uid, source, start, "end", email_id, organizer, sender)
+                       VALUES (?, ?, 'held', '', '', ?, ?, ?)""",
+                    [("held-" + hashlib.sha256(f"{email_id}|{uid}".encode()).hexdigest()[:20], uid, email_id, organizer, sender)
+                     for uid, organizer in list(named.items())[:MAX_INVITE_ROWS]],
                 )
                 return
             stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -775,10 +779,11 @@ class Store:
                 (end, start, start, end),
             ).fetchall()
             shown = _shown_meetings(conn, rows, outlook=outlook)
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
         out = []
         for row in shown:
-            key = (row["uid"], row["start"])
+            # Another organizer's invitation with the same UID is a meeting of its own, even at the same time.
+            key = (row["uid"], row["start"], _owner(row["sender"], row["organizer"])[0] if row["source"] == "invite" else "")
             if key in seen:
                 continue
             seen.add(key)
@@ -2183,23 +2188,29 @@ def _in_chunks(conn: sqlite3.Connection, sql: str, values: list[str]) -> list[sq
 
 def _shown_meetings(conn: sqlite3.Connection, rows: list[sqlite3.Row], *, outlook: bool) -> list[sqlite3.Row]:
     """The meeting rows the calendar shows, of ``rows`` (joined to their email's flags and category): Outlook's
-    (when ``outlook``) unless an invitation on held mail named the meeting; an invitation's when it isn't on held mail,
-    the meeting isn't on Outlook's calendar, and its email's word on the meeting counts (``_invite_winners``)."""
+    (when ``outlook``) unless it is Outlook's own copy of an invitation on held mail; an invitation's when it isn't on
+    held mail, the meeting isn't on Outlook's calendar, and its email's word on the meeting counts
+    (``_invite_winners``)."""
     invited = [row["uid"] for row in rows if row["source"] == "invite"]
     word = _invite_winners(conn, invited)
     on_outlook: set[str] = set()
-    held: set[str] = set()
+    held: dict[str, set[str]] = {}
     if outlook:
         sql = "SELECT DISTINCT uid FROM meetings WHERE source = 'outlook' AND uid IN ({})"
         on_outlook = {row["uid"] for row in _in_chunks(conn, sql, invited)}
-        sql = """SELECT DISTINCT m.uid, 'invite' AS source, e.flags AS email_flags, e.category AS email_category
+        sql = """SELECT m.uid, m.organizer, m.sender, e.sender_email, 'invite' AS source, e.flags AS email_flags, e.category AS email_category
                  FROM meetings m JOIN emails e ON e.id = m.email_id WHERE m.source IN ('invite', 'held') AND m.uid IN ({})"""
-        held = {row["uid"] for row in _in_chunks(conn, sql, [row["uid"] for row in rows if row["source"] == "outlook"]) if _held_invite(row)}
+        for row in _in_chunks(conn, sql, [row["uid"] for row in rows if row["source"] == "outlook"]):
+            if _held_invite(row):
+                # Outlook's copy of an invitation is organized by whoever it names as organizer, or by its sender.
+                held.setdefault(row["uid"], set()).update(
+                    filter(None, (_address(row["organizer"]), _address(row["sender"]), _address(row["sender_email"])))
+                )
     out = []
     for row in rows:
         if row["source"] == "held":
             continue
-        if row["source"] == "outlook" and (not outlook or row["uid"] in held):
+        if row["source"] == "outlook" and (not outlook or _address(row["organizer"]) in held.get(row["uid"], ())):
             continue
         if row["source"] == "invite" and (_held_invite(row) or row["uid"] in on_outlook or not word.counts(row)):
             continue
@@ -2209,22 +2220,25 @@ def _shown_meetings(conn: sqlite3.Connection, rows: list[sqlite3.Row], *, outloo
 
 @dataclass
 class _Word:
-    """Whose invitation counts for each meeting (``_invite_winners``)."""
+    """Whose invitation counts for each meeting (``_invite_winners``). A meeting is a UID and the domain of its
+    organizer: another domain's invitation with the same UID is a meeting of its own."""
 
-    series: dict[str, str] = field(default_factory=dict)  # uid: the email whose series (or meeting) counts
+    group: dict[tuple[str, str], str] = field(default_factory=dict)  # (uid, email): the organizer's domain its word is about
+    series: dict[tuple[str, str], str] = field(default_factory=dict)  # (uid, domain): the email whose series counts
     series_emails: dict[str, set[str]] = field(default_factory=dict)  # uid: the emails naming its series
-    occurrences: dict[tuple[str, str], str] = field(default_factory=dict)  # (uid, occurrence): the email whose word counts
-    replaced: dict[str, list[str]] = field(default_factory=dict)  # uid: the occurrences a later word replaces
+    occurrences: dict[tuple[str, str, str], str] = field(default_factory=dict)  # (uid, domain, occurrence): whose word counts
+    replaced: dict[tuple[str, str], list[str]] = field(default_factory=dict)  # (uid, domain): occurrences a later word replaces
 
     def counts(self, row: sqlite3.Row) -> bool:
         uid, email_id = row["uid"], row["email_id"]
+        domain = self.group.get((uid, email_id), "")
         if email_id in self.series_emails.get(uid, ()):
-            if self.series.get(uid) != email_id:
+            if self.series.get((uid, domain)) != email_id:
                 return False
             # The series' own row for an occurrence that a later word on that occurrence alone replaces.
             start = row["occurrence"] or row["start"]
-            return not any(_same_occurrence(start, occurrence) for occurrence in self.replaced.get(uid, ()))
-        return self.occurrences.get((uid, row["occurrence"])) == email_id
+            return not any(_same_occurrence(start, occurrence) for occurrence in self.replaced.get((uid, domain), ()))
+        return self.occurrences.get((uid, domain, row["occurrence"])) == email_id
 
 
 def _same_occurrence(start: str, occurrence: str) -> bool:
@@ -2240,15 +2254,26 @@ def _same_occurrence(start: str, occurrence: str) -> bool:
         return False
 
 
-def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:
-    """For each meeting (``uid``), the email whose invitation counts, and for each occurrence of a repeating one an
-    update to that occurrence alone (a RECURRENCE-ID: one week moved or cancelled) replaces.
+def _owner(sender: str | None, organizer: str | None) -> tuple[str, bool]:
+    """The organizer's domain an invitation is about (its ORGANIZER's, else its sender's when it names none), and
+    whether it is that domain's own (sent from it), not a forward of it."""
+    named, sent = _address_domain(organizer), _address_domain(sender)
+    if not named:
+        return sent, True
+    return named, sent == named
 
-    Emails naming the series (or a meeting that doesn't repeat) are weighed against each other (``_counts_most``),
-    and those naming single occurrences against the others naming the same occurrence. An occurrence's update counts
-    only from the domain of the series that counts (its sender's, or its organizer's), and only when it isn't older
-    than that series (its SEQUENCE: the whole series sent again since carries its weeks moved or cancelled itself).
-    Held mail never counts."""
+
+def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:
+    """For each meeting, the email whose invitation counts, and for each occurrence of a repeating one an update to
+    that occurrence alone (a RECURRENCE-ID: one week moved or cancelled) replaces.
+
+    A meeting is its UID and its organizer's domain (``_owner``): the invitations whose ORGANIZER is in one domain are
+    one meeting, decided among themselves, and another domain's invitation with the same UID (a lookalike's, however
+    dated and however many) is a meeting of its own that never moves, renames or cancels it. A forward (sent from
+    another domain than its ORGANIZER's) counts for its organizer's meeting only while none of that domain's own
+    invitations is here. Of the invitations that count, the highest SEQUENCE, then the latest, decides the series;
+    likewise for each occurrence, from invitations naming that occurrence alone, when not older than the series (the
+    whole series sent again since carries its weeks moved or cancelled itself). Held mail never counts."""
     rows = _in_chunks(
         conn,
         """
@@ -2258,63 +2283,58 @@ def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:
         FROM meetings m LEFT JOIN emails e ON e.id = m.email_id
         WHERE m.source = 'invite' AND m.uid IN ({})
         GROUP BY m.uid, m.email_id, m.occurrence
+        ORDER BY m.uid, m.email_id, m.occurrence
         """,
         uids,
     )
-    by_uid: dict[str, list[sqlite3.Row]] = {}
-    for row in rows:
-        if not _held_invite(row):
-            by_uid.setdefault(row["uid"], []).append(row)
     word = _Word()
-    for uid, sent in by_uid.items():
-        series = {row["email_id"]: row for row in sent if not row["occurrence"]}
-        word.series_emails[uid] = set(series)
-        owner = _counts_most(list(series.values())) if series else None
+    groups: dict[tuple[str, str], list[sqlite3.Row]] = {}
+    own: dict[tuple[str, str], bool] = {}
+    for row in rows:
+        uid, email_id = row["uid"], row["email_id"]
+        if not row["occurrence"]:
+            word.series_emails.setdefault(uid, set()).add(email_id)
+        if _held_invite(row):
+            continue
+        if (uid, email_id) not in word.group:
+            # One email's word is about one organizer: the one its series (or its first row) names.
+            domain, theirs = _owner(row["sender"], row["organizer"])
+            word.group[(uid, email_id)] = domain
+            own[(uid, email_id)] = theirs
+        groups.setdefault((uid, word.group[(uid, email_id)]), []).append(row)
+    for key, said in groups.items():
+        if any(own[(row["uid"], row["email_id"])] for row in said):
+            said = [row for row in said if own[(row["uid"], row["email_id"])]]  # the organizer's own: forwards no longer count
+        uid = key[0]
+        series = [row for row in said if not row["occurrence"]]
+        owner = _latest(series) if series else None
         if owner is not None:
-            word.series[uid] = owner["email_id"]
+            word.series[key] = owner["email_id"]
         weeks: dict[str, list[sqlite3.Row]] = {}
-        for row in sent:
-            if row["occurrence"] and row["email_id"] not in series:
-                weeks.setdefault(row["occurrence"], []).append(row)
-        for occurrence, said in weeks.items():
-            if owner is not None:
-                domains = {_address_domain(owner["sender"]), _address_domain(owner["organizer"])} - {""}
-                said = [row for row in said if _address_domain(row["sender"]) in domains and (row["sequence"] or 0) >= (owner["sequence"] or 0)]
-            winner = _counts_most(said) if said else None
-            if winner is not None:
-                word.occurrences[(uid, occurrence)] = winner["email_id"]
-                word.replaced.setdefault(uid, []).append(occurrence)
+        for row in said:
+            if row["occurrence"] and row["email_id"] not in word.series_emails.get(uid, ()):
+                if owner is None or (row["sequence"] or 0) >= (owner["sequence"] or 0):
+                    weeks.setdefault(row["occurrence"], []).append(row)
+        for occurrence, about in weeks.items():
+            word.occurrences[(uid, key[1], occurrence)] = _latest(about)["email_id"]
+            word.replaced.setdefault(key, []).append(occurrence)
     return word
 
 
-def _counts_most(sent: list[sqlite3.Row]) -> sqlite3.Row:
-    """Of the emails naming one meeting (or one occurrence of it), the one whose word counts.
+def _latest(rows: list[sqlite3.Row]) -> sqlite3.Row:
+    """Of one organizer's invitations of a meeting, the one that counts: the highest SEQUENCE (an update or a
+    cancellation), then the latest."""
+    return max(rows, key=lambda row: (row["sequence"] or 0, row["received"] or "", row["first_seen"] or "", row["email_id"]))
 
-    The meeting belongs to a domain: the one whose own emails name it as organizer (the sender's domain is the
-    organizer's), the one with most such emails, then the one whose first came earliest (a lookalike's invitation,
-    read first, takes nothing over: the drop folder reads by file name). Of the emails from that domain, the one with
-    the highest SEQUENCE, then the latest, counts: an update or cancellation from the organizer replaces the
-    invitation. When no email is the organizer's own (a forward of it), the domain of the organizer the first email
-    read names (or its sender's) decides, the same way; anyone else's email counts only while that domain has sent
-    none."""
-    own: dict[str, list[sqlite3.Row]] = {}
-    for row in sent:
-        domain = _address_domain(row["sender"])
-        if domain and domain == _address_domain(row["organizer"]):
-            own.setdefault(domain, []).append(row)
 
-    def latest(rows: list[sqlite3.Row]) -> sqlite3.Row:
-        return max(rows, key=lambda row: (row["sequence"] or 0, row["received"] or "", row["first_seen"] or ""))
-
-    if own:
-        domain = min(own, key=lambda d: (-len(own[d]), min(row["received"] or "~" for row in own[d]), min(row["first_seen"] or "~" for row in own[d])))
-        return latest([row for row in sent if _address_domain(row["sender"]) == domain])
-    first = min(sent, key=lambda row: (row["first_seen"] or "", row["email_id"]))
-    for domain in dict.fromkeys(filter(None, [_address_domain(first["organizer"]), _address_domain(first["sender"])])):
-        theirs = [row for row in sent if _address_domain(row["sender"]) == domain]
-        if theirs:
-            return latest(theirs)
-    return first
+def _address(text: str | None) -> str:
+    """The address in "Name <address>" or an address, lowercased; "" when there is none."""
+    value = text or ""
+    if "<" in value:
+        value = value.rpartition("<")[2].partition(">")[0]
+    value = value.strip().lower()
+    value = value[7:] if value.startswith("mailto:") else value
+    return value if "@" in value else ""
 
 
 def _address_domain(text: str | None) -> str:
