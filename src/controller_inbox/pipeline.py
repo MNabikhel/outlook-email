@@ -137,18 +137,21 @@ def process_message(
     from controller_inbox.links import conversation_members
 
     conversation = conversation_members(store, raw.id, raw.threading, raw.internet_message_id, raw.conversation_id)
+    # The email being read, as the conversation checks see it (it isn't stored yet).
+    me = SimpleNamespace(
+        id=raw.id,
+        sender_email=raw.sender_email,
+        reply_to=raw.reply_to,
+        internet_message_id=raw.internet_message_id,
+        threading=dict(raw.threading),
+        received_at=raw.received_at.astimezone(timezone.utc).isoformat(),
+        flags=[],
+    )
     classified_email = _classify(
         store,
         settings,
         conversation=conversation,
-        me=SimpleNamespace(
-            id=raw.id,
-            sender_email=raw.sender_email,
-            reply_to=raw.reply_to,
-            internet_message_id=raw.internet_message_id,
-            threading=dict(raw.threading),
-            received_at=raw.received_at.astimezone(timezone.utc).isoformat(),
-        ),
+        me=me,
         email_id=raw.id,
         subject=clean.subject,
         body=raw.body_text,
@@ -183,8 +186,8 @@ def process_message(
         entered_elsewhere=_entered_elsewhere(
             store,
             merged_fields.primary_invoice,
+            me,
             conversation,
-            raw.received_at.astimezone(timezone.utc).isoformat(),
             any(c.document_type == DocumentType.AP_INVOICE for c in att_classifications),
         ),
     )
@@ -582,6 +585,30 @@ def _classify(
     return apply_learned(classified, learned) if learned else classified
 
 
+def _thread_of(store: Store, me, conversation: set[str]) -> tuple[list, set[str]]:
+    """``me`` and the stored emails of its conversation (``MAX_CONVERSATION_READ`` at most: the first ones, which
+    say who started it, and the latest), and the ids among them from a domain new to the conversation."""
+    from controller_inbox.links import new_domains
+
+    ids = sorted(conversation - {me.id})
+    if len(ids) > MAX_CONVERSATION_READ:
+        times = store.received_times(ids)
+        ids.sort(key=lambda i: times.get(i, ""))
+        ids = ids[:20] + ids[-(MAX_CONVERSATION_READ - 20):]
+    found = store.get_emails(ids)
+    thread = [me, *(found[i] for i in ids if i in found)]
+    return thread, new_domains(thread)
+
+
+def _doubtful(record, newcomers: set[str]) -> bool:
+    """An email whose invoice is not to be trusted as the one to enter: held, cautioned, flagged as a possible
+    duplicate, or from a domain new to its conversation."""
+    flags = getattr(record, "flags", []) or []
+    return record.id in newcomers or "payment_caution" in flags or "duplicate_invoice" in flags or (
+        isinstance(record, EmailRecord) and attachments_locked(record)
+    )
+
+
 def _repeats(store: Store, invoice: str, me, conversation: set[str], *, own_file: bool) -> list[str]:
     """Other emails with this invoice number, but those of ``me``'s own conversation where one of the two only
     writes about the invoice: a colleague's "which PO is this for?" and the vendor's answer are no second invoice. Two
@@ -592,10 +619,7 @@ def _repeats(store: Store, invoice: str, me, conversation: set[str], *, own_file
     found = store.find_duplicate_invoices(invoice, me.id)
     if not found or not conversation & set(found):
         return found
-    from controller_inbox.links import new_domains
-
-    thread = [me, *(record for record in store.get_emails(sorted(conversation)[:MAX_CONVERSATION_READ]).values() if record.id != me.id)]
-    newcomers = new_domains(thread)
+    thread, newcomers = _thread_of(store, me, conversation)
     if me.id in newcomers:
         return found
     ours = {
@@ -606,20 +630,22 @@ def _repeats(store: Store, invoice: str, me, conversation: set[str], *, own_file
     return [other for other in found if other not in ours]
 
 
-def _entered_elsewhere(store: Store, invoice: str | None, conversation: set[str], received_at: str, own_invoice_file: bool) -> bool:
+def _entered_elsewhere(store: Store, invoice: str | None, me, conversation: set[str], own_invoice_file: bool) -> bool:
     """Whether an invoice is entered from another email of the same conversation: one that brought the invoice as a
     file, or came before this one, while this one brings no invoice file. The colleague's "which PO is this for?"
-    and the vendor's answer make no second "Code and enter" task."""
+    and the vendor's answer make no second "Code and enter" task. An email held, cautioned, flagged as a possible
+    duplicate or from a domain new to the conversation is no such email: a lookalike's "resent as a PDF" must not
+    take the task off the vendor's own."""
     if not invoice or own_invoice_file or not conversation:
         return False
     key = _invoice_key(invoice)
-    for other_id in conversation:
-        other = store.get_email(other_id)
-        if other is None or other.category != DocumentType.AP_INVOICE:
+    thread, newcomers = _thread_of(store, me, conversation)
+    for other in thread[1:]:
+        if other.category != DocumentType.AP_INVOICE or _doubtful(other, newcomers):
             continue
         if key not in {_invoice_key(n) for n in other.extracted.invoice_numbers}:
             continue
-        if any(att.document_type == DocumentType.AP_INVOICE for att in other.attachments) or (other.received_at or "") < received_at:
+        if any(att.document_type == DocumentType.AP_INVOICE for att in other.attachments) or (other.received_at or "") < (me.received_at or ""):
             return True
     return False
 
@@ -633,8 +659,11 @@ def _settle_conversation(store: Store, settings: Settings, record: EmailRecord, 
     if not conversation or not invoice:
         return
     key = _invoice_key(invoice)
-    brings_file = any(att.document_type == DocumentType.AP_INVOICE for att in record.attachments)
-    for other in store.get_emails(sorted(conversation)[:MAX_CONVERSATION_READ]).values():
+    thread, newcomers = _thread_of(store, record, conversation)
+    # Only the vendor's own invoice takes the task off the mail about it: not a held, cautioned or duplicate one, nor
+    # one from a domain new to the conversation.
+    brings_file = any(att.document_type == DocumentType.AP_INVOICE for att in record.attachments) and not _doubtful(record, newcomers)
+    for other in thread[1:]:
         if _invoice_key(other.extracted.primary_invoice) != key:
             continue
         if "duplicate_invoice" in other.flags:
@@ -724,8 +753,8 @@ def rescore_stored(
         entered_elsewhere=_entered_elsewhere(
             store,
             email.extracted.primary_invoice,
+            email,
             conversation,
-            email.received_at or "",
             any(att.document_type == DocumentType.AP_INVOICE for att in email.attachments),
         ),
     )

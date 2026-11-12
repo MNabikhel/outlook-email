@@ -33,7 +33,7 @@ from email.utils import getaddresses
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
 
-KEYS_VERSION = "4"  # changed whenever keys() files emails differently, so stored mail is filed again
+KEYS_VERSION = "5"  # changed whenever keys() files emails differently, so stored mail is filed again
 COMMON = 25  # a key shared by more emails than this links none of them
 MAX_THREAD = 60  # emails shown of one conversation, around the one opened
 MAX_CONVERSATION = 1000  # emails one conversation is followed to
@@ -47,8 +47,9 @@ _GENERIC_STEM = re.compile(
 )
 _PICTURE = re.compile(r"(?i)\.(png|jpe?g|gif|bmp|emz|wmz|ico|svg)$")
 # Version marks in a file's name: "v2", "rev 3", "final", "draft", "(1)", "- Copy", dates, "updated", "revised".
+MAX_FILE_NAME = 255  # characters of a file's name read for its versions
 _VERSION_MARKS = re.compile(
-    r"(?i)(\s*[-_ ]\s*copy(\s*\(\d+\))?|\s*\(\d+\)|[\s_-]*\bv(er(sion)?)?\s*\.?\s*\d+(\.\d+)*\b|[\s_-]*\brev(ision)?\s*\.?\s*\d+\b|"
+    r"(?i)([\s_-]+copy(\s*\(\d+\))?|\s*\(\d+\)|[\s_-]*\bv(er(sion)?)?\s*\.?\s*\d+(\.\d+)*\b|[\s_-]*\brev(ision)?\s*\.?\s*\d+\b|"
     r"[\s_-]*\b(final|draft|updated|revised|latest|clean|redline|signed|new|old)\b|"
     r"[\s_-]*\b\d{1,2}[-./]\d{1,2}[-./]\d{2,4}\b|[\s_-]*\b(19|20)\d{2}[-_.]?\d{2}[-_.]?\d{2}\b)"
 )
@@ -170,20 +171,29 @@ def number_key(text: str | None) -> str:
     return re.sub(r"(?<![0-9])0+(?=\d)", "", plain)
 
 
+def po_key(text: str | None) -> str:
+    """A PO number as it is matched: "PO-77821", "PO 77821" and "77821" are one PO."""
+    return re.sub(r"^PO(?=\d)", "", number_key(text))
+
+
 def _numbers(email: EmailRecord, name: str) -> set[str]:
-    found = {number_key(n) for n in getattr(email.extracted, name, []) or []}
+    key = po_key if name == "po_numbers" else number_key
+    found = {key(n) for n in getattr(email.extracted, name, []) or []}
     for att in email.attachments:
         listed = getattr(att.extracted_fields, name, []) or []
         # A workbook or CSV that lists several numbers is a list (an aging, a remittance), not one document of them.
         if len(listed) > 1 and re.search(r"(?i)\.(xlsx|xlsm|xls|csv|tsv)$", att.filename or ""):
             continue
-        found |= {number_key(n) for n in listed}
+        found |= {key(n) for n in listed}
     return {n for n in found if len(n) >= 4 and any(ch.isdigit() for ch in n)}
 
 
 def _numbers_written(text: str) -> set[str]:
     """The numbers a text writes, each whole, as ``number_key`` gives them ("INV-22918" is not "INV2291")."""
-    return {number_key(token) for token in re.findall(r"[A-Za-z]*[-#\s]?\d[\d-]*[A-Za-z0-9]*", text or "")}
+    tokens = re.findall(r"[A-Za-z]*[-#\s]?\d[\d-]*[A-Za-z0-9]*", text or "")
+    # "Invoice 22918" names 22918 (the word before it is no part of the number), and "PO-77821" the PO 77821.
+    bare = re.findall(r"(?<![A-Za-z0-9])\d[\d-]*[A-Za-z0-9]*", text or "")
+    return {number_key(token) for token in tokens + bare} | {po_key(token) for token in tokens}
 
 
 def _real_file(att: AttachmentRecord) -> bool:
@@ -201,10 +211,12 @@ def _real_file(att: AttachmentRecord) -> bool:
 def file_stem(filename: str) -> str:
     """A file's name without its version marks, with its extension: "Budget v2 FINAL (1).xlsx" is "budget.xlsx".
     "" for a generic name, which says nothing about which file it is."""
-    name = (filename or "").rsplit(" › ", 1)[-1]
+    # One space for each run, and a sensible length: a name of thousands of spaces is no file's real name, and
+    # would take the version marks' pattern minutes to read.
+    name = " ".join((filename or "").rsplit(" › ", 1)[-1].split())[:MAX_FILE_NAME]
     match = re.match(r"^(.*?)(\.[A-Za-z0-9]{1,5})?$", name)
     base, ext = (match.group(1), (match.group(2) or "").lower()) if match else (name, "")
-    base = base.replace("_", " ")  # "Budget_v3" is "Budget v3"
+    base = " ".join(base.replace("_", " ").split())  # "Budget_v3" is "Budget v3"
     previous = None
     while previous != base:
         previous = base
@@ -295,8 +307,8 @@ def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str
         if not new_ids:
             break
         found |= new_ids
-        refs = [value for other in new_ids for value in store.link_values(other, "thread")]
-        owns = [value for other in new_ids for value in store.link_values(other, "msg")]
+        refs = store.link_values_of(sorted(new_ids), "thread")
+        owns = store.link_values_of(sorted(new_ids), "msg")
     return sorted(found)
 
 
@@ -304,20 +316,48 @@ def new_domains(thread: list[EmailRecord]) -> set[str]:
     """The emails in a conversation whose sender's domain hadn't taken part in it: a reply from a lookalike domain
     slipped into a real thread is how payment-change fraud usually starts.
 
-    Who has taken part is counted from the email the conversation started with (the one none of the others answer),
-    not from the earliest date: a Date header can be set to anything. Its sender and the people it went to have
-    taken part; so do the senders, and the people they wrote to, of each reply from someone who had. A sender with no
-    address is new (its Reply-To is what replies would reach)."""
+    Who has taken part is counted from the email the conversation started with: the one the others answer, first
+    stored, never by its Date header (that can be set to anything) and never one still being read. Its sender and the
+    people it went to have taken part; so do the senders, and the people they wrote to, of each reply from someone
+    who had, taken in the order the replies answer each other. A sender with no address is new (its Reply-To is what
+    replies would reach), and so is an email claiming the Message-ID of one from another domain."""
     if len(thread) < 2:
         return set()
-    owns = {norm_id(record.internet_message_id): record for record in thread if record.internet_message_id}
-    answered = {norm_id(ref) for record in thread for ref in [(record.threading or {}).get("in_reply_to"), *((record.threading or {}).get("references") or [])] if ref}
-    roots = [record for record in thread if not ({norm_id(r) for r in [(record.threading or {}).get("in_reply_to"), *((record.threading or {}).get("references") or [])] if r} & set(owns))]
-    root = next((record for record in roots if norm_id(record.internet_message_id) in answered), None) or (roots[0] if roots else thread[0])
+    order = sorted(thread, key=_arrival)
+    owns: dict[str, EmailRecord] = {}
+    forged: set[str] = set()
+    for record in order:
+        mid = norm_id(record.internet_message_id)
+        if not mid:
+            continue
+        if mid not in owns:
+            owns[mid] = record
+        elif _domain_of(owns[mid]) != _domain_of(record):
+            forged.add(record.id)
+
+    def parents(record) -> list[str]:
+        info = record.threading or {}
+        return [norm_id(ref) for ref in [info.get("in_reply_to"), *(info.get("references") or [])] if ref]
+
+    def depth(record) -> int:
+        """How many emails of the thread it answers, one inside the other."""
+        steps, current, visited = 0, record, {record.id}
+        while steps < MAX_CONVERSATION:
+            info = current.threading or {}
+            parent = owns.get(norm_id(info.get("in_reply_to") or ((info.get("references") or [""])[-1])))
+            if parent is None or parent.id in visited:
+                break
+            visited.add(parent.id)
+            steps, current = steps + 1, parent
+        return steps
+
+    answered = {ref for record in thread for ref in parents(record)}
+    roots = [record for record in order if record.id not in forged and not (set(parents(record)) & set(owns))]
+    root = next((record for record in roots if norm_id(record.internet_message_id) in answered), None) or (roots[0] if roots else order[0])
     seen = {_domain_of(root)} - {""} | _to_domains(root)
-    marked: set[str] = set()
-    for record in sorted(thread, key=lambda r: r.received_at or ""):
-        if record.id == root.id:
+    marked = set(forged)
+    for record in sorted(thread, key=lambda r: (depth(r), _arrival(r))):
+        if record.id == root.id or record.id in forged:
             continue
         domain = _domain_of(record)
         if not domain or domain not in seen:
@@ -325,6 +365,11 @@ def new_domains(thread: list[EmailRecord]) -> set[str]:
             continue  # whom a newcomer wrote to doesn't count as taking part
         seen |= _to_domains(record)
     return marked
+
+
+def _arrival(record) -> tuple[str, str]:
+    """When CloseDesk first stored an email (one still being read comes last), then its Date header."""
+    return (getattr(record, "created_at", "") or "~", record.received_at or "")
 
 
 def _domain_of(record: EmailRecord) -> str:
@@ -341,7 +386,7 @@ def _label(group: dict, email: EmailRecord, records: list[EmailRecord]) -> str:
         shown = value.split("|")[-1]
         named = next((n for n in [*email.extracted.invoice_numbers, *email.extracted.po_numbers,
                                   *(x for att in email.attachments for x in [*att.extracted_fields.invoice_numbers, *att.extracted_fields.po_numbers])]
-                      if number_key(n) == shown), shown)
+                      if shown in {number_key(n), po_key(n)}), shown)
         return f"{REASONS[kind]} {named}"
     if kind == "file":
         name = next((att.filename for att in email.attachments if att.sha256 == value), "")
@@ -470,7 +515,11 @@ def trace(store, email: EmailRecord) -> dict:
         frontier = nxt
         if len(records) >= MAX_TRACE:
             break
-    steps = sorted(records.values(), key=lambda record: record.received_at or "")[-MAX_TRACE:]
+    ordered = sorted(records.values(), key=lambda record: record.received_at or "")
+    # A long matter is cut to the window around the email it was opened for, which is always on it.
+    here = next(i for i, record in enumerate(ordered) if record.id == email.id)
+    start = max(0, min(here - MAX_TRACE // 2, len(ordered) - MAX_TRACE))
+    steps = ordered[start : start + MAX_TRACE]
     return {"steps": [(record, reasons.get(record.id, [])) for record in steps], "versions": versions(steps)}
 
 

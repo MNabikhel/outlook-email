@@ -88,7 +88,7 @@ def test_a_run_weighs_the_newest_mail_within_its_limit(store, settings, model):
     from datetime import datetime, timezone
 
     weighed = link_judge.judge_recent(store, settings, limit=4, now=datetime(2026, 10, 10, tzinfo=timezone.utc))
-    assert 1 <= weighed <= 4 and len(model) <= 4
+    assert weighed >= 1 and len(model) <= 4, "at most the limit of questions; an email whose verdicts are kept costs none"
     assert store.ai_checked("m4") == link_judge.PROMPT_VERSION, "newest first"
 
 
@@ -154,3 +154,17 @@ def test_only_the_models_links_carry_its_reason(loaded, settings):
     assert all("model_why" not in row for row in related["thread"])
     dup = client.get("/api/mail/demo-inv-10482").json()["related"]
     assert dup["groups"] and all(row["model_why"] == "" for group in dup["groups"] if group["kind"] != "ai" for row in group["emails"])
+
+
+def test_a_run_is_not_spent_on_cautioned_mail(store, settings, model):
+    """Held or cautioned mail is never weighed: many of them among the newest mail mustn't use up a run's share."""
+    from datetime import datetime, timezone
+
+    for n in range(35):
+        _mail(store, f"c{n}", f"Updated remittance details {n}", sender=f"ar@lookalike{n}.example", body="New bank details.",
+              received=f"2026-10-09T{n % 24:02d}:{n % 60:02d}:00+00:00", flags=["payment_caution"])
+    _mail(store, "quote", "Harbor quote for pallet wrap", body="Harbor quote attached.", received="2026-10-01T09:00:00+00:00")
+    _mail(store, "question", "Question on the Harbor quote", sender="ap@taz.com", body="About the Harbor quote.", received="2026-10-02T09:00:00+00:00")
+    link_judge.judge_recent(store, settings, limit=2, now=datetime(2026, 10, 10, tzinfo=timezone.utc))
+    assert model, "the ordinary pair is still asked about"
+    assert not any("lookalike" in prompt for prompt in model)

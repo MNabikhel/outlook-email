@@ -994,3 +994,27 @@ def test_an_original_file_is_hashed_once_until_it_changes(tmp_path, monkeypatch)
     assert len(reads) == 1
     path.write_bytes(b"two!")
     assert agent._file_sha256(path) == hashlib.sha256(b"two!").hexdigest()
+
+
+def test_a_held_related_email_is_listed_to_the_model_without_its_words(store):
+    from controller_inbox import agent
+    from controller_inbox.models import DocumentType
+    from test_links import _record
+
+    store.upsert_email(_record("root", sender="ar@northwind.com", mid="<root@northwind.com>", threading={"to": ["ap@taz.com"]}))
+    held = _record("held", sender="ar@northwlnd.com", threading={"in_reply_to": "root@northwind.com"}, received="2026-10-06T09:00:00+00:00",
+                   flags=["fraud_risk"])
+    held.subject = "Updated bank details: account 9988776612"
+    held.category = DocumentType.PAYMENT_INSTRUCTION_CHANGE
+    store.upsert_email(held)
+    ws = agent.Workspace(store, None, [store.get_email("root")])
+    lines = agent.related_lines(ws, ws.sources[0])
+    assert "held as possible payment fraud" in lines and "9988776612" not in lines and "Updated bank details" not in lines
+
+
+def test_an_ordinary_question_naming_an_original_is_no_history_question():
+    from controller_inbox.assistant import _HISTORY
+
+    assert not _HISTORY.search("What was the original due date?")
+    assert not _HISTORY.search("Which version of the template is this?")
+    assert _HISTORY.search("What happened on this so far?") and _HISTORY.search("How did this start? Show the earlier emails")

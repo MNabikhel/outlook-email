@@ -94,8 +94,9 @@ def candidates(store: Store, settings: Settings | None, email: EmailRecord, *, l
     return out
 
 
-def judge(store: Store, settings: Settings, email: EmailRecord, *, limit: int = CANDIDATES) -> list[dict]:
-    """Ask about ``email`` and its candidates; keep and return each verdict ({"other", "same", "why"})."""
+def judge(store: Store, settings: Settings, email: EmailRecord, *, limit: int = CANDIDATES, spent: list | None = None) -> list[dict]:
+    """Ask about ``email`` and its candidates; keep and return each verdict ({"other", "same", "why"}). Each
+    question put to the model is added to ``spent``."""
     if not llm_active(settings) or _suspect(email):
         return []
     out = []
@@ -107,6 +108,8 @@ def judge(store: Store, settings: Settings, email: EmailRecord, *, limit: int = 
             out.append({"other": other.id, "same": kept["same"], "why": kept["why"]})
             continue
         verdict = _ask(settings, email, other)
+        if spent is not None:
+            spent.append(other.id)
         if verdict is None:
             continue
         store.save_ai_link(email.id, other.id, same=verdict["same"], why=verdict["why"], key=key)
@@ -125,14 +128,15 @@ def judge_recent(store: Store, settings: Settings, *, limit: int = 30, now: date
     for email in store.recent_emails(days=RECENT_DAYS, now=now):
         if asked >= limit or time.monotonic() - started > max_seconds:
             break
-        if store.ai_checked(email.id) == PROMPT_VERSION:
-            continue
+        if _suspect(email) or store.ai_checked(email.id) == PROMPT_VERSION:
+            continue  # held or cautioned mail is never weighed, and costs this run nothing
+        spent: list[str] = []
         try:
-            verdicts = judge(store, settings, email, limit=min(CANDIDATES, limit - asked))
+            judge(store, settings, email, limit=min(CANDIDATES, limit - asked), spent=spent)
         except Exception:  # the model stopped answering: the next run carries on
             log.warning("Weighing related mail with the model failed", exc_info=True)
             break
-        asked += max(1, len(verdicts))
+        asked += len(spent)  # a verdict already kept asked nothing
         weighed += 1
     return weighed
 
