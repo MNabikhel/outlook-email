@@ -592,6 +592,14 @@ def test_windows_short_date_patterns_become_outlooks_filter_dates():
     assert outlook_desktop._strftime_pattern("M/d/yyyy") == "%m/%d/%Y"
     assert outlook_desktop._strftime_pattern("yyyy-MM-dd") == "%Y-%m-%d"
     assert outlook_desktop._strftime_pattern("") == ""
+    # A month written as a name (a stock choice in Windows' list) became "%d-%m%m-%y", so the filter read
+    # "20-1010-26" and the calendar was never read. It is written as a number, in the pattern's order.
+    assert outlook_desktop._strftime_pattern("dd-MMM-yy") == "%d-%m-%y"
+    assert outlook_desktop._strftime_pattern("d-MMM-yyyy") == "%d-%m-%Y"
+    assert outlook_desktop._strftime_pattern("ddd dd/MM/yyyy") == "%d/%m/%Y", "the weekday's name is left out"
+    assert outlook_desktop._strftime_pattern("d/M/y") == "%d/%m/%y", "one y is the year too, not US order"
+    assert outlook_desktop._strftime_pattern("gg y/M/d") == "", "anything else: Outlook's US order"
+    assert datetime(2026, 10, 20).strftime(outlook_desktop._strftime_pattern("dd-MMM-yy")) == "20-10-26"
 
 
 def test_the_calendar_says_when_outlooks_limit_cut_it_short(outlook, monkeypatch):

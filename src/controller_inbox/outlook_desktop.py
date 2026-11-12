@@ -442,11 +442,20 @@ def _jet_date(value: datetime) -> str:
     return local.strftime(pattern)
 
 
+# The parts of Windows' short date pattern, as strftime writes them. A month written as a name ("MMM": Oct) is
+# written as its number, in the same place: Outlook reads numbers in this computer's order whatever its language.
+_DATE_PARTS = {"yyyyy": "%Y", "yyyy": "%Y", "yy": "%y", "y": "%y", "MMMM": "%m", "MMM": "%m", "MM": "%m", "M": "%m", "dd": "%d", "d": "%d"}
+
+
 def _strftime_pattern(windows: str) -> str:
-    """Windows' short date pattern ("dd/MM/yyyy", "M/d/yyyy", "yyyy-MM-dd") as a strftime one, leading zeros kept
-    (Outlook reads "05/10/2026" as well as "5/10/2026")."""
-    out = re.sub(r"yyyy|yy|MM|M|dd|d", lambda m: {"yyyy": "%Y", "yy": "%y", "MM": "%m", "M": "%m", "dd": "%d", "d": "%d"}[m.group(0)], windows)
-    return out if "%Y" in out or "%y" in out else ""
+    """Windows' short date pattern ("dd/MM/yyyy", "M/d/yyyy", "yyyy-MM-dd", "dd-MMM-yy") as a strftime one, leading
+    zeros kept (Outlook reads "05/10/2026" as well as "5/10/2026"). Quoted words and the weekday's name are left out;
+    a pattern with anything else in it, or without a day, month and year, gives "" (Outlook's US order)."""
+    text = re.sub(r"'[^']*'|dddd?[,.]?\s*", "", windows)
+    out = re.sub(r"y+|M+|d+", lambda m: _DATE_PARTS[m.group(0)] if m.group(0) in _DATE_PARTS else "?", text)
+    whole = ("%Y" in out or "%y" in out) and "%m" in out and "%d" in out
+    other = re.sub(r"[^A-Za-z?]", "", re.sub(r"%[Yymd]", "", out))
+    return out if whole and not other else ""
 
 
 def local_time(value) -> datetime | None:
