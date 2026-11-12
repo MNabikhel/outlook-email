@@ -333,6 +333,21 @@ def test_however_much_mail_is_held_the_overnight_reading_reaches_the_rest(loaded
     assert len(waiting) == min(10, loaded.counts()["waiting_on_bionic"]) > 0
 
 
+def test_the_digest_doesnt_count_it_as_waiting_for_the_model(loaded, settings):
+    from datetime import date
+
+    from controller_inbox import services
+
+    with loaded.connect() as conn:
+        conn.execute("UPDATE emails SET model_status = 'script_draft' WHERE id = ?", (HELD,))
+    kpis = services.digest_now(loaded, settings, date(2026, 9, 22))["kpis"]
+    record_fraud_verdict(loaded, settings, HELD, verdict="safe")
+    with loaded.connect() as conn:
+        conn.execute("UPDATE emails SET model_status = 'script_draft' WHERE id = ?", (HELD,))
+    cleared = services.digest_now(loaded, settings, date(2026, 9, 22))["kpis"]
+    assert cleared["waiting_on_bionic"] == kpis["waiting_on_bionic"] + 1, "waiting once it can be read, not while held"
+
+
 def test_trusting_a_taught_sender_releases_all_their_mail(store, settings):
     held = _taught_sender(store, settings)
     record_fraud_verdict(store, settings, held[0], verdict="safe", scope="sender")

@@ -16,6 +16,7 @@ from typing import Any
 
 from controller_inbox.classify import month_end
 from controller_inbox.clock import aware_utc
+from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import (
     DOCUMENT_LABELS,
     FOLDER_LABELS,
@@ -139,7 +140,8 @@ def build_digest(
         "due_today": len(due_today),
         "fraud_alerts": len(critical_alerts),
         "attachments": sum(len(e.attachments) for e in window_emails),
-        "waiting_on_bionic": sum(1 for e in window_emails if e.model_status == "script_draft"),
+        # Held mail is never read by the model, so it isn't waiting for it (as Store.counts has it).
+        "waiting_on_bionic": sum(1 for e in window_emails if e.model_status == "script_draft" and not attachments_locked(e)),
         "read_by_bionic": sum(1 for e in window_emails if e.model_status == "bionic"),
         "skippable": newsletters,
     }
