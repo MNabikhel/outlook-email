@@ -28,7 +28,7 @@ except ImportError:
 
 from controller_inbox import documents, memo
 from controller_inbox.config import Settings
-from controller_inbox.fraud import attachments_locked
+from controller_inbox.fraud import as_model_reads, attachments_locked, held_neighbours
 from controller_inbox.local_llm import auth_headers, http_method, lm_studio_root
 from controller_inbox.models import AttachmentRecord, EmailRecord
 from controller_inbox.store import Store
@@ -115,6 +115,10 @@ def _unit(values) -> array:
 
 def _items_head(email: EmailRecord) -> list[tuple[str, str]]:
     head = f"{email.subject}\nFrom {email.sender_name or email.sender_email}"
+    if attachments_locked(email):
+        # Held as possible payment fraud: found by its subject and sender only, its text no more read than its files.
+        # A vector made from its text before it was held is made again from these.
+        return [(f"email:{email.id}", head)]
     return [(f"email:{email.id}", f"{head}\n{(email.body_text or '')[:EMBED_CHARS]}")]
 
 
@@ -186,9 +190,11 @@ def index_mail(
     owners = store.embedding_owners(model)
     items: dict[str, tuple[str, str]] = {}
     indexed = set()
+    near = held_neighbours(store)
     for email in emails if emails is not None else store.list_emails(order="newest", limit=limit):
         indexed.add(email.id)
-        for key, text in _items(email):
+        # A reply quoting held mail is indexed by its own words (fraud.as_model_reads), as ``coverage`` counts it.
+        for key, text in _items(as_model_reads(store, email, near=near)):
             items[key] = (email.id, text)
     # Sections a file no longer has (or files the email no longer has) would still be found by search.
     stale = [key for key, (email_id, _size) in owners.items() if email_id in indexed and key not in items]
@@ -234,8 +240,9 @@ def coverage(store: Store, settings: Settings, *, limit: int = 5_000) -> dict[st
     if not model:
         return out
     have = store.embedding_keys(model)
+    near = held_neighbours(store)
     for email in store.list_emails(order="newest", limit=limit):
-        current = [(key, have.get(key) == text_key) for key, text_key in _item_keys(email)]
+        current = [(key, have.get(key) == text_key) for key, text_key in _item_keys(as_model_reads(store, email, near=near))]
         out["emails"] += 1
         out["emails_done"] += all(done for _key_, done in current)
         files = [done for key, done in current if key.startswith("file:")]

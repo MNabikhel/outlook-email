@@ -2213,6 +2213,11 @@ class Store:
                 (domain.lower(), exclude, *_NOT_FLAGGED_ARGS),
             ).fetchone()["n"]
 
+    def held_ids(self) -> list[str]:
+        """The emails held as possible payment fraud (as ``fraud.attachments_locked`` decides)."""
+        with self.connect() as conn:
+            return [row["id"] for row in conn.execute(f"SELECT id FROM emails WHERE {_HELD_SQL} ORDER BY id")]
+
     def email_ids_from(self, *, sender: str = "", domain: str = "") -> list[str]:
         """Emails from one address, or from a domain and its subdomains."""
         with self.connect() as conn:

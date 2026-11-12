@@ -32,7 +32,7 @@ from pathlib import Path
 
 from controller_inbox import answer_check, documents, memo, money, semantic, table_lookup, table_query
 from controller_inbox.config import Settings
-from controller_inbox.fraud import attachments_locked
+from controller_inbox.fraud import as_model_reads, attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
 from controller_inbox.store import Store
 
@@ -386,6 +386,8 @@ class Workspace:
         return self._memo[key]
 
     def __post_init__(self) -> None:
+        # Each email as the model may read it: a reply quoting held mail without the quote (fraud.as_model_reads).
+        self.sources[:] = [as_model_reads(self.store, email) for email in self.sources]
         # The emails in the prompt, plus those the model opens with a tool: the only ones it may write notes on.
         self.opened |= {email.id for email in self.sources}
 
@@ -393,7 +395,7 @@ class Workspace:
         for index, item in enumerate(self.sources, start=1):
             if item.id == email.id:
                 return index
-        self.sources.append(email)
+        self.sources.append(as_model_reads(self.store, email))
         return len(self.sources)
 
     def email(self, ref) -> EmailRecord | None:

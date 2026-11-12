@@ -716,6 +716,51 @@ def attachments_locked(email: "EmailRecord") -> bool:
     return "fraud_risk" in email.flags or email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE
 
 
+QUOTED_HELD = "(The quoted thread below this is left out: it includes an email held as possible payment fraud.)"
+
+
+def held_neighbours(store: "Store") -> set[str]:
+    """The emails in a conversation with mail held as possible payment fraud (not the held mail itself). Worked out
+    once for a run over much mail, such as indexing it for search by meaning."""
+    from controller_inbox.links import conversation_members
+
+    held = store.held_ids()
+    near: set[str] = set()
+    for email_id in held:
+        email = store.get_email(email_id)
+        if email is not None:
+            near |= conversation_members(store, email.id, email.threading, email.internet_message_id, email.conversation_id)
+    return near - set(held)
+
+
+def quotes_held_mail(store: "Store", email: "EmailRecord", *, near: set[str] | None = None) -> bool:
+    """A reply or forward that quotes its thread, when that conversation holds mail held as possible payment fraud:
+    Outlook quotes the earlier emails under the reply, the held one's text included. ``near`` is
+    ``held_neighbours``, when worked out already."""
+    if attachments_locked(email) or not QUOTE_START_RE.search(email.body_text or ""):
+        return False
+    if near is not None:
+        return email.id in near
+    from controller_inbox.links import conversation_members
+
+    members = conversation_members(store, email.id, email.threading, email.internet_message_id, email.conversation_id)
+    return any(attachments_locked(head) for head in store.email_heads(sorted(members)))
+
+
+def as_model_reads(store: "Store", email: "EmailRecord", *, near: set[str] | None = None) -> "EmailRecord":
+    """The email as a model may be given it. A reply quoting held mail keeps only what its sender wrote above the
+    quote, so a colleague's ordinary reply doesn't hand the model the held email's text. Its files are its own."""
+    if not quotes_held_mail(store, email, near=near):
+        return email
+    from dataclasses import replace
+
+    body = (email.body_text or "").replace("\r\n", "\n")
+    quote = QUOTE_START_RE.search(body)
+    mine = body[: quote.start()].rstrip() if quote else body
+    text = f"{mine}\n\n{QUOTED_HELD}".strip()
+    return replace(email, body_text=text, body_preview=text[:240])
+
+
 TAUGHT_HOLD = "You taught this sender's mail as a payment-instruction change"
 
 

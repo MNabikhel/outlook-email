@@ -22,7 +22,7 @@ from controller_inbox.file_summaries import summarize_files
 from controller_inbox.folder_mail import ingest_folder, reread_attachments
 from controller_inbox.local_llm import LocalReader, check_model, llm_active
 from controller_inbox.profile import is_finance
-from controller_inbox.fraud import attachments_locked
+from controller_inbox.fraud import as_model_reads, attachments_locked
 from controller_inbox.reading import build_packet, overlay_reading
 from controller_inbox.semantic import index_mail
 from controller_inbox.store import Store
@@ -134,7 +134,7 @@ def read_queue(
     for index, email in enumerate(waiting, start=1):
         if on_progress:
             on_progress("reading", index, len(waiting), email.subject)
-        packet = build_packet(email, corrections)
+        packet = build_packet(as_model_reads(store, email), corrections)
         parsed = reader.read(packet)
         if reader.stopped:
             break
@@ -144,7 +144,7 @@ def read_queue(
         # on it, or another reader may have saved one. The reading is saved onto the email as it is now, and
         # only while it is still the draft the model read; otherwise it waits for the next run.
         current = store.get_email(email.id)
-        if current is None or current.model_status != "script_draft" or build_packet(current, corrections) != packet:
+        if current is None or current.model_status != "script_draft" or build_packet(as_model_reads(store, current), corrections) != packet:
             continue
         overlay_reading(current, parsed, now=now, tz=settings.tz)
         store.upsert_email(current)

@@ -148,6 +148,73 @@ def test_the_held_answer_gives_the_strongest_reasons_and_none_that_count_for_it(
     assert because.startswith("Sender domain looks like a known one; Replies go to another address;")
 
 
+def _quoting_reply(store, settings) -> dict[str, str]:
+    """A vendor's invoice, a lookalike's held reply asking for a new account, and a colleague's reply that quotes the
+    held one under "-----Original Message-----", as Outlook does."""
+    from datetime import datetime, timezone
+
+    from controller_inbox.folder_mail import ingest_folder
+    from msgfactory import write_msg
+
+    settings.trusted_domains = "taz.com"
+    settings.ensure_data_dir()
+    day = lambda n: datetime(2026, 9, n, 14, tzinfo=timezone.utc)  # noqa: E731
+    write_msg(settings.inbox_incoming / "a.msg", "Invoice INV-55120", "Hi, invoice INV-55120 for September consulting is attached. Dana",
+              sender_name="Dana Ortiz", sender_email="dana@northwind.com", sent=day(20), message_id="<inv1@northwind.com>")
+    write_msg(settings.inbox_incoming / "b.msg", "RE: Invoice INV-55120",
+              "QUOKKAWIRE Please note our bank details have changed; please pay INV-55120 to account 5566778899.",
+              sender_name="Dana Ortiz", sender_email="dana@northwind-payments.net", sent=day(21), message_id="<inv2@x.net>",
+              headers=["In-Reply-To: <inv1@northwind.com>", "References: <inv1@northwind.com>"])
+    write_msg(settings.inbox_incoming / "c.msg", "RE: Invoice INV-55120",
+              "Dana, can you confirm the PO for INV-55120? Thanks, Priya\n\n-----Original Message-----\n"
+              "From: Dana Ortiz <dana@northwind-payments.net>\nSubject: RE: Invoice INV-55120\n\n"
+              "QUOKKAWIRE Please note our bank details have changed; please pay INV-55120 to account 5566778899.",
+              sender_name="Priya Raman", sender_email="priya@taz.com", sent=day(22), message_id="<inv3@taz.com>",
+              headers=["In-Reply-To: <inv2@x.net>", "References: <inv1@northwind.com> <inv2@x.net>"])
+    got = {email.sender_email: email.id for email in ingest_folder(store, settings)}
+    assert attachments_locked(store.get_email(got["dana@northwind-payments.net"]))
+    assert not attachments_locked(store.get_email(got["priya@taz.com"]))
+    return got
+
+
+def test_a_reply_quoting_held_mail_gives_the_model_only_its_own_words(store, settings, model, monkeypatch):
+    from array import array
+
+    from controller_inbox import reading, semantic, tools
+
+    reply = _quoting_reply(store, settings)["priya@taz.com"]
+    _answer(store, settings, "What happened so far?", reply)
+    assert model and any("confirm the PO" in prompt for prompt in model)
+    assert not any("QUOKKAWIRE" in prompt for prompt in model), "the chat's prompt"
+    ws = agent.Workspace(store, settings, [store.get_email(reply)], question="what is this")
+    opened = agent.run_tool(ws, "open_email", {"email": 1}, limit=4000)
+    assert "confirm the PO" in opened and "QUOKKAWIRE" not in opened and "held as possible payment fraud" in opened
+    packets = []
+    monkeypatch.setattr(tools, "build_packet", lambda email, corrections=None: packets.append(reading.build_packet(email, corrections)) or {})
+    tools.prepare_queue(store, limit=10)
+    assert any(packet["email_id"] == reply for packet in packets) and "QUOKKAWIRE" not in str(packets), "the overnight reading"
+    embedded: list[str] = []
+    monkeypatch.setattr(semantic, "embedding_model", lambda _s: "text-embedding-test")
+    monkeypatch.setattr(semantic, "embed", lambda _s, texts, query=False: embedded.extend(texts) or [array("f", [1.0, 0.0]) for _ in texts])
+    semantic.index_mail(store, settings)
+    assert any("confirm the PO" in text for text in embedded) and not any("QUOKKAWIRE" in text for text in embedded)
+    assert semantic.coverage(store, settings)["waiting"] == 0, "Setup counts what was indexed as indexed"
+
+
+def test_the_embedding_model_is_given_its_subject_and_sender_only(loaded, settings, monkeypatch):
+    from array import array
+
+    from controller_inbox import semantic
+
+    embedded: list[str] = []
+    monkeypatch.setattr(semantic, "embedding_model", lambda _s: "text-embedding-test")
+    monkeypatch.setattr(semantic, "embed", lambda _s, texts, query=False: embedded.extend(texts) or [array("f", [1.0, 0.0]) for _ in texts])
+    semantic.index_mail(loaded, settings)
+    subject = loaded.get_email(HELD).subject
+    assert any(text.startswith(subject) for text in embedded), "it is still found by its subject"
+    assert not any(word in text.lower() for text in embedded for word in SAYS)
+
+
 def test_trusting_a_taught_sender_releases_all_their_mail(store, settings):
     held = _taught_sender(store, settings)
     record_fraud_verdict(store, settings, held[0], verdict="safe", scope="sender")
