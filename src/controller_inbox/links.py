@@ -437,11 +437,20 @@ def _participation(thread: list) -> tuple:
         if record.id == root.id or record.id in forged:
             continue
         domain = _party(record)
-        if not domain or domain not in seen:
+        if not domain or not _took_part(domain, seen):
             marked.add(record.id)
             continue  # whom a newcomer wrote to doesn't count as taking part
         seen |= _to_parties(record)
     return root, marked
+
+
+def _took_part(party: str, seen: set[str]) -> bool:
+    """Whether a party is one that has taken part, or a subdomain of one: a vendor's billing system writing from
+    billing.northwind.com, a colleague from uk.taz.com. A subdomain is its domain owner's, so it is no lookalike.
+    An address at a free mail service is only itself."""
+    from controller_inbox.fraud import same_or_under
+
+    return party in seen or ("@" not in party and any("@" not in other and same_or_under(party, other) for other in seen))
 
 
 def _arrival(record) -> tuple[str, int, str]:
@@ -594,10 +603,12 @@ MAX_CHANGES = 25
 
 def trace(store, email: EmailRecord) -> dict:
     """Everything that belongs with ``email``, followed two links out (the invoice's PO, the PO's quote), oldest
-    first: each email with why it is here, and what changed between the versions of each file sent along the way."""
+    first: each email with why it is here, and what changed between the versions of each file sent along the way.
+    ``new_domains`` holds the emails whose sender's domain was new to their conversation, as Related marks them."""
     reasons: dict[str, list[str]] = {email.id: []}
     records: dict[str, EmailRecord] = {email.id: email}
     frontier = [email]
+    newcomers: set[str] = set()
     # An email whose conversation was walked already (it is one of it) isn't walked again: only its own invoices,
     # POs and files are followed.
     walked: dict[str, list[str]] = {}
@@ -605,6 +616,7 @@ def trace(store, email: EmailRecord) -> dict:
         nxt = []
         for current in frontier:
             found = related(store, current, known_thread=walked.get(current.id))
+            newcomers |= found["new_domains"]
             if current.id not in walked:
                 ids = [current.id, *(record.id for record in found["thread"])]
                 walked.update({member: ids for member in ids})
@@ -631,7 +643,8 @@ def trace(store, email: EmailRecord) -> dict:
     here = next(i for i, record in enumerate(ordered) if record.id == email.id)
     start = max(0, min(here - MAX_TRACE // 2, len(ordered) - MAX_TRACE))
     steps = ordered[start : start + MAX_TRACE]
-    return {"steps": [(record, reasons.get(record.id, [])) for record in steps], "versions": versions(steps)}
+    return {"steps": [(record, reasons.get(record.id, [])) for record in steps], "versions": versions(steps),
+            "new_domains": newcomers & {record.id for record in steps}}
 
 
 # A change to payment details between two versions of a file is to be checked by phone, whoever sent it. "Account"

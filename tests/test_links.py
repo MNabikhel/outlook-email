@@ -845,3 +845,34 @@ def test_catching_up_reads_its_batch_with_the_write_lock_held(store, monkeypatch
     monkeypatch.setattr(Store, "get_emails", read_then_try_to_write)
     assert store.file_link_keys(batch=500) == 1
     assert writable == [False], "another writer could change the emails between their read and their filing"
+
+
+# Guards against: a vendor's billing system answering from billing.northwind.com in the thread the vendor started,
+# or a colleague from uk.taz.com, was marked "New in this conversation", and the model told to check who it is.
+def test_a_subdomain_of_a_party_is_no_newcomer():
+    root = _record("root", sender="priya@northwind.com", mid="<root@northwind.com>", threading={"to": ["ap@taz.com"]})
+    billing = _record("billing", sender="noreply@billing.northwind.com", mid="<b1@billing.northwind.com>", received="2026-10-05T15:00:00+00:00",
+                      threading={"in_reply_to": "root@northwind.com", "to": ["ap@taz.com"]})
+    uk = _record("uk", sender="tom@uk.taz.com", mid="<u1@uk.taz.com>", received="2026-10-05T16:00:00+00:00",
+                 threading={"in_reply_to": "root@northwind.com", "to": ["priya@northwind.com"]})
+    lookalike = _record("fake", sender="priya@northwind.com.billing-desk.net", mid="<f1@billing-desk.net>", received="2026-10-05T17:00:00+00:00",
+                        threading={"in_reply_to": "root@northwind.com", "to": ["ap@taz.com"]})
+    for n, record in enumerate((root, billing, uk, lookalike)):
+        record.created_at = f"2026-10-05T18:0{n}:00+00:00"
+    assert links.new_domains([root, billing, uk, lookalike]) == {"fake"}
+
+
+# Guards against: the Whole matter page listed a lookalike's reply only as "In the conversation", with none of
+# the "New in this conversation" warning Related gives it.
+def test_the_whole_matter_marks_an_email_new_to_its_conversation(store, settings):
+    from fastapi.testclient import TestClient
+    from helpers import PAGE
+
+    from controller_inbox.web import create_app
+
+    store.upsert_email(_record("root", sender="priya@northwind.com", mid="<root@northwind.com>", threading={"to": ["ap@taz.com"]}))
+    store.upsert_email(_record("hijack", sender="priya@northwnd.com", mid="<h@northwnd.com>", received="2026-10-06T09:00:00+00:00",
+                               threading={"in_reply_to": "root@northwind.com", "to": ["ap@taz.com"]}))
+    assert links.trace(store, store.get_email("root"))["new_domains"] == {"hijack"}
+    steps = TestClient(create_app(settings, store), headers=PAGE).get("/api/trace/root").json()["steps"]
+    assert {step["id"]: step["new_domain"] for step in steps} == {"root": False, "hijack": True}

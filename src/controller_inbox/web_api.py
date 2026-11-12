@@ -576,6 +576,8 @@ def register_workspace(
             steps.append({
                 **card,
                 "here": record.id == email.id,
+                # Marked as Related marks it: a lookalike's reply slipped into the vendor's thread.
+                "new_domain": record.id in found["new_domains"],
                 # Beside the name, as Related shows it: two senders named alike ("Dana Ortiz") from two domains.
                 "domain": (links._domain_of(record) or "no address").lower(),
                 "reasons": reasons,
