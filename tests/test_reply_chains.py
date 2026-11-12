@@ -207,3 +207,23 @@ def test_a_po_number_keeps_its_own_letters():
     from controller_inbox.extract import PO_RE
 
     assert PO_RE.search("PO NX-4410 approved").group(1) == "NX-4410" and PO_RE.search("PO No. 4500123").group(1) == "4500123"
+
+
+# Guards against: once the separators before a number took no letters, a label word after a separator was no
+# longer read: "Invoice-No. 12345" (common on German vendors' English invoices), "Invoice: No. 4711" and
+# "PO-No. 77821" gave no number at all, and "Invoice No123456" gave "NO123456", which isn't the vendor's 123456.
+@pytest.mark.parametrize(("text", "invoice", "po"), [
+    ("Invoice-No. 12345", ["12345"], []), ("Invoice-No.: 2024117", ["2024117"], []), ("Invoice: No. 4711", ["4711"], []),
+    ("Invoice - No. 4711", ["4711"], []), ("Invoice #No. 4711", ["4711"], []), ("Invoice N. 4433", ["4433"], []),
+    ("Invoice No123456", ["123456"], []), ("Invoice Number: NO-7788", ["NO-7788"], []), ("Invoice NO-7788 attached", ["NO-7788"], []),
+    ("Invoice NW-88001 is due", ["NW-88001"], []), ("Invoice ON-7731 attached", ["ON-7731"], []),
+    ("PO-No. 77821", [], ["77821"]), ("PO: No. 77821", [], ["77821"]), ("Purchase Order: No. 4500123", [], ["4500123"]),
+    ("PO No4500123", [], ["4500123"]), ("PO NO-4567 approved", [], ["NO-4567"]),
+])
+def test_a_label_word_after_a_separator_is_still_read(text, invoice, po):
+    from datetime import date
+
+    from controller_inbox.extract import extract_fields
+
+    fields = extract_fields(text, as_of=date(2026, 11, 1))
+    assert (fields.invoice_numbers, fields.po_numbers) == (invoice, po)
