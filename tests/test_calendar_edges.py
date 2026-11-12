@@ -294,3 +294,32 @@ def test_a_meeting_request_read_from_microsoft_365_reaches_the_calendar_and_asks
     email = store.get_email(record.id)
     assert email.category == DocumentType.MEETING
     assert any(action.source == "meeting" for action in email.actions)
+
+
+def test_a_meeting_declined_or_deleted_in_outlook_doesnt_come_back_from_its_invitation(store):
+    from controller_inbox import outlook_sync
+    from controller_inbox.calendar_events import Meeting
+
+    window = ("2026-10-01T00:00:00+00:00", "2026-10-20T00:00:00+00:00")
+    _save(store, "req", _invite("D1", "20261008T140000Z", subject="Vendor pitch", end="20261008T150000Z",
+                                organizer="mailto:sam@vendor.example"), "sam@vendor.example")
+    _save(store, "kept", _invite("D2", "20261009T140000Z", subject="Forwarded file", end="20261009T150000Z"), "maya@taz.com")
+    outlook_sync.connect(store, calendar=True, now=NOW)
+    on = outlook_sync.calendar_on(store)
+    mine = Meeting(uid="O1", start="2026-10-07T14:00:00+00:00", end="2026-10-07T15:00:00+00:00", subject="Mine", source="outlook")
+    copy = Meeting(uid="D1", start="2026-10-08T14:00:00+00:00", end="2026-10-08T15:00:00+00:00", subject="Vendor pitch", source="outlook",
+                   busy="tentative")
+    store.replace_meetings("outlook", [mine, copy], start=window[0], end=window[1])
+    assert [(m["subject"], m["source"]) for m in store.meetings_between(*window, outlook=on)] == [
+        ("Mine", "outlook"), ("Vendor pitch", "outlook"), ("Forwarded file", "invite")]
+    # Declined in Outlook: Outlook takes it off its calendar and deletes the request.
+    store.replace_meetings("outlook", [mine], start=window[0], end=window[1])
+    store.delete_emails(["req"])
+    assert [m["subject"] for m in store.meetings_between(*window, outlook=on)] == ["Mine", "Forwarded file"], (
+        "an invitation Outlook never had stays")
+    # Accepted again (or the calendar turned off): it shows.
+    store.replace_meetings("outlook", [mine, copy], start=window[0], end=window[1])
+    assert "Vendor pitch" in [m["subject"] for m in store.meetings_between(*window, outlook=on)]
+    store.replace_meetings("outlook", [mine], start=window[0], end=window[1])
+    outlook_sync.set_calendar(store, False)
+    assert [m["subject"] for m in store.meetings_between(*window, outlook=outlook_sync.calendar_on(store))] == ["Vendor pitch", "Forwarded file"]

@@ -323,6 +323,11 @@ CREATE INDEX IF NOT EXISTS idx_meetings_start ON meetings(start);
 CREATE INDEX IF NOT EXISTS idx_meetings_uid ON meetings(uid);
 CREATE INDEX IF NOT EXISTS idx_meetings_end ON meetings("end");
 CREATE INDEX IF NOT EXISTS idx_meetings_email ON meetings(email_id);
+-- Meetings Outlook's calendar had and no longer has (declined or deleted there), by uid: an invitation naming one
+-- isn't shown while the Outlook calendar is read. One back on Outlook's calendar leaves the list.
+CREATE TABLE IF NOT EXISTS outlook_dropped (
+    uid TEXT PRIMARY KEY
+);
 
 CREATE TABLE IF NOT EXISTS outlook_items (
     entry_id TEXT PRIMARY KEY,
@@ -803,9 +808,17 @@ class Store:
         if conn is None:
             with self.transaction() as own:
                 return self.replace_meetings(source, meetings, start=start, end=end, conn=own)
-        conn.execute('DELETE FROM meetings WHERE source = ? AND start >= ? AND start <= ?', (source, start, end))
+        window = (source, start, end)
+        before = {row[0] for row in conn.execute("SELECT DISTINCT uid FROM meetings WHERE source = ? AND start >= ? AND start <= ?", window)}
+        conn.execute('DELETE FROM meetings WHERE source = ? AND start >= ? AND start <= ?', window)
         for meeting in meetings:
             self._put_meeting(conn, meeting)
+        if source == "outlook":
+            # A meeting Outlook had in the window and has no more was declined or deleted there: its invitation
+            # (kept when Outlook deletes the request it answered) doesn't bring it back.
+            now_on = sorted({meeting.uid for meeting in meetings})
+            conn.executemany("INSERT OR IGNORE INTO outlook_dropped (uid) VALUES (?)", [(uid,) for uid in before - set(now_on)])
+            conn.executemany("DELETE FROM outlook_dropped WHERE uid = ?", [(uid,) for uid in now_on])
         return len(meetings)
 
     def _put_meeting(
@@ -871,6 +884,8 @@ class Store:
     def forget_meetings(self, source: str) -> None:
         with self.connect() as conn:
             conn.execute("DELETE FROM meetings WHERE source = ?", (source,))
+            if source == "outlook":
+                conn.execute("DELETE FROM outlook_dropped")
 
     def link_keys(self, email_id: str) -> list[tuple[str, str]]:
         with self.connect() as conn:
@@ -2299,6 +2314,8 @@ def _shown_meetings(conn: sqlite3.Connection, rows: list[sqlite3.Row], *, outloo
     if outlook:
         sql = "SELECT DISTINCT uid FROM meetings WHERE source = 'outlook' AND uid IN ({})"
         on_outlook = {row["uid"] for row in _in_chunks(conn, sql, invited)}
+        # Declined or deleted in Outlook: not on its calendar, so not on this one.
+        on_outlook |= {row["uid"] for row in _in_chunks(conn, "SELECT uid FROM outlook_dropped WHERE uid IN ({})", invited)}
         sql = """SELECT m.uid, m.start, m.organizer, m.sender, m.recurring, m.source AS kind, e.id AS email, e.sender_email, e.sender_name,
                         'invite' AS source, e.flags AS email_flags, e.category AS email_category
                  FROM meetings m LEFT JOIN emails e ON e.id = m.email_id WHERE m.source IN ('invite', 'held') AND m.uid IN ({})"""
