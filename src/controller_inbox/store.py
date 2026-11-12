@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 import uuid
+from types import SimpleNamespace
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -648,6 +649,43 @@ class Store:
     def link_keys(self, email_id: str) -> list[tuple[str, str]]:
         with self.connect() as conn:
             return [(row[0], row[1]) for row in conn.execute("SELECT kind, value FROM email_keys WHERE email_id = ? ORDER BY kind, value", (email_id,))]
+
+    def email_heads(self, email_ids: list[str]) -> list[SimpleNamespace]:
+        """What the conversation checks need of each email, without its text or files: id, sender, Reply-To,
+        Message-ID, threading, when it was stored and sent, flags, category, its invoice numbers and whether it
+        brings an invoice file. In the order asked."""
+        found: dict[str, SimpleNamespace] = {}
+        ids = list(dict.fromkeys(email_ids))
+        with self.connect() as conn:
+            for start in range(0, len(ids), 400):
+                chunk = ids[start : start + 400]
+                rows = conn.execute(
+                    f"""SELECT e.id, e.sender_email, e.reply_to, e.internet_message_id, e.threading, e.created_at, e.received_at,
+                               e.flags, e.category, e.extracted,
+                               EXISTS(SELECT 1 FROM attachments a WHERE a.email_id = e.id AND a.document_type = ?) AS invoice_file
+                        FROM emails e WHERE e.id IN ({", ".join("?" * len(chunk))})""",
+                    [DocumentType.AP_INVOICE.value, *chunk],
+                ).fetchall()
+                for row in rows:
+                    extracted = _loads(row["extracted"], {}) or {}
+                    try:
+                        category = DocumentType(row["category"])
+                    except ValueError:
+                        category = DocumentType.OTHER
+                    found[row["id"]] = SimpleNamespace(
+                        id=row["id"],
+                        sender_email=row["sender_email"] or "",
+                        reply_to=row["reply_to"] or "",
+                        internet_message_id=row["internet_message_id"] or "",
+                        threading=_loads(row["threading"], {}) if row["threading"] else {},
+                        created_at=row["created_at"] or "",
+                        received_at=row["received_at"] or "",
+                        flags=_loads(row["flags"], []) or [],
+                        category=category,
+                        invoice_numbers=list(extracted.get("invoice_numbers") or []),
+                        invoice_file=bool(row["invoice_file"]),
+                    )
+        return [found[i] for i in ids if i in found]
 
     def link_values_of(self, email_ids: list[str], kind: str) -> list[str]:
         """The values the emails ``email_ids`` are filed under (``kind``), each once, in one query per 400."""
@@ -1936,17 +1974,19 @@ class Store:
                 ((sender_email or "").lower(), exclude, *_NOT_FLAGGED_ARGS),
             ).fetchone()["n"]
 
-    def domain_history(self, domain: str, *, exclude: str = "") -> int:
-        """Emails from addresses at exactly this domain, other than ``exclude``, that the fraud check let
-        through or the user said weren't fraud. A look-alike domain's own first email was flagged, so it
-        doesn't make the domain one the user already hears from."""
+    def domain_history(self, domain: str, *, exclude: str = "", outside: list[str] | tuple = ()) -> int:
+        """Emails from addresses at exactly this domain, other than ``exclude`` and those in ``outside`` (900 at
+        most are left out), that the fraud check let through or the user said weren't fraud. A look-alike domain's
+        own first email was flagged, so it doesn't make the domain one the user already hears from."""
         if not domain:
             return 0
+        skip = [exclude, *list(outside)[:900]]
         with self.connect() as conn:
             return conn.execute(
                 f"""SELECT COUNT(*) AS n FROM emails WHERE instr(sender_email, '@') > 0
-                AND lower(substr(sender_email, instr(sender_email, '@') + 1)) = ? AND id != ? AND {_NOT_FLAGGED}""",
-                (domain.lower(), exclude, *_NOT_FLAGGED_ARGS),
+                AND lower(substr(sender_email, instr(sender_email, '@') + 1)) = ?
+                AND id NOT IN ({", ".join("?" * len(skip))}) AND {_NOT_FLAGGED}""",
+                (domain.lower(), *skip, *_NOT_FLAGGED_ARGS),
             ).fetchone()["n"]
 
     def email_ids_from(self, *, sender: str = "", domain: str = "") -> list[str]:
@@ -2296,6 +2336,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_column(conn, "ALTER TABLE emails ADD COLUMN reply_to TEXT DEFAULT ''")
     if "threading" not in cols:
         _add_column(conn, "ALTER TABLE emails ADD COLUMN threading TEXT DEFAULT ''")
+    if not conn.execute("SELECT 1 FROM sync_state WHERE key = 'link_keys_version'").fetchone() and not conn.execute("SELECT 1 FROM emails LIMIT 1").fetchone():
+        # A new, empty store files every email under this version's keys as it is read: nothing to file again.
+        from controller_inbox.links import KEYS_VERSION
+
+        conn.execute("INSERT INTO sync_state(key, value) VALUES ('link_keys_version', ?)", (KEYS_VERSION,))
     if "model" not in {row[1] for row in conn.execute("PRAGMA table_info(page_failures)")}:
         _add_column(conn, "ALTER TABLE page_failures ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if not conn.execute("SELECT 1 FROM sync_state WHERE key = 'attachment_text_without_nul'").fetchone():
