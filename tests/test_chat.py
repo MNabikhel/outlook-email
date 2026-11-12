@@ -632,3 +632,18 @@ def test_a_lookup_for_invoices_due_this_week_leaves_out_later_and_undated_ones(s
     assert "None of the emails that match is due this week" in this_week and "INV-10482" not in this_week
     next_week = ask("Which invoices are due next week?")
     assert "Harbor Packaging" in next_week and "INV-10482" not in next_week
+
+
+# Meetings in an answer ------------------------------------------------------------------------
+def test_meetings_in_an_answer_are_in_the_calendars_time_and_cite_the_meeting(loaded, settings):
+    # The answer said "2026-09-23 09:30–09:45" while the calendar says "9:30am", and its [1] opened this week.
+    events = list(assistant.answer_stream(loaded, settings, "What meetings do I have tomorrow?", today="2026-09-22"))
+    text = "".join(e["text"] for e in events if e["type"] == "delta")
+    assert "- Wed Sep 23, 9:30am–9:45am · AP team standup" in text and "11am–12pm · PBC list walkthrough" in text
+    assert "09:30" not in text
+    [calendar] = [s for s in next(e for e in events if e["type"] == "sources")["sources"] if s["calendar"]]
+    pbc = next(m for m in calendar["meetings"] if m["subject"] == "PBC list walkthrough with the auditors")
+    assert pbc["day"] == "2026-09-23" and pbc["id"] in {m["id"] for m in loaded.meetings_between("2026-09-23", "2026-09-24")}
+    source = assistant.calendar_source(loaded, settings, "2026-09-22")
+    assert "2026-09-23 9:30am–9:45am · AP team standup" in source.body_text, "the model reads the calendar's times too"
+    assert "(all day)" in source.body_text

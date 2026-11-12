@@ -17,8 +17,34 @@ const ABOUT_A_FILE = /\b(attach\w*|file|pdf|document|spreadsheet|workbook|sheet|
 const SENTENCE_END = /(?<!\b(?:p|pp|no|e\.g|i\.e|vs))[.!?](?=\s)|\n/gi;
 const LOCATION = new RegExp([PAGE_AT, SLIDE_AT, SHEET_AT, /\bcells?\s+[A-Z]{1,3}\d/, /!\$?[A-Z]{1,3}\$?\d/].map((re) => re.source).join("|"), "i");
 
-export const mailHref = (source) =>
-  source.calendar ? "/app/calendar" : source.chat && (source.files || []).length ? filePath(source.id, 1) : `/app/mail/${encodeURIComponent(source.id)}`;
+/** "9:30am", "2pm": a time in the app's zone ("2026-10-05T09:30"), as the calendar and every meeting time write it. */
+export function clockTime(stamp) {
+  const hh = Number(stamp.slice(11, 13));
+  const mm = stamp.slice(14, 16);
+  return `${((hh + 11) % 12) + 1}${mm === "00" ? "" : `:${mm}`}${hh < 12 ? "am" : "pm"}`;
+}
+
+/** "9:30am–9:45am", or "All day". */
+export const meetingTime = (m) => (m.all_day ? "All day" : `${clockTime(m.start)}–${clockTime(m.end)}`);
+
+/** The calendar on the day of the meeting a citation's sentence names (else the first the answer names), open. */
+function calendarHref(source, context, whole) {
+  const meetings = source.meetings || [];
+  const named = (text) => {
+    const lower = (text || "").toLowerCase();
+    const found = meetings.map((m) => [m, lower.indexOf(m.subject.toLowerCase())]).filter(([m, at]) => at >= 0 && m.subject.length >= 4);
+    return found.length ? found.sort((a, b) => a[1] - b[1])[0][0] : null;
+  };
+  const meeting = named(context) || named(whole);
+  return meeting ? `/app/calendar?${new URLSearchParams({ view: "day", date: meeting.day, meeting: meeting.id })}` : "/app/calendar";
+}
+
+export const mailHref = (source, context = "", whole = "") =>
+  source.calendar
+    ? calendarHref(source, context, whole)
+    : source.chat && (source.files || []).length
+      ? filePath(source.id, 1)
+      : `/app/mail/${encodeURIComponent(source.id)}`;
 
 function sentences(text) {
   const out = [];
@@ -97,7 +123,7 @@ function inline(sentence, context, sources, names, whole, links) {
       const target = citeTarget(source, context, whole);
       if (target) return fileLink(target.href, target.file.name, `[${n}]`, "cite");
       const external = source.chat ? ' target="_blank" rel="noopener"' : links.nav ? " data-nav" : "";
-      return `<a class="cite" href="${escapeHtml(links.mailHref(source))}"${external} title="${escapeHtml(source.subject)}">[${n}]</a>`;
+      return `<a class="cite" href="${escapeHtml(links.mailHref(source, context, whole))}"${external} title="${escapeHtml(source.subject)}">[${n}]</a>`;
     })
   );
 }

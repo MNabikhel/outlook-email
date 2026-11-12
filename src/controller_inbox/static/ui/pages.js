@@ -2,6 +2,7 @@
    and the daily digest. The Settings page is settings.js. */
 
 import { h, icon, plural, toast } from "./dom.js";
+import { meetingTime } from "./format.js";
 
 const enc = encodeURIComponent;
 const mailLink = (id, text, listKey) => h("a", { href: `/app/mail/${enc(id)}${listKey ? `?in=${enc(listKey)}` : ""}`, dataset: { nav: "" } }, text);
@@ -95,15 +96,7 @@ export function todayView(data, meta, actions) {
         kpi("Fraud flags", meta.counts.fraud_alerts, meta.counts.fraud_alerts ? "danger" : "", "/app/fraud"),
         meta.coding.review ? kpi("AP to code", meta.coding.review, "", "/app/coding") : null
       ),
-      data.alerts.length
-        ? h(
-            "section",
-            { class: "card card-danger" },
-            h("h2", { class: "rd-h" }, icon("alert", 14), " Do not process — verify by phone"),
-            itemList(data.alerts, "", (item) => [mailLink(item.id, item.subject, "today"), h("small", null, `${item.sender} · ${item.summary || ""}`)])
-          )
-        : null,
-      meetingsCard(data.meetings_today || []),
+      ...todayBrief(data),
       h(
         "div",
         { class: "cards2" },
@@ -133,14 +126,20 @@ export function todayView(data, meta, actions) {
   );
 }
 
-function meetingTime(m) {
-  if (m.all_day) return "All day";
-  const label = (stamp) => {
-    const hh = Number(stamp.slice(11, 13));
-    const mm = stamp.slice(14, 16);
-    return `${((hh + 11) % 12) + 1}${mm === "00" ? "" : `:${mm}`}${hh < 12 ? "am" : "pm"}`;
-  };
-  return `${label(m.start)}–${label(m.end)}`;
+/** The top of Today: the payment warnings and today's meetings. A phone, which shows the list on its own, shows
+    these above it (main.js). */
+export function todayBrief(data) {
+  return [
+    data.alerts && data.alerts.length
+      ? h(
+          "section",
+          { class: "card card-danger" },
+          h("h2", { class: "rd-h" }, icon("alert", 14), " Do not process — verify by phone"),
+          itemList(data.alerts, "", (item) => [mailLink(item.id, item.subject, "today"), h("small", null, `${item.sender} · ${item.summary || ""}`)])
+        )
+      : null,
+    meetingsCard(data.meetings_today || []),
+  ].filter(Boolean);
 }
 
 /* Today's meetings, each opening in the calendar beside the mail about it. */

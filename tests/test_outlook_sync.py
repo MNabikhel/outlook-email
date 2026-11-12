@@ -388,6 +388,35 @@ def test_outlook_missing_is_said_and_the_rest_of_the_run_happens(store, settings
     assert outlook_run(store, settings, now=NOW)["message"] == "Classic Outlook didn't answer."
 
 
+def test_a_sync_that_didnt_work_shows_on_settings_until_one_does(store, settings, outlook, monkeypatch):
+    # A failed sync wasn't kept anywhere: the card stayed green and said "Not synced yet".
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    broken = True
+
+    @contextmanager
+    def connect(**_options):
+        if broken:
+            raise RuntimeError("the MAPI store is offline")
+        yield outlook
+
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    client = TestClient(web.create_app(settings, store))
+    outlook_run(store, settings, now=NOW)
+    data = client.get("/api/settings", headers=PAGE).json()["outlook"]
+    assert data["last_error"] == "Outlook couldn't be read this time (the MAPI store is offline)."
+    assert data["last_error_at"] and data["last_sync"] == ""
+    broken = False
+    outlook.add("e1", "Invoice INV-7741 from Northwind", minutes=1)
+    outlook_run(store, settings, now=NOW + timedelta(minutes=15))
+    data = client.get("/api/settings", headers=PAGE).json()["outlook"]
+    assert data["last_error"] == "" and data["last_result"] == "1 new"
+    broken = True
+    outlook_run(store, settings, now=NOW + timedelta(minutes=30))
+    assert client.get("/api/settings", headers=PAGE).json()["outlook"]["last_error"].startswith("Outlook couldn't be read")
+    outlook_sync.disconnect(store)
+    assert client.get("/api/settings", headers=PAGE).json()["outlook"]["last_error"] == "", "connecting again starts afresh"
+
+
 # The Settings page ---------------------------------------------------------------------------------------
 
 

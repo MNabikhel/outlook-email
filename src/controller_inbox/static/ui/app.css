@@ -999,6 +999,10 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .set-banner .dot { flex: none; width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: var(--faint); }
 .set-banner.on { border-color: var(--ok-line); background: var(--ok-soft); }
 .set-banner.on .dot { background: var(--ok); }
+.set-banner.error { border-color: var(--danger-line); background: var(--danger-soft); }
+.set-banner.error .dot { background: var(--danger); }
+.set-banner-error { display: flex; gap: 6px; align-items: flex-start; margin: 0; color: var(--danger); font-weight: 550; }
+.set-banner-error .ic { flex: none; margin-top: 2px; }
 .set-models { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
 .set-models-row { display: grid; grid-template-columns: minmax(130px, 1fr) minmax(110px, 0.9fr) minmax(0, 2fr); gap: 4px 14px; align-items: baseline; padding: 9px 12px; border-top: 1px solid var(--border); font-size: 13px; }
 .set-models-row:first-child { border-top: 0; }
@@ -1411,6 +1415,11 @@ dialog.consent p { margin: 0 0 10px; line-height: 1.5; }
 .cal-facts dd { margin: 0; overflow-wrap: anywhere; }
 .cal-chip { display: flex; gap: 5px; align-items: baseline; width: 100%; min-width: 0; text-align: left; border: 0; border-left: 3px solid var(--accent); border-radius: 5px; background: var(--accent-soft); color: var(--text); padding: 2px 6px; font: inherit; font-size: 12px; cursor: pointer; margin-top: 2px; }
 .cal-chip:hover, .cal-chip:focus-visible { filter: brightness(0.96); outline: 2px solid var(--accent); outline-offset: 1px; }
+/* The meeting open beside the calendar. */
+.cal-chip.open { background: var(--accent); color: var(--on-accent); }
+.cal-chip.open .cal-time { color: inherit; }
+.cal-panel-title:focus { outline: none; }
+.cal-panel-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .cal-chip.all-day { border-left-color: var(--ok, #2e7d4f); background: var(--ok-soft); }
 .cal-chip.cancelled .cal-subj { text-decoration: line-through; color: var(--muted); }
 .cal-time { flex: none; color: var(--text-2); font-variant-numeric: tabular-nums; }
@@ -1433,10 +1442,40 @@ dialog.consent p { margin: 0 0 10px; line-height: 1.5; }
 .cal-allday-cell { padding: 2px; border-left: 1px solid var(--border); min-width: 0; }
 .cal-hours { display: flex; flex-direction: column; }
 .cal-hour { font-size: 11px; color: var(--muted); text-align: right; padding-right: 6px; box-sizing: border-box; transform: translateY(-6px); }
-.cal-col { position: relative; border-left: 1px solid var(--border); background-image: linear-gradient(var(--border) 1px, transparent 1px); background-size: 100% 48px; }
+.cal-col { position: relative; list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border); background-image: linear-gradient(var(--border) 1px, transparent 1px); background-size: 100% 48px; }
+.cal-slot { position: absolute; display: flex; }
 .cal-col.today { background-color: color-mix(in srgb, var(--accent-soft) 45%, transparent); }
-.cal-block { position: absolute; flex-direction: column; gap: 0; align-items: flex-start; overflow: hidden; margin: 0; padding: 3px 6px; box-sizing: border-box; }
-.cal-block .cal-subj { white-space: normal; }
+.cal-block { flex-direction: column; gap: 0; align-items: flex-start; overflow: hidden; height: 100%; margin: 0; padding: 3px 6px; box-sizing: border-box; }
+/* As many lines of the title as the block holds, the last ending in "…". */
+.cal-block .cal-subj { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: var(--cal-lines, 2); line-clamp: var(--cal-lines, 2); overflow: hidden; }
 .cal-block.short { flex-direction: row; align-items: center; gap: 5px; padding: 0 6px; }
-.cal-block.short .cal-subj { white-space: nowrap; }
+.cal-block.short .cal-subj { display: block; white-space: nowrap; }
+.cal-wd-1 { display: none; }
+
+/* A phone: the month fits the screen (one-letter weekdays, a dot for each meeting) and the week scrolls sideways
+   with columns wide enough to read, the hours staying in view. */
+@media (max-width: 600px) {
+  .cal-month { min-width: 0; }
+  .cal-month th { padding: 4px 2px; text-align: center; }
+  .cal-wd { display: none; }
+  .cal-wd-1 { display: inline; }
+  .cal-cell { height: 58px; padding: 2px; }
+  .cal-daynum { display: block; padding: 1px 4px; }
+  .cal-month .cal-chip { display: inline-block; width: 9px; height: 9px; margin: 1px; padding: 0; border: 0; border-radius: 50%; background: var(--accent); vertical-align: middle; }
+  .cal-month .cal-chip.all-day { background: var(--ok); }
+  .cal-month .cal-chip.cancelled { background: var(--faint); }
+  .cal-month .cal-chip.open { outline: 2px solid var(--text); outline-offset: 1px; }
+  .cal-month .cal-chip > * { display: none; }
+  .cal-more { display: block; padding: 0 2px; font-size: 11px; }
+  .cal-week { min-width: 0; }
+  .cal-week.view-week > * { min-width: calc(56px + 7 * 112px); }
+  .cal-week.view-week .cal-hours, .cal-week.view-week .cal-days-head > span:first-child, .cal-week.view-week .cal-allday > span { position: sticky; left: 0; z-index: 1; background: var(--surface); }
+  .cal-main { padding: 10px 12px 24px; }
+}
 .plain-list.meetings li.cancelled a { text-decoration: line-through; color: var(--muted); }
+/* Today's warnings and meetings above its list, on a phone only (wider screens show them beside it). */
+.list-brief { display: none; }
+@media (max-width: 900px) {
+  .list-brief { display: flex; flex-direction: column; gap: 10px; padding: 12px 12px 4px; }
+  .list-brief .card { margin: 0; }
+}

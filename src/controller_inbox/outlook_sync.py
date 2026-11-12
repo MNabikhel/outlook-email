@@ -39,6 +39,8 @@ FOLDER_LIST_KEY = "outlook_folder_list"
 ACCOUNT_KEY = "outlook_account"
 LAST_SYNC_KEY = "outlook_last_sync"
 LAST_RESULT_KEY = "outlook_last_result"
+# The last sync that didn't work ({"at", "error"}), shown on Settings → Sync inbox until a sync works again.
+LAST_ERROR_KEY = "outlook_last_error"
 # Settings → Sync inbox: when the user agreed that CloseDesk reads Outlook (and the calendar, a separate yes).
 CONSENT_KEY = "outlook_consent"
 CALENDAR_KEY = "outlook_calendar"
@@ -104,10 +106,25 @@ def disconnect(store: Store) -> None:
     """Stop reading Outlook. The mail copied stays; the meetings read from its calendar go (they would only go
     stale); connecting again asks again."""
     store.set_state(CONSENT_KEY, "revoked")
-    for key in (CALENDAR_KEY, CALENDAR_LAST_KEY, LAST_SYNC_KEY):
+    for key in (CALENDAR_KEY, CALENDAR_LAST_KEY, LAST_SYNC_KEY, LAST_ERROR_KEY):
         store.set_state(key, "")
     store.set_state(AUTO_KEY, "0")
     store.forget_meetings("outlook")
+
+
+def note_failure(store: Store, error: str, now: datetime | None = None) -> None:
+    """Keep why this sync didn't work, for Settings → Sync inbox (until the next one works)."""
+    stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    store.set_state(LAST_ERROR_KEY, json.dumps({"at": stamp, "error": error}))
+
+
+def last_failure(store: Store) -> dict:
+    """The last sync that didn't work, {"at", "error"}, or {} when the last one worked."""
+    try:
+        said = json.loads(store.get_state(LAST_ERROR_KEY) or "{}")
+    except ValueError:
+        return {}
+    return said if isinstance(said, dict) and said.get("error") else {}
 
 
 def set_calendar(store: Store, on: bool) -> None:
@@ -324,6 +341,7 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
             report["failed"].append({"folder": "Calendar", "error": str(exc)[:300]})
     stamp = now.astimezone(timezone.utc).isoformat()
     store.set_state(LAST_SYNC_KEY, stamp)
+    store.set_state(LAST_ERROR_KEY, "")
     store.set_state(
         LAST_RESULT_KEY,
         json.dumps({key: report[key] for key in ("new", "updated", "moved", "removed", "already")} | {"failed": len(report["failed"]), "at": stamp}),

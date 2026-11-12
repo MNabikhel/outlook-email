@@ -55,7 +55,7 @@ To see the check without starting, run `CloseDesk.command --check` (Mac) or `Clo
 
 ## Every morning
 
-1. **Classic Outlook on Windows: connect it once.** Open **Settings → Sync inbox** and click **Connect to Outlook**. CloseDesk says what it will do and asks first: it copies your mail and attachments, and your calendar if you leave **Also read my calendar** ticked, and keeps them up to date while it's open. It only reads: nothing in Outlook is changed, moved, marked read, flagged, deleted or sent. Mail you delete in Outlook disappears from CloseDesk on the next sync. Which folders, how often and how far back are under **Advanced** (the Inbox, every 15 minutes, the last 30 days, until you change them). **Disconnect** stops it; what was copied stays. If you use this, skip the dragging below.
+1. **Classic Outlook on Windows: connect it once.** Open **Settings → Sync inbox** and click **Connect to Outlook**. CloseDesk says what it will do and asks first: it copies your mail and attachments, and your calendar if you leave **Read my calendar too** ticked, and keeps them up to date while it's open. It only reads: nothing in Outlook is changed, moved, marked read, flagged, deleted or sent. Mail you delete in Outlook disappears from CloseDesk on the next sync. Which folders, how often and how far back are under **Advanced** (the Inbox, every 15 minutes, the last 30 days, until you change them). **Disconnect** stops it; what was copied stays. If you use this, skip the dragging below.
 
    **Otherwise, get yesterday's mail out of Outlook** into the project's `inbox/incoming` folder:
    - **Classic Outlook (Windows):** click the first message, Shift+click the last, and drag the selection onto `inbox\incoming` in File Explorer. Each becomes a `.msg` with its attachments inside.
@@ -131,7 +131,8 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 | Which LM Studio address? | CloseDesk uses the OpenAI-compatible one, `http://localhost:1234/v1`, and adds `/chat/completions` itself. Pasting `…/v1/chat/completions` or `…/api/v1/chat` into `CONTROLLER_INBOX_LLM_BASE_URL` works too. |
 | Summaries look generic | Those came from the fast scripts. Start the model and process again; the model reads everything that is still waiting. |
 | **Sync inbox** says classic Outlook isn't on this computer | It works on Windows with classic Outlook only. On New Outlook or a Mac, use the drop folder; meeting invitations in that mail still show in the calendar. |
-| The calendar shows only some meetings | Without Outlook connected, it shows the meetings from invitations in your mail. Connect Outlook in **Settings → Sync inbox** with **Read my calendar** on for the whole calendar; it is read once an hour. |
+| The calendar shows only some meetings | Without Outlook connected, it shows the meetings from invitations in your mail. Connect Outlook in **Settings → Sync inbox** with **Read my calendar too** on for the whole calendar; it is read once an hour. |
+| **Sync inbox** says "Last sync didn't work" | The reason follows it (Outlook wasn't open, or couldn't be read). Open classic Outlook and click **Sync now**; the line goes once a sync works. Mail already copied stays. |
 | Outlook asks "A program is trying to access…" | Choose **Allow**. If IT blocks programs from reading Outlook, the sync says so; use the drop folder instead. |
 | A file landed in `inbox/failed` | Open the `.why.txt` next to it. Usually re-saving the message from Outlook fixes it. |
 | A category is wrong | Open the message, use **Wrong category?**, and write one sentence on why. That sender is learned. |

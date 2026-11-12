@@ -119,10 +119,10 @@ def test_ask_closedesk_reads_the_calendar_for_a_question_about_meetings(loaded, 
     sources = next(e for e in events if e["type"] == "sources")["sources"]
     assert sources[0]["subject"] == "Your calendar" and sources[0]["calendar"]
     text = "".join(e["text"] for e in events if e["type"] == "delta")
-    assert "2026-09-23 09:30–09:45 · AP team standup" in text and "PBC list walkthrough" in text
+    assert "Wed Sep 23, 9:30am–9:45am · AP team standup" in text and "PBC list walkthrough" in text
     assert "Northwind" not in text, "tomorrow's meetings only"
     monday = "".join(e["text"] for e in assistant.answer_stream(loaded, settings, "Am I free on Monday?", today="2026-09-22") if e["type"] == "delta")
-    assert "2026-09-28" in monday and "2026-09-23" not in monday, "the coming Monday"
+    assert "Mon Sep 28" in monday and "Sep 23" not in monday, "the coming Monday"
 
     asked = []
 
