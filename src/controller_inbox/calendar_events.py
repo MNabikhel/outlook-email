@@ -692,7 +692,9 @@ def refresh_invites(store, settings, *, now: datetime | None = None, limit: int 
             current = store.get_email(email_id, conn=conn)
             if current is None or attachments_locked(current):  # held meanwhile
                 continue
-            store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp, conn=conn)
+            # The occurrences before the new window are kept: the weeks a series already had stay on the calendar.
+            store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp,
+                               keep_before=_utc(now - WINDOW_BACK), conn=conn)
         done += 1
     return done
 
@@ -749,7 +751,7 @@ def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int
         for _rowid, email_id in rows:
             email = store.get_email(email_id)
             try:
-                found = _kept_invitations(email, settings, now) if email is not None else None
+                found = _caught_up(email, settings, now) if email is not None else None
             except Exception:  # an invitation that can't be read again adds nothing
                 found = None
             if found:
@@ -764,6 +766,28 @@ def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int
         looked += len(rows)
         store.set_state(CATCH_UP_KEY, str(rows[-1][0]))
     return looked
+
+
+def _caught_up(email, settings, now: datetime) -> list[Meeting] | None:
+    """An old email's meetings, as ``_kept_invitations`` reads them around ``now``, with the occurrences before that
+    window that it named around when it arrived: a repeating meeting that ended months before the update is on the
+    calendar for the weeks it was, as a one-off meeting from those weeks is."""
+    found = _kept_invitations(email, settings, now)
+    try:
+        received = _aware(datetime.fromisoformat(email.received_at))
+    except (TypeError, ValueError):
+        return found
+    low = now - WINDOW_BACK
+    if found is None or received >= low:
+        return found
+    have = {meeting.id for meeting in found}
+    before = _utc(low)
+    earlier = [m for m in _kept_invitations(email, settings, received) or [] if m.start < before and m.id not in have]
+    return found + earlier
+
+
+def _utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def _refile_invitation(store, settings, email_id: str, now: datetime) -> None:

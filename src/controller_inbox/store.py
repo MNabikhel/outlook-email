@@ -702,10 +702,12 @@ class Store:
 
     def save_invites(
         self, email_id: str, meetings: list, *, sender: str = "", received: str = "", expanded: str = "", held: bool = False,
-        sender_name: str = "", conn: sqlite3.Connection | None = None,
+        sender_name: str = "", keep_before: str = "", conn: sqlite3.Connection | None = None,
     ) -> None:
         """The meetings an email's invitations name (calendar_events), replacing what it named before, at most
-        ``MAX_INVITE_ROWS``, their repeats worked out at ``expanded`` (now when not given). Which email's word on a
+        ``MAX_INVITE_ROWS``, their repeats worked out at ``expanded`` (now when not given). With ``keep_before`` (ISO,
+        UTC), the meetings it named that start before then are kept: its repeats worked out again around a later day
+        don't reach back as far, and a series that has ended stays on the calendar for the weeks it was. Which email's word on a
         meeting counts (an update, a cancellation, a forward of it) is decided when the calendar is read
         (``_invite_winners``): an email never removes another's rows, so one arriving out of order, or later deleted,
         can't lose the meeting. For ``held`` mail only which meetings it named is kept (``_hold``), so Outlook's own
@@ -717,12 +719,18 @@ class Store:
                     "SELECT uid, MIN(first_seen) FROM meetings WHERE email_id = ? AND source = 'invite' GROUP BY uid", (email_id,)
                 )
             }
-            conn.execute("DELETE FROM meetings WHERE email_id = ? AND source IN ('invite', 'held')", (email_id,))
+            keep_before = "" if held else keep_before
+            conn.execute(
+                "DELETE FROM meetings WHERE email_id = ? AND source IN ('invite', 'held') AND NOT (source = 'invite' AND start < ?)",
+                (email_id, keep_before),
+            )
             if held:
                 _hold(conn, email_id, [(meeting.uid, meeting.start, meeting.organizer) for meeting in meetings], _named(sender_name, sender))
                 return
             stamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
             expanded = expanded or datetime.now(timezone.utc).isoformat(timespec="seconds")
+            if keep_before:  # those kept were looked at now too
+                conn.execute("UPDATE meetings SET expanded = ? WHERE email_id = ? AND source = 'invite'", (expanded, email_id))
             for meeting in meetings[:MAX_INVITE_ROWS]:
                 self._put_meeting(conn, meeting, sender=sender, received=received, first_seen=first.get(meeting.uid) or stamp, expanded=expanded)
 

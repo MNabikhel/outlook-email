@@ -1070,3 +1070,54 @@ def test_after_an_update_stored_replies_lose_their_accept_or_decline_task(store,
     assert accept.category == counter.category == DocumentType.MEETING
     assert [a.title for a in accept.actions if a.source == "meeting" and a.status == ActionStatus.OPEN] == []
     assert store.meetings_between("2026-10-01", "2026-10-31") == []
+
+
+def _stored_invitation(store, email_id: str, data: str, received: str):
+    import sys
+
+    from controller_inbox.extract import sha256_bytes
+    from controller_inbox.models import AttachmentRecord, DocumentType, ExtractedFields
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    record = _record(email_id, sender="auditor@audit.example", received=received)
+    record.category = DocumentType.MEETING
+    record.attachments = [AttachmentRecord(id=f"{email_id}:0", email_id=email_id, filename="invite.ics", content_type="text/calendar",
+                                           size_bytes=len(data), sha256=sha256_bytes(data.encode()), extracted_text=data,
+                                           document_type=DocumentType.OTHER, document_confidence=0, extracted_fields=ExtractedFields())]
+    store.upsert_email(record)
+    return record
+
+
+def test_a_repeating_meeting_that_ended_stays_on_the_calendar_when_its_repeats_are_worked_out_again(store, settings):
+    """The overnight run works a repeating invitation's repeats out again around a later day: the occurrences before
+    that day's window are kept, as a one-off meeting from the same week is, and the email isn't looked at again
+    every night for them. After an update, a series that ended months ago reaches the calendar too."""
+    from datetime import timedelta
+
+    read = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    organizer = "ORGANIZER:mailto:auditor@audit.example"
+    weekly = _ics(_event("UID:audit", "SUMMARY:Year-end audit", "DTSTART:20260105T150000Z", "DTEND:20260105T160000Z", organizer,
+                         "RRULE:FREQ=WEEKLY;COUNT=5"))
+    single = _ics(_event("UID:one", "SUMMARY:Kick-off", "DTSTART:20260105T170000Z", "DTEND:20260105T180000Z", organizer))
+    for email_id, data in (("weekly", weekly), ("single", single)):
+        record = _stored_invitation(store, email_id, data, read.isoformat())
+        store.save_invites(email_id, cal.from_ics(data, email_id=email_id, now=read), sender=record.sender_email,
+                           received=record.received_at, expanded=read.isoformat())
+
+    def january():
+        return [(m["subject"], m["start"][:10]) for m in store.meetings_between("2026-01-01T00:00:00+00:00", "2026-02-15T00:00:00+00:00")]
+
+    shown = january()
+    assert len(shown) == 6
+    may = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    assert cal.refresh_invites(store, settings, now=may) == 1
+    assert january() == shown, "worked out again in May, January's weeks are kept"
+    assert cal.refresh_invites(store, settings, now=may + timedelta(days=1)) == 0, "not looked at again the next night"
+
+    # Mail read by a version that kept no meetings, caught up in November: the series ended in February.
+    with store.connect() as conn:
+        conn.execute("DELETE FROM meetings")
+    cal.catch_up_invites(store, settings, now=datetime(2026, 11, 12, tzinfo=timezone.utc))
+    assert january() == shown
