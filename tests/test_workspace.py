@@ -836,3 +836,13 @@ def test_workspace_scripts_link_to_the_workspace_settings_not_the_classic_page()
         if re.search(r"""["'`]/settings\b""", line)
     ]
     assert found == []
+
+
+def test_an_email_shows_its_conversation_and_moves_along_it(site, page):
+    page.goto(f"{site}/app/mail/demo-inv-10482")
+    related = page.wait_for_selector("#rd-related")
+    assert "This conversation, oldest first" in related.inner_text()
+    assert page.locator("#rd-related .rel-row.here [aria-current]").count() == 1
+    page.click('#rd-related a[href="/app/mail/demo-inv-10482-dup"]')
+    page.wait_for_selector('.rd[data-email="demo-inv-10482-dup"] #rd-related')
+    assert page.url.endswith("/app/mail/demo-inv-10482-dup")

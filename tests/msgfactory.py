@@ -43,7 +43,13 @@ def build_message(
     forwarded: list[tuple[str, "msg.MapiMessage"]] | None = None,
     logo: bytes | None = None,
     html: str = "",
+    headers: list[str] | None = None,
+    conversation_index: bytes = b"",
+    in_reply_to: str = "",
+    references: str = "",
 ):
+    """``headers``: more Internet headers ("In-Reply-To: <...>"). ``conversation_index``, ``in_reply_to`` and
+    ``references``: the message's own properties, as Exchange mail without Internet headers has them."""
     require()
     sent = sent or datetime(2026, 9, 28, 14, 30, tzinfo=timezone.utc)
     message = msg.MapiMessage.create(subject, body)
@@ -58,15 +64,21 @@ def build_message(
         )
         message.set_property(SENDER_SMTP, string, sender_email)
     else:
-        headers = [
+        lines = [
             f"From: {sender_name} <{sender_email}>",
             f"Date: {format_datetime(sent)}",
             f"Subject: {subject}",
             f"Message-ID: {message_id or '<' + subject.replace(' ', '-').lower() + '@' + sender_email.split('@')[-1] + '>'}",
         ]
         if reply_to:
-            headers.append(f"Reply-To: {reply_to}")
-        message.set_property(msg.PropertyId.TRANSPORT_MESSAGE_HEADERS, string, "\r\n".join(headers) + "\r\n")
+            lines.append(f"Reply-To: {reply_to}")
+        message.set_property(msg.PropertyId.TRANSPORT_MESSAGE_HEADERS, string, "\r\n".join(lines + (headers or [])) + "\r\n")
+    if conversation_index:
+        message.set_property(0x0071, msg.PropertyTypeCode.PTYP_BINARY, conversation_index)
+    if in_reply_to:
+        message.set_property(0x1042, string, in_reply_to)
+    if references:
+        message.set_property(0x1039, string, references)
     message.set_property(msg.PropertyId.MESSAGE_DELIVERY_TIME, msg.PropertyTypeCode.PTYP_TIME, sent)
     if html:
         message.body_html = html

@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from controller_inbox import cost_codes
+from controller_inbox import cost_codes, links
 from controller_inbox.actions import local_today
 from controller_inbox.clock import parse_stamp
 from controller_inbox.config import Settings
@@ -28,6 +28,7 @@ from controller_inbox.store import Store
 from controller_inbox.vision import Result, read_waiting
 
 log = logging.getLogger(__name__)
+CATCH_UP_SECONDS = 5.0  # of linking stored mail at the start of a run
 
 Progress = Callable[[str, int, int, str], None]
 
@@ -259,6 +260,12 @@ def _run_overnight(
     reread = reread_attachments(
         store, settings, on_progress=(lambda i, n, name: on_progress("rereading", i, n, name)) if on_progress else None
     )
+    # Mail stored before emails were linked is filed under its keys: a few seconds here, so the dashboard isn't kept
+    # waiting, and the rest in the background (cli._link_stored_mail) or the next run. A failure here stops nothing.
+    try:
+        links.catch_up(store, settings, seconds=CATCH_UP_SECONDS)
+    except Exception:
+        log.warning("Linking stored mail stopped; the next run carries on", exc_info=True)
     outlook = _sync_outlook(store, settings, sync_outlook, now, on_progress)
     folder_report: dict = {}
     ingested = ingest_folder(

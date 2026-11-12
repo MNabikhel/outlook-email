@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 import uuid
+from types import SimpleNamespace
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,7 +52,8 @@ CREATE TABLE IF NOT EXISTS emails (
     summary TEXT,
     model_status TEXT,
     source_path TEXT DEFAULT '',
-    reply_to TEXT DEFAULT ''
+    reply_to TEXT DEFAULT '',
+    threading TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -261,6 +263,16 @@ CREATE TABLE IF NOT EXISTS page_failures (
 -- Messages copied from classic Outlook (outlook_sync.py): Outlook's id for each, the email it became, and what
 -- Outlook last said about it, so the next sync sees what changed. ``owned``: CloseDesk filed it from Outlook (a
 -- deletion in Outlook removes it); 0 when the same message was already here, dropped in by hand.
+-- The keys each email is filed under to find the emails that belong with it (links.py): its conversation, its
+-- invoice and PO numbers, its files and their names.
+CREATE TABLE IF NOT EXISTS email_keys (
+    email_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (email_id, kind, value)
+);
+CREATE INDEX IF NOT EXISTS idx_email_keys_value ON email_keys(kind, value);
+
 CREATE TABLE IF NOT EXISTS outlook_items (
     entry_id TEXT PRIMARY KEY,
     store_id TEXT NOT NULL DEFAULT '',
@@ -303,6 +315,7 @@ EMAIL_ROWS = (
     ("page_failures", "attachment_id"),
     ("page_fixes", "attachment_id"),
     ("embeddings", "email_id"),
+    ("email_keys", "email_id"),
     ("findings", "email_id"),
     ("action_items", "email_id"),
     ("fraud_checks", "email_id"),
@@ -416,8 +429,8 @@ class Store:
                     category, category_confidence, importance, importance_score,
                     importance_reasons, flags, extracted, source, conversation_id,
                     internet_message_id, writeback_status, created_at,
-                    folder, summary, model_status, reply_to
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    folder, summary, model_status, reply_to, threading
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     subject=excluded.subject,
                     sender_name=excluded.sender_name,
@@ -442,7 +455,8 @@ class Store:
                     folder=excluded.folder,
                     summary=excluded.summary,
                     model_status=excluded.model_status,
-                    reply_to=excluded.reply_to
+                    reply_to=excluded.reply_to,
+                    threading=excluded.threading
                 """,
                 (
                     email.id,
@@ -471,6 +485,7 @@ class Store:
                     email.summary,
                     email.model_status or "script_draft",
                     email.reply_to,
+                    _dumps(email.threading) if email.threading else "",
                 ),
             )
             stored = _first_readings(conn, email.id)
@@ -536,6 +551,158 @@ class Store:
                         action.created_at,
                     ),
                 )
+            self._file_keys(conn, email)
+
+    def _file_keys(self, conn: sqlite3.Connection, email: EmailRecord) -> None:
+        """File ``email`` under its keys (links.py), replacing the ones it had."""
+        from controller_inbox import links
+
+        conn.execute("DELETE FROM email_keys WHERE email_id = ?", (email.id,))
+        conn.executemany("INSERT OR IGNORE INTO email_keys (email_id, kind, value) VALUES (?, ?, ?)", [(email.id, kind, value) for kind, value in links.keys(email)])
+
+    def received_times(self, email_ids: list[str]) -> dict[str, str]:
+        """When each email came, by id: to order a long conversation without loading its emails."""
+        out: dict[str, str] = {}
+        ids = list(dict.fromkeys(email_ids))
+        with self.connect() as conn:
+            for start in range(0, len(ids), 500):
+                chunk = ids[start : start + 500]
+                out.update(conn.execute(f"SELECT id, received_at FROM emails WHERE id IN ({', '.join('?' * len(chunk))})", chunk).fetchall())
+        return {key: value or "" for key, value in out.items()}
+
+    def save_threadings(self, found: dict[str, dict], *, cursor: tuple[str, str] | None = None) -> None:
+        """Keep each email's conversation headers and file it under its keys again, all in one write."""
+        with self.transaction() as conn:
+            records = self.get_emails(list(found), conn=conn)
+            for email_id, info in found.items():
+                if (email := records.get(email_id)) is not None:
+                    email.threading = info
+                    conn.execute("UPDATE emails SET threading = ? WHERE id = ?", (_dumps(info), email_id))
+                    self._file_keys(conn, email)
+            if cursor is not None:
+                conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES (?, ?)", cursor)
+
+    def save_threading(self, email: EmailRecord) -> None:
+        """Keep what ``email.threading`` says now, and file it under its keys again."""
+        with self.connect() as conn:
+            conn.execute("UPDATE emails SET threading = ? WHERE id = ?", (_dumps(email.threading) if email.threading else "", email.id))
+            self._file_keys(conn, email)
+
+    def link_keys(self, email_id: str) -> list[tuple[str, str]]:
+        with self.connect() as conn:
+            return [(row[0], row[1]) for row in conn.execute("SELECT kind, value FROM email_keys WHERE email_id = ? ORDER BY kind, value", (email_id,))]
+
+    def email_heads(self, email_ids: list[str]) -> list[SimpleNamespace]:
+        """What the invoice checks need of each email, without its text or files: id, the order it was stored in,
+        subject, sender, Reply-To, Message-ID, threading, when it was stored and sent, flags, category, its invoice
+        numbers and whether it brings an invoice file. In the order asked."""
+        found: dict[str, SimpleNamespace] = {}
+        ids = list(dict.fromkeys(email_ids))
+        with self.connect() as conn:
+            for start in range(0, len(ids), 400):
+                chunk = ids[start : start + 400]
+                rows = conn.execute(
+                    f"""SELECT e.rowid AS stored, e.id, e.subject, e.sender_email, e.reply_to, e.internet_message_id, e.threading,
+                               e.created_at, e.received_at, e.flags, e.category, e.extracted,
+                               EXISTS(SELECT 1 FROM attachments a WHERE a.email_id = e.id AND a.document_type = ?) AS invoice_file
+                        FROM emails e WHERE e.id IN ({", ".join("?" * len(chunk))})""",
+                    [DocumentType.AP_INVOICE.value, *chunk],
+                ).fetchall()
+                for row in rows:
+                    extracted = _loads(row["extracted"], {}) or {}
+                    try:
+                        category = DocumentType(row["category"])
+                    except ValueError:
+                        category = DocumentType.OTHER
+                    found[row["id"]] = SimpleNamespace(
+                        id=row["id"],
+                        stored=row["stored"],
+                        subject=row["subject"] or "",
+                        sender_email=row["sender_email"] or "",
+                        reply_to=row["reply_to"] or "",
+                        internet_message_id=row["internet_message_id"] or "",
+                        threading=_loads(row["threading"], {}) if row["threading"] else {},
+                        created_at=row["created_at"] or "",
+                        received_at=row["received_at"] or "",
+                        flags=_loads(row["flags"], []) or [],
+                        category=category,
+                        invoice_numbers=list(extracted.get("invoice_numbers") or []),
+                        invoice_file=bool(row["invoice_file"]),
+                    )
+        return [found[i] for i in ids if i in found]
+
+    def link_values_of(self, email_ids: list[str], kind: str) -> list[str]:
+        """The values the emails ``email_ids`` are filed under (``kind``), each once, in one query per 400."""
+        found: dict[str, None] = {}
+        with self.connect() as conn:
+            for start in range(0, len(email_ids), 400):
+                chunk = email_ids[start : start + 400]
+                for row in conn.execute(
+                    f"SELECT value FROM email_keys WHERE kind = ? AND email_id IN ({', '.join('?' * len(chunk))})", [kind, *chunk]
+                ):
+                    found.setdefault(row[0], None)
+        return list(found)
+
+    def link_values(self, email_id: str, kind: str) -> list[str]:
+        with self.connect() as conn:
+            return [row[0] for row in conn.execute("SELECT value FROM email_keys WHERE email_id = ? AND kind = ?", (email_id, kind))]
+
+    def emails_with_keys(self, kind: str, values: list[str], *, exclude: str = "", common: int = 0) -> dict[str, list[str]]:
+        """For each of ``values``, the emails filed under it (``kind``), newest first, but ``exclude``. A value more
+        than ``common`` emails share is left out (0: none is)."""
+        found: dict[str, list[str]] = {}
+        values = list(dict.fromkeys(values))
+        with self.connect() as conn:
+            if common:
+                # A value more emails share than ``common`` is left out: counted first, not read and thrown away.
+                kept = []
+                for start in range(0, len(values), 400):
+                    chunk = values[start : start + 400]
+                    kept += [row[0] for row in conn.execute(
+                        f"SELECT value FROM email_keys WHERE kind = ? AND value IN ({', '.join('?' * len(chunk))}) GROUP BY value HAVING COUNT(*) <= ?",
+                        [kind, *chunk, common],
+                    )]
+                values = kept
+            for start in range(0, len(values), 400):
+                chunk = values[start : start + 400]
+                marks = ", ".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"""
+                    SELECT k.value, k.email_id FROM email_keys k JOIN emails e ON e.id = k.email_id
+                    WHERE k.kind = ? AND k.value IN ({marks})
+                    ORDER BY e.received_at DESC
+                    """,
+                    [kind, *chunk],
+                ).fetchall()
+                for value, email_id in rows:
+                    found.setdefault(value, []).append(email_id)
+        out = {}
+        for value, ids in found.items():
+            if common and len(ids) > common:
+                continue
+            ids = [i for i in ids if i != exclude]
+            if ids:
+                out[value] = ids
+        return out
+
+    def file_link_keys(self, *, batch: int = 500) -> int:
+        """File the emails stored before keys were (or with keys from an older version of links.py) under theirs,
+        ``batch`` at a time, oldest first; resumes where the last call stopped. Returns how many were filed."""
+        from controller_inbox import links
+
+        with self.connect() as conn:
+            if (conn.execute("SELECT value FROM sync_state WHERE key = 'link_keys_version'").fetchone() or [""])[0] != links.KEYS_VERSION:
+                conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('link_keys_version', ?)", (links.KEYS_VERSION,))
+                conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('link_keys_rowid', '0')")
+            after = int((conn.execute("SELECT value FROM sync_state WHERE key = 'link_keys_rowid'").fetchone() or ["0"])[0] or 0)
+            rows = conn.execute("SELECT rowid, id FROM emails WHERE rowid > ? ORDER BY rowid LIMIT ?", (after, batch)).fetchall()
+            if not rows:
+                return 0
+            records = self.get_emails([row[1] for row in rows], conn=conn)
+            for record in records.values():
+                self._file_keys(conn, record)
+            conn.execute("INSERT OR REPLACE INTO sync_state(key, value) VALUES ('link_keys_rowid', ?)", (str(rows[-1][0]),))
+        return len(rows)
 
     def get_email(self, email_id: str, *, conn: sqlite3.Connection | None = None) -> EmailRecord | None:
         with self._use(conn) as conn:
@@ -781,6 +948,13 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
+
+    def drop_open_tasks(self, email_id: str, *, source: str) -> int:
+        """Remove an email's open tasks of one kind (``source``); finished and snoozed ones stay."""
+        with self.connect() as conn:
+            return conn.execute(
+                "DELETE FROM action_items WHERE email_id = ? AND source = ? AND status = 'open'", (email_id, source)
+            ).rowcount
 
     def find_duplicate_invoices(self, invoice_number: str, exclude_email_id: str) -> list[str]:
         if not invoice_number:
@@ -2000,6 +2174,7 @@ def _email_from_rows(
         model_status=_col(row, "model_status", "script_draft") or "script_draft",
         source_path=_col(row, "source_path", ""),
         reply_to=_col(row, "reply_to", "") or "",
+        threading=_loads(_col(row, "threading", "") or "{}", {}),
         attachments=attachments,
         actions=[_action_from_row(item) for item in action_rows],
     )
@@ -2093,6 +2268,13 @@ def _migrate(conn: sqlite3.Connection) -> None:
         _add_column(conn, "ALTER TABLE emails ADD COLUMN done_at TEXT DEFAULT ''")
     if "reply_to" not in cols:
         _add_column(conn, "ALTER TABLE emails ADD COLUMN reply_to TEXT DEFAULT ''")
+    if "threading" not in cols:
+        _add_column(conn, "ALTER TABLE emails ADD COLUMN threading TEXT DEFAULT ''")
+    if not conn.execute("SELECT 1 FROM sync_state WHERE key = 'link_keys_version'").fetchone() and not conn.execute("SELECT 1 FROM emails LIMIT 1").fetchone():
+        # A new, empty store files every email under this version's keys as it is read: nothing to file again.
+        from controller_inbox.links import KEYS_VERSION
+
+        conn.execute("INSERT INTO sync_state(key, value) VALUES ('link_keys_version', ?)", (KEYS_VERSION,))
     if "model" not in {row[1] for row in conn.execute("PRAGMA table_info(page_failures)")}:
         _add_column(conn, "ALTER TABLE page_failures ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if not conn.execute("SELECT 1 FROM sync_state WHERE key = 'attachment_text_without_nul'").fetchone():

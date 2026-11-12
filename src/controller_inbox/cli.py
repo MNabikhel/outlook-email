@@ -7,6 +7,7 @@ import json
 import logging
 import sqlite3
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -571,6 +572,8 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None)
     app = create_app(settings, store)
     # Automatic Outlook sync while the dashboard is open (Settings → Outlook).
     app.state.start_outlook_sync()
+    # Mail stored by an older version is linked to its conversations in the background, once.
+    threading.Thread(target=_link_stored_mail, args=(settings, store), name="link-mail", daemon=True).start()
     if not is_loopback(settings.host):
         names = ", ".join(sorted(allowed_hosts(settings.host, settings.allowed_hosts)))
         print(
@@ -582,6 +585,18 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None)
         )
     uvicorn.run(app, host=host or settings.host, port=port or settings.port, log_level="warning")
     return 0
+
+
+def _link_stored_mail(settings: Settings, store: Store) -> None:
+    """File mail stored by an older version under its conversation keys, in the background. Without the run lock:
+    it only writes link keys and conversation headers, a batch at a time, so Process new mail and the Outlook sync
+    aren't kept waiting on the first start after an update."""
+    from controller_inbox import links
+
+    try:
+        links.catch_up(store, settings)
+    except Exception:  # the next run catches up instead
+        log.warning("Couldn't link the stored mail yet", exc_info=True)
 
 
 def watch_tick(settings: Settings, store: Store, *, force_digest: bool = False, now: datetime | None = None) -> dict:
