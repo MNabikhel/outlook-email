@@ -33,7 +33,7 @@ from email.utils import getaddresses
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.models import AttachmentRecord, EmailRecord
 
-KEYS_VERSION = "1"  # changed whenever keys() files emails differently, so stored mail is filed again
+KEYS_VERSION = "2"  # changed whenever keys() files emails differently, so stored mail is filed again
 COMMON = 25  # a key shared by more emails than this links none of them
 MAX_THREAD = 60  # emails shown in one conversation (the newest kept)
 MAX_PER_REASON = 12
@@ -117,12 +117,18 @@ def keys(email: EmailRecord) -> list[tuple[str, str]]:
     if email.conversation_id:
         found.add(("thread", f"graph:{email.conversation_id}"))
     domain = sender_domain(email)
+    held = attachments_locked(email)
+    # A held email's numbers count only where its own text names them: read from its files (which stay closed), a
+    # lookalike's "invoice" would tie it to the real vendor's mail.
+    said = number_key(f"{email.subject} {email.body_text}") if held else ""
     for kind, numbers in (("invoice", _numbers(email, "invoice_numbers")), ("po", _numbers(email, "po_numbers"))):
         for number in numbers:
+            if held and number not in said:
+                continue
             found.add((kind, f"{domain}|{number}" if number.isdigit() else number))
     # A held email's files link to nothing, either way: a "new bank details" form sent from a lookalike domain must
     # not show up as the same file the real vendor sent.
-    for att in [] if attachments_locked(email) else email.attachments:
+    for att in [] if held else email.attachments:
         if not _real_file(att):
             continue
         if att.sha256:
