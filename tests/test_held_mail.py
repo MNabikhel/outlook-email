@@ -274,6 +274,24 @@ def test_the_answer_check_doesnt_count_its_text_as_read(loaded, settings):
     assert not assistant._grounded(ws, draft, history=None, today="2026-09-22")
 
 
+def test_the_classic_pages_dont_show_its_files_text(store, settings, mail):
+    """As the workspace and the file page already don't: no excerpt on its page, in its preview or on Attachments,
+    and no "Read text" link that would open a page refusing it."""
+    from controller_inbox.web import create_app
+
+    scam = mail["Updated remittance details"]
+    assert attachments_locked(store.get_email(scam.id))
+    said = " ".join(store.get_email(scam.id).attachments[0].extracted_text.split()[:6])
+    assert said
+    client = TestClient(create_app(settings, store), headers=PAGE)
+    for path in (f"/inbox/{scam.id}", f"/inbox/{scam.id}/preview", "/attachments"):
+        page = html.unescape(client.get(path).text)
+        assert said not in " ".join(page.split()), path
+        assert f'href="/inbox/{scam.id}/files/1"' not in page, path
+    record_fraud_verdict(store, settings, scam.id, verdict="safe")
+    assert said in " ".join(html.unescape(client.get(f"/inbox/{scam.id}").text).split()), "shown once it is marked safe"
+
+
 def test_trusting_a_taught_sender_releases_all_their_mail(store, settings):
     held = _taught_sender(store, settings)
     record_fraud_verdict(store, settings, held[0], verdict="safe", scope="sender")

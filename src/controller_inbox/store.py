@@ -1217,7 +1217,7 @@ class Store:
             params.append(document_type)
         sql = f"""
             SELECT a.*, e.subject, e.sender_name, e.sender_email, e.received_at,
-                   e.importance, e.category
+                   e.importance, e.category, {_held_sql("e")} AS held
             FROM attachments a
             JOIN emails e ON e.id = a.email_id
             WHERE {' AND '.join(clauses)}
@@ -2509,6 +2509,11 @@ def _address_domain(text: str | None) -> str:
 _HELD_SQL = (
     "((flags LIKE '%\"fraud_risk\"%' OR category = 'payment_instruction_change') AND flags NOT LIKE '%\"fraud_cleared\"%')"
 )
+
+
+def _held_sql(alias: str) -> str:
+    """``_HELD_SQL`` for the emails table under another name in a query (``e`` in ``FROM emails e``)."""
+    return _HELD_SQL.replace("flags", f"{alias}.flags").replace("category", f"{alias}.category")
 
 
 def _held_invite(row: sqlite3.Row) -> bool:

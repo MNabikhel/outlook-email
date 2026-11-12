@@ -91,7 +91,7 @@
     </div>
     {% if files %}
     {% if locked %}
-    <p class="warn-box">Files locked: this email may be payment fraud. You can read their text here (text can't run anything), but they don't download and Ask CloseDesk won't open them. Verify by phone, then mark it safe in the fraud check below.</p>
+    <p class="warn-box">Files locked: this email may be payment fraud. Their text isn't shown, they don't download and Ask CloseDesk won't open them. Verify by phone, then mark it safe in the fraud check.</p>
     {% endif %}
     <div class="file-grid">
       {% for card in files %}
@@ -107,9 +107,13 @@
           {% if att.extracted_fields.primary_invoice %}<span class="tag">Invoice {{ att.extracted_fields.primary_invoice }}</span>{% endif %}
           {% if att.extracted_fields.primary_amount %}<span class="tag">{{ att.extracted_fields.primary_amount | money }}</span>{% endif %}
         </p>
+        {% if locked %}
+        <p class="muted small">Text not shown while the email is held.</p>
+        {% else %}
         <pre class="clip">{{ att.extracted_text[:320] if card.chars else 'No readable text (a scan or a picture).' }}</pre>
+        {% endif %}
         <div class="file-actions">
-          {% if card.chars %}<a class="ghost" href="/inbox/{{ email.id }}/files/{{ card.n }}">Read text</a>{% endif %}
+          {% if card.chars and not locked %}<a class="ghost" href="/inbox/{{ email.id }}/files/{{ card.n }}">Read text</a>{% endif %}
           {% if locked %}
           <span class="muted small">Download locked</span>
           {% elif card.downloadable %}
