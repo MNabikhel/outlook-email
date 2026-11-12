@@ -1350,6 +1350,7 @@ _OPS = {
 }
 _DATE_FORMATS = ("%Y-%m-%d", "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%m/%d/%Y")
 _DATE_STEP = re.compile(r"^(.+?)\s*([+-])\s*(\d{1,5})\s*(day|week|month|year)s?$", re.I)
+_MINUS = re.compile(r"^(.+?)\s+[-–]\s+(.+)$")
 _BETWEEN = re.compile(r"^(?:(?:number of\s+)?days?\s+)?(?:between|from)\s+(.+?)\s+(?:and|to|until)\s+(.+)$", re.I)
 CALC_HELP = "Write numbers with + - * / ( ) and %, or dates like 2026-12-31 - 90 days, or days between 2026-10-02 and 2026-12-31."
 
@@ -1375,13 +1376,23 @@ def calculate(expression: str) -> str:
     if between and _parse_date(between.group(1)) and _parse_date(between.group(2)):
         first, second = _parse_date(between.group(1)), _parse_date(between.group(2))
         return f"{(second - first).days} days from {first.isoformat()} to {second.isoformat()}"
-    cells = re.findall(r"\b[A-Z]{1,3}\d{1,6}\b", text)
+    minus = _MINUS.match(text)
+    if minus and _parse_date(minus.group(1)) and _parse_date(minus.group(2)):
+        # "2026-12-31 - 2026-10-15": the days from the second date to the first, not a sum of their figures.
+        later, earlier = _parse_date(minus.group(1)), _parse_date(minus.group(2))
+        return f"{text} = {(later - earlier).days} days (from {earlier.isoformat()} to {later.isoformat()})"
+    if re.search(r"\b\d{4}-\d{1,2}-\d{1,2}\b", text):
+        return f"A date can only be moved by days, weeks, months or years, or taken from another date. {CALC_HELP}"
+    cells =re.findall(r"\b[A-Z]{1,3}\d{1,6}\b", text)
     if cells:
         return (
             f"calculate needs the numbers, not cell names ({', '.join(dict.fromkeys(cells))}). "
             "Read those cells with read_cells first, then call calculate with their values."
         )
-    cleaned = re.sub(r"(?<=\d),(?=\d{3}\b)", "", text.replace("$", "").replace("×", "*").replace("÷", "/"))
+    cleaned = text.replace("$", "").replace("×", "*").replace("÷", "/")
+    # A figure in brackets with a thousands comma is an accounting negative: "(1,200)" is -1,200.
+    cleaned = re.sub(r"\(\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?)\s*\)", r"(-\1)", cleaned)
+    cleaned = re.sub(r"(?<=\d),(?=\d{3}\b)", "", cleaned)
     cleaned = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", cleaned)
     try:
         value = _evaluate(ast.parse(cleaned, mode="eval").body)
