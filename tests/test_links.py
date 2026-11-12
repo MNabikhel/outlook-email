@@ -246,7 +246,7 @@ def test_an_email_shows_its_conversation_and_related_mail(loaded, settings):
     related = client.get("/api/mail/demo-inv-10482").json()["related"]
     assert [(row["id"], row["here"]) for row in related["thread"]] == [("demo-inv-10482", True), ("demo-inv-10482-dup", False)]
     assert related["thread"][1]["file_names"] == ["INV-10482.pdf"]
-    assert client.get("/api/mail/demo-chase-stmt").json()["related"] == {"thread": [], "groups": [], "can_look": False}
+    assert client.get("/api/mail/demo-chase-stmt").json()["related"] == {"thread": [], "groups": [], "can_look": False, "thread_size": 0}
 
 
 # --- A whole matter ------------------------------------------------------------------------------------------------
@@ -599,3 +599,59 @@ def test_the_whole_matter_walks_a_conversation_once(store, monkeypatch):
     monkeypatch.setattr(links, "_conversation", lambda *args: (walks.append(args[1]), real(*args))[1])
     steps = links.trace(store, store.get_email("e10"))["steps"]
     assert len(steps) == 35 and len(walks) <= 2, len(walks)
+
+
+# Guards against: who had taken part in a conversation was counted on the 60 emails shown around the one opened.
+# Opened late in a long thread, the first of those was taken for the email it started with: a lookalike's early
+# reply passed as the starter, and the real vendor was marked "New in this conversation"; an auditor who had
+# written twenty times before was marked new as well.
+def test_who_took_part_is_counted_over_the_whole_of_a_long_conversation(store):
+    root = "r0@northwind.com"
+    store.upsert_email(_record("e00", mid=f"<{root}>", threading={"to": ["ap@taz.com", "jo@auditco.com"]}, received="2026-01-01T00:00:00+00:00"))
+    prev, refs = root, [root]
+    for n in range(1, 80):
+        sender = ("billing@northwind.com", "ap@taz.com", "jo@auditco.com")[n % 3]
+        if n == 19:
+            sender = "billing@northwlnd.com"
+        mid = f"r{n}@{sender.split('@')[1]}"
+        to = [x for x in ("ap@taz.com", "billing@northwind.com") if x != sender]
+        store.upsert_email(_record(f"e{n:02d}", sender=sender, mid=f"<{mid}>", threading={"in_reply_to": prev, "references": [refs[0], *refs[-19:]], "to": to},
+                                   received=f"2026-01-{1 + n // 24:02d}T{n % 24:02d}:00:00+00:00"))
+        prev, refs = mid, [*refs, mid]
+    for opened in ("e20", "e49", "e50", "e79"):
+        found = links.related(store, store.get_email(opened), ai=False)
+        assert found["new_domains"] == {"e19"}, opened
+        assert found["thread_size"] == 80
+
+
+# Guards against: one sync or drop stores all its mail at one moment, and among those the Date header decided
+# which came first. A lookalike claiming the vendor's Message-ID, dated a month earlier, took the Message-ID over
+# and the real vendor's invoice was marked "New in this conversation"; so was the vendor answering our own email
+# beside a backdated lookalike. The order the mail was read in counts now, never its Date.
+def test_within_one_sync_the_date_header_never_decides_who_started_a_conversation(store):
+    batch = "2026-10-03T08:00:00+00:00"
+    real = _record("real", sender="ar@coastalprint.com", mid="<cp1@coastalprint.com>", threading={"to": ["ap@taz.com"]}, received="2026-10-02T09:00:00+00:00")
+    reply = _record("reply", sender="ap@taz.com", mid="<r1@taz.com>", threading={"in_reply_to": "cp1@coastalprint.com"}, received="2026-10-02T10:00:00+00:00")
+    fake = _record("fake", sender="ar@coastalprlnt.com", mid="<cp1@coastalprint.com>", threading={"to": ["ap@taz.com"]}, received="2026-09-01T09:00:00+00:00")
+    vendor = _record("vendor", sender="ar@acme.com", mid="<v1@acme.com>", threading={"in_reply_to": "ours@taz.com", "to": ["ap@taz.com"]}, received="2026-10-02T09:00:00+00:00")
+    sibling = _record("sibling", sender="ar@acrne.com", mid="<f1@acrne.com>", threading={"in_reply_to": "ours@taz.com", "to": ["ap@taz.com"]}, received="2026-09-01T09:00:00+00:00")
+    for record in (real, reply, fake, vendor, sibling):
+        record.created_at = batch
+        store.upsert_email(record)
+    assert links.related(store, store.get_email("reply"), ai=False)["new_domains"] == {"fake"}
+    assert links.related(store, store.get_email("vendor"), ai=False)["new_domains"] == {"sibling"}
+
+
+# Guards against: the Related panel counted the emails listed, so a conversation of 150 read "59 other emails in
+# this conversation", with nothing saying only the part around the open email was listed.
+def test_the_related_panel_is_told_the_whole_conversations_size(store, settings):
+    from fastapi.testclient import TestClient
+    from helpers import PAGE
+
+    from controller_inbox.web import create_app
+
+    for n in range(150):
+        store.upsert_email(_record(f"m{n:03d}", mid=f"<m{n}@northwind.com>", received=f"2026-10-{1 + n // 24:02d}T{n % 24:02d}:00:00+00:00",
+                                   threading={"conversation": "ab" * 16, "to": ["ap@taz.com"]}))
+    related = TestClient(create_app(settings, store), headers=PAGE).get("/api/mail/m149").json()["related"]
+    assert len(related["thread"]) == links.MAX_THREAD and related["thread_size"] == 150

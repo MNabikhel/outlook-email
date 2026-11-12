@@ -278,6 +278,12 @@ def related(store, email: EmailRecord, *, ai: bool = True, known_thread: list[st
     at = order.index(email.id) if email.id in order else 0
     first = max(0, min(at - MAX_THREAD // 2, len(order) - MAX_THREAD))
     window = [] if known_thread is not None else order[first : first + MAX_THREAD]
+    # Who has taken part is counted over the whole conversation, not only the part shown: in a long thread the
+    # first of the part shown is not the email it started with.
+    newcomers: set[str] = set()
+    if known_thread is None and len(order) > 1:
+        heads = {head.id: head for head in store.email_heads(order)}
+        newcomers = new_domains([heads.get(i) or email for i in order if i in heads or i == email.id])
     cards = store.get_emails(list(dict.fromkeys([*window, *(i for g in groups for i in g["ids"])])))
     thread = [email if i == email.id else cards[i] for i in window if i == email.id or i in cards]
     out_groups = []
@@ -286,7 +292,7 @@ def related(store, email: EmailRecord, *, ai: bool = True, known_thread: list[st
         if records:
             label = AI_LABEL if group["kind"] == "ai" else _label(group, email, records)
             out_groups.append({"kind": group["kind"], "label": label, "emails": sorted(records, key=lambda r: r.received_at or "", reverse=True), "why": group.get("why", {})})
-    return {"thread": thread if len(thread) > 1 else [], "groups": out_groups, "new_domains": new_domains(thread), "thread_size": len(order)}
+    return {"thread": thread if len(thread) > 1 else [], "groups": out_groups, "new_domains": newcomers, "thread_size": len(order)}
 
 
 def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str]:
@@ -347,17 +353,22 @@ def _participation(thread: list) -> tuple:
         info = record.threading or {}
         return [norm_id(ref) for ref in [info.get("in_reply_to"), *(info.get("references") or [])] if ref]
 
+    depths: dict[str, int] = {}
+
     def depth(record) -> int:
-        """How many emails of the thread it answers, one inside the other."""
-        steps, current, visited = 0, record, {record.id}
-        while steps < MAX_CONVERSATION:
+        """How many emails of the thread it answers, one inside the other. Each email's is worked out once, so a
+        conversation of a thousand emails costs a thousand steps, not a million."""
+        chain, current, visited = [], record, set()
+        while current is not None and current.id not in depths and current.id not in visited and len(chain) < MAX_CONVERSATION:
+            chain.append(current)
+            visited.add(current.id)
             info = current.threading or {}
-            parent = owns.get(norm_id(info.get("in_reply_to") or ((info.get("references") or [""])[-1])))
-            if parent is None or parent.id in visited:
-                break
-            visited.add(parent.id)
-            steps, current = steps + 1, parent
-        return steps
+            current = owns.get(norm_id(info.get("in_reply_to") or ((info.get("references") or [""])[-1])))
+        steps = depths[current.id] + 1 if current is not None and current.id in depths else 0
+        for node in reversed(chain):
+            depths[node.id] = steps
+            steps += 1
+        return depths[record.id]
 
     roots = [record for record in order if record.id not in forged and not (set(parents(record)) & set(owns))] or order
     # The first stored started it. Only among those stored at the same moment does it count which one someone else,
@@ -382,9 +393,11 @@ def _participation(thread: list) -> tuple:
     return root, marked
 
 
-def _arrival(record) -> tuple[str, str]:
-    """When CloseDesk first stored an email (one still being read comes last), then its Date header."""
-    return (getattr(record, "created_at", "") or "~", record.received_at or "")
+def _arrival(record) -> tuple[str, int, str]:
+    """When CloseDesk first stored an email (one still being read comes last), then the order it was stored in
+    (one sync or drop stores all its mail at one moment, in the order it came), then its Date header."""
+    stored = getattr(record, "stored", None)
+    return (getattr(record, "created_at", "") or "~", stored if isinstance(stored, int) else 1 << 62, record.received_at or "")
 
 
 def _domain_of(record: EmailRecord) -> str:

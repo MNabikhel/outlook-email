@@ -536,6 +536,8 @@ def register_workspace(
                 for group in found["groups"]
             ],
             "can_look": check_model(settings).active and not fraud.attachments_locked(email),
+            # The whole conversation's size: a long one lists only the emails around this one.
+            "thread_size": found["thread_size"] if found["thread"] else 0,
         }
 
     @api.post("/mail/{email_id}/related/look")
