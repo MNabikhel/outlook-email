@@ -396,6 +396,8 @@ def test_a_moved_closedesk_folder_still_finds_its_kept_files(tmp_path, settings)
     kept.write_text("Subject: x\n\nbody")
     old = tmp_path / "Old place" / "CloseDesk" / "inbox" / "processed" / "2026-10" / "a.eml"
     assert links.kept_file(settings, str(old)) == kept
+    # The CloseDesk folder was in a folder of the user's own named Inbox.
+    assert links.kept_file(settings, str(tmp_path / "Inbox" / "CloseDesk" / "inbox" / "processed" / "2026-10" / "a.eml")) == kept
     assert links.kept_file(settings, str(tmp_path / "elsewhere" / "b.eml")) is None
     assert links.kept_file(settings, "") is None
 

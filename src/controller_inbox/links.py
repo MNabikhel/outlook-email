@@ -526,8 +526,9 @@ def kept_file(settings, source_path: str | None):
     if path.is_file():
         return path
     parts = [part.lower() for part in path.parts]
-    if "inbox" in parts:
-        moved = Path(settings.inbox_dir).joinpath(*path.parts[parts.index("inbox") + 1 :])
+    # The inbox folder is the last folder named so (a folder of the user's own may be named "Inbox" too).
+    for at in reversed([at for at, part in enumerate(parts[:-1]) if part == "inbox"]):
+        moved = Path(settings.inbox_dir).joinpath(*path.parts[at + 1 :])
         if moved.is_file():
             return moved
     return None
