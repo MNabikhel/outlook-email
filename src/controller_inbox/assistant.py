@@ -347,8 +347,6 @@ def _calendar_record(body: str, meetings: list[dict]) -> CalendarSource:
 # The title of a meeting in quotes, as the calendar's "Ask about this meeting" asks: "What do I need to know before
 # “Q4 planning review” (Thursday, September 24 · 2:00 PM–3:00 PM)?"
 _QUOTED = re.compile(r"[“\"]([^”\"\n]{2,200})[”\"]")
-_MONTHS_ALL = "january february march april may june july august september october november december".split()
-_MONTH_DAY = re.compile(r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b", re.I)
 
 
 def asked_meeting(store: Store, settings: Settings, question: str, today: str = "", email_id: str | None = None) -> dict | None:
@@ -365,15 +363,19 @@ def asked_meeting(store: Store, settings: Settings, question: str, today: str = 
     except ValueError:
         day = datetime.now(settings.tz).date()
     start, end = calendar_events.utc_range(day - timedelta(days=CALENDAR_DAYS_BACK), day + timedelta(days=CALENDAR_DAYS_AHEAD), settings.tz)
-    rows = [row for row in _meetings_between(store, start, end) if " ".join((row["subject"] or "").split()).lower() in titles]
-    if not rows:
+    # By its title as stored, or as the calendar shows it ("Canceled:" taken off, "(no title)" for none), which is
+    # what its "Ask about this meeting" button asks about.
+    shown = [(row, calendar_events.shown(row, settings.tz)) for row in _meetings_between(store, start, end)]
+    shown = [(row, seen) for row, seen in shown
+             if {" ".join((row["subject"] or "").split()).lower(), " ".join(seen["subject"].split()).lower()} & titles]
+    if not shown:
         return None
-    if email_id and (own := [row for row in rows if row["email_id"] == email_id]):
-        rows = own
-    shown = [(row, calendar_events.shown(row, settings.tz)) for row in rows]
-    if named := _MONTH_DAY.search(question):
-        month = _MONTHS_ALL.index(named.group(1).lower()) + 1
-        on_day = [pair for pair in shown if pair[1]["start"][5:10] == f"{month:02d}-{int(named.group(2)):02d}"]
+    if email_id and (own := [pair for pair in shown if pair[0]["email_id"] == email_id]):
+        shown = own
+    # The day it names, as the browser wrote it ("October 19" in the US, "19 October" in most other places), the
+    # title in quotes left out.
+    if (named := _named_day(_QUOTED.sub(" ", question), day)) is not None:
+        on_day = [pair for pair in shown if pair[1]["start"][5:10] == named.isoformat()[5:10]]
         if on_day:
             return on_day[0][0]
     ahead = [pair for pair in shown if pair[1]["start"][:10] >= day.isoformat()]

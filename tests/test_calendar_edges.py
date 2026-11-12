@@ -480,3 +480,23 @@ def test_the_overnight_reread_of_a_weekly_invitation_keeps_its_past_weeks(store,
     assert in_july() == before
     assert store.meetings_between((later + timedelta(days=7)).date().isoformat(), (later + timedelta(days=14)).date().isoformat())
     assert cal.refresh_invites(store, settings, now=later) == 0, "not read again the next night"
+
+
+def test_ask_about_this_meeting_finds_a_cancelled_or_untitled_one_and_the_week_named_day_first(store, settings):
+    from controller_inbox import assistant
+
+    _save(store, "cxl", _invite("C1", "20261009T140000Z", subject="Canceled: Q3 close review", method="CANCEL", end="20261009T150000Z"), "maya@taz.com")
+    _save(store, "untitled", _ics(_event("UID:N1", "DTSTART:20261010T140000Z", "DTEND:20261010T150000Z", "ORGANIZER:mailto:maya@taz.com")),
+          "maya@taz.com")
+    found = assistant.asked_meeting(store, settings, "What do I need to know before “Q3 close review” (Friday, October 9 · 2:00 PM)?",
+                                    today="2026-10-05")
+    assert found is not None and found["email_id"] == "cxl"
+    found = assistant.asked_meeting(store, settings, "What do I need to know before “(no title)” (Saturday, October 10 · 2:00 PM)?",
+                                    today="2026-10-05")
+    assert found is not None and found["email_id"] == "untitled"
+
+    _save(store, "series", _weekly(count=4), "maya@taz.com")
+    for question in ("“AP standup” (Monday, October 19 · 2:00 PM–2:30 PM)", "“AP standup” (Monday 19 October · 14:00–14:30)",
+                     "“AP standup” on 2026-10-19"):
+        found = assistant.asked_meeting(store, settings, f"What do I need to know before {question}?", today="2026-10-05")
+        assert found["start"].startswith("2026-10-19"), question
