@@ -758,9 +758,34 @@ def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int
                     if current is not None and not store.has_meetings(email_id, conn=conn):  # read meanwhile: as it was read
                         store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp,
                                            held=attachments_locked(current), sender_name=current.sender_name, conn=conn)
+                _refile_invitation(store, settings, email_id, now)
         looked += len(rows)
         store.set_state(CATCH_UP_KEY, str(rows[-1][0]))
     return looked
+
+
+def _refile_invitation(store, settings, email_id: str, now: datetime) -> None:
+    """An invitation an older version filed by its subject alone (as "Other", or with an "Accept or decline" task on a
+    cancellation): filed again by what its invitation is (its METHOD), as a new one is, keeping what the user did with
+    its tasks. Held mail, and mail the user corrected, stays as it is."""
+    from controller_inbox.fraud import assess_email, attachments_locked, trust_context
+    from controller_inbox.models import ActionStatus, DocumentType
+    from controller_inbox.pipeline import rescore_stored
+
+    email = store.get_email(email_id)
+    if email is None or attachments_locked(email) or email.model_status == "corrected":
+        return
+    method = invitation_method(email.attachments)
+    if not method:
+        return
+    asks = any(a.source == "meeting" and a.status == ActionStatus.OPEN for a in email.actions)
+    wants = method in ("REQUEST", "PUBLISH", "ADD")
+    if email.category == DocumentType.MEETING and asks == wants:
+        return  # filed as it would be now
+    try:
+        rescore_stored(store, settings, email, assess_email(store, trust_context(store, settings), email), now=now)
+    except Exception:  # filed as it was; the meeting is on the calendar either way
+        return
 
 
 def _kept_invitations(email, settings, now: datetime) -> list[Meeting] | None:
@@ -794,6 +819,47 @@ def _kept_invitations(email, settings, now: datetime) -> list[Meeting] | None:
 
 # --- For the calendar page and the chat -----------------------------------------------------------------------------
 
+CAUTION = "Check who sent this before joining or paying"
+# Flags on an invitation's email (not held: held mail's meetings aren't shown) that make its meeting doubtful.
+_CAUTION_FLAGS = {"payment_caution", "bank_change_caution", "model_said_bank_change", "fraud_confirmed"}
+
+
+def with_cautions(store, meetings: list[dict]) -> list[dict]:
+    """``meetings`` (as the store gives them), each invitation's with ``caution`` set when it is to be doubted: another
+    sender sent an invitation with the same meeting's id (a lookalike's "update" is a meeting of its own, and looks
+    like the real one), its email carries a payment caution, or its sender's domain is new to the conversation it
+    came in. "" for the others. Changed in place, and returned."""
+    from controller_inbox import links
+    from controller_inbox.store import _meeting_of
+
+    invites = [m for m in meetings if m.get("source") == "invite" and m.get("email_id")]
+    senders: dict[str, set[str]] = {}
+    for meeting in invites:
+        senders.setdefault(meeting["uid"], set()).add(_meeting_of(meeting.get("sender"), meeting.get("organizer")))
+    emails = store.get_emails(list(dict.fromkeys(m["email_id"] for m in invites))) if invites else {}
+    newcomer: dict[str, bool] = {}
+    for meeting in meetings:
+        meeting["caution"] = ""
+    for meeting in invites:
+        email = emails.get(meeting["email_id"])
+        why = ""
+        if len(senders[meeting["uid"]]) > 1:
+            why = "another sender sent an invitation with this meeting's id"
+        elif email is not None and _CAUTION_FLAGS & set(email.flags):
+            why = "its email has a payment caution"
+        elif email is not None and email.threading:
+            if email.id not in newcomer:
+                try:
+                    newcomer[email.id] = email.id in links.related(store, email, ai=False)["new_domains"]
+                except Exception:  # the conversation can't be read just now: no warning rather than no calendar
+                    newcomer[email.id] = False
+            if newcomer[email.id]:
+                why = "its sender is new to the conversation it came in"
+        if why:
+            meeting["caution"] = f"{CAUTION}: {why}."
+    return meetings
+
+
 
 def shown(meeting: dict, tz) -> dict:
     """A stored meeting as the calendar page shows it: its times in the app's time zone ("2026-10-06T09:00"),
@@ -822,6 +888,7 @@ def shown(meeting: dict, tz) -> dict:
         "email_id": meeting["email_id"],
         "busy": meeting.get("busy") or "",
         "sender": meeting.get("sender") or "",  # who emailed the invitation: its organizer is what the file says
+        "caution": meeting.get("caution") or "",  # with_cautions
     }
 
 
@@ -884,6 +951,8 @@ def listing(meetings: list[dict]) -> str:
             parts.append("with " + ", ".join(meeting["attendees"][:8]))
         if meeting["cancelled"]:
             parts.append("CANCELLED")
+        if meeting.get("caution"):
+            parts.append(meeting["caution"].replace(CAUTION, CAUTION.upper(), 1))
         if meeting["source"] == "invite":
             # Not the user's own calendar: what an emailed invitation says, from whoever sent it.
             parts.append(f"from an invitation emailed by {meeting.get('sender') or 'someone'}")

@@ -1110,6 +1110,9 @@ function refreshData() {
 }
 
 function finished(job) {
+  // "Syncing Outlook…" goes once the run has ended, however it ended: what it found (or why not) is said next.
+  if (S.syncing) S.syncing();
+  S.syncing = null;
   if (job.state === "error" && job.about && job.about.kind === "vision") {
     return visionDone({ ...job.about, pages: 0, message: `The read stopped: ${job.error}` });
   }
@@ -1134,7 +1137,9 @@ function finished(job) {
 async function syncOutlook() {
   try {
     const result = await postJSON("/api/outlook/sync");
-    toast(result.message);
+    // "Syncing Outlook…" goes when the sync ends, whatever it says then (finished).
+    if (S.syncing) S.syncing();
+    S.syncing = toast(result.message, { ms: result.started ? 120000 : 4000 });
     if (S.meta && result.started) {
       S.jobSeq += 1;
       S.meta.job = { ...result.job, stage_label: "Copying mail from Outlook" };

@@ -135,12 +135,12 @@ function sourceNote(source) {
 }
 
 function chip(meeting, open, { time = true } = {}) {
-  const said = `${meetingTime(meeting)} · ${meeting.subject}${meeting.location ? ` · ${meeting.location}` : ""}${meeting.cancelled ? " (cancelled)" : ""}`;
+  const said = `${meetingTime(meeting)} · ${meeting.subject}${meeting.location ? ` · ${meeting.location}` : ""}${meeting.cancelled ? " (cancelled)" : ""}${meeting.caution ? `. ${meeting.caution}` : ""}`;
   return h(
     "button",
     {
       type: "button",
-      class: `cal-chip${meeting.cancelled ? " cancelled" : ""}${meeting.all_day ? " all-day" : ""}`,
+      class: `cal-chip${meeting.cancelled ? " cancelled" : ""}${meeting.all_day ? " all-day" : ""}${meeting.caution ? " caution" : ""}`,
       title: said,
       // Its whole name, also where a phone's month shows the meeting as a dot.
       "aria-label": said,
@@ -148,6 +148,8 @@ function chip(meeting, open, { time = true } = {}) {
       onclick: () => open(meeting),
     },
     time && !meeting.all_day ? h("span", { class: "cal-time" }, timeLabel(meeting.start)) : null,
+    // A doubtful invitation's meeting (a lookalike's, or with a payment caution) is marked where it shows.
+    meeting.caution ? h("span", { class: "cal-caution", "aria-hidden": "true" }, icon("alert", 11)) : null,
     h("span", { class: "cal-subj" }, meeting.subject),
     meeting.cancelled ? h("span", { class: "sr-only" }, " (cancelled)") : null
   );
@@ -281,6 +283,7 @@ async function showMeeting(panel, meeting, ctx) {
   );
   panel.replaceChildren(
     h("h2", { class: "cal-panel-title", tabindex: "-1" }, meeting.subject, meeting.cancelled ? h("span", { class: "tag tag-fraud" }, "Cancelled") : null, meeting.recurring ? h("span", { class: "tag" }, "Repeats") : null),
+    meeting.caution ? h("p", { class: "tag tag-due_soon cal-caution-note" }, icon("alert", 13), " ", meeting.caution) : null,
     h("dl", { class: "cal-facts" }, ...facts.flatMap(([k, v]) => [h("dt", null, k), h("dd", null, v)])),
     ask,
     h("h3", { class: "rel-h" }, "Mail about it"),

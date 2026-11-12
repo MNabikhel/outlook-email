@@ -1180,3 +1180,53 @@ def test_the_whole_matter_and_the_reading_pane_show_the_senders_address_in_lower
     assert any("acmesteei-billing.com" in top for top in tops) and any("acmesteel-billing.com" in top for top in tops), tops
     page.goto(f"{site}/app/mail/acme-2")
     assert "<billing@acmesteei-billing.com>" in page.wait_for_selector(".rd-from").inner_text()
+
+
+def test_a_meeting_from_a_doubtful_invitation_is_marked_on_the_calendar(loaded, site, page):
+    from controller_inbox import calendar_events as cal
+
+    ics = ("BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nSUMMARY:{subject}\r\nDTSTART:20260924T180000Z\r\nDTEND:20260924T183000Z\r\n"
+           "ORGANIZER:mailto:{organizer}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n")
+    loaded.save_invites("lk-real", cal.from_ics(ics.format(uid="LK", subject="Vendor sync", organizer="pat@northwind.com"), email_id="lk-real"),
+                        sender="pat@northwind.com")
+    loaded.save_invites("lk-fake", cal.from_ics(ics.format(uid="LK", subject="Updated: Vendor sync", organizer="pat@northwlnd.com"), email_id="lk-fake"),
+                        sender="pat@northwlnd.com")
+    page.goto(f"{site}/app/calendar?view=week&date=2026-09-22")
+    page.wait_for_selector(".cal-block.caution:has-text('Updated: Vendor sync')")
+    assert "Check who sent this before joining or paying" in page.get_attribute(".cal-block:has-text('Updated: Vendor sync')", "aria-label")
+    page.click(".cal-block:has-text('Updated: Vendor sync')")
+    note = page.wait_for_selector(".cal-panel .cal-caution-note")
+    assert "Check who sent this before joining or paying" in note.inner_text()
+
+
+def test_the_shortcut_sheet_lines_up_on_a_phone_and_a_failed_sync_leaves_one_message(loaded, settings, page, monkeypatch):
+    from contextlib import contextmanager
+
+    from liveserver import serving
+
+    from controller_inbox import outlook_desktop, outlook_sync
+
+    @contextmanager
+    def offline(**_options):
+        raise outlook_desktop.OutlookError("Outlook couldn't find a message just now (The server is busy.).")
+        yield
+
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    monkeypatch.setattr(outlook_desktop, "connect", offline)
+    outlook_sync.connect(loaded, calendar=False)
+    with serving(web.create_app(settings, loaded)) as base:
+        page.set_viewport_size({"width": 390, "height": 844})
+        page.goto(f"{base}/app/calendar")
+        page.wait_for_selector(".cal-title")
+        page.keyboard.press("?")
+        page.wait_for_selector(".help")
+        lefts = page.evaluate("() => [...document.querySelectorAll('.help dl')].map((dl) => Math.round(dl.querySelector('dd').getBoundingClientRect().left))")
+        assert len(set(lefts)) == 1, f"every column's descriptions start at one place ({lefts})"
+        page.keyboard.press("Escape")
+        page.set_viewport_size({"width": 1280, "height": 900})
+        page.goto(f"{base}/app/settings#set-outlook")
+        page.click("#set-outlook button:has-text('Sync now')")
+        page.wait_for_selector(".toast.error", timeout=20000)
+        page.wait_for_timeout(300)
+        texts = page.locator("#toasts .toast:not(.leaving)").all_inner_texts()
+        assert len(texts) == 1 and "couldn't find a message" in texts[0], texts

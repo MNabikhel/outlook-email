@@ -20,7 +20,7 @@ import platform
 import threading
 import time
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -340,7 +340,7 @@ def register_workspace(
         start, end = calendar_events.utc_range(first, last, settings.tz)
         # Outlook's meetings only while it is connected with the calendar on: a sync still running at Disconnect may
         # have written some after they were cleared.
-        meetings = store.meetings_between(start, end, outlook=outlook_sync.calendar_on(store))
+        meetings = calendar_events.with_cautions(store, store.meetings_between(start, end, outlook=outlook_sync.calendar_on(store)))
         return [calendar_events.shown(meeting, settings.tz) for meeting in meetings if meeting_overlaps(meeting, first, last)]
 
     def meeting_overlaps(meeting: dict, first: date, last: date) -> bool:
@@ -379,6 +379,12 @@ def register_workspace(
         meeting = store.meeting(meeting_id, outlook=outlook_sync.calendar_on(store))
         if meeting is None:
             raise HTTPException(status_code=404, detail="That meeting isn't in the calendar any more.")
+        # Doubted as on the calendar: beside the other invitations with its id (a lookalike's), or for its email.
+        around = date.fromisoformat(meeting["start"][:10])
+        with_its_kind = store.meetings_between((around - timedelta(days=90)).isoformat(), (around + timedelta(days=90)).isoformat(),
+                                               outlook=outlook_sync.calendar_on(store))
+        same = [m for m in with_its_kind if m["uid"] == meeting["uid"] and m["id"] != meeting["id"]]
+        meeting = calendar_events.with_cautions(store, [meeting, *same])[0]
         today = board_date()
         return {
             "meeting": calendar_events.shown(meeting, settings.tz),

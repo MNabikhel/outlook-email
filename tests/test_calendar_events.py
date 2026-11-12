@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import re
 
@@ -892,3 +892,148 @@ def test_a_forged_organizer_from_a_third_domain_doesnt_move_a_forwarded_meeting(
     store.save_invites("own", cal.from_ics(_invite("X", "20261009T160000Z", sequence=2, organizer="mailto:pat@vendor.com"), email_id="own", now=NOW),
                        sender="pat@vendor.com", received="2026-10-05T09:00:00+00:00")
     assert [(m["start"], m["sender"]) for m in store.meetings_between(*WINDOW)] == [("2026-10-09T16:00:00+00:00", "pat@vendor.com")]
+
+
+def test_a_question_naming_a_date_is_answered_for_that_date(loaded, settings):
+    """"Am I free on Monday Oct 5?" is about October 5 (a Monday three weeks on), not the coming Monday; "December 1",
+    "10/1" and "the 30th" are dates too, read before any weekday word. "What is on Monday?" asks about the calendar."""
+    from controller_inbox import assistant
+
+    def said(question):
+        return "".join(e["text"] for e in assistant.answer_stream(loaded, settings, question, today="2026-09-22") if e["type"] == "delta")
+
+    assert "on Monday October 5" in said("Am I free on Monday Oct 5?")
+    assert "on Thursday October 1" in said("Am I free October 1st?")
+    assert "on Thursday October 1" in said("what's on 10/1?")
+    assert "on Wednesday September 30" in said("Am I free on the 30th?")
+    assert "on Thursday December 3" in said("Am I free December 3?"), "past the calendar's usual three weeks: read that far"
+    assert assistant.asks_about_meetings("What is on Monday?") and assistant.asks_about_meetings("what is on tomorrow?")
+    assert not assistant.asks_about_meetings("What is on the invoice?")
+    assert assistant._named_day("Is anything due on 9/2?", date(2026, 9, 22)) == date(2027, 9, 2), "a day gone by is next year's"
+
+
+def test_an_invitations_time_in_a_plain_answer_is_in_the_apps_time_zone(store, settings):
+    import sys
+
+    from controller_inbox import assistant
+    from controller_inbox.models import AttachmentRecord, DocumentType, ExtractedFields
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    data = _invite("TZ1", "20261008T140000Z", subject="Northwind pricing review")
+    record = _record("tz-mail", sender="maya@taz.com")
+    record.subject = "Northwind pricing review"
+    record.attachments = [AttachmentRecord(id="tz-mail:0", email_id="tz-mail", filename="invite.ics", content_type="text/calendar", size_bytes=len(data),
+                                           sha256="", extracted_text=data, document_type=DocumentType.OTHER, document_confidence=0,
+                                           extracted_fields=ExtractedFields())]
+    store.upsert_email(record)
+    text = "".join(e["text"] for e in assistant.answer_stream(store, settings, "Northwind pricing review", today="2026-10-01") if e["type"] == "delta")
+    assert "10:00 AM" in text and "(UTC)" not in text, text
+
+
+def test_one_week_cancelled_by_the_organizer_keeps_a_dropped_or_forwarded_series(store):
+    """A series known from a file the user dropped (no sender) or a colleague's forward keeps its weeks when the
+    organizer's own word on one week arrives: only that week changes. The organizer's own series replaces a forward."""
+    vendor = "mailto:pat@vendor.com"
+    series = WEEKLY.replace("ORGANIZER:mailto:maya@taz.com", f"ORGANIZER:{vendor}")
+    cancel = _one_week("20261019T140000Z", "20261019T140000Z", "20261019T143000Z", sequence=1, method="CANCEL", cancelled=True, organizer=vendor)
+
+    def weeks():
+        return [(m["start"][:10], m["cancelled"]) for m in store.meetings_between("2026-10-01", "2026-11-03")]
+
+    expected = [("2026-10-05", False), ("2026-10-12", False), ("2026-10-19", True), ("2026-10-26", False), ("2026-11-02", False)]
+    store.save_invites("dropped", cal.from_ics(series, email_id="dropped", now=NOW), sender="", received="2026-10-01T09:00:00+00:00")
+    store.save_invites("cancel", cal.from_ics(cancel, email_id="cancel", now=NOW), sender="pat@vendor.com", received="2026-10-02T09:00:00+00:00")
+    assert weeks() == expected, "a dropped file is the user's own copy of the organizer's invitation"
+
+    store.save_invites("dropped", [], sender="")
+    store.save_invites("fwd", cal.from_ics(series, email_id="fwd", now=NOW), sender="maya@taz.com", received="2026-10-01T09:00:00+00:00")
+    assert weeks() == expected, "a forward's series, with the organizer's own word on one week"
+    assert {m["email_id"] for m in store.meetings_between("2026-10-01", "2026-11-03") if not m["cancelled"]} == {"fwd"}
+
+    moved = series.replace("DTSTART:20261005T140000Z", "DTSTART:20261005T160000Z").replace("SEQUENCE:0", "SEQUENCE:2")
+    store.save_invites("own", cal.from_ics(moved, email_id="own", now=NOW), sender="pat@vendor.com", received="2026-10-03T09:00:00+00:00")
+    assert {m["email_id"] for m in store.meetings_between("2026-10-01", "2026-11-03")} == {"own"}, "the organizer's own series replaces it"
+
+
+def test_an_invitation_dropped_as_a_file_is_titled_by_its_meeting(store, settings):
+    from controller_inbox.folder_mail import ingest_folder
+
+    settings.ensure_data_dir()
+    (settings.inbox_incoming / "a_series.ics").write_text(WEEKLY, encoding="utf-8", newline="")
+    [record] = ingest_folder(store, settings, now=NOW)
+    assert record.subject == "AP standup"
+    assert [a.title for a in record.actions if a.source == "meeting"] == ["Accept or decline: AP standup"]
+
+
+def test_a_meeting_from_a_doubtful_invitation_says_to_check_who_sent_it(store, settings):
+    """A lookalike's same-UID "update" is a meeting of its own: it (and the meeting it imitates) says to check who
+    sent it, on the calendar and in the chat; so does one whose email carries a payment caution. Others don't."""
+    import sys
+
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import assistant, web
+    from helpers import PAGE
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    for email_id, sender, flags in (("real", "maya@taz.com", ()), ("fake", "maya@taz-c0rp.com", ()), ("careful", "ap@vendor.example", ("payment_caution",)),
+                                    ("plain", "pat@vendor.com", ())):
+        store.upsert_email(_record(email_id, sender=sender, flags=flags))
+    store.save_invites("real", cal.from_ics(_invite("U2", "20261006T140000Z"), email_id="real", now=NOW), sender="maya@taz.com")
+    store.save_invites("fake", cal.from_ics(_invite("U2", "20261007T140000Z", subject="Updated: Budget review", organizer="mailto:maya@taz-c0rp.com"),
+                                            email_id="fake", now=NOW), sender="maya@taz-c0rp.com")
+    store.save_invites("careful", cal.from_ics(_invite("U3", "20261008T140000Z", subject="Payment run", organizer="mailto:ap@vendor.example"),
+                                               email_id="careful", now=NOW), sender="ap@vendor.example")
+    store.save_invites("plain", cal.from_ics(_invite("U4", "20261009T140000Z", subject="Vendor sync", organizer="mailto:pat@vendor.com"),
+                                             email_id="plain", now=NOW), sender="pat@vendor.com")
+    client = TestClient(web.create_app(settings, store))
+    meetings = client.get("/api/calendar", params={"start": "2026-10-05", "end": "2026-10-11"}, headers=PAGE).json()["meetings"]
+    cautions = {m["email_id"]: m["caution"] for m in meetings}
+    assert cautions["plain"] == "" and all(cautions[e].startswith("Check who sent this before joining or paying") for e in ("real", "fake", "careful"))
+    fake = next(m for m in meetings if m["email_id"] == "fake")
+    assert client.get(f"/api/calendar/{fake['id']}", headers=PAGE).json()["meeting"]["caution"]
+    source = assistant.calendar_source(store, settings, "2026-10-05")
+    line = next(line for line in source.body_text.splitlines() if "Updated: Budget review" in line)
+    assert "check who sent this before joining or paying" in line.lower()
+    assert "check who sent" not in next(line for line in source.body_text.splitlines() if "Vendor sync" in line).lower()
+
+
+def test_after_an_update_stored_invitations_are_filed_as_meetings_keeping_what_was_done(store, settings):
+    """Mail an older version filed as "Other" (an invitation with no "Invitation:" in its subject), or with an
+    "Accept or decline" task on a cancellation, is filed by its invitation once the catch-up reads it. A task the
+    user finished stays finished."""
+    import sys
+
+    from controller_inbox.extract import sha256_bytes
+    from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, DocumentType, ExtractedFields, Importance
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    event = ["UID:up1", "SUMMARY:Weekly AP payment run review", "DTSTART:20261009T140000Z", "DTEND:20261009T150000Z", "ORGANIZER:mailto:jordan@horizon-goods.com"]
+    stored = {
+        "up-invite": ("Weekly AP payment run review", _ics(_event(*event, "SEQUENCE:0")), []),
+        "up-cancel": ("Canceled: Weekly AP payment run review", _ics(_event(*event, "SEQUENCE:1"), method="CANCEL"),
+                      [("Accept or decline: Canceled: Weekly AP payment run review", ActionStatus.OPEN)]),
+        "up-done": ("Budget sync", _ics(_event("UID:up2", "SUMMARY:Budget sync", "DTSTART:20261012T140000Z", "ORGANIZER:mailto:jordan@horizon-goods.com")),
+                    [("Accept or decline: Budget sync", ActionStatus.DONE)]),
+    }
+    for email_id, (subject, data, tasks) in stored.items():
+        record = _record(email_id, sender="jordan@horizon-goods.com")
+        record.subject, record.category, record.model_status = subject, DocumentType.OTHER, "needs_model"
+        record.attachments = [AttachmentRecord(id=f"{email_id}:0", email_id=email_id, filename="invite.ics", content_type="text/calendar",
+                                               size_bytes=len(data), sha256=sha256_bytes(data.encode()), extracted_text=data,
+                                               document_type=DocumentType.OTHER, document_confidence=0, extracted_fields=ExtractedFields())]
+        record.actions = [ActionItem(id=f"{email_id}-t{n}", email_id=email_id, title=title, detail="", due_date=None, priority=Importance.MEDIUM,
+                                     status=status, source="meeting") for n, (title, status) in enumerate(tasks)]
+        store.upsert_email(record)
+    cal.catch_up_invites(store, settings, now=NOW)
+    invite, cancel, done = (store.get_email(email_id) for email_id in stored)
+    assert invite.category == cancel.category == done.category == DocumentType.MEETING
+    assert [(a.title, a.status) for a in invite.actions if a.source == "meeting"] == [("Accept or decline: Weekly AP payment run review", ActionStatus.OPEN)]
+    assert [a for a in cancel.actions if a.status == ActionStatus.OPEN] == [], "a cancellation asks for no answer"
+    assert [(a.title, a.status) for a in done.actions if a.source == "meeting"] == [("Accept or decline: Budget sync", ActionStatus.DONE)]

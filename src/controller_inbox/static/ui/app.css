@@ -1228,7 +1228,8 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .help-head h2 { margin: 0; font-size: 15px; }
 .help-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 6px 22px; padding: 14px 18px 18px; overflow-y: auto; }
 .help h3 { margin: 6px 0; font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--faint); }
-.help dl { display: grid; grid-template-columns: max-content 1fr; gap: 5px 12px; margin: 0; font-size: 13px; align-items: center; }
+/* The keys take one width in every column, so the descriptions line up (one under the other on a phone). */
+.help dl { display: grid; grid-template-columns: 6.5em minmax(0, 1fr); gap: 5px 12px; margin: 0; font-size: 13px; align-items: center; }
 .help dt { display: flex; gap: 3px; }
 .help dd { margin: 0; color: var(--text-2); }
 
@@ -1422,6 +1423,11 @@ dialog.consent p { margin: 0 0 10px; line-height: 1.5; }
 .cal-panel-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .cal-chip.all-day { border-left-color: var(--ok, #2e7d4f); background: var(--ok-soft); }
 .cal-chip.cancelled .cal-subj { text-decoration: line-through; color: var(--muted); }
+/* An invitation to doubt (calendar_events.with_cautions): marked on its chip, said in full in its panel. */
+.cal-chip.caution { border-left-color: var(--warn, #b26a00); }
+.cal-caution { flex: none; color: var(--warn, #b26a00); display: inline-flex; }
+.cal-chip.open .cal-caution { color: inherit; }
+.cal-caution-note { display: flex; gap: 4px; align-items: flex-start; white-space: normal; margin: 0; }
 /* Open, the title is struck through in the open meeting's own colour: grey on the accent couldn't be read. */
 .cal-chip.open.cancelled .cal-subj { color: inherit; }
 .cal-time { flex: none; color: var(--text-2); font-variant-numeric: tabular-nums; }

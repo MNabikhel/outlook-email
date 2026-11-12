@@ -744,9 +744,19 @@ def _standalone(path: Path) -> RawMessage:
     data = path.read_bytes()
     received = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     attachment = _file_attachment(path)
+    subject = path.stem
+    if path.suffix.lower() in (".ics", ".vcs"):
+        # An invitation dropped on its own is its meeting: titled by it ("AP standup"), not by the file's name.
+        from controller_inbox import calendar_events
+
+        try:
+            meetings = calendar_events.from_ics(data[:calendar_events.MAX_ICS_BYTES])
+        except Exception:
+            meetings = []
+        subject = next((meeting.subject for meeting in meetings if meeting.subject), subject)
     return RawMessage(
         id=file_id(data),
-        subject=path.stem,
+        subject=subject,
         sender_name="Dropped file",
         sender_email="",
         received_at=received,

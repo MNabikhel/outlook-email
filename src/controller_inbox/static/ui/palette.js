@@ -7,7 +7,7 @@ const SHORTCUTS = [
   ["Moving", [["j", "Next in the list"], ["k", "Previous in the list"], ["Enter", "Open the selected email"], ["u", "Back to the list"], ["Esc", "Close what's open"]]],
   ["Acting", [["e", "Mark done, with Undo"], ["c", "Show or hide Ask CloseDesk"], ["/", "Search"], ["Ctrl K", "Jump, find or ask"]]],
   ["Going", [["g t", "Today"], ["g m", "Calendar"], ["g i", "Important"], ["g n", "Informational"], ["g r", "Reference"], ["g a", "All mail"], ["g k", "Tasks"], ["g f", "Fraud check"], ["g c", "AP coding"], ["g d", "Digest"], ["g s", "Settings"]]],
-  ["Calendar", [["d / w / m", "Day, week or month"], ["t", "Back to today"], ["← →", "Earlier or later"]]],
+  ["Calendar", [["d w m", "Day, week or month"], ["t", "Back to today"], ["← →", "Earlier or later"]]],
   ["Layout", [["[", "Collapse the side bar"], ["?", "This sheet"]]],
 ];
 

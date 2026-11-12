@@ -2346,11 +2346,12 @@ def _same_occurrence(start: str, occurrence: str) -> bool:
 
 def _owner(sender: str | None, organizer: str | None) -> tuple[str, bool]:
     """The organizer's domain an invitation is about (its ORGANIZER's, else its sender's when it names none), and
-    whether it is that domain's own (sent from it), not a forward of it."""
+    whether it is that domain's own (sent from it), not a forward of it. A file with no sender is one the user dropped
+    in the drop folder: their own copy of the organizer's invitation, counted as the organizer's."""
     named, sent = _address_domain(organizer), _address_domain(sender)
     if not named:
         return sent, True
-    return named, sent == named
+    return named, sent == named or not sent
 
 
 def _meeting_of(sender: str | None, organizer: str | None) -> str:
@@ -2398,8 +2399,10 @@ def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:
             # One email's word is about one meeting: the one its series (or its first row) names.
             word.group[(uid, email_id)] = _meeting_of(row["sender"], row["organizer"])
         groups.setdefault((uid, word.group[(uid, email_id)]), []).append(row)
-    # The organizers whose own invitation of a meeting is here: forwards of it no longer count.
-    present = {(uid, meeting) for uid, meeting in groups if "|" not in meeting}
+    # The organizers whose own invitation of a meeting's series is here: forwards of it no longer count. (Their word
+    # on one week alone leaves a forward's series standing, with that week as they say.)
+    present = {(uid, meeting) for (uid, meeting), said in groups.items() if "|" not in meeting and any(not row["occurrence"] for row in said)}
+    owners: dict[tuple[str, str], sqlite3.Row] = {}
     for key, said in groups.items():
         uid = key[0]
         if "|" in key[1] and (uid, key[1].partition("|")[0]) in present:
@@ -2408,6 +2411,7 @@ def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:
         owner = _latest(series) if series else None
         if owner is not None:
             word.series[key] = owner["email_id"]
+            owners[key] = owner
         weeks: dict[str, list[sqlite3.Row]] = {}
         for row in said:
             if row["occurrence"] and row["email_id"] not in word.series_emails.get(uid, ()):
@@ -2416,6 +2420,21 @@ def _invite_winners(conn: sqlite3.Connection, uids: list[str]) -> _Word:
         for occurrence, about in weeks.items():
             word.occurrences[(uid, key[1], occurrence)] = _latest(about)["email_id"]
             word.replaced.setdefault(key, []).append(occurrence)
+    # The organizer's own word on one week of a series known only from a forward: that week of the forward's series
+    # (the first forwarding domain's) is as the organizer says.
+    for (uid, meeting), said in groups.items():
+        if "|" in meeting or (uid, meeting) in present:
+            continue
+        forwards = sorted((key for key in owners if key[0] == uid and key[1].partition("|")[0] == meeting and "|" in key[1]),
+                          key=lambda key: (owners[key]["first_seen"] or "", key[1]))
+        if not forwards:
+            continue
+        first = forwards[0]
+        for (occ_uid, occ_meeting, occurrence), email_id in word.occurrences.items():
+            if (occ_uid, occ_meeting) == (uid, meeting):
+                sequence = max((row["sequence"] or 0) for row in said if row["email_id"] == email_id)
+                if sequence >= (owners[first]["sequence"] or 0):
+                    word.replaced.setdefault(first, []).append(occurrence)
     return word
 
 

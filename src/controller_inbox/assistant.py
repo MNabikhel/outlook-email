@@ -146,9 +146,60 @@ def _stays_on(store: Store, current: EmailRecord, question: str, *, about_today:
 _MEETINGS = re.compile(
     r"\b(meetings?|calendar|appointments?|agenda|calls? with|(?:my|our) schedule|scheduled (?:for|with|on|at)|"
     r"(?:meeting|calendar) invite[sd]?|invitations? to|(?:am i|are we) (?:free|busy)|free (?:on|at|this|tomorrow|today)|"
-    r"what'?s on (?:today|tomorrow|my)|stand-?up|1:1|one on one)\b",
+    r"what(?:'?s| is) on (?:today|tomorrow|my|this|next|(?:mon|tues|wednes|thurs|fri|satur|sun)day|the \d{1,2}(?:st|nd|rd|th)?|"
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d{1,2}|\d{1,2}/\d{1,2})|stand-?up|1:1|one on one)\b",
     re.I,
 )
+
+_MONTH_NAMES = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+_MONTH = r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
+_DATE_PATTERNS = (
+    re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"),  # 2026-12-01
+    re.compile(rf"\b{_MONTH}\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", re.I),  # Nov 23, December 1st
+    re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?{_MONTH}", re.I),  # 23 November, the 23rd of November
+    re.compile(r"\b(\d{1,2})/(\d{1,2})\b"),  # 12/1
+    re.compile(r"\bthe\s+(\d{1,2})(?:st|nd|rd|th)\b", re.I),  # the 23rd
+)
+
+
+def _named_day(question: str, today: date) -> date | None:
+    """The date a question names ("Nov 23", "December 1st", "23 November", "12/1", "the 23rd", "2026-12-01"), the
+    next one on or after ``today`` when it gives no year; None when it names none. A weekday beside a date ("Monday
+    Nov 23") is that date."""
+
+    def coming(month: int, day: int) -> date | None:
+        for year in (today.year, today.year + 1):
+            try:
+                found = date(year, month, day)
+            except ValueError:
+                continue
+            if found >= today:
+                return found
+        return None
+
+    text = question or ""
+    for index, pattern in enumerate(_DATE_PATTERNS):
+        match = pattern.search(text)
+        if not match:
+            continue
+        try:
+            if index == 0:
+                return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            if index == 1:
+                return coming(_MONTH_NAMES.index(match.group(1).lower()[:3]) + 1, int(match.group(2)))
+            if index == 2:
+                return coming(_MONTH_NAMES.index(match.group(2).lower()[:3]) + 1, int(match.group(1)))
+            if index == 3:
+                first, second = int(match.group(1)), int(match.group(2))
+                # Month first, as Outlook in the US writes it, unless that can't be a month ("23/11").
+                month, day = (second, first) if first > 12 else (first, second)
+                return coming(month, day)
+            day = int(match.group(1))
+            month = today.month if day >= today.day else today.month % 12 + 1
+            return coming(month, day)
+        except ValueError:
+            return None
+    return None
 CALENDAR_DAYS_BACK = 7
 CALENDAR_DAYS_AHEAD = 21
 
@@ -193,7 +244,9 @@ def _meetings_for(question: str, listing: str, today: str, ref: str = "") -> str
         day = date.today()
     lower = question.lower()
     names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-    if "tomorrow" in lower:
+    if (named_day := _named_day(question, day)) is not None:
+        days = [named_day]  # a date beats a weekday word ("Monday Nov 23" is November 23)
+    elif "tomorrow" in lower:
         days = [day + timedelta(days=1)]
     elif "today" in lower:
         days = [day]
@@ -231,9 +284,10 @@ class CalendarSource(EmailRecord):
     meetings: list[dict] = field(default_factory=list)
 
 
-def calendar_source(store: Store, settings: Settings, today: str = "") -> EmailRecord | None:
-    """The calendar as one numbered source for the chat: the meetings from a week back to three weeks on, as lines
-    the model reads (times in the app's time zone). None when there are none."""
+def calendar_source(store: Store, settings: Settings, today: str = "", question: str = "") -> EmailRecord | None:
+    """The calendar as one numbered source for the chat: the meetings from a week back to three weeks on (and to the
+    date the ``question`` names, when that is further), as lines the model reads (times in the app's time zone). None
+    when there are none."""
     from controller_inbox import calendar_events
 
     try:
@@ -241,6 +295,9 @@ def calendar_source(store: Store, settings: Settings, today: str = "") -> EmailR
     except ValueError:
         day = datetime.now(settings.tz).date()
     first, last = day - timedelta(days=CALENDAR_DAYS_BACK), day + timedelta(days=CALENDAR_DAYS_AHEAD)
+    named = _named_day(question, day) if question else None
+    if named is not None and day <= named <= day + timedelta(days=366):
+        last = max(last, named)
     start, end = calendar_events.utc_range(first, last, settings.tz)
     meetings = [calendar_events.shown(meeting, settings.tz) for meeting in _meetings_between(store, start, end)]
     if not meetings:
@@ -258,7 +315,9 @@ def _meetings_between(store: Store, start: str, end: str) -> list[dict]:
     """The calendar's meetings, Outlook's only while it is connected with the calendar on (outlook_sync.calendar_on)."""
     from controller_inbox import outlook_sync
 
-    return store.meetings_between(start, end, outlook=outlook_sync.calendar_on(store))
+    from controller_inbox.calendar_events import with_cautions
+
+    return with_cautions(store, store.meetings_between(start, end, outlook=outlook_sync.calendar_on(store)))
 
 
 def _calendar_record(body: str, meetings: list[dict]) -> CalendarSource:
@@ -956,7 +1015,7 @@ def offline_answer(
                 f"- **{email.subject}** · {email.sender_name or email.sender_email}{when}{summary} [{index}]"
             )
             if email.attachments and not agent.attachments_locked(email):
-                lines += [f"  - {line}" for line in agent.file_matches(email, question, limit=1, outline=False)[:2]]
+                lines += [f"  - {line}" for line in agent.file_matches(email, question, limit=1, outline=False, tz=tz)[:2]]
         return "\n".join(lines)
     return (
         "I couldn't find emails about that. Try a person's name, a company, or an invoice number.\n"
@@ -1103,7 +1162,7 @@ def answer_stream(
         found = {email.id for email in sources}
     else:
         sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings, report=searched)
-    if meeting is None and asks_about_meetings(question) and (calendar := calendar_source(store, settings, today)) is not None:
+    if meeting is None and asks_about_meetings(question) and (calendar := calendar_source(store, settings, today, question)) is not None:
         # "What meetings do I have tomorrow?": the calendar answers it, beside the mail it may name.
         current_first = sources[:1] if email_id and sources and sources[0].id == email_id else []
         sources = current_first + [calendar] + [email for email in sources if email not in current_first][: MAX_SOURCES - 1]
