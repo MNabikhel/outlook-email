@@ -257,11 +257,76 @@ def answer(text: str, question: str) -> Answer | None:
     if not asked.words and not asked.conditions:
         return None
     best: Answer | None = None
-    for table in tables_in(text):
+    best_named = -1
+    for table in asked_tables(text, tables_in(text), question):
         found = _answer(table, asked)
-        if found and (best is None or found.weight > best.weight):
-            best = found
+        if not found:
+            continue
+        # The table whose rows the question names more of wins ("Sales" and "travel" on a detail tab over "Sales"
+        # alone on the summary); the better match breaks a tie.
+        named = _rows_named(table, asked.words)
+        if best is None or (named, found.weight) > (best_named, best.weight):
+            best, best_named = found, named
     return best
+
+
+def _rows_named(table: Table, words: list[str]) -> int:
+    """How many of ``words`` name rows of ``table``: they are in its cells of words, not in its headings."""
+    cells = set()
+    for row in table.rows[:2000]:
+        for _label, value in row.cells:
+            if value and not tables.is_value(value):
+                cells.update(_words(value))
+    return sum(1 for word in set(words) if word in cells)
+
+
+# Words in a table's title that say nothing about which table it is.
+_TITLE_NOISE = frozenset({"sheet", "table", "page", "the", "and", "for", "with", "from", "total", "totals"})
+
+
+def asked_tables(text: str, tables: list[Table], question: str) -> list[Table]:
+    """The tables a question is about. When it names one by a word only some tables' titles have ("the Canada
+    entity", "on the summary", "the UK"), those; otherwise every one but a hidden sheet's (an old draft, a lookup
+    list), unless the question names that sheet."""
+    if len(tables) < 2:
+        return tables
+    lines = text.splitlines()
+    words = [_title_words(lines, table) for table in tables]
+    asked = _title_words_in(question)
+    common = set.intersection(*words) if words else set()
+    named = [table for table, own in zip(tables, words) if (own - common) & asked]
+    if named:
+        return named
+    shown = [table for table in tables if not table.where.endswith(" hidden")]
+    return shown or tables
+
+
+def _title_words(lines: list[str], table: Table) -> set[str]:
+    """The words of a table's sheet name and the headings above it."""
+    where = table.where
+    sheet = where.split('"')[1] if where.startswith('sheet "') else ""
+    heads: list[str] = []
+    at = table.rows[0].at if table.rows else 0
+    for index in range(min(at, len(lines)) - 1, -1, -1):
+        line = lines[index].strip()
+        if line.startswith("[sheet ") or line.startswith("[page "):
+            break
+        if line == "[heading]":
+            heads = [text for text in lines[index + 1 : at] if text.strip() and not text.startswith("[")][:3]
+            break
+    return _title_words_in(" ".join([sheet, *heads]))
+
+
+def _title_words_in(text: str) -> set[str]:
+    """Words that can name a table: three letters or more, or a two-letter code in capitals (US, UK, IT); not a
+    workbook's cell reference."""
+    found = set()
+    for word in re.findall(r"[A-Za-z][A-Za-z0-9&'-]*", re.sub(r"\b[A-Z]{1,3}\d+:", " ", text)):
+        if len(word) >= 3 and word.lower() not in _TITLE_NOISE:
+            found.add(word.lower())
+        elif len(word) == 2 and word.isupper():
+            found.add(word)
+    return found
 
 
 def render(found: Answer, limit: int = MAX_CHARS) -> str:
@@ -865,6 +930,9 @@ def read_question(question: str) -> Question:
     limit = None if budget else _LIMIT.search(text)
     group = _GROUP.search(text)
     words = [word for word in _words(text) if word not in _STOP]
+    # A department or entity named by a short code in capitals ("IT", "HR", "US") is no stop word ("it", "us").
+    if not text.isupper():
+        words += [code.lower() for code in re.findall(r"\b[A-Z]{2,4}\b", text) if code.lower() in _STOP]
     return Question(
         text,
         list(dict.fromkeys(words + date_keys(text))),
@@ -1015,7 +1083,8 @@ def _columns_named(table: Table, asked: Question) -> dict[str, set[str]]:
         # "The 90+ bucket", "over 90 days", "31-60 days past due": the aging column of those days.
         if asked_days & _day_buckets(label) and table.kinds.get(label) == "figure":
             found[label], scores[label] = found.get(label, set()) | (asked_days & _day_buckets(label)), 1.0
-    if _EVERY.search(asked.text):
+    every = _every_column(table, asked.text)
+    if every:
         # "Each quarter of FY2024", "break down all the deductions": every column under that merged heading, the
         # heading's word first in each column's name.
         for label in table.labels:
@@ -1025,7 +1094,6 @@ def _columns_named(table: Table, asked: Question) -> dict[str, set[str]]:
     if not found:
         return {}
     best = max(scores.values())
-    every = _EVERY.search(asked.text) is not None
     keep = {
         label: found[label] for label in table.labels
         if label in found and (scores[label] >= best - 0.34 or every) and not any(found[label] < found[other] for other in found)
@@ -1043,6 +1111,17 @@ def _columns_named(table: Table, asked: Question) -> dict[str, set[str]]:
                 keep[label] = found[label]
     keep = {label: keep[label] for label in table.labels if label in keep}
     return _with_ranges(table, asked.text, keep)
+
+
+def _every_column(table: Table, question: str) -> bool:
+    """Whether "each", "every", "all" or "break down" asks for every column under a heading. "All departments", "each
+    vendor" name the rows (a column of names is headed by that word), not the columns."""
+    rows_words = {word for label in table.labels if table.kinds.get(label) == "text" for word in _label_words(label)}
+    for match in _EVERY.finditer(question):
+        after = _words(question[match.end() :])[:2]
+        if not any(_matches(word, after) for word in rows_words):
+            return True
+    return False
 
 
 def _with_ranges(table: Table, question: str, columns: dict[str, set[str]]) -> dict[str, set[str]]:

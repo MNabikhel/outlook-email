@@ -470,6 +470,35 @@ def test_an_older_llama_cpp_says_its_context_on_props(settings, monkeypatch):
     assert (status.model, status.context_length, status.vision) == ("qwen2.5-3b-instruct", 8192, False)
 
 
+def test_the_advice_names_where_each_model_server_sets_its_context():
+    assert "LM Studio with Context Length 16,384" in agent.context_advice(4096, ["Q3 pack.xlsx"])
+    assert "OLLAMA_CONTEXT_LENGTH=16384" in agent.context_advice(4096, ["Q3 pack.xlsx"], "ollama")
+    assert "-c 16384" in agent.context_advice(8192, ["Q3 pack.xlsx"], "llama.cpp")
+    assert "in your model server" in agent.context_advice(4096, ["Q3 pack.xlsx"], "")
+
+
+def test_ollama_says_the_context_it_loaded_the_model_with(settings, monkeypatch):
+    # Ollama loads a model with a short context unless told otherwise (4,096 tokens) and cuts a longer prompt
+    # from the start without a word: the length it loaded the model with (/api/ps) is what the prompt fits.
+    asked = []
+
+    def fake_get(url, **_kwargs):
+        request = httpx.Request("GET", url)
+        asked.append(request.url.path)
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, request=request, json={"data": [{"id": "qwen3:8b", "object": "model", "owned_by": "library"}]})
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, request=request, json={"models": [{"name": "qwen3:8b", "model": "qwen3:8b", "context_length": 4096}]})
+        return httpx.Response(404, request=request)
+
+    monkeypatch.setattr(local_llm.httpx, "get", fake_get)
+    settings.llm = True
+    settings.llm_base_url = "http://127.0.0.1:11434/v1"
+    status = local_llm.check_model(settings, use_cache=False)
+    assert (status.model, status.context_length, status.server) == ("qwen3:8b", 4096, "ollama")
+    assert "/api/show" not in asked, "the length a model was trained with is not the one it was loaded with"
+
+
 def test_lm_studio_context_length_and_tool_replies_are_read(settings, monkeypatch):
     def fake_get(url, **_kwargs):
         request = httpx.Request("GET", url)

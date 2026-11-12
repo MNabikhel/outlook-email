@@ -48,6 +48,15 @@ LOCKED = (
 )
 
 SUMMARY_RE = re.compile(r"\b(summar\w*|overview|gist|tl;?dr|walk me through|what(?:'s| is| does) (?:it|this|the \w+) (?:say|about|cover))\b", re.I)
+# "Summary" naming a place in the file ("on the summary", "the summary tab"), not asking for one.
+_SUMMARY_PLACE = re.compile(
+    r"\b(?:on|in|from|of|per|under)\s+the\s+summar(?:y|ies)\b|\bsummar(?:y|ies)\s+(?:sheet|tab|page|row|line|column|table|section|schedule)s?\b", re.I
+)
+
+
+def asks_summary(question: str) -> bool:
+    """Whether the question asks for a file to be summarized, not about a figure on its summary sheet."""
+    return bool(SUMMARY_RE.search(_SUMMARY_PLACE.sub(" ", question or "")))
 
 # A question's filler, past what every question has (``documents.STOP_WORDS``), and the words for a file itself.
 _STOP = documents.STOP_WORDS | set(
@@ -307,18 +316,26 @@ def context_capacity(tokens: int, reply_tokens: int = 500) -> dict[str, object]:
     return {"tokens": tokens, "label": f"{tokens:,} tokens", "text": f"{fits}; needs {memory}. {note}", "tier": tier}
 
 
-def context_advice(context_tokens: int, left_out: list[str]) -> str:
+# Where each model server sets the context length, for the advice when a file didn't fit.
+_RAISE_CONTEXT = {
+    "lm_studio": f"reload the model in LM Studio with Context Length {RECOMMENDED_CONTEXT:,} or more "
+    "(My Models → the model's settings → Context Length)",
+    "ollama": f"start Ollama with a longer context (in its Settings, Context length {RECOMMENDED_CONTEXT:,} or more; "
+    f"or set OLLAMA_CONTEXT_LENGTH={RECOMMENDED_CONTEXT})",
+    "llama.cpp": f"start llama.cpp's server with a longer context (-c {RECOMMENDED_CONTEXT})",
+    "": f"load the model with a context length of {RECOMMENDED_CONTEXT:,} tokens or more in your model server",
+}
+
+
+def context_advice(context_tokens: int, left_out: list[str], server: str = "lm_studio") -> str:
     if not left_out:
         return ""
     named = [item for item in left_out if not item.startswith("the ")]
     what = ", ".join(dict.fromkeys(named or left_out))
     if (context_tokens or DEFAULT_CONTEXT) < RECOMMENDED_CONTEXT:
         known = f"{context_tokens:,}-token" if context_tokens else "small (probably 4,096-token)"
-        return (
-            f"Your model has a {known} context window, so I only read parts of {what}. "
-            f"For whole documents, reload the model in LM Studio with Context Length {RECOMMENDED_CONTEXT:,} or more "
-            "(My Models → the model's settings → Context Length), then ask again."
-        )
+        raise_it = _RAISE_CONTEXT.get(server, _RAISE_CONTEXT[""])
+        return f"Your model has a {known} context window, so I only read parts of {what}. For whole documents, {raise_it}, then ask again."
     several = len(dict.fromkeys(named)) > 1 or not named
     return (
         f"{what[0].upper()}{what[1:]} {'are' if several else 'is'} long, so I read only part of {'them' if several else 'it'}. "
@@ -521,7 +538,7 @@ def query_tables(ws: Workspace, question: str, complete) -> Iterator[dict]:
     email = ws.primary()
     if not ws.settings.table_queries or email is None or email.id in ws.worked or not email.attachments:
         return
-    if attachments_locked(email) or SUMMARY_RE.search(question):
+    if attachments_locked(email) or asks_summary(question):
         return
     ws.worked[email.id] = ""
     readable = [att for att in email.attachments if (att.extracted_text or "").strip()]
@@ -552,7 +569,7 @@ def file_context(ws: Workspace, question: str, room: int) -> dict[str, str]:
     primary = ws.primary()
     if primary is not None and primary.attachments:
         targets = [primary] + [email for email in targets if email.id != primary.id][:1]
-    whole = bool(SUMMARY_RE.search(question))
+    whole = bool(asks_summary(question))
     for position, email in enumerate(targets):
         share = room if len(targets) == 1 else (room * 2 // 3 if position == 0 else room // 3)
         if attachments_locked(email):
@@ -670,7 +687,7 @@ def question_points(ws: Workspace, question: str) -> list[tuple[str, str]]:
     """What the question asks of the open email's file tables (``Workspace.points``), worked out before the prompt
     is built so the reply can be given room for every point."""
     primary = ws.primary()
-    if primary is None or attachments_locked(primary) or SUMMARY_RE.search(question):
+    if primary is None or attachments_locked(primary) or asks_summary(question):
         return []
     readable = [att for att in primary.attachments if (att.extracted_text or "").strip()]
     for att in named_files(readable, question) or readable:
@@ -891,7 +908,7 @@ def overnight_summary(store: Store, att: AttachmentRecord) -> str:
 def summary_request(ws: Workspace, question: str) -> tuple[AttachmentRecord, str] | None:
     """The one file a "summarize the file" question is about and its overnight summary, when there is one."""
     email = ws.primary()
-    if email is None or not SUMMARY_RE.search(question) or attachments_locked(email):
+    if email is None or not asks_summary(question) or attachments_locked(email):
         return None
     readable = [att for att in email.attachments if (att.extracted_text or "").strip()]
     named = named_files(readable, question)

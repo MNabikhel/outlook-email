@@ -1,0 +1,316 @@
+[
+ {
+  "file": "Q3 Opex Pack.xlsx",
+  "question": "What is Marketing's total actual opex for Q3 on the summary?",
+  "answers": [
+   "435,211.01"
+  ],
+  "where": "Summary!E5",
+  "held_out": false,
+  "sql": "SELECT q3 FROM {Summary} WHERE department = 'Marketing'",
+  "needs": ""
+ },
+ {
+  "file": "Q3 Opex Pack.xlsx",
+  "question": "How much did IT spend in August?",
+  "answers": [
+   "149,335.78"
+  ],
+  "where": "Summary!C7",
+  "held_out": false,
+  "sql": "SELECT actual_aug FROM {Summary} WHERE department = 'IT'",
+  "needs": ""
+ },
+ {
+  "file": "Q3 Opex Pack.xlsx",
+  "question": "What is the total Q3 actual across all departments?",
+  "answers": [
+   "2,774,259.04"
+  ],
+  "where": "Summary!E11",
+  "held_out": false,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Q3 Opex Pack.xlsx",
+  "question": "How much did Sales spend on travel in Q3?",
+  "answers": [
+   "61,532.87"
+  ],
+  "where": "Detail",
+  "held_out": false,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Q3 Opex Pack.xlsx",
+  "question": "What did Finance spend in September?",
+  "answers": [
+   "127,189.74"
+  ],
+  "where": "Summary!D8",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Q3 Opex Pack.xlsx",
+  "question": "What is HR's Q3 budget?",
+  "answers": [
+   "539,900.00"
+  ],
+  "where": "Summary!F10",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Q3 Opex Pack.xlsx",
+  "question": "Which department is furthest over its Q3 budget, and by how much?",
+  "answers": [
+   "40,501.13"
+  ],
+  "where": "Summary",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "AP Aging by entity 10-31-26.xlsx",
+  "question": "What is the Canada entity's total 61-90 day balance?",
+  "answers": [
+   "20,951.04"
+  ],
+  "where": "",
+  "held_out": false,
+  "sql": "SELECT SUM(c_61_90) FROM {(CAD)}",
+  "needs": ""
+ },
+ {
+  "file": "AP Aging by entity 10-31-26.xlsx",
+  "question": "Which vendor has the largest over-90 balance in the UK entity?",
+  "answers": [
+   "Granite Movers"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "AP Aging by entity 10-31-26.xlsx",
+  "question": "What is the UK entity's total current balance?",
+  "answers": [
+   "18,706.37"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "AP Aging by entity 10-31-26.xlsx",
+  "question": "What do we owe Clearwater Labs in total in the US entity?",
+  "answers": [
+   "20,607.36"
+  ],
+  "where": "",
+  "held_out": false,
+  "sql": "SELECT total FROM {(USD)} WHERE vendor = 'Clearwater Labs'",
+  "needs": ""
+ },
+ {
+  "file": "Granite statement Oct 2026.pdf",
+  "question": "What is the closing balance on the Granite statement?",
+  "answers": [
+   "113,273.83"
+  ],
+  "where": "last page",
+  "held_out": false,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Granite statement Oct 2026.pdf",
+  "question": "What is the amount of invoice 88414 on the statement?",
+  "answers": [
+   "3,647.94"
+  ],
+  "where": "page 3",
+  "held_out": false,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Granite statement Oct 2026.pdf",
+  "question": "What was credit memo CM-2222 for, and how much?",
+  "answers": [
+   "2,974.32"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Brightline MSA signed.docx",
+  "question": "What interest rate applies to late payments under the Brightline agreement?",
+  "answers": [
+   "1.25%"
+  ],
+  "where": "clause 14.2",
+  "held_out": false,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Brightline MSA signed.docx",
+  "question": "What is the early termination fee in the MSA?",
+  "answers": [
+   "42,500.00",
+   "42,500"
+  ],
+  "where": "clause 22.2",
+  "held_out": false,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Brightline MSA signed.docx",
+  "question": "What are the payment terms on Brightline's invoices?",
+  "answers": [
+   "net 45",
+   "45 days"
+  ],
+  "where": "clause 11.2",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Kessler Rechnung 2026-4471.pdf",
+  "question": "What is the total on the Kessler invoice in euros?",
+  "answers": [
+   "9.236,78",
+   "9,236.78"
+  ],
+  "where": "",
+  "held_out": false,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Kessler Rechnung 2026-4471.pdf",
+  "question": "How much VAT is on the Kessler invoice?",
+  "answers": [
+   "1.474,78",
+   "1,474.78"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "bank_export_oct2026.csv",
+  "question": "What is the total of debits on 2026-10-15 in the bank export?",
+  "answers": [
+   "55.236,13",
+   "55,236.13"
+  ],
+  "where": "",
+  "held_out": false,
+  "sql": "SELECT -SUM(betrag) FROM {csv} WHERE buchungstag = '2026-10-15' AND betrag < 0",
+  "needs": ""
+ },
+ {
+  "file": "bank_export_oct2026.csv",
+  "question": "What was the largest single credit in the bank export?",
+  "answers": [
+   "9.773,91",
+   "9,773.91"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Board update Q3 2026.pptx",
+  "question": "What was EMEA revenue in Q3 according to the board deck?",
+  "answers": [
+   "7,315"
+  ],
+  "where": "",
+  "held_out": false,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Board update Q3 2026.pptx",
+  "question": "Which region's revenue fell from Q2 to Q3 in the board deck?",
+  "answers": [
+   "LATAM"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Payroll journal 10-15-26.xlsx",
+  "question": "What is the total employer 401k match for department 410 in the payroll journal?",
+  "answers": [
+   "18,518.78"
+  ],
+  "where": "",
+  "held_out": false,
+  "sql": "SELECT SUM(c_401k_er) FROM {26} WHERE dept = 410",
+  "needs": ""
+ },
+ {
+  "file": "Payroll journal 10-15-26.xlsx",
+  "question": "What is total gross pay for department 520?",
+  "answers": [
+   "403,516.47"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Payroll journal 10-15-26.xlsx",
+  "question": "How many employees are in department 320?",
+  "answers": [
+   "74"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": ""
+ },
+ {
+  "file": "Bluebird scan BF-77310.pdf",
+  "question": "What is the total due on the Bluebird scanned invoice?",
+  "answers": [
+   "3,298.96"
+  ],
+  "where": "",
+  "held_out": false,
+  "sql": "",
+  "needs": "ocr"
+ },
+ {
+  "file": "Bluebird scan BF-77310.pdf",
+  "question": "How much is the fuel surcharge on the Bluebird invoice?",
+  "answers": [
+   "353.46"
+  ],
+  "where": "",
+  "held_out": true,
+  "sql": "",
+  "needs": "ocr"
+ }
+]
