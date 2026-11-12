@@ -1123,13 +1123,19 @@ def _joined_headers(sections: list[tuple[str, list[list[str]]]]) -> list[tuple[s
 
 def csv_text(data: bytes, filename: str) -> str:
     text = decode_text(data).replace("\x00", "")
-    try:
-        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
-        # The sniffer turns doubled quotes off when its sample has none, and a quote written twice further down
-        # ('"Pipe 3"" PVC, schedule 40"') would then end the cell at its comma. Every spreadsheet writes them.
-        dialect.doublequote = True
-    except csv.Error:
-        dialect = csv.excel_tab if filename.lower().endswith(".tsv") else csv.excel
+    # Excel's own line naming the delimiter ("sep=;"), written first so Excel opens the file right.
+    named = re.match(r"sep=(.)[ \t]*(?:\r\n|\n|\r|$)", text)
+    if named:
+        text = text[named.end():]
+        dialect = type("Named", (csv.excel,), {"delimiter": named.group(1)})
+    else:
+        try:
+            dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
+            # The sniffer turns doubled quotes off when its sample has none, and a quote written twice further down
+            # ('"Pipe 3"" PVC, schedule 40"') would then end the cell at its comma. Every spreadsheet writes them.
+            dialect.doublequote = True
+        except csv.Error:
+            dialect = csv.excel_tab if filename.lower().endswith(".tsv") else csv.excel
     quote = getattr(dialect, "quotechar", None) or '"'
     try:
         rows = list(csv.reader(io.StringIO(text), dialect))

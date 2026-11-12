@@ -290,3 +290,40 @@ def test_a_column_of_months_is_stored_as_months():
     assert tables.run("SELECT accrual FROM t1 WHERE month = '2026-03'")[1] == [(120.75,)]
     assert tables.run("SELECT month FROM t1 ORDER BY month DESC LIMIT 1")[1] == [("2026-05",)]
     assert "YYYY-MM" in tables.schema()
+
+
+def test_excel_s_sep_line_names_the_delimiter():
+    text = _csv_text("sep=;\nVendor;Invoice;Amount\nAcme;INV-1;1.234,56\nBeta;INV-2;99,00\n", "ap.csv")
+    assert "A2 (Vendor): Acme | B2 (Invoice): INV-1 | C2 (Amount): 1.234,56" in text and "sep=" not in text
+
+
+def test_a_no_column_heads_its_table():
+    for text in (_csv_text("No,Description,Qty,Amount\n1,Paper,10,45.00\n2,Toner,2,180.00\n3,Pens,50,25.00\n", "lines.csv"),
+                 _xlsx_text([("No", "Description", "Qty", "Amount"), (1, "Paper", 10, 45.0), (2, "Toner", 2, 180.0), (3, "Pens", 50, 25.0)]),
+                 _xlsx_text([("No", "Description", "Qty", "Amount"), (1, "Paper", 10, 45.0), (2, "Toner", 2, 180.0), (3, "Pens", 50, 25.0)], bold=(1,))):
+        assert "B3 (Description): Toner" in text
+        assert _tables(text, "What is the total amount?").run("SELECT SUM(amount) FROM t1")[1] == [(250.0,)]
+
+
+def test_month_and_date_headings_head_their_columns_without_bold():
+    for heading in (("Sep 2026", "Oct 2026", "Nov 2026"), ("2026-09-30", "2026-10-31", "2026-11-30")):
+        text = _xlsx_text([("Account", *heading), ("Rent", 950, 950, 950), ("Payroll", 12000, 12500, 12100), ("Software", 400, 420, 430)])
+        assert f"C3 ({heading[1]}): 12,500" in text
+        assert _tables(text, "What was payroll in October?")
+    text = _xlsx_text([("Account", "Sep 2026", "Oct 2026"), ("Rent", 950.25, 950.25), ("Payroll", 12000.5, 12500.75)])
+    assert "C3 (Oct 2026): 12,500.75" in text
+    # A first row of data with one year in it is still a row.
+    text = _xlsx_text([("Rent", "2026", 950, 950), ("Payroll", "2026", 12000, 12500), ("Software", "2026", 400, 420)])
+    assert "A1: Rent" in text and "(Rent)" not in text
+
+
+# Totals ----------------------------------------------------------------------------------------
+
+
+def test_a_vendor_named_total_stays_a_row_beside_an_empty_bucket():
+    text = _csv_text("Vendor,Current,1-30,31-60,Total\nAcme Supply,1200,100,0,1300\nTotal Quality Logistics,8450,2300,0,10750\n"
+                     "Beta Corp,300,150,0,450\nTotal,9950,2550,0,12500\n", "aging.csv")
+    rows = [(row.name, row.total) for row in table_lookup.tables_in(text)[0].rows]
+    assert ("Total Quality Logistics", False) in rows and rows[-1][1]
+    tables = _tables(text, "What is the total?", "aging.csv")
+    assert tables.run("SELECT COUNT(*), SUM(total) FROM t1")[1] == [(3, 12500.0)]

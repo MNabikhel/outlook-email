@@ -640,7 +640,9 @@ def _held_totals(rows: list[Row], figures: list[str], as_rows: set[int]) -> dict
                 continue
             value = _number(raw)
             if value is not None and "%" not in raw and running[label].started():
-                held[index] += running[label].close(value)
+                # A 0 under rows of 0s (an empty bucket) adds up whether or not its row is a total: it says nothing.
+                empty = value == 0 and not any(running[label].group)
+                held[index] += running[label].close(value) and not empty
     return held
 
 

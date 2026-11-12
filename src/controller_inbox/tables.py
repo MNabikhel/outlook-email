@@ -70,13 +70,20 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
     filled = [cell for cell in first if cell]
     if len(filled) < 2 or len(set(filled)) != len(filled):
         return False
-    # A year or a month over each column ("2026", "Oct 2026") names it when the file marks the row as headings.
-    periods = marked or bold_first
+    # A year or a month over each column ("2026", "Oct 2026") names it when the file marks the row as headings, or
+    # when a word heads the row and figures sit under two or more periods ("Account | Sep 2026 | Oct 2026").
+    periods = marked or bold_first or _period_headings(rows)
     # An aging's buckets ("1-30", "61-90", "Over 90") head their columns beside words ("Vendor", "Current").
     words = sum(1 for cell in filled if not is_value(_value_of(cell)) and not _BUCKET_RE.fullmatch(cell))
     buckets = words >= 2
     if any(
-        (is_value(_value_of(cell)) and not (periods and _PERIOD_RE.fullmatch(cell)) and not (buckets and _BUCKET_RE.fullmatch(cell)))
+        (
+            is_value(_value_of(cell))
+            and not (periods and _PERIOD_RE.fullmatch(cell))
+            and not (buckets and _BUCKET_RE.fullmatch(cell))
+            # "No" beside other headings is the line number's column ("No | Description | Qty"), not a no.
+            and not (words >= 2 and _YES_NO.fullmatch(cell))
+        )
         or cell.endswith(":")
         or _FORMULA_RE.search(cell)
         for cell in filled
@@ -95,6 +102,27 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
         if len(below) >= 2 and sum(map(is_value, below)) >= 0.6 * len(below):
             return True
     return False
+
+
+_YES_NO = re.compile(r"(?i)yes|no|n/?a")
+
+
+def _period_headings(rows: list[list[str | None]]) -> bool:
+    """A first row of a word, then two or more distinct periods, each over a column of figures that are not periods
+    themselves: "Account | Sep 2026 | Oct 2026 | Nov 2026" over each account's months."""
+    first = [(cell or "").strip() for cell in rows[0]]
+    lead = next((cell for cell in first if cell), "")
+    if not lead or is_value(lead):
+        return False
+    columns = [index for index, cell in enumerate(first) if cell and _PERIOD_RE.fullmatch(cell)]
+    if len(columns) < 2 or len({first[index] for index in columns}) != len(columns):
+        return False
+    for index in columns:
+        below = [(row[index] or "").strip() for row in rows[1:] if index < len(row) and (row[index] or "").strip()]
+        # A figure with decimals ("950.25") only looks like a date.
+        if len(below) < 2 or not all(is_value(cell) and (not _PERIOD_RE.fullmatch(cell) or re.fullmatch(r"[\d,]*\.\d+", cell)) for cell in below):
+            return False
+    return True
 
 
 _AMOUNT_RE = re.compile(r"[(\-−–]?\s*[$€£¥]?\s*[(\-−–]?\d[\d,]*(?:\.\d+)?%?\)?")
