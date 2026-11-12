@@ -327,3 +327,41 @@ def test_a_vendor_named_total_stays_a_row_beside_an_empty_bucket():
     assert ("Total Quality Logistics", False) in rows and rows[-1][1]
     tables = _tables(text, "What is the total?", "aging.csv")
     assert tables.run("SELECT COUNT(*), SUM(total) FROM t1")[1] == [(3, 12500.0)]
+
+
+# Cells as Excel shows them ---------------------------------------------------------------------
+
+
+def _formatted_book(rows, formats: dict[int, str]) -> str:
+    wb = Workbook()
+    ws = wb.active
+    for row in rows:
+        ws.append(list(row))
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for column, number_format in formats.items():
+        for cells in ws.iter_rows(min_row=2, min_col=column, max_col=column):
+            cells[0].number_format = number_format
+    out = io.BytesIO()
+    wb.save(out)
+    return documents.extract_document("book.xlsx", XLSX, out.getvalue())
+
+
+def test_durations_read_as_hours_and_minutes():
+    text = _formatted_book([("Employee", "Hours"), ("Ann", 37.5 / 24), ("Bob", 41.25 / 24), ("Cy", 22 / 24)], {2: "[h]:mm"})
+    assert "B2 (Hours): 37:30" in text and "B3 (Hours): 41:15" in text and "B4 (Hours): 22:00" in text
+    assert "day" not in text
+
+
+def test_small_rates_and_formatted_decimals_keep_their_digits():
+    text = _formatted_book([("Currency", "Rate"), ("JPY", 0.006712), ("KRW", 0.000731), ("IDR", 0.0000637), ("EUR", 1.083456)], {})
+    assert "B2 (Rate): 0.006712" in text and "B3 (Rate): 0.000731" in text and "B4 (Rate): 0.0000637" in text
+    text = _formatted_book([("Currency", "Rate"), ("JPY", 0.006712), ("EUR", 1.083456)], {2: "0.000000"})
+    assert "B2 (Rate): 0.006712" in text and "B3 (Rate): 1.083456" in text
+    # Four decimals stay the most for a figure of one or more, unformatted (100/3).
+    assert "33.3333" in _formatted_book([("Dept", "Rent"), ("Ops", 100 / 3), ("IT", 1.5)], {})
+
+
+def test_a_zero_padded_format_keeps_its_zeros():
+    text = _formatted_book([("Vendor ID", "Vendor", "Balance"), (417, "Northwind", 4500.0), (418, "Granite", 12500.5)], {1: "00000"})
+    assert "A2 (Vendor ID): 00417" in text and "A3 (Vendor ID): 00418" in text

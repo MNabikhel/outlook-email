@@ -22,7 +22,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -1241,7 +1241,20 @@ def _formatted(value, cell) -> str:
                 literal = part.group(1) if part.group(1) is not None else part.group(2)
                 shown.append(literal if literal is not None else words.get(part.group(0).lower(), part.group(0)))
             return "".join(shown).strip()
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and "," not in bare:
+    numeric = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    padded = re.fullmatch(r"(0+)(?:\.(0+))?", bare)
+    if numeric and padded and len(padded.group(1)) > 1 and value >= 0:
+        # A zero-padded format ("00000"): vendor 417 is 00417, a ZIP code 02134, as Excel shows them.
+        places = len(padded.group(2) or "")
+        whole, _point, fraction = f"{value:.{places}f}".partition(".")
+        return whole.zfill(len(padded.group(1))) + (f".{fraction}" if fraction else "")
+    decimals = re.search(r"\.(0+)", bare)
+    if numeric and isinstance(value, float) and decimals and len(decimals.group(1)) > 4:
+        # More decimals than the four a figure is written with (an exchange rate formatted 0.000000).
+        places = len(decimals.group(1))
+        shown = Decimal(repr(value)).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+        return f"{shown:,.{places}f}" if "," in bare else f"{shown:.{places}f}"
+    if numeric and "," not in bare:
         return _fmt(value, grouped=False)
     return _fmt(value)
 
@@ -1255,12 +1268,20 @@ def _fmt(value, *, grouped: bool = True) -> str:
         return value.date().isoformat() if value.time() == time(0) else value.isoformat(sep=" ", timespec="minutes")
     if isinstance(value, (date, time)):
         return value.isoformat()
+    if isinstance(value, timedelta):
+        # A duration ([h]:mm on a timesheet) as hours and minutes: 37:30, not "1 day, 13:30:00".
+        seconds = round(value.total_seconds())
+        hours, rest = divmod(abs(seconds), 3600)
+        minutes, seconds = divmod(rest, 60)
+        return f"{'-' if value < timedelta(0) else ''}{hours}:{minutes:02d}" + (f":{seconds:02d}" if seconds else "")
     if isinstance(value, float):
         if math.isnan(value) or math.isinf(value):
             return str(value)
         if value.is_integer():
             return f"{int(value):,}" if grouped else str(int(value))
-        return (f"{value:,.4f}" if grouped else f"{value:.4f}").rstrip("0").rstrip(".")
+        # Four decimals, or four figures of a small one (an exchange rate of 0.006712, 0.0000637).
+        places = 4 if abs(value) >= 1 else min(12, max(4, 3 - math.floor(math.log10(abs(value)))))
+        return (f"{value:,.{places}f}" if grouped else f"{value:.{places}f}").rstrip("0").rstrip(".")
     if isinstance(value, int):
         return f"{value:,}" if grouped else str(value)
     return re.sub(r"\s+", " ", str(value)).strip()
