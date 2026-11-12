@@ -169,7 +169,7 @@ def _words(text: str) -> set[str]:
 
 def _cites_locked_mail(store: Store, pair: dict[str, Any], turns: dict[str, list[dict[str, Any]]]) -> bool:
     """Whether the earlier answer drew on an email that is now flagged as possible payment fraud.
-    What it said may come from that email's files, which the model must not be given."""
+    What it said may come from that email's text or files, which the model must not be given."""
     chat_id = pair.get("chat_id") or ""
     if chat_id not in turns:
         turns[chat_id] = store.chat_turns(chat_id) if chat_id else []
@@ -185,7 +185,7 @@ def _turn_cites_locked_mail(store: Store, turn: dict[str, Any]) -> bool:
 
     for card in turn.get("sources") or []:
         email = store.get_email(str(card.get("id") or "")) if isinstance(card, dict) else None
-        if email is not None and email.attachments and attachments_locked(email):
+        if email is not None and attachments_locked(email):
             return True
     return False
 
@@ -195,7 +195,7 @@ LOCKED_ANSWER = "(An earlier answer here drew on an email now held as possible p
 
 def history_for_model(store: Store, turns: list[dict[str, Any]], *, limit: int = 6) -> list[dict[str, str]]:
     """This conversation's last turns for the model. An answer that drew on an email flagged as possible payment
-    fraud since (or while it was marked "Not fraud") may quote its files, so it is left out, as ``past_context``
+    fraud since (or while it was marked "Not fraud") may quote its text or files, so it is left out, as ``past_context``
     leaves it out of other conversations."""
     kept = turns[-limit:]
     return [

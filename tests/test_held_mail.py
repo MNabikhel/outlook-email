@@ -76,3 +76,20 @@ def test_it_doesnt_open_in_a_mail_app_or_download_until_it_is_marked_safe(loaded
     record_fraud_verdict(loaded, settings, HELD, verdict="safe")
     assert not attachments_locked(loaded.get_email(HELD))
     assert client.get(f"/inbox/{HELD}/original").status_code == 200
+
+
+def test_an_earlier_answer_quoting_its_text_is_left_out_once_it_is_held_again(loaded, settings):
+    from controller_inbox import chats
+
+    record_fraud_verdict(loaded, settings, HELD, verdict="safe")
+    assert not loaded.get_email(HELD).attachments, "an email with no files: only its text is held"
+    loaded.create_chat("c1")
+    loaded.add_chat_turn("c1", "user", "What account does the wiring email say to use?")
+    loaded.add_chat_turn(
+        "c1", "assistant", "It says to use account 9988776612 [1].", {"mode": "model", "sources": [{"n": 1, "id": HELD}]}
+    )
+    record_fraud_verdict(loaded, settings, HELD, verdict="fraud")
+    history = chats.history_for_model(loaded, loaded.chat_turns("c1"))
+    assert not any("9988776612" in turn["text"] for turn in history)
+    assert chats.LOCKED_ANSWER in [turn["text"] for turn in history]
+    assert "9988776612" not in chats.past_context(loaded, "Which account does the wiring email say to use?", exclude="c2")
