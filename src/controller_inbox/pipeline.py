@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Protocol
 
 from controller_inbox.actions import extract_actions, keep_task_status, received_day
-from controller_inbox.classify import Classification, classify_document, classify_email, is_data_file, outlook_categories, own_words
+from controller_inbox.classify import Classification, classify_document, classify_email, is_data_file, own_words
 from controller_inbox.clock import aware_utc, parse_stamp
 from controller_inbox.config import Settings
 from controller_inbox.documents import MAX_TEXT
@@ -42,8 +42,6 @@ class Mailbox(Protocol):
 
     def get_attachments(self, message_id: str): ...
 
-    def apply_categories(self, message_id: str, categories: list[str], flag: bool) -> str: ...
-
 
 def attachment_text(filename: str, content_type: str, data: bytes) -> str:
     """An attachment's text as stored: account and card numbers masked, capped in length."""
@@ -58,7 +56,6 @@ def process_message(
     *,
     as_of=None,
     now: datetime | None = None,
-    writeback: bool | None = None,
 ) -> EmailRecord:
     now = now or datetime.now(timezone.utc)
     existing = store.get_email(raw.id)
@@ -67,8 +64,8 @@ def process_message(
     if existing is not None and raw.from_file:
         raw = _as_stored(raw, existing)
     if existing is not None and existing.writeback_status == "written":
-        # CloseDesk marks the messages it flags high importance in Outlook: read again, that is its own mark, not
-        # the sender's. The importance the message came with is kept.
+        # Versions before Outlook was read only marked the messages they flagged high importance in Outlook: read
+        # again, that is CloseDesk's own mark, not the sender's. The importance the message came with is kept.
         raw = replace(raw, outlook_importance=existing.outlook_importance)
     # Two dates. "By Friday" and "October 15" in the text are read against the day the mail was
     # sent (``anchor``); how urgent or overdue it is now is judged against today (``as_of``).
@@ -207,15 +204,8 @@ def process_message(
     if existing is not None:
         actions = keep_task_status(actions, existing.actions)
 
-    writeback_status = "skipped"
-    do_write = settings.writeback if writeback is None else writeback
-    if do_write and mailbox is not None and raw.source == "graph":
-        try:
-            cats = outlook_categories(classified_email)
-            flag = classified_email.importance.value in {"critical", "high"}
-            writeback_status = mailbox.apply_categories(raw.id, cats, flag)
-        except Exception as exc:  # do not fail ingest because Outlook writeback failed
-            writeback_status = f"error:{exc}"
+    # Nothing is written back to the mailbox: Outlook and Microsoft 365 are only read.
+    writeback_status = existing.writeback_status if existing is not None and existing.writeback_status == "written" else "skipped"
 
     record = EmailRecord(
         id=raw.id,

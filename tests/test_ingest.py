@@ -115,17 +115,13 @@ class WritebackGraph:
         return []
 
     def apply_categories(self, message_id, categories, flag):
-        if flag:
-            self.importance = "high"  # GraphMailbox.apply_categories sends {"importance": "high"}
-        return "written"
+        raise AssertionError("CloseDesk wrote to the mailbox")
 
 
-# Guards against: With Outlook writeback on, CloseDesk PATCHes importance=high onto every message it files as
-# High/Critical. When that message is read again (a `sync` re-lists the last 72 hours), Graph returns importance
-# "high", which CloseDesk then scores as "Sender marked the message as high importance in Outlook" (+10): its own
-# write is read back as the sender's signal and the email's score and level climb on every re-read.
-def test_own_writeback_is_not_read_as_sender_importance(store, settings):
-    settings.writeback = True
+# Versions before Outlook was read only PATCHed importance=high onto messages they filed as High/Critical. Read
+# again, Graph returns "high", which must not count as the sender's signal: the email's score would climb on every
+# re-read. Nothing is written now; an email an older version wrote to keeps being read as before.
+def test_an_older_versions_mark_in_outlook_is_not_read_as_the_senders(store, settings):
     now = datetime(2026, 10, 9, 13, 0, tzinfo=timezone.utc)
     raw = RawMessage(
         id="AAMk-approval",
@@ -141,12 +137,15 @@ def test_own_writeback_is_not_read_as_sender_importance(store, settings):
     )
     mailbox = WritebackGraph(raw)
     first = ingest_mailbox(mailbox, store, settings, now=now)[0]
-    assert first.importance.value in {"high", "critical"}  # so CloseDesk flagged it in Outlook
-    assert mailbox.importance == "high"
+    assert first.importance.value in {"high", "critical"} and first.writeback_status == "skipped"
+    assert mailbox.importance == "normal", "nothing is written to the mailbox"
+    first.writeback_status = "written"  # as an older version stored it, having marked it in Outlook
+    store.upsert_email(first)
+    mailbox.importance = "high"
     again = ingest_mailbox(mailbox, store, settings, received_after=now - timedelta(hours=72), now=now + timedelta(minutes=5))[0]
-    assert again.importance == first.importance, (first.importance_score, again.importance_score, again.importance_reasons)
-    assert again.importance_score == first.importance_score, again.importance_reasons
+    assert again.importance == first.importance and again.importance_score == first.importance_score, again.importance_reasons
     assert not any("high importance in Outlook" in r for r in again.importance_reasons)
+    assert again.writeback_status == "written"
 
 
 NOW = datetime(2026, 10, 20, 15, 0, tzinfo=timezone.utc)
@@ -571,36 +570,6 @@ def test_graph_drops_inline_signature_logo():
 
 
 # Writeback PATCHed `categories`, which replaces the whole list: the user's own ("Paid") were erased.
-class _Outlook:
-    """A fake Graph holding one message's categories, with Graph's PATCH semantics (the list is replaced)."""
-
-    def __init__(self, categories):
-        self.categories = list(categories)
-
-    def _user_root(self):
-        return "/me"
-
-    def get_json(self, path, params=None):
-        return {"id": "m1", "categories": list(self.categories)}
-
-    def request(self, method, path, **kwargs):
-        if method == "PATCH" and "categories" in (kwargs.get("json") or {}):
-            self.categories = list(kwargs["json"]["categories"])
-
-
-def test_writeback_keeps_the_users_own_categories():
-    outlook = _Outlook(["Paid", "Follow up"])
-    GraphMailbox(outlook).apply_categories("m1", ["CloseDesk", "AP-Invoice"], False)
-    assert sorted(outlook.categories) == ["AP-Invoice", "CloseDesk", "Follow up", "Paid"]
-
-
-def test_writeback_replaces_closedesks_own_old_categories():
-    # Filed again as a bank statement: the old AP-Invoice and CloseDesk-Important labels go.
-    outlook = _Outlook(["Paid", "CloseDesk", "AP-Invoice", "CloseDesk-Important"])
-    GraphMailbox(outlook).apply_categories("m1", ["CloseDesk", "Bank-Statement"], False)
-    assert sorted(outlook.categories) == ["Bank-Statement", "CloseDesk", "Paid"]
-
-
 # A second unreadable file with the same name landed as "<stem>-<hash>.msg" but its note replaced the first one's.
 def test_each_failed_file_keeps_its_own_note(store, settings):
     settings.ensure_data_dir()
