@@ -46,7 +46,7 @@
     {% if ocr_engine %}
     <p class="muted">Scanned PDFs and pictures are read with {{ ocr_engine }} on this computer.</p>
     {% else %}
-    <p class="muted">Scanned PDFs and pictures can't be read yet. To add it, run <code>pip install -e ".[ocr]"</code> in the CloseDesk folder (inside <code>.venv</code>).</p>
+    <p class="muted">{{ ocr_missing }}</p>
     {% endif %}
   </article>
   <article class="panel llm-card">
@@ -177,7 +177,7 @@
       {% else %}
       <p class="muted small">No model in LM Studio can look at pictures, so scans are read with OCR only. Download <b>OvisOCR2</b> in LM Studio (a small model made for reading document pages: the most accurate and fastest we measured), or load one that can see (Qwen3.5 9B, Gemma 3), to read them both ways.</p>
       {% endif %}
-      {% if not vision_setup.renderer %}<p class="warn-box small">The page renderer isn't installed. Double-click CloseDesk once (or run <code>pip install -e .</code>) to add it.</p>{% endif %}
+      {% if not vision_setup.renderer %}<p class="warn-box small">The page renderer isn't installed. Open CloseDesk again (double-click it) to add it.</p>{% endif %}
       <form method="post" action="/settings/vision" class="vision-form">
         <label><input type="radio" name="mode" value="auto" {{ 'checked' if vision_setup.mode == 'auto' }}/> <b>Automatic</b>: {% if vision_setup.by_default %}scans are read with the document reader, and its reading is the one the chat uses. Process new mail and the overnight run read waiting scans ({{ settings.vision_minutes_per_run | round | int }} minutes at most each); a question about a scan not read yet waits for it when that takes under 10 minutes, and a longer read is offered with its time.{% else %}the overnight run reads waiting scans ({{ settings.vision_minutes_per_run | round | int }} minutes at most). Process new mail and a question only read pages this computer reads in under a minute; a longer read is offered with its time.{% endif %}</label>
         <label><input type="radio" name="mode" value="ask" {{ 'checked' if vision_setup.mode == 'ask' }}/> <b>Only when I ask</b>: nothing is read until you click Read with the vision model, after seeing how long it will take.</label>
@@ -218,8 +218,7 @@
       <li>A due date the model made up is dropped. A task due this week keeps the email in Important.</li>
       <li>If the server stops answering, the run stops asking and the mail stays filed from the draft.</li>
     </ul>
-    <p class="muted">Mode: <b>{{ model.mode }}</b> ({{ settings.llm_base_url }}). <code>auto</code> uses a model whenever LM Studio's server is running. Set <code>CONTROLLER_INBOX_LLM=false</code> to never use one.</p>
-    <p class="muted">Check speed from a terminal: <code>python -m controller_inbox llm-check</code></p>
+    <p class="muted">Mode: <b>{{ model.mode }}</b> ({{ settings.llm_base_url }}). <code>auto</code> uses a model whenever LM Studio's server is running; with it stopped, CloseDesk files the mail without one.</p>
   </article>
 </section>
 <section class="split">
@@ -227,12 +226,12 @@
     <h3>Teaching it</h3>
     <p>When a category is wrong, click the message and use <b>Wrong category?</b> at the bottom of the preview (or next to the category on the full email page). Write one sentence on why. The next email from that sender follows your correction, the model never overwrites the message you fixed, and the example is saved to <code>data/training/corrections.jsonl</code>.</p>
     <p class="muted">Corrections saved: {{ correction_count }}. A saved correction cannot clear a payment-instruction warning on a new message.</p>
-    <p>For fraud flags, use the <b>Fraud check</b> panel on the email: “Not fraud”, trust the sender or their whole domain, or report it. Manage trusted domains (for example your own company's) on the <a href="/fraud">Fraud check page</a>, or list them in <code>CONTROLLER_INBOX_TRUSTED_DOMAINS</code>.</p>
+    <p>For fraud flags, use the <b>Fraud check</b> panel on the email: “Not fraud”, trust the sender or their whole domain, or report it. Manage trusted domains (for example your own company's) on the <a href="/fraud">Fraud check page</a>.</p>
   </article>
   <article class="panel">
     <h3>Running it every morning</h3>
     <p>Double-click <code>CloseDesk.bat</code> (Windows) or <code>CloseDesk.command</code> (Mac) in the project folder. It reads the drop folder, lets the model read, writes today's digest, and opens this dashboard.</p>
-    <p class="muted">Unattended: schedule <code>python -m controller_inbox overnight</code> (see README), or leave <code>python -m controller_inbox watch</code> running. Last run: {{ last_run | shortdt if last_run else 'never' }} · drop folder last read: {{ last_folder | shortdt if last_folder else 'never' }}.</p>
+    <p class="muted">To have it done by itself before you start: see “Run it before you wake up” in the setup guide (<code>docs/SETUP.md</code> in the CloseDesk folder). Last run: {{ last_run | shortdt if last_run else 'never' }} · drop folder last read: {{ last_folder | shortdt if last_folder else 'never' }}.</p>
   </article>
 </section>
 <section class="panel" id="cost-codes">
@@ -243,13 +242,16 @@
 <section class="split">
   <article class="panel">
     <h3>Outlook direct connection (optional, needs IT)</h3>
-    <p>If IT later approves a Microsoft Entra app with delegated <code>Mail.Read</code>, set <code>AZURE_CLIENT_ID</code>, then run <code>python -m controller_inbox auth</code> and <code>sync</code>. The drop folder keeps working either way.</p>
-    <p>Status: <strong>{{ 'ready to sign in' if graph_configured else 'not configured' }}</strong> · Last Outlook sync: {{ last_sync | shortdt if last_sync else 'never' }}</p>
+    {% if graph_configured %}
+    <p>Microsoft 365 sign-in is set up on this computer and only reads your mail. Last Outlook sync: {{ last_sync | shortdt if last_sync else 'never' }}</p>
+    {% else %}
+    <p>Microsoft 365 sign-in (for new Outlook or Outlook on the web) isn't set up on this computer: it needs an app your IT team registers for CloseDesk, and it would only read your mail. Ask IT if you need it. The drop folder works without it.</p>
+    {% endif %}
   </article>
   <article class="panel">
     <h3>Sample mailbox</h3>
     {% if counts.emails and not is_sample %}
-    <p class="muted">Your own mail is loaded, so the sample is switched off here — loading it would erase your mail. To look at the sample, run it with a separate data folder: <code>CONTROLLER_INBOX_DATA_DIR=./data-sample python -m controller_inbox demo --serve</code></p>
+    <p class="muted">Your own mail is loaded, so the sample is switched off here — loading it would erase your mail.</p>
     {% else %}
     <p>Load the built-in sample to see the dashboard before your own mail is in the folder. The first time you process your own mail, the sample is removed.</p>
     <form method="post" action="/demo/reload">

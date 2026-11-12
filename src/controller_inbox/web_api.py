@@ -1152,6 +1152,7 @@ def register_workspace(
             "vision": {**setup["vision_setup"](model), "minutes_per_run": round(settings.vision_minutes_per_run)},
             "search": {**search, "indexed_label": format_when(search.get("indexed_at") or "", settings.tz)},
             "ocr_engine": ocr.engine_name(),
+            "ocr_missing": "" if ocr.engine_name() else ocr.missing_note(),
             "folders": {
                 "incoming": str(settings.inbox_incoming),
                 "attachments": str(settings.inbox_attachments),
