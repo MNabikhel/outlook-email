@@ -87,7 +87,21 @@ def test_a_reply_without_the_file_never_makes_the_invoice_a_duplicate(store, set
     ingest_folder(store, settings, now=START + timedelta(hours=5))
     invoice = _by_sender(store, "ar@coastalprint.com")
     assert "duplicate_invoice" not in invoice.flags
-    assert not _open(store, "Review possible duplicate")
+    assert not [action for action in invoice.actions if action.source == "duplicate_rule"]
+
+
+# A reply from outside the invoice's side (an uncaught lookalike) keeps its own "Code and enter", so it is compared
+# with the invoice as any copy is: flagged, in either order.
+@pytest.mark.parametrize("names", BOTH_ORDERS)
+def test_a_reply_from_outside_the_invoices_side_that_keeps_its_task_is_a_duplicate(store, settings, names):
+    _invoice(settings, names[0])
+    _reply(settings, names[1], sender="Coastal Print AR <ar@coastalprlnt.com>", hours=3, body="Please pay invoice CP-5521 for $1,840.00 today.")
+    ingest_folder(store, settings, now=START + timedelta(hours=5))
+    assert _entry(store) == [("ar@coastalprint.com", "Code and enter invoice CP-5521 ($1,840.00)"),
+                             ("ar@coastalprlnt.com", "Code and enter invoice CP-5521 ($1,840.00)")]
+    assert "duplicate_invoice" in _by_sender(store, "ar@coastalprlnt.com").flags
+    assert "duplicate_invoice" not in _by_sender(store, "ar@coastalprint.com").flags
+    assert _open(store, "Review possible duplicate") == [("ar@coastalprlnt.com", "Review possible duplicate invoice CP-5521")]
 
 
 # Read again or refiled, a reply keeps the board the invoice read after it settled.

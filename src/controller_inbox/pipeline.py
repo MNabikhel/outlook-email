@@ -681,8 +681,8 @@ def _repeats(store: Store, me, holders: list[str], conversation: set[str], *, ow
 
     Each email is judged on itself, never by trusting another, and comes out the same whichever is read first. A
     reply or forward in the conversation that brings no invoice file (a colleague's "which PO is this for?", the
-    vendor's answer, anyone's) is no second invoice: it is never flagged, and never counts against the invoice. A
-    reply that brings the invoice file again, sent after the invoice, is the copy: it is flagged (when it is read, or
+    vendor's answer, anyone's) is no second invoice: it never counts against the invoice, and isn't flagged unless it
+    came from outside the invoice's side (``_sent_to``) and so keeps a "Code and enter" of its own. A reply that brings the invoice file again, sent after the invoice, is the copy: it is flagged (when it is read, or
     when the invoice is filed after it), and the invoice isn't flagged because of it. Everything else counts, as two
     copies of an invoice always did. Held or cautioned mail is never let off. Mail held as possible fraud is no
     duplicate of anything else: it is held, and flagged itself."""
@@ -695,7 +695,10 @@ def _repeats(store: Store, me, holders: list[str], conversation: set[str], *, ow
         return found
     found = [other for other in found if other not in heads or not attachments_locked(heads[other])]
     if _talk(me) and not own_file:
-        return []
+        # Written about an invoice in its conversation, from its side: no copy of it. From anyone else (a lookalike
+        # the fraud check didn't catch), it keeps a "Code and enter" of its own, so it is compared with the invoice.
+        invoices = [other for other in found if other in conversation and other in heads and not _talk(heads[other])]
+        return [] if any(_sent_to(heads[other], me) for other in invoices) else invoices
     if me.received_at and not _replying(me):
         found = [
             other for other in found
@@ -741,8 +744,8 @@ def _settle_conversation(store: Store, settings: Settings, record: EmailRecord, 
     held: the mail of its conversation about the same invoice (or naming none) ends up as it would have had the
     invoice been read first, clean. A reply that brings no invoice file, sent no earlier than the invoice from its side
     (``_sent_to``) and not held or cautioned, loses its "Code and enter" task. A held or cautioned reply, a reply that
-    brings an invoice file of its own (a lookalike's "resent as a PDF", a colleague's forward), and a reply flagged
-    when it shouldn't be are filed again, so each is or isn't a possible duplicate as when read after the invoice.
+    brings an invoice file of its own (a lookalike's "resent as a PDF", a colleague's forward), a reply from outside
+    the invoice's side, and a reply flagged when it shouldn't be are filed again, so each is or isn't a possible duplicate as when read after the invoice.
     Nothing is taken from the invoice's own email, or from any email that brings an invoice file; a task the user
     already finished or snoozed stays."""
     if not conversation or _talk(record) or _doubtful(record) or record.category != DocumentType.AP_INVOICE:
@@ -754,10 +757,11 @@ def _settle_conversation(store: Store, settings: Settings, record: EmailRecord, 
             continue  # about another invoice: its own tasks stay
         flagged = "duplicate_invoice" in head.flags
         if _talk(head) and not _doubtful(head):
-            if not flagged and (head.received_at or "") >= (record.received_at or "") and _sent_to(record, head):
+            ours = _sent_to(record, head)
+            if not flagged and ours and (head.received_at or "") >= (record.received_at or ""):
                 store.drop_open_tasks(head.id, source="invoice")
-            elif flagged:
-                again.append(head.id)
+            elif flagged == ours:
+                again.append(head.id)  # flagged from its side, or not flagged from outside it
         elif not flagged and (_doubtful(head) or (_replying(head) and _has_invoice_file(head))):
             again.append(head.id)
     _refile_others(store, settings, again, now=now)
