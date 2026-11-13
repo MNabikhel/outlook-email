@@ -1712,7 +1712,8 @@ def _short_error(exc: Exception) -> str:
 _MEMORY_RE = re.compile(
     r"compute\W*error|out of (?:device |gpu )?memory|outofmemory|insufficient (?:system |gpu )?memory|"
     r"not enough (?:system |gpu )?memory|failed to allocate|unable to allocate|cannot allocate|alloc(?:ation)? failed|"
-    r"memory (?:is )?exhausted|kiogpucommandbuffercallbackerror",
+    r"memory (?:is )?exhausted|kiogpucommandbuffercallbackerror|insufficient system resources|"
+    r"requires? more (?:system |gpu )?memory",
     re.I,
 )
 MEMORY_ADVICE = (
@@ -1726,10 +1727,15 @@ def out_of_memory(text: str) -> bool:
     return bool(_MEMORY_RE.search(text or ""))
 
 
+def ran_out_of_memory(exc: Exception) -> bool:
+    """Whether a model's failure was the server running short of memory, by what it said."""
+    said = _lm_studio_said(exc) if isinstance(exc, httpx.HTTPError) else str(exc)
+    return out_of_memory(said) or out_of_memory(str(exc))
+
+
 def failure_note(exc: Exception) -> str:
     """Why the chat's model didn't answer, in words a person can act on."""
-    said = _lm_studio_said(exc) if isinstance(exc, httpx.HTTPError) else str(exc)
-    if out_of_memory(said) or out_of_memory(str(exc)):
+    if ran_out_of_memory(exc):
         return "The local model ran out of memory partway through. " + MEMORY_ADVICE
     if isinstance(exc, httpx.TimeoutException):
         return (

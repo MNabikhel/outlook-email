@@ -84,6 +84,30 @@ def stop(process: subprocess.Popen) -> None:
         process.kill()
 
 
+def install_manager_py(work: Path, folder: Path) -> None:
+    """Windows' Python install manager has its own py.exe, which ends below 0 for a version it hasn't got. The
+    launcher took that for a Python that runs and stopped on "No runtime installed that matches 3.12". A py.exe
+    that does the same is built with the C# compiler Windows comes with, and put first on the PATH."""
+    manager = work / "install manager"
+    manager.mkdir()
+    source = manager / "py.cs"
+    source.write_text(
+        'class Py { static int Main() { System.Console.Error.WriteLine('
+        '"[ERROR] No runtime installed that matches 3.12. Try running \\"py install 3.12\\"."); return -1; } }',
+        encoding="ascii",
+    )
+    compilers = sorted(Path(os.environ.get("WINDIR", r"C:\Windows"), "Microsoft.NET").glob("Framework*/v4*/csc.exe"))
+    if not compilers:
+        print("--- no C# compiler on this computer: the Python install manager's py.exe isn't tried", flush=True)
+        return
+    subprocess.run([str(compilers[-1]), "/nologo", f"/out:{manager / 'py.exe'}", str(source)], check=True, capture_output=True)
+    done = subprocess.run([str(manager / "py.exe"), "-3.12"], capture_output=True, text=True)
+    assert done.returncode != 0 and "No runtime installed" in done.stderr, (done.returncode, done.stderr)
+    shutil.rmtree(folder / ".venv")
+    out = run(folder, "--check", env={"PATH": f"{manager}{os.pathsep}{os.environ['PATH']}"})
+    assert "No runtime installed" not in out and "Everything CloseDesk needs is in order." in out, out
+
+
 def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="closedesk smoke "))
     folder = work / "Close Desk"
@@ -163,17 +187,7 @@ def main() -> int:
     assert "already the newest" in out
 
     if WINDOWS and not own:
-        # Windows' Python install manager has its own "py", which ends below 0 for a version it hasn't got. Taken
-        # for a Python that runs, CloseDesk stopped on "No runtime installed that matches 3.12".
-        manager = work / "install manager"
-        manager.mkdir()
-        (manager / "py.cmd").write_text(
-            '@echo [ERROR] No runtime installed that matches 3.12. Try running "py install 3.12".\r\n@exit /b -1\r\n',
-            encoding="ascii",
-        )
-        shutil.rmtree(folder / ".venv")
-        out = run(folder, "--check", env={"PATH": f"{manager}{os.pathsep}{os.environ['PATH']}"})
-        assert "No runtime installed" not in out and "Everything CloseDesk needs is in order." in out, out
+        install_manager_py(work, folder)
 
     shutil.rmtree(work, ignore_errors=True)
     print("Launcher smoke test passed.", flush=True)

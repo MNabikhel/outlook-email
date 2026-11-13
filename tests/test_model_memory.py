@@ -113,3 +113,32 @@ def test_both_settings_pages_mark_a_model_too_big_and_still_offer_it(settings, s
     assert reply.headers["location"] == "/settings?notice=chat-model#chat-model" and CODER in server.loaded
     page = client.get("/settings").text
     assert f'<p class="warn-box small" data-too-big-note>{CODER} needs about 21 GB' in page, "the loaded one is too big: said"
+
+
+@pytest.mark.parametrize("said", [
+    # LM Studio's own guardrail, refusing to load a model too big for the computer.
+    "Model loading was stopped due to insufficient system resources. Continuing to load the model will likely overload your system and cause it to freeze.",
+    # Ollama's refusal.
+    "model requires more system memory (24.5 GiB) than is available (12.1 GiB)",
+])
+def test_lm_studios_and_ollamas_refusals_to_load_too_big_a_model(said):
+    assert local_llm.out_of_memory(said)
+
+
+def test_an_answer_cut_short_by_memory_says_so(loaded, settings, monkeypatch):
+    from controller_inbox import assistant
+
+    def model_answer(_ws, _question, state, **_kw):
+        # Part of the answer is on the screen when LM Studio runs out of memory.
+        state["wrote"] = True
+        state["text"] += "The invoice from Northwind is "
+        yield {"type": "delta", "text": "The invoice from Northwind is "}
+        raise httpx.HTTPError("the model server stopped with an error (Compute error.)")
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
+    monkeypatch.setattr(assistant, "_model_answer", model_answer)
+    events = list(assistant.answer_stream(loaded, settings, "Who sent the Northwind invoice?"))
+    text = "".join(e["text"] for e in events if e["type"] == "delta")
+    assert text.startswith("The invoice from Northwind is ")
+    assert "(The local model stopped answering partway. The model is likely too big for this computer's memory." in text
