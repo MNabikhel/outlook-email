@@ -350,6 +350,9 @@ class OutlookSession:
     def save_copy(self, entry_id: str, store_id: str, dest: Path) -> None:
         """Save a copy of the message as a .msg file. The message in Outlook is not changed."""
         item = self._item(entry_id, store_id)
+        # Outlook writes the file itself, from its own folder: a relative path ("data/...", CloseDesk's folder unless
+        # set) would point there, and every copy failed with "The operation failed."
+        dest = Path(dest).absolute()
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             item.SaveAs(str(dest), _SAVE_AS_MSG_UNICODE)
