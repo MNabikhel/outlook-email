@@ -7,9 +7,14 @@ const enc = encodeURIComponent;
 const mailHref = (id) => `/app/mail/${enc(id)}`;
 
 function step(s) {
+  // The same marks as Related: held, asking about payment details, or from a domain new to its conversation.
   const mark = s.locked
     ? h("span", { class: "tag tag-fraud", title: "Held as possible payment fraud: its files are not opened" }, "Held: possible fraud")
-    : null;
+    : s.caution
+      ? h("span", { class: "tag tag-due_soon", title: "This email asks about payment details: check it by phone before acting on it" }, "Caution: payment details")
+      : s.new_domain
+        ? h("span", { class: "tag tag-due_soon", title: "The first message in this conversation from this sender's domain. A reply from a lookalike domain is how payment-change fraud often starts." }, `New in this conversation: ${s.domain}`)
+        : null;
   const why = s.here ? [h("span", { class: "tr-why here" }, "The email you came from")] : s.reasons.map((reason) => h("span", { class: "tr-why" }, reason));
   return h(
     "li",

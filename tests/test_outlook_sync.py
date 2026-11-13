@@ -340,6 +340,51 @@ def test_due_follows_the_interval(store):
 def test_describe():
     assert outlook_sync.describe({"new": 3, "removed": 1}) == "3 new, 1 deleted in Outlook"
     assert outlook_sync.describe({"failed": [{}]}) == "nothing new; 1 couldn't be read"
+    busy = {"folder": "Inbox/AP", "error": "Outlook is busy (try again)."}
+    assert outlook_sync.describe({"new": 1, "failed": [busy]}) == "1 new; 1 couldn't be read: Outlook is busy (try again)"
+    # As kept for Settings (a count and the first reason), and as kept before there was a reason.
+    assert outlook_sync.describe({"failed": 2, "problem": "Outlook is busy."}) == "nothing new; 2 couldn't be read: Outlook is busy"
+    assert outlook_sync.describe({"failed": 1}) == "nothing new; 1 couldn't be read"
+
+
+def test_settings_still_open_after_a_sync_where_something_couldnt_be_read(store, settings, outlook):
+    # The last result kept "failed" as a count and the card ran len() on it: the whole Settings page answered 500.
+    outlook.add("e1", "Invoice INV-7741 from Northwind", minutes=1)
+    outlook.add("v1", "Vendor statement", folder="Inbox/Vendors", minutes=2)
+    outlook.broken.add("Inbox/Vendors")
+    sync(store, settings, outlook)
+    client = TestClient(web.create_app(settings, store))
+    reply = client.get("/api/settings", headers=PAGE)
+    assert reply.status_code == 200
+    data = reply.json()["outlook"]
+    assert data["last_result"] == "1 new; 1 couldn't be read: Outlook is busy" and data["last_error"] == ""
+
+
+def test_a_picked_folder_gone_from_outlook_says_why_and_isnt_a_sync_that_worked(store, settings, outlook, monkeypatch):
+    # Only the count was kept ("1 couldn't be read"), and a sync that read no folder at all stamped itself as one
+    # that worked and cleared the banner.
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+
+    @contextmanager
+    def connect(**_options):
+        yield outlook
+
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    outlook.add("e1", "Invoice INV-7741 from Northwind", minutes=1)
+    outlook_run(store, settings, now=NOW)
+    store.set_state(outlook_sync.FOLDERS_KEY, json.dumps(["Inbox/AP"]))  # picked, then renamed in Outlook
+    result = outlook_run(store, settings, now=NOW + timedelta(minutes=15))
+    said = "The folder Inbox/AP isn't in Outlook any more. Pick it again in Settings → Sync inbox → Advanced."
+    assert result["message"] == said
+    data = TestClient(web.create_app(settings, store)).get("/api/settings", headers=PAGE).json()["outlook"]
+    assert data["last_error"] == said and data["last_result"] == "1 new", "the last sync that worked is still the one shown"
+    assert store.get_state(outlook_sync.LAST_SYNC_KEY) == NOW.isoformat()
+    # Picked along with the Inbox: the sync works, and the card says what couldn't be read.
+    store.set_state(outlook_sync.FOLDERS_KEY, json.dumps(["Inbox", "Inbox/AP"]))
+    result = outlook_run(store, settings, now=NOW + timedelta(minutes=30))
+    assert result["message"] == f"Outlook synced: nothing new; 1 couldn't be read: {said}"
+    data = TestClient(web.create_app(settings, store)).get("/api/settings", headers=PAGE).json()["outlook"]
+    assert data["last_error"] == "" and data["last_result"] == f"nothing new; 1 couldn't be read: {said[:-1]}"
 
 
 @pytest.fixture
@@ -415,6 +460,27 @@ def test_a_sync_that_didnt_work_shows_on_settings_until_one_does(store, settings
     assert client.get("/api/settings", headers=PAGE).json()["outlook"]["last_error"].startswith("Outlook couldn't be read")
     outlook_sync.disconnect(store)
     assert client.get("/api/settings", headers=PAGE).json()["outlook"]["last_error"] == "", "connecting again starts afresh"
+
+
+class ComError(Exception):
+    """Like pywintypes.com_error: (hresult, text, excepinfo, arg), and str() is that tuple."""
+
+
+def test_outlook_busy_on_the_card_is_said_in_plain_words(store, settings, outlook, monkeypatch):
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+
+    def busy():
+        raise ComError(-2147418111, "Call was rejected by callee.", None, None)  # a window or prompt open in Outlook
+
+    outlook.folders = busy
+
+    @contextmanager
+    def connect(**_options):
+        yield outlook
+
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    assert outlook_run(store, settings, now=NOW)["message"] == outlook_desktop.BUSY
+    assert TestClient(web.create_app(settings, store)).get("/api/settings", headers=PAGE).json()["outlook"]["last_error"] == outlook_desktop.BUSY
 
 
 def test_outlooks_own_error_is_said_once_not_wrapped_again(store, settings, monkeypatch):
@@ -494,6 +560,60 @@ def test_the_automatic_sync_says_outlook_is_closed_once(store, settings, monkeyp
     assert first["quiet"] is False and again["quiet"] is True
 
 
+def test_the_scheduled_morning_run_never_starts_outlook(store, settings, outlook, monkeypatch):
+    # The 6:30 task ("overnight") started Outlook unseen, with CloseDesk closed, where a sign-in prompt could wait.
+    from controller_inbox import cli
+
+    asked = []
+
+    @contextmanager
+    def connect(**options):
+        asked.append(options)
+        yield outlook
+
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    monkeypatch.setattr(cli, "load_settings", lambda *a, **k: settings)
+    store.set_state(outlook_sync.AUTO_KEY, "1")
+    settings.ensure_data_dir()
+    assert cli.main(["overnight", "--no-graph"]) == 0
+    run_overnight(store, settings, sync_graph=False, now=NOW)  # CloseDesk starting: Outlook is started for it
+    assert asked == [{"start": False}, {"start": True}]
+
+
+def test_an_error_from_a_sync_ended_by_disconnect_isnt_shown_after_connecting_again(store, settings, monkeypatch):
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+
+    @contextmanager
+    def connect(**_options):
+        outlook_sync.disconnect(store)  # clicked while Outlook was being started
+        raise outlook_desktop.OutlookUnavailable("Classic Outlook didn't answer.")
+        yield
+
+    monkeypatch.setattr(outlook_desktop, "connect", connect)
+    outlook_run(store, settings, now=NOW)
+    assert outlook_sync.last_failure(store) == {}, "kept after Disconnect"
+    outlook_sync.note_failure(store, "Outlook isn't open, so it wasn't synced.", NOW)
+    outlook_sync.connect(store, calendar=False)
+    assert outlook_sync.last_failure(store) == {}, "connecting again starts afresh"
+
+
+def test_disconnecting_while_the_folders_are_read_stops_the_reading(store, settings):
+    # The folders' tables went on being read from Outlook, one after another, after the user said stop.
+    fake = FakeOutlook(folders=("Inbox", *(f"Inbox/F{n}" for n in range(5)), "Deleted Items"))
+    scan = fake.scan
+    read = []
+
+    def scanning(path, since):
+        read.append(path)
+        outlook_sync.disconnect(store)
+        return scan(path, since)
+
+    fake.scan = scanning
+    outlook_sync.sync(store, settings, fake, now=NOW)
+    assert read == ["Inbox"] and not store.get_state(outlook_sync.LAST_SYNC_KEY)
+
+
 def test_a_first_message_that_cant_be_read_brings_the_sample_back(store, settings, outlook, as_of_now, monkeypatch):
     from controller_inbox import pipeline
 
@@ -511,6 +631,8 @@ def test_a_first_message_that_cant_be_read_brings_the_sample_back(store, setting
     monkeypatch.setattr(pipeline, "process_message", broken)
     report = sync(store, settings, outlook)
     assert report["failed"] and len(store.list_emails(limit=100)) == sample, "the board isn't left empty"
+    # Said in words on Settings → Sync inbox ("1 couldn't be read: ..."), not as the bare error.
+    assert report["failed"][0]["error"] == "A message in Inbox couldn't be copied (unreadable)."
 
 
 def test_outlook_message_without_message_id_synced_and_dropped_is_stored_twice(store, settings):
@@ -857,3 +979,96 @@ def test_the_self_check_says_when_outlook_was_synced_in_the_apps_time_zone(store
     store.set_state("timezone", "Europe/Berlin")  # chosen in Setup, over the settings file's New York
     said = doctor._outlook_sync(settings).text
     assert "17:00" in said and "16:30" in said and "UTC" not in said, said
+
+
+def test_the_self_check_says_when_outlook_syncs_have_stopped_working(store, settings):
+    """A sync that didn't work, as Settings → Sync inbox says it: the self-check says so with why, when a sync last
+    worked, and what to do; once one works again, it is in order."""
+    from controller_inbox import doctor
+
+    outlook_sync.connect(store, calendar=False, now=NOW)
+    store.set_state(outlook_sync.LAST_SYNC_KEY, "2026-10-20T15:00:00+00:00")
+    outlook_sync.note_failure(store, "Outlook isn't open", now=NOW)
+    check = doctor._outlook_sync(settings)
+    assert check.state == doctor.NOTE
+    assert "the last sync didn't work (Outlook isn't open)" in check.text and "last worked" in check.text, check.text
+    assert "Sync now" in check.todo
+    store.set_state(outlook_sync.LAST_ERROR_KEY, "")
+    assert doctor._outlook_sync(settings).state == doctor.OK
+
+
+def _meeting(uid, subject, start, end, *, all_day=False):
+    return {"uid": uid, "start": start, "end": end, "all_day": all_day, "subject": subject, "location": "", "organizer": "",
+            "attendees": [], "busy": "busy", "cancelled": False, "recurring": False}
+
+
+def _keep(store, *meetings):
+    from controller_inbox import calendar_events
+
+    store.replace_meetings("outlook", [calendar_events.Meeting(**m, source="outlook") for m in meetings], start="2026-01-01", end="2027-06-01")
+
+
+def test_a_calendar_outlook_couldnt_read_doesnt_undo_the_mail_sync(store, settings, outlook):
+    # An error that wasn't Outlook's own (from listing the meetings) ended the sync after the mail was copied:
+    # nothing stamped, the banner kept its old error, and the next sync tried the calendar again the same way.
+    outlook_sync.connect(store, calendar=True, now=NOW)
+    outlook.add("e1", "Invoice INV-7741 from Northwind", minutes=1)
+
+    def calendar(start, end):
+        raise ComError(-2147418111, "Call was rejected by callee.", None, None)
+
+    outlook.calendar = calendar
+    report = sync(store, settings, outlook)
+    assert report["new"] == 1 and report["failed"] == [{"folder": "Calendar", "error": outlook_desktop.BUSY}]
+    assert store.get_state(outlook_sync.LAST_SYNC_KEY) and not store.get_state(outlook_sync.CALENDAR_LAST_KEY)
+
+
+def test_meetings_outlook_wouldnt_hand_over_arent_taken_for_deleted(store, settings):
+    # Outlook's guard refused some meetings' details: they were skipped as if not there, and deleted here.
+    now = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+    outlook_sync.connect(store, calendar=True, now=now)
+    _keep(store, _meeting("G1", "AP standup", "2026-10-06T13:00:00+00:00", "2026-10-06T13:15:00+00:00"),
+          _meeting("G2", "Board call", "2026-10-07T13:00:00+00:00", "2026-10-07T14:00:00+00:00"))
+
+    class Guarded:
+        def calendar(self, start, end):
+            return outlook_desktop.CalendarRead([_meeting("G1", "AP standup", "2026-10-06T13:00:00+00:00", "2026-10-06T13:15:00+00:00")], unreadable=1)
+
+    outlook_sync.sync_calendar(store, Guarded(), now=now)
+    assert [m["subject"] for m in store.meetings_between("2026-10-01", "2026-11-01")] == ["AP standup", "Board call"]
+
+
+def test_the_calendar_keeps_meetings_on_its_first_day_that_ended_before_it(store):
+    # The window's first day was cleared from midnight, though only meetings ending after the window's start are
+    # read: one that morning was deleted, while one the day before was kept for good.
+    outlook_sync.connect(store, calendar=True)
+    now = datetime(2026, 10, 20, 15, tzinfo=timezone.utc)
+    first = (now - timedelta(days=90)).date()
+    before = first - timedelta(days=1)
+    _keep(store, _meeting("A", "Day before", f"{before}T09:00:00+00:00", f"{before}T10:00:00+00:00"),
+          _meeting("B", "First day", f"{first}T09:00:00+00:00", f"{first}T10:00:00+00:00"),
+          _meeting("C", "Deleted in Outlook", f"{first}T16:00:00+00:00", f"{first}T17:00:00+00:00"))
+
+    class Outlook:
+        def calendar(self, start, end):
+            return []
+
+    outlook_sync.sync_calendar(store, Outlook(), now=now)
+    assert [m["subject"] for m in store.meetings_between(str(before), str(first + timedelta(days=1)))] == ["Day before", "First day"]
+
+
+def test_a_calendar_read_cut_short_keeps_the_meetings_it_may_not_have_reached(store):
+    # Cut short at Outlook's limit, it removed every meeting up to the last start read: a second meeting at that
+    # same time, and an all-day one on that date (Outlook lists it at local midnight), weren't read but went.
+    now = datetime(2026, 10, 5, 12, tzinfo=timezone.utc)
+    outlook_sync.connect(store, calendar=True, now=now)
+    _keep(store, _meeting("G0", "Deleted in Outlook", "2026-10-20T09:00:00+00:00", "2026-10-20T10:00:00+00:00"),
+          _meeting("G2", "Second at 13:00", "2026-12-01T13:00:00+00:00", "2026-12-01T14:00:00+00:00"),
+          _meeting("G3", "Close day", "2026-12-01", "2026-12-02", all_day=True))
+
+    class CutShort:
+        def calendar(self, start, end):
+            return outlook_desktop.CalendarRead([_meeting("G1", "First at 13:00", "2026-12-01T13:00:00+00:00", "2026-12-01T14:00:00+00:00")], cut_short=True)
+
+    outlook_sync.sync_calendar(store, CutShort(), now=now)
+    assert sorted(m["subject"] for m in store.meetings_between("2026-10-01", "2027-01-01")) == ["Close day", "First at 13:00", "Second at 13:00"]

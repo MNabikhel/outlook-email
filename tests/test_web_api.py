@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from openpyxl import Workbook
 
-from controller_inbox import web
+from controller_inbox import ocr, web
 from controller_inbox.folder_mail import ingest_folder
 from controller_inbox.pipeline import ingest_demo
 from helpers import PAGE
@@ -322,6 +322,7 @@ def test_settings_say_everything_the_setup_page_does(client, settings):
     assert data["context"]["step"] == 3 and steps[3]["tier"] == "ok" and not data["context"]["window"]["shown"]
     assert data["vision"]["mode"] == "auto" and data["vision"]["minutes_per_run"] == 30 and data["vision"]["choices"] == []
     assert data["search"]["model"] == "" and "ocr_engine" in data
+    assert data["ocr_missing"] == ("" if data["ocr_engine"] else ocr.missing_note())
     assert data["folders"]["incoming"] == str(settings.inbox_incoming) and data["folders"]["failed"] == str(settings.inbox_failed)
     assert data["runs"] == {"last_run": "", "last_folder": "", "last_sync": ""} and data["graph_configured"] is False
     assert data["corrections"] == 0 and data["cost_codes"]["workbook"].endswith("AP cost codes.xlsx")

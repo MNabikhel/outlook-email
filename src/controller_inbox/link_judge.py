@@ -28,7 +28,7 @@ from datetime import datetime, timedelta
 
 from controller_inbox import links, semantic
 from controller_inbox.config import Settings
-from controller_inbox.fraud import attachments_locked
+from controller_inbox.fraud import as_model_reads, attachments_locked
 from controller_inbox.local_llm import EmptyReply, complete_text, llm_active, parse_json_object
 from controller_inbox.models import EmailRecord
 from controller_inbox.store import Store
@@ -101,11 +101,21 @@ def judge(store: Store, settings: Settings, email: EmailRecord, *, limit: int = 
         return []
     out = []
     model = settings.llm_model or ""
+    # Each as the model may read it: a reply quoting held mail without the quote (fraud.as_model_reads).
+    email = as_model_reads(store, email)
     for other in candidates(store, settings, email, limit=limit):
+        other = as_model_reads(store, other)
         key = verdict_key(email, other, model)
         kept = store.ai_link(email.id, other.id)
         if kept and kept["key"] == key:
             out.append({"other": other.id, "same": kept["same"], "why": kept["why"]})
+            continue
+        # As they are now: either may have been held (a fraud verdict, a reported domain) while the model was asked
+        # about another pair, and a run reaches emails it picked minutes before.
+        current, theirs = store.get_email(email.id), store.get_email(other.id)
+        if current is None or _suspect(current):
+            return out  # not weighed: weighed when it is cleared
+        if theirs is None or _suspect(theirs):
             continue
         verdict = _ask(settings, email, other)
         if spent is not None:

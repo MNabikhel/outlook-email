@@ -492,7 +492,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             check = fraud.assess_email(store, fraud.trust_context(store, settings), email)
             saved = {"level": check.level, "score": check.score, "signals": check.signal_dicts(), "checked_at": ""}
         verdict = "safe" if "fraud_cleared" in email.flags else "fraud" if "fraud_confirmed" in email.flags else ""
-        return {**saved, "verdict": verdict}
+        # Held by what you taught about its sender: the check may have found nothing, and the panel says so.
+        taught = f"{fraud.TAUGHT_HOLD}, so this email is held." if fraud.taught_hold(email) else ""
+        return {**saved, "verdict": verdict, "held": fraud.attachments_locked(email), "held_reason": taught}
 
     def file_cards(email) -> list[dict]:
         cards = []
@@ -1065,6 +1067,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             context_target=context_target(settings, model),
             will_reload=needs_more_context(settings),
             ocr_engine=ocr.engine_name(),
+            ocr_missing=ocr.missing_note(),
             models=model_roles.models_in_use(settings, status=model),
             chat_choice=model_roles.chat_choices(settings, model),
             chat_problem=chat_switch["problem"] if request.query_params.get("notice") == "chat-model-failed" else "",

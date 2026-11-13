@@ -252,3 +252,18 @@ def test_the_summary_sheet_is_no_request_for_a_summary():
         assert not agent.asks_summary(question), question
     for question in ("Summarize this workbook", "Give me a summary of the attachment", "What's the gist?"):
         assert agent.asks_summary(question), question
+
+
+def test_a_question_for_a_figure_is_no_request_for_a_summary():
+    from controller_inbox import agent
+
+    for question in (
+        "What is the summary total of gross pay for department 520?",
+        "What does the journal say is total gross pay for department 520?",
+        "What does the Summary say for IT?",
+        "What does the sheet say about Sales travel?",
+        "What's the overview tab total?",
+    ):
+        assert not agent.asks_summary(question), question
+    for question in ("Summarize the totals", "What does the journal say?", "Give me an overview of the journal", "What is this about?"):
+        assert agent.asks_summary(question), question

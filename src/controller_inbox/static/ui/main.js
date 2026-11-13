@@ -2,16 +2,16 @@
    from /api. Moving around changes the address (so Back works and a link reopens the same email) without
    reloading the page. */
 
-import { $, h, icon, replace, toast, plural, isTyping, reducedMotion, skeletonList, skeletonReader } from "./dom.js";
+import { $, h, icon, replace, toast, plural, isTyping, keepTabIn, reducedMotion, skeletonList, skeletonReader } from "./dom.js";
 import { getJSON, postJSON } from "./api.js";
 import { MAIL_PAGE, listSpec, loadList, rowEl } from "./lists.js";
-import { emailView, fileView, errorView } from "./reader.js";
+import { emailView, fileView, errorView, closeTip } from "./reader.js";
 import { todayView, todayBrief, fraudView, codingView, digestView, emptyReader } from "./pages.js";
 import { createSettings } from "./settings.js";
 import { createChat } from "./chat.js";
 import { createOverlays } from "./palette.js";
 import { traceView } from "./trace.js";
-import { calendarView, rangeOf } from "./calendar.js";
+import { calendarView, isDay, rangeOf } from "./calendar.js";
 
 const enc = encodeURIComponent;
 const root = document.documentElement;
@@ -532,7 +532,21 @@ function openSelected() {
 
 function closeEmail() {
   if (!S.route) return;
-  if (S.route.file && S.email) return navigate(mailUrl(S.email.id));
+  if (S.route.file && S.email) {
+    // Opened from its email: back to that very entry, so the email still knows where it was opened from (a
+    // meeting, a list) and Esc again goes there.
+    if (openedFrom().split("?")[0] === `/app/mail/${enc(S.email.id)}`) return history.back();
+    return navigate(mailUrl(S.email.id));
+  }
+  if (S.route.view === "trace") {
+    // The whole matter: back to the email it was traced from, as Esc does.
+    S.focus = { emailId: S.route.traceId, at: "matter" };
+    return navigate(`/app/mail/${enc(S.route.traceId)}`);
+  }
+  if (S.route.view === "calendar" || S.route.view === "settings" || S.route.view === "digest") {
+    // The back arrow on a page of its own: to the list left open behind it.
+    return navigate(S.list ? S.list.spec.url : "/app");
+  }
   if (S.route.emailId) {
     // Opened from a meeting: back to the calendar, with the meeting open.
     if (openedFrom().startsWith("/app/calendar")) return navigate(openedFrom());
@@ -549,16 +563,20 @@ function focusOpened(id) {
   if (!want || want.emailId !== id) return;
   const view = [...reader.querySelectorAll(".rd[data-email]")].find((el) => el.dataset.email === id);
   if (!view) return;
-  const target = (want.at === "matter" && ($('#rd-related a[href^="/app/trace/"]', view) || $("#rd-related", view))) || $(".rd-subject", view);
+  const target =
+    (want.at === "matter" && ($('#rd-related a[href^="/app/trace/"]', view) || $("#rd-related", view))) || (want.at === "fraud" && $("#rd-fraud", view)) || $(".rd-subject", view);
   if (!target) return;
+  if (target.tagName === "DETAILS") target.open = true;
   if (!target.matches("a, button")) target.setAttribute("tabindex", "-1");
-  target.focus({ preventScroll: want.at !== "matter" });
+  target.focus({ preventScroll: want.at === "heading" });
 }
 
 /* ---------- The reading pane ---------- */
 
 function setReader(node, key = "", { animate = true } = {}) {
   S.shown = key;
+  // A Page tab's card is for a box in what is shown now: with that gone, its box can't close it.
+  closeTip();
   replace(reader, node);
   reader.scrollTop = 0;
   if (animate && !reducedMotion()) {
@@ -745,7 +763,14 @@ async function showFile(d, n, tab, token) {
     try {
       data = await getJSON(`/api/mail/${enc(d.id)}/files/${n}`);
     } catch (error) {
-      if (token === S.emailToken) setReader(errorView(error.message, () => showFile(d, n, tab, token)), "error");
+      if (token !== S.emailToken) return;
+      if (error.status === 403 || error.status === 404) {
+        // Held as possible payment fraud, or gone: trying again gives the same answer. The way on is the email
+        // (its fraud check, where it can be marked safe).
+        const held = error.status === 403;
+        const back = h("a", { class: "btn btn-sm", href: mailUrl(d.id), dataset: { nav: "", focus: held ? "fraud" : "heading" } }, held ? "See the fraud check" : "Back to the email");
+        setReader(errorView(error.message, null, back), "error");
+      } else setReader(errorView(error.message, () => showFile(d, n, tab, token)), "error");
       return;
     }
     if (token !== S.emailToken) return;
@@ -837,6 +862,11 @@ let calendarPage = null;
 
 function showCalendar(route) {
   document.title = "Calendar · CloseDesk";
+  if (!["day", "week", "month"].includes(route.calView) || (route.date && !isDay(route.date))) {
+    // An address edited by hand ("date=abc", "date=2026-11"): the calendar's own day and view instead.
+    const view = ["day", "week", "month"].includes(route.calView) ? route.calView : "week";
+    return navigate(`/app/calendar?${new URLSearchParams({ view })}`, { replace: true });
+  }
   const key = `calendar:${route.calView}:${route.date}:${route.meeting}`;
   if (!S.shown.startsWith("calendar:")) setReader(skeletonReader(), "", { animate: false });
   const wanted = () => S.route.view === "calendar" && S.route.calView === route.calView && S.route.date === route.date;
@@ -879,6 +909,8 @@ async function sync() {
   const route = parse();
   const before = S.route;
   S.route = route;
+  // No email in the address now: one still on its way (a slow email, or its file) is dropped when it lands.
+  if (!route.emailId) S.emailToken += 1;
   const doc = route.view === "digest" || route.view === "settings" || route.view === "trace" || route.view === "calendar";
   ws.classList.toggle("doc", doc);
   ws.classList.toggle("wide", Boolean(route.file));
@@ -1193,10 +1225,21 @@ document.addEventListener("visibilitychange", () => {
 
 /* ---------- Chat, palette, help ---------- */
 
+// In a phone-wide window the chat covers the whole page (app.css: min(420px, 100vw)). While it does, the page under
+// it is out of reach: Tab and a screen reader stay in the chat, and Esc closes it wherever the focus is.
+const CHAT_COVERS = matchMedia("(max-width: 420px)");
+const chatCovers = () => !$("#chat").hidden && CHAT_COVERS.matches;
+function coverPage() {
+  const covered = chatCovers();
+  for (const el of [$(".skip"), $("#rail"), $("#top"), listPane, reader]) el.inert = covered;
+}
+CHAT_COVERS.addEventListener("change", coverPage);
+
 const chat = createChat({
   root: $("#chat"),
   visionRead: (emailId, n) => visionRead(emailId, n),
   onToggle(open) {
+    coverPage();
     const button = $("#chat-btn");
     button.setAttribute("aria-expanded", String(open));
     button.classList.toggle("on", open);
@@ -1270,7 +1313,7 @@ document.addEventListener("click", (event) => {
   const mail = url.pathname.match(/^\/app\/mail\/([^/]+)$/);
   if (mail && reader.contains(anchor)) {
     const id = decodeURIComponent(mail[1]);
-    S.focus = { emailId: id, at: S.route && S.route.view === "trace" && S.route.traceId === id ? "matter" : "heading" };
+    S.focus = { emailId: id, at: anchor.dataset.focus || (S.route && S.route.view === "trace" && S.route.traceId === id ? "matter" : "heading") };
   }
   navigate(url.pathname + url.search, { replace: "replace" in anchor.dataset });
 });
@@ -1292,9 +1335,13 @@ document.addEventListener("keydown", (event) => {
     }
     return;
   }
+  if (event.key === "Tab" && chatCovers()) {
+    keepTabIn($("#chat"), event);
+    return;
+  }
   if (event.key === "Escape") {
     if (chat.closeHistory()) return event.preventDefault();
-    if (document.activeElement && document.activeElement.closest("#chat")) {
+    if (chatCovers() || (document.activeElement && document.activeElement.closest("#chat"))) {
       if (chat.busy()) return;
       event.preventDefault();
       chat.close();
@@ -1310,8 +1357,7 @@ document.addEventListener("keydown", (event) => {
     }
     if (S.route && S.route.view === "trace") {
       event.preventDefault();
-      S.focus = { emailId: S.route.traceId, at: "matter" };
-      navigate(`/app/mail/${enc(S.route.traceId)}`);
+      closeEmail();
       return;
     }
     if (S.route && (S.route.emailId || S.route.file)) {

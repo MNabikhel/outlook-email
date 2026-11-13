@@ -112,11 +112,17 @@ def from_ics(
     for event in series:
         if len(out) >= limit:
             break
-        out += _occurrences(event, zones, overrides, method, email_id, now, rows=limit - len(out), deadline=deadline)
+        try:
+            out += _occurrences(event, zones, overrides, method, email_id, now, rows=limit - len(out), deadline=deadline)
+        except Exception:  # one meeting written wrong loses only itself, not the others in the file
+            continue
     # A moved occurrence whose series isn't in this file (an update to one week only) is a meeting of its own.
     seen = {(m.uid, m.start) for m in out}
     for (uid, _start), (event, replaces) in overrides.items():
-        meeting = _meeting(event, zones, method, email_id)
+        try:
+            meeting = _meeting(event, zones, method, email_id)
+        except Exception:
+            continue
         if meeting is not None and (meeting.uid, meeting.start) not in seen:
             meeting.occurrence = replaces
             meeting.recurring = True  # one occurrence of a repeating meeting
@@ -128,71 +134,107 @@ def _occurrences(
     event: dict, zones: dict, overrides: dict, method: str, email_id: str, now: datetime, *, rows: int = MAX_ROWS,
     deadline: float | None = None,
 ) -> list[Meeting]:
-    """One meeting's occurrences in the window, ``rows`` at most. Once ``deadline`` has passed (the file's time is
-    up), a repeating meeting is its first occurrence, marked as repeating; one being walked then keeps what was found."""
+    """One meeting's occurrences in the window, ``rows`` at most: its rule's (RRULE), and the dates it adds to them
+    (RDATE), less those it skips (EXDATE). Once ``deadline`` has passed (the file's time is up), a repeating meeting
+    is its first occurrence, marked as repeating; one being walked then keeps what was found."""
     first = _meeting(event, zones, method, email_id)
     if first is None:
         return []
     rule = event.get("RRULE")
-    if rule is None:
+    extra = event.get("_all", {}).get("RDATE", [])
+    if rule is None and not extra:
         return [first]
-    # The rule alone: dateutil reads what follows a space on the line as more rules and dates ("... RDATE:..."), as a
-    # set of rules none of the limits below would reach.
-    rule_text = (rule[2].split() or [""])[0]
+    first.recurring = True
     if deadline is not None and monotonic() >= deadline:
-        first.recurring = True
         return [first]
-    if _too_often(rule_text):
-        # No meeting repeats more often than a few times a day: such a rule (which anyone can email, from years back)
-        # would take minutes to walk. Its first occurrence is kept, marked as repeating.
-        first.recurring = True
-        return [first]
-    from dateutil.rrule import rrulestr
-
     start = _when(event["DTSTART"], zones)
     if start is None:
         return [first]
     begin, all_day = start
     length = _parse(first.end, first.all_day) - _parse(first.start, first.all_day)
-    try:
-        anchor = begin if not all_day else datetime.combine(begin, time())
-        rrule = rrulestr(_until_in_utc(rule_text, begin, all_day), dtstart=anchor.replace(tzinfo=None) if all_day else anchor, ignoretz=all_day)
-    except (ValueError, TypeError):
-        first.recurring = True
-        return [first]
     low = now - WINDOW_BACK
     high = now + WINDOW_AHEAD
     if all_day:
         low, high = low.replace(tzinfo=None), high.replace(tzinfo=None)
-    excluded = {_key(when[0]) for name in ("EXDATE",) for raw in event.get("_all", {}).get(name, []) for when in _whens(raw, zones)}
-    # Walked a step at a time from its first occurrence, up to the window's end, and at most ``MAX_STEPS`` steps
-    # however far back it starts: a rule from years back that repeats often, which anyone can email, mustn't hold the
-    # run or fill the memory. (dateutil's own "after" walks from the start too, with no limit.)
+    # An all-day series' skipped day written as a time ("EXDATE:20261015T000000Z") is that day.
+    excluded = {_key(_on_day(when, all_day)) for raw in event.get("_all", {}).get("EXDATE", []) for when, _date in _whens(raw, zones)}
+    starts = [begin] if rule is None else _walked(rule[2], begin, all_day, low, high, deadline)
+    if starts is None:
+        return [first]
+    for raw in extra[:MAX_OCCURRENCES]:
+        for when, is_date in _whens(raw, zones)[:MAX_OCCURRENCES]:
+            if is_date and not all_day:
+                continue
+            stamp = _on_day(when, all_day)
+            if low <= (datetime.combine(stamp, time()) if all_day else stamp) <= high:
+                starts.append(stamp)
     out = []
-    from itertools import islice
-
-    for when in islice(_walk(rrule, high, deadline), MAX_STEPS):
-        if when < low:
-            continue
-        stamp = when.date() if all_day else when
-        key = _key(stamp)
-        if key in excluded:
-            continue
-        moved = overrides.get((first.uid, key))
-        if moved is not None:
-            meeting = _meeting(moved[0], zones, method, email_id)
-            if meeting is not None:
-                meeting.recurring = True
-                meeting.occurrence = _iso(stamp, all_day)
-                out.append(meeting)
-            continue
-        out.append(Meeting(**{**asdict(first), "start": _iso(stamp, all_day), "end": _iso(stamp + length, all_day), "recurring": True}))
+    try:
+        for stamp in sorted({_key(stamp): stamp for stamp in starts}.values(), key=_key):
+            key = _key(stamp)
+            if key in excluded:
+                continue
+            moved = overrides.get((first.uid, key))
+            if moved is not None:
+                meeting = _meeting(moved[0], zones, method, email_id)
+                if meeting is not None:
+                    meeting.recurring = True
+                    meeting.occurrence = _iso(stamp, all_day)
+                    out.append(meeting)
+                continue
+            out.append(Meeting(**{**asdict(first), "start": _iso(stamp, all_day), "end": _iso(stamp + length, all_day), "recurring": True}))
+    except (OverflowError, ValueError):  # a date past what a calendar holds: what was found is kept
+        pass
     cap = min(MAX_OCCURRENCES, rows)
     if len(out) > cap:
         # More than a calendar shows: those from today on are kept first.
         upcoming = [m for m in out if m.start >= _iso(now.date() if all_day else now, all_day)]
         out = (upcoming[:cap] or out[-cap:])
     return out
+
+
+def _on_day(when, all_day: bool):
+    """A date-time as an all-day series' day; anything else as it is."""
+    return when.date() if all_day and isinstance(when, datetime) else when
+
+
+def _walked(rule_line: str, begin, all_day: bool, low, high, deadline: float | None) -> list | None:
+    """A rule's occurrences from ``low`` to ``high`` (dates for an all-day series); None for a rule that can't be
+    walked (it repeats too often, or every no weeks, or dateutil can't read it): the meeting is then its first
+    occurrence."""
+    from dateutil.rrule import rrulestr
+
+    # The rule alone: dateutil reads what follows a space on the line as more rules and dates ("... RDATE:..."), as a
+    # set of rules none of the limits below would reach.
+    rule_text = (rule_line.split() or [""])[0]
+    if _too_often(rule_text) or _no_interval(rule_text):
+        # No meeting repeats more often than a few times a day: such a rule (which anyone can email, from years back)
+        # would take minutes to walk.
+        return None
+    try:
+        anchor = begin if not all_day else datetime.combine(begin, time())
+        rrule = rrulestr(_until_in_utc(rule_text, begin, all_day), dtstart=anchor.replace(tzinfo=None) if all_day else anchor, ignoretz=all_day)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    # Walked a step at a time from its first occurrence, up to the window's end, and at most ``MAX_STEPS`` steps
+    # however far back it starts: a rule from years back that repeats often, which anyone can email, mustn't hold the
+    # run or fill the memory. (dateutil's own "after" walks from the start too, with no limit.)
+    from itertools import islice
+
+    found = []
+    try:
+        for when in islice(_walk(rrule, high, deadline), MAX_STEPS):
+            if when >= low:
+                found.append(when.date() if all_day else when)
+    except (ValueError, TypeError, OverflowError):  # dateutil gave up partway: what it found is kept
+        pass
+    return found
+
+
+def _no_interval(rule: str) -> bool:
+    """A rule repeating every 0 (or -1) weeks: dateutil reads it, then fails or repeats the first day forever."""
+    match = re.search(r"INTERVAL=(-?\d+)", rule, re.I)
+    return bool(match) and int(match.group(1)) < 1
 
 
 class _PastTheWindow(Exception):
@@ -283,12 +325,17 @@ def _meeting(event: dict, zones: dict, method: str, email_id: str) -> Meeting | 
         return None
     begin, all_day = start
     end_raw = _when(event.get("DTEND"), zones) if event.get("DTEND") else None
-    if end_raw is not None:
+    if end_raw is not None and end_raw[1] == all_day:  # an end of the other kind (a date for a timed start) is none
         end = end_raw[0]
     elif event.get("DURATION"):
-        end = begin + _duration(event["DURATION"][2])
+        try:
+            end = begin + _duration(event["DURATION"][2])
+        except OverflowError:  # a length past what a calendar holds
+            end = begin
     else:
         end = begin + (timedelta(days=1) if all_day else timedelta(0))
+    if all_day and end <= begin:  # ending on its own day ("DTEND;VALUE=DATE" the same as its start): that day
+        end = begin + timedelta(days=1)
     uid = event.get("UID", ("", {}, ""))[2] or hashlib.sha256(f"{event.get('SUMMARY', ('', {}, ''))[2]}{_iso(begin, all_day)}".encode()).hexdigest()[:24]
     organizer = event.get("ORGANIZER")
     attendees = [_person(raw) for raw in event.get("_all", {}).get("ATTENDEE", [])[:MAX_ATTENDEES * 2]]
@@ -382,32 +429,128 @@ def _blocks(lines: list[tuple[str, dict, str]], kind: str, *, limit: int | None 
 def _vtimezones(lines, text: str = ""):
     """The zones an invitation names, by its TZID: an IANA name, a Windows name ("Eastern Standard Time"), else the
     zone the invitation itself defines (its VTIMEZONE block: Outlook's "(UTC-05:00) Eastern Time (US & Canada)" or
-    "Customized Time Zone", with its own daylight saving rules), else the "(UTC-05:00)" offset in its name."""
+    "Customized Time Zone", with its own daylight saving rules), else the "(UTC-05:00)" offset in its name. A name
+    that is none of these is kept as None, so it isn't looked up again; past ``MAX_ZONES`` names, the others are
+    None too (a real invitation names one or two, and anyone can email a file naming thousands)."""
     zones: dict = {}
-    defined = {}
-    if "BEGIN:VTIMEZONE" in text:
-        try:
-            import io
-
-            from dateutil.tz import tzical
-
-            calendar = tzical(io.StringIO(re.sub(r"\r?\n", "\r\n", text)))
-            defined = {key: calendar.get(key) for key in calendar.keys()}
-        except Exception:  # a block dateutil can't read: the names and offsets below still apply
-            defined = {}
+    defined = _defined_zones(lines) if "BEGIN:VTIMEZONE" in text.upper() else {}
     for name, params, value in lines:
         tzid = params.get("TZID") or (value if name == "TZID" else "")
-        if tzid and tzid not in zones and (zone := zone_named(tzid) or defined.get(tzid) or _offset_zone(tzid)) is not None:
-            zones[tzid] = zone
+        if not tzid or tzid in zones:
+            continue
+        zones[tzid] = (zone_named(tzid) or defined.get(tzid) or _offset_zone(tzid)) if len(zones) < MAX_ZONES else None
     return zones
 
 
+MAX_ZONES = 20  # zones looked up for one file
+# What a zone's STANDARD or DAYLIGHT part may say: dateutil refuses any other property (Thunderbird's
+# X-LIC-LOCATION, a TZNAME with a language), and loses every zone of the file with it.
+_ZONE_PROPERTIES = ("DTSTART", "TZOFFSETFROM", "TZOFFSETTO", "RRULE")
+
+
+def _defined_zones(lines) -> dict:
+    """The zones the file's VTIMEZONE blocks define, by TZID, each read on its own (a block dateutil can't read loses
+    only itself), ``MAX_ZONES`` at most. A zone changes its clocks once or twice a year: a part whose rule is not a
+    plain yearly one ("the second Sunday of March") is no real zone's, and dateutil would walk such a rule from 1601
+    for every time asked of it (every second, or day by day to year 9999 for a day that never comes), so that zone
+    is its standard offset all year."""
+    import io
+
+    from dateutil.tz import tzical
+
+    defined: dict = {}
+    block: list | None = None
+    for name, params, value in lines:
+        if name == "BEGIN" and value.upper() == "VTIMEZONE":
+            block = []
+        elif block is not None and name == "END" and value.upper() == "VTIMEZONE":
+            tzid, zone = _zone_of(block, io, tzical)
+            if tzid and zone is not None:
+                defined.setdefault(tzid, zone)
+            block = None
+            if len(defined) >= MAX_ZONES:
+                break
+        elif block is not None and len(block) < 200:
+            block.append((name, params, value))
+    return defined
+
+
+def _zone_of(block, io, tzical):
+    """One VTIMEZONE block's (TZID, zone); the zone is None when it can't be read."""
+    tzid = next((value for name, _params, value in block if name == "TZID"), "")
+    out, offsets, plain = [], [], True
+    part = ""
+    for name, _params, value in block:
+        if name == "BEGIN" and value.upper() in ("STANDARD", "DAYLIGHT"):
+            part = value.upper()
+            out.append(f"BEGIN:{part}")
+        elif name == "END" and part and value.upper() == part:
+            out.append(f"END:{part}")
+            part = ""
+        elif part and name in _ZONE_PROPERTIES:
+            if name == "TZOFFSETTO":
+                offsets.append((part, value.strip()))
+            if name == "RRULE" and not _yearly_change(value):
+                plain = False
+            out.append(f"{name}:{value.strip()}")
+    if not tzid:
+        return "", None
+    if not plain:
+        standard = next((value for part, value in offsets if part == "STANDARD"), offsets[0][1] if offsets else "")
+        return tzid, _fixed_offset(standard)
+    try:
+        text = "\r\n".join(["BEGIN:VTIMEZONE", "TZID:" + re.sub(r"[\r\n]", "", tzid), *out, "END:VTIMEZONE"])
+        return tzid, tzical(io.StringIO(text)).get(tzid)
+    except Exception:  # a block dateutil can't read: the names and offsets still apply
+        return tzid, None
+
+
+def _yearly_change(rule: str) -> bool:
+    """A zone's rule for when its clocks change, as real zones write it: yearly, in one month, on one day of it
+    ("BYDAY=2SU", "BYDAY=-1SU"; or a week of days, "BYMONTHDAY=8,9,10,11,12,13,14;BYDAY=SU"), with an UNTIL or COUNT
+    at most. Such a rule comes true every year or every few, so dateutil finds its dates in a moment."""
+    parts = dict(part.partition("=")[::2] for part in rule.upper().strip().split(";") if part)
+    if parts.get("FREQ") != "YEARLY" or parts.get("INTERVAL", "1") != "1":
+        return False
+    if set(parts) - {"FREQ", "INTERVAL", "BYMONTH", "BYDAY", "BYMONTHDAY", "UNTIL", "COUNT", "WKST"}:
+        return False
+    if not re.fullmatch(r"(1[0-2]|[1-9])", parts.get("BYMONTH", "")):
+        return False
+    days = parts.get("BYMONTHDAY")
+    weekday = parts.get("BYDAY")
+    if days is not None:
+        try:
+            numbers = sorted(int(day) for day in days.split(","))
+        except ValueError:
+            return False
+        if not all(1 <= day <= 28 for day in numbers):
+            return False
+        if weekday is None:
+            return len(numbers) == 1
+        return re.fullmatch(r"(SU|MO|TU|WE|TH|FR|SA)", weekday) is not None and numbers == list(range(numbers[0], numbers[0] + 7))
+    return weekday is None or re.fullmatch(r"(-?[1-5])?(SU|MO|TU|WE|TH|FR|SA)", weekday) is not None
+
+
+def _fixed_offset(value: str):
+    """A zone's offset as written ("-0500", "+0530", "+053000"); None when it isn't one."""
+    match = re.fullmatch(r"([+-])(\d{2})(\d{2})(\d{2})?", value.strip())
+    if not match or int(match.group(2)) > 23 or int(match.group(3)) > 59:
+        return None
+    span = timedelta(hours=int(match.group(2)), minutes=int(match.group(3)), seconds=int(match.group(4) or 0))
+    return timezone(-span if match.group(1) == "-" else span)
+
+
 def zone_named(name: str) -> ZoneInfo | None:
+    """The IANA zone a TZID names: itself, a Windows name, or the zone a path-like name ends in (SOGo's
+    "/inverse.ca/20091015_1/America/New_York", Thunderbird's "/mozilla.org/20050126_1/America/New_York")."""
     from tzlocal import windows_tz
 
     candidates = [name, windows_tz.win_tz.get(name, "")]
+    if name.startswith("/"):
+        pieces = [piece for piece in name.split("/") if piece]
+        candidates += ["/".join(pieces[-3:]), "/".join(pieces[-2:])]
     for candidate in candidates:
-        if not candidate:
+        if not candidate or candidate.startswith("/"):
             continue
         try:
             return ZoneInfo(candidate)
@@ -446,15 +589,31 @@ def _whens(prop, zones) -> list[tuple[datetime | date, bool]]:
         match = re.fullmatch(r"(\d{8})T(\d{4,6})(Z?)", piece)
         if not match:
             continue
-        stamp = datetime.strptime(match.group(1) + match.group(2).ljust(6, "0"), "%Y%m%d%H%M%S")
+        try:
+            stamp = datetime.strptime(match.group(1) + match.group(2).ljust(6, "0"), "%Y%m%d%H%M%S")
+        except ValueError:  # no such hour or day ("T250000")
+            continue
         if match.group(3):
             out.append((stamp.replace(tzinfo=timezone.utc), False))
             continue
         tzid = params.get("TZID", "")
-        zone = zones.get(tzid) or (zone_named(tzid) or _offset_zone(tzid) if tzid else None)
-        # Kept in its own zone, so a repeating meeting stays at its local time across daylight saving changes.
-        out.append((stamp.replace(tzinfo=zone) if zone else stamp.astimezone(), False))  # no zone: this computer's
+        zone = zones[tzid] if tzid in zones else (zone_named(tzid) or _offset_zone(tzid) if tzid else None)
+        # Kept in its own zone, so a repeating meeting stays at its local time across daylight saving changes. With
+        # none (a "floating" time), this computer's, with its daylight saving rules too.
+        zone = zone or _local_zone()
+        out.append((stamp.replace(tzinfo=zone) if zone else stamp.astimezone(), False))
     return out
+
+
+def _local_zone():
+    """This computer's time zone, with its rules (a fixed offset would move a weekly meeting an hour at the clock
+    change); None when it can't be told."""
+    try:
+        from tzlocal import get_localzone
+
+        return get_localzone()
+    except Exception:
+        return None
 
 
 def _duration(value: str) -> timedelta:
@@ -517,6 +676,26 @@ def invitation_method(attachments, meetings=()) -> str:
     if meetings:
         return "CANCEL" if any(meeting.cancelled for meeting in meetings) else "REQUEST"
     return ""
+
+
+def all_over(meetings, now: datetime) -> bool:
+    """Whether every meeting an invitation names (``meetings``: as read, or ``store.email_meetings``) ended before
+    ``now``: an invitation to a meeting long past asks for no answer. A repeating meeting may go on past the
+    occurrences read, so it is never over here; nor is an invitation that names none."""
+    if not meetings:
+        return False
+    for meeting in meetings:
+        if meeting.recurring:
+            return False
+        try:
+            if meeting.all_day:
+                if date.fromisoformat((meeting.end or meeting.start)[:10]) > now.date():
+                    return False
+            elif datetime.fromisoformat(meeting.end or meeting.start) > now:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 # --- Outlook meeting requests (.msg) ---------------------------------------------------------------------------------
@@ -692,7 +871,9 @@ def refresh_invites(store, settings, *, now: datetime | None = None, limit: int 
             current = store.get_email(email_id, conn=conn)
             if current is None or attachments_locked(current):  # held meanwhile
                 continue
-            store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp, conn=conn)
+            # The occurrences before the new window stay: the weeks of last quarter are still on the calendar.
+            store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp,
+                               keep_before=(now - WINDOW_BACK).astimezone(timezone.utc).isoformat(timespec="seconds"), conn=conn)
         done += 1
     return done
 
@@ -749,7 +930,7 @@ def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int
         for _rowid, email_id in rows:
             email = store.get_email(email_id)
             try:
-                found = _kept_invitations(email, settings, now) if email is not None else None
+                found = _caught_up(email, settings, now) if email is not None else None
             except Exception:  # an invitation that can't be read again adds nothing
                 found = None
             if found:
@@ -758,32 +939,56 @@ def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int
                     if current is not None and not store.has_meetings(email_id, conn=conn):  # read meanwhile: as it was read
                         store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp,
                                            held=attachments_locked(current), sender_name=current.sender_name, conn=conn)
-                _refile_invitation(store, settings, email_id, now)
+            # Filed again by its invitation even when it named no meeting: an attendee's answer ("Accepted: ...") or a
+            # proposed new time an older version gave an "Accept or decline" task, or filed as "Other".
+            _refile_invitation(store, settings, email_id, now)
         looked += len(rows)
         store.set_state(CATCH_UP_KEY, str(rows[-1][0]))
     return looked
+
+
+def _caught_up(email, settings, now: datetime) -> list[Meeting] | None:
+    """An old email's meetings, as ``_kept_invitations`` reads them around ``now``, with the occurrences before that
+    window that it named around when it arrived: a repeating meeting that ended months before the update is on the
+    calendar for the weeks it was, as a one-off meeting from those weeks is."""
+    found = _kept_invitations(email, settings, now)
+    try:
+        received = _aware(datetime.fromisoformat(email.received_at))
+    except (TypeError, ValueError):
+        return found
+    low = now - WINDOW_BACK
+    if found is None or received >= low:
+        return found
+    have = {meeting.id for meeting in found}
+    before = _utc(low)
+    earlier = [m for m in _kept_invitations(email, settings, received) or [] if m.start < before and m.id not in have]
+    return found + earlier
+
+
+def _utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def _refile_invitation(store, settings, email_id: str, now: datetime) -> None:
     """An invitation an older version filed by its subject alone (as "Other", or with an "Accept or decline" task on a
     cancellation): filed again by what its invitation is (its METHOD), as a new one is, keeping what the user did with
     its tasks. Held mail, and mail the user corrected, stays as it is."""
-    from controller_inbox.fraud import assess_email, attachments_locked, trust_context
+    from controller_inbox.fraud import attachments_locked, refile_checked
     from controller_inbox.models import ActionStatus, DocumentType
-    from controller_inbox.pipeline import rescore_stored
 
     email = store.get_email(email_id)
     if email is None or attachments_locked(email) or email.model_status == "corrected":
         return
-    method = invitation_method(email.attachments)
+    meetings = store.email_meetings(email_id)
+    method = invitation_method(email.attachments, meetings)
     if not method:
         return
     asks = any(a.source == "meeting" and a.status == ActionStatus.OPEN for a in email.actions)
-    wants = method in ("REQUEST", "PUBLISH", "ADD")
+    wants = method in ("REQUEST", "PUBLISH", "ADD") and not all_over(meetings, now)
     if email.category == DocumentType.MEETING and asks == wants:
         return  # filed as it would be now
     try:
-        rescore_stored(store, settings, email, assess_email(store, trust_context(store, settings), email), now=now)
+        refile_checked(store, settings, email, now=now)
     except Exception:  # filed as it was; the meeting is on the calendar either way
         return
 
@@ -801,7 +1006,9 @@ def _kept_invitations(email, settings, now: datetime) -> list[Meeting] | None:
         if not is_invitation(att) or len(found) >= MAX_ROWS:
             continue
         text = att.extracted_text or ""
-        if text.lstrip().upper().startswith("BEGIN:VCALENDAR") and "[CloseDesk stopped reading here" not in text:
+        # The text stored is read when it is the whole file: an older version kept only its first 2000 characters,
+        # and a long one is cut at the stored text's limit. Else the file kept under inbox/extracted is.
+        if _whole_calendar(text):
             data: bytes | str | None = text
         else:
             data = _kept_file(settings.inbox_extracted / email.id / safe_filename(att.filename), att.sha256) if att.sha256 else None
@@ -815,6 +1022,13 @@ def _kept_invitations(email, settings, now: datetime) -> list[Meeting] | None:
         read = read or bool(request)
         found = request + found
     return found if read else None
+
+
+def _whole_calendar(text: str) -> bool:
+    """The stored text of an invitation, from its BEGIN:VCALENDAR to its END:VCALENDAR, not cut short."""
+    body = text.strip()
+    return (body.upper().startswith("BEGIN:VCALENDAR") and body.upper().endswith("END:VCALENDAR")
+            and "[CloseDesk stopped reading here" not in text)
 
 
 # --- For the calendar page and the chat -----------------------------------------------------------------------------
@@ -833,11 +1047,16 @@ def with_cautions(store, meetings: list[dict]) -> list[dict]:
     from controller_inbox.store import _meeting_of
 
     invites = [m for m in meetings if m.get("source") == "invite" and m.get("email_id")]
-    senders: dict[str, set[str]] = {}
+    # Every invitation naming the meeting's id, not only those on show: a lookalike's moved to another day is
+    # doubtful in the Day view too.
+    senders = store.invitation_meetings([m["uid"] for m in invites]) if invites else {}
     for meeting in invites:
         senders.setdefault(meeting["uid"], set()).add(_meeting_of(meeting.get("sender"), meeting.get("organizer")))
+    for uid, about in senders.items():
+        senders[uid] = _others(about)
     emails = store.get_emails(list(dict.fromkeys(m["email_id"] for m in invites))) if invites else {}
     newcomer: dict[str, bool] = {}
+    walked: dict = {}  # the conversations looked at, shared by their invitations
     for meeting in meetings:
         meeting["caution"] = ""
     for meeting in invites:
@@ -850,7 +1069,7 @@ def with_cautions(store, meetings: list[dict]) -> list[dict]:
         elif email is not None and email.threading:
             if email.id not in newcomer:
                 try:
-                    newcomer[email.id] = email.id in links.related(store, email, ai=False)["new_domains"]
+                    newcomer[email.id] = links.is_newcomer(store, email, seen=walked)
                 except Exception:  # the conversation can't be read just now: no warning rather than no calendar
                     newcomer[email.id] = False
             if newcomer[email.id]:
@@ -859,6 +1078,21 @@ def with_cautions(store, meetings: list[dict]) -> list[dict]:
             meeting["caution"] = f"{CAUTION}: {why}."
     return meetings
 
+
+def _others(meetings: set[str]) -> set[str]:
+    """The different senders among the meetings invitations with one id are about (``store._meeting_of``): the
+    organizer's own word ("vendor.com") and one colleague's forward of it ("vendor.com|taz.com") are one sender, the
+    organizer; two domains forwarding it, or another organizer, are not."""
+    forwards: dict[str, int] = {}
+    for meeting in meetings:
+        if "|" in meeting:
+            organizer = meeting.partition("|")[0]
+            forwards[organizer] = forwards.get(organizer, 0) + 1
+    out = set()
+    for meeting in meetings:
+        organizer = meeting.partition("|")[0]
+        out.add(organizer if organizer in meetings and forwards.get(organizer) == 1 else meeting)
+    return out
 
 
 def shown(meeting: dict, tz) -> dict:
@@ -900,7 +1134,13 @@ def utc_range(first: date, last: date, tz) -> tuple[str, str]:
 
 
 _TITLE_NOISE = frozenset("""meeting call sync review weekly daily monthly catch up catchup check in checkin with and the for
-of on re fw fwd invitation invite updated accepted tentative declined canceled cancelled zoom teams""".split())
+of on re fw fwd invitation invite updated accepted tentative declined canceled cancelled zoom teams all""".split())
+_TITLE_WORD = re.compile(r"[A-Za-z][A-Za-z0-9&'-]{2,}|\d{3,}")
+
+
+def _title_words(text: str) -> list[str]:
+    """The words of a title or subject, lowercased, each once, in order: "all entities, all accounts" has "all" once."""
+    return list(dict.fromkeys(w.strip("'-").lower() for w in _TITLE_WORD.findall(text or "")))
 
 
 def related_mail(store, meeting: dict, *, limit: int = 8) -> list:
@@ -910,7 +1150,7 @@ def related_mail(store, meeting: dict, *, limit: int = 8) -> list:
     found = []
     if meeting.get("email_id") and (invite := store.get_email(meeting["email_id"])) is not None:
         found.append(invite)
-    words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9&'-]{2,}|\d{3,}", meeting.get("subject") or "") if w.lower() not in _TITLE_NOISE]
+    words = [w for w in _title_words(meeting.get("subject") or "") if w not in _TITLE_NOISE]
     people = [re.sub(r".*<|>.*", "", person).strip().lower() for person in [meeting.get("organizer") or "", *meeting.get("attendees", [])]]
     addresses = {person for person in people if "@" in person}
     when = datetime.fromisoformat(meeting["start"]) if "T" in meeting["start"] else datetime.combine(date.fromisoformat(meeting["start"][:10]), time(), tzinfo=timezone.utc)
@@ -926,7 +1166,9 @@ def related_mail(store, meeting: dict, *, limit: int = 8) -> list:
         received = received if received.tzinfo else received.replace(tzinfo=timezone.utc)
         if abs(received - when) > timedelta(days=14):
             continue
-        named = sum(1 for word in words if word.lower() in (email.subject or "").lower())
+        # Whole words of the subject: "all" isn't named by "call", nor "pay" by "payroll".
+        subject_words = set(_title_words(email.subject or ""))
+        named = sum(1 for word in words if word in subject_words)
         from_people = (email.sender_email or "").lower() in addresses
         if (named >= min(2, len(words)) or (named and from_people)) and email.id not in {e.id for e in found}:
             found.append(email)
@@ -935,14 +1177,42 @@ def related_mail(store, meeting: dict, *, limit: int = 8) -> list:
     return found
 
 
+# How the chat's lines mark an item Outlook shows as free ("Payday reminder"): not a meeting that keeps the user busy.
+SHOWN_FREE = "shown as free"
+
+
+def _listed_when(meeting: dict) -> str:
+    """When a meeting is, as the chat's lines write it: "2026-09-23 09:30–09:45", "2026-09-30 (all day)", and with its
+    last day when that is later ("2026-09-29 to 2026-10-02 (all day)", "2026-09-29 09:00 to 2026-10-01 17:00")."""
+    start, end = meeting["start"], meeting["end"] or ""
+    if meeting["all_day"]:
+        try:
+            last = date.fromisoformat(end[:10]) - timedelta(days=1)  # an all-day meeting ends the morning after its last day
+        except ValueError:
+            last = None
+        if last is not None and last.isoformat() > start[:10]:
+            return f"{start[:10]} to {last.isoformat()} (all day)"
+        return f"{start[:10]} (all day)"
+    when = start.replace("T", " ")
+    try:
+        first_day, last_day = date.fromisoformat(start[:10]), date.fromisoformat(end[:10])
+    except ValueError:
+        return f"{when}–{end[11:16]}"
+    # One that ends at midnight ends with its own day.
+    if last_day > first_day and not (end[11:16] == "00:00" and last_day == first_day + timedelta(days=1)):
+        return f"{when} to {end.replace('T', ' ')}"
+    return f"{when}–{end[11:16]}"
+
+
 def listing(meetings: list[dict]) -> str:
-    """Meetings as lines for the chat's model: when, what, where, who."""
+    """Meetings as lines for the chat's model: when, what, whether Outlook shows it as free or tentative, where, who."""
     lines = []
     for meeting in meetings:
-        when = meeting["start"].replace("T", " ") + ("" if meeting["all_day"] else f"–{meeting['end'][11:16]}")
-        if meeting["all_day"]:
-            when = f"{meeting['start']} (all day)"
-        parts = [when, meeting["subject"]]
+        parts = [_listed_when(meeting), meeting["subject"]]
+        if meeting.get("busy") == "free":
+            parts.append(SHOWN_FREE)
+        elif meeting.get("busy") == "tentative":
+            parts.append("tentative")
         if meeting["location"]:
             parts.append(f"at {meeting['location']}")
         if meeting["organizer"]:

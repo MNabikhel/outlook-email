@@ -22,10 +22,19 @@ from controller_inbox.extract import (
     sha256_bytes,
 )
 from controller_inbox.models import AttachmentRecord, DocumentType, EmailRecord, ExtractedFields, RawMessage
-from controller_inbox.calendar_events import invitation_method
-from controller_inbox.fraud import assess, attachments_locked, domain_of, dropped_file_body, reassess_email, save_check, trust_context
+from controller_inbox.calendar_events import all_over, invitation_method
+from controller_inbox.fraud import (
+    FREEMAIL,
+    assess,
+    attachments_locked,
+    domain_of,
+    dropped_file_body,
+    reassess_email,
+    save_check,
+    trust_context,
+)
 from controller_inbox.profile import is_finance
-from controller_inbox.store import Store
+from controller_inbox.store import Store, invoice_key
 
 
 VERDICT_FLAGS = {"fraud_cleared", "fraud_confirmed"}
@@ -89,6 +98,7 @@ def process_message(
 
         files = unique_attachments(files)
         write_extracted(settings, replace(raw, attachments=files))
+    came_with = files  # its files, with those a mailbox (Microsoft 365) gave: an invitation among them is read
     attachments_raw = explode_archives(files)
     # Another copy of a stored message: the files stored from earlier copies are kept, and this copy adds
     # only files they don't hold. A re-saved .eml often comes without the files dropped beside the first.
@@ -137,10 +147,8 @@ def process_message(
 
     conversation = conversation_members(store, raw.id, raw.threading, raw.internet_message_id, raw.conversation_id)
     # The email being read, as the conversation checks see it (it isn't stored yet).
-    stored = store.email_heads([raw.id]) if existing is not None else []
     me = SimpleNamespace(
         id=raw.id,
-        stored=stored[0].stored if stored else None,  # read again: where it was stored first
         subject=clean.subject,
         sender_email=raw.sender_email,
         reply_to=raw.reply_to,
@@ -149,8 +157,11 @@ def process_message(
         received_at=raw.received_at.astimezone(timezone.utc).isoformat(),
         flags=[],
         invoice_file=any(c.document_type == DocumentType.AP_INVOICE for c in att_classifications),
+        invoice_key=invoice_key(merged_fields.primary_invoice),
     )
     invitation = invitation_method([*raw.attachments, *att_records], raw.meetings)
+    # The meetings its invitations name. Read before the write lock is taken, so a long one keeps nobody waiting.
+    found = invites(replace(raw, attachments=came_with), raw.id, now)
     holders = _holders(store, merged_fields.primary_invoice)
     classified_email = _classify(
         store,
@@ -196,6 +207,7 @@ def process_message(
         sender=raw.sender_name or raw.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in att_records),
         invitation=invitation,
+        meeting_over=all_over(found, now),
         received_on=anchor,
         entered_elsewhere=_entered_elsewhere(
             store, me, holders, conversation, own_file=me.invoice_file, fraud=check.level
@@ -242,9 +254,7 @@ def process_message(
     # the email or snooze or finish its tasks. That is read again with the write lock held, so it is kept rather than
     # overwritten from the copy read at the start. (Done is never written here: upsert_email leaves it alone.)
     # An invitation on mail held as possible payment fraud is no meeting: its text never reaches the calendar, only
-    # which meeting it named, so Outlook's own copy of that meeting isn't shown either. Read before the write lock is
-    # taken, so a long one keeps nobody waiting.
-    found = invites(raw, record.id, now)
+    # which meeting it named, so Outlook's own copy of that meeting isn't shown either.
     with store.transaction() as conn:
         latest = store.get_email(raw.id, conn=conn)
         verdict_changed = latest is not None and _keep_user_state(record, latest)
@@ -252,6 +262,11 @@ def process_message(
         store.save_invites(record.id, found, sender=raw.sender_email, received=record.received_at, held=attachments_locked(record),
                            sender_name=raw.sender_name,
                            expanded=now.astimezone(timezone.utc).isoformat(timespec="seconds"), conn=conn)
+        if found and not attachments_locked(record):
+            # An update or a cancellation of a meeting: an earlier invitation of it no longer asks for an answer
+            # (one the user snoozed or finished stays as they left it).
+            for replaced in store.replaced_invitations(record.id, conn=conn):
+                store.drop_open_tasks(replaced, source="meeting", conn=conn)
     from controller_inbox import cost_codes
 
     try:
@@ -261,7 +276,7 @@ def process_message(
         else:
             save_check(store, record, check, now=now)
         cost_codes.refresh(store, settings, email_ids=[record.id])
-        _settle_conversation(store, settings, record, conversation, holders, now=now)
+        _settle_conversation(store, settings, record, conversation, now=now)
     except Exception:
         # The email is stored and on the board: a fraud check or cost code that couldn't be saved is logged, and the
         # message isn't reported as one that couldn't be read.
@@ -469,8 +484,7 @@ def ingest_mailbox(
         received = aware_utc(raw.received_at)
         if read_before and received < read_before and raw.id not in tries and store.has_email(raw.id):
             continue  # listed again only because the cursor waited for a message that failed
-        if not store.has_email(raw.id) and store.email_with_message_id(raw.internet_message_id, raw.source):
-            # Outlook gives a message a new id when it is moved to another folder; it was read under the old one.
+        if not store.has_email(raw.id) and _moved_in_outlook(store, raw):
             continue
         if not store.has_email(raw.id) and _filed_from_a_file(store, raw):
             continue
@@ -501,6 +515,16 @@ def ingest_mailbox(
     return processed
 
 
+def _moved_in_outlook(store: Store, raw: RawMessage) -> bool:
+    """Whether this message was read already under another id: Outlook gives a message a new id when it is moved
+    to another folder. Only when a stored one with its Message-ID is this message (the same subject, sender and
+    time): a copier gives every scan the same Message-ID, and a lookalike can copy the real vendor's."""
+    from controller_inbox.mail_identity import another_message
+
+    stored = store.get_emails(store.emails_with_message_id(raw.internet_message_id, raw.source))
+    return any(not another_message(email, raw) for email in stored.values())
+
+
 def _filed_from_a_file(store: Store, raw: RawMessage) -> bool:
     """Whether this message is already filed from the drop folder or classic Outlook (the same Message-ID, and
     the same subject, sender and time, as the drop folder tells a reused Message-ID apart): it isn't filed twice,
@@ -521,7 +545,8 @@ def invites(raw: RawMessage, email_id: str, now: datetime) -> list:
     deadline = monotonic() + calendar_events.ICS_SECONDS
     for att in raw.attachments:
         name = (att.filename or "").lower()
-        if (name.endswith(".ics") or "calendar" in (att.content_type or "").lower()) and att.content:
+        # As ``invitation_method`` tells an invitation: an .ics or .vcs file, or a calendar sent as one.
+        if (name.endswith((".ics", ".vcs")) or "calendar" in (att.content_type or "").lower()) and att.content:
             if len(found) >= calendar_events.MAX_ROWS:
                 break
             try:
@@ -572,7 +597,7 @@ def _classify(
     script draft is built, so it can see amounts and dates. A correction
     the user already saved is kept and is not sent back to the model.
     """
-    from controller_inbox.learn import apply_learned, match_correction
+    from controller_inbox.learn import apply_learned, match_correction, trusted_since
 
     own_file = any(c.document_type == DocumentType.AP_INVOICE for c in attachments)
     me = me or SimpleNamespace(id=email_id, subject=subject, sender_email=sender_email, threading={}, received_at="", flags=[], invoice_file=own_file)
@@ -604,10 +629,19 @@ def _classify(
         invitation=invitation,
     )
     learned = match_correction(store, sender_email=sender_email, subject=subject, email_id=email_id)
+    if learned and trusted_since(store, learned, sender_email=sender_email):
+        learned = None
     return apply_learned(classified, learned) if learned else classified
 
 
-_REPLY_SUBJECT = re.compile(r"^\s*(re|fw|fwd|aw|wg|tr|sv)\s*:", re.I)
+# "RE:" or "FW:" in any of the languages Outlook writes it (AW, WG, TR, SV, VS, RES, RV, ENC, ANTW, ODP, R, I), and
+# an out-of-office's "Automatic reply:", maybe after a tag a mail server puts in front of outside mail ("[EXTERNAL]",
+# "EXT:"). Microsoft 365 gives no reply headers, so for its mail the subject is all there is to go by.
+_REPLY_SUBJECT = re.compile(
+    r"^\s*(?:(?:\[[^\]\n]{1,30}\]|[a-z]{2,12}\s*:)\s*){0,3}?"
+    r"(?:re|fw|fwd|aw|wg|tr|sv|vs|res|rv|enc|antw|odp|r|i|automatic reply|auto[- ]?reply)\s*:",
+    re.I,
+)
 
 
 def _replying(record) -> bool:
@@ -635,11 +669,25 @@ def _has_invoice_file(record) -> bool:
 
 
 def _sent_to(record, other) -> bool:
-    """Whether ``other`` came from ``record``'s own sender or from someone ``record`` went to: who answers about it."""
+    """Whether ``other`` came from ``record``'s side of it, who answers about it: its sender, the Reply-To it asks
+    answers to go to, someone it went to, or someone else at one of their companies (the vendor's own people, an AP
+    clerk reached through a shared mailbox). At a free mail service only the address itself counts, as anyone can
+    have one there; and when the Reply-To is at another domain, the sender is a service that sent the invoice for that
+    company (QuickBooks, Bill.com), so the service's domain counts only as that one address."""
     sender = (getattr(other, "sender_email", "") or "").strip().lower()
     if not sender:
         return False
-    return sender == (record.sender_email or "").strip().lower() or sender in {a.lower() for a in (record.threading or {}).get("to") or []}
+    own = (record.sender_email or "").strip().lower()
+    answers = (getattr(record, "reply_to", "") or "").strip().lower()
+    went_to = {address.strip().lower() for address in (record.threading or {}).get("to") or []}
+    if sender in {own, answers, *went_to} - {""}:
+        return True
+    domain = domain_of(sender)
+    if not domain or domain in FREEMAIL:
+        return False
+    sides = {domain_of(address) for address in went_to}
+    sides.add(domain_of(answers) if answers and domain_of(answers) != domain_of(own) else domain_of(own))
+    return domain in sides - {""}
 
 
 def _holders(store: Store, invoice: str | None) -> list[str]:
@@ -650,59 +698,103 @@ def _holders(store: Store, invoice: str | None) -> list[str]:
 def _repeats(store: Store, me, holders: list[str], conversation: set[str], *, own_file: bool, fraud: str = "") -> list[str]:
     """The other emails with ``me``'s invoice number (``holders``: all that have it), as possible duplicates.
 
-    Each email is judged on itself, never by trusting another: a reply that brings no invoice file (a colleague's
-    "which PO is this for?", the vendor's answer) is no second invoice, so it is never flagged; and an invoice read
-    after such replies in its own conversation, from its sender or the people it went to, isn't flagged because of
-    them. Everything else counts, as two copies of an invoice always did. Held or cautioned mail is never let off.
-    Mail held as possible fraud is no duplicate of anything else: it is held, and flagged itself."""
+    Each email is judged on itself, never by trusting another, and comes out the same whichever is read first. A
+    reply or forward in the conversation that brings no invoice file (a colleague's "which PO is this for?", the
+    vendor's answer, anyone's) is no second invoice: it never counts against the invoice, and isn't flagged unless it
+    came from outside the invoice's side (``_sent_to``) and so keeps a "Code and enter" of its own. A reply that brings the invoice file again, sent after the invoice, is the copy: it is flagged (when it is read, or
+    when the invoice is filed after it), and the invoice isn't flagged because of it. Everything else counts, as two
+    copies of an invoice always did. Held or cautioned mail is never let off. Mail held as possible fraud is no
+    duplicate of anything else: it is held, and flagged itself."""
     found = [other for other in holders if other != me.id]
     if not found:
         return []
     heads = {head.id: head for head in store.email_heads(found)}
+    found = [other for other in found if not (other in conversation and other in heads and _talk(heads[other]))]
     if _doubtful(me, fraud):
         return found
     found = [other for other in found if other not in heads or not attachments_locked(heads[other])]
     if _talk(me) and not own_file:
-        return []
-    return [
-        other for other in found
-        if not (other in conversation and other in heads and _talk(heads[other]) and _sent_to(me, heads[other]))
-    ]
+        # Written about an invoice in its conversation, from its side: no copy of it. From anyone else (a lookalike
+        # the fraud check didn't catch), it keeps a "Code and enter" of its own, so it is compared with the invoice.
+        invoices = [other for other in found if other in conversation and other in heads and not _talk(heads[other])]
+        return [] if any(_sent_to(heads[other], me) for other in invoices) else invoices
+    if me.received_at and not _replying(me):
+        found = [
+            other for other in found
+            if not (other in conversation and other in heads and _replying(heads[other]) and (heads[other].received_at or "") > me.received_at)
+        ]
+    return found
 
 
 def _entered_elsewhere(store: Store, me, holders: list[str], conversation: set[str], *, own_file: bool, fraud: str = "") -> bool:
     """Whether a reply about an invoice needs no "Code and enter" task of its own: it brings no invoice file, and
-    an earlier email of its conversation, not held or cautioned, is the invoice (it brings the file, or isn't a reply)
-    and came from the same sender or went to the one replying. That email keeps its own task, always."""
+    an email of its conversation sent no later than it, not held or cautioned, is the invoice (it brings the file, or
+    isn't a reply), is about the same invoice (or the reply names none) and came from the side it is answered from
+    (``_sent_to``). That email keeps its own task, always. Judged by when they were sent, not by which was read
+    first, as ``_settle_conversation`` judges it, so reading the reply again changes nothing."""
     if own_file or not _talk(me) or _doubtful(me, fraud):
         return False
-    mine = getattr(me, "stored", None)
-    for head in store.email_heads([other for other in holders if other != me.id and other in conversation]):
-        if _talk(head) or _doubtful(head) or head.category != DocumentType.AP_INVOICE:
+    about = getattr(me, "invoice_key", None)
+    others = holders if about else conversation
+    for head in store.email_heads([other for other in others if other != me.id and other in conversation]):
+        if _talk(head) or _doubtful(head) or head.category != DocumentType.AP_INVOICE or (about and head.invoice_key != about):
             continue
-        earlier = (mine is None or head.stored < mine) and (head.received_at or "") <= (me.received_at or "")
-        if earlier and _sent_to(head, me):
+        if (head.received_at or "") <= (me.received_at or "") and _sent_to(head, me):
             return True
     return False
 
 
-def _settle_conversation(store: Store, settings: Settings, record: EmailRecord, conversation: set[str], holders: list[str], *, now: datetime) -> None:
-    """An invoice read after mail about it (the drop folder reads files by name, not by date). The "Code and
-    enter" task goes from replies that bring no invoice file, came later than the invoice, and are from its sender
-    or someone it went to. And a reply from another domain that brought an invoice file of its own (a lookalike's
-    "resent as a PDF" read first) is filed again as a possible duplicate. Nothing is taken from the invoice's own
-    email, or from any email that brings an invoice file; a task the user already finished or snoozed stays."""
+def entered_elsewhere(store: Store, email: EmailRecord) -> bool:
+    """``_entered_elsewhere`` for a stored email filed as it is now (the category and flags the user just corrected
+    it to), with its conversation and invoice as reading it would find them."""
+    from controller_inbox.links import conversation_members
+
+    heads = store.email_heads([email.id])
+    if not heads:
+        return False
+    me = heads[0]
+    me.category, me.flags = email.category, list(email.flags)
+    conversation = conversation_members(store, email.id, email.threading, email.internet_message_id, email.conversation_id)
+    return _entered_elsewhere(store, me, _holders(store, email.extracted.primary_invoice), conversation, own_file=me.invoice_file)
+
+
+def _settle_conversation(store: Store, settings: Settings, record: EmailRecord, conversation: set[str], *, now: datetime | None) -> None:
+    """An invoice read after mail about it (the drop folder reads files by name, not by date), or cleared after being
+    held: the mail of its conversation about the same invoice (or naming none) ends up as it would have had the
+    invoice been read first, clean. A reply that brings no invoice file, sent no earlier than the invoice from its side
+    (``_sent_to``) and not held or cautioned, loses its "Code and enter" task. A held or cautioned reply, a reply that
+    brings an invoice file of its own (a lookalike's "resent as a PDF", a colleague's forward), a reply from outside
+    the invoice's side, and a reply flagged when it shouldn't be are filed again, so each is or isn't a possible duplicate as when read after the invoice.
+    Nothing is taken from the invoice's own email, or from any email that brings an invoice file; a task the user
+    already finished or snoozed stays."""
     if not conversation or _talk(record) or _doubtful(record) or record.category != DocumentType.AP_INVOICE:
         return
-    domain = domain_of(record.sender_email)
-    for head in store.email_heads([other for other in holders if other != record.id and other in conversation]):
-        if _talk(head) and (head.received_at or "") >= (record.received_at or "") and _sent_to(record, head):
-            store.drop_open_tasks(head.id, source="invoice")
-        elif _replying(head) and _has_invoice_file(head) and "duplicate_invoice" not in head.flags and domain_of(head.sender_email) != domain:
-            from controller_inbox.fraud import assess_email
+    about = invoice_key(record.extracted.primary_invoice)
+    again: list[str] = []
+    for head in store.email_heads([other for other in conversation if other != record.id]):
+        if head.invoice_key != about and (head.invoice_key or not _talk(head)):
+            continue  # about another invoice: its own tasks stay
+        flagged = "duplicate_invoice" in head.flags
+        if _talk(head) and not _doubtful(head):
+            ours = _sent_to(record, head)
+            if not flagged and ours and (head.received_at or "") >= (record.received_at or ""):
+                store.drop_open_tasks(head.id, source="invoice")
+            elif flagged == ours:
+                again.append(head.id)  # flagged from its side, or not flagged from outside it
+        elif not flagged and (_doubtful(head) or (_replying(head) and _has_invoice_file(head))):
+            again.append(head.id)
+    _refile_others(store, settings, again, now=now)
 
-            if (stored := store.get_email(head.id)) is not None:
-                rescore_stored(store, settings, stored, assess_email(store, trust_context(store, settings), stored), now=now)
+
+def _refile_others(store: Store, settings: Settings, email_ids: list[str], *, now: datetime | None) -> None:
+    """File these stored emails again under a fresh fraud check, kept as fraud.refile_checked keeps it (saved, its
+    meetings following a hold), without settling their conversations again in turn."""
+    from controller_inbox.fraud import refile_checked
+
+    ctx = trust_context(store, settings) if email_ids else None
+    for email_id in email_ids:
+        if (stored := store.get_email(email_id)) is not None:
+            refile_checked(store, settings, stored, ctx=ctx, now=now, settle=False)
 
 
 def _bank_caution(check) -> list[str]:
@@ -711,7 +803,7 @@ def _bank_caution(check) -> list[str]:
 
 
 def rescore_stored(
-    store: Store, settings: Settings, email: EmailRecord, check, *, now: datetime | None = None
+    store: Store, settings: Settings, email: EmailRecord, check, *, now: datetime | None = None, settle: bool = True
 ) -> EmailRecord:
     """Refile a stored email after its fraud level changed (a verdict, a trusted domain, a report).
 
@@ -719,8 +811,13 @@ def rescore_stored(
     under the old level is read again. Tasks keep what the user did with them (``keep_task_status``).
     As in ``process_message``, urgency is judged against today; the stored fields were
     already read against the day the mail was sent.
+
+    The mail around it follows (``settle``), as if it had been read as it is now: when it is held now, or no longer
+    held, the other emails with its invoice number are filed again (held mail is no duplicate of anything, so their
+    duplicate flags change), and an invoice that is clean now settles its conversation (``_settle_conversation``).
     """
     as_of = (now or datetime.now(timezone.utc)).astimezone(settings.tz).date()
+    was_held = attachments_locked(email)
     attachments = [
         classify_document(
             subject=email.subject,
@@ -739,11 +836,15 @@ def rescore_stored(
     conversation = conversation_members(store, email.id, email.threading, email.internet_message_id, email.conversation_id)
     # The email as the invoice checks see it: stored, with its files' kinds as just read again.
     heads = store.email_heads([email.id])
-    me = heads[0] if heads else SimpleNamespace(id=email.id, stored=None, subject=email.subject, sender_email=email.sender_email,
-                                                threading=email.threading, received_at=email.received_at, flags=[])
+    me = heads[0] if heads else SimpleNamespace(id=email.id, subject=email.subject, sender_email=email.sender_email, reply_to=email.reply_to,
+                                                threading=email.threading, received_at=email.received_at, flags=[],
+                                                invoice_key=invoice_key(email.extracted.primary_invoice))
     me.invoice_file = any(c.document_type == DocumentType.AP_INVOICE for c in attachments)
     me.flags = []  # judged under ``check``, the level it is filed again under
     holders = _holders(store, email.extracted.primary_invoice)
+    # What its invitation is: its .ics file, else the meetings saved from it (an Outlook meeting request has no file).
+    meetings = store.email_meetings(email.id)
+    invitation = invitation_method(email.attachments, meetings)
     classified = _classify(
         store,
         settings,
@@ -760,7 +861,7 @@ def rescore_stored(
         as_of=as_of,
         has_attachments=email.has_attachments,
         fraud=check.level,
-        invitation=invitation_method(email.attachments),
+        invitation=invitation,
     )
     kept = [flag for flag in email.flags if flag in VERDICT_FLAGS | {"model_said_bank_change"}]
     email.category = classified.document_type
@@ -781,7 +882,8 @@ def rescore_stored(
         now=now,
         sender=email.sender_name or email.sender_email,
         has_invite=any(att.filename.lower().endswith(".ics") for att in email.attachments),
-        invitation=invitation_method(email.attachments),
+        invitation=invitation,
+        meeting_over=all_over(meetings, now or datetime.now(timezone.utc)),
         received_on=sent_date(email.received_at, settings, fallback=as_of),
         entered_elsewhere=_entered_elsewhere(store, me, holders, conversation, own_file=me.invoice_file, fraud=check.level),
     )
@@ -791,4 +893,10 @@ def rescore_stored(
 
     assign_script_draft(email)
     store.upsert_email(email)
+    if settle:
+        if attachments_locked(email) != was_held:
+            heads = {head.id: head for head in store.email_heads(holders)}
+            _refile_others(store, settings, [other for other in holders if other != email.id and other in heads
+                                             and not (other in conversation and _talk(heads[other]))], now=now)
+        _settle_conversation(store, settings, email, conversation, now=now)
     return store.get_email(email.id) or email

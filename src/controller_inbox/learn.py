@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 
 from controller_inbox.actions import extract_actions, keep_task_status, local_today, received_day
-from controller_inbox.calendar_events import invitation_method
+from controller_inbox.calendar_events import all_over, invitation_method
 from controller_inbox.classify import Classification, score_importance
 from controller_inbox.config import Settings
 from controller_inbox.models import DOCUMENT_LABELS, ActionStatus, DocumentType, Importance
@@ -48,6 +48,23 @@ def match_correction(store: Store, *, sender_email: str, subject: str, email_id:
         if _norm(row["subject"]) == normalized and domain_of(row.get("sender_email") or "") == domain:
             return row
     return None
+
+
+def trusted_since(store: Store, correction: dict, *, sender_email: str) -> bool:
+    """Whether you marked this sender (or their domain) "Not fraud" after teaching their mail as a payment-instruction
+    change. Your later word wins: their mail is no longer held for the teaching (the fraud check still runs)."""
+    from controller_inbox.fraud import domain_of
+
+    if correction.get("corrected_category") != DocumentType.PAYMENT_INSTRUCTION_CHANGE.value:
+        return False
+    sender = (sender_email or "").strip().lower()
+    wanted = {("sender", sender), ("domain", domain_of(sender))}
+    taught = correction.get("created_at") or ""
+    return any(
+        (row["kind"], row["value"]) in wanted and row["verdict"] == "safe" and (row.get("created_at") or "") >= taught
+        for row in store.trust_entries()
+        if sender
+    )
 
 
 def apply_learned(classification: Classification, correction: dict) -> Classification:
@@ -179,6 +196,9 @@ def record_correction(
         item for item in learned.importance_reasons if not item.startswith("You corrected")
     ]
     stored = list(email.actions)
+    from controller_inbox.pipeline import entered_elsewhere
+
+    meetings = store.email_meetings(email.id)  # an Outlook meeting request has no file to say what it is
     email.actions = extract_actions(
         email_id=email.id,
         subject=email.subject,
@@ -189,7 +209,9 @@ def record_correction(
         flags=email.flags,
         as_of=today,
         received_on=received_on,
-        invitation=invitation_method(email.attachments),
+        invitation=invitation_method(email.attachments, meetings),
+        meeting_over=all_over(meetings, datetime.now(timezone.utc)),
+        entered_elsewhere=entered_elsewhere(store, email),
     )
     # The tasks are written again for the new category; one it still asks for keeps what the user did with it.
     # A snoozed task it no longer asks for goes (it would come back when the snooze ends); a finished one stays.

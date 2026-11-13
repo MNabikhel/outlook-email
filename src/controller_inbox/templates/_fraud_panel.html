@@ -1,8 +1,8 @@
 {% set signal_keys = check.signals | map(attribute='key') | list %}
-<section class="panel fraud-panel {{ check.level }}" id="fraud">
+<section class="panel fraud-panel {{ 'high' if check.held else check.level }}" id="fraud">
   <h3>Fraud check
     <small>
-      {% if check.level == 'high' %}possible payment fraud{% elif check.level == 'caution' %}double-check before paying{% elif check.verdict == 'safe' %}marked not fraud{% else %}nothing suspicious{% endif %}
+      {% if check.level == 'high' %}possible payment fraud{% elif check.held %}held as possible payment fraud{% elif check.level == 'caution' %}double-check before paying{% elif check.verdict == 'safe' %}marked not fraud{% else %}nothing suspicious{% endif %}
       · score {{ check.score }}
     </small>
   </h3>
@@ -10,6 +10,9 @@
   <p>This reads like a payment-fraud attempt. Nothing on it is processed and its files are locked until you verify it by phone using a number you already have.</p>
   {% elif check.level == 'caution' %}
   <p>Worth a second look before any money moves. It doesn't block work.</p>
+  {% endif %}
+  {% if check.held_reason %}
+  <p class="note">{{ check.held_reason }} Its files are locked and the model doesn't read it until you mark it Not fraud. To stop holding this sender's mail, trust the sender or correct the category.</p>
   {% endif %}
   {% if check.verdict == 'safe' %}
   <p class="note">You marked this email as not fraud.</p>
@@ -34,7 +37,7 @@
       <input type="text" name="note" maxlength="300" placeholder="e.g. Called Dana at the number on file, confirmed"/>
     </label>
     <div class="verdict-row">
-      {% if check.verdict != 'safe' and (check.level != 'none' or check.verdict == 'fraud') %}
+      {% if check.verdict != 'safe' and (check.level != 'none' or check.verdict == 'fraud' or check.held) %}
       <button type="submit" name="choice" value="safe:email">Not fraud</button>
       {% endif %}
       {% if email.sender_email and 'trusted_sender' not in signal_keys %}

@@ -856,6 +856,82 @@ def test_a_held_invitation_hides_only_outlooks_tentative_copy_at_its_own_time(st
     assert store.meetings_between(*WINDOW) == [], "tentative, at its time, organized by the name it gave: Outlook's copy of it"
 
 
+def test_invitations_from_a_newcomer_to_their_conversation_say_so_with_one_look_at_it(store, monkeypatch):
+    """An invitation whose sender's domain is new to the conversation it came in says to check who sent it. The
+    invitations of one conversation share one look at it, and only the invitations' own emails are loaded whole."""
+    import sys
+
+    from controller_inbox import links
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    store.upsert_email(_record("root", sender="pat@vendor.com", mid="<root@vendor.com>", threading={"to": ["ap@taz.com"]},
+                               received="2026-10-01T09:00:00+00:00"))
+    store.upsert_email(_record("ours", sender="ap@taz.com", mid="<ours@taz.com>", threading={"in_reply_to": "root@vendor.com", "to": ["pat@vendor.com"]},
+                               received="2026-10-01T10:00:00+00:00"))
+    for n, (email_id, sender) in enumerate((("own", "pat@vendor.com"), ("look1", "pat@vendor-mail.com"), ("look2", "pat@vendor-mail.com"))):
+        store.upsert_email(_record(email_id, sender=sender, mid=f"<{email_id}@x>", threading={"in_reply_to": "ours@taz.com", "to": ["ap@taz.com"]},
+                                   received=f"2026-10-02T0{n + 1}:00:00+00:00"))
+        store.save_invites(email_id, cal.from_ics(_invite(f"N{n}", f"2026100{n + 6}T140000Z", organizer=f"mailto:{sender}"), email_id=email_id, now=NOW),
+                           sender=sender)
+    walks, loaded = [], []
+    real_walk, real_load = links._conversation, store.get_emails
+    monkeypatch.setattr(links, "_conversation", lambda *args: (walks.append(args[1]), real_walk(*args))[1])
+    monkeypatch.setattr(store, "get_emails", lambda ids, **kw: (loaded.extend(ids), real_load(ids, **kw))[1])
+    meetings = cal.with_cautions(store, store.meetings_between(*WINDOW))
+    cautions = {m["email_id"]: m["caution"] for m in meetings}
+    assert cautions["own"] == ""
+    assert cautions["look1"] == cautions["look2"] == f"{cal.CAUTION}: its sender is new to the conversation it came in."
+    assert len(walks) == 1, walks
+    assert set(loaded) == {"own", "look1", "look2"}, loaded
+
+
+def test_a_series_updated_many_times_costs_the_calendar_no_more_to_show_or_open(store, settings, monkeypatch):
+    """Each update of a daily series by mail keeps its email's rows. A day on the calendar, with Outlook's copy of
+    the series on it, reads each email's flags once, not once per row of every update; opening the meeting reads
+    the rows of its own series only."""
+    import sys
+
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import outlook_sync, web
+    from controller_inbox import store as store_module
+    from controller_inbox.calendar_events import Meeting
+    from helpers import PAGE
+
+    def series(uid: str, version: int) -> str:
+        return _ics(_event(f"UID:{uid}", f"SUMMARY:Standup v{version}", "DTSTART:20260901T140000Z", "DTEND:20260901T141500Z",
+                           f"SEQUENCE:{version}", "ORGANIZER:mailto:lead@taz.com", "RRULE:FREQ=DAILY"))
+
+    for uid in ("S1", "S2"):
+        for version in range(15):
+            email_id = f"{uid}-v{version}"
+            store.save_invites(email_id, cal.from_ics(series(uid, version), email_id=email_id, now=NOW), sender="lead@taz.com",
+                               received=f"2026-09-{version + 1:02d}T09:00:00+00:00")
+    store.replace_meetings("outlook", [Meeting(uid="S1", start="2026-10-06T14:00:00+00:00", end="2026-10-06T14:15:00+00:00", subject="Standup",
+                                               organizer="lead@taz.com", busy="busy", source="outlook")], start=WINDOW[0], end=WINDOW[1])
+    store.set_state(outlook_sync.CONSENT_KEY, "2026-01-01T00:00:00")
+    store.set_state(outlook_sync.CALENDAR_KEY, "1")
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    for email_id in {f"{uid}-v{version}" for uid in ("S1", "S2") for version in range(15)}:
+        store.upsert_email(_record(email_id, sender="lead@taz.com"))
+    loads = []
+    real = store_module._loads
+    monkeypatch.setattr(store_module, "_loads", lambda value, default: (loads.append(value), real(value, default))[1])
+    day = store.meetings_between("2026-10-06T00:00:00+00:00", "2026-10-07T00:00:00+00:00")
+    assert [(m["source"], m["subject"]) for m in day] == [("outlook", "Standup"), ("invite", "Standup v14")]
+    assert loads.count("[]") <= 30, loads.count("[]")
+    client = TestClient(web.create_app(settings, store))
+    read = []
+    real_between = store_module.Store.meetings_between
+    monkeypatch.setattr(store_module.Store, "meetings_between", lambda self, *a, **k: (read.append(k.get("uid")), real_between(self, *a, **k))[1])
+    opened = client.get(f"/api/calendar/{day[1]['id']}", headers=PAGE).json()["meeting"]
+    assert opened["subject"] == "Standup v14" and read == ["S2"]
+
+
 def test_a_held_invitation_cleared_becomes_a_meeting_and_one_held_later_stops_being_one(store, settings):
     from controller_inbox import fraud
 
@@ -1037,3 +1113,116 @@ def test_after_an_update_stored_invitations_are_filed_as_meetings_keeping_what_w
     assert [(a.title, a.status) for a in invite.actions if a.source == "meeting"] == [("Accept or decline: Weekly AP payment run review", ActionStatus.OPEN)]
     assert [a for a in cancel.actions if a.status == ActionStatus.OPEN] == [], "a cancellation asks for no answer"
     assert [(a.title, a.status) for a in done.actions if a.source == "meeting"] == [("Accept or decline: Budget sync", ActionStatus.DONE)]
+
+
+def test_after_an_update_stored_replies_lose_their_accept_or_decline_task(store, settings):
+    """An attendee's answer ("Accepted: ...") and a proposed new time hold no meeting, so the catch-up saves none for
+    them: they are still filed again by their invitation, as a new one is, with no "Accept or decline" task."""
+    import sys
+
+    from controller_inbox.extract import sha256_bytes
+    from controller_inbox.models import ActionItem, ActionStatus, AttachmentRecord, DocumentType, ExtractedFields, Importance
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    event = ["UID:rp1", "SUMMARY:Budget review", "DTSTART:20261009T140000Z", "DTEND:20261009T150000Z", "ORGANIZER:mailto:jordan@horizon-goods.com"]
+    stored = {
+        "rp-accept": ("Accepted: Budget review", "REPLY", DocumentType.MEETING, ["Accept or decline: Accepted: Budget review"]),
+        "rp-counter": ("New Time Proposed: Budget review", "COUNTER", DocumentType.OTHER, []),
+    }
+    for email_id, (subject, method, category, tasks) in stored.items():
+        data = _ics(_event(*event), method=method)
+        record = _record(email_id, sender="jordan@horizon-goods.com")
+        record.subject, record.category, record.model_status = subject, category, "needs_model"
+        record.attachments = [AttachmentRecord(id=f"{email_id}:0", email_id=email_id, filename="invite.ics", content_type="text/calendar",
+                                               size_bytes=len(data), sha256=sha256_bytes(data.encode()), extracted_text=data,
+                                               document_type=DocumentType.OTHER, document_confidence=0, extracted_fields=ExtractedFields())]
+        record.actions = [ActionItem(id=f"{email_id}-t{n}", email_id=email_id, title=title, detail="", due_date=None, priority=Importance.MEDIUM,
+                                     status=ActionStatus.OPEN, source="meeting") for n, title in enumerate(tasks)]
+        store.upsert_email(record)
+    cal.catch_up_invites(store, settings, now=NOW)
+    accept, counter = (store.get_email(email_id) for email_id in stored)
+    assert accept.category == counter.category == DocumentType.MEETING
+    assert [a.title for a in accept.actions if a.source == "meeting" and a.status == ActionStatus.OPEN] == []
+    assert store.meetings_between("2026-10-01", "2026-10-31") == []
+
+
+def _stored_invitation(store, email_id: str, data: str, received: str):
+    import sys
+
+    from controller_inbox.extract import sha256_bytes
+    from controller_inbox.models import AttachmentRecord, DocumentType, ExtractedFields
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    record = _record(email_id, sender="auditor@audit.example", received=received)
+    record.category = DocumentType.MEETING
+    record.attachments = [AttachmentRecord(id=f"{email_id}:0", email_id=email_id, filename="invite.ics", content_type="text/calendar",
+                                           size_bytes=len(data), sha256=sha256_bytes(data.encode()), extracted_text=data,
+                                           document_type=DocumentType.OTHER, document_confidence=0, extracted_fields=ExtractedFields())]
+    store.upsert_email(record)
+    return record
+
+
+def test_a_repeating_meeting_that_ended_stays_on_the_calendar_when_its_repeats_are_worked_out_again(store, settings):
+    """The overnight run works a repeating invitation's repeats out again around a later day: the occurrences before
+    that day's window are kept, as a one-off meeting from the same week is, and the email isn't looked at again
+    every night for them. After an update, a series that ended months ago reaches the calendar too."""
+    from datetime import timedelta
+
+    read = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+    organizer = "ORGANIZER:mailto:auditor@audit.example"
+    weekly = _ics(_event("UID:audit", "SUMMARY:Year-end audit", "DTSTART:20260105T150000Z", "DTEND:20260105T160000Z", organizer,
+                         "RRULE:FREQ=WEEKLY;COUNT=5"))
+    single = _ics(_event("UID:one", "SUMMARY:Kick-off", "DTSTART:20260105T170000Z", "DTEND:20260105T180000Z", organizer))
+    for email_id, data in (("weekly", weekly), ("single", single)):
+        record = _stored_invitation(store, email_id, data, read.isoformat())
+        store.save_invites(email_id, cal.from_ics(data, email_id=email_id, now=read), sender=record.sender_email,
+                           received=record.received_at, expanded=read.isoformat())
+
+    def january():
+        return [(m["subject"], m["start"][:10]) for m in store.meetings_between("2026-01-01T00:00:00+00:00", "2026-02-15T00:00:00+00:00")]
+
+    shown = january()
+    assert len(shown) == 6
+    may = datetime(2026, 5, 20, tzinfo=timezone.utc)
+    assert cal.refresh_invites(store, settings, now=may) == 1
+    assert january() == shown, "worked out again in May, January's weeks are kept"
+    assert cal.refresh_invites(store, settings, now=may + timedelta(days=1)) == 0, "not looked at again the next night"
+
+    # Mail read by a version that kept no meetings, caught up in November: the series ended in February.
+    with store.connect() as conn:
+        conn.execute("DELETE FROM meetings")
+    cal.catch_up_invites(store, settings, now=datetime(2026, 11, 12, tzinfo=timezone.utc))
+    assert january() == shown
+
+
+def test_a_meetings_mail_matches_its_title_by_whole_words_each_counted_once(store):
+    """'all' twice in the title, and inside 'call' in a subject, isn't two of the title's words named."""
+    import sys
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    scam = _record("scam", sender="billing@acme-payments.net", received="2026-10-28T09:00:00+00:00")
+    scam.subject = "Invitation: Vendor bank details update call"
+    scam.body_text = "Join the call about all accounts and the new bank details for all entities."
+    near = _record("near", sender="audit@taz.com", received="2026-10-27T09:00:00+00:00")
+    near.subject = "Reconciliation review: external auditors' list"
+    for email in (scam, near):
+        store.upsert_email(email)
+    meeting = {"subject": "Quarterly reconciliation review with external auditors and the controller's office, all entities, all accounts",
+               "start": "2026-10-30T14:00:00+00:00", "organizer": "", "attendees": [], "email_id": ""}
+    assert [e.id for e in cal.related_mail(store, meeting)] == ["near"]
+
+
+def test_the_sample_calendar_says_it_is_the_sample(loaded, settings):
+    from fastapi.testclient import TestClient
+    from helpers import PAGE
+
+    from controller_inbox.web import create_app
+
+    client = TestClient(create_app(settings, loaded), headers=PAGE)
+    assert client.get("/api/calendar?start=2026-09-21&end=2026-09-27").json()["source"]["sample"] is True

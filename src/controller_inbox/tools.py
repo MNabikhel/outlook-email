@@ -56,7 +56,9 @@ def prepare_queue(store: Store, *, limit: int = 20) -> dict:
 
     waiting = waiting_for_reading(store, limit)
     corrections = store.list_corrections()
-    packets = [build_packet(email, corrections) for email in waiting]
+    from controller_inbox.fraud import as_model_reads
+
+    packets = [build_packet(as_model_reads(store, email), corrections) for email in waiting]
     return {"ok": True, "count": len(packets), "packets": packets}
 
 

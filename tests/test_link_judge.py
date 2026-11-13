@@ -73,11 +73,11 @@ def test_mail_held_as_fraud_is_never_shown_to_the_model(store, settings, model):
 
 def test_mail_already_linked_or_months_apart_is_not_asked_about(store, settings, model):
     _mail(store, "q1", "Harbor quote for pallet wrap", body="Harbor quote attached.", received="2026-01-05T09:00:00+00:00")
-    first = _record("inv", invoices=["INV-4410"], received="2026-10-01T09:00:00+00:00")
-    first.subject = "Harbor quote invoice INV-4410"
+    first = _record("inv", invoices=["HB-4410"], received="2026-10-01T09:00:00+00:00")
+    first.subject = "Harbor quote invoice HB-4410"
     store.upsert_email(first)
-    second = _record("inv2", sender="ap@taz.com", invoices=["INV-4410"], received="2026-10-02T09:00:00+00:00")
-    second.subject = "Harbor quote INV-4410 approved"
+    second = _record("inv2", sender="ap@taz.com", invoices=["HB-4410"], received="2026-10-02T09:00:00+00:00")
+    second.subject = "Harbor quote HB-4410 approved"
     store.upsert_email(second)
     assert [e.id for e in link_judge.candidates(store, settings, store.get_email("inv2"))] == []
 
@@ -154,6 +154,28 @@ def test_only_the_models_links_carry_its_reason(loaded, settings):
     assert all("model_why" not in row for row in related["thread"])
     dup = client.get("/api/mail/demo-inv-10482").json()["related"]
     assert dup["groups"] and all(row["model_why"] == "" for group in dup["groups"] if group["kind"] != "ai" for row in group["emails"])
+
+
+def test_mail_held_while_a_run_weighs_others_isnt_shown_to_the_model_after(store, settings, model, monkeypatch):
+    """Marked fraud while the run asks about other mail: it isn't weighed, or shown beside another email, after."""
+    from datetime import datetime, timezone
+
+    _mail(store, "quote", "Harbor quote for pallet wrap", body="Harbor quote attached.", received="2026-10-01T09:00:00+00:00")
+    _mail(store, "question", "Question on the Harbor quote", sender="ap@taz.com", body="About the Harbor quote. PANGOLIN", received="2026-10-02T09:00:00+00:00")
+    _mail(store, "follow", "Harbor quote follow-up", sender="buyer@taz.com", body="Following up on the Harbor quote.", received="2026-10-03T09:00:00+00:00")
+    asking = link_judge.complete_text
+
+    def hold_after_first(settings_, messages, **kwargs):
+        if not model:  # while the model answers the first question
+            held = store.get_email("question")
+            held.flags = [*held.flags, "fraud_risk"]
+            store.upsert_email(held)
+        return asking(settings_, messages, **kwargs)
+
+    monkeypatch.setattr(link_judge, "complete_text", hold_after_first)
+    link_judge.judge_recent(store, settings, limit=10, now=datetime(2026, 10, 10, tzinfo=timezone.utc))
+    assert model and not any("PANGOLIN" in prompt for prompt in model[1:])
+    assert store.ai_checked("question") != link_judge.PROMPT_VERSION, "not weighed once held"
 
 
 def test_a_run_is_not_spent_on_cautioned_mail(store, settings, model):

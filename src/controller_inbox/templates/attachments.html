@@ -30,7 +30,7 @@
         <td>{{ row.document_type | label_doc }}<br/><small>{{ '%.0f'|format((row.document_confidence or 0) * 100) }}%</small></td>
         <td>{{ row.sender_name }}<br/><small>{{ row.sender_email }}</small></td>
         <td><a href="/inbox/{{ row.email_id }}">{{ row.subject }}</a></td>
-        <td><pre class="clip">{{ (row.extracted_text or '')[:280] }}</pre></td>
+        <td>{% if row.held %}<span class="muted small">Not shown: the email is held as possible payment fraud.</span>{% else %}<pre class="clip">{{ (row.extracted_text or '')[:280] }}</pre>{% endif %}</td>
       </tr>
       {% else %}
       <tr><td colspan="6" class="muted">No attachments stored yet.</td></tr>

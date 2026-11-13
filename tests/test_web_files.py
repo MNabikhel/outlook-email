@@ -187,3 +187,32 @@ def test_setup_shows_the_context_window_and_how_to_raise_it(client, settings, mo
     assert "4,096 tokens" in page.text and "Context Length 16,384" in page.text
     status.context_length = 32768
     assert "Enough to read whole attachments" in client.get("/settings").text
+
+
+def test_setup_asks_nobody_to_type_a_command(client, monkeypatch):
+    """The classic Setup page is linked from the app: like Settings there, it says what to do without a terminal."""
+    import html
+    import re
+
+    from controller_inbox import ocr, vision
+
+    monkeypatch.setattr(ocr, "engine_name", lambda: "")
+    monkeypatch.setattr(vision, "can_render", lambda: False)
+    text = html.unescape(re.sub(r"<[^>]+>", " ", client.get("/settings").text))  # your own mail is loaded here
+    for command in ("pip install", "python -m", "AZURE_CLIENT_ID", "CONTROLLER_INBOX_", "llm-check", ".venv)"):
+        assert command not in text, command
+    assert ocr.missing_note() in text and "Ask IT" in text
+
+
+def test_the_note_on_reading_scans_fits_the_python_it_runs_on():
+    from controller_inbox import ocr
+
+    assert "Python 3.12" in ocr.missing_note((3, 13)) and "Python 3.12" in ocr.missing_note((3, 14))
+    assert "couldn't be added" in ocr.missing_note((3, 12)) and "couldn't be added" in ocr.missing_note((3, 11), why_only=True)
+    for version in ((3, 11), (3, 12), (3, 13)):
+        assert "pip" not in ocr.missing_note(version) and "open CloseDesk again" in ocr.missing_note(version)
+    # The workspace's Settings shows the same note, and no command either.
+    from pathlib import Path
+
+    script = (Path(ocr.__file__).parent / "static" / "ui" / "settings.js").read_text(encoding="utf-8")
+    assert "data.ocr_missing" in script and "pip install" not in script

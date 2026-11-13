@@ -2,7 +2,7 @@
    calendar (read only) and the invitations that came by mail. A meeting opens beside the calendar with the mail
    about it. Keys: t today, d / w / m day, week, month, ← / → back and on. */
 
-import { h, icon, plural } from "./dom.js";
+import { h, icon, plural, replace } from "./dom.js";
 import { clockTime as timeLabel, meetingTime } from "./format.js";
 
 const enc = encodeURIComponent;
@@ -21,6 +21,9 @@ const addDays = (date, n) => new Date(date.getTime() + n * DAY_MS);
 const mondayOf = (date) => addDays(date, -((date.getUTCDay() + 6) % 7));
 const minutesOf = (stamp) => Number(stamp.slice(11, 13)) * 60 + Number(stamp.slice(14, 16));
 const fmt = (date, options) => date.toLocaleDateString(undefined, { timeZone: "UTC", ...options });
+
+/** Whether ``text`` is a day the calendar can show ("2026-10-05"): an edited or saved address may hold anything. */
+export const isDay = (text) => /^\d{4}-\d{2}-\d{2}$/.test(text) && !Number.isNaN(parseDay(text).getTime());
 
 /** The days a view shows around ``date``: its first and last. */
 export function rangeOf(view, date) {
@@ -53,10 +56,20 @@ function title(view, date) {
   return `${fmt(first, { month: "long", day: "numeric" })} – ${end}, ${last.getUTCFullYear()}`;
 }
 
-/** The meetings on one day: all-day ones covering it, then the others starting it, earliest first. */
+/** The meetings on one day: all-day ones covering it, then the others on it (starting it, or running into it from
+ * the day before: 10pm to 2am, or Monday to Wednesday), earliest first. */
 function onDay(meetings, day) {
   const text = dayText(day);
-  return meetings.filter((m) => (m.all_day ? m.start <= text && m.end > text : m.start.slice(0, 10) === text));
+  const next = dayText(addDays(day, 1));
+  return meetings.filter((m) => (m.all_day ? m.start <= text && m.end > text : m.start.slice(0, 10) === text || (m.start < next && m.end > `${text}T00:00`)));
+}
+
+/** A timed meeting's minutes on one day: from its start (the day's start, when it began before), to its end (the
+ * day's end, when it runs on after). */
+function minutesOn(m, text) {
+  const start = m.start.slice(0, 10) < text ? 0 : minutesOf(m.start);
+  const end = m.end.slice(0, 10) > text ? 24 * 60 : minutesOf(m.end);
+  return [start, end];
 }
 
 /* ---------- The page ---------- */
@@ -121,6 +134,10 @@ function sourceNote(source) {
   }
   if (source.calendar) {
     return h("p", { class: "cal-note muted small" }, icon("ok", 13), ` Your Outlook calendar, read only; read ${source.calendar_last}. Meeting invitations in your mail show here too.`);
+  }
+  if (source.sample) {
+    // Only the sample mailbox is loaded: these meetings came with it, not from invitations in anyone's mail.
+    return h("p", { class: "cal-note muted small" }, icon("info", 13), " The sample calendar. Your own meetings show here once your mail is in.");
   }
   if (source.outlook_available) {
     return h(
@@ -188,8 +205,9 @@ function timeGrid(data, view, date, open) {
   for (let day = first; day <= last; day = addDays(day, 1)) days.push(day);
   const timed = data.meetings.filter((m) => !m.all_day);
   // 7am to 7pm, stretched to the earliest and latest meeting shown.
-  const starts = timed.map((m) => minutesOf(m.start));
-  const ends = timed.map((m) => (m.end.slice(0, 10) > m.start.slice(0, 10) ? 24 * 60 : minutesOf(m.end)));
+  const spans = days.flatMap((day) => onDay(timed, day).map((m) => minutesOn(m, dayText(day))));
+  const starts = spans.map(([start]) => start);
+  const ends = spans.map(([, end]) => end);
   const from = Math.min(7 * 60, ...starts.map((m) => Math.floor(m / 60) * 60));
   const to = Math.max(19 * 60, ...ends.map((m) => Math.ceil(m / 60) * 60));
   const hourPx = 48;
@@ -215,9 +233,9 @@ function timeGrid(data, view, date, open) {
       "ul",
       { class: `cal-col${dayText(day) === data.today ? " today" : ""}`, style: { height: `${((to - from) / 60) * hourPx}px` }, "aria-label": fmt(day, { weekday: "long", month: "long", day: "numeric" }) },
       ...meetings.map((m) => {
-        const top = ((minutesOf(m.start) - from) / 60) * hourPx;
-        const end = m.end.slice(0, 10) > m.start.slice(0, 10) ? to : minutesOf(m.end);
-        const height = Math.max(20, ((end - minutesOf(m.start)) / 60) * hourPx - 2);
+        const [start, end] = minutesOn(m, dayText(day));
+        const top = ((start - from) / 60) * hourPx;
+        const height = Math.max(20, ((Math.min(end, to) - start) / 60) * hourPx - 2);
         const { lane, of } = lanes.get(m.id);
         const block = chip(m, open, { time: true });
         block.classList.add("cal-block");
@@ -281,7 +299,9 @@ async function showMeeting(panel, meeting, ctx) {
     icon("chat", 14),
     "Ask about this meeting"
   );
-  panel.replaceChildren(
+  // replace() leaves out what is null (a meeting with no caution), where replaceChildren would write "null".
+  replace(
+    panel,
     h("h2", { class: "cal-panel-title", tabindex: "-1" }, meeting.subject, meeting.cancelled ? h("span", { class: "tag tag-fraud" }, "Cancelled") : null, meeting.recurring ? h("span", { class: "tag" }, "Repeats") : null),
     meeting.caution ? h("p", { class: "tag tag-due_soon cal-caution-note" }, icon("alert", 13), " ", meeting.caution) : null,
     h("dl", { class: "cal-facts" }, ...facts.flatMap(([k, v]) => [h("dt", null, k), h("dd", null, v)])),

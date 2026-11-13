@@ -464,14 +464,16 @@ def _gift_ask(text: str) -> re.Match[str] | None:
     return found[0] if found else None
 
 
-def _gift_asks(text: str) -> list[re.Match[str]]:
+@lru_cache(maxsize=8)
+def _gift_asks(text: str) -> tuple[re.Match[str], ...]:
     """Every gift-card mention in a sentence that asks someone to buy them or send their codes.
 
-    Each sentence is read once, however many mentions it has, so a long run of them stays quick.
+    Each sentence is read once, however many mentions it has, so a long run of them stays quick. One check reads
+    the same text several times (the body, then with its files), so the last few are kept.
     """
     mentions = list(GIFT_RE.finditer(text or ""))
     if not mentions:
-        return []
+        return ()
     stops = [stop.start() for stop in re.finditer(r"[.\n]", text)]
     read: dict[tuple[int, int], tuple[bool, bool]] = {}
     found = []
@@ -491,7 +493,7 @@ def _gift_asks(text: str) -> list[re.Match[str]]:
                 continue
         if asks:
             found.append(match)
-    return found
+    return tuple(found)
 
 
 def assess(
@@ -716,6 +718,77 @@ def attachments_locked(email: "EmailRecord") -> bool:
     return "fraud_risk" in email.flags or email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE
 
 
+QUOTED_HELD = "(The quoted thread below this is left out: it includes an email held as possible payment fraud.)"
+
+
+def held_neighbours(store: "Store") -> set[str]:
+    """The emails in a conversation with mail held as possible payment fraud (not the held mail itself). Worked out
+    once for a run over much mail, such as indexing it for search by meaning."""
+    from controller_inbox.links import conversation_members
+
+    held = store.held_ids()
+    near: set[str] = set()
+    for email_id in held:
+        email = store.get_email(email_id)
+        if email is not None:
+            near |= conversation_members(store, email.id, email.threading, email.internet_message_id, email.conversation_id)
+    return near - set(held)
+
+
+def quotes_held_mail(store: "Store", email: "EmailRecord", *, near: set[str] | None = None) -> bool:
+    """A reply or forward that quotes its thread, when that conversation holds mail held as possible payment fraud:
+    Outlook quotes the earlier emails under the reply, the held one's text included. ``near`` is
+    ``held_neighbours``, when worked out already."""
+    if attachments_locked(email) or not QUOTE_START_RE.search(email.body_text or ""):
+        return False
+    if near is not None:
+        return email.id in near
+    from controller_inbox.links import conversation_members
+
+    members = conversation_members(store, email.id, email.threading, email.internet_message_id, email.conversation_id)
+    return any(attachments_locked(head) for head in store.email_heads(sorted(members)))
+
+
+def as_model_reads(store: "Store", email: "EmailRecord", *, near: set[str] | None = None) -> "EmailRecord":
+    """The email as a model may be given it. A reply quoting held mail keeps only what its sender wrote above the
+    quote, so a colleague's ordinary reply doesn't hand the model the held email's text. Its files are its own."""
+    if not quotes_held_mail(store, email, near=near):
+        return email
+    from dataclasses import replace
+
+    body = (email.body_text or "").replace("\r\n", "\n")
+    quote = QUOTE_START_RE.search(body)
+    mine = body[: quote.start()].rstrip() if quote else body
+    text = f"{mine}\n\n{QUOTED_HELD}".strip()
+    return replace(email, body_text=text, body_preview=text[:240])
+
+
+TAUGHT_HOLD = "You taught this sender's mail as a payment-instruction change"
+
+
+def taught_hold(email: "EmailRecord") -> bool:
+    """Held because of a correction you saved for its sender (``learn.apply_learned``), whatever the check found."""
+    from controller_inbox.models import DocumentType
+
+    return (
+        attachments_locked(email)
+        and "user_trained" in email.flags
+        and "fraud_confirmed" not in email.flags
+        and email.category == DocumentType.PAYMENT_INSTRUCTION_CHANGE
+    )
+
+
+def hold_reasons(email: "EmailRecord", check: dict | None, *, limit: int = 5) -> list[str]:
+    """Why an email is held, strongest first: your own word on it, then the check's signals that count against it.
+    Signals that count for it ("Trusted domain") are no reason to hold it."""
+    own = ["You marked it as fraud"] if "fraud_confirmed" in email.flags else [TAUGHT_HOLD] if taught_hold(email) else []
+    if own and (check or {}).get("level") != "high":
+        return own  # the check didn't hold it: its weaker signals are no reason it is held
+    signals = [signal for signal in (check or {}).get("signals") or [] if isinstance(signal, dict) and signal.get("label")]
+    against = sorted((signal for signal in signals if int(signal.get("points") or 0) > 0), key=lambda signal: -int(signal["points"]))
+    return list(dict.fromkeys([*own, *(signal["label"] for signal in against)]))[:limit]
+
+
 def save_check(store: "Store", email: "EmailRecord", check: FraudCheck, *, now: datetime | None = None, event: str = "") -> None:
     """Remember the check; log it when it flags something new or changes level."""
     at = _stamp(now)
@@ -758,6 +831,22 @@ def reassess_email(store: "Store", settings: "Settings", email: "EmailRecord", *
     # Held now, its invitation's meetings go (only which it named stays); cleared, they are read again.
     calendar_events.follow_hold(store, settings, store.get_email(email.id) or email, now=now)
     return email, check
+
+
+def refile_checked(store: "Store", settings: "Settings", email: "EmailRecord", *, ctx: TrustContext | None = None,
+                   now: datetime | None = None, settle: bool = True) -> "EmailRecord":
+    """File a stored email again under a fresh fraud check, and keep that check: saved (logged when its level
+    changed) and its meetings following a hold, as ``reassess_email`` does. An email held by a refile then says
+    why it is held: the panel, the log and Ask CloseDesk give the signals that hold it."""
+    from controller_inbox.pipeline import rescore_stored
+
+    check = assess_email(store, ctx or trust_context(store, settings), email)
+    email = rescore_stored(store, settings, email, check, now=now, settle=settle)
+    save_check(store, email, check, now=now)
+    from controller_inbox import calendar_events
+
+    calendar_events.follow_hold(store, settings, email, now=now)
+    return email
 
 
 def record_fraud_verdict(

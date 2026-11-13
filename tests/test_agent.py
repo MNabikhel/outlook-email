@@ -400,6 +400,18 @@ def test_an_answer_stops_where_the_model_starts_repeating_its_instructions():
         list(assistant.without_echo(iter(["Your draft answer:", " the memo..."])))
 
 
+def test_calculate_takes_one_date_from_another_as_the_days_between():
+    """"2026-12-31 - 2026-10-15" is 77 days, not the sum 2026 - 12 - 31 - 2026 - 10 - 15; an accounting negative
+    "(1,200)" is -1,200."""
+    assert agent.calculate("2026-12-31 - 2026-10-15") == "2026-12-31 - 2026-10-15 = 77 days (from 2026-10-15 to 2026-12-31)"
+    assert "= 49 days" in agent.calculate("2026-11-30 - 2026-10-12")
+    assert "= 77 days" in agent.calculate("December 31, 2026 - October 15, 2026")
+    refused = agent.calculate("2026-12-31 * 2")
+    assert "=" not in refused and "date" in refused, refused
+    assert agent.calculate("(1,200) + 500") == "(1,200) + 500 = -700"
+    assert agent.calculate("($1,200.00) - 300") == "($1,200.00) - 300 = -1,500"
+
+
 def test_calculate_sends_cell_names_back_to_read_cells():
     assert agent.calculate("(E5 - B5) / B5").startswith("calculate needs the numbers, not cell names (E5, B5). Read those cells")
 

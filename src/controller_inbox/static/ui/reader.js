@@ -1,7 +1,7 @@
 /* The reading pane: one email (header, why it was flagged, what was read from it, tasks, files, coding,
    fraud check), and an attachment's Page, Tables and Text views. */
 
-import { h, icon, replace, toast, plural, isTyping, $ } from "./dom.js";
+import { h, icon, replace, toast, plural, isTyping, keepTabIn, $ } from "./dom.js";
 import { getJSON, getBlob, postJSON, mailPath, filePath } from "./api.js";
 import { previewPane, thumb } from "./preview.js";
 
@@ -332,13 +332,16 @@ function fraudPanel(d, ctx) {
     }
   };
   const choices = [];
-  if (f.verdict !== "safe" && (level !== "none" || f.verdict === "fraud")) choices.push(btn("Not fraud", { class: "btn-sm", onclick: () => verdict("safe:email") }));
+  // Offered whenever the email is held, also when what you taught about its sender holds it and the check found nothing.
+  if (f.verdict !== "safe" && (level !== "none" || f.verdict === "fraud" || f.held)) choices.push(btn("Not fraud", { class: "btn-sm", onclick: () => verdict("safe:email") }));
   if (f.can_trust_sender) choices.push(btn(`Trust ${d.sender_email}`, { class: "btn-sm btn-quiet", onclick: () => verdict("safe:sender") }));
   if (f.can_trust_domain) choices.push(btn(`Trust @${f.sender_domain}`, { class: "btn-sm btn-quiet", onclick: () => verdict("safe:domain") }));
   if (f.verdict !== "fraud") choices.push(btn("This is fraud", { class: "btn-sm btn-danger", onclick: () => verdict("fraud:email") }));
   if (d.sender_email) choices.push(btn("Report this sender", { class: "btn-sm btn-danger-quiet", onclick: () => verdict("fraud:sender") }));
-  const label = level === "high" ? "Possible payment fraud" : level === "caution" ? "Double-check before paying" : f.verdict === "safe" ? "Marked not fraud" : "Nothing suspicious";
+  const label = level === "high" ? "Possible payment fraud" : f.held ? "Held as possible payment fraud" : level === "caution" ? "Double-check before paying" : f.verdict === "safe" ? "Marked not fraud" : "Nothing suspicious";
+  const tone = level === "high" || f.held ? "high" : level;
   const body = [
+    f.held_reason ? h("p", { class: "note" }, `${f.held_reason} Its files are locked and the model doesn't read it until you mark it Not fraud. To stop holding this sender's mail, trust the sender or correct the category.`) : null,
     f.verdict === "safe" ? h("p", { class: "note" }, "You marked this email as not fraud.") : f.verdict === "fraud" ? h("p", { class: "note" }, "You reported this email as fraud.") : null,
     f.signals && f.signals.length
       ? h(
@@ -350,11 +353,11 @@ function fraudPanel(d, ctx) {
     h("div", { class: "verdict" }, note, h("div", { class: "row-actions" }, choices)),
     h("p", { class: "muted small" }, "Every answer goes to the fraud log and changes how much these signals count next time. A request to change bank details always gets at least a caution, even from someone you trust."),
   ];
-  const head = h("span", { class: `tag ${level === "high" ? "tag-fraud" : level === "caution" ? "tag-due_soon" : "tag-ok"}` }, `${label} · score ${f.score}`);
-  if (level === "none") {
+  const head = h("span", { class: `tag ${tone === "high" ? "tag-fraud" : tone === "caution" ? "tag-due_soon" : "tag-ok"}` }, `${label} · score ${f.score}`);
+  if (tone === "none") {
     return h("details", { class: "rd-sec rd-fold", id: "rd-fraud" }, h("summary", { class: "rd-h" }, "Fraud check", h("span", { class: "rd-h-aside" }, head)), ...body);
   }
-  return section("Fraud check", { id: "rd-fraud", class: `fraud-${level}`, aside: head }, ...body);
+  return section("Fraud check", { id: "rd-fraud", class: `fraud-${tone}`, aside: head }, ...body);
 }
 
 /* ---------- Related mail: the conversation, and mail sharing an invoice, a PO or a file ---------- */
@@ -413,12 +416,15 @@ function related(d, ctx) {
     // Nothing links it yet: the model can still look, when one is running.
     return rel.can_look ? section("Related", { id: "rd-related", aside: h("span", { class: "rd-h-aside" }, lookButton(d, ctx)) }, h("p", { class: "muted small" }, "Nothing in this email ties it to others: no conversation, invoice, PO or file in common.")) : null;
   }
-  const count = rel.thread.length ? rel.thread.length - 1 : 0;
+  const shown = rel.thread.length ? rel.thread.length - 1 : 0;
+  // A long conversation lists only the emails around this one: the count is the whole conversation's.
+  const count = Math.max(shown, rel.thread_size ? rel.thread_size - 1 : 0);
+  const conversation = count ? plural(count, "other email") + " in this conversation" + (count > shown ? ` (the ${shown} around this one shown)` : "") : "";
   const others = rel.groups.reduce((n, g) => n + g.emails.length, 0);
   const aside = h(
     "span",
     { class: "rd-h-aside" },
-    h("span", { class: "muted small" }, [count ? plural(count, "other email") + " in this conversation" : "", others ? plural(others, "related email") : ""].filter(Boolean).join(" · ")),
+    h("span", { class: "muted small" }, [conversation, others ? plural(others, "related email") : ""].filter(Boolean).join(" · ")),
     rel.can_look ? lookButton(d, ctx) : null,
     h("a", { class: "btn btn-sm btn-quiet", href: `/app/trace/${enc(d.id)}`, dataset: { nav: "" }, title: "Every email linked to this one, two links out, and what changed in their files" }, icon("route", 14), "Whole matter")
   );
@@ -758,11 +764,19 @@ let pinned = false;
 
 let anchor = null; // the box the tip is for
 
-function hideTip(force = false) {
+function hideTip(force = false, { refocus = false } = {}) {
   if (!tip || (pinned && force !== true)) return;
+  // A fix form closed from the keyboard (Esc, Cancel) gives the focus back to its box, so Tab goes on from there.
+  const back = refocus && pinned && tip.contains(document.activeElement) && anchor && anchor.isConnected ? anchor : null;
   pinned = false;
   tip.hidden = true;
   tip.classList.remove("pinned");
+  if (back) back.focus({ preventScroll: true });
+}
+
+/** The card closed whatever it shows: the reading pane is about to show something else, and its box goes. */
+export function closeTip() {
+  hideTip(true);
 }
 
 function showTip(box, children, { pin = false } = {}) {
@@ -780,8 +794,10 @@ function showTip(box, children, { pin = false } = {}) {
         if (event.key === "Escape" && pinned) {
           event.preventDefault();
           event.stopImmediatePropagation();
-          hideTip(true);
+          hideTip(true, { refocus: true });
         }
+        // The open fix form is a dialog over the page: Tab goes round its fields and buttons until it closes.
+        if (event.key === "Tab" && pinned && !tip.hidden && keepTabIn(tip, event)) event.stopImmediatePropagation();
       },
       true
     );
@@ -1184,7 +1200,7 @@ function pageView(data, ctx) {
       if (!region || !box) return;
       const input = h("input", { type: "text", class: "pv-fix-input", value: region.text, maxlength: "500", "aria-label": "What the page says here" });
       const save = h("button", { type: "submit", class: "btn btn-sm btn-primary" }, "Save fix");
-      const cancel = h("button", { type: "button", class: "btn btn-sm", onclick: () => hideTip(true) }, "Cancel");
+      const cancel = h("button", { type: "button", class: "btn btn-sm", onclick: () => hideTip(true, { refocus: true }) }, "Cancel");
       let extra = null;
       if (region.fixed && region.fixed.by === "you") {
         extra = h("button", { type: "button", class: "btn btn-sm btn-quiet", onclick: () => undo(region.fixed.id) }, "Undo my fix");
@@ -1201,7 +1217,7 @@ function pageView(data, ctx) {
       );
       form.addEventListener("submit", (event) => {
         event.preventDefault();
-        if (input.value.trim() === region.text.trim()) return hideTip(true);
+        if (input.value.trim() === region.text.trim()) return hideTip(true, { refocus: true });
         send({ kind: "text", region: index, now: input.value });
       });
       hideTip(true);
@@ -1584,7 +1600,8 @@ export function fileView(data, tab, ctx) {
   );
 }
 
-export function errorView(message, retry) {
-  return h("div", { class: "rd-empty" }, icon("alert", 28), h("p", null, message), retry ? btn("Try again", { class: "btn-sm", onclick: retry }, "refresh") : null);
+/** A message in place of what couldn't be shown, with Try again when trying again can help, or another way on. */
+export function errorView(message, retry, onward = null) {
+  return h("div", { class: "rd-empty" }, icon("alert", 28), h("p", null, message), retry ? btn("Try again", { class: "btn-sm", onclick: retry }, "refresh") : onward);
 }
 

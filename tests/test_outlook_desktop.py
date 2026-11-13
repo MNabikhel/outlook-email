@@ -32,12 +32,12 @@ COM_CALLS = {
 # Python's own methods on Python values (strings, dates, lists, sets, this file's own), each on what it is called on:
 # a Python method's name on an Outlook object ("item.replace()", "items.get()") would reach whatever Outlook has by it.
 PYTHON_CALLS_ON = {
-    "append": {"binned", "found", "seen"}, "astimezone": {"aware_utc(value)", "naive"}, "date": {"item.End", "item.Start"},
+    "append": {"binned", "found", "seen", "stores"}, "astimezone": {"aware_utc(value)", "naive"}, "date": {"item.End", "item.Start"},
     "get": {"_BUSY", "_IMPORTANCE", "self._by_path"}, "group": {"m"}, "isoformat": {"ends", "item.End.date()", "item.Start.date()", "starts"},
     "lower": {"str(folder.Name)"}, "mkdir": {"dest.parent"}, "now": {"datetime"}, "pop": {"meeting"}, "replace": {"message_id", "value"},
     "split": {"str(field or '')[:50000]"}, "startswith": {"path", "str(message_class or '')"}, "strftime": {"local"},
-    "strip": {"p", "str(info[2])", "str(message_id or '')", "str(mid or '')"}, "sub": {"re"},
-    "add": {"bins", "codes", "names", "trash"}, "sort": {"stores"}, "_item": {"self"}, "folders": {"self"}, "__init__": {"super()"},
+    "strip": {"args[1]", "p", "str(info[2])", "str(message_id or '')", "str(mid or '')"}, "sub": {"re"},
+    "add": {"bins", "codes", "names", "trash"}, "sort": {"stores"}, "_item": {"self"}, "_scan": {"self"}, "folders": {"self"}, "__init__": {"super()"},
 }
 PYTHON_CALLS = set(PYTHON_CALLS_ON)
 # What Outlook's objects are read for (and the methods above): any other name is something new of Outlook's.
@@ -48,8 +48,8 @@ COM_NAMES = set(COM_CALLS) | {
 }
 # Python's own attributes read in the file (of datetimes, exceptions, modules and this file's classes).
 PYTHON_NAMES = PYTHON_CALLS | set(PYTHON_CALLS_ON) | {
-    "__name__", "_by_path", "_folders", "args", "client", "cut_short", "entry_id", "ns", "parent", "path", "platform",
-    "store_id", "utc", "year",
+    "__name__", "_by_path", "_folders", "_left_out", "args", "client", "cut_short", "entry_id", "ns", "parent", "path", "platform",
+    "store_id", "unreadable", "utc", "year",
 }
 READ_BY_NAME = {"ExchangeStoreType", "DisplayName", "hresult", "excepinfo", "args"}  # getattr(obj, "...", default)
 # Python's own functions it calls, besides its own, and the names it imports (none from pythoncom or win32com.client,
@@ -181,6 +181,22 @@ def test_only_the_reader_talks_to_outlook():
     package = SOURCE.parent
     users = sorted(path.name for path in package.rglob("*.py") if re.search(r"\bwin32com\b", path.read_text(encoding="utf-8")))
     assert users == ["outlook_desktop.py"], users
+
+
+# OutlookSession's own handles on Outlook's objects: reached from another file, a write there
+# ("session.ns.GetItemFromID(...).UnRead = False") would escape the checks above, which read only outlook_desktop.py.
+COM_HANDLES = {"ns", "_by_path", "_item", "_scan", "_folders"}
+
+
+def _reaches_outlook_objects(source: str) -> list[str]:
+    return [f"line {node.lineno}: .{node.attr}" for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Attribute) and node.attr in COM_HANDLES]
+
+
+def test_no_other_file_reaches_outlooks_objects_through_the_reader():
+    assert _reaches_outlook_objects("session.ns.GetItemFromID(e, s).UnRead = False\nsession._item(e, s).Move(f)\n")
+    package = SOURCE.parent
+    found = {path.name: _reaches_outlook_objects(path.read_text(encoding="utf-8")) for path in package.rglob("*.py") if path != SOURCE}
+    assert {name: lines for name, lines in found.items() if lines} == {}, "only OutlookSession's reads may be used outside outlook_desktop.py"
 
 
 # Fake Outlook objects: reading works, any write raises -------------------------------------------------
@@ -424,6 +440,72 @@ def test_find_message_looks_in_every_folder_by_message_id(outlook):
     assert session.find_message("<nobody@x.com>") == [] and session.find_message("") == []
 
 
+class _Offline(Folder):
+    """A folder of the Online Archive that can't be opened just now."""
+
+    def GetTable(self, where, kind):
+        raise ComError(-2147221219, "Exception occurred.", (4096, "Microsoft Outlook", "The archive is offline.", None, 0, -2147221219), None)
+
+
+class _OfflineStore:
+    """A mailbox or data file Outlook lists but can't open (a missing .pst, a shared mailbox removed): even its id
+    can't be read."""
+
+    DisplayName = "Old archive.pst"
+
+    @property
+    def StoreID(self):
+        raise ComError(-2147352567, "Exception occurred.", (4096, "Microsoft Outlook", "The file C:\\old.pst cannot be found.", None, 0, -2147221219), None)
+
+    def GetRootFolder(self):
+        raise AssertionError("not asked for once its id can't be read")
+
+
+def _archive(offline_folder: bool, offline_store: bool) -> OutlookSession:
+    row = ("E-moved", local(2026, 10, 20, 9), False, "IPM.Note", 1, "<inv@x.com>", 0)
+    inbox = Folder("Inbox", "F-inbox")
+    root = Folder("maya@taz.com", "F-root", children=[inbox, Folder("Deleted Items", "F-del")])
+    archive_inbox = (_Offline if offline_folder else Folder)("Inbox", "F-arch-inbox", store="S9", rows=[row])
+    archive_root = Folder("Online Archive", "F-arch", store="S9", children=[archive_inbox])
+    stores = [Store("S1", "maya@taz.com", root), *([_OfflineStore()] if offline_store else []), Store("S9", "Online Archive", archive_root)]
+    return OutlookSession(Namespace(stores, {6: inbox}, {}))
+
+
+def test_find_message_says_when_it_couldnt_look_everywhere():
+    # It answered "not anywhere" when a folder (or a whole mailbox) couldn't be looked in, and the sync took a
+    # message moved to the Online Archive for deleted, and removed CloseDesk's copy with its tasks.
+    assert [s.folder for s in _archive(False, False).find_message("<inv@x.com>")] == ["Online Archive/Inbox"]
+    assert _archive(False, False).find_message("<gone@x.com>") == [], "looked everywhere: not anywhere"
+    # Found where it could look: found, whatever couldn't be looked in.
+    assert [s.folder for s in _archive(False, True).find_message("<inv@x.com>")] == ["Online Archive/Inbox"]
+    for offline_folder, offline_store, message_id in ((True, False, "<inv@x.com>"), (False, True, "<gone@x.com>")):
+        with pytest.raises(OutlookError) as caught:
+            _archive(offline_folder, offline_store).find_message(message_id)
+        assert not isinstance(caught.value, NotInOutlook)
+
+
+def test_a_mailbox_whose_id_cant_be_read_is_left_out():
+    # Its id was read to put the default mailbox first, outside the check that leaves such a mailbox out, so one
+    # missing data file stopped every sync, the Inbox's too.
+    session = _archive(False, True)
+    assert [f.path for f in session.folders()] == ["Inbox", "Deleted Items", "Online Archive/Inbox"]
+
+
+def test_outlook_busy_is_said_in_plain_words():
+    # Outlook with a window or prompt open rejects calls; the card showed "(-2147418111, 'Call was rejected by
+    # callee.', None, None)".
+    class Busy(Namespace):
+        def GetDefaultFolder(self, kind):
+            raise ComError(-2147418111, "Call was rejected by callee.", None, None)
+
+    with pytest.raises(OutlookError) as caught:
+        OutlookSession(Busy([], {}, {})).folders()
+    assert str(caught.value) == outlook_desktop.BUSY and "Allow" in outlook_desktop.BUSY
+    other = ComError(-2147467259, "Unspecified error", None, None)
+    assert outlook_desktop.trouble("Outlook couldn't be read this time", other) == "Outlook couldn't be read this time (Unspecified error)."
+    assert outlook_desktop.trouble("Outlook couldn't be read this time", RuntimeError("offline")) == "Outlook couldn't be read this time (offline)."
+
+
 def test_the_automatic_sync_never_starts_outlook(monkeypatch):
     import sys
     import types
@@ -526,6 +608,14 @@ def test_windows_short_date_patterns_become_outlooks_filter_dates():
     assert outlook_desktop._strftime_pattern("M/d/yyyy") == "%m/%d/%Y"
     assert outlook_desktop._strftime_pattern("yyyy-MM-dd") == "%Y-%m-%d"
     assert outlook_desktop._strftime_pattern("") == ""
+    # A month written as a name (a stock choice in Windows' list) became "%d-%m%m-%y", so the filter read
+    # "20-1010-26" and the calendar was never read. It is written as a number, in the pattern's order.
+    assert outlook_desktop._strftime_pattern("dd-MMM-yy") == "%d-%m-%y"
+    assert outlook_desktop._strftime_pattern("d-MMM-yyyy") == "%d-%m-%Y"
+    assert outlook_desktop._strftime_pattern("ddd dd/MM/yyyy") == "%d/%m/%Y", "the weekday's name is left out"
+    assert outlook_desktop._strftime_pattern("d/M/y") == "%d/%m/%y", "one y is the year too, not US order"
+    assert outlook_desktop._strftime_pattern("gg y/M/d") == "", "anything else: Outlook's US order"
+    assert datetime(2026, 10, 20).strftime(outlook_desktop._strftime_pattern("dd-MMM-yy")) == "20-10-26"
 
 
 def test_the_calendar_says_when_outlooks_limit_cut_it_short(outlook, monkeypatch):
@@ -546,3 +636,51 @@ def test_the_calendar_says_when_outlooks_limit_cut_it_short(outlook, monkeypatch
     monkeypatch.setattr(outlook_desktop, "MAX_CALENDAR_ITEMS", 3000)
     found = read()
     assert [m["subject"] for m in found] == ["AP standup", "Later"] and not found.cut_short
+
+
+class _Guarded(Appointment):
+    """A meeting whose attendees Outlook's guard won't hand over: the user clicked Deny on "A program is trying to
+    access e-mail address information stored in Outlook", or let it time out."""
+
+    def __getattribute__(self, name):
+        if name in ("RequiredAttendees", "OptionalAttendees", "Organizer"):
+            raise ComError(-2147352567, "Exception occurred.", (4096, "Microsoft Outlook", "Operation aborted", None, 0, -2147467260), None)
+        return object.__getattribute__(self, name)
+
+
+def test_meetings_outlook_wont_hand_over_are_counted_not_taken_for_none(outlook):
+    # Each was skipped as if it weren't there: an empty read, and every meeting in the window was deleted.
+    session, _items = outlook
+    window = (datetime(2026, 10, 5, tzinfo=timezone.utc), datetime(2026, 11, 30, tzinfo=timezone.utc))
+
+    def read(appointments):
+        object.__setattr__(session.ns, "_defaults", {**session.ns._defaults, 9: CalendarFolder(CalendarItems(appointments))})
+        return session.calendar(*window)
+
+    fine = Appointment("AP standup", local(2026, 10, 6, 9), local(2026, 10, 6, 9, 15), gid="G-standup")
+    guarded = _Guarded("Board call", local(2026, 10, 7, 9), local(2026, 10, 7, 10), gid="G-board")
+    found = read([fine, guarded])
+    assert [m["subject"] for m in found] == ["AP standup"] and found.unreadable == 1
+    assert read([fine]).unreadable == 0
+    with pytest.raises(OutlookError, match="choose Allow"):
+        read([guarded])
+
+
+def test_an_error_while_the_calendar_is_listed_is_outlooks_error(outlook):
+    # Only the filter was checked: an error from GetFirst or GetNext (Outlook busy) ended the whole sync after the
+    # mail had been copied.
+    session, _items = outlook
+
+    class Rejecting(Listed):
+        def GetNext(self):
+            raise ComError(-2147418111, "Call was rejected by callee.", None, None)
+
+    class Items(CalendarItems):
+        def Restrict(self, where):
+            super().Restrict(where)
+            return Rejecting([Appointment("AP standup", local(2026, 10, 6, 9), local(2026, 10, 6, 9, 15))])
+
+    object.__setattr__(session.ns, "_defaults", {**session.ns._defaults, 9: CalendarFolder(Items([]))})
+    with pytest.raises(OutlookError) as caught:
+        session.calendar(datetime(2026, 10, 5, tzinfo=timezone.utc), datetime(2026, 11, 30, tzinfo=timezone.utc))
+    assert str(caught.value) == outlook_desktop.BUSY

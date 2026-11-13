@@ -39,6 +39,23 @@ export function replace(el, ...children) {
   return append(el, children);
 }
 
+/** Tab and Shift+Tab kept inside ``box`` (an open form over the page, or a panel covering it): from its last control
+    on to its first, and back. Gives whether it moved the focus. */
+export function keepTabIn(box, event) {
+  if (event.key !== "Tab") return false;
+  const stops = [...box.querySelectorAll("a[href], button, input, select, textarea, [tabindex]")].filter(
+    (el) => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length
+  );
+  if (!stops.length) return false;
+  const at = document.activeElement;
+  const inside = box.contains(at);
+  const edge = event.shiftKey ? stops[0] : stops[stops.length - 1];
+  if (inside && at !== edge) return false;
+  event.preventDefault();
+  (event.shiftKey ? stops[stops.length - 1] : stops[0]).focus();
+  return true;
+}
+
 export const escapeHtml = (text) =>
   String(text ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 

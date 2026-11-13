@@ -94,19 +94,22 @@ _ELSEWHERE = re.compile(
     re.I,
 )
 # A question about how the email on screen came about, or what else belongs with it: its linked mail answers it.
+# Not one that only uses such a word: "do I need to follow up?", "a supply chain issue", "the payment history".
 _HISTORY = re.compile(
-    r"\b(thread|conversation|history|trace\w*|timeline|back[- ]and[- ]forth|what happened|so far|whole matter|"
-    r"(?:email|mail|message)s? (?:chain|trail)|chain|earlier (?:e-?mails?|messages?|versions?)|previous (?:e-?mails?|messages?|versions?)|"
-    r"related (?:e-?mails?|mail|messages?)|what changed|(?:other|earlier|previous|older|newer|all) versions?|follow[- ]?ups?|"
-    r"how (?:it|this|that) started|led up to|how (?:it|this|that) began)\b",
+    r"\b(thread|conversation|history of (?:this|it|that)|(?:conversation|e-?mail|mail|message|thread) history|"
+    r"trace (?:this|it|that)|timeline|back[- ]and[- ]forth|what happened|so far|whole matter|"
+    r"(?:e-?mail|mail|message|reply)s? (?:chain|trail)|earlier (?:e-?mails?|messages?|versions?)|previous (?:e-?mails?|messages?|versions?)|"
+    r"related (?:e-?mails?|mail|messages?)|(?:other|more) (?:e-?mails?|mail|messages?) (?:about|on|for|like) (?:this|it|that)|what changed|(?:other|earlier|previous|older|newer|all) versions?|"
+    r"(?:any|the|other|earlier) follow[- ]?ups?|how (?:it|this|that) (?:started|began)|how did (?:it|this|that) (?:start|begin)|led up to)\b",
     re.I,
 )
 
 
 def _matter(store: Store, current: EmailRecord) -> tuple[list[EmailRecord], list[str], int]:
-    """The mail linked to ``current``: its conversation (oldest first), then mail sharing an invoice, a PO or a file;
-    the ids of its conversation, ``current`` among them, oldest first; and how many emails of its conversation are
-    held as possible payment fraud (left out)."""
+    """The mail linked to ``current``: the emails of its conversation nearest it (``_nearest``, oldest first), then
+    mail sharing an invoice, a PO or a file; the ids of its conversation, ``current`` among them, oldest first (just
+    ``current`` when it has only linked mail); and how many emails of its conversation are held as possible payment
+    fraud (left out)."""
     from controller_inbox import links
 
     found = links.related(store, current)
@@ -114,7 +117,8 @@ def _matter(store: Store, current: EmailRecord) -> tuple[list[EmailRecord], list
     thread = [email for email in found["thread"] if email.id != current.id and not attachments_locked(email)]
     linked = [email for group in found["groups"] for email in group["emails"] if not attachments_locked(email)]
     held = sum(1 for email in found["thread"] if email.id != current.id and attachments_locked(email))
-    return thread + linked, [email.id for email in found["thread"] if email.id == current.id or not attachments_locked(email)], held
+    ids = [email.id for email in found["thread"] if email.id == current.id or not attachments_locked(email)]
+    return _nearest(current, thread) + linked, ids or [current.id], held
 
 
 def _conversation(store: Store, current: EmailRecord) -> list[EmailRecord]:
@@ -124,11 +128,39 @@ def _conversation(store: Store, current: EmailRecord) -> list[EmailRecord]:
     return [email for email in links.related(store, current, ai=False)["thread"] if email.id != current.id and not attachments_locked(email)]
 
 
+def _nearest(current: EmailRecord, conversation: list[EmailRecord], limit: int = MAX_SOURCES) -> list[EmailRecord]:
+    """At most ``limit`` emails of ``current``'s conversation (oldest first): the ones nearest it in time, the replies
+    that led to it, still oldest first."""
+    if len(conversation) <= limit:
+        return conversation
+
+    def when(email: EmailRecord) -> float:
+        try:
+            return datetime.fromisoformat((email.received_at or "").replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return 0.0
+
+    here = when(current)
+    keep = {email.id for email in sorted(conversation, key=lambda email: abs(when(email) - here))[:limit]}
+    return [email for email in conversation if email.id in keep]
+
+
+def _named_terms(question: str) -> list[str]:
+    """The names and codes a question turns on ("Purchasing", "CP2000", "IRS"), not a day or a month."""
+    return [term for term in keywords(question) if _distinctive(term, question) and term not in _DAYS + _MONTHS]
+
+
+def _missing(terms: list[str], emails: list[EmailRecord]) -> list[str]:
+    """The terms none of these emails has. Held mail's words don't count: its text isn't read."""
+    found = {term for email in emails if not attachments_locked(email) for term in _found_in(email, terms)} if terms else set()
+    return [term for term in terms if term not in found]
+
+
 def _stays_on(store: Store, current: EmailRecord, question: str, *, about_today: bool) -> list[EmailRecord] | None:
-    """The open email and its conversation, for a question their words answer and that asks about no other mail:
-    "what is the payment schedule?" on a vendor's reply. None when it points elsewhere ("any other emails about
-    it?", "what's due today?"), names someone or something they don't ("anything from Priya?"), or none of its
-    words are in them."""
+    """The open email and its conversation (the emails nearest it), for a question their words answer and that asks
+    about no other mail: "what is the payment schedule?" on a vendor's reply. None when it points elsewhere ("any
+    other emails about it?", "what's due today?"), names someone or something they don't ("anything from Priya?"),
+    or none of its words are in them."""
     if _ELSEWHERE.search(question) or (about_today and not _due_here(current, question)):
         return None
     terms = keywords(question)
@@ -140,20 +172,39 @@ def _stays_on(store: Store, current: EmailRecord, question: str, *, about_today:
     named = [term for term in terms if _distinctive(term, question)]
     if not found or any(term not in found for term in named):
         return None
-    return [current, *conversation][: MAX_SOURCES + 1]
+    return [current, *_nearest(current, conversation)]
 
 
-# A question about meetings: the calendar is one of its sources.
+# A month as a question writes it ("Oct", "Sept.", "October"), not a word that starts the same ("marketing", "decision").
+_MONTH = (
+    r"(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|"
+    r"nov(?:ember)?|dec(?:ember)?)\.?(?![a-z])"
+)
+_WEEKDAY = r"(?:mon|tues|wednes|thurs|fri|satur|sun)day"
+# A day or period a calendar question can name.
+_A_DAY = (
+    rf"(?:today|tonight|tomorrow|yesterday|{_WEEKDAY}|(?:this|next|last) (?:week(?:end)?|month)|this (?:afternoon|morning)|"
+    rf"the \d{{1,2}}(?:st|nd|rd|th)?|{_MONTH} \d{{1,2}}|\d{{1,2}}/\d{{1,2}})"
+)
+# A question about meetings: the calendar is one of its sources. "What's on my to-do list?", "which payments are
+# scheduled for Friday?" and "what's on this invoice?" are not.
 _MEETINGS = re.compile(
-    r"\b(meetings?|calendar|appointments?|agenda|calls? with|(?:my|our) schedule|scheduled (?:for|with|on|at)|"
-    r"(?:meeting|calendar) invite[sd]?|invitations? to|(?:am i|are we) (?:free|busy)|free (?:on|at|this|tomorrow|today)|"
-    r"what(?:'?s| is) on (?:today|tomorrow|my|this|next|(?:mon|tues|wednes|thurs|fri|satur|sun)day|the \d{1,2}(?:st|nd|rd|th)?|"
-    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.? \d{1,2}|\d{1,2}/\d{1,2})|stand-?up|1:1|one on one)\b",
+    r"\b(?:meetings?|calendar|appointments?|agenda|calls? with|(?:my|our) schedule|scheduled with|"
+    r"(?:meeting|calendar) invite[sd]?|invitations? to|(?:am i|are we) (?:free|busy|booked)|free (?:on|at|this|tomorrow|today)|"
+    rf"what(?:['’]?s| is) on {_A_DAY}|stand-?up|1:1|one on one)\b",
     re.I,
 )
+# "What have I got tomorrow?", "Do I have anything on Thursday?": the calendar too, when a day is named and the
+# question isn't about what falls due or is paid then.
+_BOOKED = re.compile(
+    rf"\b(?:(?:what|anything) (?:do|did|have) i (?:have|got)\b[^?.!]{{0,24}}?\b{_A_DAY}|do i have anything (?:on )?{_A_DAY})\b",
+    re.I,
+)
+_NOT_MEETINGS = re.compile(r"\b(?:due|pa(?:y|id)\w*|wires?|invoices?|deadlines?|tasks?)\b", re.I)
+# "What meetings did I have", "what was on my calendar": a date gone by is this year's, a weekday the last one.
+_PAST = re.compile(r"\b(?:did|was|were|had|yesterday|last)\b", re.I)
 
 _MONTH_NAMES = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
-_MONTH = r"(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?"
 _DATE_PATTERNS = (
     re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"),  # 2026-12-01
     re.compile(rf"\b{_MONTH}\s+(\d{{1,2}})(?:st|nd|rd|th)?\b", re.I),  # Nov 23, December 1st
@@ -164,19 +215,28 @@ _DATE_PATTERNS = (
 
 
 def _named_day(question: str, today: date) -> date | None:
-    """The date a question names ("Nov 23", "December 1st", "23 November", "12/1", "the 23rd", "2026-12-01"), the
-    next one on or after ``today`` when it gives no year; None when it names none. A weekday beside a date ("Monday
-    Nov 23") is that date."""
+    """The date a question names ("Nov 23", "December 1st", "23 November", "12/1", "the 23rd", "2026-12-01"); None
+    when it names none. Without a year it is the nearest one: this year's (or this month's) when it is still to
+    come, gone by within the calendar's week back, or asked of in the past tense ("what did I have on Sep 21?");
+    else the next one ("the 31st" asked in September is October 31). A weekday beside a date ("Monday Nov 23") is
+    that date."""
+    past = bool(_PAST.search(question or ""))
 
-    def coming(month: int, day: int) -> date | None:
-        for year in (today.year, today.year + 1):
+    def nearest(candidates: list[date]) -> date | None:
+        gone = [found for found in candidates if found <= today]
+        coming = [found for found in candidates if found >= today]
+        if gone and (past or (today - max(gone)).days <= CALENDAR_DAYS_BACK):
+            return max(gone)
+        return min(coming) if coming else None
+
+    def dated(month: int, day: int) -> date | None:
+        candidates = []
+        for year in range(today.year - 1, today.year + 5):
             try:
-                found = date(year, month, day)
+                candidates.append(date(year, month, day))
             except ValueError:
                 continue
-            if found >= today:
-                return found
-        return None
+        return nearest(candidates)
 
     text = question or ""
     for index, pattern in enumerate(_DATE_PATTERNS):
@@ -187,27 +247,96 @@ def _named_day(question: str, today: date) -> date | None:
             if index == 0:
                 return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
             if index == 1:
-                return coming(_MONTH_NAMES.index(match.group(1).lower()[:3]) + 1, int(match.group(2)))
+                return dated(_MONTH_NAMES.index(match.group(1).lower()[:3]) + 1, int(match.group(2)))
             if index == 2:
-                return coming(_MONTH_NAMES.index(match.group(2).lower()[:3]) + 1, int(match.group(1)))
+                return dated(_MONTH_NAMES.index(match.group(2).lower()[:3]) + 1, int(match.group(1)))
             if index == 3:
                 first, second = int(match.group(1)), int(match.group(2))
                 # Month first, as Outlook in the US writes it, unless that can't be a month ("23/11").
                 month, day = (second, first) if first > 12 else (first, second)
-                return coming(month, day)
+                return dated(month, day)
             day = int(match.group(1))
-            month = today.month if day >= today.day else today.month % 12 + 1
-            return coming(month, day)
+            candidates = []
+            for step in range(-1, 13):  # last month, this month, and the months after it that have that day
+                year, month = today.year + (today.month - 1 + step) // 12, (today.month - 1 + step) % 12 + 1
+                try:
+                    candidates.append(date(year, month, day))
+                except ValueError:
+                    continue
+            return nearest(candidates)
         except ValueError:
             return None
     return None
+
+
 CALENDAR_DAYS_BACK = 7
 CALENDAR_DAYS_AHEAD = 21
+_DAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+_MONTHS_ALL = "january february march april may june july august september october november december".split()
 
 
-# A line of the calendar's listing starts "2026-09-23 09:30–09:45"; on screen it is "9:30am–9:45am", as the
-# calendar writes it.
-_LISTED_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})(?:–(\d{2}):(\d{2}))?")
+def _period(question: str, today: date) -> tuple[list[date], str] | None:
+    """The days a calendar question asks about, and how to say them: a date it names, today, tomorrow, the day after
+    tomorrow, yesterday, a weekday (the coming one, a week on after "next" when it is today, the last one in the past
+    tense), this, next or last week, this weekend, this or next month, or a month by name ("in October"). None when it
+    names none."""
+    lower = " ".join((question or "").lower().split())
+    past = bool(_PAST.search(lower))
+
+    def one(day: date) -> tuple[list[date], str]:
+        return [day], f"on {day:%A %B} {day.day}"
+
+    def span(first: date, last: date, said: str) -> tuple[list[date], str]:
+        return [first + timedelta(days=i) for i in range((last - first).days + 1)], said
+
+    def month_end(first: date) -> date:
+        return date(first.year + first.month // 12, first.month % 12 + 1, 1) - timedelta(days=1)
+
+    if (named := _named_day(question, today)) is not None:
+        return one(named)  # a date beats a weekday word ("Monday Nov 23" is November 23)
+    if re.search(r"\bday after tomorrow\b", lower):
+        return one(today + timedelta(days=2))
+    if re.search(r"\btomorrow\b", lower):
+        return one(today + timedelta(days=1))
+    if re.search(r"\byesterday\b", lower):
+        return one(today - timedelta(days=1))
+    if re.search(r"\b(?:today|tonight|this (?:morning|afternoon|evening))\b", lower):
+        return one(today)
+    monday = today - timedelta(days=today.weekday())
+    if re.search(r"\bnext weekend\b", lower):
+        return span(monday + timedelta(days=12), monday + timedelta(days=13), "next weekend")
+    if re.search(r"\bweekend\b", lower):
+        return span(monday + timedelta(days=5), monday + timedelta(days=6), "this weekend")
+    if re.search(r"\blast week\b", lower):
+        return span(monday - timedelta(days=7), monday - timedelta(days=1), "last week")
+    if re.search(r"\bnext week\b", lower):
+        return span(monday + timedelta(days=7), monday + timedelta(days=13), "next week")
+    if re.search(r"\b(?:this|the) week\b", lower):
+        return span(monday, today, "this week") if past else span(today, monday + timedelta(days=6), "this week")
+    if re.search(r"\bnext month\b", lower):
+        first = month_end(today) + timedelta(days=1)
+        return span(first, month_end(first), "next month")
+    if re.search(r"\b(?:this|the) month\b", lower):
+        return span(today.replace(day=1), today, "this month") if past else span(today, month_end(today), "this month")
+    if month := re.search(rf"\b(?:in|during|for|through|throughout)\s+{_MONTH}", lower):
+        number = _MONTH_NAMES.index(month.group(1)[:3]) + 1
+        year = today.year + (1 if number < today.month and not past else 0)
+        first = date(year, number, 1)
+        return span(first, month_end(first), f"in {_MONTHS_ALL[number - 1].capitalize()}")
+    if (named := next((i for i, name in enumerate(_DAY_NAMES) if re.search(rf"\b{name}s?\b", lower)), None)) is not None:
+        last = bool(re.search(rf"\blast {_DAY_NAMES[named]}\b", lower))
+        if past or last:
+            return one(today - timedelta(days=(today.weekday() - named) % 7 or (7 if last else 0)))
+        ahead = (named - today.weekday()) % 7 or (7 if re.search(rf"\bnext {_DAY_NAMES[named]}\b", lower) else 0)
+        return one(today + timedelta(days=ahead))
+    return None
+
+
+# A line of the calendar's listing starts "2026-09-23 09:30–09:45", or "2026-09-29 09:00 to 2026-10-01 17:00" for a
+# meeting that ends on a later day; on screen it is "9:30am–9:45am", as the calendar writes it.
+_LISTED_TIME = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2})(?:–(\d{2}):(\d{2}))?(?: to (\d{4}-\d{2}-\d{2}) (\d{2}):(\d{2}))?")
+# The days a listed meeting is on: its start, and its last day when that is later.
+_LISTED_DAYS = re.compile(r"^(\d{4}-\d{2}-\d{2})(?:[^·]*? to (\d{4}-\d{2}-\d{2}))?")
 
 
 def clock_time(hour: int, minute: str) -> str:
@@ -219,63 +348,76 @@ def _calendar_times(line: str) -> str:
     def said(match: re.Match) -> str:
         start = clock_time(int(match.group(2)), match.group(3))
         end = f"–{clock_time(int(match.group(4)), match.group(5))}" if match.group(4) else ""
-        return f"{match.group(1)} {start}{end}"
+        later = f" to {match.group(6)} {clock_time(int(match.group(7)), match.group(8))}" if match.group(6) else ""
+        return f"{match.group(1)} {start}{end}{later}"
 
     return _LISTED_TIME.sub(said, line, count=1)
 
 
 def _readable_day(row: str) -> str:
-    """"2026-09-23 9:30am–9:45am · …" as "Wed Sep 23, 9:30am–9:45am · …" for an answer on screen."""
+    """"2026-09-23 9:30am–9:45am · …" as "Wed Sep 23, 9:30am–9:45am · …" for an answer on screen, and a meeting's
+    last day "to 2026-10-02" as "to Fri Oct 2"."""
     try:
         day = date.fromisoformat(row[:10])
     except ValueError:
         return row
-    rest = row[10:]
-    return f"{day:%a %b} {day.day}{',' if rest.startswith(' ') and not rest.startswith(' (') else ''}{rest}"
+
+    def later(match: re.Match) -> str:
+        last = date.fromisoformat(match.group(1))
+        return f" to {last:%a %b} {last.day}"
+
+    rest = re.sub(r" to (\d{4}-\d{2}-\d{2})", later, row[10:], count=1)
+    timed = re.match(r" \d", rest) is not None  # "Wed Sep 23, 9:30am", but "Tue Sep 29 to Fri Oct 2 (all day)"
+    return f"{day:%a %b} {day.day}{',' if timed else ''}{rest}"
+
+
+def _listed_days(row: str) -> tuple[str, str]:
+    """The first and last day of a listed meeting, as "2026-09-29"."""
+    match = _LISTED_DAYS.match(row)
+    return (match.group(1), match.group(2) or match.group(1)) if match else (row[:10], row[:10])
 
 
 def _meetings_for(question: str, listing: str, today: str, ref: str = "") -> str:
-    """The answer to "am I free Friday?" without a model: how many meetings there are on the day a question names
-    (today, tomorrow, a weekday), or in the next seven days, then the calendar's lines for them. ``ref`` cites the
-    calendar ("[1]")."""
+    """The answer to "am I free Friday?" without a model: how many meetings there are on the days a question names
+    (``_period``), or in the next seven days, then the calendar's lines for them. A meeting over several days is on
+    each of them; one cancelled or shown as free isn't counted. ``ref`` cites the calendar ("[1]")."""
+    from controller_inbox.calendar_events import SHOWN_FREE
+
     rows = [line for line in listing.splitlines()[1:] if line.strip()]
     try:
         day = date.fromisoformat(today) if today else date.today()
     except ValueError:
         day = date.today()
-    lower = question.lower()
-    names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-    if (named_day := _named_day(question, day)) is not None:
-        days = [named_day]  # a date beats a weekday word ("Monday Nov 23" is November 23)
-    elif "tomorrow" in lower:
-        days = [day + timedelta(days=1)]
-    elif "today" in lower:
-        days = [day]
-    elif (named := next((i for i, name in enumerate(names) if name in lower), None)) is not None:
-        days = [day + timedelta(days=(named - day.weekday()) % 7)]
-    elif "next week" in lower:
-        monday = day + timedelta(days=7 - day.weekday())
-        days = [monday + timedelta(days=i) for i in range(7)]
-    else:
-        days = [day + timedelta(days=i) for i in range(7)]
-    wanted = {d.isoformat() for d in days}
-    picked = [f"- {_readable_day(row)}" for row in rows if row[:10] in wanted]
-    if len(days) == 1:
-        when = f"on {days[0]:%A %B} {days[0].day}"
-    else:
-        when = "next week" if "next week" in lower else "in the next seven days"
-    on = sum(1 for row in rows if row[:10] in wanted and "CANCELLED" not in row)
-    if not picked:
+    days, when = _period(question, day) or ([day + timedelta(days=i) for i in range(7)], "in the next seven days")
+    first, last = days[0].isoformat(), days[-1].isoformat()
+    chosen = [row for row in rows if _listed_days(row)[0] <= last and _listed_days(row)[1] >= first]
+    if not chosen:
         return f"Nothing on your calendar {when}{ref}."
+    cancelled = sum(1 for row in chosen if "CANCELLED" in row)
+    free = sum(1 for row in chosen if "CANCELLED" not in row and f" · {SHOWN_FREE}" in row)
+    on = len(chosen) - cancelled - free
     if not on:
-        lead = f"Nothing on your calendar {when}{ref}: what was there is cancelled."
+        why = "cancelled or shown as free" if free and cancelled else "shown as free" if free else "cancelled"
+        lead = f"Nothing on your calendar {when}{ref}: what is there is {why}."
     else:
-        lead = f"You have {on} meeting{'' if on == 1 else 's'} {when}{ref}:"
-    return "\n".join([lead, *picked])
+        also = f" ({free} more shown as free)" if free else ""
+        lead = f"You have {on} meeting{'' if on == 1 else 's'} {when}{ref}{also}:"
+    return "\n".join([lead, *(f"- {_readable_day(row)}" for row in chosen)])
 
 
 def asks_about_meetings(question: str) -> bool:
-    return bool(_MEETINGS.search(question or ""))
+    question = question or ""
+    return bool(_MEETINGS.search(question) or (_BOOKED.search(question) and not _NOT_MEETINGS.search(question)))
+
+
+def _about_calendar(question: str, email_id: str | None) -> bool:
+    """A question the calendar answers. With an email open, not one that points at it ("who organized this
+    meeting?", "set up a call with Maya about this") nor "what's on the agenda?": the email answers those."""
+    if not asks_about_meetings(question):
+        return False
+    if not email_id:
+        return True
+    return not on_screen_question(question) and asks_about_meetings(re.sub(r"\bagenda\b", " ", question, flags=re.I))
 
 
 @dataclass
@@ -286,29 +428,35 @@ class CalendarSource(EmailRecord):
 
 
 def calendar_source(store: Store, settings: Settings, today: str = "", question: str = "") -> EmailRecord | None:
-    """The calendar as one numbered source for the chat: the meetings from a week back to three weeks on (and to the
-    date the ``question`` names, when that is further), as lines the model reads (times in the app's time zone). None
-    when there are none."""
+    """The calendar as one numbered source for the chat, as lines the model reads (times in the app's time zone):
+    the meetings on the days the ``question`` names ("tomorrow", "Friday", "December 15", "next week"), else from
+    today to three weeks on. Only those days, so a full calendar can't push the day asked about out of the prompt.
+    None when there are no meetings in the calendar's weeks, nor on the days asked about."""
     from controller_inbox import calendar_events
 
     try:
         day = date.fromisoformat(today) if today else datetime.now(settings.tz).date()
     except ValueError:
         day = datetime.now(settings.tz).date()
-    first, last = day - timedelta(days=CALENDAR_DAYS_BACK), day + timedelta(days=CALENDAR_DAYS_AHEAD)
-    named = _named_day(question, day) if question else None
-    if named is not None and day <= named <= day + timedelta(days=366):
-        last = max(last, named)
-    start, end = calendar_events.utc_range(first, last, settings.tz)
-    meetings = [calendar_events.shown(meeting, settings.tz) for meeting in _meetings_between(store, start, end)]
+    period = _period(question, day) if question else None
+    if period is not None and not (day - timedelta(days=366) <= period[0][0] and period[0][-1] <= day + timedelta(days=366)):
+        period = None
+    days, when = period or ([day, day + timedelta(days=CALENDAR_DAYS_AHEAD)], "")
+    first, last = days[0], days[-1]
+    meetings = [calendar_events.shown(meeting, settings.tz)
+                for meeting in _meetings_between(store, *calendar_events.utc_range(first, last, settings.tz))]
     if not meetings:
-        return None
+        around = calendar_events.utc_range(day - timedelta(days=CALENDAR_DAYS_BACK), day + timedelta(days=CALENDAR_DAYS_AHEAD), settings.tz)
+        if period is None or not _meetings_between(store, *around):
+            return None
     zone = getattr(settings.tz, "key", str(settings.tz))
     lines = "\n".join(_calendar_times(line) for line in calendar_events.listing(meetings).splitlines())
-    body = (
-        f"Meetings from {first:%A %B} {first.day} to {last:%A %B} {last.day}, {last.year}; today is {day:%A %B} {day.day}. "
-        f"Times are {zone}.\n" + lines
-    )
+    if first == last:
+        span = f"Meetings on {first:%A %B} {first.day}, {first.year}"
+    else:
+        span = f"Meetings from {first:%A %B} {first.day} to {last:%A %B} {last.day}, {last.year}" + (f" ({when})" if when else "")
+    # Nothing on the days asked about is said, when the calendar has meetings around them: the user is free then.
+    body = f"{span}{'' if meetings else ': none'}; today is {day:%A %B} {day.day}. Times are {zone}.\n" + lines
     return _calendar_record(body, meetings)
 
 
@@ -347,8 +495,6 @@ def _calendar_record(body: str, meetings: list[dict]) -> CalendarSource:
 # The title of a meeting in quotes, as the calendar's "Ask about this meeting" asks: "What do I need to know before
 # “Q4 planning review” (Thursday, September 24 · 2:00 PM–3:00 PM)?"
 _QUOTED = re.compile(r"[“\"]([^”\"\n]{2,200})[”\"]")
-_MONTHS_ALL = "january february march april may june july august september october november december".split()
-_MONTH_DAY = re.compile(r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b", re.I)
 
 
 def asked_meeting(store: Store, settings: Settings, question: str, today: str = "", email_id: str | None = None) -> dict | None:
@@ -365,15 +511,19 @@ def asked_meeting(store: Store, settings: Settings, question: str, today: str = 
     except ValueError:
         day = datetime.now(settings.tz).date()
     start, end = calendar_events.utc_range(day - timedelta(days=CALENDAR_DAYS_BACK), day + timedelta(days=CALENDAR_DAYS_AHEAD), settings.tz)
-    rows = [row for row in _meetings_between(store, start, end) if " ".join((row["subject"] or "").split()).lower() in titles]
-    if not rows:
+    # By its title as stored, or as the calendar shows it ("Canceled:" taken off, "(no title)" for none), which is
+    # what its "Ask about this meeting" button asks about.
+    shown = [(row, calendar_events.shown(row, settings.tz)) for row in _meetings_between(store, start, end)]
+    shown = [(row, seen) for row, seen in shown
+             if {" ".join((row["subject"] or "").split()).lower(), " ".join(seen["subject"].split()).lower()} & titles]
+    if not shown:
         return None
-    if email_id and (own := [row for row in rows if row["email_id"] == email_id]):
-        rows = own
-    shown = [(row, calendar_events.shown(row, settings.tz)) for row in rows]
-    if named := _MONTH_DAY.search(question):
-        month = _MONTHS_ALL.index(named.group(1).lower()) + 1
-        on_day = [pair for pair in shown if pair[1]["start"][5:10] == f"{month:02d}-{int(named.group(2)):02d}"]
+    if email_id and (own := [pair for pair in shown if pair[0]["email_id"] == email_id]):
+        shown = own
+    # The day it names, as the browser wrote it ("October 19" in the US, "19 October" in most other places), the
+    # title in quotes left out.
+    if (named := _named_day(_QUOTED.sub(" ", question), day)) is not None:
+        on_day = [pair for pair in shown if pair[1]["start"][5:10] == named.isoformat()[5:10]]
         if on_day:
             return on_day[0][0]
     ahead = [pair for pair in shown if pair[1]["start"][:10] >= day.isoformat()]
@@ -386,9 +536,12 @@ def _shown(meeting: dict, settings: Settings) -> dict:
     return calendar_events.shown(meeting, settings.tz)
 
 
-def meeting_sources(store: Store, settings: Settings, meeting: dict, email_id: str | None = None) -> list[EmailRecord]:
+def meeting_sources(
+    store: Store, settings: Settings, meeting: dict, email_id: str | None = None, report: dict | None = None
+) -> list[EmailRecord]:
     """The sources for a question about one meeting: the meeting itself (as a calendar source), and the mail about
-    it (its invitation, then mail near its date naming its title or from its people). The open email leads."""
+    it (its invitation, then mail near its date naming its title or from its people). The open email leads.
+    ``report`` gets how many emails about it are held as possible payment fraud ("held")."""
     from controller_inbox import calendar_events
 
     shown = calendar_events.shown(meeting, settings.tz)
@@ -396,18 +549,25 @@ def meeting_sources(store: Store, settings: Settings, meeting: dict, email_id: s
     lines = "\n".join(_calendar_times(line) for line in calendar_events.listing([shown]).splitlines())
     calendar = _calendar_record(f"The meeting asked about. Times are {zone}.\n" + lines, [shown])
     # Held mail about a meeting (a lookalike's "updated dial-in") is no source: it never reaches the model.
-    mail = [email for email in calendar_events.related_mail(store, meeting, limit=MAX_SOURCES) if not attachments_locked(email)]
+    about = calendar_events.related_mail(store, meeting, limit=MAX_SOURCES)
+    mail = [email for email in about if not attachments_locked(email)]
+    if report is not None:
+        report["held"] = len(about) - len(mail)
     if email_id and email_id not in {email.id for email in mail} and (current := store.get_email(email_id)) is not None:
         mail = [current, *mail]
     lead = [email for email in mail if email.id == email_id]
     return lead + [calendar] + [email for email in mail if email.id != email_id][: MAX_SOURCES - len(lead)]
 
 
+# Help with CloseDesk itself: the things it names, not "how do I" alone ("How do I approve it?" is about the email).
 _HELP = re.compile(
-    r"\b(set ?up|install\w*|lm studio|ollama|bionic|local model|how do i|how to|export\w*|drop folder|"
-    r"profile|launcher|start (?:the )?server)\b",
+    r"\b(closedesk|lm studio|ollama|bionic|local model|the model|install\w*|set ?up (?:the )?(?:app|model|server|outlook)|"
+    r"export\w* (?:my |the )?(?:mail|e-?mails?|messages?|from outlook)|drop folder|inbox/incoming|outlook profile|launcher|"
+    r"start (?:the )?server|process new mail)\b",
     re.I,
 )
+# The words a help question asks with, left out with what it names: "how do I set up LM Studio?" searches nothing.
+_HOW = re.compile(r"\b(how (?:do|can|should) (?:i|we)|how to|set ?up|setting up|start|run|use|get|work|works)\b", re.I)
 
 _INTENTS = [
     (re.compile(r"\b(repl(?:y|ies)|respond|answer|get back)\b", re.I), [DocumentType.REPLY_NEEDED]),
@@ -546,20 +706,34 @@ def pick_sources(
     current = store.get_email(email_id) if email_id else None
     if current is not None:
         picked[current.id] = current
+        named = _named_terms(question)
         if _HISTORY.search(question):
             matter, thread, held = _matter(store, current)
-            if matter or held:
+            # Not "what is the history of the CP2000 notice?" asked on an invoice: the mail that names it is searched.
+            if (matter or held) and not _missing(named, [current, *matter]):
                 # "What happened on this so far?", "trace this back": the email's conversation and linked mail.
                 if report is not None:
                     report["thread"] = thread
                     report["held"] = held
                 return [current, *matter][: MAX_SOURCES + 1], False, set()
-        here = not _ELSEWHERE.search(question) and answered_here(current, question)
-        if on_screen_question(question) or (here and (not about_today or _due_here(current, question))):
-            return [current], False, set()
-        if (stay := _stays_on(store, current, question, about_today=about_today)) is not None:
+            if report is not None and not (matter or held):
+                report["unlinked"] = True
+        # "When is payment due?", "what is the first item on the PBC list?": "due" and "first" can ask about today,
+        # but here the rest of the question is about the open email.
+        today = about_today and not _due_here(current, question) and not _points_here(current, question)
+        here = not _ELSEWHERE.search(question) and (answered_here(current, question) or (about_today and not today))
+        if on_screen_question(question) or (here and not today):
+            if not _missing(named, [current]):
+                return [current], False, set()
+            # "Did Purchasing issue a PO for this?": the email, then the mail that names what it doesn't.
+        elif (stay := _stays_on(store, current, question, about_today=today)) is not None:
+            if report is not None:
+                report["conversation"] = [email.id for email in stay[1:]]
             return stay, False, set()
-    stripped = _TODAY.sub(" ", question) if about_today else question
+        about_today = today
+    # "What's urgent today?", "summarize my day": the focus list answers them, not mail with the word "day" in it.
+    # "What is due next week?": the period is no search word (``due_mail`` answers it).
+    stripped = _TODAY.sub(" ", _MY_DAY.sub(" ", _DUE_WHEN.sub(" ", question))) if about_today else question
     by_kind: list[EmailRecord] = []
     for pattern, categories in _INTENTS:
         if pattern.search(question):
@@ -567,7 +741,7 @@ def pick_sources(
             for category in categories:
                 by_kind += store.list_emails(category=category.value, order="score", limit=4)
     # "How do I set up LM Studio?" is a help question, but "the payroll export" is a search.
-    terms = keywords(_HELP.sub(" ", stripped))
+    terms = keywords(_HOW.sub(" ", _HELP.sub(" ", stripped)) if _HELP.search(stripped) else stripped)
     if terms:
         terms = keywords(stripped)
     by_search, by_meaning, how = semantic.find_mail(store, settings, stripped, terms, limit=MAX_SOURCES)
@@ -615,8 +789,9 @@ def locked_files_answer(email: EmailRecord) -> str:
 def held_answer(store: Store, email: EmailRecord) -> str:
     """The answer about an email held as possible payment fraud, whatever was asked: why it is held (the check's own
     reasons, nothing the email says) and what to do. Neither the email nor its files are read to answer it."""
-    check = store.fraud_check(email.id) or {}
-    reasons = list(dict.fromkeys(signal.get("label") for signal in check.get("signals", []) if signal.get("label")))[:5]
+    from controller_inbox.fraud import hold_reasons
+
+    reasons = hold_reasons(email, store.fraud_check(email.id))
     why = ("It was held because: " + "; ".join(reasons) + ".\n\n") if reasons else ""
     return (
         "This email is held as possible payment fraud [1], so I don't read it or its files, and I won't answer "
@@ -624,7 +799,7 @@ def held_answer(store: Store, email: EmailRecord) -> str:
         + why
         + "Don't pay anything, change any bank details, open its files or follow its links because of it. Call the "
         "sender on a phone number you already have, not one from this email. If they confirm it is genuine, click "
-        "**Not fraud** on the email page (or trust the sender in Settings) and ask me again."
+        "**Not fraud** in the email's Fraud check (or trust the sender there) and ask me again."
     )
 
 
@@ -643,10 +818,44 @@ def answered_here(email: EmailRecord, question: str) -> bool:
 
 def asks_for_help(question: str, found: set[str], screen: EmailRecord | None) -> bool:
     """"How do I set up the local model?": help with CloseDesk. Not when the mail answers it: the search found
-    emails with its words, or the email on screen has them ("the Clearwater vendor setup form")."""
+    emails with its words, or the email on screen has them ("the Clearwater vendor setup form") or the question
+    points at it."""
     if not _HELP.search(question) or found:
         return False
+    if screen is not None and on_screen_question(question):
+        return False
     return screen is None or not (agent.named_files(screen.attachments, question) or answered_here(screen, question))
+
+
+# What only asks about the whole inbox's day: "what's due today?", "anything overdue?", "what's urgent?".
+_INBOX_WIDE = re.compile(
+    r"\b(today|focus|urgent|priorit\w*|overdue|to-?do|catch me up|this week|morning|what needs|"
+    r"(?:what(?:['’]?s| is| are)|anything|everything|all) (?:that )?(?:is )?due|(?:which|what|any) \w+s (?:that )?(?:are )?due|due (?:today|tomorrow|this|next|soon|by))\b",
+    re.I,
+)
+
+
+def _points_here(email: EmailRecord, question: str) -> bool:
+    """"What is the first item on the PBC list?", "when is the response due?": the question's words, past those that
+    can ask about today ("first", "due", "tasks", "behind"), are in the open email. Not "what's due today?" or "what
+    should I do first?", which ask about the whole inbox."""
+    if _MY_DAY.search(question) or _INBOX_WIDE.search(question):
+        return False
+    rest = _TODAY.sub(" ", question)
+    terms = keywords(rest)
+    if not terms:
+        return False
+    found = _found_in(email, terms)
+    named = [term for term in terms if _distinctive(term, rest)]
+    if any(term not in found for term in named):
+        return False
+    # "When is the response due?" on a notice that falls due: its date answers it, whatever it calls the response.
+    if _WHEN_DUE.search(question) and _due_on(email) is not None:
+        return True
+    return len(found) == len(terms) or answered_here(email, rest) or bool(named)
+
+
+_WHEN_DUE = re.compile(r"\bwhen(?:['’]s| is| are| was| were)?\b[^?.!]*\bdue\b", re.I)
 
 
 def _due_here(email: EmailRecord, question: str) -> bool:
@@ -667,11 +876,13 @@ def _found_in(email: EmailRecord, terms: list[str]) -> list[str]:
     """The terms in this email or its files; a month also as a sheet heads it ("August" as "Aug" or "Aug-26")."""
     pieces = (email.subject, email.body_text or "", *(att.extracted_text or "" for att in email.attachments))
     text = _FOUND_TEXT.get_or(pieces, lambda: _spaced(" ".join(pieces)))
-    return [
-        term
-        for term in terms
-        if _spaced(term) in text or (term in _MONTHS and re.search(rf"\b{term[:3]}t?\b", text))
-    ]
+    return [term for term in terms if _has_term(text, term) or (term in _MONTHS and re.search(rf"\b{term[:3]}t?\b", text))]
+
+
+def _has_term(spaced: str, term: str) -> bool:
+    """The term in text ``_spaced`` gives, starting a word: "invoice" in "invoices", but "irs" not in "first" nor
+    "ach" in "attached"."""
+    return re.search(rf"(?<![a-z0-9]){re.escape(_spaced(term))}", spaced) is not None
 
 
 # An email's text as ``_found_in`` looks in it, by the text itself: asked several times a question.
@@ -684,8 +895,11 @@ def _spaced(text: str) -> str:
 
 
 def _distinctive(term: str, question: str) -> bool:
-    """A name (capitalized in the question, not just as its first word), or a word with a digit in it."""
+    """A name (capitalized in the question, not just as its first word), a code written in capitals ("IRS", "ACH",
+    "PBC"), or a word with a digit in it."""
     if any(ch.isdigit() for ch in term):
+        return True
+    if not question.isupper() and re.search(rf"\b{re.escape(term.upper())}S?\b", question):
         return True
     rest = re.sub(r"^\W*\w+", "", question)
     return bool(re.search(rf"\b{re.escape(term[:1].upper() + term[1:])}", rest))
@@ -720,12 +934,14 @@ def build_messages(
     tools: bool = False,
     tail: str = "",
     bodies: bool = True,
+    tz=None,
 ) -> list[dict]:
     """System prompt, recent turns, and one user message: the emails (with file passages), then the question.
 
     ``budget`` is for everything sent: the system prompt (and tool guide), earlier turns, each email's
     header, summary, tasks and file list, the file text, notes, ``tail`` and the question. Email bodies get
-    what is left (none with ``bodies=False``, which callers use to measure the rest)."""
+    what is left (none with ``bodies=False``, which callers use to measure the rest). ``tz``: the app's time zone, for
+    when each email came."""
     files = files or {}
     numbers = {email.id: index for index, email in enumerate(sources, start=1)}
     system = SYSTEM + (TOOLS_GUIDE if tools else "")
@@ -760,7 +976,7 @@ def build_messages(
 
     def heads() -> int:
         return sum(
-            size(_source_block(numbers[email.id], email, 0, on_screen=email.id == current_id, brief=brief[email.id])) + 1
+            size(_source_block(numbers[email.id], email, 0, on_screen=email.id == current_id, brief=brief[email.id], tz=tz)) + 1
             for email in sources
         )
 
@@ -775,7 +991,7 @@ def build_messages(
         # The body's share is in budget characters; a body full of figures gets fewer of its own.
         body = re.sub(r"\s+", " ", email.body_text or "").strip()  # as _source_block shows it
         limit = int(limit * len(body) / max(1, size(body))) if body else limit
-        block = _source_block(numbers[email.id], email, limit, on_screen=email.id == current_id, brief=brief[email.id])
+        block = _source_block(numbers[email.id], email, limit, on_screen=email.id == current_id, brief=brief[email.id], tz=tz)
         lines.append(block + fenced.get(email.id, ""))
     if notes:
         lines += ["", notes]
@@ -805,12 +1021,12 @@ def prompt_chars(messages: list[dict]) -> int:
     return sum(agent.prompt_size(str(m.get("content") or "")) + MESSAGE_CHARS for m in messages)
 
 
-def _source_block(number: int, email: EmailRecord, limit: int, *, on_screen: bool, brief: bool = False) -> str:
+def _source_block(number: int, email: EmailRecord, limit: int, *, on_screen: bool, brief: bool = False, tz=None) -> str:
     if email.source == "chat":
         return f"[{number}] Files the user added to this chat (not an email)\n" + agent.files_line(email)
     label = DOCUMENT_LABELS.get(email.category, email.category.value)
     head = (
-        f"[{number}] {email.received_at[:10]} · from {email.sender_name or email.sender_email} · "
+        f"[{number}] {agent.when_local(email.received_at, tz)} · from {email.sender_name or email.sender_email} · "
         f"\"{email.subject}\" · {label} · {email.folder or 'unfiled'}" + (" · (open on screen)" if on_screen else "")
     )
     if attachments_locked(email):
@@ -836,7 +1052,8 @@ def _source_block(number: int, email: EmailRecord, limit: int, *, on_screen: boo
     if body and len(body) <= limit:
         bits.append("Text: " + body)
     elif body and limit >= 40:
-        bits.append("Text: " + body[:limit].rsplit(" ", 1)[0] + " …")
+        cut = " … (later meetings left out for room)" if email.source == "calendar" else " …"
+        bits.append("Text: " + body[:limit].rsplit(" ", 1)[0] + cut)
     return "\n".join(bits)
 
 
@@ -925,6 +1142,51 @@ def due_window(question: str, today: str) -> tuple[date, date, str] | None:
     return day, nxt - timedelta(days=1), "due this month"
 
 
+MAX_DUE = 12  # emails a "what's due next week?" answer lists
+
+
+def _due_dates(email: EmailRecord) -> list[date]:
+    """The days an email falls due: the date printed on it, and its open tasks'."""
+    found = []
+    for value in [email.extracted.primary_due, *(a.due_date for a in email.actions if a.status == ActionStatus.OPEN)]:
+        try:
+            found.append(date.fromisoformat(str(value)[:10]))
+        except ValueError:
+            continue
+    return sorted(set(found))
+
+
+def due_mail(store: Store, window: tuple[date, date, str]) -> list[EmailRecord]:
+    """The emails with an open task that fall due in ``window`` (on the date printed on them or a task's), soonest
+    first: at most MAX_DUE."""
+    first, last, _said = window
+    emails = [store.get_email(email_id) for email_id in dict.fromkeys(email.id for _action, email in store.list_actions(status="open"))]
+    dated = []
+    for email in emails:
+        if email is not None and (days := [day for day in _due_dates(email) if first <= day <= last]):
+            dated.append((days[0], email.received_at or "", email))
+    return [email for _day, _received, email in sorted(dated, key=lambda item: item[:2])][:MAX_DUE]
+
+
+def _due_answer(note: str, sources: list[EmailRecord], window: tuple[date, date, str], numbers: dict, current_id: str | None) -> str:
+    """What falls due in a period, with no model: each email and the day, soonest first."""
+    first, last, said = window
+    due = [email for email in sources if email.id != current_id]
+    if not due:
+        return f"{note} Nothing is {said}."
+    lines = [f"{note} {'This is' if len(due) == 1 else 'These are'} {said}:"]
+    for email in due:
+        day = next(day for day in _due_dates(email) if first <= day <= last)
+        tasks = [a.title.rstrip(".") for a in email.actions if a.status == ActionStatus.OPEN and a.due_date and str(a.due_date)[:10] == day.isoformat()]
+        what = f" — {tasks[0]}" if tasks else ""
+        lines.append(f"- {day:%a %b} {day.day} · **{email.subject}** · {_who(email)}{what} [{numbers[email.id]}]")
+    if any(is_fraud(email) for email in due):
+        lines.append(FRAUD_WARNING)
+    if len(due) == MAX_DUE:
+        lines.append(f"The first {MAX_DUE} are listed: ask about a shorter period for the rest.")
+    return "\n".join(lines)
+
+
 def _due_on(email: EmailRecord) -> date | None:
     """When the email falls due: the date printed on it (an invoice's due date), else its earliest open task's."""
     dates = [email.extracted.primary_due] if email.extracted.primary_due else sorted(
@@ -950,12 +1212,17 @@ def offline_answer(
     thread: list[str] | None = None,
     meeting: dict | None = None,
     held: int = 0,
+    conversation: list[str] | None = None,
+    unlinked: bool = False,
+    due: tuple[date, date, str] | None = None,
 ) -> str:
     """The answer with no model: the emails, lines and file passages that match, as a list.
 
     ``tz``: the app's time zone, for when each email came and when a meeting is. ``thread``: the open email's
-    conversation, oldest first, for a question about how it came about. ``meeting``: the meeting asked about (as
-    ``calendar_events.shown`` gives it), whose mail ``sources`` are."""
+    conversation, oldest first, for a question about how it came about. ``conversation``: the ids of the emails of
+    its conversation among ``sources``, for a question their words answer. ``unlinked``: the open email has no mail
+    linked to it. ``due``: the period (``due_window``) a question asks what falls due in, whose mail ``sources`` is. ``meeting``: the meeting asked about (as ``calendar_events.shown`` gives it), whose mail
+    ``sources`` are."""
     found = found or set()
     current = next((email for email in sources if email.id == current_id), None)
     numbers = {email.id: index for index, email in enumerate(sources, start=1)}
@@ -963,10 +1230,12 @@ def offline_answer(
         return HELP_TEXT
     note = "Here's a straight lookup instead." if model_failed else "The local model isn't running, so this is a straight lookup."
     if meeting is not None:
-        return _meeting_answer(note, question, sources, meeting, numbers, tz)
+        return _meeting_answer(note, question, sources, meeting, numbers, tz, held=held)
     calendar = next((email for email in sources if email.source == "calendar"), None)
     if calendar is not None:
         return f"{note} " + _meetings_for(question, calendar.body_text, today, f" [{numbers[calendar.id]}]")
+    if due is not None:
+        return _due_answer(note, sources, due, numbers, current_id)
     if current is not None and not found and not about_today:
         if thread and (len(sources) > 1 or held):
             return _history_answer(note, sources, current, thread, numbers, tz, held=held)
@@ -991,7 +1260,10 @@ def offline_answer(
         if matches:
             lines.append("In the files:")
             lines += [f"- {line}" for line in matches]
-        others = [email for email in sources if email.id != current.id]
+        # Only its own conversation: the focus list's emails beside it, for the model, are not about it.
+        others = [email for email in sources if email.id != current.id and email.id in set(conversation or [])]
+        if unlinked and not others:
+            lines.append("No other emails are linked to this one.")
         if others:
             # The rest of its conversation: what each says on the question, or that it was looked at.
             lines.append("In its conversation:")
@@ -1091,7 +1363,7 @@ def body_lines(email: EmailRecord, question: str, *, limit: int = 2, width: int 
     scored = []
     for index, sentence in enumerate(_sentences(email)):
         low = _spaced(sentence)
-        hits = sum(1 for term in terms if _spaced(term) in low)
+        hits = sum(1 for term in terms if _has_term(low, term))
         if hits:
             scored.append((-hits, index, sentence))
     best = sorted(sorted(scored)[:limit], key=lambda item: item[1])
@@ -1116,6 +1388,9 @@ def _history_answer(
         for email in linked:
             here = " (open on screen)" if email.id == current.id else ""
             lines.append(f"- {_when(email, tz)} · {_who(email)}: **{email.subject}**{here} — {first_line(email)} [{numbers[email.id]}]")
+    if left := sum(1 for email_id in thread if email_id not in by_id):
+        # A long conversation: the emails nearest the open one are listed.
+        lines.append(f"{left} more email{' of this conversation isn' if left == 1 else 's of this conversation aren'}'t shown here.")
     if held:
         lines.append(f"{held} email{' of this conversation is' if held == 1 else 's of this conversation are'} held as possible payment fraud and "
                      f"{'is' if held == 1 else 'are'}n't shown here.")
@@ -1124,9 +1399,17 @@ def _history_answer(
     return "\n".join(lines)
 
 
-def _meeting_answer(note: str, question: str, sources: list[EmailRecord], meeting: dict, numbers: dict, tz) -> str:
+def _held_line(held: int, of: str) -> str:
+    """How many emails of a conversation or about a meeting are held: "1 email of this conversation is held as possible
+    payment fraud, so its text isn't shown"."""
+    one = held == 1
+    return f"{held} email{'' if one else 's'} {of} {'is' if one else 'are'} held as possible payment fraud, so {'its' if one else 'their'} text isn't shown."
+
+
+def _meeting_answer(note: str, question: str, sources: list[EmailRecord], meeting: dict, numbers: dict, tz, *, held: int = 0) -> str:
     """A meeting asked about, with no model: when and where it is, then the mail about it (its invitation, mail
-    naming it or from its people). An invitation's file is the meeting, already said, so it isn't quoted."""
+    naming it or from its people), and how many emails about it are held as possible payment fraud (``held``), with
+    nothing of them. An invitation's file is the meeting, already said, so it isn't quoted."""
     calendar = next((email for email in sources if email.source == "calendar"), None)
     ref = f" [{numbers[calendar.id]}]" if calendar is not None else ""
     facts = [f"**{meeting['subject']}**, {agent.meeting_when(meeting)}"]
@@ -1138,14 +1421,19 @@ def _meeting_answer(note: str, question: str, sources: list[EmailRecord], meetin
         facts.append("cancelled")
     lines = [f"{note} The meeting{ref}:", " · ".join(facts) + "."]
     mail = [email for email in sources if email.source != "calendar"]
+    if held:
+        # A lookalike's "updated dial-in" or "new bank details" is the email the user most needs to hear about.
+        lines.append(f"{_held_line(held, 'about it')} Verify by phone before acting on any change to it.")
     if not mail:
-        lines.append("No mail about it turned up: nothing near its date names it or comes from its people.")
+        if not held:
+            lines.append("No mail about it turned up: nothing near its date names it or comes from its people.")
         return "\n".join(lines)
     lines.append("Mail about it:")
     for email in mail:
         summary = f" — {email.summary}" if email.summary else ""
         lines.append(f"- **{email.subject}** · {_who(email)} · {_when(email, tz)}{summary} [{numbers[email.id]}]")
-        said = body_lines(email, question, limit=1)
+        # What the summary above already says isn't said again: an invitation's summary is often its first line.
+        said = [line for line in body_lines(email, question, limit=2) if line not in (email.summary or "")][:1]
         if not agent.attachments_locked(email):
             said += agent.file_matches(email, question, limit=1, outline=False, tz=tz, invitations=False)[:1]
         lines += [f"  - {line}" for line in said[:2]]
@@ -1178,11 +1466,17 @@ def answer_stream(
     if meeting is not None:
         # "Ask about this meeting": the meeting and the mail about it, not every email that shares a word with its
         # day and time.
-        sources, about_today = meeting_sources(store, settings, meeting, email_id), False
+        sources, about_today = meeting_sources(store, settings, meeting, email_id, report=searched), False
         found = {email.id for email in sources}
     else:
         sources, about_today, found = pick_sources(store, question, email_id=email_id, focus=focus, settings=settings, report=searched)
-    if meeting is None and asks_about_meetings(question) and (calendar := calendar_source(store, settings, today, question)) is not None:
+        if about_today and not found and (window := due_window(question, today)) is not None:
+            # "What is due next week?", "anything overdue?": every email that falls due then, not the focus list's top.
+            current_first = sources[:1] if email_id and sources and sources[0].id == email_id else []
+            due = [email for email in due_mail(store, window) if email not in current_first]
+            sources, found = current_first + due, {email.id for email in due}
+            searched["due"] = window
+    if meeting is None and _about_calendar(question, email_id) and (calendar := calendar_source(store, settings, today, question)) is not None:
         # "What meetings do I have tomorrow?": the calendar answers it, beside the mail it may name.
         current_first = sources[:1] if email_id and sources and sources[0].id == email_id else []
         sources = current_first + [calendar] + [email for email in sources if email not in current_first][: MAX_SOURCES - 1]
@@ -1202,7 +1496,11 @@ def answer_stream(
     # the answer is a fixed one (why it is held, and what to do); among other mail, the model is told only that it
     # is there (who sent it, when, its subject) and that it is held (``_source_block``).
     held_open = next((email for email in sources if email.id == email_id and attachments_locked(email)), None)
-    if held_open is not None:
+    # Only a question about the held email itself gets the fixed answer: one about the calendar, today or other mail
+    # is answered as usual, with the held email in it by its header alone.
+    mail = [email for email in sources if email.source != "calendar"]
+    elsewhere = bool(_ELSEWHERE.search(question)) or about_today or asks_about_meetings(question)
+    if held_open is not None and (len(mail) == 1 or on_screen_question(question) or not elsewhere):
         yield {"type": "sources", "sources": source_cards([held_open], settings), "mode": "lookup", "warning": FRAUD_WARNING}
         yield {"type": "delta", "text": held_answer(store, held_open)}
         yield {"type": "done"}
@@ -1214,7 +1512,7 @@ def answer_stream(
         return
     use_model = llm_active(settings)
     event: dict[str, Any] = {"type": "sources", "sources": source_cards(sources, settings), "mode": "model" if use_model else "lookup"}
-    if any(is_fraud(email) for email in sources):
+    if any(is_fraud(email) for email in sources) or searched.get("held"):
         event["warning"] = FRAUD_WARNING
     current = next((email for email in sources if email.id == email_id), None)
     if current is not None and asks_about_locked_files(current, question):
@@ -1229,11 +1527,23 @@ def answer_stream(
     lookup = {
         "about_today": about_today, "focus": focus, "found": found, "current_id": email_id, "today": today, "tz": settings.tz,
         "thread": searched.get("thread"), "meeting": _shown(meeting, settings) if meeting is not None else None, "held": searched.get("held", 0),
+        "conversation": searched.get("conversation"), "unlinked": searched.get("unlinked", False), "due": searched.get("due"),
     }
     if not use_model:
         yield {"type": "delta", "text": offline_answer(question, sources, **lookup)}
         yield {"type": "done"}
         return
+    numbers = {email.id: number for number, email in enumerate(sources, start=1)}
+    if len(steps := [step for step in searched.get("thread") or [] if step in numbers]) > 1:
+        # "What happened so far?": the open email is [1] whatever its place, so the model is told the order.
+        by_id = {email.id: email for email in sources}
+        order = ", ".join(f"[{numbers[step]}] {agent.when_local(by_id[step].received_at, settings.tz)}"
+                          + (" (open on screen)" if step == email_id else "") for step in steps)
+        past = "\n\n".join(part for part in (f"This conversation, oldest first: {order}.", past) if part)
+    if held := searched.get("held", 0):
+        # Held mail is no source, so the model is told only that it is there.
+        past = "\n\n".join(part for part in (_held_line(held, "about this meeting" if meeting is not None else "of this conversation")
+                                                  + " Tell the user, and to verify by phone before acting on it.", past) if part)
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id, past=past)
     state = {"wrote": False, "text": ""}
     offer = None
@@ -1556,6 +1866,7 @@ def _model_answer(ws: agent.Workspace, question: str, state: dict, *, history, f
                     current_id=ws.current_id,
                     budget=_budget(settings, tools=False) // shrink,
                     notes=ws.past,
+                    tz=settings.tz,
                 )
                 yield from _stream(settings, messages, state)
             return
@@ -1714,10 +2025,13 @@ def _read_material(ws: agent.Workspace, *, history, today: str, focus: list[dict
     material += [" · ".join(str(value) for value in row.values() if isinstance(value, (str, int, float))) for row in focus or []]
     files = []
     for email in ws.sources:
-        material.append(f"{email.subject}\n{email.body_text}")
-        material.append(_source_block(0, email, len(email.body_text or "") + 1, on_screen=False))
+        # Of held mail the model is shown its header only (``_source_block``), never its text or files.
         if not agent.attachments_locked(email):
+            material.append(f"{email.subject}\n{email.body_text}")
             files += [(att.filename, att.extracted_text) for att in email.attachments if att.extracted_text]
+            # An invitation is shown to the model as the meeting it holds, in the app's time zone.
+            material += [agent.invitation_text(att, getattr(ws.settings, "tz", None)) for att in email.attachments if agent.is_invitation(att)]
+        material.append(_source_block(0, email, len(email.body_text or "") + 1, on_screen=False, tz=getattr(ws.settings, "tz", None)))
     return {"material": material, "files": files}
 
 
@@ -1778,7 +2092,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     primary = ws.primary()
     notes = agent.earlier_findings(ws, primary) if primary is not None else ""
     notes = "\n\n".join(part for part in (notes, ws.past) if part)
-    base = dict(history=history, today=today, current_id=ws.current_id, notes=notes)
+    base = dict(history=history, today=today, current_id=ws.current_id, notes=notes, tz=settings.tz)
     yield from agent.query_tables(ws, question, complete_text)
     plain = _budget(settings, tools=False) // shrink
     room = int((plain - prompt_chars(build_messages(question, ws.sources, budget=plain, bodies=False, **base))) * 0.85)

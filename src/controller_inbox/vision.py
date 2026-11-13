@@ -192,7 +192,7 @@ def why_not_reader(settings: Settings, model: str | None = None) -> str:
     if settings.vision_mode == "off":
         return "Reading scans with a vision model is turned off in Setup."
     if not can_render():
-        return "The page renderer isn't installed (double-click CloseDesk once, or run pip install -e .)."
+        return "The page renderer isn't installed (open CloseDesk again to add it)."
     model = reading_model(settings) if model is None else model
     if model and trusted_reader(model):
         return ""
@@ -1539,6 +1539,8 @@ def read_pages(
 
 
 def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, should_stop=None) -> Result:
+    from controller_inbox import fraud
+
     result = Result()
     if not same_file(att, data):
         result.failed.append("the file kept under this name isn't this attachment")
@@ -1573,6 +1575,9 @@ def _read_pages(store, settings, email, att, data, pages, *, on_progress=None, s
             if page not in stored:
                 continue
             first = stored[page]["first"]
+        current = store.get_email(email.id)
+        if current is None or fraud.attachments_locked(current):
+            break  # held since the read began (a fraud verdict, a reported domain): no more of its pages are sent
         if on_progress:
             on_progress(index - 1, len(todo), f"{att.filename}, page {page}")
         started = time.monotonic()
@@ -1873,7 +1878,7 @@ def offer(store: Store, settings: Settings, email: EmailRecord, att: AttachmentR
     elif settings.vision_mode == "off":
         reason = "Reading scans with the vision model is turned off in Setup."
     elif not can_render():
-        reason = "The page renderer isn't installed. Double-click CloseDesk once (or run pip install -e .) to add it."
+        reason = "The page renderer isn't installed. Open CloseDesk again (double-click it) to add it."
     elif not check_model(settings).reachable:
         reason = "No model server is answering. Start LM Studio's server to read scans both ways."
     elif settings.vision_model and not available(settings):

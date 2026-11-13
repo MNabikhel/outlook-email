@@ -866,6 +866,31 @@ def test_the_whole_matter_is_one_page_and_esc_goes_back(site, page):
     page.wait_for_selector('.rd[data-email="demo-inv-10482"]')
 
 
+def test_the_whole_matter_marks_a_newcomer_and_a_payment_caution(loaded, site, page):
+    from test_links import _record
+
+    loaded.upsert_email(_record("t-root", sender="priya@northwind.com", mid="<t-root@northwind.com>", threading={"to": ["ap@taz.com"]}))
+    loaded.upsert_email(_record("t-hijack", sender="priya@northwnd.com", mid="<t-h@northwnd.com>", received="2026-10-06T09:00:00+00:00",
+                                threading={"in_reply_to": "t-root@northwind.com", "to": ["ap@taz.com"]}))
+    loaded.upsert_email(_record("t-caution", sender="priya@northwind.com", mid="<t-c@northwind.com>", received="2026-10-07T09:00:00+00:00",
+                                threading={"in_reply_to": "t-root@northwind.com", "to": ["ap@taz.com"]}, flags=["payment_caution"]))
+    page.goto(f"{site}/app/trace/t-root")
+    page.wait_for_selector(".trace .tr-steps")
+    text = page.text_content(".tr-steps")
+    assert "New in this conversation: northwnd.com" in text and "Caution: payment details" in text
+
+
+def test_related_says_how_long_the_whole_conversation_is(loaded, site, page):
+    from test_links import _record
+
+    for n in range(70):
+        loaded.upsert_email(_record(f"long-{n:02d}", mid=f"<long{n}@northwind.com>", received=f"2026-10-{1 + n // 24:02d}T{n % 24:02d}:00:00+00:00",
+                                    threading={"conversation": "cd" * 16, "to": ["ap@taz.com"]}))
+    page.goto(f"{site}/app/mail/long-69")
+    related = page.wait_for_selector("#rd-related")
+    assert "69 other emails in this conversation (the 59 around this one shown)" in related.inner_text()
+
+
 def test_a_link_the_model_made_shows_with_its_reason(loaded, site, page):
     loaded.save_ai_link("demo-question", "demo-approval", same=True, why="Both are about the Senior Analyst hire.", key="k")
     page.goto(f"{site}/app/mail/demo-question")

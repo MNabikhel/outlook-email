@@ -370,6 +370,8 @@ def register_workspace(
                 "connected": cfg["consent"],
                 "calendar": cfg["calendar"],
                 "calendar_last": format_when(store.get_state(outlook_sync.CALENDAR_LAST_KEY) or "", settings.tz),
+                # Only the sample mailbox is loaded: its meetings are the sample calendar's, not from any invitation.
+                "sample": store.only_sample(),
             },
         }
 
@@ -382,7 +384,7 @@ def register_workspace(
         # Doubted as on the calendar: beside the other invitations with its id (a lookalike's), or for its email.
         around = date.fromisoformat(meeting["start"][:10])
         with_its_kind = store.meetings_between((around - timedelta(days=90)).isoformat(), (around + timedelta(days=90)).isoformat(),
-                                               outlook=outlook_sync.calendar_on(store))
+                                               outlook=outlook_sync.calendar_on(store), uid=meeting["uid"])
         same = [m for m in with_its_kind if m["uid"] == meeting["uid"] and m["id"] != meeting["id"]]
         meeting = calendar_events.with_cautions(store, [meeting, *same])[0]
         today = board_date()
@@ -537,6 +539,8 @@ def register_workspace(
                 for group in found["groups"]
             ],
             "can_look": check_model(settings).active and not fraud.attachments_locked(email),
+            # The whole conversation's size: a long one lists only the emails around this one.
+            "thread_size": found["thread_size"] if found["thread"] else 0,
         }
 
     @api.post("/mail/{email_id}/related/look")
@@ -575,6 +579,8 @@ def register_workspace(
             steps.append({
                 **card,
                 "here": record.id == email.id,
+                # Marked as Related marks it: a lookalike's reply slipped into the vendor's thread.
+                "new_domain": record.id in found["new_domains"],
                 # Beside the name, as Related shows it: two senders named alike ("Dana Ortiz") from two domains.
                 "domain": (links._domain_of(record) or "no address").lower(),
                 "reasons": reasons,
@@ -1150,6 +1156,7 @@ def register_workspace(
             "vision": {**setup["vision_setup"](model), "minutes_per_run": round(settings.vision_minutes_per_run)},
             "search": {**search, "indexed_label": format_when(search.get("indexed_at") or "", settings.tz)},
             "ocr_engine": ocr.engine_name(),
+            "ocr_missing": "" if ocr.engine_name() else ocr.missing_note(),
             "folders": {
                 "incoming": str(settings.inbox_incoming),
                 "attachments": str(settings.inbox_attachments),

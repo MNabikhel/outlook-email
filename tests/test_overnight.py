@@ -75,6 +75,25 @@ def test_digest_send_no_longer_sends_and_says_so(settings: Settings, store: Stor
     assert not hasattr(cli, "_send_digest")
 
 
+def test_the_overnight_summary_is_written_in_full_to_a_windows_log(settings: Settings, store: Store, monkeypatch):
+    """The scheduled run on Windows writes to a log file in the Windows code page (cp1252): a file name it has no
+    letters for is written with "?" in their place, and the rest of the summary still follows."""
+    import io
+
+    from controller_inbox import overnight
+
+    monkeypatch.setattr(cli, "load_settings", lambda *a, **k: settings)
+    monkeypatch.setattr(overnight, "run_overnight", lambda *a, **k: {
+        "headline": "3 of 5 emails need you.", "ingested": 2, "read_by_bionic": 0, "folders": {"important": 1, "informational": 1, "reference": 1},
+        "failed_files": [{"file": "发票 ✅.msg", "error": "Not a valid .msg"}], "waiting_on_bionic": 0, "digest_path": "d.md", "log_path": "l.md"})
+    log = io.BytesIO()
+    for name in ("stdout", "stderr"):
+        monkeypatch.setattr(sys, name, io.TextIOWrapper(log, encoding="cp1252", write_through=True))
+    assert cli.main(["overnight"]) == 0
+    written = log.getvalue().decode("cp1252")
+    assert "Could not read ?? ?.msg" in written and written.rstrip().endswith("Log: l.md")
+
+
 # One failing check does not stop watch.
 def test_watch_keeps_running_after_a_failed_check(settings: Settings, store: Store, monkeypatch, capsys):
     calls = []

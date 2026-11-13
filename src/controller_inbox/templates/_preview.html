@@ -57,10 +57,11 @@
       <li>
         <span><b>{{ card.att.filename }}</b> <small class="muted">· {{ card.kind }} · {{ card.att.document_type.value | label_doc }}</small></span>
         <span class="file-actions">
-          {% if card.chars %}<a class="ghost tiny" data-full href="/inbox/{{ email.id }}/files/{{ card.n }}">Read</a>{% endif %}
+          {% if card.chars and not locked %}<a class="ghost tiny" data-full href="/inbox/{{ email.id }}/files/{{ card.n }}">Read</a>{% endif %}
           {% if card.chars and not locked %}
           <button type="button" class="tiny" data-action="ask-file" data-mode="summary" data-id="{{ email.id }}" data-file="{{ card.att.filename }}">Summarize</button>
           <button type="button" class="tiny ghost" data-action="ask-file" data-id="{{ email.id }}" data-file="{{ card.att.filename }}">Ask…</button>
+          {% elif locked %}<small class="muted">locked: possible payment fraud</small>
           {% elif not card.chars %}<small class="muted">no readable text</small>{% endif %}
         </span>
       </li>

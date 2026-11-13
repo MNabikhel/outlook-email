@@ -89,7 +89,7 @@ def test_chat_streams_from_the_local_model_with_sources(settings, loaded, monkey
     system, *middle, user = seen["messages"]
     assert "verify by phone" in system["content"]
     assert middle == [{"role": "user", "content": "hi"}]
-    assert '[1] 2026-09-22 · from Maya Chen · "Quick question on the Q4 headcount numbers"' in user["content"]
+    assert '[1] 2026-09-22 06:00 · from Maya Chen · "Quick question on the Q4 headcount numbers"' in user["content"]
     assert user["content"].endswith("Question: What needs a reply?")
     assert len(user["content"]) < settings.llm_max_prompt_chars
 

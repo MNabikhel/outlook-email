@@ -21,9 +21,10 @@ from controller_inbox.totals import is_total_label
 # A further "-0457" segment belongs to the number ("INV-2024-0457"); a segment needs a digit, so
 # "12345-due" stays "12345".
 _ID_TAIL = r"(?:[-_](?=[A-Z0-9]*\d)[A-Z0-9]{1,12})*"
-# "Invoice Number: 12345", "PO No. 4500123": the label word is read whole, and the separators are no letters, so
-# a number's own N or O stays ("NW-88001", "ON-7731").
-_NUMBER_WORD = r"(?:\s*(?:number|num|no)\b\.?)?"
+# "Invoice Number: 12345", "PO No. 4500123", "Invoice-No. 12345", "Invoice: No. 4711", "Invoice N. 4433": the label
+# word is read whole, also after a separator, and the separators are no letters, so a number's own N or O stays
+# ("NW-88001", "ON-7731", "NO-7788"). "No" is the label only before a space, a dot, a colon, a "#" or a digit.
+_NUMBER_WORD = r"(?:[\s#:.-]*(?:number\b|num\b|(?:nr|no)(?=[\s.:#]|\d)|n(?=\.))\.?)?"
 INVOICE_RE = re.compile(
     r"\b(?:invoice|inv(?![-_]?\d)\.?|bill)" + _NUMBER_WORD + r"[\s#:.-]*((?:[A-Z]{1,6}[-_]?\d{2,12}|\d{3,12})" + _ID_TAIL + r")",
     re.IGNORECASE,
@@ -263,6 +264,10 @@ def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> st
         if structured:
             return structured
         if name.endswith((".txt", ".md")) or ctype.startswith("text/plain"):
+            return decode_text(data)[:400_000]
+        if name.endswith((".ics", ".vcs")) or "calendar" in ctype:
+            # An invitation is kept whole: its meetings are read again from it overnight, after an update and when
+            # a hold is cleared, and a sample cut short of its END:VEVENT holds no meeting.
             return decode_text(data)[:400_000]
         if name.endswith(".rtf") or "rtf" in ctype:
             return _rtf_text(data)

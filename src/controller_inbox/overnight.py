@@ -22,7 +22,7 @@ from controller_inbox.file_summaries import summarize_files
 from controller_inbox.folder_mail import ingest_folder, reread_attachments
 from controller_inbox.local_llm import LocalReader, check_model, llm_active
 from controller_inbox.profile import is_finance
-from controller_inbox.fraud import attachments_locked
+from controller_inbox.fraud import as_model_reads, attachments_locked
 from controller_inbox.reading import build_packet, overlay_reading
 from controller_inbox.semantic import index_mail
 from controller_inbox.store import Store
@@ -99,11 +99,9 @@ def waiting_for_reading(store: Store, limit: int) -> list:
     """The next ``limit`` emails the model is to read, most important first: not mail held as possible fraud."""
     if limit <= 0:
         return []
-    found = store.list_emails(model_status="script_draft", order="queue", limit=limit + HELD_SLACK)
-    return [email for email in found if not attachments_locked(email)][:limit]
-
-
-HELD_SLACK = 500  # held emails looked past to fill a batch
+    # Left out in the query, as Store.counts leaves it out of what is waiting: held mail is never read, so it waits
+    # for good, and it is filed first in this order.
+    return store.list_emails(model_status="script_draft", held=False, order="queue", limit=limit)
 
 
 def read_queue(
@@ -127,14 +125,17 @@ def read_queue(
     result["model"] = reader.model
     batch = limit if limit is not None else settings.overnight_batch
     # 0 means read none (SQLite would read everything for a negative LIMIT).
-    # Held mail is never read by the model, its text no more than its files; it is filed first, so the batch is
-    # taken from past it.
+    # Held mail is never read by the model, its text no more than its files (waiting_for_reading leaves it out).
     waiting = waiting_for_reading(store, batch)
     corrections = store.list_corrections()
     for index, email in enumerate(waiting, start=1):
         if on_progress:
             on_progress("reading", index, len(waiting), email.subject)
-        packet = build_packet(email, corrections)
+        # As it is now: an email held while earlier ones were read (a fraud verdict, a reported domain) isn't read.
+        email = store.get_email(email.id)
+        if email is None or attachments_locked(email):
+            continue
+        packet = build_packet(as_model_reads(store, email), corrections)
         parsed = reader.read(packet)
         if reader.stopped:
             break
@@ -144,7 +145,7 @@ def read_queue(
         # on it, or another reader may have saved one. The reading is saved onto the email as it is now, and
         # only while it is still the draft the model read; otherwise it waits for the next run.
         current = store.get_email(email.id)
-        if current is None or current.model_status != "script_draft" or build_packet(current, corrections) != packet:
+        if current is None or current.model_status != "script_draft" or build_packet(as_model_reads(store, current), corrections) != packet:
             continue
         overlay_reading(current, parsed, now=now, tz=settings.tz)
         store.upsert_email(current)
@@ -167,17 +168,19 @@ def run_overnight(
     on_progress: Progress | None = None,
     vision_minutes: float | None = None,
     should_stop: Callable[[], bool] | None = None,
+    start_outlook: bool = True,
 ) -> dict:
     """One full pass. Raises ``RunBusy`` instead of racing another run over the same drop folder. ``vision_minutes``:
     how long it may spend reading scanned pages with the vision model (default ``Settings.vision_minutes_per_run``);
     ``should_stop``: the reading of scans ends after the page being read when it says so. ``sync_outlook``: copy new
-    mail from classic Outlook first; None does when automatic sync is on in Settings."""
+    mail from classic Outlook first; None does when automatic sync is on in Settings. ``start_outlook``: start Outlook
+    for it when it isn't running (CloseDesk starting); the scheduled morning run passes False, as nobody is there."""
     with run_lock(settings) as locked:
         if not locked:
             raise RunBusy()
         return _run_overnight(
             store, settings, now=now, limit=limit, sync_graph=sync_graph, sync_outlook=sync_outlook, reader=reader,
-            on_progress=on_progress, vision_minutes=vision_minutes, should_stop=should_stop,
+            on_progress=on_progress, vision_minutes=vision_minutes, should_stop=should_stop, start_outlook=start_outlook,
         )
 
 
@@ -246,9 +249,11 @@ def _sync_outlook(
         note = str(exc)  # written to be read as it is
     except Exception as exc:  # the drop folder and the digest still happen
         log.warning("Syncing Outlook failed", exc_info=True)
-        note = f"Outlook couldn't be read this time ({str(exc)[:200]})."
-    # Settings → Sync inbox says so until a sync works again.
-    outlook_sync.note_failure(store, note, now)
+        note = outlook_desktop.trouble("Outlook couldn't be read this time", exc)
+    # Settings → Sync inbox says so until a sync works again; unless the user disconnected while it ran (connecting
+    # again starts afresh).
+    if outlook_sync.config(store)["consent"]:
+        outlook_sync.note_failure(store, note, now)
     return {"note": note}
 
 
@@ -274,6 +279,7 @@ def _run_overnight(
     vision_minutes: float | None = None,
     should_stop: Callable[[], bool] | None = None,
     sync_outlook: bool | None = None,
+    start_outlook: bool = True,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     settings.ensure_data_dir()
@@ -292,7 +298,7 @@ def _run_overnight(
         calendar_events.catch_up_invites(store, settings, now=now)  # once, after an update: stored invitations
     except Exception:
         log.warning("Couldn't read the stored invitations yet", exc_info=True)
-    outlook = _sync_outlook(store, settings, sync_outlook, now, on_progress)
+    outlook = _sync_outlook(store, settings, sync_outlook, now, on_progress, start=start_outlook)
     folder_report: dict = {}
     ingested = ingest_folder(
         store,
