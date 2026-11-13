@@ -537,6 +537,8 @@ def register_workspace(
                 for group in found["groups"]
             ],
             "can_look": check_model(settings).active and not fraud.attachments_locked(email),
+            # The whole conversation's size: a long one lists only the emails around this one.
+            "thread_size": found["thread_size"] if found["thread"] else 0,
         }
 
     @api.post("/mail/{email_id}/related/look")
@@ -575,6 +577,8 @@ def register_workspace(
             steps.append({
                 **card,
                 "here": record.id == email.id,
+                # Marked as Related marks it: a lookalike's reply slipped into the vendor's thread.
+                "new_domain": record.id in found["new_domains"],
                 # Beside the name, as Related shows it: two senders named alike ("Dana Ortiz") from two domains.
                 "domain": (links._domain_of(record) or "no address").lower(),
                 "reasons": reasons,

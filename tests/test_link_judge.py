@@ -73,11 +73,11 @@ def test_mail_held_as_fraud_is_never_shown_to_the_model(store, settings, model):
 
 def test_mail_already_linked_or_months_apart_is_not_asked_about(store, settings, model):
     _mail(store, "q1", "Harbor quote for pallet wrap", body="Harbor quote attached.", received="2026-01-05T09:00:00+00:00")
-    first = _record("inv", invoices=["INV-4410"], received="2026-10-01T09:00:00+00:00")
-    first.subject = "Harbor quote invoice INV-4410"
+    first = _record("inv", invoices=["HB-4410"], received="2026-10-01T09:00:00+00:00")
+    first.subject = "Harbor quote invoice HB-4410"
     store.upsert_email(first)
-    second = _record("inv2", sender="ap@taz.com", invoices=["INV-4410"], received="2026-10-02T09:00:00+00:00")
-    second.subject = "Harbor quote INV-4410 approved"
+    second = _record("inv2", sender="ap@taz.com", invoices=["HB-4410"], received="2026-10-02T09:00:00+00:00")
+    second.subject = "Harbor quote HB-4410 approved"
     store.upsert_email(second)
     assert [e.id for e in link_judge.candidates(store, settings, store.get_email("inv2"))] == []
 

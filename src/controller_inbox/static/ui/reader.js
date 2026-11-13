@@ -416,12 +416,15 @@ function related(d, ctx) {
     // Nothing links it yet: the model can still look, when one is running.
     return rel.can_look ? section("Related", { id: "rd-related", aside: h("span", { class: "rd-h-aside" }, lookButton(d, ctx)) }, h("p", { class: "muted small" }, "Nothing in this email ties it to others: no conversation, invoice, PO or file in common.")) : null;
   }
-  const count = rel.thread.length ? rel.thread.length - 1 : 0;
+  const shown = rel.thread.length ? rel.thread.length - 1 : 0;
+  // A long conversation lists only the emails around this one: the count is the whole conversation's.
+  const count = Math.max(shown, rel.thread_size ? rel.thread_size - 1 : 0);
+  const conversation = count ? plural(count, "other email") + " in this conversation" + (count > shown ? ` (the ${shown} around this one shown)` : "") : "";
   const others = rel.groups.reduce((n, g) => n + g.emails.length, 0);
   const aside = h(
     "span",
     { class: "rd-h-aside" },
-    h("span", { class: "muted small" }, [count ? plural(count, "other email") + " in this conversation" : "", others ? plural(others, "related email") : ""].filter(Boolean).join(" · ")),
+    h("span", { class: "muted small" }, [conversation, others ? plural(others, "related email") : ""].filter(Boolean).join(" · ")),
     rel.can_look ? lookButton(d, ctx) : null,
     h("a", { class: "btn btn-sm btn-quiet", href: `/app/trace/${enc(d.id)}`, dataset: { nav: "" }, title: "Every email linked to this one, two links out, and what changed in their files" }, icon("route", 14), "Whole matter")
   );
