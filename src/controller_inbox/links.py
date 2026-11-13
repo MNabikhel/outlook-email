@@ -148,11 +148,12 @@ def keys(email: EmailRecord) -> list[tuple[str, str]]:
         for number in numbers:
             if held and number not in said:
                 continue
-            # A number of digits alone is one sender's: two vendors' invoice 10482 are two invoices. So is one that
-            # only puts "INV" or "BILL" before them: Xero numbers every small vendor's invoices INV-0001, INV-0002…
-            # A PO is the buyer's own number, quoted back by the vendor, so one of five digits or more is one PO
-            # whoever writes it.
-            if kind == "invoice" and (plain := _GENERIC_PREFIX.sub("", number)).isdigit():
+            # A number of digits alone is one sender's: two vendors' invoice 10482 are two invoices. So is a short
+            # one that only puts "INV" or "BILL" before them: Xero numbers every small vendor's invoices INV-0001,
+            # INV-0002… A longer one (INV-55120) is that invoice whoever writes it: the customer's remittance for it
+            # links to it. A PO is the buyer's own number, quoted back by the vendor, so one of five digits or more
+            # is one PO whoever writes it.
+            if kind == "invoice" and (plain := _GENERIC_PREFIX.sub("", number)).isdigit() and len(plain) < 5:
                 found.add((kind, f"{domain}|{plain}"))
                 continue
             scoped = number.isdigit() and not (kind == "po" and len(number) >= 5)

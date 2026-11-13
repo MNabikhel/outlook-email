@@ -112,7 +112,10 @@ def test_keys_leave_out_what_links_everything():
         mid="<abc@northwind.com>",
     )
     found = set(links.keys(email))
-    assert ("invoice", "northwind.com|10482") in found and not any(value == "INV10482" for _kind, value in found), "INV-0010482 and 10482 are one vendor's"
+    assert ("invoice", "northwind.com|10482") in found, "10482 alone is one vendor's"
+    assert ("invoice", "INV10482") in found, "INV-0010482 is that invoice whoever writes it, as a customer's remittance does"
+    short = _record("e2", invoices=["INV-0042"])
+    assert ("invoice", "northwind.com|42") in set(links.keys(short)), "a short INV- number (Xero's INV-0042) is one vendor's"
     assert ("po", "77821") in found, "a PO is matched however it is written (PO-77821, PO 77821, 77821)"
     assert ("file", "a" * 64) in found and ("file", "e" * 64) in found
     assert not {("file", "b" * 64), ("file", "c" * 64), ("file", "d" * 64)} & found
