@@ -701,6 +701,10 @@ LOCKED_FILES = (
     "This email is flagged as possible payment fraud, so its files don't open. "
     "Verify it by phone, then mark it safe in its fraud check."
 )
+LOCKED_ORIGINAL = (
+    "This email is flagged as possible payment fraud, so it doesn't open in your mail app or download: there its "
+    "links and files would work. Verify it by phone, then mark it safe in its fraud check."
+)
 
 
 def attachments_locked(email: "EmailRecord") -> bool:

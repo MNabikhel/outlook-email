@@ -983,7 +983,9 @@ def test_a_reading_is_not_saved_over_a_correction_or_verdict_made_meanwhile(stor
     from test_bionic import AgreeingReader
 
     ingest_demo(store, settings, now=NOW_OCT6)
-    first, corrected, flagged = (e.id for e in store.list_emails(model_status="script_draft", order="queue", limit=3))
+    from controller_inbox.overnight import waiting_for_reading
+
+    first, corrected, flagged = (e.id for e in waiting_for_reading(store, 3))
 
     class SlowReader(AgreeingReader):
         def read(self, packet):
@@ -999,7 +1001,7 @@ def test_a_reading_is_not_saved_over_a_correction_or_verdict_made_meanwhile(stor
     assert kept.category.value == "newsletter" and kept.model_status == "corrected"
     verdict = store.get_email(flagged)
     assert {"fraud_risk", "fraud_confirmed"} <= set(verdict.flags)
-    assert verdict.model_status == "script_draft", "read again on the next run, as it is now"
+    assert verdict.model_status == "script_draft", "not read: held mail never goes to the model"
 
 
 def test_a_limit_of_zero_reads_nothing(loaded: Store, settings: Settings):
@@ -1007,7 +1009,7 @@ def test_a_limit_of_zero_reads_nothing(loaded: Store, settings: Settings):
     from test_bionic import AgreeingReader
 
     assert read_queue(loaded, settings, limit=0, reader=AgreeingReader())["read_ids"] == []
-    assert loaded.counts()["waiting_on_bionic"] == 19
+    assert loaded.counts()["waiting_on_bionic"] == 18, "the sample's 19, less the one held as possible fraud"
 
 
 # Another copy of a stored message keeps the files that came with the first ---------------

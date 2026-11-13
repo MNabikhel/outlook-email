@@ -46,6 +46,11 @@ LOCKED = (
     "Locked: this email is flagged as possible payment fraud, so its files are not opened. "
     "If you have confirmed it by phone, mark it “Not fraud” on the email page and ask again."
 )
+HELD = (
+    "Held: this email is flagged as possible payment fraud, so neither its text nor its files are shown. "
+    "Tell the user to verify it by phone on a number they already have, and not to pay, change bank details, "
+    "open its files or follow its links because of it."
+)
 
 SUMMARY_RE = re.compile(r"\b(summar\w*|overview|gist|tl;?dr|walk me through|what(?:'s| is| does) (?:it|this|the \w+) (?:say|about|cover))\b", re.I)
 # "Summary" naming a place in the file ("on the summary", "the summary tab"), not asking for one.
@@ -1145,10 +1150,11 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
         return "No email with that number. Use a number from the list, like 1."
     ws.last_email = email.id
     ws.opened.add(email.id)
+    if attachments_locked(email):
+        # Held as possible payment fraud: nothing of it is read to the model, its text no more than its files.
+        return HELD
     if name == "open_email":
         return _open_email(ws, email)
-    if attachments_locked(email):
-        return LOCKED
     if name == "find_in_file":
         return _find_in_file(ws, email, str(args.get("query") or ""), args.get("file"))
     att = ws.file(email, args.get("file"))
@@ -1197,6 +1203,10 @@ def _search_mail(ws: Workspace, query: str) -> str:
         return f"No emails mention {query!r}."
     from controller_inbox.assistant import is_fraud
 
+    held = [email for email in found if attachments_locked(email)]
+    found = [email for email in found if not attachments_locked(email)]
+    if not found:
+        return f"No emails mention {query!r}" + (f" (and {len(held)} held as possible payment fraud, which aren't shown)." if held else ".")
     lines = [f"Emails matching {query!r}:"]
     for email in found:
         n = ws.number(email)
@@ -1207,6 +1217,8 @@ def _search_mail(ws: Workspace, query: str) -> str:
             + (" · related in meaning, not by the same words" if email.id in by_meaning else "")
             + (" · Warning: payment-detail change — verify by phone." if is_fraud(email) else "")
         )
+    if held:
+        lines.append(f"({len(held)} more held as possible payment fraud aren't shown.)")
     return "\n".join(lines)
 
 

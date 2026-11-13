@@ -381,8 +381,12 @@ def test_the_same_chats_earlier_answer_from_a_now_flagged_emails_files_is_not_gi
 
     monkeypatch.setattr(assistant, "stream_text", stream)
     client = TestClient(web.create_app(settings, store))
+    # With the held email open the model isn't asked at all; asked with nothing open, the chat's history goes to the
+    # model, without that answer's text.
     reply = client.post("/chat", json={"message": "Should I update the vendor's account?", "chat_id": chat_id, "email_id": scam.id},
                         headers={"x-closedesk": "1"})
+    assert reply.status_code == 200 and not sent and "held as possible payment fraud" in reply.text
+    reply = client.post("/chat", json={"message": "Should I update the vendor's account?", "chat_id": chat_id}, headers={"x-closedesk": "1"})
     assert reply.status_code == 200 and sent, reply.text
     prompt = json.dumps(sent)
     assert "5566778899" not in prompt, "text from a fraud-held email's file reached the model through the chat history"

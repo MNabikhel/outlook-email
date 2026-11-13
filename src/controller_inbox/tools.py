@@ -52,7 +52,9 @@ def queue_status(store: Store, settings: Settings) -> dict:
 
 
 def prepare_queue(store: Store, *, limit: int = 20) -> dict:
-    waiting = store.list_emails(model_status="script_draft", order="queue", limit=limit)
+    from controller_inbox.overnight import waiting_for_reading
+
+    waiting = waiting_for_reading(store, limit)
     corrections = store.list_corrections()
     packets = [build_packet(email, corrections) for email in waiting]
     return {"ok": True, "count": len(packets), "packets": packets}

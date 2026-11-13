@@ -699,8 +699,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             codebook=cost_codes.load(settings),
             back=_local_path(next, "/"),
             done=store.is_done(email.id),
-            has_original=original_path(email) is not None,
-            original_downloads=original_downloads(original_path(email)),
+            has_original=original_path(email) is not None and not fraud.attachments_locked(email),
+            original_downloads=original_downloads(original_path(email)) and not fraud.attachments_locked(email),
             files=file_cards(email),
             locked=fraud.attachments_locked(email),
         )
@@ -713,6 +713,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         email = store.get_email(email_id)
         if not email:
             raise HTTPException(status_code=404, detail="Message not found")
+        if fraud.attachments_locked(email):
+            return JSONResponse({"ok": False, "message": fraud.LOCKED_ORIGINAL}, status_code=403)
         download = f"/inbox/{email_id}/original"
         path = original_path(email)
         if path is None:
@@ -743,10 +745,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         email = store.get_email(email_id)
         if not email:
             raise HTTPException(status_code=404, detail="Message not found")
+        # Held as possible fraud, with files or without: in a mail app its links would work.
+        if fraud.attachments_locked(email):
+            raise HTTPException(status_code=403, detail=fraud.LOCKED_ORIGINAL)
         path = original_path(email)
         if path is not None:
-            if fraud.attachments_locked(email) and email.attachments:
-                raise HTTPException(status_code=403, detail=fraud.LOCKED_FILES)
             # A file dropped loose in the inbox is its own original; the attachment rule applies to it too.
             if not original_downloads(path):
                 raise HTTPException(
