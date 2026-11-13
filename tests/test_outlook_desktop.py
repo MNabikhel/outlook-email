@@ -32,7 +32,7 @@ COM_CALLS = {
 # Python's own methods on Python values (strings, dates, lists, sets, this file's own), each on what it is called on:
 # a Python method's name on an Outlook object ("item.replace()", "items.get()") would reach whatever Outlook has by it.
 PYTHON_CALLS_ON = {
-    "append": {"binned", "found", "seen", "stores"}, "astimezone": {"aware_utc(value)", "naive"}, "date": {"item.End", "item.Start"},
+    "absolute": {"Path(dest)"}, "append": {"binned", "found", "seen", "stores"}, "astimezone": {"aware_utc(value)", "naive"}, "date": {"item.End", "item.Start"},
     "get": {"_BUSY", "_IMPORTANCE", "self._by_path"}, "group": {"m"}, "isoformat": {"ends", "item.End.date()", "item.Start.date()", "starts"},
     "lower": {"str(folder.Name)"}, "mkdir": {"dest.parent"}, "now": {"datetime"}, "pop": {"meeting"}, "replace": {"message_id", "value"},
     "split": {"str(field or '')[:50000]"}, "startswith": {"path", "str(message_class or '')"}, "strftime": {"local"},
@@ -300,6 +300,10 @@ class Item(ReadOnly):
 
     def SaveAs(self, path, kind):
         assert kind == 9  # .msg, Unicode
+        if not Path(path).is_absolute():
+            # Outlook is its own program: a relative path is taken from Outlook's folder, not CloseDesk's, and
+            # writing there fails.
+            raise ComError(-2147287037, "Exception occurred.", (4096, "Microsoft Outlook", "The operation failed.", None, 0, -2147287037), None)
         Path(path).write_bytes(b"msg")
         self.saved.append(path)
 
@@ -406,6 +410,16 @@ def test_save_copy_and_locate(outlook, tmp_path):
         session.locate("E-gone", "S1")
     with pytest.raises(NotInOutlook):
         session.save_copy("E-gone", "S1", dest)
+
+
+def test_a_copy_is_saved_by_its_full_path_when_closedesk_s_folder_is_relative(outlook, tmp_path, monkeypatch):
+    # CloseDesk's data folder is "./data" unless set: Outlook was handed "data/outlook-copying/....msg", took it from
+    # its own folder, and every message failed with "The operation failed." (the calendar, read without a file, came).
+    session, items = outlook
+    monkeypatch.chdir(tmp_path)
+    session.save_copy("E-new", "S1", Path("data") / "outlook-copying" / "a.msg")
+    assert (tmp_path / "data" / "outlook-copying" / "a.msg").read_bytes() == b"msg"
+    assert items["E-new"].saved == [str(tmp_path / "data" / "outlook-copying" / "a.msg")]
 
 
 def test_an_outlook_error_that_isnt_not_found_is_not_a_deletion():
