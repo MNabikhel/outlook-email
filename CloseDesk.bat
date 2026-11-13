@@ -89,11 +89,13 @@ if exist ".venv" rmdir /s /q ".venv"
 goto :again
 
 rem Sets PY to the command given when it is a Python 3.11 or newer that runs. (The "python" Windows offers
-rem before one is installed only points at the Store; it fails this, and nothing opens.)
+rem before one is installed only points at the Store; it fails this, and nothing opens.) Only an exit of exactly 0
+rem counts: the "py" of Windows' Python install manager ends below 0 for a version it hasn't got ("No runtime
+rem installed that matches 3.12"). Run with call, so a Python that is itself a .bat file returns here.
 :try
 if defined PY exit /b 0
-%* -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
-if not errorlevel 1 set PY=%*
+call %* -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+if "%ERRORLEVEL%"=="0" set PY=%*
 exit /b 0
 
 rem A Python 3.11 or newer already on this computer.

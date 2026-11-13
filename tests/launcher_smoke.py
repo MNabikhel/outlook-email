@@ -162,6 +162,19 @@ def main() -> int:
     out = run(folder, "--update", env={"CLOSEDESK_UPDATE_URL": archive.as_uri()})
     assert "already the newest" in out
 
+    if WINDOWS and not own:
+        # Windows' Python install manager has its own "py", which ends below 0 for a version it hasn't got. Taken
+        # for a Python that runs, CloseDesk stopped on "No runtime installed that matches 3.12".
+        manager = work / "install manager"
+        manager.mkdir()
+        (manager / "py.cmd").write_text(
+            '@echo [ERROR] No runtime installed that matches 3.12. Try running "py install 3.12".\r\n@exit /b -1\r\n',
+            encoding="ascii",
+        )
+        shutil.rmtree(folder / ".venv")
+        out = run(folder, "--check", env={"PATH": f"{manager}{os.pathsep}{os.environ['PATH']}"})
+        assert "No runtime installed" not in out and "Everything CloseDesk needs is in order." in out, out
+
     shutil.rmtree(work, ignore_errors=True)
     print("Launcher smoke test passed.", flush=True)
     return 0

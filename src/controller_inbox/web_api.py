@@ -1145,7 +1145,9 @@ def register_workspace(
                 "pinned": choice["pinned"],
                 "env_model": settings.llm_model if choice["pinned"] else "",
                 "current": choice["current"],
-                "models": [{"key": key, "loaded": key in choice["loaded"]} for key in choice["models"]],
+                "models": [
+                    {"key": key, "loaded": key in choice["loaded"], "too_big": choice["too_big"].get(key, "")} for key in choice["models"]
+                ],
                 "min_context_tokens": settings.min_context_tokens,
             },
             "context": {

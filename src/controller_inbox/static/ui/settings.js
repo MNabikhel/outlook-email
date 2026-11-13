@@ -406,8 +406,17 @@ export function createSettings(ctx) {
       "select",
       { id: "set-chat", class: "set-select", name: "model", required: true },
       chat.current ? null : h("option", { value: "" }, "Choose a model"),
-      chat.models.map((item) => h("option", { value: item.key, selected: item.key === chat.current }, `${item.key}${item.loaded ? " (loaded)" : ""}`))
+      chat.models.map((item) =>
+        h("option", { value: item.key, selected: item.key === chat.current }, `${item.key}${item.loaded ? " (loaded)" : ""}${item.too_big ? " (likely too big for this computer)" : ""}`)
+      )
     );
+    // A model too big for this computer's memory is still offered; choosing it says why it will likely fail.
+    const tooBig = (key) => (chat.models.find((item) => item.key === key) || {}).too_big || "";
+    const warning = h("p", { class: "set-help set-warn", id: "set-chat-too-big", role: "status", hidden: !tooBig(chat.current) }, tooBig(chat.current));
+    select.addEventListener("change", () => {
+      warning.textContent = tooBig(select.value);
+      warning.hidden = !warning.textContent;
+    });
     const min = chat.min_context_tokens;
     return h(
       "form",
@@ -422,6 +431,7 @@ export function createSettings(ctx) {
       },
       h("h3", { class: "set-sub" }, "Model that answers your questions"),
       h("div", { class: "set-inline" }, select, h("button", { type: "submit", class: "btn btn-primary btn-sm" }, "Load and use")),
+      warning,
       h(
         "p",
         { class: "set-help" },

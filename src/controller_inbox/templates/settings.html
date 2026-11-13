@@ -85,15 +85,26 @@
         <select name="model" required>
           {% if not chat_choice.current %}<option value="">Choose a model</option>{% endif %}
           {% for key in chat_choice.models %}
-          <option value="{{ key }}" {{ 'selected' if key == chat_choice.current }}>{{ key }}{% if key in chat_choice.loaded %} (loaded){% endif %}</option>
+          <option value="{{ key }}" {{ 'selected' if key == chat_choice.current }}{% if key in chat_choice.too_big %} data-too-big="{{ chat_choice.too_big[key] }}"{% endif %}>{{ key }}{% if key in chat_choice.loaded %} (loaded){% endif %}{% if key in chat_choice.too_big %} (likely too big for this computer){% endif %}</option>
           {% endfor %}
         </select>
       </label>
       <button type="submit" data-loading="Loading in LM Studio…">Load and use</button>
+      {% set too_big_now = chat_choice.too_big.get(chat_choice.current, '') %}
+      <p class="warn-box small" data-too-big-note{% if not too_big_now %} hidden{% endif %}>{{ too_big_now }}</p>
       <p class="muted small">CloseDesk has LM Studio load it{% if settings.min_context_tokens %} with a {{ '{:,}'.format(settings.min_context_tokens) }}-token context (or the most it supports){% endif %} and unload the other chat model, so the two don't share the memory. The page reader and the search model are left as they are. Loading can take a minute or two, and an answer being written then stops.</p>
       {% endif %}
     </form>
     <script>
+      // A model too big for this computer's memory is still offered; choosing it says why it will likely fail.
+      document.querySelectorAll('#chat-model select[name=model]').forEach(function (select) {
+        var note = select.form.querySelector('[data-too-big-note]');
+        select.addEventListener('change', function () {
+          var warning = select.selectedOptions[0] ? select.selectedOptions[0].dataset.tooBig || '' : '';
+          note.textContent = warning;
+          note.hidden = !warning;
+        });
+      });
       document.querySelectorAll('[data-loading]').forEach(function (button) {
         button.form.addEventListener('submit', function () { button.disabled = true; button.textContent = button.dataset.loading; });
       });
