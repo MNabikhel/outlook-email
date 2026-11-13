@@ -57,11 +57,13 @@ def extract_actions(
     received_on: date | None = None,
     entered_elsewhere: bool = False,
     invitation: str = "",
+    meeting_over: bool = False,
 ) -> list[ActionItem]:
     """Tasks for a message.
 
     ``invitation`` is what its invitation is (``calendar_events.invitation_method``): only a request (or a meeting
-    sent for the calendar) asks for an answer; a cancellation, an answer or a proposed new time doesn't.
+    sent for the calendar) asks for an answer; a cancellation, an answer or a proposed new time doesn't, nor does an
+    invitation to a meeting already over (``meeting_over``, ``calendar_events.all_over``).
 
     ``as_of`` is today: task priorities and "due today" are measured from it. Relative dates in
     the text ("by Friday", "tomorrow") are read from ``received_on``, the day the message arrived
@@ -217,7 +219,7 @@ def extract_actions(
     elif category == DocumentType.REPLY_NEEDED and not body_tasks:
         who = (sender or "the sender").split("<")[0].strip() or "the sender"
         add(f"Reply to {who}: {subject}", "They asked you something and are waiting on an answer.", due, _due_priority(due, as_of, importance), "reply")
-    elif category == DocumentType.MEETING and (
+    elif category == DocumentType.MEETING and not meeting_over and (
         invitation in ("REQUEST", "PUBLISH", "ADD")
         if invitation
         else (has_invite or re.match(r"\s*(?:updated\s+)?invitation:.*\s@\s", subject or "", re.I))

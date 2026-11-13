@@ -264,6 +264,10 @@ def extract_text_from_bytes(filename: str, content_type: str, data: bytes) -> st
             return structured
         if name.endswith((".txt", ".md")) or ctype.startswith("text/plain"):
             return decode_text(data)[:400_000]
+        if name.endswith((".ics", ".vcs")) or "calendar" in ctype:
+            # An invitation is kept whole: its meetings are read again from it overnight, after an update and when
+            # a hold is cleared, and a sample cut short of its END:VEVENT holds no meeting.
+            return decode_text(data)[:400_000]
         if name.endswith(".rtf") or "rtf" in ctype:
             return _rtf_text(data)
         if "html" in ctype or name.endswith((".html", ".htm")):

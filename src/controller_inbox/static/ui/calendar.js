@@ -53,10 +53,20 @@ function title(view, date) {
   return `${fmt(first, { month: "long", day: "numeric" })} – ${end}, ${last.getUTCFullYear()}`;
 }
 
-/** The meetings on one day: all-day ones covering it, then the others starting it, earliest first. */
+/** The meetings on one day: all-day ones covering it, then the others on it (starting it, or running into it from
+ * the day before: 10pm to 2am, or Monday to Wednesday), earliest first. */
 function onDay(meetings, day) {
   const text = dayText(day);
-  return meetings.filter((m) => (m.all_day ? m.start <= text && m.end > text : m.start.slice(0, 10) === text));
+  const next = dayText(addDays(day, 1));
+  return meetings.filter((m) => (m.all_day ? m.start <= text && m.end > text : m.start.slice(0, 10) === text || (m.start < next && m.end > `${text}T00:00`)));
+}
+
+/** A timed meeting's minutes on one day: from its start (the day's start, when it began before), to its end (the
+ * day's end, when it runs on after). */
+function minutesOn(m, text) {
+  const start = m.start.slice(0, 10) < text ? 0 : minutesOf(m.start);
+  const end = m.end.slice(0, 10) > text ? 24 * 60 : minutesOf(m.end);
+  return [start, end];
 }
 
 /* ---------- The page ---------- */
@@ -188,8 +198,9 @@ function timeGrid(data, view, date, open) {
   for (let day = first; day <= last; day = addDays(day, 1)) days.push(day);
   const timed = data.meetings.filter((m) => !m.all_day);
   // 7am to 7pm, stretched to the earliest and latest meeting shown.
-  const starts = timed.map((m) => minutesOf(m.start));
-  const ends = timed.map((m) => (m.end.slice(0, 10) > m.start.slice(0, 10) ? 24 * 60 : minutesOf(m.end)));
+  const spans = days.flatMap((day) => onDay(timed, day).map((m) => minutesOn(m, dayText(day))));
+  const starts = spans.map(([start]) => start);
+  const ends = spans.map(([, end]) => end);
   const from = Math.min(7 * 60, ...starts.map((m) => Math.floor(m / 60) * 60));
   const to = Math.max(19 * 60, ...ends.map((m) => Math.ceil(m / 60) * 60));
   const hourPx = 48;
@@ -215,9 +226,9 @@ function timeGrid(data, view, date, open) {
       "ul",
       { class: `cal-col${dayText(day) === data.today ? " today" : ""}`, style: { height: `${((to - from) / 60) * hourPx}px` }, "aria-label": fmt(day, { weekday: "long", month: "long", day: "numeric" }) },
       ...meetings.map((m) => {
-        const top = ((minutesOf(m.start) - from) / 60) * hourPx;
-        const end = m.end.slice(0, 10) > m.start.slice(0, 10) ? to : minutesOf(m.end);
-        const height = Math.max(20, ((end - minutesOf(m.start)) / 60) * hourPx - 2);
+        const [start, end] = minutesOn(m, dayText(day));
+        const top = ((start - from) / 60) * hourPx;
+        const height = Math.max(20, ((Math.min(end, to) - start) / 60) * hourPx - 2);
         const { lane, of } = lanes.get(m.id);
         const block = chip(m, open, { time: true });
         block.classList.add("cal-block");

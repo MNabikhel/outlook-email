@@ -130,6 +130,7 @@ class GraphMailbox:
     def __init__(self, client: GraphClient):
         self.client = client
         self._own_addresses: set[str] | None = None
+        self._meeting_messages: set[str] = set()  # meeting requests, updates and cancellations (eventMessage)
 
     def list_messages(self, received_after: datetime | None = None) -> Iterable[RawMessage]:
         # Graph rejects a sort on a property unless the filter names it first ("InefficientFilter"),
@@ -195,7 +196,22 @@ class GraphMailbox:
                 )
             elif odata_type.endswith("itemAttachment"):
                 attachments.extend(self._item_attachment(message_id, item))
+        if message_id in self._meeting_messages and not any(_calendar_file(att) for att in attachments):
+            attachments.extend(self._meeting_calendar(message_id))
         return attachments
+
+    def _meeting_calendar(self, message_id: str) -> list[RawAttachment]:
+        """A meeting request's invitation: Microsoft 365 attaches no .ics to it, the calendar is only in the
+        message's MIME (``$value``, which Mail.Read reads), kept as the invite file it is. [] when it can't be read:
+        the email is still read."""
+        from controller_inbox.folder_mail import _eml_content
+
+        try:
+            mime = self.client.get_bytes(f"{self.client._user_root()}/messages/{message_id}/$value")
+            _body, files = _eml_content(BytesParser(policy=policy.default).parsebytes(mime or b""))
+        except Exception:
+            return []
+        return [att for att in files if _calendar_file(att)][:1]
 
     def _item_attachment(self, message_id: str, item: dict[str, Any]) -> list[RawAttachment]:
         """A forwarded email (or other Outlook item) attached as an item. ``$value`` is its MIME,
@@ -215,6 +231,9 @@ class GraphMailbox:
 
     def _to_raw(self, item: dict[str, Any]) -> RawMessage:
         sender = (item.get("from") or {}).get("emailAddress") or {}
+        meeting = "eventmessage" in str(item.get("@odata.type") or "").lower()
+        if meeting:
+            self._meeting_messages.add(item["id"])
         body = item.get("body") or {}
         content = body.get("content") or ""
         if (body.get("contentType") or "").lower() == "html":
@@ -230,7 +249,7 @@ class GraphMailbox:
             received_at=received_dt,
             body_text=text,
             body_preview=item.get("bodyPreview") or text[:240],
-            has_attachments=bool(item.get("hasAttachments")),
+            has_attachments=bool(item.get("hasAttachments")) or meeting,  # a meeting request's calendar is read with them
             outlook_importance=(item.get("importance") or "normal").lower(),
             is_read=bool(item.get("isRead")),
             conversation_id=item.get("conversationId") or "",
@@ -242,6 +261,10 @@ class GraphMailbox:
             # told from its senders and recipients (links.new_domains).
             threading=links.threading(to=_recipients(item)),
         )
+
+
+def _calendar_file(att: RawAttachment) -> bool:
+    return (att.filename or "").lower().endswith((".ics", ".vcs")) or "calendar" in (att.content_type or "").lower()
 
 
 def _recipients(item: dict[str, Any]) -> list[str]:
