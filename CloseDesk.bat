@@ -55,26 +55,25 @@ exit /b 1
 :start
 if defined UV set "CLOSEDESK_UV=%UV%"
 if defined GETPY goto :start_plain
-rem An update replaces this file while it runs, so that one is run from a block read whole beforehand. With
-rem call, a Python that is a .bat file comes back here too.
+rem An update replaces this file while it runs, so that one is run from a block read whole beforehand.
 if /i "%~1"=="--update" (
-  call %PY% scripts\launch.py %*
+  %PY% scripts\launch.py %*
   echo.
   pause
   exit /b
 )
-call %PY% scripts\launch.py %*
+%PY% scripts\launch.py %*
 goto :ran
 
 rem After --get-python: the rest of the line is passed on, without it.
 :start_plain
 if /i "%~2"=="--update" (
-  call %PY% scripts\launch.py %2 %3 %4 %5 %6 %7 %8 %9
+  %PY% scripts\launch.py %2 %3 %4 %5 %6 %7 %8 %9
   echo.
   pause
   exit /b
 )
-call %PY% scripts\launch.py %2 %3 %4 %5 %6 %7 %8 %9
+%PY% scripts\launch.py %2 %3 %4 %5 %6 %7 %8 %9
 
 :ran
 set "CODE=%ERRORLEVEL%"
@@ -90,16 +89,11 @@ if exist ".venv" rmdir /s /q ".venv"
 goto :again
 
 rem Sets PY to the command given when it is a Python 3.11 or newer that runs. (The "python" Windows offers
-rem before one is installed only points at the Store; it fails this, and nothing opens.) Only an exit of exactly 0
-rem counts: the "py" of Windows' Python install manager ends below 0 for a version it hasn't got ("No runtime
-rem installed that matches 3.12"). A name (py, python) is run with call, so one that is a .bat file (pyenv-win's)
-rem comes back here; a path to an .exe is run as it is, so a % or ^ in it is kept.
+rem before one is installed only points at the Store; it fails this, and nothing opens.)
 :try
 if defined PY exit /b 0
-set "RUNPY=call"
-if /i "%~x1"==".exe" set "RUNPY="
-%RUNPY% %* -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
-if "%ERRORLEVEL%"=="0" set PY=%*
+%* -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+if not errorlevel 1 set PY=%*
 exit /b 0
 
 rem A Python 3.11 or newer already on this computer.
