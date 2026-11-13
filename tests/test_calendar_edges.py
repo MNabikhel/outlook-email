@@ -424,20 +424,14 @@ def test_extra_dates_of_a_repeating_meeting_are_kept_and_an_all_day_ones_skipped
 
 
 def test_a_repeating_meeting_at_a_floating_time_keeps_its_local_time_after_the_clock_change(monkeypatch):
-    import time
-
     from zoneinfo import ZoneInfo
 
-    monkeypatch.setenv("TZ", "America/New_York")
-    time.tzset()
-    monkeypatch.setattr(cal, "_local_zone", lambda: ZoneInfo("America/New_York"), raising=False)  # tzlocal keeps the first it found
-    try:
-        data = _ics(_event("UID:fl", "SUMMARY:Standup", "DTSTART:20261019T090000", "DTEND:20261019T093000", "RRULE:FREQ=WEEKLY;COUNT=4"))
-        local = [datetime.fromisoformat(m.start).astimezone().strftime("%m-%d %H:%M") for m in cal.from_ics(data, now=NOW)]
-        assert local == ["10-19 09:00", "10-26 09:00", "11-02 09:00", "11-09 09:00"]
-    finally:
-        monkeypatch.delenv("TZ")
-        time.tzset()
+    # The computer's zone is what CloseDesk asks for; set here directly (time.tzset is not on Windows).
+    new_york = ZoneInfo("America/New_York")
+    monkeypatch.setattr(cal, "_local_zone", lambda: new_york, raising=False)
+    data = _ics(_event("UID:fl", "SUMMARY:Standup", "DTSTART:20261019T090000", "DTEND:20261019T093000", "RRULE:FREQ=WEEKLY;COUNT=4"))
+    local = [datetime.fromisoformat(m.start).astimezone(new_york).strftime("%m-%d %H:%M") for m in cal.from_ics(data, now=NOW)]
+    assert local == ["10-19 09:00", "10-26 09:00", "11-02 09:00", "11-09 09:00"]
 
 
 def test_the_update_catch_up_reads_outlook_meeting_requests_an_older_version_filed_by_their_subject(store):
