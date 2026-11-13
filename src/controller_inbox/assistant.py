@@ -41,7 +41,9 @@ from controller_inbox.local_llm import (
     context_length,
     context_target,
     ensure_context,
+    MEMORY_ADVICE,
     failure_note,
+    ran_out_of_memory,
     llm_active,
     needs_more_context,
     reader_load_problem,
@@ -1577,7 +1579,8 @@ def answer_stream(
         yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
     except Exception as exc:  # any model failure falls back to the lookup answer
         if state["wrote"]:
-            yield {"type": "delta", "text": "\n\n(The local model stopped answering partway.)"}
+            why = f" {MEMORY_ADVICE}" if ran_out_of_memory(exc) else ""
+            yield {"type": "delta", "text": f"\n\n(The local model stopped answering partway.{why})"}
         else:
             note = failure_note(exc)
             if isinstance(exc, ContextOverflow):

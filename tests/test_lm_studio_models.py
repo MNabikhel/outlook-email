@@ -30,6 +30,8 @@ class LMStudio:
         self.asked: list[str] = []
         self.timeouts: list[float] = []
         self.fails_to_load: set[str] = set()  # not enough memory for these
+        self.answer_error = ""  # "status": a 500 for the answer, "stream": an error written into the stream
+        self.sizes: dict[str, int] = {}  # each model's download size, as LM Studio reports it
         self.calls: list[tuple] = []  # loads and unloads, in order
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
@@ -44,7 +46,8 @@ class LMStudio:
 
             def item(kind, key, **extra):
                 instances = [{"id": key, "config": {"context_length": self.contexts.get(key, 4096)}}] if key in self.loaded else []
-                return {"type": kind, "key": key, "loaded_instances": instances, **extra}
+                sized = {"size_bytes": self.sizes[key]} if key in self.sizes else {}
+                return {"type": kind, "key": key, "loaded_instances": instances, **sized, **extra}
 
             models = [
                 item("llm", CODER, max_context_length=32768),
@@ -70,6 +73,11 @@ class LMStudio:
             payload = json.loads(request.content)
             self.asked.append(payload["model"])
             self.timeouts.append(request.extensions["timeout"]["read"])
+            if self.answer_error == "status":
+                return httpx.Response(500, json={"error": {"code": 500, "message": "Compute error."}})
+            if self.answer_error == "stream" and payload.get("stream"):
+                body = 'data: {"error": {"code": 500, "message": "Compute error."}}\n\n'
+                return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
             if payload.get("stream"):
                 body = 'data: {"choices": [{"delta": {"content": "It is $12,480."}}]}\n\ndata: [DONE]\n\n'
                 return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
@@ -199,7 +207,7 @@ def test_a_model_lm_studio_cant_load_leaves_the_one_before_answering(settings, m
     server.fails_to_load = {CODER}
     _serve(monkeypatch, server)
     problem = use_chat_model(settings, CODER)
-    assert problem == f"LM Studio couldn't load {CODER} (not enough memory to load the model). {CHAT} was loaded back."
+    assert problem == f"LM Studio couldn't load {CODER} (not enough memory to load the model). {CHAT} was loaded back. {local_llm.MEMORY_ADVICE}"
     assert server.loaded == [CHAT] and server.contexts[CHAT] == 16384, "loaded back as it was"
     assert check_model(settings).model == CHAT
     # Not a chat model LM Studio has (the page reader isn't one), or LM Studio stopped: nothing is touched.
@@ -326,7 +334,7 @@ def test_the_workspace_settings_offer_the_chat_models_and_load_the_one_chosen(se
     server.fails_to_load = {CODER}
     refused = client.post("/api/settings/chat-model", json={"model": CODER}, headers=page)
     assert refused.status_code == 409
-    assert refused.json()["detail"] == f"The model that answers wasn't changed. LM Studio couldn't load {CODER} (not enough memory to load the model). {CHAT} was loaded back."
+    assert refused.json()["detail"] == f"The model that answers wasn't changed. LM Studio couldn't load {CODER} (not enough memory to load the model). {CHAT} was loaded back. {local_llm.MEMORY_ADVICE}"
     # A model named in .env answers whatever is loaded: Settings say where it is set instead of offering a list.
     settings.llm_model = CODER
     local_llm._status_cache.clear()

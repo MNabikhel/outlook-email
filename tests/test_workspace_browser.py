@@ -217,3 +217,36 @@ def test_a_long_unbroken_subject_wraps_on_a_phone(settings, store, page):
             page.goto(base + classic)
             wide = page.evaluate("() => [document.documentElement.scrollWidth, window.innerWidth]")
             assert wide[0] <= wide[1], (classic, wide)
+
+
+# Settings ------------------------------------------------------------------------------------------------------
+
+
+def test_choosing_a_model_too_big_for_this_computer_says_so_on_both_settings_pages(settings, store, page, monkeypatch):
+    from test_lm_studio_models import CHAT, CODER, LMStudio, _serve
+
+    from controller_inbox import model_roles
+
+    gb = 1024**3
+    settings.llm = None
+    server = LMStudio(loaded=[CHAT])
+    server.sizes = {CODER: 19 * gb, CHAT: 5 * gb}
+    _serve(monkeypatch, server)
+    monkeypatch.setattr(model_roles, "computer_memory", lambda: 16 * gb)
+    with serving(web.create_app(settings, store)) as base:
+        for size in (WIDE, PHONE):
+            page.set_viewport_size(size)
+            page.goto(f"{base}/app/settings")
+            page.wait_for_selector("#set-chat")
+            note = page.locator("#set-chat-too-big")
+            assert not note.is_visible(), "the one loaded fits"
+            page.select_option("#set-chat", CODER)
+            assert note.is_visible() and "needs about 21 GB" in note.inner_text() and "3B to 8B" in note.inner_text()
+            assert page.evaluate("() => document.documentElement.scrollWidth <= innerWidth"), "no sideways scroll"
+            page.select_option("#set-chat", CHAT)
+            assert not note.is_visible()
+        page.goto(f"{base}/settings")
+        note = page.locator("[data-too-big-note]")
+        assert not note.is_visible()
+        page.select_option("#chat-model select[name=model]", CODER)
+        assert note.is_visible() and "needs about 21 GB" in note.inner_text()
