@@ -1496,7 +1496,11 @@ def answer_stream(
     # the answer is a fixed one (why it is held, and what to do); among other mail, the model is told only that it
     # is there (who sent it, when, its subject) and that it is held (``_source_block``).
     held_open = next((email for email in sources if email.id == email_id and attachments_locked(email)), None)
-    if held_open is not None:
+    # Only a question about the held email itself gets the fixed answer: one about the calendar, today or other mail
+    # is answered as usual, with the held email in it by its header alone.
+    mail = [email for email in sources if email.source != "calendar"]
+    elsewhere = bool(_ELSEWHERE.search(question)) or about_today or asks_about_meetings(question)
+    if held_open is not None and (len(mail) == 1 or on_screen_question(question) or not elsewhere):
         yield {"type": "sources", "sources": source_cards([held_open], settings), "mode": "lookup", "warning": FRAUD_WARNING}
         yield {"type": "delta", "text": held_answer(store, held_open)}
         yield {"type": "done"}

@@ -352,3 +352,10 @@ def test_trusting_a_taught_sender_releases_all_their_mail(store, settings):
     held = _taught_sender(store, settings)
     record_fraud_verdict(store, settings, held[0], verdict="safe", scope="sender")
     assert not any(attachments_locked(store.get_email(email_id)) for email_id in held)
+
+
+def test_with_a_held_email_open_a_question_about_other_things_is_answered_as_usual(loaded, settings, model):
+    calendar = _answer(loaded, settings, "What meetings do I have tomorrow?", HELD)
+    assert "held as possible payment fraud [1], so I don't read it" not in calendar
+    assert model and not any(word in prompt.lower() for prompt in model for word in SAYS)
+    assert "held as possible payment fraud" in _answer(loaded, settings, "Is this legit?", HELD)
