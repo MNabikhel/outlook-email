@@ -2,7 +2,7 @@
    calendar (read only) and the invitations that came by mail. A meeting opens beside the calendar with the mail
    about it. Keys: t today, d / w / m day, week, month, ← / → back and on. */
 
-import { h, icon, plural } from "./dom.js";
+import { h, icon, plural, replace } from "./dom.js";
 import { clockTime as timeLabel, meetingTime } from "./format.js";
 
 const enc = encodeURIComponent;
@@ -21,6 +21,9 @@ const addDays = (date, n) => new Date(date.getTime() + n * DAY_MS);
 const mondayOf = (date) => addDays(date, -((date.getUTCDay() + 6) % 7));
 const minutesOf = (stamp) => Number(stamp.slice(11, 13)) * 60 + Number(stamp.slice(14, 16));
 const fmt = (date, options) => date.toLocaleDateString(undefined, { timeZone: "UTC", ...options });
+
+/** Whether ``text`` is a day the calendar can show ("2026-10-05"): an edited or saved address may hold anything. */
+export const isDay = (text) => /^\d{4}-\d{2}-\d{2}$/.test(text) && !Number.isNaN(parseDay(text).getTime());
 
 /** The days a view shows around ``date``: its first and last. */
 export function rangeOf(view, date) {
@@ -131,6 +134,10 @@ function sourceNote(source) {
   }
   if (source.calendar) {
     return h("p", { class: "cal-note muted small" }, icon("ok", 13), ` Your Outlook calendar, read only; read ${source.calendar_last}. Meeting invitations in your mail show here too.`);
+  }
+  if (source.sample) {
+    // Only the sample mailbox is loaded: these meetings came with it, not from invitations in anyone's mail.
+    return h("p", { class: "cal-note muted small" }, icon("info", 13), " The sample calendar. Your own meetings show here once your mail is in.");
   }
   if (source.outlook_available) {
     return h(
@@ -292,7 +299,9 @@ async function showMeeting(panel, meeting, ctx) {
     icon("chat", 14),
     "Ask about this meeting"
   );
-  panel.replaceChildren(
+  // replace() leaves out what is null (a meeting with no caution), where replaceChildren would write "null".
+  replace(
+    panel,
     h("h2", { class: "cal-panel-title", tabindex: "-1" }, meeting.subject, meeting.cancelled ? h("span", { class: "tag tag-fraud" }, "Cancelled") : null, meeting.recurring ? h("span", { class: "tag" }, "Repeats") : null),
     meeting.caution ? h("p", { class: "tag tag-due_soon cal-caution-note" }, icon("alert", 13), " ", meeting.caution) : null,
     h("dl", { class: "cal-facts" }, ...facts.flatMap(([k, v]) => [h("dt", null, k), h("dd", null, v)])),

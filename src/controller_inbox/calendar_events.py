@@ -1134,7 +1134,13 @@ def utc_range(first: date, last: date, tz) -> tuple[str, str]:
 
 
 _TITLE_NOISE = frozenset("""meeting call sync review weekly daily monthly catch up catchup check in checkin with and the for
-of on re fw fwd invitation invite updated accepted tentative declined canceled cancelled zoom teams""".split())
+of on re fw fwd invitation invite updated accepted tentative declined canceled cancelled zoom teams all""".split())
+_TITLE_WORD = re.compile(r"[A-Za-z][A-Za-z0-9&'-]{2,}|\d{3,}")
+
+
+def _title_words(text: str) -> list[str]:
+    """The words of a title or subject, lowercased, each once, in order: "all entities, all accounts" has "all" once."""
+    return list(dict.fromkeys(w.strip("'-").lower() for w in _TITLE_WORD.findall(text or "")))
 
 
 def related_mail(store, meeting: dict, *, limit: int = 8) -> list:
@@ -1144,7 +1150,7 @@ def related_mail(store, meeting: dict, *, limit: int = 8) -> list:
     found = []
     if meeting.get("email_id") and (invite := store.get_email(meeting["email_id"])) is not None:
         found.append(invite)
-    words = [w for w in re.findall(r"[A-Za-z][A-Za-z0-9&'-]{2,}|\d{3,}", meeting.get("subject") or "") if w.lower() not in _TITLE_NOISE]
+    words = [w for w in _title_words(meeting.get("subject") or "") if w not in _TITLE_NOISE]
     people = [re.sub(r".*<|>.*", "", person).strip().lower() for person in [meeting.get("organizer") or "", *meeting.get("attendees", [])]]
     addresses = {person for person in people if "@" in person}
     when = datetime.fromisoformat(meeting["start"]) if "T" in meeting["start"] else datetime.combine(date.fromisoformat(meeting["start"][:10]), time(), tzinfo=timezone.utc)
@@ -1160,7 +1166,9 @@ def related_mail(store, meeting: dict, *, limit: int = 8) -> list:
         received = received if received.tzinfo else received.replace(tzinfo=timezone.utc)
         if abs(received - when) > timedelta(days=14):
             continue
-        named = sum(1 for word in words if word.lower() in (email.subject or "").lower())
+        # Whole words of the subject: "all" isn't named by "call", nor "pay" by "payroll".
+        subject_words = set(_title_words(email.subject or ""))
+        named = sum(1 for word in words if word in subject_words)
         from_people = (email.sender_email or "").lower() in addresses
         if (named >= min(2, len(words)) or (named and from_people)) and email.id not in {e.id for e in found}:
             found.append(email)

@@ -80,7 +80,7 @@ def ocr_row() -> dict:
         return {"role": "Reads scans as they arrive (OCR)", "model": engine, "state": "on", "note": "",
                 "status": "On this computer: a scan's text is there in seconds, before the page reader runs."}
     return {"role": "Reads scans as they arrive (OCR)", "model": "", "state": "off", "note": "",
-            "status": 'Not installed: scans wait for the page reader. Run pip install -e ".[ocr]" to add it.'}
+            "status": "Not installed: scans wait for the page reader. " + ocr.missing_note(why_only=True)}
 
 
 def chat_choices(settings: Settings, status: ModelStatus) -> dict | None:

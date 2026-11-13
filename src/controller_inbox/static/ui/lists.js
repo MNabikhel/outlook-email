@@ -168,6 +168,8 @@ export async function loadList(spec, signal, want = MAIL_PAGE) {
 /* ---------- Rows ---------- */
 
 const chip = (text, cls = "", iconName = "") => h("span", { class: `chip ${cls}` }, iconName ? icon(iconName, 12) : null, text);
+// Held as possible payment fraud: "Files locked" when it has files; without any, that it is held (no files to look for).
+const heldChip = (d) => (d.files ? chip("Files locked", "chip-danger", "lock") : chip("Held: possible fraud", "chip-danger", "alert"));
 
 function mailRow(d) {
   return [
@@ -177,7 +179,7 @@ function mailRow(d) {
     h(
       "div",
       { class: "item-meta" },
-      d.locked ? chip("Files locked", "chip-danger", "lock") : d.caution ? chip("Check before paying", "chip-warn", "alert") : null,
+      d.locked ? heldChip(d) : d.caution ? chip("Check before paying", "chip-warn", "alert") : null,
       d.amount_label ? chip(d.amount_label, "chip-num") : null,
       d.due ? chip(`Due ${d.due}`) : null,
       d.files ? chip(String(d.files), "", "clip") : null,
@@ -201,7 +203,7 @@ function focusRow(d) {
       ? h(
           "div",
           { class: "item-meta" },
-          d.locked ? chip("Files locked", "chip-danger", "lock") : null,
+          d.locked ? heldChip(d) : null,
           d.more_tasks ? chip(`+${plural(d.more_tasks, "more task")}`) : null,
           d.files ? chip(String(d.files), "", "clip") : null
         )

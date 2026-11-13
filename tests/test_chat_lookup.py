@@ -177,3 +177,16 @@ def test_held_mail_of_a_matter_or_about_a_meeting_is_no_source(store, settings):
     meeting = {"id": "m1", "uid": "u1", "subject": "Budget review", "start": "2026-10-07T15:00:00+00:00", "end": "2026-10-07T16:00:00+00:00",
                "email_id": "held", "organizer": "ar@northwlnd.com", "attendees": [], "all_day": False, "location": "", "source": "invite", "cancelled": False, "recurring": False, "busy": ""}
     assert "held" not in {email.id for email in assistant.meeting_sources(store, settings, meeting)}
+
+
+def test_a_meetings_mail_isnt_quoted_twice_when_its_summary_is_its_first_line(settings):
+    from controller_inbox import assistant
+
+    invite = _record("inv", "Invitation: Q4 budget walkthrough", "Let's walk through the Q4 budget draft together. Bring the variance notes.",
+                     sender="Maya Chen", address="maya@taz.com")
+    invite.summary = "Meeting / calendar: Let's walk through the Q4 budget draft together."
+    meeting = {"subject": "Q4 budget walkthrough", "start": "2026-11-12T11:00:00+00:00", "end": "2026-11-12T12:00:00+00:00", "all_day": False,
+               "location": "", "organizer": "", "cancelled": False}
+    question = "What do I need to know before “Q4 budget walkthrough” (Thursday, November 12 · 6am–7am)?"
+    text = assistant._meeting_answer("A lookup.", question, [invite], meeting, {"inv": 1}, settings.tz)
+    assert text.count("Let's walk through the Q4 budget draft together.") == 1, text

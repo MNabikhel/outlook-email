@@ -1197,3 +1197,32 @@ def test_a_repeating_meeting_that_ended_stays_on_the_calendar_when_its_repeats_a
         conn.execute("DELETE FROM meetings")
     cal.catch_up_invites(store, settings, now=datetime(2026, 11, 12, tzinfo=timezone.utc))
     assert january() == shown
+
+
+def test_a_meetings_mail_matches_its_title_by_whole_words_each_counted_once(store):
+    """'all' twice in the title, and inside 'call' in a subject, isn't two of the title's words named."""
+    import sys
+
+    sys.path.insert(0, "tests")
+    from test_links import _record
+
+    scam = _record("scam", sender="billing@acme-payments.net", received="2026-10-28T09:00:00+00:00")
+    scam.subject = "Invitation: Vendor bank details update call"
+    scam.body_text = "Join the call about all accounts and the new bank details for all entities."
+    near = _record("near", sender="audit@taz.com", received="2026-10-27T09:00:00+00:00")
+    near.subject = "Reconciliation review: external auditors' list"
+    for email in (scam, near):
+        store.upsert_email(email)
+    meeting = {"subject": "Quarterly reconciliation review with external auditors and the controller's office, all entities, all accounts",
+               "start": "2026-10-30T14:00:00+00:00", "organizer": "", "attendees": [], "email_id": ""}
+    assert [e.id for e in cal.related_mail(store, meeting)] == ["near"]
+
+
+def test_the_sample_calendar_says_it_is_the_sample(loaded, settings):
+    from fastapi.testclient import TestClient
+    from helpers import PAGE
+
+    from controller_inbox.web import create_app
+
+    client = TestClient(create_app(settings, loaded), headers=PAGE)
+    assert client.get("/api/calendar?start=2026-09-21&end=2026-09-27").json()["source"]["sample"] is True

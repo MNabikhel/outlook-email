@@ -546,10 +546,10 @@ export function createSettings(ctx) {
       "eye",
       "Scanned PDFs and pictures are read with OCR on this computer, and with a model that can look at pages when there is one.",
       h("div", { class: `set-banner ${v.sees && v.mode !== "off" && !v.missing ? "on" : "off"}` }, h("span", { class: "dot", "aria-hidden": "true" }), h("div", null, h("p", null, state))),
-      v.renderer ? null : h("p", { class: "note" }, "The page renderer isn't installed. Double-click CloseDesk once (or run ", code("pip install -e ."), ") to add it."),
+      v.renderer ? null : h("p", { class: "note" }, "The page renderer isn't installed. Open CloseDesk again (double-click it) to add it."),
       data.ocr_engine
         ? h("p", { class: "set-help" }, icon("ok", 14), " Scanned PDFs and pictures are read with ", b(data.ocr_engine), " on this computer.")
-        : h("p", { class: "note" }, "Scanned PDFs and pictures can't be read yet. To add it, run ", code('pip install -e ".[ocr]"'), " in the CloseDesk folder (inside ", code(".venv"), ")."),
+        : h("p", { class: "note" }, data.ocr_missing),
       form
     );
   }

@@ -10,6 +10,7 @@ import importlib.util
 import io
 import re
 import shutil
+import sys
 import threading
 
 MAX_CHARS = 20_000
@@ -28,6 +29,20 @@ def engine_name() -> str:
     if importlib.util.find_spec("pytesseract") is not None and shutil.which("tesseract"):
         return "Tesseract"
     return ""
+
+
+def missing_note(version: tuple[int, int] | None = None, *, why_only: bool = False) -> str:
+    """What Settings says when no OCR engine is found: what to do, with nothing to type (``why_only``: without the
+    first sentence, for a line that already says scans aren't read). The launcher adds the OCR reader where it is built
+    for the Python (not yet 3.13 or newer), trying once for each set-up; a new set-up (no .venv folder) tries again."""
+    version = version or sys.version_info[:2]
+    if version >= (3, 13):
+        why = ("The OCR reader isn't built for this version of Python yet. It works with Python 3.11 and 3.12: install "
+               "Python 3.12, delete the .venv folder in the CloseDesk folder and open CloseDesk again.")
+    else:
+        why = ("The OCR reader couldn't be added on this computer. To try again, delete the .venv folder in the "
+               "CloseDesk folder and open CloseDesk again.")
+    return why if why_only else f"Scanned PDFs and pictures can't be read yet. {why}"
 
 
 # Pages read from one TIFF; a fax or a scanner's batch is a few, past this it is not a document to read whole.

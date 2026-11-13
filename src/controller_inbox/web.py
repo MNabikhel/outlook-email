@@ -1067,6 +1067,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             context_target=context_target(settings, model),
             will_reload=needs_more_context(settings),
             ocr_engine=ocr.engine_name(),
+            ocr_missing=ocr.missing_note(),
             models=model_roles.models_in_use(settings, status=model),
             chat_choice=model_roles.chat_choices(settings, model),
             chat_problem=chat_switch["problem"] if request.query_params.get("notice") == "chat-model-failed" else "",
