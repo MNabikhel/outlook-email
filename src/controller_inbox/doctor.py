@@ -197,8 +197,9 @@ def _outlook_sync(settings) -> Check:
     if not cfg["consent"]:
         return Check(OK, "Classic Outlook: can be read on this computer; not connected (Settings, Sync inbox)")
     if failed:
-        # Every sync since may have failed: said here too, not only on the Settings card.
-        return Check(NOTE, f"Classic Outlook: last sync didn't work ({format_when(failed.get('at', ''), settings.tz)}): {failed['error']}",
+        # As Settings, Sync inbox says it: the syncs keep not working, and the time given is of the last that did.
+        worked = f"last worked {format_when(last, settings.tz)}" if last else "no sync has worked yet"
+        return Check(NOTE, f"Classic Outlook: connected, but the last sync didn't work ({failed['error']}); {worked}",
                      "Open classic Outlook, then click Sync now in Settings, Sync inbox.")
     said = f"connected, last synced {format_when(last, settings.tz)}" if last else "connected, not synced yet"
     if cfg["calendar"]:

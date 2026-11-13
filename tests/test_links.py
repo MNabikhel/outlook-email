@@ -276,6 +276,24 @@ def test_what_changed_between_versions_of_a_workbook_and_a_document():
     assert listed == ["Removed: Term: 12 months"] and more == 1
 
 
+def test_what_changed_between_two_long_reports_is_found_quickly():
+    """A weekly report of thousands of lines, numbers changed on half of them: the trace page lists its changes in
+    a moment, each line taken out next to the one put in its place, and an unchanged stretch moved adds nothing."""
+    import time
+
+    def report(week: int) -> str:
+        return "\n".join(f"Customer {i} open {i * 3.17 + (week if i % 2 == 0 else 0):.2f}" for i in range(6000))
+
+    started = time.monotonic()
+    listed, more = links.changes(report(1), report(2))
+    assert time.monotonic() - started < 0.5
+    assert listed[:2] == ["Removed: Customer 0 open 1.00", "Added: Customer 0 open 2.00"]
+    assert listed[2:4] == ["Removed: Customer 2 open 7.34", "Added: Customer 2 open 8.34"]
+    assert len(listed) + more == 6000
+    moved = "\n".join(f"Line {i}" for i in range(3000))
+    assert links.changes(moved + "\nTotal 1", "Total 2\n" + moved) == (["Added: Total 2", "Removed: Total 1"], 0)
+
+
 def test_the_versions_along_a_matter_say_what_changed(store):
     v1 = _record("v1", files=[("Lease schedule v1.xlsx", "1" * 64, 20_000, None)], received="2026-09-01T09:00:00+00:00")
     v1.attachments[0].extracted_text = '[sheet "Lease" A1:B2]\nA1: Item | B1: Rent\nA2 (Item): Unit 4 | B2 (Rent): 4,000'
@@ -378,6 +396,8 @@ def test_a_moved_closedesk_folder_still_finds_its_kept_files(tmp_path, settings)
     kept.write_text("Subject: x\n\nbody")
     old = tmp_path / "Old place" / "CloseDesk" / "inbox" / "processed" / "2026-10" / "a.eml"
     assert links.kept_file(settings, str(old)) == kept
+    # The CloseDesk folder was in a folder of the user's own named Inbox.
+    assert links.kept_file(settings, str(tmp_path / "Inbox" / "CloseDesk" / "inbox" / "processed" / "2026-10" / "a.eml")) == kept
     assert links.kept_file(settings, str(tmp_path / "elsewhere" / "b.eml")) is None
     assert links.kept_file(settings, "") is None
 
@@ -876,3 +896,17 @@ def test_the_whole_matter_marks_an_email_new_to_its_conversation(store, settings
     assert links.trace(store, store.get_email("root"))["new_domains"] == {"hijack"}
     steps = TestClient(create_app(settings, store), headers=PAGE).get("/api/trace/root").json()["steps"]
     assert {step["id"]: step["new_domain"] for step in steps} == {"root": False, "hijack": True}
+
+
+def test_microsoft_365_mail_stored_before_recipients_were_kept_marks_no_one_new_on_its_account(store):
+    """Mail stored before CloseDesk kept whom it went to (Microsoft 365's has no file to read it again from): the
+    vendor it was copied to is not new when it replies. Once whom it went to is known, an outsider is new."""
+    started = _record("A", sender="colleague@ourco.com", received="2026-10-01T09:00:00+00:00")  # no recipients on record
+    started.conversation_id, started.created_at = "conv-old", "2026-10-01T09:05:00+00:00"
+    vendor = _record("B", sender="billing@northwind.com", threading={"to": ["me@ourco.com", "colleague@ourco.com"]}, received="2026-10-04T09:00:00+00:00")
+    vendor.conversation_id, vendor.created_at = "conv-old", "2026-10-04T09:05:00+00:00"
+    store.upsert_email(started)
+    store.upsert_email(vendor)
+    assert links.related(store, store.get_email("B"), ai=False)["new_domains"] == set()
+    store.save_threadings({"A": {"to": ["me@ourco.com"]}})
+    assert links.related(store, store.get_email("B"), ai=False)["new_domains"] == {"B"}

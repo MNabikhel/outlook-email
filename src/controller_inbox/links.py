@@ -316,17 +316,11 @@ def related(store, email: EmailRecord, *, ai: bool = True, known_thread: list[st
             groups.append({"kind": "ai", "value": "", "ids": list(judged)[:MAX_PER_REASON], "why": judged})
             shown |= set(judged)
     # A long conversation is shown around the email opened (it is always in it), its emails loaded only there.
-    times = store.received_times(thread_ids)
-    order = sorted((i for i in thread_ids if i in times or i == email.id), key=lambda i: (times.get(i) or email.received_at or "", i))
-    at = order.index(email.id) if email.id in order else 0
-    first = max(0, min(at - MAX_THREAD // 2, len(order) - MAX_THREAD))
-    window = [] if known_thread is not None else order[first : first + MAX_THREAD]
+    window, order = _around(store, email, thread_ids)
+    window = [] if known_thread is not None else window
     # Who has taken part is counted over the whole conversation, not only the part shown: in a long thread the
     # first of the part shown is not the email it started with.
-    newcomers: set[str] = set()
-    if known_thread is None and len(order) > 1:
-        heads = {head.id: head for head in store.email_heads(order)}
-        newcomers = new_domains([heads.get(i) or email for i in order if i in heads or i == email.id])
+    newcomers = _newcomers(store, email, order) if known_thread is None else set()
     cards = store.get_emails(list(dict.fromkeys([*window, *(i for g in groups for i in g["ids"])])))
     thread = [email if i == email.id else cards[i] for i in window if i == email.id or i in cards]
     out_groups = []
@@ -336,6 +330,40 @@ def related(store, email: EmailRecord, *, ai: bool = True, known_thread: list[st
             label = AI_LABEL if group["kind"] == "ai" else _label(group, email, records)
             out_groups.append({"kind": group["kind"], "label": label, "emails": sorted(records, key=lambda r: r.received_at or "", reverse=True), "why": group.get("why", {})})
     return {"thread": thread if len(thread) > 1 else [], "groups": out_groups, "new_domains": newcomers, "thread_size": len(order)}
+
+
+def _around(store, email: EmailRecord, thread_ids: list[str]) -> tuple[list[str], list[str]]:
+    """The ``MAX_THREAD`` emails of a conversation around ``email`` (always one of them), and the whole
+    conversation, both in the order received."""
+    times = store.received_times(thread_ids)
+    order = sorted((i for i in thread_ids if i in times or i == email.id), key=lambda i: (times.get(i) or email.received_at or "", i))
+    at = order.index(email.id) if email.id in order else 0
+    first = max(0, min(at - MAX_THREAD // 2, len(order) - MAX_THREAD))
+    return order[first : first + MAX_THREAD], order
+
+
+def _newcomers(store, email: EmailRecord, order: list[str]) -> set[str]:
+    """The emails of a whole conversation (``order``) from a domain new to it (``new_domains``), read light."""
+    if len(order) < 2:
+        return set()
+    # Every email as stored (its own too, which says when it was stored), the open one as it is when it isn't yet.
+    heads = {head.id: head for head in store.email_heads(order)}
+    return new_domains([heads.get(i) or email for i in order if i in heads or i == email.id])
+
+
+def is_newcomer(store, email: EmailRecord, *, seen: dict | None = None) -> bool:
+    """Whether ``email``'s sender is new to its conversation, as ``related`` says (its ``new_domains``), told from
+    the other emails' headers alone: what the calendar asks of each invitation it shows. ``seen``, shared by the
+    calls for one page, lets the emails of one conversation share one walk of it."""
+    seen = {} if seen is None else seen
+    thread_ids = seen.get(("thread", email.id))
+    if thread_ids is None:
+        thread_ids = _conversation(store, email.id, store.link_keys(email.id) or keys(email))
+        seen.update({("thread", member): thread_ids for member in thread_ids})
+    _window, order = _around(store, email, thread_ids)
+    if ("marked", *order) not in seen:
+        seen[("marked", *order)] = _newcomers(store, email, order)
+    return email.id in seen[("marked", *order)]
 
 
 def _conversation(store, email_id: str, mine: list[tuple[str, str]]) -> list[str]:
@@ -385,7 +413,11 @@ def _participation(thread: list) -> tuple:
     stored, never by its Date header (that can be set to anything) and never one still being read. Its sender and the
     people it went to have taken part; so do the senders, and the people they wrote to, of each reply from someone
     who had, taken in the order the replies answer each other. A sender with no address is new (its Reply-To is what
-    replies would reach), and so is an email claiming the Message-ID of one from another domain."""
+    replies would reach), and so is an email claiming the Message-ID of one from another domain.
+
+    An email with no headers on record at all (stored before CloseDesk kept them, with no file left to read them
+    from: Microsoft 365 mail, or a file since deleted) went to people no one knows: once it has taken part, a later
+    sender may be one of them, and isn't marked new on its account."""
     if len(thread) < 2:
         return (thread[0] if thread else None), set()
     order = sorted(thread, key=_arrival)
@@ -432,15 +464,19 @@ def _participation(thread: list) -> tuple:
 
     root = next((record for record in tied if answered_by_another(record)), tied[0])
     seen = {_party(root)} - {""} | _to_parties(root)
+    unknown = not root.threading  # whom it went to isn't known
     marked = set(forged)
     for record in sorted(thread, key=lambda r: (depth(r), _arrival(r))):
         if record.id == root.id or record.id in forged:
             continue
         domain = _party(record)
-        if not domain or not _took_part(domain, seen):
+        # A sender is new unless it (or the domain it is under) has taken part, or whom someone who took part wrote
+        # to isn't known (Microsoft 365 mail stored before its recipients were kept).
+        if not domain or (not _took_part(domain, seen) and not unknown):
             marked.add(record.id)
             continue  # whom a newcomer wrote to doesn't count as taking part
-        seen |= _to_parties(record)
+        seen |= {domain} | _to_parties(record)
+        unknown = unknown or not record.threading
     return root, marked
 
 
@@ -570,8 +606,9 @@ def kept_file(settings, source_path: str | None):
     if path.is_file():
         return path
     parts = [part.lower() for part in path.parts]
-    if "inbox" in parts:
-        moved = Path(settings.inbox_dir).joinpath(*path.parts[parts.index("inbox") + 1 :])
+    # The inbox folder is the last folder named so (a folder of the user's own may be named "Inbox" too).
+    for at in reversed([at for at, part in enumerate(parts[:-1]) if part == "inbox"]):
+        moved = Path(settings.inbox_dir).joinpath(*path.parts[at + 1 :])
         if moved.is_file():
             return moved
     return None
@@ -750,8 +787,12 @@ def changes(old: str, new: str, *, limit: int = MAX_CHANGES) -> tuple[list[str],
     import difflib
 
     lines = lambda text: [line.strip() for line in text.splitlines() if line.strip() and not line.startswith("[")]  # noqa: E731
+    before, after = lines(old), lines(new)
+    if max(len(before), len(after)) > MAX_DIFF_LINES:
+        found = _line_changes(before, after)
+        return found[:limit], max(0, len(found) - limit)
     found = []
-    for line in difflib.unified_diff(lines(old), lines(new), lineterm="", n=0):
+    for line in difflib.unified_diff(before, after, lineterm="", n=0):
         if line.startswith(("---", "+++", "@@")):
             continue
         if line.startswith("-"):
@@ -759,6 +800,37 @@ def changes(old: str, new: str, *, limit: int = MAX_CHANGES) -> tuple[list[str],
         elif line.startswith("+"):
             found.append(f"Added: {line[1:][:200]}")
     return found[:limit], max(0, len(found) - limit)
+
+
+MAX_DIFF_LINES = 1000  # lines of a version compared line by line in order; a longer one by which lines it has
+
+
+def _line_changes(before: list[str], after: list[str]) -> list[str]:
+    """The lines taken out of ``before`` and put in ``after``, in the order the files have them: a long report's
+    versions are compared by which lines each has (lining them up as a diff does takes seconds on thousands of
+    lines), a line taken out listed next to the one put in its place."""
+    from collections import Counter
+
+    start = 0
+    while start < min(len(before), len(after)) and before[start] == after[start]:
+        start += 1
+    end = 0
+    while end < min(len(before), len(after)) - start and before[-1 - end] == after[-1 - end]:
+        end += 1
+    old, new = before[start : len(before) - end], after[start : len(after) - end]
+
+    def only_in(lines: list[str], other: list[str]) -> list[tuple[int, str]]:
+        left = Counter(other)
+        out = []
+        for at, line in enumerate(lines):
+            if left[line] > 0:
+                left[line] -= 1
+            else:
+                out.append((at, line))
+        return out
+
+    marked = [(at, 0, f"Removed: {line[:200]}") for at, line in only_in(old, new)] + [(at, 1, f"Added: {line[:200]}") for at, line in only_in(new, old)]
+    return [text for _at, _kind, text in sorted(marked)]
 
 
 def _cells(text: str) -> dict[tuple[str, str], tuple[str, str]]:

@@ -29,7 +29,20 @@ DEMO_NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
 log = logging.getLogger("controller_inbox")
 
 
+def _replace_what_cant_be_written() -> None:
+    """Output a Windows console or log file can't show in its code page (a file named in Chinese, an emoji, in a log
+    the scheduled run writes in cp1252) is written with "?" in its place, not stopped with an error."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _replace_what_cant_be_written()
     parser = argparse.ArgumentParser(
         prog="controller-inbox",
         description="CloseDesk: read exported Outlook mail, let a local model file it, and get a daily focus digest.",

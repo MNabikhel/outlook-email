@@ -930,7 +930,7 @@ def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int
         for _rowid, email_id in rows:
             email = store.get_email(email_id)
             try:
-                found = _kept_invitations(email, settings, now) if email is not None else None
+                found = _caught_up(email, settings, now) if email is not None else None
             except Exception:  # an invitation that can't be read again adds nothing
                 found = None
             if found:
@@ -939,10 +939,34 @@ def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int
                     if current is not None and not store.has_meetings(email_id, conn=conn):  # read meanwhile: as it was read
                         store.save_invites(email_id, found, sender=current.sender_email, received=current.received_at, expanded=stamp,
                                            held=attachments_locked(current), sender_name=current.sender_name, conn=conn)
-                _refile_invitation(store, settings, email_id, now)
+            # Filed again by its invitation even when it named no meeting: an attendee's answer ("Accepted: ...") or a
+            # proposed new time an older version gave an "Accept or decline" task, or filed as "Other".
+            _refile_invitation(store, settings, email_id, now)
         looked += len(rows)
         store.set_state(CATCH_UP_KEY, str(rows[-1][0]))
     return looked
+
+
+def _caught_up(email, settings, now: datetime) -> list[Meeting] | None:
+    """An old email's meetings, as ``_kept_invitations`` reads them around ``now``, with the occurrences before that
+    window that it named around when it arrived: a repeating meeting that ended months before the update is on the
+    calendar for the weeks it was, as a one-off meeting from those weeks is."""
+    found = _kept_invitations(email, settings, now)
+    try:
+        received = _aware(datetime.fromisoformat(email.received_at))
+    except (TypeError, ValueError):
+        return found
+    low = now - WINDOW_BACK
+    if found is None or received >= low:
+        return found
+    have = {meeting.id for meeting in found}
+    before = _utc(low)
+    earlier = [m for m in _kept_invitations(email, settings, received) or [] if m.start < before and m.id not in have]
+    return found + earlier
+
+
+def _utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def _refile_invitation(store, settings, email_id: str, now: datetime) -> None:
@@ -1032,6 +1056,7 @@ def with_cautions(store, meetings: list[dict]) -> list[dict]:
         senders[uid] = _others(about)
     emails = store.get_emails(list(dict.fromkeys(m["email_id"] for m in invites))) if invites else {}
     newcomer: dict[str, bool] = {}
+    walked: dict = {}  # the conversations looked at, shared by their invitations
     for meeting in meetings:
         meeting["caution"] = ""
     for meeting in invites:
@@ -1044,7 +1069,7 @@ def with_cautions(store, meetings: list[dict]) -> list[dict]:
         elif email is not None and email.threading:
             if email.id not in newcomer:
                 try:
-                    newcomer[email.id] = email.id in links.related(store, email, ai=False)["new_domains"]
+                    newcomer[email.id] = links.is_newcomer(store, email, seen=walked)
                 except Exception:  # the conversation can't be read just now: no warning rather than no calendar
                     newcomer[email.id] = False
             if newcomer[email.id]:

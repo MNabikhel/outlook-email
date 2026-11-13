@@ -981,15 +981,17 @@ def test_the_self_check_says_when_outlook_was_synced_in_the_apps_time_zone(store
     assert "17:00" in said and "16:30" in said and "UTC" not in said, said
 
 
-def test_the_self_check_says_when_outlooks_syncs_dont_work(store, settings):
-    # It said "connected, last synced Nov 01" in green while every sync since had failed.
+def test_the_self_check_says_when_outlook_syncs_have_stopped_working(store, settings):
+    """A sync that didn't work, as Settings → Sync inbox says it: the self-check says so with why, when a sync last
+    worked, and what to do; once one works again, it is in order."""
     from controller_inbox import doctor
 
     outlook_sync.connect(store, calendar=False, now=NOW)
     store.set_state(outlook_sync.LAST_SYNC_KEY, "2026-10-20T15:00:00+00:00")
-    outlook_sync.note_failure(store, "Outlook isn't open, so it wasn't synced. It syncs once Outlook is open.", NOW + timedelta(days=2))
+    outlook_sync.note_failure(store, "Outlook isn't open", now=NOW)
     check = doctor._outlook_sync(settings)
-    assert check.state == doctor.NOTE and "Outlook isn't open" in check.text and "last sync didn't work" in check.text
+    assert check.state == doctor.NOTE
+    assert "the last sync didn't work (Outlook isn't open)" in check.text and "last worked" in check.text, check.text
     assert "Sync now" in check.todo
     store.set_state(outlook_sync.LAST_ERROR_KEY, "")
     assert doctor._outlook_sync(settings).state == doctor.OK
