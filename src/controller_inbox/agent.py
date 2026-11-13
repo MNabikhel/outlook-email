@@ -608,6 +608,12 @@ def _email_files(ws: Workspace, email: EmailRecord, question: str, room: int, *,
         used += prompt_size(worked)
     per_file = max(600, (room - used) // len(readable))
     for att in readable:
+        if is_invitation(att):
+            # The meeting it holds, in the app's time zone: its raw text gives UTC times.
+            lines.append(f"── File: {att.filename} (calendar invitation)\n{invitation_text(att, _zone(ws))}")
+            ws.reads.append(f"Read {att.filename} as the meeting it holds")
+            files_shown += 1
+            continue
         text = att.extracted_text
         parts = ws.memo(("parts", text), lambda: documents.split_parts(text))
         head = (
@@ -1094,6 +1100,30 @@ def _ends_after(meeting, now: datetime) -> bool:
         return False
 
 
+def invitation_text(att: AttachmentRecord, tz=None) -> str:
+    """An invitation file as the model reads it: the meeting it holds in the app's time zone, where it is and who is
+    in it. Not the file's own text, whose times are UTC and which a small model reads wrongly."""
+    from controller_inbox import calendar_events
+
+    try:
+        meetings = calendar_events.from_ics(att.extracted_text or "")
+    except Exception:  # an invitation that can't be read is left out, never shown as raw text
+        meetings = []
+    said = invitation_line(att, tz) if meetings else ""
+    if not said:
+        return "A calendar invitation; no meeting could be read from it."
+    shown = calendar_events.shown(meetings[0].to_row(), tz or timezone.utc)
+    lines = [f"Meeting: {said}"]
+    if shown["location"]:
+        lines.append(f"Where: {shown['location']}")
+    if shown["organizer"]:
+        lines.append(f"Organized by: {shown['organizer']}")
+    if shown["attendees"]:
+        lines.append("Invited: " + ", ".join(shown["attendees"][:12]))
+    lines.append(f"Times are {getattr(tz, 'key', str(tz)) if tz is not None else 'UTC'}.")
+    return "\n".join(lines)
+
+
 # Tools --------------------------------------------------------------------------------------
 
 
@@ -1178,6 +1208,8 @@ def _dispatch(ws: Workspace, name: str, args: dict) -> str:
         return f"No file like {args.get('file')!r} on [{ws.number(email)}]. " + (files_line(email) or "It has no files.")
     ws.read_files = True
     if name == "read_file":
+        if is_invitation(att):
+            return f"{att.filename} (calendar invitation):\n{invitation_text(att, _zone(ws))}"
         return _read_file(att, str(args.get("part") or ""))
     if name in {"read_cells", "trace_cell", "compare_columns"}:
         if not att.filename.lower().endswith(documents.SPREADSHEET_SUFFIXES):
@@ -1228,7 +1260,7 @@ def _search_mail(ws: Workspace, query: str) -> str:
         n = ws.number(email)
         files = ", ".join(att.filename for att in email.attachments[:5])
         lines.append(
-            f"[{n}] {email.received_at[:10]} · from {email.sender_name or email.sender_email} · “{email.subject}”"
+            f"[{n}] {when_local(email.received_at, _zone(ws))} · from {email.sender_name or email.sender_email} · “{email.subject}”"
             + (f" · files: {files}" if files else "")
             + (" · related in meaning, not by the same words" if email.id in by_meaning else "")
             + (" · Warning: payment-detail change — verify by phone." if is_fraud(email) else "")
@@ -1242,7 +1274,7 @@ def _open_email(ws: Workspace, email: EmailRecord) -> str:
     n = ws.number(email)
     body = re.sub(r"\n{3,}", "\n\n", email.body_text or "").strip()
     lines = [
-        f"[{n}] {email.received_at[:10]} · from {email.sender_name or email.sender_email} <{email.sender_email}> · “{email.subject}”",
+        f"[{n}] {when_local(email.received_at, _zone(ws))} · from {email.sender_name or email.sender_email} <{email.sender_email}> · “{email.subject}”",
         body[:2500] + (" …" if len(body) > 2500 else ""),
     ]
     from controller_inbox.assistant import is_fraud
@@ -1254,7 +1286,9 @@ def _open_email(ws: Workspace, email: EmailRecord) -> str:
         lines.append(files_line(email))
         if not attachments_locked(email):
             for att in email.attachments:
-                if (att.extracted_text or "").strip():
+                if is_invitation(att):
+                    lines.append(f"{att.filename} (calendar invitation): " + invitation_text(att, _zone(ws)).replace("\n", " · "))
+                elif (att.extracted_text or "").strip():
                     lines.append(f"Outline of {att.filename}: " + " / ".join(documents.outline(att.extracted_text, limit=10)))
     if related := related_lines(ws, email):
         lines.append(related)
@@ -1265,6 +1299,22 @@ def _open_email(ws: Workspace, email: EmailRecord) -> str:
 
 
 MAX_RELATED = 6
+
+
+def when_local(value: str, tz) -> str:
+    """When an email came, in the app's time zone as its pages show it ("2026-09-21 21:00"): the UTC day it is stored
+    by is a day off for evening mail. The stored day when the stamp can't be read."""
+    from controller_inbox.clock import parse_stamp
+
+    parsed = parse_stamp(value or "")
+    if parsed is None:
+        return (value or "")[:10]
+    return (parsed.astimezone(tz) if tz is not None else parsed).strftime("%Y-%m-%d %H:%M")
+
+
+def _zone(ws: Workspace):
+    """The app's time zone, for when an email came; none for a workspace without settings."""
+    return getattr(ws.settings, "tz", None)
 
 
 def related_lines(ws: Workspace, email: EmailRecord) -> str:
@@ -1281,12 +1331,12 @@ def related_lines(ws: Workspace, email: EmailRecord) -> str:
         # A held email is listed without its words or a number to open it by. A cautioned one is never taken at its
         # word, and a sender new to the conversation (a lookalike's reply) is named by address, to be checked.
         if attachments_locked(other):
-            return f"- {other.received_at[:10]} · an email held as possible payment fraud ({why}): not shown — Warning: verify by phone"
+            return f"- {when_local(other.received_at, _zone(ws))} · an email held as possible payment fraud ({why}): not shown — Warning: verify by phone"
         warn = " — Warning: payment-detail change, verify by phone" if is_fraud(other) or "payment_caution" in other.flags else ""
         if other.id in found["new_domains"]:
             warn += " — Warning: this sender's domain is new to the conversation; check it is who it claims"
         who = f"{other.sender_name} <{other.sender_email}>" if other.sender_name and other.sender_email else other.sender_name or other.sender_email or "(no address)"
-        return f"[{ws.number(other)}] {other.received_at[:10]} · {who} · “{other.subject}” ({why}){warn}"
+        return f"[{ws.number(other)}] {when_local(other.received_at, _zone(ws))} · {who} · “{other.subject}” ({why}){warn}"
 
     # The conversation's emails nearest the one open, not its oldest: the window ``related`` gives is centred on it.
     thread = [other for other in found["thread"] if other.id != email.id]
@@ -1328,9 +1378,17 @@ def _find_in_file(ws: Workspace, email: EmailRecord, query: str, file) -> str:
         return "No readable file to search. " + (files_line(email) or "")
     ws.read_files = True
     hits = []
+    words = documents.terms(query, stop=_STOP)
     for att in targets:
+        if is_invitation(att):
+            said = invitation_text(att, _zone(ws))
+            if any(word in said.lower() for word in words):
+                hits.append(f"{att.filename} · [the meeting]\n{said}")
+            continue
         for part in documents.search_parts(att.extracted_text, query, limit=3, stop=_STOP):
             hits.append(f"{att.filename} · [{part.label}]\n{part.text}")
+    if not hits and not words:
+        return f"{query!r} is too short or too common to search for: give a name, a figure or a longer word, or read_file for the outline."
     if not hits:
         return f"None of the files mention {query!r}. Try other words, or read_file for the outline."
     return "\n\n".join(hits[:4])
@@ -1363,6 +1421,7 @@ _OPS = {
 }
 _DATE_FORMATS = ("%Y-%m-%d", "%d %B %Y", "%d %b %Y", "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%m/%d/%Y")
 _DATE_STEP = re.compile(r"^(.+?)\s*([+-])\s*(\d{1,5})\s*(day|week|month|year)s?$", re.I)
+_MINUS = re.compile(r"^(.+?)\s+[-–]\s+(.+)$")
 _BETWEEN = re.compile(r"^(?:(?:number of\s+)?days?\s+)?(?:between|from)\s+(.+?)\s+(?:and|to|until)\s+(.+)$", re.I)
 CALC_HELP = "Write numbers with + - * / ( ) and %, or dates like 2026-12-31 - 90 days, or days between 2026-10-02 and 2026-12-31."
 
@@ -1388,13 +1447,23 @@ def calculate(expression: str) -> str:
     if between and _parse_date(between.group(1)) and _parse_date(between.group(2)):
         first, second = _parse_date(between.group(1)), _parse_date(between.group(2))
         return f"{(second - first).days} days from {first.isoformat()} to {second.isoformat()}"
-    cells = re.findall(r"\b[A-Z]{1,3}\d{1,6}\b", text)
+    minus = _MINUS.match(text)
+    if minus and _parse_date(minus.group(1)) and _parse_date(minus.group(2)):
+        # "2026-12-31 - 2026-10-15": the days from the second date to the first, not a sum of their figures.
+        later, earlier = _parse_date(minus.group(1)), _parse_date(minus.group(2))
+        return f"{text} = {(later - earlier).days} days (from {earlier.isoformat()} to {later.isoformat()})"
+    if re.search(r"\b\d{4}-\d{1,2}-\d{1,2}\b", text):
+        return f"A date can only be moved by days, weeks, months or years, or taken from another date. {CALC_HELP}"
+    cells =re.findall(r"\b[A-Z]{1,3}\d{1,6}\b", text)
     if cells:
         return (
             f"calculate needs the numbers, not cell names ({', '.join(dict.fromkeys(cells))}). "
             "Read those cells with read_cells first, then call calculate with their values."
         )
-    cleaned = re.sub(r"(?<=\d),(?=\d{3}\b)", "", text.replace("$", "").replace("×", "*").replace("÷", "/"))
+    cleaned = text.replace("$", "").replace("×", "*").replace("÷", "/")
+    # A figure in brackets with a thousands comma is an accounting negative: "(1,200)" is -1,200.
+    cleaned = re.sub(r"\(\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?)\s*\)", r"(-\1)", cleaned)
+    cleaned = re.sub(r"(?<=\d),(?=\d{3}\b)", "", cleaned)
     cleaned = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", cleaned)
     try:
         value = _evaluate(ast.parse(cleaned, mode="eval").body)

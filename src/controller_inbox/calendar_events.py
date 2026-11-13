@@ -1144,14 +1144,42 @@ def related_mail(store, meeting: dict, *, limit: int = 8) -> list:
     return found
 
 
+# How the chat's lines mark an item Outlook shows as free ("Payday reminder"): not a meeting that keeps the user busy.
+SHOWN_FREE = "shown as free"
+
+
+def _listed_when(meeting: dict) -> str:
+    """When a meeting is, as the chat's lines write it: "2026-09-23 09:30–09:45", "2026-09-30 (all day)", and with its
+    last day when that is later ("2026-09-29 to 2026-10-02 (all day)", "2026-09-29 09:00 to 2026-10-01 17:00")."""
+    start, end = meeting["start"], meeting["end"] or ""
+    if meeting["all_day"]:
+        try:
+            last = date.fromisoformat(end[:10]) - timedelta(days=1)  # an all-day meeting ends the morning after its last day
+        except ValueError:
+            last = None
+        if last is not None and last.isoformat() > start[:10]:
+            return f"{start[:10]} to {last.isoformat()} (all day)"
+        return f"{start[:10]} (all day)"
+    when = start.replace("T", " ")
+    try:
+        first_day, last_day = date.fromisoformat(start[:10]), date.fromisoformat(end[:10])
+    except ValueError:
+        return f"{when}–{end[11:16]}"
+    # One that ends at midnight ends with its own day.
+    if last_day > first_day and not (end[11:16] == "00:00" and last_day == first_day + timedelta(days=1)):
+        return f"{when} to {end.replace('T', ' ')}"
+    return f"{when}–{end[11:16]}"
+
+
 def listing(meetings: list[dict]) -> str:
-    """Meetings as lines for the chat's model: when, what, where, who."""
+    """Meetings as lines for the chat's model: when, what, whether Outlook shows it as free or tentative, where, who."""
     lines = []
     for meeting in meetings:
-        when = meeting["start"].replace("T", " ") + ("" if meeting["all_day"] else f"–{meeting['end'][11:16]}")
-        if meeting["all_day"]:
-            when = f"{meeting['start']} (all day)"
-        parts = [when, meeting["subject"]]
+        parts = [_listed_when(meeting), meeting["subject"]]
+        if meeting.get("busy") == "free":
+            parts.append(SHOWN_FREE)
+        elif meeting.get("busy") == "tentative":
+            parts.append("tentative")
         if meeting["location"]:
             parts.append(f"at {meeting['location']}")
         if meeting["organizer"]:

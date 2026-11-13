@@ -1374,11 +1374,12 @@ def singular(word: str) -> str:
 
 def terms(text: str, *, stop: set[str] | frozenset[str] = frozenset(), fold_plurals: bool = True) -> list[str]:
     """The words of ``text`` that carry meaning, lower case, each once in order: no ``stop`` words, nothing under
-    three letters but a figure, a possessive dropped, and with ``fold_plurals`` a plural read as its word."""
+    three letters but one with a figure in it ("12", "Q4", "H1"), a possessive dropped, and with ``fold_plurals`` a
+    plural read as its word."""
     words = []
     for match in _TERM.findall(text or ""):
         word = _ENDING.sub("", match.lower().strip(".'-"))
-        if (len(word) < 3 and not word.isdigit()) or word in stop:
+        if (len(word) < 3 and not any(ch.isdigit() for ch in word)) or word in stop:
             continue
         words.append(singular(word) if fold_plurals else word)
     return list(dict.fromkeys(words))
