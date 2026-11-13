@@ -182,7 +182,9 @@ class Column:
     most: bool = False  # its formula holds on most rows, not every one (a footer row or two works otherwise)
     same_as: str = ""  # in a _cells table: the table whose column this repeats
     running: str = ""  # a running balance: what each row adds to the row above's ("+ charges - payments")
+    newest_first: bool = False  # a running balance listed newest first (a bank export): each row adds to the row below's
     below: tuple[int, int] = (0, 0)  # figures: how many of its rows are below zero, of how many with a figure
+    day_first: bool = False  # dates: written day first (31/10/2026)
 
 
 @dataclass
@@ -195,6 +197,7 @@ class Sheet:
     of: str = ""  # a _cells table: the table it lays out one value per row
     across: str = ""  # its columns that were laid out (the first ... the last)
     caution: str = ""  # its printed totals that don't match its rows as read
+    left_out: int = 0  # rows of the sheet past the last one read: the table is not the whole sheet
 
 
 @dataclass
@@ -226,6 +229,8 @@ class Tables:
         self._db.create_function("like", 2, lambda pattern, value: _like(pattern, value, deadline=self._deadline), deterministic=True)
         self._db.create_function("like", 3, lambda pattern, value, escape: _like(pattern, value, escape, deadline=self._deadline), deterministic=True)
         self.facts: list[tuple[str, str, str]] = []
+        # Tables of rows past the ones loaded: named in the schema, so an answer over the whole file says it is partial.
+        self.not_loaded: list[str] = []
         count = small = 0
         # The tables the question names by their title (an entity, a sheet), else all but a hidden sheet's.
         read = [
@@ -239,6 +244,9 @@ class Tables:
                     count += 1
                     self._load(f"t{count}", table, lines, source)
                     loaded.add(source)
+                elif len(table.body) >= 2:
+                    where = table.where
+                    self.not_loaded.append(f"{source} / " + (f'sheet "{where.split(chr(34))[1]}"' if where.startswith('sheet "') else where))
         # A table of one row is a table too (an aging's buckets, an invoice's box of number, dates and terms), in a
         # few places of its own, so it never takes the place of a table of rows.
         asked = [word for word in table_lookup.read_question(question).words if len(word) >= 3 or table_lookup._numeric(word)]
@@ -248,9 +256,12 @@ class Tables:
                     small += 1
                     self._load(f"t{count + small}", table, lines, source)
                     loaded.add(source)
-        for source, lines, found in read:
+        for (source, lines, found), (_source, text) in zip(read, files):
             if source in loaded:
                 rows = {row.at for table in found if len(table.rows) >= 2 for row in table.rows}
+                # A table's header row names its columns; it is no detail beside the table ("Region: Region Revenue"),
+                # a hidden sheet's either.
+                rows |= {at for table in table_lookup.tables_in(text) if (at := _header_line(lines, table)) is not None}
                 self.facts += [(source, name, value) for name, value in _facts_in(lines, rows)]
         if self.facts:
             self._db.execute("CREATE TABLE facts (file TEXT COLLATE NOCASE, name TEXT COLLATE NOCASE, value TEXT COLLATE NOCASE)")
@@ -290,8 +301,14 @@ class Tables:
         columns = [Column("Section", _ident("section", taken), "text")] if section else []
         columns += [Column(label, _ident(label, taken), table.kinds.get(label, "text")) for label in table.labels]
         for index, column in enumerate(columns[1 if section else 0 :]):
-            if column.kind == "figure" and _codes(column.label, [row.cells[index][1] for row in table.body if index < len(row.cells)]):
+            cells = [row.cells[index][1] for row in table.body if index < len(row.cells)]
+            if column.kind == "figure" and _codes(column.label, cells):
                 column.kind = "text"
+            column.day_first = column.label in table.day_first
+            written = [cell for cell in cells if cell and cell != tables.BLANK]
+            if column.kind == "text" and written and all(_MONTH_CELL.fullmatch(cell) and _month(cell) for cell in written):
+                # A column of months ("Jan-26", "Mar 2026") is stored as months, 2026-03, to filter and sort.
+                column.kind = "month"
         values: list[list] = []
         for row in table.body:
             cells = [row.group or None] if section else []
@@ -300,8 +317,10 @@ class Tables:
                 raw = "" if raw == tables.BLANK else raw
                 if raw:
                     column.samples.append(raw)
-                stored = _stored(raw, column.kind)
-                if column.kind == "date" and isinstance(stored, str):
+                stored = _stored(raw, column.kind, day_first=column.day_first)
+                if column.kind in {"date", "month"} and isinstance(stored, str) and not _HAS_TIME.search(raw):
+                    # Shown as the sheet writes it; a date with a time is shown as its date, the row's own time
+                    # being one of several on that day.
                     column.written.setdefault(stored, raw)
                 cells.append(stored)
             values.append(cells)
@@ -323,7 +342,13 @@ class Tables:
         title = " / ".join(part for part in (source, sheet, " / ".join(headings[:3])) if part)
         verdict = table_lookup.verify(table)
         caution = f"{len(verdict.mismatched)} of its {verdict.checked} printed totals don't match its rows as read" if verdict.mismatched else ""
-        self._register(Sheet(name, title, _notes(lines), columns, len(values), caution=caution))
+        unworked = [column.label for column in columns if column.samples and all(sample.startswith("=") for sample in column.samples)]
+        if unworked:
+            # A workbook saved without its formulas' results: those columns hold formulas, not figures.
+            caution = "; ".join(
+                part for part in (caution, f"its formulas were saved without their results, so {', '.join(unworked)} holds no figures") if part
+            )
+        self._register(Sheet(name, title, _notes(lines), columns, len(values), caution=caution, left_out=table.left_out))
         family = _family(columns)
         if family:
             self._load_cells(self.sheets[-1], family, values, _over(headings, columns, family))
@@ -367,7 +392,7 @@ class Tables:
         if over:
             for index in family:
                 columns[index].under = over
-        self._register(Sheet(name, sheet.title, "", cells_columns, len(rows), of=sheet.name, across=across))
+        self._register(Sheet(name, sheet.title, "", cells_columns, len(rows), of=sheet.name, across=across, left_out=sheet.left_out))
 
     def _register(self, sheet: Sheet) -> None:
         self.sheets.append(sheet)
@@ -395,10 +420,18 @@ class Tables:
         return "\n".join(kept + ([facts] if facts else []))
 
     def _facts_line(self) -> str:
-        if not self.facts:
-            return ""
-        listed = "; ".join(f"{name}: {value}" for _source, name, value in self.facts)
-        return f"CREATE TABLE facts (file TEXT, name TEXT, value TEXT);  -- details printed beside the tables: {listed[:500]}"
+        """The facts table, and the tables of the file that were not loaded."""
+        lines = []
+        if self.facts:
+            listed = "; ".join(f"{name}: {value}" for _source, name, value in self.facts)
+            lines.append(f"CREATE TABLE facts (file TEXT, name TEXT, value TEXT);  -- details printed beside the tables: {listed[:500]}")
+        if self.not_loaded:
+            listed = "; ".join(dict.fromkeys(self.not_loaded))
+            lines.append(
+                f"-- Also in the file, not loaded (only {MAX_TABLES} tables are): {listed[:400]}. An answer over the whole file "
+                "from the tables above leaves these out: say so."
+            )
+        return "\n".join(lines)
 
     def _create(self, sheet: Sheet, names: int) -> str:
         if sheet.of:
@@ -411,6 +444,7 @@ class Tables:
             comma = "," if index < len(sheet.columns) - 1 else ""
             lines.append(f"  {column.name} {_sql_type(column.kind)}{comma}  -- {_describe(column, names)}")
         notes = [f"caution: {sheet.caution}, so its figures may be misread"] if sheet.caution else []
+        notes += [f"note: it {_partial(sheet)}"] if sheet.left_out and not sheet.of else []
         notes += [f"note: {sheet.note}"] if sheet.note else []
         lines.append(");" + (f"  -- {'; '.join(notes)}" if notes else ""))
         return "\n".join(lines)
@@ -439,7 +473,7 @@ class Tables:
         for sheet, column in self._added_up_running(bare):
             raise ValueError(
                 f"{column.name} in {sheet.name} is a running balance: each row's already includes every row above it, "
-                f"so adding it up means nothing. Take the last row's {column.name}, or add up the columns it moves by "
+                f"so adding it up means nothing. Take the {'first' if column.newest_first else 'last'} row's {column.name}, or add up the columns it moves by "
                 f"({column.running})"
             )
         started = time.monotonic()
@@ -468,6 +502,8 @@ class Tables:
         for sheet in self.sheets:
             if sheet.name in used and sheet.caution:
                 lines.append(f"Caution: {sheet.caution} ({sheet.title}); its figures may be misread, so say so if you use them.")
+            if sheet.name in used and sheet.left_out and not sheet.of:
+                lines.append(f"Caution: {sheet.name} {_partial(sheet)}; say so if you use them.")
         lines.append(f"Result ({len(found.rows)} row{'s' if len(found.rows) != 1 else ''}{', more not shown' if found.more else ''}):")
         for row in found.rows:
             cells = [f"{self._heading(name)}: {self._shown(name, value)}" for name, value in zip(found.names, row)]
@@ -730,49 +766,37 @@ def _ident(label: str, taken: set[str]) -> str:
     return name
 
 
-# Headings of a column that names its rows by a number (a department, an account, a store), rather than counting.
-_CODE_HEADING = re.compile(
-    r"\b(dept|department|div|division|code|id|no|nbr|num|number|#|entity|co|company|acct|account|gl|cost cent(er|re)|"
-    r"cc|store|branch|location|loc|site|region|units?|bu|class|fund|project|job|vendor|customer|emp|employee)\b\.?",
-    re.I,
-)
-# Headings that say outright they hold codes, whatever else they say ("Cost center", "Budget code", "Sales region").
-_CODE_PHRASE = re.compile(
-    r"\b(cost cent(er|re)s?|codes?|id|ids|region|regions|business units?|dept|department|division|entity|gl|"
-    r"(acct|account)\s*(no|nbr|num|number|#))\b|#",
-    re.I,
-)
-# Headings of a quantity, however they start ("Employee count", "Customer balance", "No. of invoices"): figures.
-_QUANTITY_HEADING = re.compile(
-    r"\b(count|counts|balance|total|amount|amt|cost|costs|sales|qty|quantity|units|hours|hrs|days|price|rate|revenue|"
-    r"spend|budget|actual|value|paid|due|owed|headcount|fte|items|invoices|orders)\b|\b(no|number)\.?\s+of\b",
-    re.I,
-)
+# A figure column that is really a list of codes (a department, an account, a store): see ``table_lookup.codes``.
+_codes = table_lookup.codes
 
 
-def _codes(label: str, cells: list[str]) -> bool:
-    """A figure column that is really a list of codes: headed like one, every cell a whole number as written
-    (no separators, decimals or signs), and few of them repeated over the rows (210, 320, 410)."""
-    if not _CODE_HEADING.search(label) or (_QUANTITY_HEADING.search(label) and not _CODE_PHRASE.search(label)):
-        return False
-    written = [cell.strip() for cell in cells if cell and cell != tables.BLANK]
-    if not written or not all(re.fullmatch(r"\d{1,10}", cell) for cell in written):
-        return False
-    return len(set(written)) <= max(40, len(written) // 3) and (len(written) < 4 or len(set(written)) < len(written))
+def _partial(sheet: Sheet) -> str:
+    """What a table of a sheet too long to read whole leaves out."""
+    return (
+        f"holds only the first rows of its sheet: the file has {sheet.left_out} more rows that were not read, "
+        "so a total or count over it is not the whole sheet"
+    )
 
 
 def _sql_type(kind: str) -> str:
     return "REAL" if kind == "figure" else "TEXT COLLATE NOCASE"
 
 
-def _stored(raw: str, kind: str):
+_HAS_TIME = re.compile(r"\d:\d\d")
+# A cell that is a month and nothing else ("Jan-26", "March 2026").
+_MONTH_CELL = re.compile(r"\s*[A-Za-z]{3,9}\.?[\s\-'/]*\d{2,4}\s*")
+
+
+def _stored(raw: str, kind: str, *, day_first: bool = False):
     raw = raw[:MAX_CELL_CHARS]
+    if kind == "month":
+        return _month(raw) or raw or None
     if kind == "figure":
         # A "-" is the accounting format's zero; a blank cell is no figure at all (MIN and AVG skip it).
         number = table_lookup._number(raw)
         return float(number) if number is not None else None
     if kind == "date":
-        when = table_lookup.cell_date(raw)
+        when = table_lookup.cell_date(raw, day_first=day_first)
         if when:
             year, month, day = when
             return f"{year:04d}-{month:02d}-{day:02d}" if year else f"{month:02d}-{day:02d}"
@@ -797,6 +821,9 @@ def _describe(column: Column, names: int = MAX_NAMES) -> str:
         note = f'"{column.label}" figure' + (f', under "{column.under}"' if column.under else "")
         if column.samples and all("%" in sample for sample in column.samples):
             note += ", a percent (6.3 means 6.3%)"
+        if column.running and column.newest_first:
+            return (f"{note}, a running balance listed newest first: each row's is the row below's {column.running}; the first "
+                    "row's is the latest balance, never add it up")
         if column.running:
             return f"{note}, a running balance: each row's is the row above's {column.running}; the last row's is the balance, never add it up"
         below, of = column.below
@@ -805,7 +832,7 @@ def _describe(column: Column, names: int = MAX_NAMES) -> str:
             note += f", below 0 on {below} of its {of} rows"
         return f"{note} = {column.formula} on {'most rows' if column.most else 'every row'}" if column.formula else note
     if column.kind == "date":
-        stored = next((_stored(s, "date") for s in column.samples if table_lookup.cell_date(s)), "")
+        stored = next((_stored(s, "date", day_first=column.day_first) for s in column.samples if table_lookup.cell_date(s, day_first=column.day_first)), "")
         shape = "YYYY-MM-DD" if len(stored or "") == 10 else "MM-DD"
         return f'"{column.label}" date as text {shape}' + (f", e.g. {stored}" if stored else "")
     listed = list(dict.fromkeys(column.samples))
@@ -837,7 +864,10 @@ def _formulas(columns: list[Column], values: list[list]) -> None:
         # (the later buckets are mostly empty) but only the one over every bucket holds on all of them.
         for share in (1.0, 0.9):
             for run, interleaved in runs:
-                signs = [(1,) * len(run)] if len(run) > 5 or interleaved else [(1, *rest) for rest in itertools.product((1, -1), repeat=len(run) - 1)]
+                # A first term taken away too ("variance = - budget + actual"), after those that add it, never every term.
+                signs = [(1,) * len(run)] if len(run) > 5 or interleaved else [
+                    (1, *rest) for rest in itertools.product((1, -1), repeat=len(run) - 1)
+                ] + [(-1, *rest) for rest in itertools.product((1, -1), repeat=len(run) - 1) if 1 in rest]
                 terms = next((list(zip(run, pattern)) for pattern in signs if _holds(values, target, list(zip(run, pattern)), share)), None)
                 if terms:
                     found[target] = terms
@@ -870,9 +900,12 @@ def _running_balances(columns: list[Column], values: list[list]) -> None:
         # (36 months) every pair is a million rows read for each question.
         near = sorted(sorted(others, key=lambda index: abs(index - target))[:8])
         options = [[(a, sign)] for a in others for sign in (1, -1)] + [[(a, 1), (b, -1)] for a in near for b in near if a != b]
-        for terms in options:
-            if _runs(values, target, terms):
+        # Listed oldest first, or newest first as many banks export it (each row's is the row below's plus its own).
+        for order, newest in ((values, False), (values[::-1], True)):
+            terms = next((terms for terms in options if _runs(order, target, terms)), None)
+            if terms:
                 columns[target].running = " ".join(("+ " if sign > 0 else "- ") + columns[index].name for index, sign in terms)
+                columns[target].newest_first = newest
                 break
 
 
@@ -1002,6 +1035,19 @@ _CELL = re.compile(r"^([A-Z]{1,3}\d+)( \([^)]*\))?: ?(.*)$")
 _LABEL = re.compile(r"^[A-Za-z][\w .&/()#'-]{1,40}:?$")
 
 
+def _header_line(lines: list[str], table: Table) -> int | None:
+    """The line just above a table's first row when it is the table's header row: its cells are the table's headings."""
+    at = table.rows[0].at - 1 if table.rows else -1
+    if at < 0 or at >= len(lines):
+        return None
+    cells = [_CELL.match(piece.strip()) for piece in lines[at].split(" | ")]
+    if not all(cells):
+        return None
+    values = [cell.group(3).strip() for cell in cells]
+    labels = set(table.labels)
+    return at if len(values) >= 2 and sum(value in labels for value in values) >= max(2, len(values) - 1) else None
+
+
 def _facts_in(lines: list[str], rows: set[int] = frozenset()) -> list[tuple[str, str]]:
     """Details printed beside a file's tables as "Name: value" on a line of their own ("Pay Date: Oct 15,
     2026", "Prepared by: L. Wei 10/2/2026"); a table row has several of them and is left alone. ``rows``: the
@@ -1015,6 +1061,9 @@ def _facts_in(lines: list[str], rows: set[int] = frozenset()) -> list[tuple[str,
             continue
         if line.startswith("["):
             block = line.strip()
+            continue
+        if line.startswith(("Workbook with ", "Named ranges: ")):
+            # The workbook's list of its sheets and names, written before its first sheet.
             continue
         pieces = [piece.strip() for piece in line.strip().split(" | ")]
         cells = [_CELL.match(piece) for piece in pieces]

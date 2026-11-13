@@ -22,7 +22,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
@@ -34,7 +34,7 @@ logging.getLogger("pypdf").setLevel(logging.ERROR)
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 # Raise when attachments read differently, so text stored by an older reader is read again.
-READER_VERSION = "18"
+READER_VERSION = "19"
 MAX_TEXT = 400_000
 MAX_PDF_PAGES = 300
 MAX_SHEETS = 40
@@ -639,6 +639,18 @@ def _defined_names(book) -> list[tuple[str, str]]:
 
 
 _HEADER_SEARCH = 10
+# Headings of a column of numbers that name something rather than count it: an invoice or account number, a year.
+_ID_COLUMN = re.compile(
+    r"(?i)(?:\b(?:no|nos|nbr|num|number|id|code|ref|reference|acct|account|gl|year|fy|period|dept|department|store|"
+    r"branch|site|entity|cost cent(?:er|re)|cc|po|check|cheque|invoice|zip|postal code)\.?|#)\s*$"
+)
+_GROUPED_WHOLE = re.compile(r"\d{1,3}(?:,\d{3})+")
+
+
+def _label(heading) -> str:
+    """A heading as it is written before each cell ("C5 (Budget - FY26): 120,000"): a "|" or ": " in it would read
+    as the end of the cell or of its name."""
+    return str(heading).replace("|", "/").replace(": ", " - ")
 
 
 @dataclass
@@ -656,18 +668,44 @@ def sheet_row_lines(rows: list[SheetRow], *, first_names_columns: bool = False) 
     from openpyxl.utils import get_column_letter
 
     header = _sheet_header(rows, first_names_columns=first_names_columns)
-    labels = {c: v.replace("|", "/") for c, v in rows[header].cells.items()} if header is not None else {}
-    second = _second_heading_row(rows, header)
-    if second is not None:
-        labels = _two_row_labels(labels, rows[second].cells)
-        header = second
-    # Tables stacked on one sheet (an aging per entity) repeat the heading row over each; the one-cell row just
-    # above each heading row is that table's title, not one of the rows of the table before it.
-    repeats = {index for index, row in enumerate(rows) if header is not None and index > header and row.cells == rows[header].cells}
-    titles = {index - 1 for index in repeats | ({header} if header is not None else set()) if index > 0 and len(rows[index - 1].cells) == 1}
+    # Each table's heading rows, by the index of its first: (the index of its last, its labels). Tables stacked on one
+    # sheet (an aging per entity, open invoices over credits) each have their own.
+    heads: dict[int, tuple[int, dict[int, str]]] = {}
+    if header is not None:
+        heads[header] = _headings(rows, header)
+        top, (last, labels) = header, heads[header]
+        index = last + 1
+        while index < len(rows):
+            # The same heading rows again (both of a two-row heading) start another table with the same columns.
+            same = all(index + step < len(rows) and rows[index + step].cells == rows[top + step].cells for step in range(last - top + 1))
+            if same:
+                heads[index] = (index + last - top, labels)
+                index += last - top + 1
+                continue
+            # After a blank row, other headings over rows of their own (a one-cell title above them or not) start
+            # another table with other columns: the credits under the open invoices.
+            start = index + 1 if _title_row(rows[index]) and index + 1 < len(rows) else index
+            gap = rows[index].number > rows[index - 1].number + 1
+            if gap and len(rows[start].cells) >= 2 and _heads_at(rows, start):
+                own = _headings(rows, start)
+                if set(own[1].values()) != set(labels.values()):
+                    heads[start] = own
+                    top, (last, labels) = start, own
+                    index = last + 1
+                    continue
+            index += 1
+    heading_rows = {row for first, (last, _labels) in heads.items() for row in range(first, last + 1)}
+    stacked = len(heads) > 1
+    # The title just above each table's heading rows ("Canada entity (CAD)", "Entity: | CA02 (CAD)") is its title,
+    # not one of the rows of the table before it.
+    titles = {first - 1 for first in heads if first > 0 and first - 1 not in heading_rows and _title_row(rows[first - 1])}
     out = []
+    labels: dict[int, str] = {}
+    end = len(rows)
     for index, row in enumerate(rows):
-        named = header is not None and index > header and index not in repeats and index not in titles
+        if index in heads:
+            end, labels = heads[index]
+        named = index > end and index not in heading_rows and index not in titles
         columns = sorted(row.cells)
         if named and len(columns) >= 2:
             columns = sorted(set(columns) | {c for c in labels if columns[0] < c < columns[-1]})
@@ -675,12 +713,33 @@ def sheet_row_lines(rows: list[SheetRow], *, first_names_columns: bool = False) 
         for column in columns:
             ref = f"{get_column_letter(column)}{row.number}"
             label = f" ({labels[column]})" if named and column in labels else ""
-            cells.append(f"{ref}{label}: {row.cells.get(column) or tables.BLANK}")
+            value = (row.cells.get(column) or tables.BLANK).replace(" | ", " / ")
+            if label and _ID_COLUMN.search(labels[column]) and _GROUPED_WHOLE.fullmatch(value):
+                # A number typed into an invoice-number, account or year column reads as Excel shows it (100235,
+                # 2026), not as an amount (100,235), so it matches the number on the invoice.
+                value = value.replace(",", "")
+            cells.append(f"{ref}{label}: {value}")
         line = " | ".join(cells)
         # Each stacked table's title is a heading over its rows, so its rows are a table of their own, told apart
         # by the title ("Canada entity (CAD)"), not added to the table above.
-        out.extend(["[heading]", line, ""] if repeats and index in titles else [line])
+        out.extend(["[heading]", line, ""] if stacked and index in titles else [line])
     return out
+
+
+def _headings(rows: list[SheetRow], header: int) -> tuple[int, dict[int, str]]:
+    """The heading rows starting at ``header``: the index of the last (a second row under "Actual" merged over Jul,
+    Aug, Sep), and each column's label."""
+    labels = {c: _label(v) for c, v in rows[header].cells.items()}
+    second = _second_heading_row(rows, header)
+    if second is None:
+        return header, labels
+    return second, _two_row_labels(labels, rows[second].cells)
+
+
+def _title_row(row: SheetRow) -> bool:
+    """A table's title over its headings: one cell ("Credits"), or a label and its value ("Entity: | CA02 (CAD)")."""
+    values = [str(value) for _column, value in sorted(row.cells.items())]
+    return len(values) == 1 or (len(values) == 2 and values[0].rstrip().endswith(":"))
 
 
 def _second_heading_row(rows: list[SheetRow], header: int | None) -> int | None:
@@ -699,13 +758,30 @@ def _second_heading_row(rows: list[SheetRow], header: int | None) -> int | None:
     # row with a note past the last heading ("Called twice"): a heading row leaves a heading merged down empty under
     # it ("Department", "Q3"), or has its own cells between two headings; that row fills every heading's column.
     spanned = [column for column in under.cells if column not in top]
-    if not spanned or any(not any(c < column for c in top) for column in spanned):
+    # Columns left of every heading above ("Account", "Description" beside "Q3 2026" merged over the months) name
+    # themselves, when the row above heads later columns of this one.
+    lead = [column for column in spanned if column < min(top)]
+    if not spanned or (lead and len(lead) == len(spanned)):
         return None
     merged_down = any(column not in under.cells for column in top)
     between = any(any(c > column for c in top) for column in spanned)
     if not merged_down and not between:
         return None
+    if not merged_down and _shaped_like(under, rows[header + 2 : header + 7]):
+        # A list's first row filling a column left without a heading ("Acme | Jane Roe | Primary | Active" under
+        # "Vendor | Contact | | Status"): the rows under it are text in the same columns, as a row of the list is.
+        return None
     return header + 1
+
+
+def _shaped_like(under: SheetRow, later: list[SheetRow]) -> bool:
+    """Whether one of the rows after ``under`` fills every one of its columns with text, as a row of a list does;
+    under a second heading row there are figures ("Jul", "Aug" over amounts)."""
+    columns = set(under.cells)
+    return any(
+        columns <= set(row.cells) and not any(tables.is_value(str(row.cells[column])) for column in columns)
+        for row in later
+    )
 
 
 _MONTH_HEADING = re.compile(r"(?i)(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?(\s*[-' ]?\s*\d{2,4})?|q[1-4](\s*\d{2,4})?|(19|20)\d\d")
@@ -716,25 +792,47 @@ def _two_row_labels(top: dict[int, str], under: dict[int, object]) -> dict[int, 
     and its own ("Actual Jul"). A column with nothing under its label keeps the label alone ("Q3", "Budget")."""
     labels = dict(top)
     for column in sorted(under):
-        own = str(under[column]).replace("|", "/")
-        over = top.get(column) or top[max(c for c in top if c < column)]
+        own = _label(under[column])
+        left = [c for c in top if c <= column]
+        if not left:
+            # Left of every heading above: its own label alone ("Account" beside "Q3 2026").
+            labels[column] = own
+            continue
+        over = top.get(column) or top[max(left)]
         labels[column] = f"{over} {own}" if over != own else own
     return labels
 
 
 def _sheet_header(rows: list[SheetRow], *, first_names_columns: bool = False) -> int | None:
     """The index of the row naming the columns: one of the first rows, with two or more distinct labels,
-    bold over rows that aren't, or over a column of figures."""
+    bold over rows that aren't, or over a column of figures. A title of two cells over wider rows (the company
+    in A1, "As of 10/31/2026" in D1) is not the header when a row of more labels under it is."""
+
+    def heads(index: int) -> bool:
+        return _heads_at(rows, index, marked=first_names_columns and index == 0 and rows[index].number == 1)
+
     for index, row in enumerate(rows[:_HEADER_SEARCH]):
-        if len(row.cells) < 2:
+        if len(row.cells) < 2 or not heads(index):
             continue
-        below = rows[index + 1 : index + 31]
-        columns = range(min(row.cells), max(max(r.cells) for r in [row, *below]) + 1)
-        grid = [[r.cells.get(c, "") for c in columns] for r in [row, *below]]
-        bold = row.bold and not all(r.bold for r in below)
-        if tables.has_header(grid, bold_first=bold, marked=first_names_columns and index == 0 and row.number == 1):
-            return index
+        if len(row.cells) == 2:
+            wider = next(
+                (later for later in range(index + 1, min(len(rows), _HEADER_SEARCH)) if len(rows[later].cells) >= 3 and heads(later)),
+                None,
+            )
+            if wider is not None:
+                return wider
+        return index
     return None
+
+
+def _heads_at(rows: list[SheetRow], index: int, *, marked: bool = False) -> bool:
+    """Whether the row at ``index`` names the columns of the rows under it (``tables.has_header``)."""
+    row = rows[index]
+    below = rows[index + 1 : index + 31]
+    columns = range(min(row.cells), max(max(r.cells) for r in [row, *below]) + 1)
+    grid = [[r.cells.get(c, "") for c in columns] for r in [row, *below]]
+    bold = row.bold and not all(r.bold for r in below)
+    return tables.has_header(grid, bold_first=bold, marked=marked)
 
 
 def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
@@ -751,6 +849,11 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
     rows: list[SheetRow] = []
     more = 0
     formula_count = 0
+    # Formulas with no result saved or 0 as their result, the cells of those with 0 (and their formula), and whether
+    # the sheet has figures of its own.
+    unworked: list[tuple[dict[int, str], int, str]] = []
+    no_result = 0
+    figures = False
     first_col = first_row = last_col = last_row = 0
     for index, (frow, vrow) in enumerate(
         zip(
@@ -770,8 +873,13 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
             if formula := _formula(raw):
                 formula_count += 1
                 shown = f"{_formatted(value, cell)} ({formula})" if value is not None else formula
+                if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool) and value == 0):
+                    no_result += 1
+                    if value is not None:
+                        unworked.append((cells, column + 1, formula))
             else:
                 shown = _formatted(value if value is not None else raw, cell)
+                figures = figures or (isinstance(value, (int, float)) and not isinstance(value, bool) and value != 0)
             if shown:
                 cells[column + 1] = shown
                 bold = bold and bool(getattr(getattr(cell, "font", None), "b", False))
@@ -782,6 +890,14 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
             continue
         number = next((cell.row for cell in frow if getattr(cell, "row", None)), index + 1)
         rows.append(SheetRow(number, cells, bold))
+    # A file saved by a reporting tool (or XlsxWriter) holds its formulas without their results, which Excel works out
+    # when it opens the file: their 0s are not figures. Each such cell is written as its formula alone.
+    # Said in the text only where a 0 was taken away: a formula shown alone already reads as no figure.
+    saved_without = formula_count >= 2 and no_result >= 0.8 * formula_count and figures and bool(unworked)
+    if saved_without:
+        for cells_of_row, column, formula in unworked:
+            if column in cells_of_row:
+                cells_of_row[column] = formula
     _fill_merged_down(rows, _merged_ranges(formula_sheet))
     rows_text = sheet_row_lines(rows)
     try:
@@ -797,10 +913,33 @@ def _sheet_lines(formula_sheet, value_sheet) -> list[str]:
     note = f"({len(rows) + more} row{'s' if len(rows) + more != 1 else ''} with data" + (
         f", {formula_count} formula{'s' if formula_count != 1 else ''}" if formula_count else ""
     ) + ")"
-    out = [head, note, *rows_text]
+    out = [head, note]
+    if saved_without:
+        out.append(f"[{_SAVED_WITHOUT_RESULTS}]")
+    out += rows_text
     if more:
         out.append(f"[{more} more rows not shown; ask for a range such as rows {MAX_ROWS + 1}–{MAX_ROWS + 200}.]")
+    try:
+        widest = range_boundaries(declared)[2] or 0
+    except (ValueError, TypeError):
+        widest = 0
+    if widest > MAX_COLUMNS:
+        out.append(_columns_left_out(MAX_COLUMNS + 1, widest))
     return out
+
+
+# Short: it is read with every question about the sheet.
+_SAVED_WITHOUT_RESULTS = "Formulas saved without their results: such a cell shows its formula, not the figure Excel shows"
+
+
+def _columns_left_out(first: int, last: int, *, workbook: bool = True) -> str:
+    """The note for a sheet wider than is read: its last columns (often its totals) are not in the text."""
+    from openpyxl.utils import get_column_letter
+
+    left, right = get_column_letter(first), get_column_letter(last)
+    if not workbook:
+        return f"[Columns {left}–{right} not shown.]"
+    return f"[Columns {left}–{right} not shown; ask read_cells for them, such as {left}1:{right}40.]"
 
 
 _MERGE_CELL = re.compile(rb'<(?:\w+:)?mergeCell\b[^>]*?\bref="([A-Z]{1,3})(\d+):([A-Z]{1,3})(\d+)"')
@@ -900,6 +1039,8 @@ def xls_text(data: bytes) -> str:
         lines.extend(sheet_row_lines(rows))
         if rows_left:
             lines.append(f"[{rows_left} more rows not shown.]")
+        if sheet.ncols > MAX_COLUMNS:
+            lines.append(_columns_left_out(MAX_COLUMNS + 1, sheet.ncols))
     return "\n".join(lines).strip()
 
 
@@ -1072,13 +1213,19 @@ def _joined_headers(sections: list[tuple[str, list[list[str]]]]) -> list[tuple[s
 
 def csv_text(data: bytes, filename: str) -> str:
     text = decode_text(data).replace("\x00", "")
-    try:
-        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
-        # The sniffer turns doubled quotes off when its sample has none, and a quote written twice further down
-        # ('"Pipe 3"" PVC, schedule 40"') would then end the cell at its comma. Every spreadsheet writes them.
-        dialect.doublequote = True
-    except csv.Error:
-        dialect = csv.excel_tab if filename.lower().endswith(".tsv") else csv.excel
+    # Excel's own line naming the delimiter ("sep=;"), written first so Excel opens the file right.
+    named = re.match(r"sep=(.)[ \t]*(?:\r\n|\n|\r|$)", text)
+    if named:
+        text = text[named.end():]
+        dialect = type("Named", (csv.excel,), {"delimiter": named.group(1)})
+    else:
+        try:
+            dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t|")
+            # The sniffer turns doubled quotes off when its sample has none, and a quote written twice further down
+            # ('"Pipe 3"" PVC, schedule 40"') would then end the cell at its comma. Every spreadsheet writes them.
+            dialect.doublequote = True
+        except csv.Error:
+            dialect = csv.excel_tab if filename.lower().endswith(".tsv") else csv.excel
     quote = getattr(dialect, "quotechar", None) or '"'
     try:
         rows = list(csv.reader(io.StringIO(text), dialect))
@@ -1133,6 +1280,8 @@ def _rows_text(rows: list[list[str]], filename: str) -> str:
     lines.extend(sheet_row_lines([row for row in sheet if row.cells], first_names_columns=True))
     if len(rows) > MAX_ROWS:
         lines.append(f"[{len(rows) - MAX_ROWS} more rows not shown.]")
+    if width > MAX_COLUMNS:
+        lines.append(_columns_left_out(MAX_COLUMNS + 1, width, workbook=False))
     return "\n".join(lines)
 
 
@@ -1184,7 +1333,20 @@ def _formatted(value, cell) -> str:
                 literal = part.group(1) if part.group(1) is not None else part.group(2)
                 shown.append(literal if literal is not None else words.get(part.group(0).lower(), part.group(0)))
             return "".join(shown).strip()
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and "," not in bare:
+    numeric = isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    padded = re.fullmatch(r"(0+)(?:\.(0+))?", bare)
+    if numeric and padded and len(padded.group(1)) > 1 and value >= 0:
+        # A zero-padded format ("00000"): vendor 417 is 00417, a ZIP code 02134, as Excel shows them.
+        places = len(padded.group(2) or "")
+        whole, _point, fraction = f"{value:.{places}f}".partition(".")
+        return whole.zfill(len(padded.group(1))) + (f".{fraction}" if fraction else "")
+    decimals = re.search(r"\.(0+)", bare)
+    if numeric and isinstance(value, float) and decimals and len(decimals.group(1)) > 4:
+        # More decimals than the four a figure is written with (an exchange rate formatted 0.000000).
+        places = len(decimals.group(1))
+        shown = Decimal(repr(value)).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+        return f"{shown:,.{places}f}" if "," in bare else f"{shown:.{places}f}"
+    if numeric and "," not in bare:
         return _fmt(value, grouped=False)
     return _fmt(value)
 
@@ -1198,12 +1360,20 @@ def _fmt(value, *, grouped: bool = True) -> str:
         return value.date().isoformat() if value.time() == time(0) else value.isoformat(sep=" ", timespec="minutes")
     if isinstance(value, (date, time)):
         return value.isoformat()
+    if isinstance(value, timedelta):
+        # A duration ([h]:mm on a timesheet) as hours and minutes: 37:30, not "1 day, 13:30:00".
+        seconds = round(value.total_seconds())
+        hours, rest = divmod(abs(seconds), 3600)
+        minutes, seconds = divmod(rest, 60)
+        return f"{'-' if value < timedelta(0) else ''}{hours}:{minutes:02d}" + (f":{seconds:02d}" if seconds else "")
     if isinstance(value, float):
         if math.isnan(value) or math.isinf(value):
             return str(value)
         if value.is_integer():
             return f"{int(value):,}" if grouped else str(int(value))
-        return (f"{value:,.4f}" if grouped else f"{value:.4f}").rstrip("0").rstrip(".")
+        # Four decimals, or four figures of a small one (an exchange rate of 0.006712, 0.0000637).
+        places = 4 if abs(value) >= 1 else min(12, max(4, 3 - math.floor(math.log10(abs(value)))))
+        return (f"{value:,.{places}f}" if grouped else f"{value:.{places}f}").rstrip("0").rstrip(".")
     if isinstance(value, int):
         return f"{value:,}" if grouped else str(value)
     return re.sub(r"\s+", " ", str(value)).strip()
@@ -1591,9 +1761,12 @@ def read_cells(data: bytes, sheet: str, cells: str, *, limit: int = 200, books: 
         except (ValueError, TypeError):
             return f"{cells!r} isn't a cell range. Use something like A1:F20."
         min_col, min_row = min_col or 1, min_row or 1
-        max_col = min(max_col or ws.max_column, min_col + MAX_COLUMNS - 1)
+        asked = max_col or ws.max_column
+        max_col = min(asked, min_col + MAX_COLUMNS - 1)
         max_row = min(max_row or ws.max_row, ws.max_row)
         lines = [f'Sheet "{ws.title}" {get_column_letter(min_col)}{min_row}:{get_column_letter(max_col)}{max_row}']
+        if asked > max_col:
+            lines.append(_columns_left_out(max_col + 1, asked))
         shown = 0
         held = _held(ws, min_col, min_row, max_col, max_row)
         held_values = _held(vs, min_col, min_row, max_col, max_row)

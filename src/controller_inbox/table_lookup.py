@@ -33,6 +33,11 @@ MAX_CHARS = 1800
 
 FOUND_HEAD = "Rows that match the question, copied from the table (the file is above):"
 WORKED_HEAD = "Worked out from the table, exactly (check it is what was asked; the file is above):"
+# The same, over a sheet too long to read whole: what is worked out covers only the rows that were read.
+PARTIAL_HEAD = (
+    "Worked out from the first {read} rows of the table only: the file has {left} more rows CloseDesk did not read, "
+    "so a total or count here is not the whole sheet; say so (the file is above):"
+)
 
 # Words that carry no meaning for matching a column or a row.
 _STOP = frozenset(
@@ -140,7 +145,11 @@ _LIMIT = re.compile(r"\b(over|above|under|below|exceed(?:s|ed|ing)?)\s+(?:their|
 _GROUP = re.compile(r"\b(?:by|per|for each|for every|each)\s+([a-z][a-z#&-]*)", re.I)
 _RANGE = re.compile(r"^\s*(?:through|thru|to|until|-|–)\s*$", re.I)
 _DATE = re.compile(r"(?<![\d/])(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?(?![\d/])")
-_ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+_ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})(?:\b|(?=T\d))")
+# A date written day first with dots (01.10.2026), as in Germany and much of Europe.
+_DOTTED = re.compile(r"(?<![\d.])(\d{1,2})\.(\d{1,2})\.(\d{4}|\d{2})(?![\d.])")
+# A time after a date ("10/31/2026 04:05 PM", "2026-10-01T00:00:00.000").
+_TIME = re.compile(r"(?:T|\s+)\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:\s*[ap]\.?m\.?)?(?:\s*(?:Z|[+-]\d{2}:?\d{2}))?", re.I)
 _MONTH_DAY = re.compile(
     rf"\b({_MONTH_NAMES})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:\s*(?:-|–|to|and|&)\s*(\d{{1,2}})(?:st|nd|rd|th)?)?(?:,?\s+(\d{{4}}))?\b",
     re.I,
@@ -150,13 +159,19 @@ _WEEKDAY = re.compile(r"^(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*\.
 _TOKEN = re.compile(r"[a-z0-9][a-z0-9&]*|#|%")
 _CELL_REF = re.compile(r"^([A-Z]{1,3}\d{1,7})(?: \((.+)\))?$")
 _DASHES = frozenset({"-", "–", "—", "$ -", "$-"})
-# Commas group the thousands ("1,250.00"); in European style dots do and a comma marks the decimals ("1.234,56",
-# "447,15").
-_EUROPEAN = re.compile(r"\d{1,3}(?:\.\d{3})+,\d+|\d{1,3},\d{1,2}(?![\d,])")
+# Commas group the thousands ("1,250.00"); in European style dots or spaces do and a comma marks the decimals
+# ("1.234,56", "1 234,56", "1234,56", "447,15").
+_EUROPEAN = re.compile(r"\d{1,3}(?:\.\d{3})+,\d+|\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:,\d+)?|\d+,\d{1,2}(?![\d,])")
+# A currency's code before or after the figure ("EUR 1.234,56", "1,234.56 USD"), or its sign after it ("1.250,00 €").
+_CURRENCY_CODE = r"(?:EUR|USD|GBP|CHF|CAD|AUD|NZD|JPY|SEK|NOK|DKK|PLN|CZK|HUF|MXN|INR|CNY|HKD|SGD|ZAR)"
+_CURRENCY_AFTER = re.compile(r"[$€£¥]|" + _CURRENCY_CODE, re.I)
 _LEADING_FIGURE = re.compile(
-    r"\s*([(\-−–])?\s*([$€£¥])?\s*([(\-−–])?\s*"
-    r"(\d{1,3}(?:\.\d{3})+,\d+|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{1,3},\d{1,2}(?![\d,])|\d+(?:\.\d+)?|\.\d+)"
+    r"\s*(?:\+\s*)?([(\-−–])?\s*(?:" + _CURRENCY_CODE + r"\s*)?([$€£¥])?\s*([(\-−–])?\s*"
+    r"(\d{1,3}(?:\.\d{3})+,\d+|\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d{1,3}(?:[ \u00a0\u202f]\d{3})+(?:,\d+)?(?![\d.])"
+    r"|\d+,\d{1,2}(?![\d,])|\d+(?:\.\d+)?|\.\d+)"
 )
+# The line a sheet too long to read whole ends with ("[501 more rows not shown; ask for a range ...]").
+_LEFT_OUT = re.compile(r"^\[(\d+) more rows not shown\b")
 _CREDIT_DEBIT = re.compile(r"(CR|DR)\.?", re.I)
 
 When = tuple  # (year or None, month, day)
@@ -195,6 +210,14 @@ class Table:
     labels: tuple[str, ...]
     rows: list[Row] = field(default_factory=list)
     kinds: dict[str, str] = field(default_factory=dict)
+    # Rows of the sheet past the last one read ("[501 more rows not shown ...]"): the table is not the whole sheet.
+    left_out: int = 0
+    # The columns whose dates are written day first (31/10/2026), as some of their cells can only be read.
+    day_first: set[str] = field(default_factory=set)
+
+    def date(self, label: str, value: str) -> When | None:
+        """The date in a cell of column ``label``, read the way that column writes its dates."""
+        return cell_date(value, day_first=label in self.day_first)
 
     @property
     def body(self) -> list[Row]:
@@ -262,6 +285,9 @@ def answer(text: str, question: str) -> Answer | None:
         found = _answer(table, asked)
         if not found:
             continue
+        if table.left_out and found.head == WORKED_HEAD:
+            found.head = PARTIAL_HEAD.format(read=len(table.body), left=table.left_out)
+            found.exact = False
         # The table whose rows the question names more of wins ("Sales" and "travel" on a detail tab over "Sales"
         # alone on the summary); the better match breaks a tie.
         named = _rows_named(table, asked.words)
@@ -364,12 +390,17 @@ def _tables_in(text: str) -> list[Table]:
     headed: set[int] = set()
     page = ""
     heading = False
+    # Each sheet's rows left out at its end, by its marker.
+    cut: dict[str, int] = {}
     for at, raw in enumerate((text or "").splitlines()):
         line = raw.strip()
         marker = MARKER_RE.match(line)
         if marker:
             page = marker.group(1)
             heading = False
+            continue
+        if left := _LEFT_OUT.match(line):
+            cut[page] = int(left.group(1))
             continue
         if line == "[heading]":
             heading = True
@@ -398,6 +429,10 @@ def _tables_in(text: str) -> list[Table]:
         _with_row_labels(table)
         _close_sections(table)
     found = _joined_across_pages(found)
+    for page, left in cut.items():
+        last = next((table for table in reversed(found) if table.rows and table.rows[-1].page == page), None)
+        if last is not None:
+            last.left_out = left
     for table in found:
         _name_rows(table)
         table.kinds = _kinds(table)
@@ -605,7 +640,9 @@ def _held_totals(rows: list[Row], figures: list[str], as_rows: set[int]) -> dict
                 continue
             value = _number(raw)
             if value is not None and "%" not in raw and running[label].started():
-                held[index] += running[label].close(value)
+                # A 0 under rows of 0s (an empty bucket) adds up whether or not its row is a total: it says nothing.
+                empty = value == 0 and not any(running[label].group)
+                held[index] += running[label].close(value) and not empty
     return held
 
 
@@ -781,6 +818,8 @@ def _row(line: str, page: str) -> Row | None:
     # look like references ("US01", "CA02" entity codes, "Q1" ... "Q4") are names.
     named = [_CELL_REF.match(part.partition(": ")[0].strip()) for part in parts if ": " in part]
     workbook = bool(named) and all(named) and len({re.sub(r"^[A-Z]+", "", ref.group(1)) for ref in named}) == 1
+    if workbook and not any(ref.group(2) for ref in named):
+        return None
     group: list[str] = []
     cells: list[tuple[str, str]] = []
     refs: list[str] = []
@@ -794,7 +833,11 @@ def _row(line: str, page: str) -> Row | None:
             ref = ""
             if workbook and (cell := _CELL_REF.match(label)):
                 if not cell.group(2):
-                    return None
+                    # A cell in a column with no heading: before the named cells it is the row's label ("Revenue"
+                    # under a blank A1, as a PDF's row labels are); after them, a note ("Disputed"), left in the line.
+                    if not cells:
+                        group.append(value.strip())
+                    continue
                 ref, label = cell.group(1), cell.group(2)
             # Two columns headed alike ("Date | Amount | Date | Amount"): the second is "Amount (2)", so it is read too.
             seen[label] = seen.get(label, 0) + 1
@@ -802,8 +845,6 @@ def _row(line: str, page: str) -> Row | None:
             refs.append(ref)
         elif not cells:
             group.append(part)
-        # A cell in a column with no heading ("Disputed" in an unheaded notes column) has no name to go by. It stays
-        # in the row's line; the row keeps its named cells, so its figures still count.
     if len(cells) < 2:
         return None
     return Row(page, " > ".join(group), cells, line, refs)
@@ -891,10 +932,22 @@ def _kinds(table: Table) -> dict[str, str]:
         if not values:
             kinds[label] = "text"
             continue
-        dates = sum(cell_date(value) is not None for value in values)
+        if _day_first(values):
+            table.day_first.add(label)
+        dates = sum(table.date(label, value) is not None for value in values)
         figures = sum(_number(value) is not None for value in values)
         kinds[label] = "date" if dates >= 0.6 * len(values) else "figure" if figures >= 0.6 * len(values) else "text"
+        if kinds[label] == "figure" and codes(label, cells):
+            # A department, an account or a store named by a number picks rows; it is never added up.
+            kinds[label] = "text"
     return kinds
+
+
+def _day_first(values: list[str]) -> bool:
+    """Whether a column writes its dates day first (31/10/2026, as in the UK and Europe): one of them can only be
+    read that way, and none only month first. A column that can be read either way is read month first."""
+    parts = [(int(match.group(1)), int(match.group(2))) for value in values if (match := _DATE.search(value))]
+    return any(first > 12 and second <= 12 for first, second in parts) and not any(second > 12 for _first, second in parts)
 
 
 # The question ----------------------------------------------------------------------------------
@@ -1173,7 +1226,7 @@ def _whole_years(span: tuple[When, When]) -> bool:
 
 
 def _dated_with_years(table: Table, label: str) -> bool:
-    return any((when := cell_date(row.value(label))) is not None and when[0] is not None for row in table.rows)
+    return any((when := table.date(label, row.value(label))) is not None and when[0] is not None for row in table.rows)
 
 
 def _in_heading(condition: Condition, table: Table) -> bool:
@@ -1204,7 +1257,7 @@ def _meets(row: Row, condition: Condition, table: Table) -> bool:
         return {
             ">": number > target, ">=": number >= target, "<": number < target, "<=": number <= target, "=": number == target,
         }[condition.op]
-    when = cell_date(value)
+    when = table.date(condition.column, value)
     if when is None:
         return False
     low, high = condition.value
@@ -1290,8 +1343,8 @@ def _worked(
             label for label in table.labels if table.kinds.get(label) == "date"
         ]
         # Among the rows with a date: an undated one ("Opening balance") is neither the first nor the last.
-        order = [row for row in body if cell_date(row.value(dated[0]))] if dated else []
-        order = sorted(order, key=lambda row: _date_key(cell_date(row.value(dated[0])))) if order else body
+        order = [row for row in body if table.date(dated[0], row.value(dated[0]))] if dated else []
+        order = sorted(order, key=lambda row: _date_key(table.date(dated[0], row.value(dated[0])))) if order else body
         row = order[0] if op == "first" else order[-1]
         shown = [label for label in columns] or figures
         lines = [f"- The {op} row{where}{reading}" + (f", by {dated[0]}" if dated else "") + ":"]
@@ -1702,6 +1755,49 @@ def _stem(word: str) -> str:
 
 _ID_LABEL = re.compile(r"#|\b(?:id|no\.?|number|code|acct|account)\s*$", re.I)
 
+# Headings of a column that names its rows by a number (a department, an account, a store), rather than counting.
+_CODE_HEADING = re.compile(
+    r"\b(dept|department|div|division|code|id|no|nbr|num|number|entity|co|company|acct|account|gl|cost cent(er|re)|"
+    r"cc|store|branch|location|loc|site|region|units?|bu|class|fund|project|job|vendor|customer|emp|employee|check|"
+    r"cheque|po|ref|invoice)\b\.?|#",
+    re.I,
+)
+# Headings that say outright they hold codes, whatever else they say ("Cost center", "Budget code", "Sales region").
+_CODE_PHRASE = re.compile(
+    r"\b(cost cent(er|re)s?|codes?|id|ids|region|regions|business units?|dept|department|division|entity|gl|"
+    r"(acct|account)\s*(no|nbr|num|number|#))\b|#",
+    re.I,
+)
+# Headings of a quantity, however they start ("Employee count", "Customer balance", "No. of invoices"): figures.
+_QUANTITY_HEADING = re.compile(
+    r"\b(count|counts|balance|total|amount|amt|cost|costs|sales|qty|quantity|units|hours|hrs|days|price|rate|revenue|"
+    r"spend|budget|actual|value|paid|due|owed|headcount|fte|items|invoices|orders|salary|salaries|wages?|pay|gross|"
+    r"fees?|rent|bonus|bonuses|expenses?|charges?|deposits?|income|payments?|cash|profit|margin|tax)\b"
+    r"|\b(no|number)\.?\s+of\b",
+    re.I,
+)
+# Headings of an identifier, unique on each row: an invoice, vendor or check number, a GL account.
+_ID_HEADING = re.compile(r"\b(no|nbr|num|number|id|code|acct|account|ref)\b\.?|#", re.I)
+
+
+def codes(label: str, cells: list[str]) -> bool:
+    """A figure column that is really a list of codes: headed like one, every cell a whole number as written
+    (no separators, decimals or signs), and few of them repeated over the rows (210, 320, 410), or each an
+    identifier ("Invoice No", "Vendor ID", "GL Account", "Check #"), or written with a leading zero ("00417").
+    A heading's last word says what it holds: "Budget code" and "Sales region" are codes, "Dept Budget",
+    "Region Revenue" and "Employee Salary" amounts."""
+    if not _CODE_HEADING.search(label):
+        return False
+    quantity = [match.end() for match in _QUANTITY_HEADING.finditer(label)]
+    if quantity and max((match.end() for match in _CODE_PHRASE.finditer(label)), default=-1) < max(quantity):
+        return False
+    written = [cell.strip() for cell in cells if cell and cell != tables.BLANK]
+    if not written or not all(re.fullmatch(r"\d{1,10}", cell) for cell in written):
+        return False
+    if _ID_HEADING.search(label) or any(len(cell) > 1 and cell.startswith("0") for cell in written):
+        return True
+    return len(set(written)) <= max(40, len(written) // 3) and (len(written) < 4 or len(set(written)) < len(written))
+
 
 # Short forms in headings that aren't the start of the word they stand for ("Hours OT" for overtime hours).
 _SHORT = {"ot": "overtime", "dt": "doubletime", "pto": "leave", "qty": "quantity", "amt": "amount", "acct": "account", "dept": "department"}
@@ -1724,6 +1820,8 @@ def _number(value: str) -> Decimal | None:
     if not match:
         return None
     rest = text[match.end():].strip()
+    if after := _CURRENCY_AFTER.match(rest):
+        rest = rest[after.end():].strip()
     # SAP and Oracle reports print a negative with its minus last ("1,234.56-").
     minus_last = rest[:1] in {"-", "−"} and not (match.group(1) or match.group(3))
     if minus_last:
@@ -1736,6 +1834,7 @@ def _number(value: str) -> Decimal | None:
         return None
     figure = match.group(4)
     figure = figure.replace(".", "").replace(",", ".") if _EUROPEAN.fullmatch(figure) else figure.replace(",", "")
+    figure = re.sub(r"[ \u00a0\u202f]", "", figure)
     try:
         number = Decimal(figure)
     except InvalidOperation:
@@ -1760,28 +1859,36 @@ def _places(sample: str) -> int:
     """The decimals a cell writes: 2 for "1,250.00", "447,15" and "1.234,56"."""
     figure = _LEADING_FIGURE.match(sample)
     if figure and _EUROPEAN.fullmatch(figure.group(4)):
-        return len(figure.group(4).rsplit(",", 1)[1])
+        return len(figure.group(4).rsplit(",", 1)[1]) if "," in figure.group(4) else 0
     m = re.search(r"\.(\d+)", sample)
     return len(m.group(1)) if m else 0
 
 
-def cell_date(value: str) -> When | None:
-    """The date a cell holds ("01/15/2026", "Mon 09/28", "10/14", "2026-10-14", "Oct 14, 2026"), or None."""
+def cell_date(value: str, *, day_first: bool = False) -> When | None:
+    """The date a cell holds ("01/15/2026", "Mon 09/28", "10/14", "2026-10-14", "Oct 14, 2026", "03.10.2026", with
+    a time after it or not), or None. ``day_first``: its column writes 31/10/2026, so 03/11/2026 is 3 November."""
     text = (value or "").strip()
     if not text or len(text) > 40:
         return None
-    for pattern in (_ISO, _DATE, _MONTH_DAY, _DAY_MONTH):
+    for pattern in (_ISO, _DATE, _DOTTED, _MONTH_DAY, _DAY_MONTH):
         match = pattern.search(text)
         if not match:
             continue
-        rest = (text[: match.start()] + text[match.end():]).strip()
+        after = text[match.end():]
+        if (time := _TIME.match(after)) and not after[time.end():].strip():
+            after = ""
+        rest = (text[: match.start()] + after).strip()
         if rest and not _WEEKDAY.match(rest):
             return None
         if pattern is _ISO:
             year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
         elif pattern is _DATE:
             month, day = int(match.group(1)), int(match.group(2))
+            if day_first:
+                month, day = day, month
             year = _year(match.group(3))
+        elif pattern is _DOTTED:
+            day, month, year = int(match.group(1)), int(match.group(2)), _year(match.group(3))
         elif pattern is _MONTH_DAY:
             if match.group(3):
                 return None

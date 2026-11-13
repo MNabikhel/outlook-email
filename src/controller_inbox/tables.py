@@ -68,15 +68,22 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
         return False
     first = [cell.strip() for cell in rows[0] if cell is not None]
     filled = [cell for cell in first if cell]
-    if len(filled) < 2 or len(set(filled)) != len(filled):
+    if len(filled) < 2 or (len(set(filled)) != len(filled) and not _repeated_block(filled)):
         return False
-    # A year or a month over each column ("2026", "Oct 2026") names it when the file marks the row as headings.
-    periods = marked or bold_first
+    # A year or a month over each column ("2026", "Oct 2026") names it when the file marks the row as headings, or
+    # when a word heads the row and figures sit under two or more periods ("Account | Sep 2026 | Oct 2026").
+    periods = marked or bold_first or _period_headings(rows)
     # An aging's buckets ("1-30", "61-90", "Over 90") head their columns beside words ("Vendor", "Current").
     words = sum(1 for cell in filled if not is_value(_value_of(cell)) and not _BUCKET_RE.fullmatch(cell))
     buckets = words >= 2
     if any(
-        (is_value(_value_of(cell)) and not (periods and _PERIOD_RE.fullmatch(cell)) and not (buckets and _BUCKET_RE.fullmatch(cell)))
+        (
+            is_value(_value_of(cell))
+            and not (periods and _PERIOD_RE.fullmatch(cell))
+            and not (buckets and _BUCKET_RE.fullmatch(cell))
+            # "No" beside other headings is the line number's column ("No | Description | Qty"), not a no.
+            and not (words >= 2 and _YES_NO.fullmatch(cell))
+        )
         or cell.endswith(":")
         or _FORMULA_RE.search(cell)
         for cell in filled
@@ -95,6 +102,37 @@ def has_header(rows: list[list[str | None]], *, marked: bool = False, bold_first
         if len(below) >= 2 and sum(map(is_value, below)) >= 0.6 * len(below):
             return True
     return False
+
+
+_YES_NO = re.compile(r"(?i)yes|no|n/?a")
+
+
+def _repeated_block(labels: list[str]) -> bool:
+    """Distinct labels written twice or more side by side ("Date | Amount | Date | Amount"): two lists of one kind
+    beside each other, such as a bank reconciliation's deposits in transit and outstanding checks."""
+    for size in range(2, len(labels) // 2 + 1):
+        block = labels[:size]
+        if len(labels) % size == 0 and len(set(block)) == size and labels == block * (len(labels) // size):
+            return True
+    return False
+
+
+def _period_headings(rows: list[list[str | None]]) -> bool:
+    """A first row of a word, then two or more distinct periods, each over a column of figures that are not periods
+    themselves: "Account | Sep 2026 | Oct 2026 | Nov 2026" over each account's months."""
+    first = [(cell or "").strip() for cell in rows[0]]
+    lead = next((cell for cell in first if cell), "")
+    if not lead or is_value(lead):
+        return False
+    columns = [index for index, cell in enumerate(first) if cell and _PERIOD_RE.fullmatch(cell)]
+    if len(columns) < 2 or len({first[index] for index in columns}) != len(columns):
+        return False
+    for index in columns:
+        below = [(row[index] or "").strip() for row in rows[1:] if index < len(row) and (row[index] or "").strip()]
+        # A figure with decimals ("950.25") only looks like a date.
+        if len(below) < 2 or not all(is_value(cell) and (not _PERIOD_RE.fullmatch(cell) or re.fullmatch(r"[\d,]*\.\d+", cell)) for cell in below):
+            return False
+    return True
 
 
 _AMOUNT_RE = re.compile(r"[(\-−–]?\s*[$€£¥]?\s*[(\-−–]?\d[\d,]*(?:\.\d+)?%?\)?")
@@ -135,8 +173,9 @@ def table_lines(rows: list[list[str | None]], *, header: bool) -> list[str]:
 
 def labelled_row(labels: list[str | None], row: list[str | None]) -> str:
     """``Label: value`` for each column, ``Label: not listed`` where the cell is empty."""
-    labels = [_clean(label) or "" for label in labels]
-    row = [_clean(cell) for cell in row] + [""] * (len(labels) - len(row))
+    # A "|" or ": " in a heading, or " | " in a cell, would read as the end of a cell or of its name.
+    labels = [(_clean(label) or "").replace("|", "/").replace(": ", " - ") for label in labels]
+    row = [None if cell is None else cell.replace(" | ", " / ") for cell in map(_clean, row)] + [""] * (len(labels) - len(row))
     filled = [cell for cell in row if cell]
     # A lone heading ("Contractors") reads on its own; a lone figure, often a total, needs its column.
     if len(filled) == 1 and len(labels) > 2 and not is_value(filled[0]):

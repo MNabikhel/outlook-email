@@ -59,9 +59,25 @@ _SUMMARY_PLACE = re.compile(
 )
 
 
+# Asking outright for a summary, whatever else the question names ("Summarize the totals").
+_SUMMARY_ASKED = re.compile(
+    r"\b(?:summari[sz]e|summari[sz]ing|gist|tl;?dr|walk me through|(?:give|write|need|want)\s+(?:me\s+)?(?:a|an)\s+(?:summary|overview))\b", re.I
+)
+# Asking for a figure or about one row, which a summary of the whole file would not reach: "the summary total of gross
+# pay for department 520", "what does the journal say is total gross pay", "what does the Summary say for IT".
+_FIGURE_ASKED = re.compile(
+    r"\b(?:total|totals|sum|amount|how much|how many|balance|owed?|due|paid|spend|spent|cost|count|number of)\b"
+    r"|\bsays?\s+(?:for|about|is|are|was|were)\b",
+    re.I,
+)
+
+
 def asks_summary(question: str) -> bool:
     """Whether the question asks for a file to be summarized, not about a figure on its summary sheet."""
-    return bool(SUMMARY_RE.search(_SUMMARY_PLACE.sub(" ", question or "")))
+    text = _SUMMARY_PLACE.sub(" ", question or "")
+    if _SUMMARY_ASKED.search(text):
+        return True
+    return bool(SUMMARY_RE.search(text)) and not _FIGURE_ASKED.search(text)
 
 # A question's filler, past what every question has (``documents.STOP_WORDS``), and the words for a file itself.
 _STOP = documents.STOP_WORDS | set(
