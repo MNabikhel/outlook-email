@@ -464,14 +464,16 @@ def _gift_ask(text: str) -> re.Match[str] | None:
     return found[0] if found else None
 
 
-def _gift_asks(text: str) -> list[re.Match[str]]:
+@lru_cache(maxsize=8)
+def _gift_asks(text: str) -> tuple[re.Match[str], ...]:
     """Every gift-card mention in a sentence that asks someone to buy them or send their codes.
 
-    Each sentence is read once, however many mentions it has, so a long run of them stays quick.
+    Each sentence is read once, however many mentions it has, so a long run of them stays quick. One check reads
+    the same text several times (the body, then with its files), so the last few are kept.
     """
     mentions = list(GIFT_RE.finditer(text or ""))
     if not mentions:
-        return []
+        return ()
     stops = [stop.start() for stop in re.finditer(r"[.\n]", text)]
     read: dict[tuple[int, int], tuple[bool, bool]] = {}
     found = []
@@ -491,7 +493,7 @@ def _gift_asks(text: str) -> list[re.Match[str]]:
                 continue
         if asks:
             found.append(match)
-    return found
+    return tuple(found)
 
 
 def assess(

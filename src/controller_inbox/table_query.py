@@ -929,32 +929,50 @@ def _runs(values: list[list], target: int, terms: list[tuple[int, int]]) -> bool
 
 def _holds(values: list[list], target: int, terms: list[tuple[int, int]], share: float = 1.0) -> bool:
     """Whether ``target`` is the signed sum of ``terms`` on at least ``share`` of the rows that have it."""
-    used = good = steady = 0
+    # More rows off than ``share`` allows of them all can't hold: a formula that doesn't stops early. Most tried
+    # don't, so the sum is checked first and the rest only for one that adds up.
+    allowed = (1 - share) * len(values)
+    tolerance = 0.015 * len(terms)
+    rows = []
+    bad = 0
+    for row in values:
+        total = row[target]
+        # A row with none of the parts ("Balance per trial balance, GL" under a rollforward) isn't worked out
+        # from them at all; a blank part adds nothing, as in the sheet's SUM.
+        if total is None:
+            continue
+        added = 0.0
+        some = False
+        for index, sign in terms:
+            part = row[index]
+            if part is not None:
+                some = True
+                added += sign * part
+        if not some:
+            continue
+        rows.append(row)
+        if abs(added - total) > tolerance:
+            bad += 1
+            if bad > allowed:
+                return False
+    used = len(rows)
+    if used < 3:
+        return False
+    if used - bad < share * used or sum(1 for row in values if row[target]) < 2:
+        return False
     copies = [0] * len(terms)
+    steady = 0
     # The columns in the sheet's order, to tell a straight-line schedule (each column the same step from the last).
     in_order = sorted([target, *(index for index, _sign in terms)])
-    # More rows off than ``share`` allows of them all can't hold: a formula that doesn't stops early.
-    allowed = (1 - share) * len(values)
-    for row in values:
-        # A blank part adds nothing, as in the sheet's SUM.
-        parts = [row[index] or 0.0 for index, _sign in terms]
-        # A row with none of the parts ("Balance per trial balance, GL" under a rollforward) isn't worked out
-        # from them at all.
-        if row[target] is None or all(row[index] is None for index, _sign in terms):
-            continue
-        used += 1
-        good += abs(sum(sign * part for (_index, sign), part in zip(terms, parts)) - row[target]) <= 0.015 * len(terms)
-        if used - good > allowed:
-            return False
-        for position, part in enumerate(parts):
-            copies[position] += abs(part - row[target]) < 0.005
+    for row in rows:
+        for position, (index, _sign) in enumerate(terms):
+            copies[position] += abs((row[index] or 0.0) - row[target]) < 0.005
         cells = [row[index] or 0.0 for index in in_order]
         steps = [after - before for before, after in zip(cells, cells[1:])]
-        steady += max(steps) - min(steps) <= 0.015 * len(terms)
-    nonzero = sum(1 for row in values if row[target])
+        steady += max(steps) - min(steps) <= tolerance
     # Equal months ("Oct = Jul - Aug + Sep" when every month is the same) only look like a formula, and so do equal
     # steps: a balance amortized straight-line ("Mar 31 = Jun 30 + Sep 30 - Dec 31") fits a + d = b + c every time.
-    return used >= 3 and nonzero >= 2 and good >= share * used and max(copies) < 0.8 * used and steady < 0.8 * used
+    return max(copies) < 0.8 * used and steady < 0.8 * used
 
 
 def _headings_above(lines: list[str], at: int) -> list[str]:
