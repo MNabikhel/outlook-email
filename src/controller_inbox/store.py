@@ -865,7 +865,8 @@ class Store:
     def email_heads(self, email_ids: list[str]) -> list[SimpleNamespace]:
         """What the invoice checks need of each email, without its text or files: id, the order it was stored in,
         subject, sender, Reply-To, Message-ID, threading, when it was stored and sent, flags, category, its invoice
-        numbers and whether it brings an invoice file. In the order asked."""
+        numbers, the one it is about (``invoice_key``: its primary invoice as the duplicate check compares it) and
+        whether it brings an invoice file. In the order asked."""
         found: dict[str, SimpleNamespace] = {}
         ids = list(dict.fromkeys(email_ids))
         with self.connect() as conn:
@@ -897,6 +898,7 @@ class Store:
                         flags=_loads(row["flags"], []) or [],
                         category=category,
                         invoice_numbers=list(extracted.get("invoice_numbers") or []),
+                        invoice_key=_invoice_key(ExtractedFields.from_dict(extracted).primary_invoice),
                         invoice_file=bool(row["invoice_file"]),
                     )
         return [found[i] for i in ids if i in found]
@@ -1249,21 +1251,27 @@ class Store:
                 FROM emails e
                 WHERE e.id != ?
                   AND (
-                    EXISTS (
+                    (EXISTS (
                         SELECT 1 FROM json_each(CASE WHEN json_valid(e.extracted) THEN e.extracted ELSE '{}' END,
                                                 '$.invoice_numbers') n
                         WHERE invoice_key(n.value) = ?
                     )
+                    -- Mail that is no invoice and lists several (a vendor's statement, a remittance) holds no repeat of one.
+                    AND NOT (COALESCE(e.category, '') != 'ap_invoice' AND json_array_length(
+                        CASE WHEN json_valid(e.extracted) THEN e.extracted ELSE '{}' END, '$.invoice_numbers') > 1))
                     OR EXISTS (
                         SELECT 1 FROM attachments a,
                             json_each(CASE WHEN json_valid(a.extracted_fields) THEN a.extracted_fields ELSE '{}' END,
                                       '$.invoice_numbers') n
                         WHERE a.email_id = e.id AND invoice_key(n.value) = ?
-                          -- A workbook or CSV that is no invoice of its own, or lists several, holds no repeat of one.
+                          -- A workbook or CSV that is no invoice of its own, or lists several, holds no repeat of one;
+                          -- nor does any other file listing several that is no invoice (a statement or remittance PDF).
                           AND NOT ((COALESCE(a.document_type, '') IN ('spreadsheet', 'other')
                                     OR json_array_length(a.extracted_fields, '$.invoice_numbers') > 1) AND (
                             lower(a.filename) LIKE '%.xlsx' OR lower(a.filename) LIKE '%.xlsm' OR lower(a.filename) LIKE '%.xls'
                             OR lower(a.filename) LIKE '%.csv' OR lower(a.filename) LIKE '%.tsv'))
+                          AND NOT (COALESCE(a.document_type, '') != 'ap_invoice'
+                                   AND json_array_length(a.extracted_fields, '$.invoice_numbers') > 1)
                     )
                   )
                 """,
@@ -2771,6 +2779,11 @@ _MATCH_ANY = (
 def _fold(text: str | None) -> str | None:
     """Case-folded text for search, so "MÜLLER" finds "Müller" (SQLite folds only A-Z). Registered as fold()."""
     return text.casefold() if isinstance(text, str) else text
+
+
+def invoice_key(text: str | None) -> str | None:
+    """An invoice number as the duplicate check compares it (``_invoice_key``), for the checks outside the store."""
+    return _invoice_key(text)
 
 
 def _invoice_key(text: str | None) -> str | None:

@@ -196,6 +196,8 @@ def record_correction(
         item for item in learned.importance_reasons if not item.startswith("You corrected")
     ]
     stored = list(email.actions)
+    from controller_inbox.pipeline import entered_elsewhere
+
     email.actions = extract_actions(
         email_id=email.id,
         subject=email.subject,
@@ -207,6 +209,7 @@ def record_correction(
         as_of=today,
         received_on=received_on,
         invitation=invitation_method(email.attachments),
+        entered_elsewhere=entered_elsewhere(store, email),
     )
     # The tasks are written again for the new category; one it still asks for keeps what the user did with it.
     # A snoozed task it no longer asks for goes (it would come back when the snooze ends); a finished one stays.
