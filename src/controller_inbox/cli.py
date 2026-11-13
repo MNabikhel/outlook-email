@@ -341,7 +341,8 @@ def main(argv: list[str] | None = None) -> int:
         from controller_inbox.overnight import RunBusy, run_overnight
 
         try:
-            result = run_overnight(store, settings, limit=args.limit, sync_graph=not args.no_graph)
+            # Run by the scheduled task, often with nobody at the computer: Outlook is synced only if it is open.
+            result = run_overnight(store, settings, limit=args.limit, sync_graph=not args.no_graph, start_outlook=False)
         except RunBusy as exc:
             print(exc)
             return 0

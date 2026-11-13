@@ -20,12 +20,12 @@ import json
 import logging
 import shutil
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from controller_inbox.config import Settings
 from controller_inbox.mail_identity import content_id, find_existing, same_time
-from controller_inbox.outlook_desktop import FolderInfo, NotInOutlook, OutlookError, Seen
+from controller_inbox.outlook_desktop import FolderInfo, NotInOutlook, OutlookError, Seen, trouble
 from controller_inbox.store import Store
 
 log = logging.getLogger(__name__)
@@ -112,6 +112,7 @@ def connect(store: Store, *, calendar: bool, now: datetime | None = None) -> Non
     store.set_state(CONSENT_KEY, (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"))
     store.set_state(AUTO_KEY, "1")
     store.set_state(CALENDAR_KEY, "1" if calendar else "0")
+    store.set_state(LAST_ERROR_KEY, "")  # a sync that ended after Disconnect isn't this connection's
 
 
 def disconnect(store: Store) -> None:
@@ -124,10 +125,10 @@ def disconnect(store: Store) -> None:
     store.forget_meetings("outlook")
 
 
-def note_failure(store: Store, error: str, now: datetime | None = None) -> None:
+def note_failure(store: Store, error: str, now: datetime | None = None, *, conn=None) -> None:
     """Keep why this sync didn't work, for Settings → Sync inbox (until the next one works)."""
     stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-    store.set_state(LAST_ERROR_KEY, json.dumps({"at": stamp, "error": error}))
+    store.set_state(LAST_ERROR_KEY, json.dumps({"at": stamp, "error": error}), conn=conn)
 
 
 def last_failure(store: Store) -> dict:
@@ -238,6 +239,8 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
     seen: list[Seen] = []
     read: set[str] = set()
     for path in paths:
+        if not _connected(store):
+            return report  # Disconnected while the folders were read: no more is read from Outlook
         try:
             seen.extend(session.scan(path, since))
             read.add(path)
@@ -245,7 +248,10 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
             report["failed"].append({"folder": path, "error": str(exc)[:300]})
         except Exception as exc:  # one folder Outlook trips on must not stop the others
             log.warning("Couldn't read the Outlook folder %s", path, exc_info=True)
-            report["failed"].append({"folder": path, "error": str(exc)[:300]})
+            report["failed"].append({"folder": path, "error": f"The folder {path} couldn't be read just now ({str(exc)[:200]})."})
+    if not read and report["failed"]:
+        # Not one of the folders could be read: said as a sync that didn't work, not as one that found nothing new.
+        report["note"] = report["failed"][0]["error"]
 
     tracked = store.outlook_items()
     by_message = {row["message_id"]: row for row in tracked.values() if row["message_id"]}
@@ -287,7 +293,8 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
             email_id, owned, added = _copy_in(store, settings, session, item, now=now, report=report)
         except Exception as exc:
             log.warning("Couldn't copy an Outlook message from %s", item.folder, exc_info=True)
-            report["failed"].append({"folder": item.folder, "error": str(exc)[:300]})
+            said = str(exc) if isinstance(exc, OutlookError) else f"A message in {item.folder} couldn't be copied ({str(exc)[:200]})."
+            report["failed"].append({"folder": item.folder, "error": said[:300]})
             continue
         store.save_outlook_item(
             {
@@ -357,15 +364,24 @@ def sync(store: Store, settings: Settings, session, *, now: datetime | None = No
             report["meetings"] = sync_calendar(store, session, now=now)
         except OutlookError as exc:
             report["failed"].append({"folder": "Calendar", "error": str(exc)[:300]})
+        except Exception as exc:  # the calendar never undoes a mail sync that worked
+            log.warning("Couldn't read Outlook's calendar", exc_info=True)
+            report["failed"].append({"folder": "Calendar", "error": trouble("Outlook's calendar couldn't be read just now", exc)[:300]})
     stamp = now.astimezone(timezone.utc).isoformat()
     with store.transaction() as conn:
         if not _connected(store, conn):
             return report  # disconnected while the calendar was read
+        if report.get("note"):
+            # Shown on Settings → Sync inbox until a sync works; the last one that worked stays as it was.
+            note_failure(store, report["note"], now, conn=conn)
+            return report
         store.set_state(LAST_SYNC_KEY, stamp, conn=conn)
         store.set_state(LAST_ERROR_KEY, "", conn=conn)
+        # What couldn't be read is kept as a count and the first reason, for the card's "Last sync" line.
+        failed = {"failed": len(report["failed"]), "problem": report["failed"][0]["error"] if report["failed"] else ""}
         store.set_state(
             LAST_RESULT_KEY,
-            json.dumps({key: report[key] for key in ("new", "updated", "moved", "removed", "already")} | {"failed": len(report["failed"]), "at": stamp}),
+            json.dumps({key: report[key] for key in ("new", "updated", "moved", "removed", "already")} | failed | {"at": stamp}),
             conn=conn,
         )
     return report
@@ -394,16 +410,25 @@ def sync_calendar(store: Store, session, *, now: datetime | None = None) -> int:
                                 source="outlook")
         for item in found
     ]
-    # Read to Outlook's limit (a very busy calendar): what wasn't read is kept as it was, not taken for deleted.
-    # Outlook says so (``cut_short``): the meetings it read and left out (ended before the window) count to its limit.
-    if getattr(found, "cut_short", False):
-        upto = max((m.start for m in meetings), default="")  # none read in the window: none removed
+    # What wasn't read is kept as it was, not taken for deleted: meetings Outlook wouldn't hand over (``unreadable``),
+    # and those past where a read of a very busy calendar stopped at Outlook's limit (``cut_short``; the meetings it
+    # read and left out, ended before the window, count to its limit).
+    if getattr(found, "unreadable", 0):
+        upto = ""  # none removed
+    elif getattr(found, "cut_short", False):
+        # Removed up to two days before the last one read: another at that time may not have been reached, and Outlook
+        # lists an all-day meeting at local midnight, up to a day away from its date in UTC.
+        last = max((m.start for m in meetings), default="")  # none read in the window: none removed
+        upto = f"{date.fromisoformat(last[:10]) - timedelta(days=2)}T23:59:59+00:00" if last else ""
     else:
         upto = end.isoformat()
     with store.transaction() as conn:
         if not calendar_on(store, conn):
             return 0
-        kept = store.replace_meetings("outlook", meetings, start=start.date().isoformat(), end=upto, conn=conn)
+        # From the window's start to the second: only meetings ending after it are read, so one that ended before it
+        # on its first day is kept, as the days before are.
+        since = start.astimezone(timezone.utc).isoformat(timespec="seconds")
+        kept = store.replace_meetings("outlook", meetings, start=since, end=upto, conn=conn)
         store.set_state(CALENDAR_LAST_KEY, now.astimezone(timezone.utc).isoformat(), conn=conn)
     return kept
 
@@ -433,7 +458,8 @@ def changed(report: dict) -> bool:
 
 
 def describe(report: dict) -> str:
-    """"3 new, 1 removed in Outlook" — what a sync did, for a message on screen."""
+    """"3 new, 1 removed in Outlook" — what a sync did, for a message on screen. ``report`` is a sync's own (its
+    ``failed`` a list) or the one kept for Settings (``failed`` a count, ``problem`` the first reason)."""
     parts = [
         f"{report['new']} new" if report.get("new") else "",
         f"{report['removed']} deleted in Outlook" if report.get("removed") else "",
@@ -441,8 +467,13 @@ def describe(report: dict) -> str:
         f"{report['updated']} updated" if report.get("updated") else "",
     ]
     said = ", ".join(part for part in parts if part) or "nothing new"
-    if report.get("failed"):
-        said += f"; {len(report['failed'])} couldn't be read"
+    failed = report.get("failed") or 0
+    count = failed if isinstance(failed, int) else len(failed)
+    if count:
+        first = str(report.get("problem") or "")
+        if not first and isinstance(failed, list) and isinstance(failed[0], dict):
+            first = str(failed[0].get("error") or "")
+        said += f"; {count} couldn't be read" + (f": {first.rstrip('.')}" if first else "")
     return said
 
 

@@ -46,6 +46,10 @@ _COLUMNS = ("EntryID", "ReceivedTime", "UnRead", "MessageClass", "Importance", _
 # MAPI_E_NOT_FOUND: the message is gone from Outlook (deleted for good, or Deleted Items emptied).
 _NOT_FOUND = (-2147221233, 0x8004010F)
 _IMPORTANCE = {0: "low", 1: "normal", 2: "high"}
+# RPC_E_CALL_REJECTED and RPC_E_SERVERCALL_RETRYLATER: Outlook has a window or prompt open and won't answer until it
+# is closed (its own "A program is trying to access" prompt among them).
+_BUSY_CODES = (-2147418111, -2147417846)
+BUSY = "Outlook is busy: close any window or prompt open in Outlook (choose Allow if it asks about access), then click Sync now."
 
 
 class OutlookUnavailable(RuntimeError):
@@ -86,11 +90,13 @@ class Seen:
 
 class CalendarRead(list):
     """The meetings ``OutlookSession.calendar`` read, and whether it stopped at ``MAX_CALENDAR_ITEMS`` with more
-    left (``cut_short``): the meetings past the last one read weren't looked at, so they aren't gone from Outlook."""
+    left (``cut_short``): the meetings past the last one read weren't looked at, so they aren't gone from Outlook.
+    ``unreadable``: how many meetings Outlook wouldn't hand over (they aren't gone from Outlook either)."""
 
-    def __init__(self, meetings=(), *, cut_short: bool = False) -> None:
+    def __init__(self, meetings=(), *, cut_short: bool = False, unreadable: int = 0) -> None:
         super().__init__(meetings)
         self.cut_short = cut_short
+        self.unreadable = unreadable
 
 
 def available() -> str:
@@ -145,6 +151,7 @@ class OutlookSession:
         self.ns = namespace
         self._folders: list[FolderInfo] | None = None
         self._by_path: dict[str, object] = {}
+        self._left_out = False  # a mailbox couldn't be opened, so the folder list isn't all of Outlook's
 
     def account(self) -> str:
         try:
@@ -160,9 +167,13 @@ class OutlookSession:
         the others are still listed. Deleted Items and Junk, and every folder inside them, are marked ``trash``."""
         if self._folders is not None:
             return self._folders
-        inbox = self.ns.GetDefaultFolder(_INBOX)
-        default_store = str(inbox.StoreID)
-        inbox_id = str(inbox.EntryID)
+        try:
+            inbox = self.ns.GetDefaultFolder(_INBOX)
+            default_store = str(inbox.StoreID)
+            inbox_id = str(inbox.EntryID)
+            count = self.ns.Stores.Count
+        except Exception as exc:
+            raise OutlookError(trouble("Outlook's folders couldn't be listed just now", exc)) from None
         trash: set[str] = set()
         for kind in (_DELETED, _JUNK):
             try:
@@ -170,16 +181,22 @@ class OutlookSession:
             except Exception:
                 pass
         found: list[FolderInfo] = []
-        stores = [self.ns.Stores.Item(i) for i in range(1, self.ns.Stores.Count + 1)]
-        stores.sort(key=lambda store: str(store.StoreID) != default_store)
-        names: set[str] = set()
-        for store in stores:
+        stores: list[tuple[str, object]] = []
+        for i in range(1, count + 1):
             try:
+                store = self.ns.Stores.Item(i)
                 if getattr(store, "ExchangeStoreType", None) == _PUBLIC_FOLDERS:
                     continue  # can hold thousands of folders, none of them anyone's mail
-                store_id = str(store.StoreID)
+                stores.append((str(store.StoreID), store))
+            except Exception:  # a mailbox that is offline or no longer shared, or a data file that is missing
+                self._left_out = True
+        stores.sort(key=lambda pair: pair[0] != default_store)
+        names: set[str] = set()
+        for store_id, store in stores:
+            try:
                 root = store.GetRootFolder()
             except Exception:  # a mailbox that is offline or no longer shared
+                self._left_out = True
                 continue
             # Each mailbox's own Deleted Items and Junk, whatever their names in this Outlook's language.
             bins = set(trash)
@@ -215,13 +232,16 @@ class OutlookSession:
     def find_message(self, message_id: str) -> list[Seen]:
         """Where a message with this Internet Message-ID is now, in any folder: how a message moved to a folder that
         isn't synced, where Outlook gave it a new id, is told from one that was deleted. Read from each folder's table
-        filtered on the Message-ID, so nothing is opened."""
+        filtered on the Message-ID, so nothing is opened. Raises ``OutlookError`` when it isn't found and a folder or
+        mailbox couldn't be looked in (an archive offline just now): not found there isn't gone from Outlook."""
         if not message_id:
             return []
         quoted = message_id.replace("'", "''")
         where = f'@SQL="{_MESSAGE_ID}" = \'{quoted}\''
         found: list[Seen] = []
-        for info in self.folders():
+        infos = self.folders()
+        missed = self._left_out
+        for info in infos:
             folder = self._by_path.get(info.path)
             try:
                 table = folder.GetTable(where, 0)
@@ -235,7 +255,9 @@ class OutlookSession:
                              bool(unread), flag == 2, _IMPORTANCE.get(importance, "normal"), str(mid or "").strip())
                     )
             except Exception:  # a folder Outlook won't open: the others are still looked in
-                continue
+                missed = True
+        if missed and not found:
+            raise OutlookError("Outlook couldn't look in every folder just now, so where a message went isn't known yet.")
         return found
 
     def scan(self, path: str, since: datetime) -> list[Seen]:
@@ -245,6 +267,12 @@ class OutlookSession:
         folder = self._by_path.get(path)
         if folder is None:
             raise OutlookError(f"The folder {path} isn't in Outlook any more.")
+        try:
+            return self._scan(folder, path, since)
+        except Exception as exc:
+            raise OutlookError(trouble(f"The folder {path} couldn't be read just now", exc)) from None
+
+    def _scan(self, folder, path: str, since: datetime) -> list[Seen]:
         store_id = str(folder.StoreID)
         table = folder.GetTable("", 0)  # olUserItems
         table.Columns.RemoveAll()
@@ -290,21 +318,34 @@ class OutlookSession:
         low, high = aware_utc(start), aware_utc(end)
         found: list[dict] = []
         cut_short = False
-        item = listed.GetFirst()
-        for _ in range(MAX_CALENDAR_ITEMS):
-            if item is None:
-                break
-            meeting = _meeting(item)
-            if meeting is not None:
-                begins = meeting.pop("_starts")
-                if begins > high:
-                    break  # earliest first: the rest start later
-                if meeting.pop("_ends") >= low:
-                    found.append(meeting)
-            item = listed.GetNext()
-        else:
-            cut_short = item is not None
-        return CalendarRead(found, cut_short=cut_short)
+        unreadable = 0
+        try:
+            item = listed.GetFirst()
+            for _ in range(MAX_CALENDAR_ITEMS):
+                if item is None:
+                    break
+                try:
+                    meeting = _meeting(item)
+                except Exception:  # Outlook wouldn't hand over its details (its access prompt refused, or busy)
+                    unreadable += 1
+                    meeting = None
+                if meeting is not None:
+                    begins = meeting.pop("_starts")
+                    if begins > high:
+                        break  # earliest first: the rest start later
+                    if meeting.pop("_ends") >= low:
+                        found.append(meeting)
+                item = listed.GetNext()
+            else:
+                cut_short = item is not None
+        except Exception as exc:
+            raise OutlookError(trouble("Outlook's calendar couldn't be read just now", exc)) from None
+        if unreadable and not found:
+            raise OutlookError(
+                "Outlook didn't let CloseDesk read your calendar. If Outlook asked whether to allow access, choose Allow; "
+                "the calendar is read again with the next sync."
+            )
+        return CalendarRead(found, cut_short=cut_short, unreadable=unreadable)
 
     def save_copy(self, entry_id: str, store_id: str, dest: Path) -> None:
         """Save a copy of the message as a .msg file. The message in Outlook is not changed."""
@@ -357,35 +398,33 @@ def _walk(folder, path: str, depth: int):
 
 
 def _meeting(item) -> dict | None:
-    """One calendar item's details, or None for one that can't be read (Outlook refused, or it has no start)."""
-    try:
-        starts, ends = local_time(item.Start), local_time(item.End)
-        if starts is None:
-            return None
-        ends = ends or starts
-        all_day = bool(item.AllDayEvent)
-        people = [p.strip()[:200] for field in (item.RequiredAttendees, item.OptionalAttendees) for p in str(field or "")[:50_000].split(";") if p.strip()]
-        start = item.Start.date().isoformat() if all_day else starts.isoformat(timespec="seconds")
-        end = item.End.date().isoformat() if all_day else ends.isoformat(timespec="seconds")
-        return {
-            "uid": str(item.GlobalAppointmentID or "") or f"{item.Subject}|{start}",
-            "start": start,
-            "end": end,
-            "all_day": all_day,
-            "subject": str(item.Subject or "")[:300],
-            "location": str(item.Location or "")[:300],
-            # The name Outlook shows: asking Outlook for an address can make it warn that a program is reading
-            # e-mail addresses, and looks each one up in the directory.
-            "organizer": str(item.Organizer or "")[:200],
-            "attendees": people[:60],
-            "busy": _BUSY.get(item.BusyStatus, ""),
-            "cancelled": item.MeetingStatus in _CANCELLED,
-            "recurring": bool(item.IsRecurring),
-            "_starts": starts,
-            "_ends": ends,
-        }
-    except Exception:
+    """One calendar item's details, or None for one with no start. Raises when Outlook won't hand them over (its
+    access prompt refused, or busy): ``calendar`` counts those, so they aren't taken for deleted."""
+    starts, ends = local_time(item.Start), local_time(item.End)
+    if starts is None:
         return None
+    ends = ends or starts
+    all_day = bool(item.AllDayEvent)
+    people = [p.strip()[:200] for field in (item.RequiredAttendees, item.OptionalAttendees) for p in str(field or "")[:50_000].split(";") if p.strip()]
+    start = item.Start.date().isoformat() if all_day else starts.isoformat(timespec="seconds")
+    end = item.End.date().isoformat() if all_day else ends.isoformat(timespec="seconds")
+    return {
+        "uid": str(item.GlobalAppointmentID or "") or f"{item.Subject}|{start}",
+        "start": start,
+        "end": end,
+        "all_day": all_day,
+        "subject": str(item.Subject or "")[:300],
+        "location": str(item.Location or "")[:300],
+        # The name Outlook shows: asking Outlook for an address can make it warn that a program is reading
+        # e-mail addresses, and looks each one up in the directory.
+        "organizer": str(item.Organizer or "")[:200],
+        "attendees": people[:60],
+        "busy": _BUSY.get(item.BusyStatus, ""),
+        "cancelled": item.MeetingStatus in _CANCELLED,
+        "recurring": bool(item.IsRecurring),
+        "_starts": starts,
+        "_ends": ends,
+    }
 
 
 def _jet_date(value: datetime) -> str:
@@ -403,11 +442,20 @@ def _jet_date(value: datetime) -> str:
     return local.strftime(pattern)
 
 
+# The parts of Windows' short date pattern, as strftime writes them. A month written as a name ("MMM": Oct) is
+# written as its number, in the same place: Outlook reads numbers in this computer's order whatever its language.
+_DATE_PARTS = {"yyyyy": "%Y", "yyyy": "%Y", "yy": "%y", "y": "%y", "MMMM": "%m", "MMM": "%m", "MM": "%m", "M": "%m", "dd": "%d", "d": "%d"}
+
+
 def _strftime_pattern(windows: str) -> str:
-    """Windows' short date pattern ("dd/MM/yyyy", "M/d/yyyy", "yyyy-MM-dd") as a strftime one, leading zeros kept
-    (Outlook reads "05/10/2026" as well as "5/10/2026")."""
-    out = re.sub(r"yyyy|yy|MM|M|dd|d", lambda m: {"yyyy": "%Y", "yy": "%y", "MM": "%m", "M": "%m", "dd": "%d", "d": "%d"}[m.group(0)], windows)
-    return out if "%Y" in out or "%y" in out else ""
+    """Windows' short date pattern ("dd/MM/yyyy", "M/d/yyyy", "yyyy-MM-dd", "dd-MMM-yy") as a strftime one, leading
+    zeros kept (Outlook reads "05/10/2026" as well as "5/10/2026"). Quoted words and the weekday's name are left out;
+    a pattern with anything else in it, or without a day, month and year, gives "" (Outlook's US order)."""
+    text = re.sub(r"'[^']*'|dddd?[,.]?\s*", "", windows)
+    out = re.sub(r"y+|M+|d+", lambda m: _DATE_PARTS[m.group(0)] if m.group(0) in _DATE_PARTS else "?", text)
+    whole = ("%Y" in out or "%y" in out) and "%m" in out and "%d" in out
+    other = re.sub(r"[^A-Za-z?]", "", re.sub(r"%[Yymd]", "", out))
+    return out if whole and not other else ""
 
 
 def local_time(value) -> datetime | None:
@@ -419,16 +467,34 @@ def local_time(value) -> datetime | None:
     return naive.astimezone(timezone.utc)
 
 
-def _not_found(exc: Exception) -> bool:
-    codes = {getattr(exc, "hresult", None)}
-    info = getattr(exc, "excepinfo", None) or (exc.args[2] if len(getattr(exc, "args", ())) > 2 else None)
+def _codes(exc: Exception) -> set:
+    """The error numbers a COM error carries: its own, and Outlook's in its details."""
+    args = getattr(exc, "args", ())
+    codes = {getattr(exc, "hresult", None), args[0] if args and isinstance(args[0], int) else None}
+    info = getattr(exc, "excepinfo", None) or (args[2] if len(args) > 2 else None)
     if isinstance(info, tuple) and len(info) > 5:
         codes.add(info[5])
-    return any(code in _NOT_FOUND for code in codes if code is not None)
+    return codes
+
+
+def _not_found(exc: Exception) -> bool:
+    return any(code in _NOT_FOUND for code in _codes(exc) if code is not None)
+
+
+def trouble(what: str, exc: Exception) -> str:
+    """Why ``what`` didn't happen, in a sentence for the user: "``what`` (Outlook's own words)." Outlook busy with a
+    window or prompt open is said as that, with what to do."""
+    if any(code in _BUSY_CODES for code in _codes(exc) if code is not None):
+        return BUSY
+    return f"{what} ({_said(exc)})."
 
 
 def _said(exc: Exception) -> str:
-    info = exc.args[2] if len(getattr(exc, "args", ())) > 2 else None
+    """Outlook's own words for an error: the text in its details, else the error's text, never its numbers."""
+    args = getattr(exc, "args", ())
+    info = args[2] if len(args) > 2 else None
     if isinstance(info, tuple) and len(info) > 2 and info[2]:
         return str(info[2]).strip()[:200]
+    if len(args) > 1 and isinstance(args[0], int) and isinstance(args[1], str) and args[1]:
+        return args[1].strip()[:200]  # a COM error without details: (number, text, None, None)
     return (str(exc) or type(exc).__name__)[:200]

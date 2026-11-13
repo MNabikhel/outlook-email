@@ -109,7 +109,7 @@ Mac / Linux (`crontab -e`):
 30 6 * * 1-5  /Users/you/Documents/CloseDesk/scripts/overnight.sh
 ```
 
-Leave LM Studio's server running overnight. In the morning, double-click CloseDesk as usual — the night's reading is already done, so it only picks up anything new and opens the digest.
+Leave LM Studio's server running overnight. In the morning, double-click CloseDesk as usual — the night's reading is already done, so it only picks up anything new and opens the digest. With classic Outlook connected, the morning run copies your mail only if Outlook is open; it never starts Outlook itself, and CloseDesk syncs when you start it.
 
 ## You are ready when
 
