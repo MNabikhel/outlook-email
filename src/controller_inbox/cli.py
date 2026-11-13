@@ -412,15 +412,18 @@ def _run(settings: Settings, store: Store, args) -> int:
         suffix = f" {done}/{total}" if total > 1 else ""
         print(f"  {label}{suffix}: {note[:70]}", flush=True)
 
-    try:
+    def read_new_mail(on_progress=progress) -> dict:
         # Nobody should wait on minutes-long page reads for the dashboard to open.
-        result = run_overnight(store, settings, limit=args.limit, on_progress=progress, vision_minutes=0)
-    except RunBusy as exc:
-        print(exc)
-    else:
-        print()
-        _print_overnight(result)
+        return run_overnight(store, settings, limit=args.limit, on_progress=on_progress, vision_minutes=0)
+
     if args.no_serve:
+        try:
+            result = read_new_mail()
+        except RunBusy as exc:
+            print(exc)
+        else:
+            print()
+            _print_overnight(result)
         return 0
     host = args.host or settings.host
     port, running = _port_to_use(host, args.port or settings.port)
@@ -437,7 +440,32 @@ def _run(settings: Settings, store: Store, args) -> int:
     print(f"\nOpening {url}  (leave this window open; press Ctrl+C to stop)")
     if not args.no_browser:
         _open_browser_soon(url)
-    return _serve(settings, store, host=host, port=port)
+    # The dashboard opens first; the new mail is read behind it, its progress on the page's top bar (a local model
+    # can take a minute an email: it read all of it before the page opened).
+    return _serve(settings, store, host=host, port=port, startup=lambda job_progress: _read_behind(read_new_mail, progress, job_progress))
+
+
+def _read_behind(read_new_mail, say, show) -> dict:
+    """The start's reading of new mail, as the page's background job: its progress on the page (``show``) and in this
+    window (``say``), and what it did in this window when done."""
+    from controller_inbox.overnight import RunBusy
+
+    def both(stage: str, done: int, total: int, note: str) -> None:
+        show(stage, done, total, note)
+        say(stage, done, total, note)
+
+    try:
+        result = read_new_mail(both)
+    except RunBusy as exc:
+        # The overnight schedule (or another run) is reading now: nothing the user did, so the page says nothing.
+        print(exc, flush=True)
+        return {"kind": "outlook", "quiet": True, "message": str(exc)}
+    except Exception as exc:
+        print(f"Reading the new mail stopped: {exc}", flush=True)
+        raise
+    print(flush=True)
+    _print_overnight(result)
+    return result
 
 
 def _port_to_use(host: str, port: int) -> tuple[int, bool]:
@@ -568,7 +596,9 @@ def _graph_mailbox(settings: Settings):
     return GraphMailbox(client)
 
 
-def _serve(settings: Settings, store: Store, host: str | None, port: int | None) -> int:
+def _serve(settings: Settings, store: Store, host: str | None, port: int | None, *, startup=None) -> int:
+    """Run the dashboard. ``startup``: work for the page's background job as it opens (``run``'s reading of new
+    mail), given the job's progress function."""
     import uvicorn
 
     from controller_inbox.web import allowed_hosts, create_app, is_loopback
@@ -585,6 +615,9 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None)
             return 1
         print(f"CloseDesk is at http://{settings.host}:{port}/  (press Ctrl+C to stop)")
     app = create_app(settings, store)
+    if startup is not None:
+        # Before the automatic sync's first check, so the two don't both start: it waits while this runs.
+        app.state.job.start(startup, about={"kind": "startup", "auto": True})
     # Automatic Outlook sync while the dashboard is open (Settings → Sync inbox).
     app.state.start_outlook_sync()
     # Mail stored by an older version is linked to its conversations, and its invitations put on the calendar, in the

@@ -1,4 +1,4 @@
-{% set stage_labels = {'starting': 'Starting', 'importing': 'Reading files', 'rereading': 'Re-reading attachments', 'reading': 'Local model reading', 'summarizing': 'Summarizing attachments', 'vision': 'Reading scans with the vision model', 'indexing': 'Indexing for search', 'digest': 'Writing the digest'} %}
+{% set stage_labels = {'starting': 'Starting', 'outlook': 'Copying mail from Outlook', 'importing': 'Reading files', 'rereading': 'Re-reading attachments', 'reading': 'Local model reading', 'summarizing': 'Summarizing attachments', 'vision': 'Reading scans with the vision model', 'indexing': 'Indexing for search', 'linking': 'Looking for related mail', 'digest': 'Writing the digest'} %}
 {% if job.state == 'running' %}
 <section class="job running" data-poll="/process/status">
   <div>

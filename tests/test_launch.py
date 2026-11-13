@@ -6,6 +6,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import socket
+import time
 import sys
 import zipfile
 from pathlib import Path
@@ -376,3 +377,81 @@ def test_the_check_prints_in_a_windows_console_that_cant_show_every_character(he
     assert doctor.main() == 0
     console.flush()
     assert "Classic Outlook: not connected" in raw.getvalue().decode("cp1252")
+
+
+# The dashboard opens first; new mail is read behind it ------------------------------------------------------------
+
+
+def test_the_dashboard_opens_before_the_new_mail_is_read(settings, store, monkeypatch, capsys):
+    # A local model that took a minute an email held the page back until all of them were read ("Model reading 1/20",
+    # and nothing opened). The page opens first and the reading is its background job.
+    import threading
+
+    import uvicorn
+
+    from controller_inbox import overnight
+
+    release, started = threading.Event(), threading.Event()
+    reading: list = []
+
+    def slow_reading(_store, _settings, *, on_progress=None, **_kw):
+        on_progress("reading", 1, 20, "Prop 12 invoice")
+        started.set()
+        assert release.wait(10)
+        reading.append("done")
+        return {"headline": "1 new", "ingested": 1, "read_by_bionic": 1, "folders": {"important": 1, "informational": 0, "reference": 0},
+                "waiting_on_bionic": 0, "digest_path": "d", "log_path": "l"}
+
+    served: list = []
+
+    def server(app, **_kw):
+        # The page is served now: the reading has started behind it, and isn't done.
+        assert started.wait(10)
+        snapshot = app.state.job.snapshot()
+        served.append((snapshot["state"], snapshot["stage"], snapshot["done"], snapshot["total"], list(reading)))
+        release.set()
+
+    monkeypatch.setattr(overnight, "run_overnight", slow_reading)
+    monkeypatch.setattr(uvicorn, "run", server)
+    monkeypatch.setattr(cli, "_link_stored_mail", lambda *_a: None)
+    args = type("Args", (), {"no_serve": False, "no_browser": True, "limit": 0, "host": "127.0.0.1", "port": _unused_port()})()
+    assert cli._run(settings, store, args) == 0
+    assert served == [("running", "reading", 1, 20, [])], "the page was up while the first email was being read"
+    out, deadline = "", time.monotonic() + 10
+    while "1 new" not in out and time.monotonic() < deadline:
+        out += capsys.readouterr().out
+        time.sleep(0.05)
+    assert "Model reading 1/20: Prop 12 invoice" in out and "1 new" in out, "the console window still says what it read"
+
+
+def test_run_without_the_dashboard_still_reads_before_it_ends(settings, store, monkeypatch):
+    # The overnight schedule runs `run --no-serve`: there the reading is the whole job, done before it returns.
+    from controller_inbox import overnight
+
+    calls: list = []
+    monkeypatch.setattr(overnight, "run_overnight", lambda *_a, **_k: calls.append(1) or {
+        "headline": "", "ingested": 0, "read_by_bionic": 0, "folders": {"important": 0, "informational": 0, "reference": 0},
+        "waiting_on_bionic": 0, "digest_path": "d", "log_path": "l"})
+    args = type("Args", (), {"no_serve": True, "no_browser": True, "limit": 0, "host": "127.0.0.1", "port": 0})()
+    assert cli._run(settings, store, args) == 0 and calls == [1]
+
+
+def test_a_reading_already_under_way_at_the_start_is_said_in_the_window_not_as_an_error_on_the_page(capsys):
+    # The overnight schedule (or another run) holds the lock as CloseDesk opens: nothing the user did.
+    from controller_inbox.overnight import RunBusy
+
+    def busy(_progress):
+        raise RunBusy()
+
+    result = cli._read_behind(busy, lambda *_a: None, lambda *_a: None)
+    assert result == {"kind": "outlook", "quiet": True, "message": str(RunBusy())}
+    assert "already processing mail" in capsys.readouterr().out
+
+
+def test_a_start_up_reading_that_fails_says_so_in_the_window(capsys):
+    def broken(_progress):
+        raise OSError("the inbox folder can't be read")
+
+    with pytest.raises(OSError):
+        cli._read_behind(broken, lambda *_a: None, lambda *_a: None)
+    assert "Reading the new mail stopped: the inbox folder can't be read" in capsys.readouterr().out
