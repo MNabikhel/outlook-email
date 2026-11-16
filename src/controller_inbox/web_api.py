@@ -1404,6 +1404,8 @@ def register_workspace(
         while True:
             time.sleep(OUTLOOK_TICK_SECONDS)
             try:
+                if getattr(app.state, "update_asked", False):  # stopping to update: the job wouldn't start anyway
+                    return
                 if outlook_desktop.available() or not outlook_sync.due(store):
                     continue
                 interval = outlook_sync.config(store)["interval"] * 60

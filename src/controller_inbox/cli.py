@@ -427,7 +427,15 @@ def _run(settings: Settings, store: Store, args) -> int:
             _print_overnight(result)
         return 0
     host = args.host or settings.host
-    port, running = _port_to_use(host, args.port or settings.port)
+    # Started again after an update from Settings (CLOSEDESK_REOPEN, set by the launcher): the page that asked for
+    # the update is still open, waiting on the port CloseDesk was on, and reloads itself when it answers there.
+    reopened = _reopened_port(store) if os.environ.get("CLOSEDESK_REOPEN") else 0
+    from controller_inbox import doctor
+
+    if reopened and not doctor.listening(host, reopened):
+        port, running = reopened, False
+    else:
+        port, running = _port_to_use(host, args.port or settings.port)
     if not port:
         return 1
     url = f"http://{host}:{port}/"
@@ -439,9 +447,8 @@ def _run(settings: Settings, store: Store, args) -> int:
             webbrowser.open(url)
         return 0
     print(f"\nOpening {url}  (leave this window open; press Ctrl+C to stop)")
-    # Started again after an update from Settings (CLOSEDESK_REOPEN, set by the launcher): the page that asked for
-    # the update is still open and reloads itself, so no second tab is opened.
-    if not args.no_browser and not os.environ.get("CLOSEDESK_REOPEN"):
+    # On that port no second tab is opened; on another (it was taken), the waiting page can't find it, so one is.
+    if not args.no_browser and port != reopened:
         _open_browser_soon(url)
     # The dashboard opens first; the new mail is read behind it, its progress on the page's top bar (a local model
     # can take a minute an email: it read all of it before the page opened).
@@ -641,9 +648,26 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None,
     _run_server(app, host=host or settings.host, port=port or settings.port)
     # Settings' Update button stopped it: the launcher updates CloseDesk and starts it again.
     if getattr(app.state, "update_asked", False):
+        _remember_port(store, port or settings.port)
         print("\nCloseDesk stops now to update, and opens again by itself when the update is done.", flush=True)
         return updates.UPDATE_AND_RESTART
     return 0
+
+
+REOPEN_PORT_KEY = "update_reopen_port"
+
+
+def _remember_port(store: Store, port: int) -> None:
+    """The port CloseDesk was on when it stopped to update: the page that asked waits on it."""
+    store.set_state(REOPEN_PORT_KEY, str(port))
+
+
+def _reopened_port(store: Store) -> int:
+    """The port remembered when CloseDesk stopped to update (0 when none), read once."""
+    saved = store.get_state(REOPEN_PORT_KEY) or ""
+    if saved:
+        store.set_state(REOPEN_PORT_KEY, "")
+    return int(saved) if saved.isdigit() else 0
 
 
 def _run_server(app, *, host: str, port: int) -> None:

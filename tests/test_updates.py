@@ -98,7 +98,7 @@ def test_main_older_than_this_copy_is_not_offered(download, settings, store):
         {"sha": NEWER, "commit": {"committer": {"date": "yesterday"}}},
     ],
 )
-def test_no_answer_or_a_strange_one_is_said_nowhere_and_asked_again_tomorrow(download, settings, store, answer):
+def test_no_answer_or_a_strange_one_is_asked_again_tomorrow(download, settings, store, answer):
     asked: list = []
 
     def ask(url):
@@ -129,6 +129,69 @@ def test_github_is_asked_once_a_day_at_most(download, settings, store):
     back = github()
     updates.check(store, settings, now=NOW - timedelta(days=3), ask=back)
     assert len(back.asked) == 1
+
+
+def test_after_an_update_the_old_answer_is_not_offered_and_github_is_asked_again(download, settings, store):
+    # 09:00: main is b..., dated today. Later the same day main moves on and the user updates to c..., also dated
+    # today. The morning's answer was about the copy before: it isn't offered, and GitHub is asked again soon.
+    ask = github(sha=NEWER, date="2026-11-16T09:00:00Z")
+    updates.check(store, settings, now=NOW, ask=ask)
+    assert updates.status(store, settings)["newer"] is True
+    (download / ".git_archival.txt").write_text(f"commit: {'c' * 40}\ndate: 2026-11-16T14:00:00Z\n", encoding="utf-8")
+    shown = updates.status(store, settings)
+    assert shown["newer"] is False and shown["message"] == ""
+    again = github(sha="c" * 40, date="2026-11-16T14:00:00Z")
+    updates.check(store, settings, now=NOW + timedelta(hours=5), ask=again)
+    assert len(again.asked) == 1, "asked again, though a day hasn't passed: the answer was for the copy before"
+    assert updates.status(store, settings)["newer"] is False
+    later = github()
+    updates.check(store, settings, now=NOW + timedelta(hours=6), ask=later)
+    assert later.asked == [], "then once a day again"
+
+
+def test_an_evening_commit_west_of_utc_has_one_version_number(download, settings, store):
+    # A commit made at 22:12 at -06:00 is November 13 in UTC. GitHub says so; the downloaded copy says the same.
+    (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-12T22:12:03-06:00\n", encoding="utf-8")
+    assert version.installed() == (NEWER, "2026-11-13")
+    assert version.label() == "CloseDesk 2026.11.13 (bbbbbbb)"
+    assert version.number("2026-11-12T22:12:03-06:00") == "2026.11.13"
+    assert version.number("2026-11-13T04:12:03Z") == "2026.11.13"
+    assert version.number("2026-11-13") == "2026.11.13"
+    archival = (ROOT / ".git_archival.txt").read_text(encoding="utf-8")
+    assert "date: $Format:%cI$" in archival, "GitHub writes the commit's date with its offset, not a local day"
+
+
+def test_github_is_reached_with_the_computers_own_certificates_when_python_cant(monkeypatch):
+    # Behind a company proxy that inspects HTTPS, Python's own certificates fail; curl trusts the computer's.
+    import subprocess
+
+    import httpx
+
+    def refused(*_a, **_k):
+        raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] self-signed certificate in certificate chain")
+
+    ran: list = []
+
+    def curl(cmd, **_k):
+        ran.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"sha": NEWER}), stderr="")
+
+    monkeypatch.setattr(httpx, "get", refused)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/curl" if name == "curl" else None)
+    monkeypatch.setattr(updates.subprocess, "run", curl)
+    assert updates._fetch_json(updates.LATEST_URL) == {"sha": NEWER}
+    assert ran and ran[0][0] == "/usr/bin/curl" and updates.LATEST_URL in ran[0]
+
+
+def test_settings_say_when_github_couldnt_be_reached(download, settings, store):
+    def down(url):
+        raise OSError("certificate verify failed")
+
+    updates.check(store, settings, now=NOW, ask=down)
+    note = updates.status(store, settings)["note"]
+    assert "couldn't reach GitHub on November 16" in note and "CloseDesk-Update" in note
+    updates.check(store, settings, now=NOW + timedelta(days=1, minutes=1), ask=github())
+    assert "couldn't reach" not in updates.status(store, settings)["note"]
 
 
 def test_turned_off_in_env_nothing_is_asked_or_shown(download, settings, store, monkeypatch):
@@ -236,6 +299,30 @@ def test_the_update_button_waits_while_mail_is_processed(download, settings, sto
     assert stop.calls == 0 and not getattr(app.state, "update_asked", False)
 
 
+def test_once_the_update_is_asked_no_new_work_starts(download, settings, store):
+    # The automatic Outlook sync (or anything else) starting in the seconds CloseDesk takes to stop would be cut off.
+    app = web.create_app(settings, store)
+    app.state.stop_server = Stopper()
+    assert TestClient(app).post("/api/update", headers=PAGE).status_code == 200
+    ran: list = []
+    assert app.state.job.start(lambda progress: ran.append(1)) is False
+    time.sleep(0.1)
+    assert ran == [] and app.state.job.snapshot()["state"] != "running"
+
+
+def test_work_started_just_before_the_update_holds_it_back(download, settings, store):
+    app = web.create_app(settings, store)
+    app.state.stop_server = stop = Stopper()
+    release = threading.Event()
+    app.state.job.start(lambda progress: release.wait(10))
+    try:
+        # The page saw no work running; by the time the update is asked, a sync has started.
+        assert updates.stop_to_update(app.state, "idle") == updates.BUSY
+    finally:
+        release.set()
+    assert stop.calls == 0 and not getattr(app.state, "update_asked", False)
+
+
 def test_without_a_launcher_the_button_says_to_use_closedesk_update(download, settings, store, monkeypatch):
     monkeypatch.delenv(updates.LAUNCHER_ENV)
     app = web.create_app(settings, store)
@@ -307,7 +394,43 @@ def test_started_again_after_an_update_no_second_tab_is_opened(settings, store, 
     args = type("Args", (), {"no_serve": False, "no_browser": False, "limit": 0, "host": "127.0.0.1", "port": _free_port()})()
     assert cli._run(settings, store, args) == 0 and len(opened) == 1
     monkeypatch.setenv("CLOSEDESK_REOPEN", "1")
+    cli._remember_port(store, args.port)  # as _serve does when it stops to update
     assert cli._run(settings, store, args) == 0 and len(opened) == 1
+
+
+def test_started_again_on_another_port_the_browser_is_opened(settings, store, monkeypatch):
+    # Before the update CloseDesk was on the next port (another program had the usual one). The page that waits
+    # asks that port, so CloseDesk opens there again when it is free, and without a tab.
+    monkeypatch.setattr(cli, "_open_browser_soon", lambda url: opened.append(url))
+    served: list = []
+    monkeypatch.setattr(cli, "_serve", lambda *a, **k: served.append(k["port"]) or 0)
+    usual, before = _free_port(), _free_port()
+    args = type("Args", (), {"no_serve": False, "no_browser": False, "limit": 0, "host": "127.0.0.1", "port": usual})()
+    monkeypatch.setenv("CLOSEDESK_REOPEN", "1")
+    opened: list = []
+    cli._remember_port(store, before)
+    assert cli._run(settings, store, args) == 0
+    assert served == [before] and opened == [], "the page waiting on the port before finds it again"
+    # That port taken now: it opens on another, and a tab is opened there (the waiting page can't find it).
+    cli._remember_port(store, before)
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", before))
+        taken.listen()
+        assert cli._run(settings, store, args) == 0
+    assert served[-1] != before and opened == [f"http://127.0.0.1:{served[-1]}/"]
+
+
+def test_the_port_is_remembered_when_closedesk_stops_to_update(download, settings, store, monkeypatch):
+    monkeypatch.setattr(cli, "_link_stored_mail", lambda *_a: None)
+    settings.update_check = False
+
+    def asked(app, *, host, port):
+        app.state.update_asked = True
+
+    monkeypatch.setattr(cli, "_run_server", asked)
+    port = _free_port()
+    assert cli._serve(settings, store, host="127.0.0.1", port=port) == updates.UPDATE_AND_RESTART
+    assert cli._reopened_port(store) == port and cli._reopened_port(store) == 0, "read once"
 
 
 # The launchers' part -----------------------------------------------------------------------------------------

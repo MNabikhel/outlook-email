@@ -46,12 +46,13 @@ Keep the folder in your home folder (not in Downloads, Documents or Desktop), an
 
 Each copy has a version number, its date year first, shown with the first characters of its commit: **CloseDesk
 2026.11.16 (e8926db)**. You see it at the bottom of the side bar, in **Settings → This copy and its check**, and on the
-first line of the self-check.
+first line of the self-check. The date is the commit's day in UTC, as GitHub gives it.
 
 Once a day, while CloseDesk is open, it asks GitHub for the newest version's number; nothing about your mail is sent.
 When a newer one is out, the top bar shows a small **Update ready** link, and Settings says **A newer CloseDesk is
 ready (2026.11.16; you have 2026.11.13)** with an **Update** button. To stop it asking, put
-`CONTROLLER_INBOX_UPDATE_CHECK=false` in the `.env` file in CloseDesk's folder.
+`CONTROLLER_INBOX_UPDATE_CHECK=false` in the `.env` file in CloseDesk's folder. When GitHub can't be reached (no
+internet, or a company network that blocks it), Settings says so under the version, and CloseDesk-Update still works.
 
 Any of these works, and none needs admin rights:
 

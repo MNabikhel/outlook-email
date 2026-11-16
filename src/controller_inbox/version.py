@@ -2,11 +2,13 @@
 (written by GitHub: see .gitattributes); a developer's checkout doesn't, and says so.
 
 A download's version number is its date, year first: the copy of November 16, 2026 is "2026.11.16", and is
-shown with the first seven characters of its commit, "CloseDesk 2026.11.16 (e8926db)"."""
+shown with the first seven characters of its commit, "CloseDesk 2026.11.16 (e8926db)". The date is the UTC one, as
+GitHub gives it for the newest version: a commit made at 22:12 at -06:00 on November 12 is "2026.11.13" on both sides."""
 
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -24,14 +26,28 @@ def installed() -> tuple[str, str]:
                 found[name.strip()] = value.strip()
     except OSError:
         pass
-    return found.get("commit", ""), found.get("date", "")
+    return found.get("commit", ""), utc_day(found.get("date", ""))
+
+
+def utc_day(date: str) -> str:
+    """"2026-11-13" for a date with its time and offset ("2026-11-12T22:12:03-06:00" or "2026-11-13T04:12:03Z"),
+    the day in UTC; a day alone ("2026-11-13") as it is; "" when it isn't a date."""
+    date = (date or "").strip()
+    try:
+        when = datetime.fromisoformat(date.replace("Z", "+00:00"))
+    except ValueError:
+        found = re.match(r"(\d{4}-\d{2}-\d{2})", date)
+        return found.group(1) if found else ""
+    if when.tzinfo is not None:
+        when = when.astimezone(timezone.utc)
+    return when.date().isoformat()
 
 
 def number(date: str) -> str:
-    """The version number for a download's date: "2026-11-16" (or "2026-11-16T09:30:00Z") is "2026.11.16"; ""
-    when the date isn't one."""
-    found = re.match(r"\s*(\d{4})-(\d{2})-(\d{2})", date or "")
-    return ".".join(found.groups()) if found else ""
+    """The version number for a download's date: "2026-11-16" (or "2026-11-16T09:30:00Z") is "2026.11.16", the day
+    in UTC; "" when the date isn't one."""
+    found = utc_day(date)
+    return found.replace("-", ".") if found else ""
 
 
 def short(commit: str, date: str) -> str:

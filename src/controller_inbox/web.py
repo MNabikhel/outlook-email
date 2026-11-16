@@ -262,6 +262,8 @@ class ProcessJob:
         # What a job other than Process new mail is about (a vision read: its email and file), for the pages.
         self.about: dict | None = None
         self._stop = threading.Event()
+        # CloseDesk is stopping to update: nothing new starts, so nothing is cut off when it stops.
+        self._closed = False
 
     @property
     def stopping(self) -> bool:
@@ -291,9 +293,17 @@ class ProcessJob:
                 "stopping": self._stop.is_set(),
             }
 
-    def start(self, target, *, about: dict | None = None) -> bool:
+    def close(self) -> bool:
+        """No job starts after this (CloseDesk stops to update). False, and nothing closed, while one is running."""
         with self._lock:
             if self.state == "running":
+                return False
+            self._closed = True
+            return True
+
+    def start(self, target, *, about: dict | None = None) -> bool:
+        with self._lock:
+            if self.state == "running" or self._closed:
                 return False
             self.state, self.stage, self.done, self.total = "running", "starting", 0, 0
             self.note, self.result, self.error, self.about = "", None, "", about
