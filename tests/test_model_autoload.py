@@ -143,8 +143,6 @@ def test_a_load_that_fails_says_why_and_the_mail_is_read_without_a_model(setting
 
 
 def test_the_start_loads_the_model_first_and_the_page_says_so(settings, store, lm, monkeypatch):
-    import uvicorn
-
     from controller_inbox import overnight
 
     remember_model(settings, CHAT)
@@ -184,7 +182,7 @@ def test_the_start_loads_the_model_first_and_the_page_says_so(settings, store, l
         seen.append(client.get("/").text)
 
     monkeypatch.setattr(overnight, "run_overnight", reading)
-    monkeypatch.setattr(uvicorn, "run", server)
+    monkeypatch.setattr(cli, "_run_server", server)
     monkeypatch.setattr(cli, "_link_stored_mail", lambda *_a: None)
     args = type("Args", (), {"no_serve": False, "no_browser": True, "limit": 0, "host": "127.0.0.1", "port": 0})()
     monkeypatch.setattr(cli, "_port_to_use", lambda host, port: (8765, False))
