@@ -109,6 +109,9 @@ class Settings(BaseSettings):
     # How long the overnight run may spend reading scanned pages with the vision model. Process new mail reads only
     # what takes this computer under a minute, and starting CloseDesk reads none, so nobody waits on it.
     vision_minutes_per_run: float = 30.0
+    # Once a day, while CloseDesk is open, ask GitHub for the newest version's number (updates.py). Nothing about the
+    # mail is sent. False: never ask; Settings then says nothing about newer versions.
+    update_check: bool = True
 
     # Read with or without the CONTROLLER_INBOX_ prefix, from the environment or .env (.env.example has them without).
     azure_client_id: str = Field("", validation_alias=AliasChoices("CONTROLLER_INBOX_AZURE_CLIENT_ID", "AZURE_CLIENT_ID", "azure_client_id"))

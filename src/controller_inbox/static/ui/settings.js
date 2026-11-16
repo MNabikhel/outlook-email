@@ -985,9 +985,48 @@ export function createSettings(ctx) {
       "help",
       "",
       facts([["Version", a.version], ["Python", a.python], pathRow("Folder", a.folder)]),
-      h("p", { class: "set-help" }, "To update, close CloseDesk and double-click ", h("b", null, "CloseDesk-Update"), " in its folder: your mail and settings are kept. Every start checks the set-up and puts right what isn't; the same check runs here."),
+      updateNotice(),
+      h("p", { class: "set-help" }, "Every start checks the set-up and puts right what isn't; the same check runs here."),
       actions("about", h("button", { type: "button", class: "btn btn-sm", onclick: check }, "Check the set-up")),
       list
+    );
+  }
+
+  /** Whether a newer CloseDesk is ready, with its Update button when a launcher started this one (it starts the
+      new one), else how to update by hand; and what the daily check for one does. */
+  function updateNotice() {
+    const u = data.update || {};
+    const busy = data.job && data.job.state === "running";
+    const update = async (event) => {
+      const button = event.currentTarget;
+      button.disabled = true;
+      const line = $('[data-status="update"]', root);
+      try {
+        const reply = await postJSON("/api/update");
+        ctx.updating(reply);
+      } catch (error) {
+        button.disabled = false;
+        if (line) replace(line, icon("alert", 14), h("span", null, error.message));
+        if (line) line.className = "set-status error";
+      }
+    };
+    return h(
+      "div",
+      { class: "set-update", id: "set-update" },
+      u.newer
+        ? [
+            h("div", { class: "set-banner on" }, h("span", { class: "dot", "aria-hidden": "true" }), h("div", null, h("p", null, h("b", null, u.message)))),
+            u.launcher
+              ? [
+                  actions("update", h("button", { type: "button", class: "btn btn-sm btn-primary", onclick: update, disabled: busy }, "Update")),
+                  h("p", { class: "set-help" }, "CloseDesk closes, fetches the newest version, and opens again by itself in a minute or two. Your mail and settings are kept.", busy ? " It can update once the mail being processed now is done." : ""),
+                ]
+              : h("p", { class: "set-help" }, u.by_hand),
+          ]
+        : u.developer
+          ? null
+          : h("p", { class: "set-help" }, u.by_hand),
+      h("p", { class: "set-help" }, u.note)
     );
   }
 

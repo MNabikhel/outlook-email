@@ -16,7 +16,7 @@ Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get
 
      It puts CloseDesk in a `CloseDesk` folder in your home folder and starts it. Downloaded this way, macOS doesn't ask an administrator to approve it.
    - **Windows:** green **Code** button → **Download ZIP**, unzip it somewhere permanent (for example `Documents`), and double-click **`CloseDesk.bat`**. If Windows shows "Windows protected your PC", click **More info → Run anyway**.
-3. **The first start sets itself up** in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around. From then on, double-click `CloseDesk.command` (Mac) or `CloseDesk.bat` (Windows): every start checks the set-up and puts right what isn't, so after an update, or after moving the folder, you just open it. **`CloseDesk-Update`** fetches the newest version and keeps your mail and settings.
+3. **The first start sets itself up** in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around. From then on, double-click `CloseDesk.command` (Mac) or `CloseDesk.bat` (Windows): every start checks the set-up and puts right what isn't, so after an update, or after moving the folder, you just open it. When a newer version is out, Settings says so and its **Update** button fetches it and opens CloseDesk again; **`CloseDesk-Update`** does the same from the folder. Both keep your mail and settings.
 4. **Add your mail:** on Windows with classic Outlook, open **Settings → Sync inbox** and click **Connect to Outlook**. After you agree, it copies your mail and attachments (and your calendar, if you like) and keeps them up to date, and never changes anything in Outlook. Otherwise drag emails from Outlook into the `inbox/incoming` folder and click **Process new mail**. ([New Outlook, web, and Mac](docs/SETUP.md#every-morning))
 5. **Optional local AI:** in [LM Studio](https://lmstudio.ai/), download a chat model (a 3B–8B instruct model is plenty; a bigger one works if the computer has the memory) and start the server (Developer tab → **Start server**). CloseDesk finds it on its own, and loads a model itself when none is loaded.
 
@@ -467,11 +467,12 @@ src/controller_inbox/
   web_common.py     What both share: notices, which files download, same-page checks, finding an attachment
   services.py       What a button does, the same from the classic pages and the workspace
   doctor.py         The self-check: `controller_inbox doctor`, or `CloseDesk --check`
-  version.py        Which version this copy is
+  version.py        Which version this copy is: its date-based number (2026.11.16) and commit
+  updates.py        Whether a newer CloseDesk is out (asked of GitHub once a day), and Settings' Update button
   templates/        The classic pages
   static/app.js     Open-in-place preview, chat box, search shortcut (answers formatted by static/ui/format.js)
   static/ui/        The workspace's scripts and styles (no build step, no CDN)
-CloseDesk.bat / CloseDesk.command   Double-click launchers: find the computer's Python, then run launch.py (--get-python downloads one, only when asked)
+CloseDesk.bat / CloseDesk.command   Double-click launchers: find the computer's Python, then run launch.py (--get-python downloads one, only when asked); after Settings' Update button, update and start again
 CloseDesk-Update.bat / .command     Double-click to fetch the newest version (mail and settings are kept)
 scripts/launch.py                   Every start: check the set-up, install what is missing, start; also --check and --update
 scripts/check_deps.py               The package checks launch.py uses
@@ -515,5 +516,6 @@ The suite classifies the demo mailbox end-to-end (including the fraud wire and d
 - Mail is processed on the machine that runs CloseDesk and stored in local SQLite.
 - Routing / account / IBAN values are redacted in stored bodies; only last-4 is kept for matching.
 - Outlook and Microsoft 365 are only read: CloseDesk asks Microsoft only to sign in and read mail, and never changes, files, flags or sends anything in the mailbox.
+- Once a day, while CloseDesk is open, a downloaded copy asks `api.github.com` for the newest version's number (one request; nothing about your mail is in it), so Settings can say when an update is out. `CONTROLLER_INBOX_UPDATE_CHECK=false` in `.env` turns it off.
 - There is no cloud AI in the default path. The model, when used, runs on the laptop, and so do the chat box and reply drafts. Ask CloseDesk conversations, and the files you add to them, are saved in the same local SQLite database and listed under **Past conversations** (the clock button in the chat box); delete one there (trash icon) to remove it and its files. The fraud rules are deterministic so a $48,500 “new account” email cannot be quietly labeled “FYI”, whatever the model says. The chat's tools only read; attachment text is given to the model as data, never as instructions, and files from fraud-flagged mail are never given to it. Dashboard forms refuse posts from other websites.
 - The dashboard has no login. It listens on `127.0.0.1` (this computer only) unless you set `CONTROLLER_INBOX_HOST`; on any other address it prints a warning, answers only to this computer's own names and addresses plus any listed in `CONTROLLER_INBOX_ALLOWED_HOSTS` (comma-separated), and anyone who can reach it can read your mail.
