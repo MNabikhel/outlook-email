@@ -250,3 +250,53 @@ def test_choosing_a_model_too_big_for_this_computer_says_so_on_both_settings_pag
         assert not note.is_visible()
         page.select_option("#chat-model select[name=model]", CODER)
         assert note.is_visible() and "needs about 21 GB" in note.inner_text()
+
+
+def test_a_model_that_fits_better_is_suggested_and_loaded_only_on_a_click(settings, loaded, page, monkeypatch):
+    from test_lm_studio_models import CHAT, LMStudio, _serve
+
+    from controller_inbox import local_llm, model_choice, model_roles
+
+    gb, small = 1024**3, "qwen/qwen3-8b"
+    settings.llm = None
+    server = LMStudio(loaded=[CHAT])
+    server.extra = [small]
+    server.sizes = {CHAT: 8 * gb, small: 5 * gb}
+    _serve(monkeypatch, server)
+    monkeypatch.setattr(model_roles, "computer_memory", lambda: 16 * gb)
+    model_choice.record_speed(loaded, CHAT, 70.0, 5)
+    message = f"{CHAT} takes about 70 s an email on this computer. {small} would fit and answer faster."
+    with serving(web.create_app(settings, loaded)) as base:
+        # A phone shows it above Today's list; a wide window above Today's overview.
+        for size in (PHONE, WIDE):
+            page.set_viewport_size(size)
+            page.goto(f"{base}/app/today")
+            tip = page.locator(".model-tip:visible")
+            tip.wait_for()
+            assert message in tip.inner_text()
+            assert page.evaluate("() => document.documentElement.scrollWidth <= innerWidth"), "no sideways scroll"
+        assert server.calls == [], "showing it switches nothing"
+        # Keep: the line goes and isn't shown again.
+        tip.locator("button", has_text=f"Keep {CHAT}").click()
+        page.wait_for_selector(".model-tip", state="detached")
+        page.reload()
+        page.wait_for_selector(".kpis")
+        assert page.locator(".model-tip").count() == 0 and server.calls == []
+        # Asked again (the choice forgotten): Load, on Today, switches to the smaller model.
+        loaded.set_state(model_choice.KEPT_KEY, "[]")
+        page.reload()
+        page.locator(".model-tip:visible button", has_text=f"Load {small}").click()
+        page.wait_for_selector(".model-tip", state="detached")
+        assert server.loaded == [small] and ("unload", CHAT) in server.calls
+        # And from Settings, the same buttons.
+        model_choice.record_speed(loaded, small, 70.0, 5)
+        server.extra.append("qwen/qwen3-4b")
+        server.sizes["qwen/qwen3-4b"] = 3 * gb
+        local_llm._status_cache.clear()  # LM Studio is asked afresh (its list is kept 30 seconds)
+        page.goto(f"{base}/app/settings")
+        tip = page.locator("#set-model-tip")
+        tip.wait_for()
+        assert f"{small} takes about 70 s an email" in tip.inner_text() and server.calls[-1] == ("load", small, settings.min_context_tokens)
+        tip.locator("button", has_text=f"Keep {small}").click()
+        page.wait_for_selector("#set-model-tip", state="detached")
+        assert server.loaded == [small] and "won't suggest another model" in page.inner_text("#set-chat-model")

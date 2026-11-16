@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
+    agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, model_choice, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
     semantic, services, table_lookup, updates, version, vision,
 )
 from controller_inbox.extract import extraction_failed
@@ -69,6 +69,7 @@ UNREADABLE = "This file couldn't be read: it looks damaged or cut short. Downloa
 RUN_STATES = {"last_run": "last_overnight_at", "last_folder": "last_folder_ingest", "last_sync": "last_sync_at"}
 STAGES = {
     "starting": "Starting",
+    "model": "Loading a model in LM Studio",
     "outlook": "Copying mail from Outlook",
     "importing": "Reading files",
     "rereading": "Re-reading attachments",
@@ -271,6 +272,8 @@ def register_workspace(
         snapshot = job.snapshot()
         coding = store.coding_counts()
         last_run = store.get_state("last_overnight_at") or ""
+        # A model that fits this computer better than the one answering, offered once on Today.
+        tip = model_choice.recommendation(settings, store, model)
         update = updates.status(store, settings)
         return {
             **services.today_fields(board_date(sample), sample=sample),
@@ -284,6 +287,7 @@ def register_workspace(
                 "describe": model.describe(),
             },
             "models": model_roles.models_in_use(settings, status=model),
+            "model_tip": tip,
             "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
             # This copy's version, and whether a newer one is ready (the top bar's "Update ready").
             "closedesk": {key: update[key] for key in ("label", "newer", "message")},
@@ -297,7 +301,7 @@ def register_workspace(
             "categories": [{"value": key.value, "label": label} for key, label in DOCUMENT_LABELS.items()],
             # Changes whenever a count does, so the page knows when its lists are out of date.
             "version": hashlib.sha256(
-                json.dumps([counts, coding, last_run, snapshot["finished_at"]], sort_keys=True).encode()
+                json.dumps([counts, coding, last_run, snapshot["finished_at"], tip and [tip["current"], tip["suggested"]]], sort_keys=True).encode()
             ).hexdigest()[:12],
         }
 
@@ -1152,6 +1156,7 @@ def register_workspace(
                     {"key": key, "loaded": key in choice["loaded"], "too_big": choice["too_big"].get(key, "")} for key in choice["models"]
                 ],
                 "min_context_tokens": settings.min_context_tokens,
+                "tip": model_choice.recommendation(settings, store, model),
             },
             "context": {
                 "steps": [agent.context_capacity(tokens, settings.chat_max_tokens) for tokens in agent.CONTEXT_STEPS],
@@ -1243,6 +1248,16 @@ def register_workspace(
         if notice == "chat-model-failed":
             raise HTTPException(status_code=409, detail=f"{NOTICES[notice]} {setup['chat_problem']()}".strip())
         return saved(notice)
+
+    @api.post("/settings/chat-model/keep")
+    async def settings_keep_chat_model(request: Request):
+        """Keep the model answering when another was suggested: it isn't suggested against again."""
+        data = await json_body(request)
+        model = str(data.get("model") or "").strip()[:200]
+        if not model:
+            raise HTTPException(status_code=400, detail="Choose a model.")
+        model_choice.keep(store, model)
+        return saved("chat-model-kept")
 
     @api.post("/settings/vision")
     async def settings_vision(request: Request):

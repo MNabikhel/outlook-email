@@ -405,7 +405,7 @@ function renderItems() {
   const count = $(".list-count", listPane);
   if (count) count.textContent = shown.length === items.length ? String(items.length) : `${shown.length} of ${items.length}`;
   // A phone shows Today's list without the overview beside it: its warnings and meetings come first here.
-  const brief = spec.kind === "focus" && S.list.data ? todayBrief(S.list.data) : [];
+  const brief = spec.kind === "focus" && S.list.data ? todayBrief(S.list.data, S.meta, { loadModel, keepModel }) : [];
   const top = brief.length ? h("div", { class: "list-brief" }, ...brief) : null;
   if (!shown.length) {
     replace(body, top, h("div", { class: "list-empty" }, icon(spec.kind === "focus" ? "ok" : "all", 24), h("p", null, items.length ? "Nothing matches this filter." : spec.empty)));
@@ -605,7 +605,7 @@ function showOverview() {
   const key = `overview:${spec.key}:${data ? "data" : "none"}:${S.meta ? S.meta.version : ""}`;
   if (S.shown === key) return;
   if (!data) return setReader(skeletonReader(), key, { animate: false });
-  if (spec.kind === "focus") setReader(todayView(data, S.meta, { processMail, loadSample }), key);
+  if (spec.kind === "focus") setReader(todayView(data, S.meta, { processMail, loadSample, loadModel, keepModel }), key);
   else if (spec.kind === "fraud") setReader(fraudView(data), key);
   else if (spec.kind === "coding") setReader(codingView(data), key);
   else setReader(emptyReader(spec.q ? `${plural(data.items.length, "email")} mention “${spec.q}”. Choose one to read it.` : "Choose an email to read it here."), key);
@@ -1213,11 +1213,14 @@ function finished(job) {
   }
   const read = typeof result.ingested === "number" ? `Read ${plural(result.ingested, "new file")}.` : "";
   const synced = result.outlook_message ? ` ${result.outlook_message}` : "";
+  // The start loaded a model in LM Studio (or couldn't, and says why).
+  const load = result.model_load || null;
+  const loaded = load ? ` ${load.message}` : "";
   const failed = (result.failed_files || []).length;
-  if (!failed) return toast(`Processed. ${read}${synced}`, { tone: "ok", ms: 6000 });
+  if (!failed) return toast(`Processed. ${read}${synced}${loaded}`, { tone: load && load.failed ? "error" : "ok", ms: load ? 12000 : 6000 });
   // A file that can't be read is moved aside, not retried: say so, and where it went.
   const where = (S.meta && S.meta.failed_folder) || "inbox/failed";
-  toast(`Processed. ${read}${synced} ${failed === 1 ? "1 file couldn't be read and was" : `${failed} files couldn't be read and were`} moved to ${where}.`, { tone: "error", ms: 12000 });
+  toast(`Processed. ${read}${synced}${loaded} ${failed === 1 ? "1 file couldn't be read and was" : `${failed} files couldn't be read and were`} moved to ${where}.`, { tone: "error", ms: 12000 });
 }
 
 async function syncOutlook() {
@@ -1248,6 +1251,32 @@ async function loadSample(event) {
     event.currentTarget.disabled = false;
     toast(error.message, { tone: "error" });
   }
+}
+
+/* Today's suggestion of a model that fits this computer better: Load switches to it (as Settings does), Keep leaves
+   the one answering and stops the suggestion. */
+async function modelTipAction(path, body, button, busyText) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = busyText;
+  try {
+    const reply = await postJSON(path, body);
+    toast(reply.message, { tone: "ok" });
+  } catch (error) {
+    toast(error.message, { tone: "error", ms: 12000 });
+    button.disabled = false;
+    button.textContent = label;
+  }
+  // The state's version changes with the suggestion: Today (and a phone's list) is drawn again without it.
+  await poll();
+}
+
+function loadModel(tip, button) {
+  return modelTipAction("/api/settings/chat-model", { model: tip.suggested }, button, "Loading in LM Studio…");
+}
+
+function keepModel(tip, button) {
+  return modelTipAction("/api/settings/chat-model/keep", { model: tip.current }, button, "Saving…");
 }
 
 async function processMail() {

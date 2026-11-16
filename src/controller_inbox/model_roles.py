@@ -133,17 +133,32 @@ def memory_needed(size_bytes: int, context_tokens: int) -> int:
     return size_bytes + max(0, context_tokens) * CONTEXT_BYTES_PER_TOKEN
 
 
+def on_this_computer(settings: Settings, status: ModelStatus) -> bool:
+    """LM Studio runs on this computer, so this computer's memory is the one a model loads into."""
+    return (urlparse(status.base_url or settings.llm_base_url).hostname or "") in _THIS_COMPUTER
+
+
+def context_for(settings: Settings, status: ModelStatus, key: str) -> int:
+    """The context ``key`` is loaded with: the one Setup asks for, but no more than the model supports."""
+    most = status.chat_models.get(key, 0)
+    return min(settings.min_context_tokens, most) if settings.min_context_tokens and most else settings.min_context_tokens
+
+
+def fits(settings: Settings, status: ModelStatus, key: str, memory: int) -> bool:
+    """``key`` loads in this computer's ``memory`` with the context Setup asks for (False when its size isn't known)."""
+    size = status.chat_sizes.get(key, 0)
+    return bool(size and memory) and memory_needed(size, context_for(settings, status, key)) <= USABLE_SHARE * memory
+
+
 def too_big(settings: Settings, status: ModelStatus) -> dict[str, str]:
     """The downloaded chat models too big to load on this computer with the context Setup asks for, each with why.
     Nothing when LM Studio doesn't give the sizes, the memory can't be read, or LM Studio is on another computer."""
-    host = urlparse(status.base_url or settings.llm_base_url).hostname or ""
     memory = computer_memory()
-    if not status.chat_sizes or not memory or host not in _THIS_COMPUTER:
+    if not status.chat_sizes or not memory or not on_this_computer(settings, status):
         return {}
     found = {}
     for key, size in status.chat_sizes.items():
-        most = status.chat_models.get(key, 0)
-        tokens = min(settings.min_context_tokens, most) if settings.min_context_tokens and most else settings.min_context_tokens
+        tokens = context_for(settings, status, key)
         needed = memory_needed(size, tokens)
         if needed > USABLE_SHARE * memory:
             context = f" with a {tokens:,}-token context" if tokens else ""

@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from controller_inbox import calendar_events, cost_codes, link_judge, links
+from controller_inbox import calendar_events, cost_codes, link_judge, links, model_choice
 from controller_inbox.actions import local_today
 from controller_inbox.clock import parse_stamp
 from controller_inbox.config import Settings
@@ -151,6 +151,8 @@ def read_queue(
         store.upsert_email(current)
         result["read_ids"].append(email.id)
     result["stats"] = reader.stats
+    # How long this model takes an email here, for Settings to suggest a faster one when it is slow.
+    model_choice.record_speed(store, reader.model, reader.stats.typical_seconds, reader.stats.read)
     if reader.stats.stopped_reason:
         result["note"] = f"Stopped reading: {reader.stats.stopped_reason}."
     return result
@@ -169,18 +171,22 @@ def run_overnight(
     vision_minutes: float | None = None,
     should_stop: Callable[[], bool] | None = None,
     start_outlook: bool = True,
+    before_reading: Callable[[], None] | None = None,
 ) -> dict:
     """One full pass. Raises ``RunBusy`` instead of racing another run over the same drop folder. ``vision_minutes``:
     how long it may spend reading scanned pages with the vision model (default ``Settings.vision_minutes_per_run``);
     ``should_stop``: the reading of scans ends after the page being read when it says so. ``sync_outlook``: copy new
     mail from classic Outlook first; None does when automatic sync is on in Settings. ``start_outlook``: start Outlook
-    for it when it isn't running (CloseDesk starting); the scheduled morning run passes False, as nobody is there."""
+    for it when it isn't running (CloseDesk starting); the scheduled morning run passes False, as nobody is there.
+    ``before_reading``: called once the new mail is in and before the model reads it (CloseDesk starting has LM Studio
+    load a model then, so the mail isn't held back while it loads)."""
     with run_lock(settings) as locked:
         if not locked:
             raise RunBusy()
         return _run_overnight(
             store, settings, now=now, limit=limit, sync_graph=sync_graph, sync_outlook=sync_outlook, reader=reader,
             on_progress=on_progress, vision_minutes=vision_minutes, should_stop=should_stop, start_outlook=start_outlook,
+            before_reading=before_reading,
         )
 
 
@@ -280,6 +286,7 @@ def _run_overnight(
     should_stop: Callable[[], bool] | None = None,
     sync_outlook: bool | None = None,
     start_outlook: bool = True,
+    before_reading: Callable[[], None] | None = None,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     settings.ensure_data_dir()
@@ -318,6 +325,8 @@ def _run_overnight(
     except Exception:  # the rest of the run still happens
         log.warning("Reading invitations again failed", exc_info=True)
 
+    if before_reading:
+        before_reading()
     reading = read_queue(store, settings, limit=limit, now=now, reader=reader, on_progress=on_progress)
     # After reading: the model may have filed more mail as AP invoices, and the workbook may have changed.
     coded = cost_codes.refresh(store, settings)

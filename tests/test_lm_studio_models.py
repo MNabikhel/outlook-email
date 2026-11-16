@@ -33,6 +33,7 @@ class LMStudio:
         self.answer_error = ""  # "status": a 500 for the answer, "stream": an error written into the stream
         self.sizes: dict[str, int] = {}  # each model's download size, as LM Studio reports it
         self.calls: list[tuple] = []  # loads and unloads, in order
+        self.extra: list[str] = []  # more downloaded chat models, listed after the others
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         if self.down:
@@ -41,7 +42,7 @@ class LMStudio:
         if path.endswith("/models") and self.slow:
             raise httpx.ReadTimeout("timed out", request=request)
         if path == "/v1/models":
-            return httpx.Response(200, json={"data": [{"id": key} for key in (CODER, CHAT, OVIS, EMBED)]})
+            return httpx.Response(200, json={"data": [{"id": key} for key in (CODER, CHAT, OVIS, EMBED, *self.extra)]})
         if path == "/api/v1/models":
 
             def item(kind, key, **extra):
@@ -54,6 +55,7 @@ class LMStudio:
                 item("llm", CHAT, max_context_length=262144),
                 item("llm", OVIS, capabilities={"vision": True}),
                 item("embedding", EMBED),
+                *[item("llm", key, max_context_length=131072) for key in self.extra],
             ]
             return httpx.Response(200, json={"models": models})
         if path == "/api/v1/models/load":
