@@ -191,6 +191,10 @@ def install_manager_py(work: Path, folder: Path) -> None:
 
 
 def main() -> int:
+    # The launcher's window text can hold characters a Windows console's code page lacks ("—" read back as "\ufffd"):
+    # printed as "?", not a crash of the test after CloseDesk did its part.
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="replace")
     work = Path(tempfile.mkdtemp(prefix="closedesk smoke "))
     folder = work / "Close Desk"
     export(folder, commit="a" * 40)
