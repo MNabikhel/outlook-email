@@ -54,7 +54,8 @@ jobs:
           - os: ubuntu-latest
             python: "3.14"
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Windows' and macOS's runners take about 20 minutes for the suite; the limit leaves room for a slow runner.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
