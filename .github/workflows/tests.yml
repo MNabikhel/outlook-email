@@ -66,7 +66,7 @@ jobs:
         run: pip install -e ".[dev,ocr,tables]"
       - name: Test
         # The browser tests run in their own job below.
-        run: pytest -q -m "not browser"
+        run: pytest -q -m "not browser" --durations=25
 
   # The launchers themselves, run as a person runs them: set-up from nothing, a second start, a renamed folder,
   # the dashboard answering, an update. Once with the machine's Python (nothing may be downloaded), once with
