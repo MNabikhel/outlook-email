@@ -160,7 +160,9 @@ def test_the_start_loads_the_model_first_and_the_page_says_so(settings, store, l
     _serve(monkeypatch, slow_load)
     order: list = []
 
-    def reading(_store, _settings, *, on_progress=None, **_kw):
+    def reading(_store, _settings, *, on_progress=None, before_reading=None, **_kw):
+        order.append(("import", list(lm.loaded)))
+        before_reading()
         order.append(("read", list(lm.loaded)))
         return {"headline": "", "ingested": 0, "read_by_bionic": 0, "folders": {"important": 0, "informational": 0, "reference": 0},
                 "waiting_on_bionic": 0, "digest_path": "d", "log_path": "l", "model": CHAT, "avg_seconds": 0}
@@ -190,7 +192,7 @@ def test_the_start_loads_the_model_first_and_the_page_says_so(settings, store, l
     job, classic, result, home = seen
     assert job["stage"] == "model" and job["stage_label"] == "Loading a model in LM Studio" and CHAT in job["note"]
     assert "Loading a model in LM Studio" in classic
-    assert order == [("read", [CHAT])], "the mail is read once the model is in"
+    assert order == [("import", []), ("read", [CHAT])], "the mail is read once the model is in"
     assert result["model_load"] == {"message": f"Loaded {CHAT} in LM Studio: it answers your questions and reads the mail.", "failed": False}
     assert f"Loaded {CHAT} in LM Studio" in home
 
@@ -199,13 +201,44 @@ def test_the_start_without_the_page_loads_the_model_too(settings, store, lm, mon
     from controller_inbox import overnight
 
     lm.sizes = {CHAT: 6 * GB}
-    monkeypatch.setattr(overnight, "run_overnight", lambda *_a, **_k: {
+    monkeypatch.setattr(overnight, "run_overnight", lambda *_a, before_reading, **_k: before_reading() or {
         "headline": "", "ingested": 0, "read_by_bionic": 0, "folders": {"important": 0, "informational": 0, "reference": 0},
         "waiting_on_bionic": 0, "digest_path": "d", "log_path": "l"})
     args = type("Args", (), {"no_serve": True, "no_browser": True, "limit": 0, "host": "127.0.0.1", "port": 0})()
     assert cli._run(settings, store, args) == 0
     out = capsys.readouterr().out
     assert f"Loading a model in LM Studio: {CHAT}" in out and f"Loaded {CHAT} in LM Studio" in out
+
+
+def test_the_new_mail_is_imported_before_the_model_loads(settings, store, lm, monkeypatch):
+    """Copying mail in needs no model: a load that takes minutes (or hangs) doesn't hold the new mail back."""
+    from email.message import EmailMessage
+
+    from controller_inbox import overnight
+
+    remember_model(settings, CHAT)
+    message = EmailMessage()
+    message["Subject"] = "Invoice 552"
+    message["From"] = "Ann <ann@vendor-x.com>"
+    message["Date"] = "Mon, 28 Sep 2026 14:30:00 +0000"
+    message.set_content("Invoice 552, due October 30.")
+    (settings.inbox_incoming / "invoice.eml").write_bytes(bytes(message))
+    real = lm.__call__
+    at_load: list = []
+
+    def load(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/models/load":
+            at_load.append([email.subject for email in store.list_emails(limit=10)])
+        return real(request)
+
+    _serve(monkeypatch, load)
+    stages: list = []
+    monkeypatch.setattr(overnight, "read_queue", lambda *_a, **_k: stages.append(("read", list(lm.loaded))) or {
+        "read_ids": [], "model": "", "note": "", "stats": None})
+    args = type("Args", (), {"no_serve": True, "no_browser": True, "limit": 0, "host": "127.0.0.1", "port": 0})()
+    assert cli._run(settings, store, args) == 0
+    assert at_load == [["Invoice 552"]], "the email was in before LM Studio was asked to load the model"
+    assert stages == [("read", [CHAT])], "and read once the model is in"
 
 
 def test_both_pages_name_the_loading_stage():
@@ -244,13 +277,27 @@ def test_a_slow_model_gets_a_faster_one_suggested(settings, store, lm):
 
 
 def test_a_model_too_big_gets_one_that_fits_suggested(settings, store, lm):
+    lm.contexts = {GEMMA27: 16384}
     status = _answering(lm, settings, GEMMA27, **{GEMMA27: 17 * GB, CHAT: 6 * GB, QWEN8: 5 * GB})
     tip = model_choice.recommendation(settings, store, status)
     assert tip["reason"] == "too_big" and tip["suggested"] == CHAT
+    # Only what is known: it loaded and answers, so nothing is said about running out of memory or answering faster.
     assert tip["message"] == (
-        f"{GEMMA27} needs about 19 GB of memory and this computer has 16 GB, so LM Studio will likely run out of memory "
-        f"with it. {CHAT} would fit and answer faster."
+        f"{GEMMA27} needs about 19 GB of memory with a 16,384-token context and this computer has 16 GB, so the "
+        f"computer may slow down while it answers. {CHAT} fits in its memory."
     )
+
+
+def test_the_context_the_model_was_loaded_with_is_the_one_counted(settings, store, lm):
+    # Setup asks for 32,768 tokens (13 GB with a 9 GB model: too big for 12 GB), but LM Studio loaded it with 16,384
+    # (11 GB): it fits as it is.
+    settings.min_context_tokens = 32768
+    lm.contexts = {QWEN8: 16384}
+    status = _answering(lm, settings, QWEN8, **{QWEN8: 9 * GB, CHAT: 5 * GB})
+    assert model_choice.recommendation(settings, store, status) is None
+    lm.contexts = {QWEN8: 32768}
+    tip = model_choice.recommendation(settings, store, _answering(lm, settings, QWEN8, **{QWEN8: 9 * GB, CHAT: 5 * GB}))
+    assert tip["reason"] == "too_big" and "about 13 GB of memory with a 32,768-token context" in tip["message"]
 
 
 def test_nothing_is_suggested_without_a_smaller_model_that_fits(settings, store, lm):
@@ -273,6 +320,33 @@ def test_the_reading_keeps_how_long_the_model_took_an_email(settings, store):
 
     read_queue(store, settings, reader=Reader())
     assert model_choice.seconds_an_email(store, CHAT) == 70.0
+
+
+def test_a_load_during_the_first_email_does_not_make_the_model_look_slow(settings, store, lm, monkeypatch):
+    """LM Studio loads the model while it answers the first email (nothing loaded yet): that minute isn't the
+    model's reading speed, so a model that reads at 20 s an email isn't called slow."""
+    from types import SimpleNamespace
+
+    clock = [0.0]
+    took = iter([80.0, 20.0, 20.0])  # a 60 s load, then 20 s an email
+
+    def answer(_prompt):
+        clock[0] += next(took)
+        return local_llm.Reply(content="{}")
+
+    monkeypatch.setattr(local_llm, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=lambda _s: None))
+    monkeypatch.setattr(local_llm, "_find_reading", lambda _reply: {"folder": "reference"})
+    reader = local_llm.LocalReader(settings, model=CHAT, client=httpx.Client(transport=httpx.MockTransport(lm)))
+    reader._complete = answer
+    reader.read({"subject": "a"})
+    reader.read({"subject": "b"})
+    model_choice.record_speed(store, CHAT, reader.stats.typical_seconds, reader.stats.read)
+    assert model_choice.seconds_an_email(store, CHAT) == 0.0, "two emails, one with a load, are too few to tell"
+    reader.read({"subject": "c"})
+    model_choice.record_speed(store, CHAT, reader.stats.typical_seconds, reader.stats.read)
+    assert model_choice.seconds_an_email(store, CHAT) == 20.0
+    status = _answering(lm, settings, CHAT, **{CHAT: 8 * GB, QWEN8: 5 * GB})
+    assert model_choice.recommendation(settings, store, status) is None
 
 
 def test_keep_stops_the_suggestion_for_that_model(settings, store, lm):
@@ -312,3 +386,29 @@ def test_both_settings_pages_offer_the_suggestion_and_load_it_only_when_clicked(
     reply = client.post("/api/settings/chat-model", json={"model": QWEN8}, headers=PAGE)
     assert reply.status_code == 200 and lm.loaded == [QWEN8]
     assert client.get("/api/settings", headers=PAGE).json()["chat"]["tip"] is None
+
+
+def test_the_classic_today_page_offers_the_suggestion_too(settings, loaded, lm):
+    model_choice.record_speed(loaded, CHAT, 70.0, 5)
+    _answering(lm, settings, CHAT, **{CHAT: 8 * GB, QWEN8: 5 * GB})
+    client = TestClient(web.create_app(settings, loaded))
+    box = client.get("/").text.split('id="model-tip"')[1].split("</div>")[0]
+    assert f"{CHAT} takes about 70 s an email on this computer. {QWEN8} would fit and answer faster." in box
+    assert f"Load {QWEN8}</button>" in box and f"Keep {CHAT}</button>" in box
+    assert box.count('<input type="hidden" name="next" value="/">') == 2, "both come back to Today"
+    assert lm.calls == [], "showing it switches nothing"
+    origin = {"Origin": "http://testserver"}
+    # Load, from Today: back on Today, saying so.
+    reply = client.post("/settings/chat-model", data={"model": QWEN8, "next": "/"}, headers=origin, follow_redirects=False)
+    assert reply.headers["location"] == "/?notice=chat-model" and lm.loaded == [QWEN8]
+    assert "Loaded in LM Studio. It answers your questions now." in client.get(reply.headers["location"]).text
+    # Keep, from Today.
+    model_choice.record_speed(loaded, QWEN8, 70.0, 5)
+    lm.extra = [*lm.extra, "tiny/model-1b"]
+    _answering(lm, settings, QWEN8, **{QWEN8: 5 * GB, "tiny/model-1b": 1 * GB})
+    reply = client.post("/settings/chat-model/keep", data={"model": QWEN8, "next": "/"}, headers=origin, follow_redirects=False)
+    assert reply.headers["location"] == "/?notice=chat-model-kept"
+    assert 'id="model-tip"' not in client.get(reply.headers["location"]).text
+    # Another site's address isn't followed.
+    reply = client.post("/settings/chat-model/keep", data={"model": QWEN8, "next": "//evil.example"}, headers=origin, follow_redirects=False)
+    assert reply.headers["location"] == "/settings?notice=chat-model-kept#chat-model"

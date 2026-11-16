@@ -5,8 +5,8 @@ CloseDesk has it load one: the one used last if it is still downloaded, else the
 that fits this computer's memory. Any size can still be chosen in Settings; the automatic choice only prefers one
 that fits. A model the user loaded is never unloaded or replaced without their click.
 
-When the model answering is too big for this computer, or slow at reading mail (``SLOW_SECONDS`` an email or more),
-and a smaller downloaded one would fit, Settings and Today suggest it once: "Load" switches, "Keep" stops asking
+When the model answering is too big for this computer's memory (with the context it was loaded with), or slow at
+reading mail (over ``SLOW_SECONDS`` an email), and a smaller downloaded one would fit, Settings and Today suggest it once: "Load" switches, "Keep" stops asking
 about that model.
 """
 
@@ -22,9 +22,10 @@ if TYPE_CHECKING:
     from controller_inbox.config import Settings
     from controller_inbox.store import Store
 
-# Seconds an email above which reading mail counts as slow, from at least SPEED_MIN_EMAILS read in one go.
+# Seconds an email above which reading mail counts as slow: the middle time of at least SPEED_MIN_EMAILS read in one
+# go, so the first email waiting for LM Studio to load the model is outweighed by the others.
 SLOW_SECONDS = 45.0
-SPEED_MIN_EMAILS = 2
+SPEED_MIN_EMAILS = 3
 SPEED_KEY = "model_speed"  # {model: {"seconds": average an email, "emails": how many}}, the last reading of each
 KEPT_KEY = "model_kept"  # models the user chose to keep when another was suggested: not suggested against again
 
@@ -144,13 +145,19 @@ def recommendation(settings: Settings, store: Store, status: ModelStatus | None 
     status = status or check_model(settings)
     if not status.active or not status.lm_studio or pinned(settings):
         return None
-    current = status.instances.get(status.model, (status.model, 0))[0]
+    current, loaded_context = status.instances.get(status.model, (status.model, 0))
     if not current or kept(store, current):
         return None
     seconds = seconds_an_email(store, status.model, current)
     slow = seconds > SLOW_SECONDS
-    too_big = model_roles.too_big(settings, status).get(current, "")
     size = status.chat_sizes.get(current, 0)
+    # The memory it takes with the context LM Studio loaded it with (Setup's when LM Studio doesn't say).
+    tokens = loaded_context or model_roles.context_for(settings, status, current)
+    needed = model_roles.memory_needed(size, tokens)
+    memory = model_roles.computer_memory()
+    too_big = bool(
+        size and memory and model_roles.on_this_computer(settings, status) and needed > model_roles.USABLE_SHARE * memory
+    )
     if not (slow or too_big) or not size:
         return None
     smaller = [key for key in _chat_keys(status) if key != current and 0 < status.chat_sizes.get(key, 0) < size]
@@ -160,10 +167,10 @@ def recommendation(settings: Settings, store: Store, status: ModelStatus | None 
     if slow:
         message = f"{current} takes about {_whole(seconds)} an email on this computer. {suggested} would fit and answer faster."
     else:
-        memory = model_roles.computer_memory()
-        needed = model_roles.memory_needed(size, model_roles.context_for(settings, status, current))
+        # It loaded and answers: only what is known is said, not that it will fail or that the other is faster.
+        context = f" with a {tokens:,}-token context" if tokens else ""
         message = (
-            f"{current} needs about {round(needed / 1024**3)} GB of memory and this computer has "
-            f"{round(memory / 1024**3)} GB, so LM Studio will likely run out of memory with it. {suggested} would fit and answer faster."
+            f"{current} needs about {round(needed / 1024**3)} GB of memory{context} and this computer has "
+            f"{round(memory / 1024**3)} GB, so the computer may slow down while it answers. {suggested} fits in its memory."
         )
     return {"current": current, "suggested": suggested, "reason": "slow" if slow else "too_big", "message": message}

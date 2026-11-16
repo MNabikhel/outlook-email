@@ -19,6 +19,14 @@
   {% endif %}
 </p>
 
+{% if model_tip %}
+<div class="model-tip" id="model-tip">
+  <p>{{ model_tip.message }}</p>
+  <form method="post" action="/settings/chat-model" class="inline"><input type="hidden" name="model" value="{{ model_tip.suggested }}"><input type="hidden" name="next" value="/"><button type="submit" data-loading="Loading in LM Studio…">Load {{ model_tip.suggested }}</button></form>
+  <form method="post" action="/settings/chat-model/keep" class="inline"><input type="hidden" name="model" value="{{ model_tip.current }}"><input type="hidden" name="next" value="/"><button type="submit" class="ghost">Keep {{ model_tip.current }}</button></form>
+</div>
+{% endif %}
+
 {% if payload.critical_alerts %}
 <section class="panel alert">
   <h2>Do not process — verify by phone</h2>

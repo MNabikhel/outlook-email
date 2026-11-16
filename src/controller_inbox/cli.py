@@ -413,15 +413,19 @@ def _run(settings: Settings, store: Store, args) -> int:
         print(f"  {label}{suffix}: {note[:70]}", flush=True)
 
     def read_new_mail(on_progress=progress) -> dict:
-        # First, with no model loaded in LM Studio, CloseDesk has it load one (the one used last, or the most capable
-        # that fits this computer), so the new mail is read with it.
         from controller_inbox.model_choice import load_at_start
 
-        loaded = load_at_start(settings, on_progress)
-        if loaded["message"]:
-            print(f"  {loaded['message']}", flush=True)
+        loaded = {"message": ""}
+
+        def load_model() -> None:
+            # Once the new mail is copied in and imported, and with no model loaded in LM Studio, CloseDesk has it load
+            # one (the one used last, or the most capable that fits this computer), so the new mail is read with it.
+            loaded.update(load_at_start(settings, on_progress))
+            if loaded["message"]:
+                print(f"  {loaded['message']}", flush=True)
+
         # Nobody should wait on minutes-long page reads for the dashboard to open.
-        result = run_overnight(store, settings, limit=args.limit, on_progress=on_progress, vision_minutes=0)
+        result = run_overnight(store, settings, limit=args.limit, on_progress=on_progress, vision_minutes=0, before_reading=load_model)
         if loaded["message"]:
             result["model_load"] = {"message": loaded["message"], "failed": bool(loaded.get("failed"))}
         return result

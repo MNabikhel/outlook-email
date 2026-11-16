@@ -396,6 +396,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             page="home",
             heading="Today",
             payload=payload,
+            model_tip=model_choice.recommendation(settings, store),
         )
 
     def more_link(request: Request, shown: int, total: int, limit: int) -> dict:
@@ -1180,13 +1181,21 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return ""
 
     @app.post("/settings/chat-model")
-    def save_chat_model(model: str = Form(...)):
-        return RedirectResponse(f"/settings?notice={switch_chat_model(model)}#chat-model", status_code=303)
+    def save_chat_model(model: str = Form(...), next: str = Form("")):
+        notice = switch_chat_model(model)
+        # From Today's suggestion, a load that worked goes back to Today; one that didn't goes to Settings, which says why.
+        back = _local_path(next, "") if notice == "chat-model" else ""
+        if back:
+            return RedirectResponse(f"{back}?notice={notice}", status_code=303)
+        return RedirectResponse(f"/settings?notice={notice}#chat-model", status_code=303)
 
     @app.post("/settings/chat-model/keep")
-    def keep_chat_model(model: str = Form(...)):
+    def keep_chat_model(model: str = Form(...), next: str = Form("")):
         # The model answering stays, and isn't suggested against again.
         model_choice.keep(store, model.strip()[:200])
+        back = _local_path(next, "")
+        if back:
+            return RedirectResponse(f"{back}?notice=chat-model-kept", status_code=303)
         return RedirectResponse("/settings?notice=chat-model-kept#chat-model", status_code=303)
 
     @app.post("/settings/index")

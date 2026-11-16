@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import statistics
 import threading
 import weakref
 import time
@@ -604,10 +605,17 @@ class ReaderStats:
     seconds: float = 0.0
     stopped_reason: str = ""
     last_error: str = ""
+    times: list[float] = field(default_factory=list)  # seconds each email read took, in order
 
     @property
     def average_seconds(self) -> float:
         return self.seconds / self.read if self.read else 0.0
+
+    @property
+    def typical_seconds(self) -> float:
+        """The middle of the times each email took: one email that waited for LM Studio to load the model (the first,
+        when nothing was loaded) doesn't make the model look slow."""
+        return statistics.median(self.times) if self.times else self.average_seconds
 
 
 class LocalReader:
@@ -662,8 +670,10 @@ class LocalReader:
         if parsed is None:
             return self._failed(reply.why_unusable())
         self._consecutive_failures = 0
+        took = time.monotonic() - started
         self.stats.read += 1
-        self.stats.seconds += time.monotonic() - started
+        self.stats.seconds += took
+        self.stats.times.append(took)
         return parsed
 
     def _failed(self, reason: str) -> None:
