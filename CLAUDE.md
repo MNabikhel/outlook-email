@@ -41,4 +41,5 @@ python tests/launcher_smoke.py          # after touching the launchers or script
   such a call is added.
 - Mail held as possible payment fraud never reaches the model, the previews or the downloads.
 - Comments and user-facing text are plain words about what happens, in the style already there.
-- Changes go to `main` through pull requests, which the owner merges.
+- Changes go to `main` through pull requests. Claude merges its own pull requests once every check passes (the
+  owner's standing instruction), then says what went in; anything risky is still put to the owner first.
