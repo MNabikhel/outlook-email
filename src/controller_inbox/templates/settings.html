@@ -232,6 +232,24 @@
     <p class="muted">Mode: <b>{{ model.mode }}</b> ({{ settings.llm_base_url }}). <code>auto</code> uses a model whenever LM Studio's server is running; with it stopped, CloseDesk files the mail without one.</p>
   </article>
 </section>
+<section class="panel" id="update">
+  <h3>This copy</h3>
+  <p><b>{{ closedesk.label }}</b></p>
+  {% if closedesk.newer %}
+  <p class="notice">{{ closedesk.message }}</p>
+  {% if closedesk.launcher %}
+  <form method="post" action="/settings/update">
+    <button type="submit" {{ 'disabled' if job.state == 'running' else '' }}>Update</button>
+  </form>
+  <p class="muted">CloseDesk closes, fetches the newest version, and opens again by itself in a minute or two. Your mail and settings are kept.{% if job.state == 'running' %} It can update once the mail being processed now is done.{% endif %}</p>
+  {% else %}
+  <p>{{ closedesk.by_hand }}</p>
+  {% endif %}
+  {% elif not closedesk.developer %}
+  <p class="muted">{{ closedesk.by_hand }}</p>
+  {% endif %}
+  <p class="muted">{{ closedesk.note }}</p>
+</section>
 <section class="split">
   <article class="panel">
     <h3>Teaching it</h3>

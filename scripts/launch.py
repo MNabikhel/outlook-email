@@ -7,8 +7,10 @@ On a start it checks, in order:
 - that the environment runs this folder's code, not that of a folder it was copied or moved from;
 - the optional add-ons (the OCR reader, the second table reader), tried once per Python and kept where they install.
 
-Then it starts CloseDesk. One exit code asks the launcher to do what a running Python can't do to itself:
-``REBUILD`` (remove ``.venv`` and run this again).
+Then it starts CloseDesk. Two exit codes ask the launcher to do what a running Python can't do to itself:
+``REBUILD`` (remove ``.venv`` and run this again), and CloseDesk's own ``UPDATE`` (Settings' Update button: run this
+with ``--update``, then start CloseDesk again). CloseDesk is told a launcher started it (``CLOSEDESK_LAUNCHER``), so
+it offers that button only then.
 
 The Python is whichever the launcher found on the computer; none is ever downloaded unasked. (The launcher's
 ``--get-python`` downloads one for CloseDesk alone, when the person asks for it.)
@@ -46,8 +48,9 @@ VENV = ROOT / ".venv"
 STATE = VENV / "closedesk-setup.json"
 LOG = VENV / "closedesk-setup.log"
 
-# The exit code the launchers act on (see the module docstring).
+# The exit codes the launchers act on (see the module docstring). UPDATE is controller_inbox.updates.UPDATE_AND_RESTART.
 REBUILD = 76
+UPDATE = 75
 
 REPO = "MNabikhel/outlook-email"
 BRANCH = "main"
@@ -384,6 +387,8 @@ def main(argv: list[str]) -> int:
     if "--command" in args:
         at = args.index("--command")
         return _hand_over([*module, *args[at + 1 :]])
+    # The launcher acts on CloseDesk's UPDATE exit code: CloseDesk offers its Update button only when one started it.
+    os.environ["CLOSEDESK_LAUNCHER"] = "1"
     return _hand_over([*module, "run", *args])
 
 

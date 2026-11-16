@@ -30,7 +30,7 @@ from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
     agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
-    semantic, services, table_lookup, version, vision,
+    semantic, services, table_lookup, updates, version, vision,
 )
 from controller_inbox.extract import extraction_failed
 from controller_inbox.local_llm import check_model, context_target, needs_more_context
@@ -271,6 +271,7 @@ def register_workspace(
         snapshot = job.snapshot()
         coding = store.coding_counts()
         last_run = store.get_state("last_overnight_at") or ""
+        update = updates.status(store, settings)
         return {
             **services.today_fields(board_date(sample), sample=sample),
             "finance": active_profile(settings, store) == "finance",
@@ -284,6 +285,8 @@ def register_workspace(
             },
             "models": model_roles.models_in_use(settings, status=model),
             "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
+            # This copy's version, and whether a newer one is ready (the top bar's "Update ready").
+            "closedesk": {key: update[key] for key in ("label", "newer", "message")},
             "last_run": format_when(last_run, settings.tz) if last_run else "",
             "tz": settings.tz.key,
             "drop_folder": str(settings.inbox_incoming),
@@ -1179,7 +1182,8 @@ def register_workspace(
                 "can_load": not (counts["emails"] and store.real_mail_count()),
             },
             "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
-            "about": {"version": version.describe(), "python": platform.python_version(), "folder": str(version.ROOT)},
+            "about": {"version": version.label(), "python": platform.python_version(), "folder": str(version.ROOT)},
+            "update": updates.status(store, settings),
         }
 
     def saved(notice: str, **extra) -> dict[str, Any]:
@@ -1191,6 +1195,15 @@ def register_workspace(
     @api.get("/settings")
     def settings_get(recheck: int = 0):
         return settings_state(recheck=bool(recheck))
+
+    @api.post("/update")
+    def update_now():
+        """Settings' Update button: CloseDesk stops once this is answered, and its launcher fetches the newest version
+        and starts it again. The page then waits for /health to answer with the new version."""
+        why = updates.stop_to_update(app.state, job.snapshot()["state"])
+        if why:
+            raise HTTPException(status_code=409, detail=why)
+        return {"ok": True, "message": updates.UPDATING, "commit": version.installed()[0]}
 
     @api.get("/settings/check")
     def settings_check():
@@ -1391,6 +1404,8 @@ def register_workspace(
         while True:
             time.sleep(OUTLOOK_TICK_SECONDS)
             try:
+                if getattr(app.state, "update_asked", False):  # stopping to update: the job wouldn't start anyway
+                    return
                 if outlook_desktop.available() or not outlook_sync.due(store):
                     continue
                 interval = outlook_sync.config(store)["interval"] * 60

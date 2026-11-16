@@ -210,7 +210,7 @@ def _outlook_sync(settings) -> Check:
 def checks(*, port: bool = True, settings=None) -> list[Check]:
     """Everything looked at, in order. Asked from the dashboard itself (Settings), ``settings`` are the ones it
     runs with, and ``port`` False leaves its port out: it would only find itself there."""
-    found = [Check(OK, f"CloseDesk: {version.describe()}"), _python()]
+    found = [Check(OK, version.label()), _python()]
     if settings is None:
         settings, read = _settings()
         found.append(read)

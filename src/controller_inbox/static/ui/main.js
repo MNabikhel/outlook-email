@@ -150,7 +150,8 @@ function updateRail(active) {
     $("#rail-foot"),
     h("a", { class: `rail-chip model ${meta.model.active ? "on" : "off"}`, href: "/app/settings", dataset: { nav: "" }, title: meta.model.describe }, h("span", { class: "dot" }), h("span", { class: "rail-label" }, `Local model ${meta.model.label}`)),
     meta.finance ? h("div", { class: "rail-chip close", title: `Month-end ${meta.close_date}` }, h("b", null, String(meta.days_to_close)), h("span", { class: "rail-label" }, `day${meta.days_to_close === 1 ? "" : "s"} to month-end`)) : null,
-    h("a", { class: "rail-item rail-classic", href: "/", title: "The classic CloseDesk pages" }, icon("classic", 17), h("span", { class: "rail-label" }, "Classic view"))
+    h("a", { class: "rail-item rail-classic", href: "/", title: "The classic CloseDesk pages" }, icon("classic", 17), h("span", { class: "rail-label" }, "Classic view")),
+    meta.closedesk ? h("span", { class: "rail-version rail-label", title: meta.closedesk.label }, meta.closedesk.label) : null
   );
 }
 
@@ -177,6 +178,16 @@ function renderTop() {
     h("span", { class: "muted" }, meta.finance ? ` · ${plural(meta.days_to_close, "day")} to month-end` : ` · ${plural(meta.counts.emails, "email")} sorted`),
     meta.is_sample ? h("span", { class: "chip faint sample" }, "sample mailbox") : null
   );
+  // A newer CloseDesk is ready: a small link to Settings, where its Update button is.
+  const ready = Boolean(meta.closedesk && meta.closedesk.newer);
+  let notice = $("#top-update");
+  if (ready && !notice) {
+    notice = h("a", { id: "top-update", class: "top-update", href: "/app/settings#set-about", dataset: { nav: "" } }, "Update ready");
+    $(".top-tools").prepend(notice);
+  } else if (!ready && notice) {
+    notice.remove();
+  }
+  if (ready) notice.title = meta.closedesk.message;
   const job = meta.job;
   const running = job.state === "running";
   const button = $("#process-btn");
@@ -819,6 +830,7 @@ const settings = createSettings({
   syncOutlook: () => syncOutlook(),
   job: () => (S.meta ? S.meta.job : { state: "idle" }),
   isShown: () => Boolean(S.route && S.route.view === "settings"),
+  updating: (reply) => updating(reply),
   show(node, { keepScroll = false } = {}) {
     const top = reader.scrollTop;
     setReader(node, "settings", { animate: !keepScroll && S.shown !== "settings" });
@@ -1109,6 +1121,7 @@ function doneSelected() {
 
 async function poll() {
   clearTimeout(S.poll);
+  if (S.updating) return; // CloseDesk is stopping to update: updating() waits for it instead
   // One loop: a call while a check is still on its way (the tab shown again, a job started) leaves it to that one.
   if (S.polling) return;
   S.polling = true;
@@ -1133,6 +1146,47 @@ async function poll() {
   const running = S.meta && S.meta.job.state === "running";
   clearTimeout(S.poll);
   S.poll = setTimeout(poll, document.hidden ? 60000 : running ? 1500 : 15000);
+}
+
+/* ---------- Updating ---------- */
+
+/** Settings' Update button was answered: CloseDesk stops, its launcher fetches the newest version and starts it
+    again. Say so, and load the page again once CloseDesk answers (with the new version, or as it was when the
+    update couldn't be done). */
+function updating(reply) {
+  S.updating = true;
+  clearTimeout(S.poll);
+  const line = h("p", { class: "lede" }, reply.message);
+  setReader(
+    h(
+      "div",
+      { class: "page", id: "updating" },
+      h(
+        "div",
+        { class: "page-inner narrow" },
+        h("p", { class: "kicker" }, "Update"),
+        h("h1", { class: "page-title" }, "Updating CloseDesk"),
+        line,
+        h("div", { class: "job" }, h("span", { class: "spin", "aria-hidden": "true" }), h("span", { class: "job-bar" }, h("span", { class: "indeterminate", style: { width: "30%" } })))
+      )
+    ),
+    "updating"
+  );
+  const before = reply.commit || "";
+  const started = Date.now();
+  let gone = false; // CloseDesk stopped answering: the next answer is the new one
+  const again = async () => {
+    try {
+      const response = await fetch("/health", { cache: "no-store" });
+      const health = await response.json();
+      if (health.app === "closedesk" && (gone || health.commit !== before)) return location.reload();
+    } catch (error) {
+      gone = true;
+      if (Date.now() - started > 5 * 60 * 1000) line.textContent = "CloseDesk hasn't opened again yet. Its window says what it is doing; if it has closed, double-click CloseDesk.";
+    }
+    setTimeout(again, 2000);
+  };
+  setTimeout(again, 2000);
 }
 
 function refreshData() {

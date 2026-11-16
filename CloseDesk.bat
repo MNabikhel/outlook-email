@@ -80,6 +80,8 @@ call %PY% scripts\launch.py %2 %3 %4 %5 %6 %7 %8 %9
 set "CODE=%ERRORLEVEL%"
 if "%CODE%"=="0" exit /b 0
 if "%CODE%"=="130" exit /b 0
+rem 75: Settings' Update button. CloseDesk stopped so that its newest version can be fetched and started.
+if "%CODE%"=="75" goto :update_and_reopen
 rem 76: launch.py says the environment is beyond repair; it is made again, once.
 if "%CODE%"=="76" set "CLOSEDESK_REBUILT=1"
 if "%CODE%"=="76" goto :remake
@@ -88,6 +90,26 @@ goto :fail
 :remake
 if exist ".venv" rmdir /s /q ".venv"
 goto :again
+
+rem Settings' Update button: fetch the newest CloseDesk (mail and settings are kept), then start the new one.
+rem The update replaces this file while it runs, and cmd reads a .bat from the disk as it goes, so the update
+rem and the start of the new file are one block, read whole before it runs. The environment is there now and
+rem stays, so the new start is without --get-python. The page that asked for the update is still open and
+rem reloads itself, so no second one is opened (CLOSEDESK_REOPEN).
+:update_and_reopen
+if exist ".venv\Scripts\python.exe" set PY=".venv\Scripts\python.exe"
+set "CLOSEDESK_REOPEN=1"
+echo.
+if defined GETPY (
+  call %PY% scripts\launch.py --update
+  call "%~f0" %2 %3 %4 %5 %6 %7 %8 %9
+  exit /b
+)
+(
+  call %PY% scripts\launch.py --update
+  call "%~f0" %*
+  exit /b
+)
 
 rem Sets PY to the command given when it is a Python 3.11 or newer that runs. (The "python" Windows offers
 rem before one is installed only points at the Store; it fails this, and nothing opens.) Only an exit of exactly 0

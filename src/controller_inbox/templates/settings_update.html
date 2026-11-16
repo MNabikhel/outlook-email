@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Updating · CloseDesk{% endblock %}
+{% block heading %}Setup{% endblock %}
+{% block body %}
+<section class="panel" id="update">
+  <h3>Update CloseDesk</h3>
+  {% if refused %}
+  <p class="notice">{{ refused }}</p>
+  <p><a href="/settings#update">Back to Setup</a></p>
+  {% else %}
+  <p data-update-line>{{ message }}</p>
+  <p class="muted"><progress aria-label="Updating"></progress></p>
+  <script>
+    // CloseDesk stops, its launcher fetches the newest version, and CloseDesk starts again: Setup is shown when it
+    // answers again (with the new version, or as it was when the update couldn't be done).
+    (function () {
+      var before = {{ commit | tojson }};
+      var gone = false;
+      var started = Date.now();
+      function again() {
+        fetch('/health', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (h) {
+          if (h.app === 'closedesk' && (gone || h.commit !== before)) { window.location.href = '/settings#update'; return; }
+          setTimeout(again, 2000);
+        }).catch(function () {
+          gone = true;
+          if (Date.now() - started > 5 * 60 * 1000) {
+            document.querySelector('[data-update-line]').textContent = "CloseDesk hasn't opened again yet. Its window says what it is doing; if it has closed, double-click CloseDesk.";
+          }
+          setTimeout(again, 2000);
+        });
+      }
+      setTimeout(again, 2000);
+    })();
+  </script>
+  {% endif %}
+</section>
+{% endblock %}
