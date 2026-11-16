@@ -391,6 +391,31 @@ export function createSettings(ctx) {
     );
   }
 
+  /* A model that fits this computer better than the one answering: loaded only when the user clicks Load; Keep
+     stops CloseDesk asking about this one. */
+  function modelTip(tip) {
+    if (!tip) return null;
+    return h(
+      "div",
+      { class: "set-help set-warn model-tip", id: "set-model-tip", role: "status" },
+      h("p", null, tip.message),
+      h(
+        "div",
+        { class: "set-inline" },
+        h(
+          "button",
+          {
+            type: "button",
+            class: "btn btn-primary btn-sm",
+            onclick: (event) => save("chat", "/api/settings/chat-model", { model: tip.suggested }, event.currentTarget, { busyText: "Loading in LM Studio…" }),
+          },
+          `Load ${tip.suggested}`
+        ),
+        h("button", { type: "button", class: "btn btn-sm", onclick: (event) => save("chat", "/api/settings/chat-model/keep", { model: tip.current }, event.currentTarget) }, `Keep ${tip.current}`)
+      )
+    );
+  }
+
   function chatModel() {
     const chat = data.chat;
     if (!chat) return null;
@@ -430,6 +455,7 @@ export function createSettings(ctx) {
         },
       },
       h("h3", { class: "set-sub" }, "Model that answers your questions"),
+      modelTip(chat.tip),
       h("div", { class: "set-inline" }, select, h("button", { type: "submit", class: "btn btn-primary btn-sm" }, "Load and use")),
       warning,
       h(

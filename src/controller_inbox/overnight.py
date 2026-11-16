@@ -13,7 +13,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from controller_inbox import calendar_events, cost_codes, link_judge, links
+from controller_inbox import calendar_events, cost_codes, link_judge, links, model_choice
 from controller_inbox.actions import local_today
 from controller_inbox.clock import parse_stamp
 from controller_inbox.config import Settings
@@ -151,6 +151,8 @@ def read_queue(
         store.upsert_email(current)
         result["read_ids"].append(email.id)
     result["stats"] = reader.stats
+    # How long this model takes an email here, for Settings to suggest a faster one when it is slow.
+    model_choice.record_speed(store, reader.model, reader.stats.average_seconds, reader.stats.read)
     if reader.stats.stopped_reason:
         result["note"] = f"Stopped reading: {reader.stats.stopped_reason}."
     return result

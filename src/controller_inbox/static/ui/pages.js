@@ -75,6 +75,23 @@ function getStarted(meta, actions) {
   );
 }
 
+/* A gentle line when a downloaded model fits this computer better than the one answering. Nothing changes until
+   the user clicks Load; Keep stops CloseDesk asking about this model. */
+function modelTip(tip, actions) {
+  if (!tip || !actions || !actions.loadModel) return null;
+  return h(
+    "div",
+    { class: "model-tip", role: "status" },
+    h("p", null, tip.message),
+    h(
+      "div",
+      { class: "model-tip-actions" },
+      h("button", { type: "button", class: "btn btn-sm btn-primary", onclick: (event) => actions.loadModel(tip, event.currentTarget) }, `Load ${tip.suggested}`),
+      h("button", { type: "button", class: "btn btn-sm", onclick: (event) => actions.keepModel(tip, event.currentTarget) }, `Keep ${tip.current}`)
+    )
+  );
+}
+
 export function todayView(data, meta, actions) {
   if (!meta.counts.emails && actions) return getStarted(meta, actions);
   const k = data.kpis;
@@ -96,7 +113,7 @@ export function todayView(data, meta, actions) {
         kpi("Fraud flags", meta.counts.fraud_alerts, meta.counts.fraud_alerts ? "danger" : "", "/app/fraud"),
         meta.coding.review ? kpi("AP to code", meta.coding.review, "", "/app/coding") : null
       ),
-      ...todayBrief(data),
+      ...todayBrief(data, meta, actions),
       h(
         "div",
         { class: "cards2" },
@@ -126,10 +143,11 @@ export function todayView(data, meta, actions) {
   );
 }
 
-/** The top of Today: the payment warnings and today's meetings. A phone, which shows the list on its own, shows
-    these above it (main.js). */
-export function todayBrief(data) {
+/** The top of Today: a model that would fit better, the payment warnings and today's meetings. A phone, which
+    shows the list on its own, shows these above it (main.js). */
+export function todayBrief(data, meta, actions) {
   return [
+    modelTip(meta && meta.model_tip, actions),
     data.alerts && data.alerts.length
       ? h(
           "section",

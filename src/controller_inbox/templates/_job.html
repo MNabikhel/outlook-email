@@ -1,4 +1,4 @@
-{% set stage_labels = {'starting': 'Starting', 'outlook': 'Copying mail from Outlook', 'importing': 'Reading files', 'rereading': 'Re-reading attachments', 'reading': 'Local model reading', 'summarizing': 'Summarizing attachments', 'vision': 'Reading scans with the vision model', 'indexing': 'Indexing for search', 'linking': 'Looking for related mail', 'digest': 'Writing the digest'} %}
+{% set stage_labels = {'starting': 'Starting', 'model': 'Loading a model in LM Studio', 'outlook': 'Copying mail from Outlook', 'importing': 'Reading files', 'rereading': 'Re-reading attachments', 'reading': 'Local model reading', 'summarizing': 'Summarizing attachments', 'vision': 'Reading scans with the vision model', 'indexing': 'Indexing for search', 'linking': 'Looking for related mail', 'digest': 'Writing the digest'} %}
 {% if job.state == 'running' %}
 <section class="job running" data-poll="/process/status">
   <div>
@@ -42,6 +42,7 @@
     {% if job.result.model %}The local model read {{ job.result.read_by_bionic }}{% if job.result.avg_seconds %} (about {{ job.result.avg_seconds }}s each){% endif %}.{% else %}No local model was running, so mail is filed from the script draft.{% endif %}
     {% if job.result.failed_files %}{{ job.result.failed_files | length }} file(s) could not be read and were moved to <code>inbox/failed</code>.{% endif %}
     {% if job.result.model_note and job.result.model %}{{ job.result.model_note }}{% endif %}
+    {% if job.result.model_load %}{{ job.result.model_load.message }}{% endif %}
   </span>
 </section>
 {% elif job.state == 'error' %}

@@ -907,6 +907,10 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 .kicker { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--gold); }
 .page-title { margin: -6px 0 0; font-size: 22px; line-height: 1.3; font-weight: 650; letter-spacing: -0.015em; text-wrap: balance; }
 .lede { margin: -4px 0 0; color: var(--text-2); max-width: 70ch; }
+/* A model that fits this computer better than the one answering (Today, Settings): loaded only on the user's click. */
+.model-tip { margin: 0; padding: 10px 12px; color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-line); border-radius: 8px; font-size: 13px; }
+.model-tip p { margin: 0 0 8px; }
+.model-tip-actions, .model-tip .set-inline { display: flex; flex-wrap: wrap; gap: 6px; }
 .kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 8px; }
 .kpi { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: inherit; text-decoration: none; }
 a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }

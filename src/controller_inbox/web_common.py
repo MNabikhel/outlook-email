@@ -39,6 +39,7 @@ NOTICES = {
     "chat-model": "Loaded in LM Studio. It answers your questions now.",
     "chat-model-failed": "The model that answers wasn't changed.",
     "chat-model-busy": "Mail is being processed or a scan read with the model right now. Change the model when it finishes.",
+    "chat-model-kept": "Kept. CloseDesk won't suggest another model in its place again.",
     "index-failed": "The embedding model didn't answer, so nothing was indexed. Load one in LM Studio and try again.",
     "index-off": "No embedding model found. Load one in LM Studio (for example nomic-embed-text) and try again.",
     "coding-confirmed": "Cost code confirmed. The next invoice from this sender is suggested the same code.",

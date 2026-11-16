@@ -76,6 +76,13 @@
     <p class="muted small">Loaded in {{ 'LM Studio' if model.lm_studio else 'the model server' }} now: {{ loaded_now | join(', ') }}</p>
     {% endif %}
     {% if chat_choice %}
+    {% if model_tip %}
+    <div class="model-tip" id="model-tip">
+      <p>{{ model_tip.message }}</p>
+      <form method="post" action="/settings/chat-model" class="inline"><input type="hidden" name="model" value="{{ model_tip.suggested }}"><button type="submit" data-loading="Loading in LM Studio…">Load {{ model_tip.suggested }}</button></form>
+      <form method="post" action="/settings/chat-model/keep" class="inline"><input type="hidden" name="model" value="{{ model_tip.current }}"><button type="submit" class="ghost">Keep {{ model_tip.current }}</button></form>
+    </div>
+    {% endif %}
     <form method="post" action="/settings/chat-model" class="chat-model-form" id="chat-model">
       {% if chat_problem %}<p class="warn-box small">{{ chat_problem }}</p>{% endif %}
       {% if chat_choice.pinned %}

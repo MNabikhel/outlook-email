@@ -201,8 +201,11 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         status.server = "lm_studio" if listing.route else ""
         # LM Studio (or a server that didn't say what it has loaded) lists every model it could load.
         knows_loaded = bool(listing.route) or listing.busy
+        # A remembered model LM Studio just couldn't load isn't asked for again (LM Studio would try and fail again).
+        remembered = remembered_model(settings)
+        remembered = "" if load_failed_lately(remembered) else remembered
         status.model = _pick_model(
-            settings.llm_model, ids, loaded, lm_studio=knows_loaded, remembered=remembered_model(settings),
+            settings.llm_model, ids, loaded, lm_studio=knows_loaded, remembered=remembered,
             reader=(settings.vision_model or "").strip(), keys={item: reloadable.get(item, (item, 0))[0] for item in loaded},
         )
         if listing.route and status.model in loaded:
@@ -1401,11 +1404,23 @@ def _lm_studio_said(exc: httpx.HTTPError) -> str:
     return _short_error(exc)
 
 
-def use_chat_model(settings: Settings, key: str) -> str:
+# Chat models LM Studio couldn't load lately, with when: not asked for again on CloseDesk's own (the start's automatic
+# load, LM Studio loading the remembered model when a request names it) for a while. Choosing one in Settings still
+# tries it.
+_chat_load_failed: dict[str, float] = {}
+
+
+def load_failed_lately(key: str) -> bool:
+    failed = _chat_load_failed.get(key) if key else None
+    return failed is not None and time.monotonic() - failed < READER_RETRY_SECONDS
+
+
+def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) -> str:
     """Make ``key`` (a downloaded model's key in LM Studio) the model that answers, chosen in Setup: the other chat
     models loaded are unloaded first, so two don't share the memory, then it is loaded with the context Setup asks
     for. Document readers, the page reader chosen in Setup and embedding models stay loaded. If LM Studio can't load it, the ones unloaded are loaded
-    back. Returns what went wrong, or ""."""
+    back. ``only_if_none`` (CloseDesk choosing one by itself): a chat model loaded meanwhile is left as it is, and
+    nothing is loaded beside it. Returns what went wrong, or ""."""
     with _context_lock:
         status = check_model(settings, use_cache=False)
         if not status.reachable:
@@ -1441,6 +1456,8 @@ def use_chat_model(settings: Settings, key: str) -> str:
             for instance, (model, size) in status.instances.items()
             if model != key and not document_reader(model) and not document_reader(instance) and reader not in (model, instance)
         ]
+        if only_if_none and others:
+            return f"{others[0][1]} was loaded in LM Studio meanwhile, so it was left as it is."
         busy = [model for instance, model, _size in others if model_busy(instance, model)]
         if busy:
             return f"CloseDesk is using {', '.join(busy)} for an answer or a reading right now. Try again once it is done."
@@ -1465,12 +1482,14 @@ def use_chat_model(settings: Settings, key: str) -> str:
                 except StillLoading as exc:  # nothing is loaded back beside it
                     return str(exc)
                 except httpx.HTTPError as exc:
+                    _chat_load_failed[key] = time.monotonic()
                     said = _lm_studio_said(exc)
                     advice = f" {MEMORY_ADVICE}" if out_of_memory(said) else ""
                     return f"LM Studio couldn't load {key} ({said}).{load_back(unloaded)}{advice}"
         finally:
             _status_cache.clear()
         _context_raised.discard(key)  # loaded afresh: a longer context may be tried again
+        _chat_load_failed.pop(key, None)
         remember_model(settings, key)
         return ""
 
