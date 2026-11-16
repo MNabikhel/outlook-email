@@ -44,12 +44,22 @@ Keep the folder in your home folder (not in Downloads, Documents or Desktop), an
 
 ## Updating
 
-Either way works, and neither needs admin rights:
+Each copy has a version number, its date year first, shown with the first characters of its commit: **CloseDesk
+2026.11.16 (e8926db)**. You see it at the bottom of the side bar, in **Settings → This copy and its check**, and on the
+first line of the self-check.
 
+Once a day, while CloseDesk is open, it asks GitHub for the newest version's number; nothing about your mail is sent.
+When a newer one is out, the top bar shows a small **Update ready** link, and Settings says **A newer CloseDesk is
+ready (2026.11.16; you have 2026.11.13)** with an **Update** button. To stop it asking, put
+`CONTROLLER_INBOX_UPDATE_CHECK=false` in the `.env` file in CloseDesk's folder.
+
+Any of these works, and none needs admin rights:
+
+- **Click Update in Settings.** CloseDesk closes, fetches the newest version, and opens again by itself in a minute or two, in the same browser tab. Your mail and settings are kept. It waits while mail is being processed. (This needs CloseDesk started by double-clicking it; started some other way, Settings says to use CloseDesk-Update instead.)
 - **Double-click `CloseDesk-Update.command`** (Mac) or **`CloseDesk-Update.bat`** (Windows). It fetches the newest CloseDesk and replaces CloseDesk's own files. Your mail (`data`, `inbox`), your settings (`.env`) and the `AP cost codes` folder are not touched, and the files it replaced are kept in `.previous`.
 - **Or by hand:** download the ZIP again and swap the folders, keeping `data`, `inbox`, `.env` and `AP cost codes` from the old one. (On a Mac the Terminal line from the setup does this for you: run again, it updates.)
 
-Then open CloseDesk as usual. Every start checks the set-up and puts right what isn't: packages an update added, a folder that was moved or renamed, a Python that was upgraded or replaced. When everything is in place it just starts (the check takes about half a second).
+After CloseDesk-Update or an update by hand, open CloseDesk as usual. Every start checks the set-up and puts right what isn't: packages an update added, a folder that was moved or renamed, a Python that was upgraded or replaced. When everything is in place it just starts (the check takes about half a second).
 
 To see the check without starting, run `CloseDesk.command --check` (Mac) or `CloseDesk.bat --check` (Windows). It lists what is in order, what is optional and missing, and what to do about anything marked FIX.
 

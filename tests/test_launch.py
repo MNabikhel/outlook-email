@@ -240,12 +240,24 @@ def test_an_update_that_cant_be_put_in_place_leaves_closedesk_as_it_was(launch, 
 # Which version this is ----------------------------------------------------------------------------------------
 
 
-def test_a_download_knows_its_version_and_a_checkout_says_it_is_one(monkeypatch, tmp_path):
+def test_a_download_knows_its_version_and_a_checkout_says_it_is_one(monkeypatch, tmp_path, settings):
     assert version.describe() == "a developer's copy (not a download)"  # the placeholder GitHub fills in is still there
+    assert version.label() == "CloseDesk, a developer's copy (not a download)"
     monkeypatch.setattr(version, "ROOT", tmp_path)
     (tmp_path / ".git_archival.txt").write_text("commit: 0ec5783d4cbd3e0414a927b22be4549cb7c1405d\ndate: 2026-10-21\n", encoding="utf-8")
     assert version.installed() == ("0ec5783d4cbd3e0414a927b22be4549cb7c1405d", "2026-10-21")
-    assert version.describe() == "the version of 2026-10-21 (0ec5783)"
+    assert version.describe() == "2026.10.21 (0ec5783)"
+    assert version.label() == "CloseDesk 2026.10.21 (0ec5783)"
+    # The self-check's first line says it the same way.
+    assert doctor.checks(port=False, settings=settings)[0].text == "CloseDesk 2026.10.21 (0ec5783)"
+
+
+def test_a_version_number_is_the_downloads_date_year_first():
+    assert version.number("2026-11-16") == "2026.11.16"
+    assert version.number("2026-01-05T23:59:59Z") == "2026.01.05", "GitHub's API gives a date with its time"
+    assert version.number("") == version.number("$Format:%cs$") == version.number("November 16") == ""
+    assert version.short("e8926db0" * 5, "2026-11-16") == "2026.11.16 (e8926db)"
+    assert version.short("e8926db0" * 5, "") == "version e8926db", "a download without its date still names its commit"
 
 
 # The self-check -----------------------------------------------------------------------------------------------
@@ -346,11 +358,11 @@ def test_settings_shows_which_copy_this_is_and_runs_the_check(settings, store):
 
     client = TestClient(web.create_app(settings, store))
     about = client.get("/api/settings", headers=PAGE).json()["about"]
-    assert about["version"] == version.describe() and about["python"].startswith(f"{sys.version_info[0]}.{sys.version_info[1]}")
+    assert about["version"] == version.label() and about["python"].startswith(f"{sys.version_info[0]}.{sys.version_info[1]}")
     reply = client.get("/api/settings/check", headers=PAGE)
     assert reply.status_code == 200
     found = reply.json()["checks"]
-    assert found[0]["text"].startswith("CloseDesk: ") and {item["state"] for item in found} <= {"ok", "note", "problem"}
+    assert found[0]["text"] == version.label() and {item["state"] for item in found} <= {"ok", "note", "problem"}
     assert not any("Dashboard:" in item["text"] for item in found), "asked from the dashboard, the port would only find itself"
     assert client.get("/api/settings/check").status_code == 403, "only CloseDesk's own page may ask"
 
@@ -362,7 +374,7 @@ def test_the_check_runs_from_settings_and_lists_what_it_found(site, page):
     page.click("#set-about button:has-text('Check the set-up')")
     page.wait_for_selector("#set-about .set-check")
     lines = page.locator("#set-about .set-check").all_inner_texts()
-    assert any(line.startswith("CloseDesk: ") for line in lines) and any("Database: in order" in line for line in lines), lines
+    assert any(line.startswith("CloseDesk") for line in lines) and any("Database: in order" in line for line in lines), lines
 
 
 def test_the_check_prints_in_a_windows_console_that_cant_show_every_character(here, monkeypatch):
@@ -387,8 +399,6 @@ def test_the_dashboard_opens_before_the_new_mail_is_read(settings, store, monkey
     # and nothing opened). The page opens first and the reading is its background job.
     import threading
 
-    import uvicorn
-
     from controller_inbox import overnight
 
     release, started = threading.Event(), threading.Event()
@@ -412,7 +422,7 @@ def test_the_dashboard_opens_before_the_new_mail_is_read(settings, store, monkey
         release.set()
 
     monkeypatch.setattr(overnight, "run_overnight", slow_reading)
-    monkeypatch.setattr(uvicorn, "run", server)
+    monkeypatch.setattr(cli, "_run_server", server)
     monkeypatch.setattr(cli, "_link_stored_mail", lambda *_a: None)
     args = type("Args", (), {"no_serve": False, "no_browser": True, "limit": 0, "host": "127.0.0.1", "port": _unused_port()})()
     assert cli._run(settings, store, args) == 0

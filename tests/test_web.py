@@ -573,9 +573,7 @@ def test_extra_allowed_hosts_and_startup_warning(settings: Settings, store: Stor
     settings.host = "0.0.0.0"
     client = TestClient(create_app(settings, store), base_url="http://closedesk.corp:8765")
     assert client.get("/health").status_code == 200
-    import uvicorn
-
-    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_run_server", lambda *a, **k: None)
     cli._serve(settings, store, host="0.0.0.0", port=8765)
     out = capsys.readouterr().out
     assert "WARNING" in out and "no login" in out and "closedesk.corp" in out

@@ -16,7 +16,7 @@ Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get
 
      It puts CloseDesk in a `CloseDesk` folder in your home folder and starts it. Downloaded this way, macOS doesn't ask an administrator to approve it.
    - **Windows:** green **Code** button → **Download ZIP**, unzip it somewhere permanent (for example `Documents`), and double-click **`CloseDesk.bat`**. If Windows shows "Windows protected your PC", click **More info → Run anyway**.
-3. **The first start sets itself up** in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around. From then on, double-click `CloseDesk.command` (Mac) or `CloseDesk.bat` (Windows): every start checks the set-up and puts right what isn't, so after an update, or after moving the folder, you just open it. **`CloseDesk-Update`** fetches the newest version and keeps your mail and settings.
+3. **The first start sets itself up** in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around. From then on, double-click `CloseDesk.command` (Mac) or `CloseDesk.bat` (Windows): every start checks the set-up and puts right what isn't, so after an update, or after moving the folder, you just open it. When a newer version is out, Settings says so and its **Update** button fetches it and opens CloseDesk again; **`CloseDesk-Update`** does the same from the folder. Both keep your mail and settings.
 4. **Add your mail:** on Windows with classic Outlook, open **Settings → Sync inbox** and click **Connect to Outlook**. After you agree, it copies your mail and attachments (and your calendar, if you like) and keeps them up to date, and never changes anything in Outlook. Otherwise drag emails from Outlook into the `inbox/incoming` folder and click **Process new mail**. ([New Outlook, web, and Mac](docs/SETUP.md#every-morning))
 5. **Optional local AI:** in [LM Studio](https://lmstudio.ai/), load a small instruct model (3B–8B) and start the server (Developer tab → **Start server**). CloseDesk finds it on its own.
 
@@ -464,11 +464,12 @@ src/controller_inbox/
   web_common.py     What both share: notices, which files download, same-page checks, finding an attachment
   services.py       What a button does, the same from the classic pages and the workspace
   doctor.py         The self-check: `controller_inbox doctor`, or `CloseDesk --check`
-  version.py        Which version this copy is
+  version.py        Which version this copy is: its date-based number (2026.11.16) and commit
+  updates.py        Whether a newer CloseDesk is out (asked of GitHub once a day), and Settings' Update button
   templates/        The classic pages
   static/app.js     Open-in-place preview, chat box, search shortcut (answers formatted by static/ui/format.js)
   static/ui/        The workspace's scripts and styles (no build step, no CDN)
-CloseDesk.bat / CloseDesk.command   Double-click launchers: find the computer's Python, then run launch.py (--get-python downloads one, only when asked)
+CloseDesk.bat / CloseDesk.command   Double-click launchers: find the computer's Python, then run launch.py (--get-python downloads one, only when asked); after Settings' Update button, update and start again
 CloseDesk-Update.bat / .command     Double-click to fetch the newest version (mail and settings are kept)
 scripts/launch.py                   Every start: check the set-up, install what is missing, start; also --check and --update
 scripts/check_deps.py               The package checks launch.py uses

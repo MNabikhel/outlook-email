@@ -5,6 +5,7 @@ import csv
 import io
 import json
 import logging
+import os
 import sqlite3
 import sys
 import threading
@@ -438,7 +439,9 @@ def _run(settings: Settings, store: Store, args) -> int:
             webbrowser.open(url)
         return 0
     print(f"\nOpening {url}  (leave this window open; press Ctrl+C to stop)")
-    if not args.no_browser:
+    # Started again after an update from Settings (CLOSEDESK_REOPEN, set by the launcher): the page that asked for
+    # the update is still open and reloads itself, so no second tab is opened.
+    if not args.no_browser and not os.environ.get("CLOSEDESK_REOPEN"):
         _open_browser_soon(url)
     # The dashboard opens first; the new mail is read behind it, its progress on the page's top bar (a local model
     # can take a minute an email: it read all of it before the page opened).
@@ -598,9 +601,8 @@ def _graph_mailbox(settings: Settings):
 
 def _serve(settings: Settings, store: Store, host: str | None, port: int | None, *, startup=None) -> int:
     """Run the dashboard. ``startup``: work for the page's background job as it opens (``run``'s reading of new
-    mail), given the job's progress function."""
-    import uvicorn
-
+    mail), given the job's progress function. Returns 0, or ``updates.UPDATE_AND_RESTART`` when Settings' Update
+    button stopped it."""
     from controller_inbox.web import allowed_hosts, create_app, is_loopback
 
     if host:
@@ -632,8 +634,33 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None,
             "Use CONTROLLER_INBOX_HOST=127.0.0.1 to keep it on this computer only.\n",
             flush=True,
         )
-    uvicorn.run(app, host=host or settings.host, port=port or settings.port, log_level="warning")
+    # Once a day at most, while it is open: whether a newer CloseDesk is out (updates.py).
+    from controller_inbox import updates
+
+    updates.start_checking(store, settings)
+    _run_server(app, host=host or settings.host, port=port or settings.port)
+    # Settings' Update button stopped it: the launcher updates CloseDesk and starts it again.
+    if getattr(app.state, "update_asked", False):
+        print("\nCloseDesk stops now to update, and opens again by itself when the update is done.", flush=True)
+        return updates.UPDATE_AND_RESTART
     return 0
+
+
+def _run_server(app, *, host: str, port: int) -> None:
+    """Serve ``app`` until Ctrl+C, or until it asks to stop (``app.state.stop_server``: Settings' Update button),
+    after the request that asked has been answered."""
+    import uvicorn
+
+    server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning", timeout_graceful_shutdown=10))
+
+    def stop() -> None:
+        server.should_exit = True
+
+    app.state.stop_server = stop
+    server.run()
+    if not server.started and not server.should_exit:
+        # The port couldn't be opened (uvicorn has said why): as uvicorn.run does, end with an error.
+        raise SystemExit(3)
 
 
 def _link_stored_mail(settings: Settings, store: Store) -> None:

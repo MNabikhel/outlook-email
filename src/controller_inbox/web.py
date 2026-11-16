@@ -33,7 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
-from controller_inbox import agent, chats, cost_codes, documents, fraud, model_roles, ocr, semantic, services, vision
+from controller_inbox import agent, chats, cost_codes, documents, fraud, model_roles, ocr, semantic, services, updates, version, vision
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
@@ -377,6 +377,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "profiles": PROFILES,
             "finance": profile == "finance",
             "coding_counts": store.coding_counts(),
+            "closedesk": updates.status(store, settings),
         }
         base["llm_enabled"] = base["model"].active
         base.update(extra)
@@ -1194,6 +1195,15 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return RedirectResponse(f"/settings?notice={notice}#context", status_code=303)
 
+    @app.post("/settings/update")
+    def update_now(request: Request):
+        """Setup's Update button: CloseDesk stops once this page is sent, its launcher fetches the newest version and
+        starts it again, and the page waits for that, then goes back to Setup."""
+        why = updates.stop_to_update(app.state, job.snapshot()["state"])
+        if why:
+            return render(request, "settings_update.html", page="settings", refused=why, status_code=409)
+        return render(request, "settings_update.html", page="settings", refused="", commit=version.installed()[0], message=updates.UPDATING)
+
     @app.post("/settings/profile")
     def save_profile(profile: str = Form(...)):
         try:
@@ -1226,6 +1236,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "emails": store.counts()["emails"],
             "graph": settings.graph_configured,
             "model": model.model if model.active else "",
+            # Which version answers: the page that asked for an update reloads when the new one does.
+            "version": version.label(),
+            "commit": version.installed()[0],
         }
 
     register_workspace(

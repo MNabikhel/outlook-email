@@ -155,6 +155,20 @@ while [ "$tries" -lt 3 ]; do
   case "$code" in
     0 | 130) exit 0 ;;
     76) export CLOSEDESK_REBUILT=1; rm -rf .venv ;;        # launch.py: the environment is beyond repair, make it again
+    75)
+      # Settings' Update button: fetch the newest CloseDesk (mail and settings are kept), then start the new one.
+      # The update replaces this file too, so the new file is started in this one's place rather than read on.
+      # Without --get-python: the environment is there now, and stays.
+      [ -x .venv/bin/python ] && PY=.venv/bin/python
+      echo
+      if ! "$PY" scripts/launch.py --update; then
+        echo
+        echo "CloseDesk starts again now. The message above says what didn't go as it should."
+      fi
+      # The page that asked for the update is still open, and reloads itself: no second one is opened.
+      export CLOSEDESK_REOPEN=1
+      exec bash "$PWD/CloseDesk.command" ${args[@]+"${args[@]}"}
+      ;;
     *)
       echo
       echo "CloseDesk stopped. The message above says why."
