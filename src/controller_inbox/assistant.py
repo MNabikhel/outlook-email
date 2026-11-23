@@ -15,6 +15,7 @@ conversation, and "Ask about this meeting" lists the mail about that meeting.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -28,7 +29,7 @@ from urllib.parse import quote
 
 import httpx
 
-from controller_inbox import agent, answer_check, chats, documents, memo, semantic, table_lookup, vision
+from controller_inbox import agent, answer_check, chats, documents, memo, model_fit, semantic, table_lookup, vision
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
@@ -1549,7 +1550,10 @@ def answer_stream(
         past = "\n\n".join(part for part in (_held_line(held, "about this meeting" if meeting is not None else "of this conversation")
                                                   + " Tell the user, and to verify by phone before acting on it.", past) if part)
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id, past=past)
-    state = {"wrote": False, "text": ""}
+    # How long the model answering may take, worked out for it or set by the user (model_fit): every call waits that.
+    wait = model_fit.chat_wait(store, settings)
+    ws.wait = wait.seconds
+    state: dict[str, Any] = {"wrote": False, "text": "", "store": store, "wait": wait}
     offer = None
     if current is not None and _should_read_files(ws, question, focus if about_today else None):
         outcome: dict[str, Any] = {}
@@ -1944,11 +1948,29 @@ class _Recorded:
             close()
 
 
+def _limit(state: dict) -> float | None:
+    """How long this chat's calls wait for the model (``model_fit.chat_wait``), or None for the usual."""
+    wait = state.get("wait")
+    return wait.seconds if wait is not None else None
+
+
+def _record_speed(state: dict, messages: list[dict], finished: dict) -> None:
+    """Keep how fast the model read this prompt and wrote its answer, for the next wait and estimate."""
+    wait, store = state.get("wait"), state.get("store")
+    if wait is None or store is None or not finished.get("read_seconds"):
+        return
+    tokens = finished.get("prompt_tokens") or prompt_chars(messages) // agent.CHARS_PER_TOKEN
+    model_fit.record_speed(
+        store, wait.model, prompt_tokens=tokens, read_seconds=finished["read_seconds"],
+        written=finished.get("written", 0), write_seconds=finished.get("write_seconds", 0.0),
+    )
+
+
 def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[dict[str, Any]]:
     before = len(state["text"])
     wrote = state["wrote"]
     finished: dict[str, Any] = {}
-    raw = _Recorded(stream_text(settings, messages, max_tokens=settings.chat_max_tokens, finished=finished))
+    raw = _Recorded(stream_text(settings, messages, max_tokens=settings.chat_max_tokens, finished=finished, limit=_limit(state)))
     echoed = True
     try:
         for piece in without_echo(raw):
@@ -1962,6 +1984,7 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
     else:
         echoed = not raw.whole
         raw.read_on()
+    _record_speed(state, messages, finished)
     # A model whose chat template opens <think> in the prompt, on a server that doesn't separate reasoning,
     # writes its reasoning and then "</think>": what came before that tag is not the answer, even when it quoted
     # the instructions (taken for an echo, it would have been shown as the answer).
@@ -2109,7 +2132,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     notes = agent.earlier_findings(ws, primary) if primary is not None else ""
     notes = "\n\n".join(part for part in (notes, ws.past) if part)
     base = dict(history=history, today=today, current_id=ws.current_id, notes=notes, tz=settings.tz)
-    yield from agent.query_tables(ws, question, complete_text)
+    yield from agent.query_tables(ws, question, functools.partial(complete_text, limit=ws.wait or None))
     plain = _budget(settings, tools=False) // shrink
     room = int((plain - prompt_chars(build_messages(question, ws.sources, budget=plain, bodies=False, **base))) * 0.85)
     if primary is not None and ws.worked.get(primary.id):
@@ -2146,7 +2169,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         draft = yield from _tool_loop(ws, messages, budget)
     except ToolsUnsupported:
         messages = build_messages(question, ws.sources, budget=budget, files=files, **base)
-        draft = complete_text(settings, messages, max_tokens=settings.chat_max_tokens)
+        draft = complete_text(settings, messages, max_tokens=settings.chat_max_tokens, limit=ws.wait or None)
     except EmptyReply:
         # A turn with no answer (a thinking model out of room) after the tools have read something: answer
         # from what was read below, rather than drop it all for the lookup answer.
@@ -2260,7 +2283,7 @@ def _tool_loop(ws: agent.Workspace, messages: list[dict], budget: int):
     used = prompt_chars(messages)
     asked: set[str] = set()  # the calls already run: a small model can ask for the same one again and again
     for _step in range(agent.MAX_STEPS):
-        reply = chat_with_tools(ws.settings, messages, agent.TOOLS, max_tokens=ws.settings.chat_max_tokens)
+        reply = chat_with_tools(ws.settings, messages, agent.TOOLS, max_tokens=ws.settings.chat_max_tokens, limit=ws.wait or None)
         if not reply.calls:
             return reply.content
         problems = [agent.argument_problem(call["name"], call["arguments"]) for call in reply.calls]

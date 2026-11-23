@@ -131,7 +131,7 @@ def read_queue(
         if not llm_active(settings):
             result["note"] = check_model(settings).describe()
             return result
-        with LocalReader(settings) as own_reader:
+        with LocalReader(settings, store=store) as own_reader:
             return _read_waiting(store, settings, waiting, own_reader, now, on_progress, result)
     return _read_waiting(store, settings, waiting, reader, now, on_progress, result)
 

@@ -193,7 +193,7 @@ def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monk
     budget = mail["Q4 budget draft"]
     turns = []
 
-    def fake_tools(_settings, messages, tools, *, max_tokens):
+    def fake_tools(_settings, messages, tools, *, max_tokens, **_kw):
         turns.append([dict(m) for m in messages])
         if len(turns) == 1:
             return ToolReply("", [{"id": "c1", "name": "trace_cell", "arguments": {"email": "1", "file": "Q4 budget.xlsx", "sheet": "Budget", "cell": "D4"}}])
@@ -315,7 +315,7 @@ def test_a_full_context_window_is_retried_smaller_and_explained(store, settings,
     monkeypatch.setattr(assistant, "context_length", lambda _s: 2048)
     monkeypatch.setattr(assistant, "reply_budget", lambda _s, _n: 100)
 
-    def tools(_s, messages, _tools, *, max_tokens):
+    def tools(_s, messages, _tools, *, max_tokens, **_kw):
         sizes.append(len(messages[-1]["content"]))
         if len(sizes) == 1:
             raise ContextOverflow("The number of tokens to keep from the initial prompt is greater than the context length")
@@ -335,7 +335,7 @@ def test_an_email_a_tool_found_before_the_context_filled_gets_its_card(store, se
     budget = mail["Q4 budget draft"]
     turns = []
 
-    def tools(_s, messages, _tools, *, max_tokens):
+    def tools(_s, messages, _tools, *, max_tokens, **_kw):
         turns.append(messages[-1]["content"])
         if len(turns) == 1:
             return ToolReply("", [{"id": "c1", "name": "search_mail", "arguments": {"query": "Acme quote"}}])

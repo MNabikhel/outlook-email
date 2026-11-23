@@ -29,7 +29,7 @@ const SECTIONS = [
 
 const STATE_LABELS = { on: "Ready", fallback: "Older method", off: "Off" };
 // The section a change's message shows in, when it isn't the change's own name.
-const SECTION_OF = { chat: "model", "outlook-more": "outlook" };
+const SECTION_OF = { chat: "model", wait: "model", "outlook-more": "outlook" };
 const b = (text) => h("b", null, text);
 const code = (text) => h("code", null, text);
 
@@ -371,6 +371,7 @@ export function createSettings(ctx) {
       table,
       m.loaded.length ? h("p", { class: "set-help" }, `Loaded in ${m.server} now: ${m.loaded.join(", ")}`) : null,
       chatModel(),
+      modelWait(),
       h(
         "details",
         { class: "set-more" },
@@ -461,9 +462,35 @@ export function createSettings(ctx) {
       h(
         "p",
         { class: "set-help" },
-        `CloseDesk has LM Studio load it${min ? ` with a ${min.toLocaleString("en-US")}-token context (or the most it supports)` : ""} and unload the other chat model, so the two don't share the memory. The page reader and the search model are left as they are. Loading can take a minute or two, and an answer being written then stops.`
+        `CloseDesk has LM Studio load it${min ? ` with up to a ${min.toLocaleString("en-US")}-token context (less for a model too big for that on this computer, or the most it supports)` : ""} and unload the other chat model, so the two don't share the memory. The page reader and the search model are left as they are. Loading can take a minute or two, and an answer being written then stops.`
       ),
       h("div", { class: "set-actions" }, status("chat"))
+    );
+  }
+
+  /* What CloseDesk chose for the model answering: the context it asks LM Studio for and how long Ask CloseDesk
+     waits for it ("set automatically", or the user's own), with a way to set the wait in minutes or go back. */
+  function modelWait() {
+    const fit = data.fit;
+    if (!fit) return null;
+    const minutes = h("input", { type: "number", id: "set-wait-minutes", class: "set-input set-minutes", min: "1", max: "120", step: "1", inputmode: "numeric", value: String(fit.minutes), "aria-describedby": "set-wait-help" });
+    return h(
+      "form",
+      {
+        class: "set-form set-block",
+        id: "set-model-wait",
+        novalidate: true,
+        onsubmit: (event) => {
+          event.preventDefault();
+          save("wait", "/api/settings/model-wait", { model: fit.model, minutes: minutes.value.trim() }, $("button[type=submit]", event.currentTarget));
+        },
+      },
+      h("h3", { class: "set-sub" }, "Context and wait"),
+      h("p", { class: "set-fit", id: "set-fit-line" }, fit.line),
+      h("div", { class: "set-inline" }, h("label", { class: "set-label", for: "set-wait-minutes" }, "Wait up to"), minutes, h("span", null, "minutes"), h("button", { type: "submit", class: "btn btn-primary btn-sm" }, "Save"),
+        fit.yours ? h("button", { type: "button", class: "btn btn-sm", onclick: (event) => save("wait", "/api/settings/model-wait", { model: fit.model, minutes: null }, event.currentTarget) }, "Automatic") : null),
+      h("p", { class: "set-help", id: "set-wait-help" }, "How long Ask CloseDesk waits for this model to read a question and its files before it writes a word. CloseDesk works it out from how fast the model has been on this computer, or from its size; a wait you set is kept for this model."),
+      h("div", { class: "set-actions" }, status("wait"))
     );
   }
 

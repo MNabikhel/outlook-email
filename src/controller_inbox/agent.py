@@ -391,6 +391,9 @@ class Workspace:
     # The table rows picked out and worked out for the question, as the prompt gave them: an answer copying a
     # figure from them read it.
     picked: list[str] = field(default_factory=list)
+    # How long the model answering may take (``model_fit.chat_wait``), in seconds: each of the chat's calls waits this
+    # long for it. 0: the usual wait.
+    wait: float = 0.0
     # What was worked out from a file for this question, by what it was worked out from (the file's text itself and
     # the question): the files are laid out for the prompt two or three times a question.
     _memo: dict = field(default_factory=dict, repr=False, compare=False)

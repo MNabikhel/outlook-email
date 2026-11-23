@@ -29,11 +29,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, model_choice, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
+    agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, model_choice, model_fit, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
     semantic, services, table_lookup, updates, version, vision,
 )
 from controller_inbox.extract import extraction_failed
-from controller_inbox.local_llm import check_model, context_fits, context_target, needs_more_context
+from controller_inbox.local_llm import check_model, context_capped, context_fits, context_target, needs_more_context
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
 from controller_inbox.profile import active_profile, set_profile
 from controller_inbox.clock import effective_timezone, format_when, offset_label, on_daylight_time, set_timezone, zone_name
@@ -1085,10 +1085,12 @@ def register_workspace(
         target = context_target(settings, model)
         recommended = agent.RECOMMENDED_CONTEXT
         fits = context_fits(settings, model)
+        capped = context_capped(settings, model)
         if needs_more_context(settings) and fits:
+            why = "the most that fits this computer" if capped else "the minimum set below"
             advice = (
                 f"The next time you ask something, CloseDesk reloads {model.key} in LM Studio with {target:,} tokens "
-                "(the minimum set below). If your computer runs short of memory, it goes back to the current size."
+                f"({why}). If your computer runs short of memory, it goes back to the current size."
             )
         elif window >= recommended:
             advice = "Enough to read whole attachments when you ask about them."
@@ -1103,6 +1105,11 @@ def register_workspace(
                 advice += (
                     f" LM Studio couldn't load {model.key} with {target:,} tokens. "
                     "Close other apps or pick a smaller minimum below, then Save to try again."
+                )
+            elif model.key and capped:
+                advice += (
+                    f" {model.key} is too big for this computer's memory with a longer context, so CloseDesk asks LM "
+                    f"Studio for {target:,} tokens. A smaller model reads whole workbooks and PDFs."
                 )
             elif model.key and model.max_context and model.max_context < recommended:
                 advice += f" {model.key} supports at most {model.max_context:,} tokens. For whole workbooks and PDFs, load a model with a longer context."
@@ -1152,6 +1159,8 @@ def register_workspace(
                 "server": "LM Studio" if model.lm_studio else "the model server",
             },
             "models": model_roles.models_in_use(settings, status=model),
+            # The context and the wait CloseDesk chose for the model answering (model_fit), with the user's own wait.
+            "fit": model_fit.describe(store, settings, model),
             "chat": None
             if choice is None
             else {
@@ -1264,6 +1273,18 @@ def register_workspace(
             raise HTTPException(status_code=400, detail="Choose a model.")
         model_choice.keep(store, model)
         return saved("chat-model-kept")
+
+    @api.post("/settings/model-wait")
+    async def settings_model_wait(request: Request):
+        """How long the chat waits for a model, in minutes (1 to 120), or with ``minutes`` null, automatic again."""
+        data = await json_body(request)
+        model = str(data.get("model") or "").strip()[:200]
+        minutes = data.get("minutes")
+        try:
+            model_fit.set_wait(store, model, None if minutes is None else model_fit.parse_minutes(minutes))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return saved("model-wait" if minutes is not None else "model-wait-auto")
 
     @api.post("/settings/vision")
     async def settings_vision(request: Request):

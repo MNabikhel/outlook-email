@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 
-from controller_inbox import local_llm, model_roles
+from controller_inbox import local_llm, model_fit, model_roles
 from controller_inbox.local_llm import LocalReader, failure_note, remember_model, stream_text
 from controller_inbox.overnight import read_queue, run_overnight
 
@@ -170,6 +170,10 @@ def lm_studio(settings, monkeypatch, request):
     monkeypatch.setattr(local_llm, "LOAD_WAIT_SECONDS", 5.0)
     monkeypatch.setattr(local_llm, "LOAD_POLL_SECONDS", 0.05)
     monkeypatch.setattr(model_roles, "computer_memory", lambda: 16 * GB)
+    # The wait worked out for a model (model_fit), scaled: none from its size unless a test says so.
+    monkeypatch.setattr(model_fit, "SECONDS_PER_GB", 0.0)
+    monkeypatch.setattr(model_fit, "WAIT_FLOOR", TIMEOUT)
+    monkeypatch.setattr(model_fit, "WAIT_CEILING", 60.0)
     servers: list[SlowLMStudio] = []
 
     def start(**options) -> SlowLMStudio:
@@ -210,8 +214,10 @@ def test_a_thinking_model_still_thinking_is_not_cut_off(settings, lm_studio):
 
 
 def test_process_new_mail_loads_an_unloaded_model_first_and_reads_every_email(settings, loaded, lm_studio):
-    """LM Studio unloaded the model since (idle auto-unload): it is loaded with Setup's context before the first
-    email, the page says so, and the load (longer than two time limits) isn't counted against any email."""
+    """LM Studio unloaded the model since (idle auto-unload): it is loaded with the context that fits this computer
+    (model_fit: Setup's 16,384 at most, here the smallest, 4,096, as 17 GB of model is more than this 16 GB computer
+    gives) before the first email, the page says so, and the load (longer than two time limits) isn't counted
+    against any email."""
     server = lm_studio(loaded=False, load_seconds=TIMEOUT * 3)
     remember_model(settings, BIG)  # read with it yesterday
     stages: list[tuple] = []
@@ -219,8 +225,8 @@ def test_process_new_mail_loads_an_unloaded_model_first_and_reads_every_email(se
         loaded, settings, sync_graph=False, limit=3, vision_minutes=0, on_progress=lambda *step: stages.append(step)
     )
     assert summary["read_by_bionic"] == 3 and summary["model_note"] == ""
-    assert server.log[0] == ("load", BIG, settings.min_context_tokens), "loaded first, with the context Setup asks for"
-    assert server.context == settings.min_context_tokens
+    assert server.log[0] == ("load", BIG, 4096), "loaded first, with the context that fits"
+    assert server.context == 4096
     assert len(_chats(server)) == 3, "no email was asked twice"
     assert [stage for stage in stages if stage[0] == "model"], "the page shows 'Loading a model in LM Studio'"
     assert summary["model_load"]["message"] == f"Loaded {BIG} in LM Studio: it answers your questions and reads the mail."
@@ -246,6 +252,16 @@ def test_a_model_too_slow_even_with_longer_stops_the_reading_and_says_so(setting
         f"{SMALL} would fit and answer faster: choose it in Settings → Local model."
     )
     assert len(_chats(server)) == 2, "asked once with the usual limit, once with the longer one, then stopped"
+
+
+def test_a_model_whose_wait_is_known_isnt_stopped_for_reading_slowly(settings, loaded, lm_studio, monkeypatch):
+    """The same slow start, but the wait worked out from the model's size covers it: every email is read, each asked
+    once (before, the first two timed out and the reading stopped)."""
+    monkeypatch.setattr(model_fit, "SECONDS_PER_GB", LONGER * 3 / 17)  # 17 GB of model: three of its five minutes
+    server = lm_studio(first_token=LONGER * 2)
+    result = read_queue(loaded, settings, limit=2)
+    assert len(result["read_ids"]) == 2 and result["note"] == "", result["note"]
+    assert len(_chats(server)) == 2
 
 
 def test_a_server_that_really_stopped_still_stops_the_reading(settings, loaded, lm_studio):

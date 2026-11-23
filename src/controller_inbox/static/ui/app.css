@@ -979,6 +979,11 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .set-inline { display: flex; flex-wrap: wrap; gap: 8px; }
 .set-inline .set-select { flex: 1 1 260px; width: auto; }
 .set-inline .btn { height: 34px; }
+.set-inline .set-label { align-self: center; }
+.set-inline > span { align-self: center; font-size: 13px; }
+.set-minutes { width: 5.5em; height: 34px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); }
+.set-minutes:focus-visible { border-color: var(--accent); }
+.set-fit { margin: 0; font-size: 13px; }
 .set-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .set-status { display: inline-flex; align-items: flex-start; gap: 6px; font-size: 12.5px; font-weight: 550; }
 .set-status:empty { display: none; }

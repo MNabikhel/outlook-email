@@ -147,25 +147,27 @@ def test_a_model_the_user_loaded_that_runs_out_of_memory_is_left_as_it_is(store,
 
 
 def test_a_model_that_wouldnt_fit_with_more_context_keeps_its_own(store, settings, mail, monkeypatch):
+    """A 17 GB model on a 16 GB computer fits with no more context than the smallest CloseDesk asks for (4,096
+    tokens), so the minimum of 16,384 is "at most" for it: it isn't reloaded, and nothing in the chat says so; Settings
+    says why it has no more (model_fit)."""
     settings.llm = True
     server = MacLMStudio({BIG: 4096})
     _serve(monkeypatch, server, memory_gb=16)  # 17 GB of model and 2 GB of context: more than a 16 GB computer has
     budget = mail["Q4 budget draft"].id
     steps, modes, text = _ask(store, settings, "What is the total in this budget?", budget)
     assert server.calls == [], "not reloaded"
-    assert steps.count(f"Kept {BIG} at its 4,096-token context: a 16,384-token one wouldn't fit in this computer's memory.") == 1
-    assert not any(step.startswith("Reloading the model") for step in steps)
+    assert not any(BIG in step or step.startswith("Reloading the model") for step in steps)
     assert not modes and "$12,480" in text
-    # Said once.
     steps, _modes, _text = _ask(store, settings, "And the total again?", budget)
     assert not any(BIG in step for step in steps) and server.calls == []
-    # Settings doesn't say the next question reloads it.
+    # Settings doesn't say the next question reloads it, and says why it has no more.
     client = TestClient(web.create_app(settings, store))
     page = client.get("/settings").text
     assert "The next time you ask something, CloseDesk reloads" not in page
-    assert f"{BIG} with 16,384 tokens wouldn't fit in this computer's memory, so CloseDesk keeps it as LM Studio loaded it." in page
+    said = f"{BIG} is too big for this computer's memory with a longer context, so CloseDesk asks LM Studio for 4,096 tokens."
+    assert said in page
     window = client.get("/api/settings", headers={"X-CloseDesk": "1"}).json()["context"]["window"]
-    assert "wouldn't fit in this computer's memory" in str(window) and "next time you ask" not in str(window)
+    assert said in window["advice"] and "next time you ask" not in str(window)
 
 
 def test_lowering_the_minimum_reloads_a_model_closedesk_raised(store, settings, mail, monkeypatch):

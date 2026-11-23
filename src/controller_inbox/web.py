@@ -33,7 +33,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
-from controller_inbox import agent, chats, cost_codes, documents, fraud, model_choice, model_roles, ocr, semantic, services, updates, version, vision
+from controller_inbox import (
+    agent, chats, cost_codes, documents, fraud, model_choice, model_fit, model_roles, ocr, semantic, services, updates, version, vision,
+)
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
@@ -52,7 +54,7 @@ from controller_inbox.clock import (
 )
 from controller_inbox.config import PROFILES, Settings
 from controller_inbox.digest import write_digest_files
-from controller_inbox.local_llm import check_model, context_fits, context_target, needs_more_context, set_min_context, use_chat_model
+from controller_inbox.local_llm import check_model, context_capped, context_fits, context_target, needs_more_context, set_min_context, use_chat_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.profile import active_profile, set_profile
 from controller_inbox.services import Invalid, Missing
@@ -1065,6 +1067,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     chat_switch = {"problem": ""}
     # What saving a smaller minimum context did to the model loaded in LM Studio, shown with its notice.
     context_change = {"said": ""}
+    # Why the wait typed in Settings wasn't saved, shown with its notice.
+    wait_problem = {"said": ""}
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, recheck: int = 0):
@@ -1080,6 +1084,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             context_step=nearest_step(settings.min_context_tokens),
             context_target=context_target(settings, model),
             context_fits=context_fits(settings, model),
+            context_capped=context_capped(settings, model),
             will_reload=needs_more_context(settings) and context_fits(settings, model),
             context_change=context_change["said"] if request.query_params.get("notice") == "context-reloaded" else "",
             ocr_engine=ocr.engine_name(),
@@ -1088,6 +1093,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             chat_choice=model_roles.chat_choices(settings, model),
             model_tip=model_choice.recommendation(settings, store, model),
             chat_problem=chat_switch["problem"] if request.query_params.get("notice") == "chat-model-failed" else "",
+            model_fit=model_fit.describe(store, settings, model),
+            wait_problem=wait_problem["said"] if request.query_params.get("notice") == "model-wait-refused" else "",
             vision_setup=vision_setup(model),
             search=semantic.coverage(store, settings),
             timezone_choice=settings.timezone,
@@ -1215,6 +1222,16 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if back:
             return RedirectResponse(f"{back}?notice=chat-model-kept", status_code=303)
         return RedirectResponse("/settings?notice=chat-model-kept#chat-model", status_code=303)
+
+    @app.post("/settings/model-wait")
+    def save_model_wait(model: str = Form(""), minutes: str = Form(""), automatic: str = Form("")):
+        """How long the chat waits for the model answering, in minutes, or Automatic."""
+        try:
+            model_fit.set_wait(store, model.strip()[:200], None if automatic else model_fit.parse_minutes(minutes))
+        except ValueError as exc:
+            wait_problem["said"] = str(exc)
+            return RedirectResponse("/settings?notice=model-wait-refused#model-wait", status_code=303)
+        return RedirectResponse(f"/settings?notice={'model-wait-auto' if automatic else 'model-wait'}#model-wait", status_code=303)
 
     @app.post("/settings/index")
     def index_all():

@@ -66,7 +66,7 @@ def test_the_prompt_fits_a_4096_token_context_and_leaves_room_for_tools(store, s
     monkeypatch.setattr(semantic, "embedding_model", lambda _s: "")
     seen = []
 
-    def fake_tools(_settings, messages, _tools, *, max_tokens):
+    def fake_tools(_settings, messages, _tools, *, max_tokens, **_kw):
         seen.append([dict(m) for m in messages])
         if len(seen) == 1:
             return ToolReply("", [{"id": "c1", "name": "read_file", "arguments": {"email": "1", "file": "Offsite memo.docx", "part": "page 3"}}])
@@ -128,7 +128,7 @@ def test_bad_tool_arguments_go_back_to_the_model_instead_of_crashing(store, sett
     assert agent.step_label("open_email", ["1"], agent.Workspace(store, settings, [budget])) == "Opening [1] Q4 budget draft"
     seen = []
 
-    def fake_tools(_settings, messages, _tools, *, max_tokens):
+    def fake_tools(_settings, messages, _tools, *, max_tokens, **_kw):
         seen.append([dict(m) for m in messages])
         if len(seen) == 1:
             return ToolReply("", [

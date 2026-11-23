@@ -407,7 +407,7 @@ def test_the_room_for_many_figures_fits_a_small_context(store, settings, monkeyp
     chats.add_file(store, settings, chat, "budget vs actual.txt", "text/plain", "\n".join(rows).encode())
     seen = []
 
-    def tools(_s, messages, _tools, *, max_tokens):
+    def tools(_s, messages, _tools, *, max_tokens, **_kw):
         seen.append((assistant.prompt_chars(messages), max_tokens))
         return ToolReply("Acct0 is over by $100.00 [1].")
 
