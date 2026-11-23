@@ -272,6 +272,18 @@ def test_settings_say_the_context_the_model_is_loaded_with(settings, store, monk
     assert model_fit.describe(store, settings)["line"].startswith("qwen3-32b: 4,096-token context, waits up to")
 
 
+def test_settings_say_the_context_another_model_server_reports(store, settings):
+    """With Ollama or llama.cpp, Settings named LM Studio and left out the context the server reported."""
+    from controller_inbox.local_llm import ModelStatus
+
+    ollama = ModelStatus(mode="on", reachable=True, model="llama3.1:8b", context_length=8192, server="ollama")
+    fit = model_fit.describe(store, settings, ollama)
+    assert fit["context"] == 8192 and fit["line"].startswith("llama3.1:8b: 8,192-token context, waits up to")
+    unknown = ModelStatus(mode="on", reachable=True, model="llama3.1:8b", context_length=0, server="ollama")
+    line = model_fit.describe(store, settings, unknown)["line"]
+    assert "LM Studio" not in line and line.startswith("llama3.1:8b: the context the model server loaded it with,")
+
+
 def test_one_slow_first_reading_doesn_t_keep_a_model_slow_for_good(store):
     """The first question waited behind another request (the reading of mail) before the model read it: 3,000 tokens
     in 60 seconds were kept as 50 tokens a second, and every true reading after it (about 1,000 a second) was more

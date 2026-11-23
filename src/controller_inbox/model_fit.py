@@ -281,7 +281,7 @@ def minutes_said(seconds: float) -> str:
 
 def describe(store: Store | None, settings: Settings, status: ModelStatus | None = None) -> dict | None:
     """What Settings shows for the model answering: ``model``, ``context`` (the tokens it is loaded with, or when it
-    isn't loaded the tokens CloseDesk asks for; 0 for LM Studio's own), ``minutes`` (its wait), ``yours`` (the user
+    isn't loaded the tokens CloseDesk asks for; 0 when that isn't known), ``minutes`` (its wait), ``yours`` (the user
     set it) and ``line``, in words. None with no model."""
     from controller_inbox import local_llm  # it imports this module
 
@@ -290,12 +290,14 @@ def describe(store: Store | None, settings: Settings, status: ModelStatus | None
         return None
     wait = chat_wait(store, settings, status)
     key = wait.model
-    loaded = status.context_length if status.lm_studio else 0
+    # The context the server reports, whichever it is; only LM Studio is asked to load the model with another.
+    loaded = status.context_length
     context = loaded or (auto_context(settings, status, key) if status.lm_studio else 0)
     name = key.split("/")[-1]
-    held = f"{context:,}-token context" if context else "the context LM Studio loaded it with"
+    server = "LM Studio" if status.lm_studio else "the model server"
+    held = f"{context:,}-token context" if context else f"the context {server} loaded it with"
     # Loaded with less than CloseDesk asks for, and the next question reloads it: the line says both.
-    wanted = auto_context(settings, status, key) if loaded else 0
+    wanted = auto_context(settings, status, key) if loaded and status.lm_studio else 0
     if (
         0 < loaded < wanted
         and status.model not in local_llm._context_raised
