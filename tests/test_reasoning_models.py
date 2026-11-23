@@ -39,8 +39,14 @@ THOUGHT = "Let me think about this email carefully. " * 80
 class FakeLMStudio:
     """LM Studio 0.4 with a Qwen3.5-style model loaded, as the bug reports describe it."""
 
-    def __init__(self, *, native: bool = True, rejects_effort: bool = False, think_tokens: int = 600, options=("off", "on")):
+    def __init__(
+        self, *, native: bool = True, rejects_effort: bool = False, think_tokens: int = 600, options=("off", "on"),
+        schema_thinks_too: bool = False,
+    ):
         self.native = native
+        # True: a reply asked for in the JSON schema thinks first too, and runs out of room like any other.
+        self.schema_thinks_too = schema_thinks_too
+        self.timeouts: list[float | None] = []  # how long CloseDesk waited for each answer
         self.options = list(options)
         self.rejects_effort = rejects_effort
         self.think_tokens = think_tokens
@@ -69,12 +75,14 @@ class FakeLMStudio:
             return httpx.Response(404)
         payload = json.loads(request.content)
         self.calls.append(payload)
+        self.timeouts.append((request.extensions.get("timeout") or {}).get("read"))
         if self.rejects_effort and "reasoning_effort" in payload:
             return httpx.Response(400, json={"error": "Unrecognized key 'reasoning_effort'"})
         answer = json.dumps(READING) if "JSON object" in payload["messages"][0]["content"] else "Start with [1]; it needs you today."
         thinking = "off" not in self.options or payload.get("reasoning_effort") not in {"none", "minimal"}
         thought = THOUGHT if thinking else ""
-        if (payload.get("response_format") or {}).get("type") == "json_schema":
+        runs_out = thinking and self.think_tokens >= int(payload.get("max_tokens") or 0)
+        if (payload.get("response_format") or {}).get("type") == "json_schema" and not (self.schema_thinks_too and runs_out):
             reasoning, content, finish = (thought + answer), "", "stop"
         elif thinking and self.think_tokens >= int(payload.get("max_tokens") or 0):
             reasoning, content, finish = thought, "", "length"
@@ -97,10 +105,10 @@ def _serve(monkeypatch, server: FakeLMStudio) -> httpx.Client:
         return client.get(url, headers=kw.get("headers"))
 
     def post(url, **kw):
-        return client.post(url, json=kw.get("json"), headers=kw.get("headers"))
+        return client.post(url, json=kw.get("json"), headers=kw.get("headers"), timeout=kw.get("timeout"))
 
     def stream(method, url, **kw):
-        return client.stream(method, url, json=kw.get("json"), headers=kw.get("headers"))
+        return client.stream(method, url, json=kw.get("json"), headers=kw.get("headers"), timeout=kw.get("timeout"))
 
     monkeypatch.setattr(local_llm.httpx, "get", get)
     monkeypatch.setattr(local_llm.httpx, "post", post)
@@ -382,7 +390,8 @@ def test_a_busy_server_does_not_stop_thinking_being_turned_off(settings, monkeyp
     monkeypatch.setattr(local_llm.httpx, "post", lambda url, json=None, **_k: sent.append(dict(json)) or next(replies))
     local_llm.complete_text(settings, [{"role": "user", "content": "hi"}])
     local_llm.complete_text(settings, [{"role": "user", "content": "hi"}])
-    assert [payload.get("reasoning_effort") for payload in sent] == ["none", None, "none"]
+    # The busy moment is asked again as it was: without the effort, the model would think again with the same room.
+    assert [payload.get("reasoning_effort") for payload in sent] == ["none", "none", "none"]
 
 
 def test_a_busy_server_does_not_turn_the_readers_thinking_back_on_for_the_run(settings):
@@ -402,7 +411,7 @@ def test_a_busy_server_does_not_turn_the_readers_thinking_back_on_for_the_run(se
     reader = LocalReader(settings, model="qwen3", client=httpx.Client(transport=httpx.MockTransport(server)))
     packet = {"subject": "Invoice", "body": "Please pay", "attachments": []}
     assert reader.read(packet) is not None and reader.read(packet) is not None
-    assert sent == [("none", True), (None, True), ("none", True)]
+    assert sent == [("none", True), ("none", True), ("none", True)], "asked again as it was, thinking still off"
 
 
 # A reasoning model's thinking that quotes the prompt is taken for an echo: its reasoning is shown as the answer --
