@@ -611,7 +611,7 @@ def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> 
     A busy server (500, 404) is asked once more as it was, with the effort kept: without it, a model that can turn
     thinking off would think again with the same room. A model out of memory isn't asked again at all.
     """
-    with _using(str(payload.get("model"))):
+    with _using(str(payload.get("model")), options.get("timeout")):
         response = post(url, json=payload, headers=auth_headers(settings), **options)
         if response.status_code >= 400 and _OVERFLOW_RE.search(response.text[:600]):
             # A prompt too long for the context is no shorter without the effort (or the schema): not sent again.
@@ -1179,7 +1179,7 @@ def _stream_once(
     # reading a long prompt isn't taken for a model that stopped.
     timeout = httpx.Timeout(max(settings.llm_timeout, limit or CHAT_TIMEOUT, wait or 0.0), connect=5.0)
     without_probs = busy = False
-    with _using(str(payload.get("model"))), http_method("stream")("POST", url, json=payload, headers=auth_headers(settings), timeout=timeout) as response:
+    with _using(str(payload.get("model")), timeout), http_method("stream")("POST", url, json=payload, headers=auth_headers(settings), timeout=timeout) as response:
         if response.status_code >= 400:
             response.read()
             if _OVERFLOW_RE.search(response.text[:600]):
@@ -1352,25 +1352,34 @@ _context_before: dict[str, int] = {}
 _context_lock = threading.Lock()
 
 # Models answering a request right now (a chat answer, the overnight reading, a page read), by the name the request
-# gave, with when each request started: none of them is unloaded or reloaded under the request. A request older than
-# IN_USE_SECONDS no longer counts (a stream left unclosed must not keep the model "busy" for good).
-_in_use: dict[str, list[float]] = {}
+# gave, with when each request started and how long it may take: none of them is unloaded or reloaded under the
+# request. A request may take as long as it waits for the model (up to 2 hours, or 4 for the reading's longer wait)
+# and IN_USE_SECONDS more to write; past that it no longer counts (a stream left unclosed must not keep the model
+# "busy" for good).
+_in_use: dict[str, list[tuple[float, float]]] = {}
 _in_use_lock = threading.Lock()
 IN_USE_SECONDS = 1800.0
 
 
+def _wait_of(timeout) -> float:
+    """The seconds a request waits for the model, from its ``timeout`` (an httpx.Timeout or a number)."""
+    if isinstance(timeout, httpx.Timeout):
+        timeout = timeout.read
+    return float(timeout) if isinstance(timeout, (int, float)) and timeout > 0 else 0.0
+
+
 @contextmanager
-def _using(model: str):
-    started = time.monotonic()
+def _using(model: str, timeout=None):
+    entry = (time.monotonic(), IN_USE_SECONDS + _wait_of(timeout))
     with _in_use_lock:
-        _in_use.setdefault(model, []).append(started)
+        _in_use.setdefault(model, []).append(entry)
     try:
         yield
     finally:
         with _in_use_lock:
             requests = _in_use.get(model, [])
-            if started in requests:
-                requests.remove(started)
+            if entry in requests:
+                requests.remove(entry)
             if not requests:
                 _in_use.pop(model, None)
 
@@ -1379,7 +1388,7 @@ def model_busy(*names: str) -> bool:
     """A request is being answered by one of these models (instance ids or keys) right now."""
     now = time.monotonic()
     with _in_use_lock:
-        return any(now - started < IN_USE_SECONDS for name in names if name for started in _in_use.get(name, []))
+        return any(now - started < allowed for name in names if name for started, allowed in _in_use.get(name, []))
 
 
 # A big model can take LM Studio longer to load than CloseDesk waits for the answer to its load request. The load goes

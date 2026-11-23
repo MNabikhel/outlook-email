@@ -76,6 +76,25 @@ def test_the_chat_model_isnt_switched_while_an_answer_is_being_written(settings,
     assert server.calls == [] and "Try again once it is done" in said
 
 
+def test_a_request_given_a_long_wait_keeps_the_model_busy_for_as_long(settings, monkeypatch):
+    """The chat can wait up to 2 hours for a big model now. A request counted as busy for 30 minutes only, so a model
+    chosen in Settings 31 minutes into an hour's wait unloaded the model under it and cut the answer off."""
+    settings.llm = None
+    server = LMStudio(loaded=[CODER])
+    _serve(monkeypatch, server)
+    clock = [1000.0]
+    monkeypatch.setattr(local_llm.time, "monotonic", lambda: clock[0])
+    with local_llm._using(CODER, httpx.Timeout(3600.0, connect=5.0)):
+        clock[0] += 31 * 60
+        assert local_llm.model_busy(CODER)
+        assert "Try again once it is done" in local_llm.use_chat_model(settings, CHAT) and server.calls == []
+        clock[0] += 3600
+        assert not local_llm.model_busy(CODER), "a stream left unclosed doesn't keep it busy for good"
+    with local_llm._using(CODER):
+        clock[0] += 31 * 60
+        assert not local_llm.model_busy(CODER), "with no wait of its own, 30 minutes as before"
+
+
 class _NeverShows(LMStudio):
     """A load that times out and doesn't show up in LM Studio's list within CloseDesk's wait."""
 
