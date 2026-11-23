@@ -90,6 +90,42 @@ def load_at_start(settings: Settings, on_progress: Callable[[str, int, int, str]
     key = auto_choice(settings, status)
     if not key:
         return {"model": "", "message": ""}
+    return _load(settings, key, on_progress)
+
+
+def ready_to_read(settings: Settings, model: str = "", on_progress: Callable[[str, int, int, str], None] | None = None) -> dict:
+    """Before the model reads mail (any reading: Process new mail, Sync now, the automatic sync, the scheduled run,
+    watch): when LM Studio has unloaded the model that reads it (``model``, else the one CloseDesk would ask for), it
+    is loaded first, with the context Setup asks for, and a load LM Studio has under way is waited for. Otherwise the
+    first email's own request has LM Studio load it, inside the time an email may take and with LM Studio's default
+    context. With no model to ask for, nothing is loaded: only the start chooses one by itself (``load_at_start``).
+    Returns what ``load_at_start`` does."""
+    status = check_model(settings, use_cache=False)
+    if status.mode == "off" or not status.reachable or not status.lm_studio:
+        return {"model": "", "message": ""}
+    # With just-in-time loading off, LM Studio lists only what is loaded: the model used last is still the one to load.
+    remembered = remembered_model(settings)
+    if remembered not in status.chat_models or pinned(settings) or local_llm.load_failed_lately(remembered):
+        remembered = ""
+    key = model or status.model or remembered
+    if not key:  # nothing to ask for: Settings says to choose a model (the start chooses one itself)
+        return {"model": "", "message": ""}
+    if any(key in (instance, loaded) for instance, (loaded, _context) in status.instances.items()):
+        return {"model": "", "message": ""}
+    if key in local_llm._pending_loads or local_llm.model_busy(key):
+        # LM Studio is loading it already (for a chat question, or a load CloseDesk stopped waiting for): another
+        # load request beside it could load it twice.
+        if on_progress:
+            on_progress("model", 0, 0, f"{key}: LM Studio is loading it")
+        if local_llm.wait_for_load(settings, key):
+            return {"model": key, "message": ""}
+        return {"model": "", "message": f"LM Studio was still loading {key}. The mail is filed without a model for now.", "failed": True}
+    if key not in status.chat_models:  # not a model LM Studio has downloaded under this name: left to LM Studio
+        return {"model": "", "message": ""}
+    return _load(settings, key, on_progress)
+
+
+def _load(settings: Settings, key: str, on_progress: Callable[[str, int, int, str], None] | None) -> dict:
     if on_progress:
         on_progress("model", 0, 0, f"{key}: this can take a minute")
     problem = use_chat_model(settings, key, only_if_none=True)
@@ -149,6 +185,13 @@ def _whole(seconds: float) -> str:
     return f"{round(seconds)} s"
 
 
+def faster_model(settings: Settings, status: ModelStatus, current: str) -> str:
+    """A downloaded chat model smaller than ``current`` that fits this computer (the most capable such), or ""."""
+    size = status.chat_sizes.get(current, 0)
+    smaller = [key for key in _chat_keys(status) if key != current and 0 < status.chat_sizes.get(key, 0) < size]
+    return _best_fit(settings, status, smaller)
+
+
 def recommendation(settings: Settings, store: Store, status: ModelStatus | None = None) -> dict | None:
     """A better fit for this computer than the model answering, or None. ``current`` (the model answering),
     ``suggested`` (a downloaded chat model that fits and is smaller), ``reason`` ("slow" or "too_big") and
@@ -169,8 +212,7 @@ def recommendation(settings: Settings, store: Store, status: ModelStatus | None 
     too_big = bool(size and budget and model_roles.on_this_computer(settings, status) and needed > budget.runs_well)
     if not (slow or too_big) or not size:
         return None
-    smaller = [key for key in _chat_keys(status) if key != current and 0 < status.chat_sizes.get(key, 0) < size]
-    suggested = _best_fit(settings, status, smaller)
+    suggested = faster_model(settings, status, current)
     if not suggested:
         return None
     if slow:

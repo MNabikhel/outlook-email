@@ -606,6 +606,7 @@ class ReaderStats:
     stopped_reason: str = ""
     last_error: str = ""
     times: list[float] = field(default_factory=list)  # seconds each email read took, in order
+    too_slow: bool = False  # stopped because the model sent nothing for longer than even the longer wait allows
 
     @property
     def average_seconds(self) -> float:
@@ -634,6 +635,12 @@ class LocalReader:
         if _thinks(settings, self.model, self._effort):
             self._max_tokens = max(self._max_tokens, THINKING_ROOM)
         self._consecutive_failures = 0
+        # The reply is streamed, so the time limit is how long the model may go without a word, not how long the whole
+        # reply may take: a big model writing slowly is never cut off. A server that refuses streaming is asked for
+        # the whole reply in one piece instead.
+        self._streams = True
+        self._longer = 0.0  # the longer wait, once a model needed it: kept for the rest of the run
+        self._partial = Reply(content="")
 
     def close(self) -> None:
         if self._closer is not None:
@@ -703,6 +710,44 @@ class LocalReader:
 
     def _complete(self, user: str) -> Reply:
         url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
+        loads_waited = 0
+        while True:
+            try:
+                return self._ask(url, user)
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as exc:
+                raise ModelUnavailable(f"the local model server stopped answering ({_short_error(exc)})") from exc
+            except httpx.TimeoutException as exc:
+                # Nothing came for the whole wait: asked again once the reason is known, or the reading stops.
+                loads_waited += self._after_timeout(exc, loads_waited)
+
+    def _after_timeout(self, exc: httpx.TimeoutException, loads_waited: int) -> int:
+        """Why the model sent nothing in time, and what to do: returns 1 after waiting for LM Studio to load the model,
+        0 when it is to be asked again with the longer wait. Raises ``ModelUnavailable`` to stop the reading."""
+        root = lm_studio_root(self.settings.llm_base_url.rstrip("/"))
+        if _gone(self.settings, root):
+            raise ModelUnavailable(f"the local model server stopped answering ({_short_error(exc)})") from exc
+        status = check_model(self.settings, use_cache=False)
+        if status.lm_studio and not _is_loaded(self.settings, self.model) and loads_waited < 2:
+            # LM Studio unloaded the model (idle auto-unload, a restart) and this request had it load it again: the
+            # load goes on after the request stopped waiting. Waited for, then the email is asked again.
+            if wait_for_load(self.settings, self.model):
+                return 1
+            raise ModelUnavailable(
+                f"LM Studio was still loading {self.model} after {LOAD_WAIT_SECONDS / 60:.0f} minutes. Check LM Studio, "
+                "and process the mail again once it shows the model loaded"
+            ) from exc
+        if not self._longer:
+            # A big model reading a long email can take a while to start. Given longer, for the rest of the run.
+            self._longer = max(self._wait() * 2, CHAT_TIMEOUT)
+            return 0
+        self.stats.too_slow = True
+        raise ModelUnavailable(f"{self.model} takes over {self._wait():.0f} s an email on this computer") from exc
+
+    def _wait(self) -> float:
+        """How long the model may go without sending a word: longer with room to think, longer still once needed."""
+        return max(_timeout(self.settings, self._max_tokens), self._longer)
+
+    def _ask(self, url: str, user: str) -> Reply:
         payload = {
             "model": self.model,
             "temperature": 0,
@@ -712,46 +757,60 @@ class LocalReader:
                 {"role": "user", "content": user},
             ],
         }
+        if self._streams:
+            payload["stream"] = True
         if self._structured:
             payload["response_format"] = {"type": "json_schema", "json_schema": _schema()}
         if self._effort:
             payload["reasoning_effort"] = self._effort
-        try:
-            response = _post_chat(self.client.post, url, payload, self.settings, timeout=_timeout(self.settings, self._max_tokens))
-            # A busy moment (a 500 the same request without the effort got past) is not a refusal: the effort and the
-            # schema are only dropped for the rest of the run when the server said no to them.
+        response = _post_chat(self._send, url, payload, self.settings, timeout=httpx.Timeout(self._wait(), connect=5.0))
+        # A busy moment (a 500 the same request without the effort got past) is not a refusal: the effort and the
+        # schema are only dropped for the rest of the run when the server said no to them.
+        if self.model in _effort_rejected:
+            self._effort = None
+        if self._structured and response.status_code in _RETRYABLE:
+            # Older LM Studio / Ollama builds reject response_format. Ask again, plain.
+            refused = response.status_code in _REFUSES
+            payload.pop("response_format", None)
+            response = _post_chat(self._send, url, payload, self.settings, timeout=httpx.Timeout(self._wait(), connect=5.0))
+            if refused and response.status_code < 400:
+                self._structured = False
             if self.model in _effort_rejected:
                 self._effort = None
-            if self._structured and response.status_code in _RETRYABLE:
-                # Older LM Studio / Ollama builds reject response_format. Ask again, plain.
-                refused = response.status_code in _REFUSES
-                payload.pop("response_format", None)
-                response = _post_chat(
-                    self.client.post, url, payload, self.settings, timeout=_timeout(self.settings, self._max_tokens)
-                )
-                if refused and response.status_code < 400:
-                    self._structured = False
-                if self.model in _effort_rejected:
-                    self._effort = None
-            response.raise_for_status()
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as exc:
-            raise ModelUnavailable(f"the local model server stopped answering ({_short_error(exc)})") from exc
-        except httpx.ReadTimeout as exc:
-            if self._consecutive_failures >= 1:
-                raise ModelUnavailable(
-                    f"the model took longer than {_timeout(self.settings, self._max_tokens):.0f}s twice in a row"
-                ) from exc
-            raise
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
-        if not _first_choice(data):
-            raise httpx.DecodingError("unexpected reply: no choices")
-        reply = _reply_from(data)
+        if self._streams and response.status_code in _REFUSES:
+            # A server that doesn't stream: the whole reply in one piece, from then on.
+            payload.pop("stream", None)
+            response = _post_chat(self._send, url, payload, self.settings, timeout=httpx.Timeout(self._wait(), connect=5.0))
+            if response.status_code < 400:
+                self._streams = False
+        response.raise_for_status()
+        reply = self._partial
         if reply.reasoning:
             _reasoning_seen.add(self.model)
         return reply
+
+    def _send(self, url: str, *, json: dict, headers: dict, **options) -> httpx.Response:
+        """One request, read as it comes (``_post_chat`` sends it, and again without what the server refused). The
+        reply goes into ``self._partial``; a refusal is returned read, so its text can be looked at."""
+        reply = self._partial = Reply(content="")
+        raw: list[str] = []
+        with self.client.stream("POST", url, json=json, headers=headers, **options) as response:
+            if response.status_code >= 400:
+                response.read()
+                return response
+            whole = "text/event-stream" not in response.headers.get("content-type", "")
+            pieces = list(_stream_pieces(response, reply, raw=raw))
+        if raw:
+            # Streamed: the content as sent, think tags and all, read as a reply in one piece is.
+            sent = "".join(raw)
+            reasoning = "" if reply.reasoning == _THINK_OPEN else reply.reasoning
+            reply.content = strip_thinking(sent)
+            reply.reasoning = (reasoning + "".join(_THINK_RE.findall(sent))).strip()
+        else:
+            reply.content = "".join(pieces)
+            if whole and not reply.content and not reply.reasoning and not reply.finish:
+                raise httpx.DecodingError("unexpected reply: no choices")
+        return response
 
 
 def _find_reading(reply: Reply) -> dict | None:
@@ -951,12 +1010,18 @@ def stream_text(
         reply = Reply(content="")
         if token_probs is not None:
             token_probs.clear()
-        for piece in _stream_once(
-            settings, messages, budget, effort, reply, wait=wait, temperature=temperature, sampling=sampling, model=model,
-            token_probs=token_probs,
-        ):
-            reply.content += piece
-            yield piece
+        try:
+            for piece in _stream_once(
+                settings, messages, budget, effort, reply, wait=wait, temperature=temperature, sampling=sampling, model=model,
+                token_probs=token_probs,
+            ):
+                reply.content += piece
+                yield piece
+        except httpx.TimeoutException as exc:
+            # Went quiet after it had started: still writing (or thinking), not loading. ``failure_note`` says which.
+            if reply.content or reply.reasoning:
+                exc.reply_started = "writing" if reply.content else "thinking"
+            raise
         if finished is not None:
             finished["reason"], finished["thought"] = reply.finish, bool(reply.reasoning)
         if reply.content:
@@ -1052,7 +1117,8 @@ def _token_probs(choice: dict, into: list | None) -> None:
             into.append((token, float(logprob)))
 
 
-def _stream_pieces(response: httpx.Response, reply: Reply, token_probs: list | None = None):
+def _stream_pieces(response: httpx.Response, reply: Reply, token_probs: list | None = None, raw: list | None = None):
+    """The answer's pieces as they come. ``raw``: given a list, filled with the content as sent, think tags and all."""
     if "text/event-stream" not in response.headers.get("content-type", ""):
         try:
             data = json.loads(response.read() or b"{}")
@@ -1088,7 +1154,10 @@ def _stream_pieces(response: httpx.Response, reply: Reply, token_probs: list | N
             reply.reasoning += _reasoning_text(part)
         if choice.get("finish_reason"):
             reply.finish = str(choice["finish_reason"])
-        piece = thinking.feed(part.get("content") if isinstance(part.get("content"), str) else "")
+        content = part.get("content") if isinstance(part.get("content"), str) else ""
+        if raw is not None and content:
+            raw.append(content)
+        piece = thinking.feed(content)
         if thinking.saw and not reply.reasoning:
             reply.reasoning = "<think>"
         if piece:
@@ -1242,6 +1311,21 @@ def _load(settings: Settings, root: str, key: str, context: int, timeout: httpx.
             time.sleep(LOAD_POLL_SECONDS)
         _pending_loads[key] = time.monotonic()
         raise StillLoading(key) from exc
+
+
+def wait_for_load(settings: Settings, key: str, seconds: float | None = None) -> bool:
+    """Wait for a load LM Studio has under way (one a request started, or one CloseDesk stopped waiting for) to finish,
+    for up to ``seconds`` (``LOAD_WAIT_SECONDS``): True once the model is in, False when LM Studio stopped or the time
+    ran out."""
+    root = lm_studio_root(settings.llm_base_url.rstrip("/"))
+    deadline = time.monotonic() + (LOAD_WAIT_SECONDS if seconds is None else seconds)
+    while True:
+        if _is_loaded(settings, key):
+            _pending_loads.pop(key, None)
+            return True
+        if time.monotonic() >= deadline or _gone(settings, root):
+            return False
+        time.sleep(LOAD_POLL_SECONDS)
 
 
 def _raise_for(response: httpx.Response) -> None:
@@ -1884,6 +1968,13 @@ def failure_note(exc: Exception) -> str:
     """Why the chat's model didn't answer, in words a person can act on."""
     if ran_out_of_memory(exc):
         return "The local model ran out of memory partway through. " + MEMORY_ADVICE
+    if isinstance(exc, httpx.TimeoutException) and getattr(exc, "reply_started", ""):
+        doing = "still thinking" if exc.reply_started == "thinking" else "still writing its answer"
+        return (
+            f"The local model was {doing} when it went quiet for longer than CloseDesk waits between words: a big "
+            "model on a busy computer can pause. Ask again; on a slow computer, give it longer with "
+            "CONTROLLER_INBOX_LLM_TIMEOUT."
+        )
     if isinstance(exc, httpx.TimeoutException):
         return (
             "The local model took too long to start answering: LM Studio may still be loading it or reading a long "
