@@ -1469,6 +1469,7 @@ def answer_stream(
     question = (question or "").strip()[:MAX_QUESTION]
     focus = focus or []
     searched: dict[str, Any] = {}
+    asked_about = email_id  # as the page sent it: the offer of more time asks again about the same email
     meeting = asked_meeting(store, settings, question, today, email_id)
     if meeting is not None:
         # "Ask about this meeting": the meeting and the mail about it, not every email that shares a word with its
@@ -1602,7 +1603,7 @@ def answer_stream(
     except Exception as exc:  # any model failure falls back to the lookup answer
         # Out of time (not out of memory: then the memory advice stands): the chat offers the model more time, with
         # how long it likely needs, under the answer.
-        more_time = _more_time(state, settings, exc, question, email_id)
+        more_time = _more_time(state, settings, exc, question, asked_about)
         if state["wrote"]:
             why = f" {MEMORY_ADVICE}" if ran_out_of_memory(exc) else ""
             if why and (back := step_back_context(settings)):  # the next question has the room it needs

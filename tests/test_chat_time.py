@@ -129,6 +129,24 @@ def test_a_timeout_offers_more_time_under_the_lookup_answer(settings, loaded, lm
     )
 
 
+def test_the_offer_keeps_the_email_that_was_open_when_the_conversation_has_files(settings, loaded, lm):
+    """With files added to the conversation, a question not about the email on screen is answered from the files
+    first, under their stand-in id. The offer kept that id, so asked again, the email that was open wasn't read."""
+    from controller_inbox import chats
+    from controller_inbox.fraud import attachments_locked
+
+    lm(timeout="start")
+    chat = chats.new_id()
+    loaded.create_chat(chat)
+    chats.add_file(loaded, settings, chat, "notes.txt", "text/plain", b"Budget notes for the quarter.")
+    uploads = chats.chat_mail(loaded, chat)
+    email_id = next(email.id for email in loaded.list_emails(limit=50) if not attachments_locked(email))
+    local_llm._status_cache.clear()
+    events = list(answer_stream(loaded, settings, QUESTION, email_id=email_id, uploads=uploads))
+    offer = next(event for event in events if event["type"] == "more_time")
+    assert offer["email_id"] == email_id
+
+
 def test_the_suggestion_without_a_measured_speed_comes_from_the_size_then_the_time_taken(settings, store, lm):
     lm()
     status = local_llm.check_model(settings)
