@@ -289,6 +289,7 @@
       }
       if (turn.context) html += `<p class="msg-context">${escapeHtml(turn.context)} <a href="/settings">Setup</a></p>`;
       if (turn.vision && !turn.pending) html += visionOffer(turn.vision);
+      if (turn.more_time) html += moreTimeOffer(turn.more_time);
       const cited =
         turn.mode === "model" ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
       if (!turn.pending && cited.length) {
@@ -449,6 +450,9 @@
           answer.mode = event.mode;
           answer.note = event.note || "";
           renderTurn(answer, bubble);
+        } else if (event.type === "more_time") {
+          answer.more_time = event;
+          renderTurn(answer, bubble);
         } else if (event.type === "vision") {
           answer.vision = event;
         } else if (event.type === "reading") {
@@ -478,6 +482,43 @@
     renderTurn(answer, bubble);
     chatInput.focus({ preventScroll: true });
   }
+
+  /* ---------- More time for a slow model ---------- */
+
+  /* The model ran out of time: how long it was given, how long it likely needs (prefilled), and Save and ask again,
+     which keeps the new wait for that model and asks the same question again in this conversation. */
+  function moreTimeOffer(offer) {
+    return (
+      `<form class="more-time" novalidate data-more-time data-model="${escapeHtml(offer.model)}" data-question="${escapeHtml(offer.question || "")}" data-email="${escapeHtml(offer.email_id || "")}">` +
+      `<p>${escapeHtml(offer.text)}</p>` +
+      `<label>Minutes <input type="number" name="minutes" min="1" max="120" step="1" inputmode="numeric" value="${Number(offer.suggest) || ""}"></label> ` +
+      `<button type="submit">Save and ask again</button>` +
+      `<span class="more-time-status" role="status" aria-live="polite"></span></form>`
+    );
+  }
+
+  document.addEventListener("submit", async (event) => {
+    const form = event.target.closest("[data-more-time]");
+    if (!form) return;
+    event.preventDefault();
+    const status = $(".more-time-status", form);
+    const button = $("button", form);
+    button.disabled = true;
+    try {
+      const response = await fetch("/chat/wait", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ model: form.dataset.model, minutes: $("input", form).value.trim() }),
+      });
+      const reply = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(reply.detail || `the server said ${response.status}`);
+      status.textContent = reply.message || "Saved.";
+      ask(form.dataset.question, form.dataset.email || undefined);
+    } catch (error) {
+      status.textContent = error.message;
+      button.disabled = false;
+    }
+  });
 
   /* ---------- Reading a scan with the vision model ---------- */
 

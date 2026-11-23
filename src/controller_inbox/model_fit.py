@@ -263,3 +263,32 @@ def describe(store: Store | None, settings: Settings, status: ModelStatus | None
         "yours": wait.yours,
         "line": f"{name}: {held}, waits up to {minutes_said(wait.seconds)} ({how}).",
     }
+
+
+def suggested_minutes(
+    store: Store | None, settings: Settings, status: ModelStatus, *, prompt_tokens: int, waited: float, elapsed: float
+) -> int:
+    """How many minutes to suggest for the model answering after it ran out of time on a question: from its measured
+    prompt-reading speed and this question's prompt (``prompt_tokens``) when both are known, else from its size, else
+    a bit over the ``elapsed`` seconds it had taken when it was cut off. Always more than the ``waited`` it had, in
+    whole minutes from 1 to 120."""
+    key = model_key(status)
+    rates = speeds(store, key, status.model)
+    if rates.get("read") and prompt_tokens:
+        seconds = prompt_tokens / rates["read"] * MARGIN + SPARE_SECONDS
+    elif size := status.chat_sizes.get(key, 0):
+        thinks = _thinks(settings, status, status.model) or _thinks(settings, status, key)
+        seconds = size / GB * SECONDS_PER_GB * (THINKING_SHARE if thinks else 1.0)
+    else:
+        seconds = elapsed * MARGIN
+    minutes = max(math.ceil(seconds / 60), max(1, round(waited / 60)) + 1)  # more than the minutes it was given
+    return min(MAX_MINUTES, max(MIN_MINUTES, minutes))
+
+
+def more_time_text(model: str, waited: float, suggest: int) -> str:
+    """What the chat says above its minutes box when the model ran out of time."""
+    name = model.split("/")[-1] or "The model"
+    return (
+        f"The local model needed more time than CloseDesk gives it ({minutes_said(waited)}). {name} usually needs "
+        f"about {minutes_said(suggest * 60)} for a question like this on this computer."
+    )

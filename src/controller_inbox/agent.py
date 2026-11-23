@@ -394,6 +394,9 @@ class Workspace:
     # How long the model answering may take (``model_fit.chat_wait``), in seconds: each of the chat's calls waits this
     # long for it. 0: the usual wait.
     wait: float = 0.0
+    # The call to the model under way: its prompt's size in tokens and when it went (``time.monotonic()``), for the
+    # chat's offer of more time when it runs out.
+    call: dict = field(default_factory=dict)
     # What was worked out from a file for this question, by what it was worked out from (the file's text itself and
     # the question): the files are laid out for the prompt two or three times a question.
     _memo: dict = field(default_factory=dict, repr=False, compare=False)

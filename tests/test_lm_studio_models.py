@@ -181,7 +181,7 @@ def test_the_chat_waits_minutes_for_a_long_prompt_to_be_read(settings, monkeypat
 
 def test_a_model_that_took_too_long_is_said_to_be_busy_not_broken():
     note = failure_note(httpx.ReadTimeout("timed out"))
-    assert "took too long to start answering" in note and "CONTROLLER_INBOX_LLM_TIMEOUT" in note
+    assert "took too long to start answering" in note and "Settings → Local model" in note
     assert failure_note(httpx.ConnectError("refused")) == "The local model didn't answer (refused)."
 
 

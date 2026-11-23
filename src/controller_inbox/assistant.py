@@ -1553,7 +1553,7 @@ def answer_stream(
     # How long the model answering may take, worked out for it or set by the user (model_fit): every call waits that.
     wait = model_fit.chat_wait(store, settings)
     ws.wait = wait.seconds
-    state: dict[str, Any] = {"wrote": False, "text": "", "store": store, "wait": wait}
+    state: dict[str, Any] = {"wrote": False, "text": "", "store": store, "wait": wait, "call": ws.call}
     offer = None
     if current is not None and _should_read_files(ws, question, focus if about_today else None):
         outcome: dict[str, Any] = {}
@@ -1593,6 +1593,9 @@ def answer_stream(
             ws.evidence.clear()
             yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
     except Exception as exc:  # any model failure falls back to the lookup answer
+        # Out of time (not out of memory: then the memory advice stands): the chat offers the model more time, with
+        # how long it likely needs, under the answer.
+        more_time = _more_time(state, settings, exc, question, email_id)
         if state["wrote"]:
             why = f" {MEMORY_ADVICE}" if ran_out_of_memory(exc) else ""
             if why and (back := step_back_context(settings)):  # the next question has the room it needs
@@ -1604,8 +1607,12 @@ def answer_stream(
                 note = "The question and its files didn't fit the model's context window. " + agent.context_advice(
                     context_length(settings), ["the emails and files"], model_server(settings)
                 )
+            elif more_time:
+                note = "The local model needed more time than CloseDesk gives it, so this answer comes from looking things up."
             yield {"type": "mode", "mode": "lookup", "note": note}
             yield {"type": "delta", "text": offline_answer(question, sources, model_failed=True, **lookup)}
+        if more_time:
+            yield more_time
     else:
         if not state["wrote"]:
             yield {"type": "mode", "mode": "lookup", "note": "The local model sent an empty answer."}
@@ -1948,6 +1955,33 @@ class _Recorded:
             close()
 
 
+def _more_time(state: dict, settings: Settings, exc: Exception, question: str, email_id: str | None) -> dict | None:
+    """The chat's offer of more time after the model ran out of it (``exc``, a timeout), or None for any other
+    failure: how long it was given, how long it likely needs (``model_fit.suggested_minutes``), and the question to
+    ask again once the user saves the new wait."""
+    wait = state.get("wait")
+    if wait is None or not isinstance(exc, httpx.TimeoutException) or ran_out_of_memory(exc):
+        return None
+    call = state.get("call") or {}
+    waited = max(wait.seconds, settings.llm_timeout)
+    elapsed = time.monotonic() - call["started"] if call.get("started") else waited
+    tokens = int(call.get("tokens") or 0)
+    suggest = model_fit.suggested_minutes(
+        state.get("store"), settings, check_model(settings), prompt_tokens=tokens, waited=waited, elapsed=elapsed
+    )
+    return {
+        "type": "more_time", "model": wait.model, "minutes": model_fit.Wait(wait.model, waited, wait.yours).minutes,
+        "suggest": suggest, "tokens": tokens, "text": model_fit.more_time_text(wait.model, waited, suggest),
+        "question": question, "email_id": email_id or "",
+    }
+
+
+def _calling(call: dict | None, messages: list[dict]) -> None:
+    """Note the call about to go to the model (its prompt's size, when it went), for the offer of more time."""
+    if call is not None:
+        call.update(tokens=prompt_chars(messages) // agent.CHARS_PER_TOKEN, started=time.monotonic())
+
+
 def _limit(state: dict) -> float | None:
     """How long this chat's calls wait for the model (``model_fit.chat_wait``), or None for the usual."""
     wait = state.get("wait")
@@ -1970,6 +2004,7 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
     before = len(state["text"])
     wrote = state["wrote"]
     finished: dict[str, Any] = {}
+    _calling(state.get("call"), messages)
     raw = _Recorded(stream_text(settings, messages, max_tokens=settings.chat_max_tokens, finished=finished, limit=_limit(state)))
     echoed = True
     try:
@@ -2283,6 +2318,7 @@ def _tool_loop(ws: agent.Workspace, messages: list[dict], budget: int):
     used = prompt_chars(messages)
     asked: set[str] = set()  # the calls already run: a small model can ask for the same one again and again
     for _step in range(agent.MAX_STEPS):
+        _calling(ws.call, messages)
         reply = chat_with_tools(ws.settings, messages, agent.TOOLS, max_tokens=ws.settings.chat_max_tokens, limit=ws.wait or None)
         if not reply.calls:
             return reply.content

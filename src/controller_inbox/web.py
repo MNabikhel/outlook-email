@@ -244,6 +244,8 @@ class _AnswerLog:
             self.data["note"] = event.get("note", "")
         elif kind == "vision":
             self.data["vision"] = {key: event.get(key) for key in ("email_id", "n", "file", "pages", "estimate", "text", "question")}
+        elif kind == "more_time":  # the offer of more time, shown again with the conversation
+            self.data["more_time"] = {key: event.get(key) for key in ("model", "minutes", "suggest", "text", "question", "email_id")}
         elif kind == "reading" and event.get("label"):  # which reading of the scans the answer used
             self.data["reading"] = {key: event.get(key) for key in ("state", "reader", "label", "text")}
 
@@ -858,6 +860,21 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         # The database and today's list take a moment: in a worker thread, so other pages aren't held up.
         lines = await run_in_threadpool(answer_lines, data, question)
         return StreamingResponse(_closing(lines), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
+
+    @app.post("/chat/wait")
+    async def chat_wait(request: Request):
+        """The chat's "Save and ask again": how long to wait for this model from now on, in minutes (1 to 120). The page
+        then asks the question again."""
+        require_page(request)
+        data = await json_body(request)
+        model = str(data.get("model") or "").strip()[:200]
+        try:
+            minutes = model_fit.parse_minutes(data.get("minutes"))
+            model_fit.set_wait(store, model, minutes)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        said = model_fit.minutes_said(minutes * 60)
+        return JSONResponse({"ok": True, "seconds": minutes * 60, "message": f"Saved: CloseDesk waits up to {said} for {model}."})
 
     @app.get("/chats")
     def chat_list(q: str = ""):

@@ -2148,13 +2148,12 @@ def failure_note(exc: Exception) -> str:
         doing = "still thinking" if exc.reply_started == "thinking" else "still writing its answer"
         return (
             f"The local model was {doing} when it went quiet for longer than CloseDesk waits between words: a big "
-            "model on a busy computer can pause. Ask again; on a slow computer, give it longer with "
-            "CONTROLLER_INBOX_LLM_TIMEOUT."
+            "model on a busy computer can pause. Ask again; on a slow computer, give it longer in Settings → Local model."
         )
     if isinstance(exc, httpx.TimeoutException):
         return (
             "The local model took too long to start answering: LM Studio may still be loading it or reading a long "
-            "prompt. Ask again in a minute; on a slow computer, give it longer with CONTROLLER_INBOX_LLM_TIMEOUT."
+            "prompt. Ask again in a minute; on a slow computer, give it longer in Settings → Local model."
         )
     # The server's own words (LM Studio's "Model is reloading"), not httpx's "Server error '500 ...' for url ...".
     said = _lm_studio_said(exc) if isinstance(exc, httpx.HTTPError) else str(exc)

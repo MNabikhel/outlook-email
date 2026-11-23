@@ -524,6 +524,10 @@ details.correct summary { cursor: pointer; font-family: var(--serif); font-size:
 .vision-offer { margin-top: 10px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 10px; }
 .vision-offer p { margin: 0 0 8px; }
 .vision-offer button + button { margin-left: 6px; }
+.more-time { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; }
+.more-time p { margin: 0 0 8px; }
+.more-time input { width: 5em; }
+.more-time-status { display: block; margin-top: 6px; font-size: 12px; }
 .vision-pages { margin: 12px 0; }
 .vision-page { margin-top: 14px; }
 .vision-page h4 { margin: 0 0 8px; font-size: 13px; }

@@ -165,6 +165,41 @@ export function createChat({ root, onToggle, visionRead }) {
     );
   }
 
+  /* The model ran out of time: how long it was given and how long it likely needs (prefilled, in minutes). Save and
+     ask again keeps that wait for the model and asks the same question again in this conversation. */
+  function moreTimeEl(turn) {
+    const offer = turn.more_time;
+    if (!offer) return null;
+    const minutes = h("input", { type: "number", class: "more-time-minutes", min: "1", max: "120", step: "1", inputmode: "numeric", value: String(offer.suggest || ""), "aria-label": "Minutes to wait" });
+    const said = h("p", { class: `more-time-status${offer.failed ? " error" : ""}`, role: "status", "aria-live": "polite" }, offer.message || "");
+    const button = h("button", { type: "submit", class: "btn btn-sm btn-primary", disabled: Boolean(offer.saved) }, icon("refresh", 14), h("span", null, "Save and ask again"));
+    const save = async (event) => {
+      event.preventDefault();
+      button.disabled = true;
+      try {
+        const reply = await postJSON("/chat/wait", { model: offer.model, minutes: minutes.value.trim() });
+        offer.saved = true;
+        offer.failed = false;
+        offer.message = reply.message || "Saved.";
+        offer.suggest = Number(minutes.value);
+        repaint(turn);
+        ask(offer.question, offer.email_id || undefined);
+      } catch (error) {
+        offer.failed = true;
+        offer.message = error.message;
+        offer.suggest = minutes.value;
+        repaint(turn);
+      }
+    };
+    return h(
+      "form",
+      { class: "msg-more-time", novalidate: true, onsubmit: save },
+      h("p", null, offer.text),
+      h("div", { class: "more-time-row" }, h("label", null, minutes, h("span", null, "minutes")), button),
+      said
+    );
+  }
+
   // A read finished (or stopped, or failed): the offers for that file say so. Nothing read: offer it again.
   window.addEventListener("closedesk:vision", (event) => {
     const done = event.detail || {};
@@ -211,6 +246,7 @@ export function createChat({ root, onToggle, visionRead }) {
       turn.checks && turn.checks.length ? h("ul", { class: "msg-check" }, turn.checks.map((item) => h("li", null, icon("ok", 13), h("span", null, item)))) : null,
       turn.context ? h("p", { class: "msg-context" }, turn.context, " ", h("a", { href: "/app/settings", dataset: { nav: "" } }, "Settings")) : null,
       visionEl(turn),
+      moreTimeEl(turn),
       cited.length
         ? h(
             "ul",
@@ -418,6 +454,9 @@ export function createChat({ root, onToggle, visionRead }) {
               break;
             case "vision":
               answer.vision = { ...event, state: "offered", message: "" };
+              break;
+            case "more_time":
+              answer.more_time = { ...event };
               break;
             case "reading":
               if (event.state === "running") answer.readingNow = event;
