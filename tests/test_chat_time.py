@@ -147,6 +147,18 @@ def test_the_offer_keeps_the_email_that_was_open_when_the_conversation_has_files
     assert offer["email_id"] == email_id
 
 
+def test_with_the_longest_wait_already_no_more_time_is_offered(settings, loaded, lm):
+    """At 120 minutes, the most the chat waits, the offer said "needed more time than CloseDesk gives it (120
+    minutes) ... usually needs about 120 minutes" and asked again with the same wait, to run out the same way."""
+    lm(timeout="start")
+    model_fit.set_wait(loaded, KEY, model_fit.MAX_MINUTES)
+    events = _ask(loaded, settings)
+    assert not [event for event in events if event["type"] == "more_time"]
+    mode = next(event for event in events if event["type"] == "mode")
+    assert mode["mode"] == "lookup" and "didn't answer within 120 minutes, the longest CloseDesk waits" in mode["note"]
+    assert "smaller model" in mode["note"]
+
+
 def test_the_suggestion_without_a_measured_speed_comes_from_the_size_then_the_time_taken(settings, store, lm):
     lm()
     status = local_llm.check_model(settings)

@@ -1617,6 +1617,12 @@ def answer_stream(
                 )
             elif more_time:
                 note = "The local model needed more time than CloseDesk gives it, so this answer comes from looking things up."
+            elif _had_longest_wait(state, settings, exc):
+                note = (
+                    f"The local model didn't answer within {model_fit.minutes_said(model_fit.MAX_MINUTES * 60)}, the "
+                    "longest CloseDesk waits, so this answer comes from looking things up. A smaller model, or a "
+                    "shorter question, answers sooner."
+                )
             yield {"type": "mode", "mode": "lookup", "note": note}
             yield {"type": "delta", "text": offline_answer(question, sources, model_failed=True, **lookup)}
         if more_time:
@@ -1981,11 +1987,22 @@ def _more_time(state: dict, settings: Settings, exc: Exception, question: str, e
     suggest = model_fit.suggested_minutes(
         state.get("store"), settings, check_model(settings), prompt_tokens=tokens, waited=waited, elapsed=elapsed
     )
+    if suggest * 60 <= waited:  # it had the longest wait already: the same again would run out the same way
+        return None
     return {
         "type": "more_time", "model": wait.model, "minutes": model_fit.Wait(wait.model, waited, wait.yours).minutes,
         "suggest": suggest, "tokens": tokens, "text": model_fit.more_time_text(wait.model, waited, suggest),
         "question": question, "email_id": email_id or "",
     }
+
+
+def _had_longest_wait(state: dict, settings: Settings, exc: Exception) -> bool:
+    """The model ran out of time (``exc``) with the longest wait CloseDesk gives (``model_fit.MAX_MINUTES``)."""
+    wait = state.get("wait")
+    return (
+        wait is not None and isinstance(exc, httpx.TimeoutException) and not ran_out_of_memory(exc)
+        and max(wait.seconds, settings.llm_timeout) >= model_fit.MAX_MINUTES * 60
+    )
 
 
 def _calling(call: dict | None, messages: list[dict]) -> None:

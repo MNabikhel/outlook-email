@@ -293,8 +293,8 @@ def suggested_minutes(
 ) -> int:
     """How many minutes to suggest for the model answering after it ran out of time on a question: from its measured
     prompt-reading speed and this question's prompt (``prompt_tokens``) when both are known, else from its size, else
-    a bit over the ``elapsed`` seconds it had taken when it was cut off. Always more than the ``waited`` it had, in
-    whole minutes from 1 to 120."""
+    a bit over the ``elapsed`` seconds it had taken when it was cut off. More than the ``waited`` it had, in whole
+    minutes from 1 to 120: so not more when it had 120 already (the chat then offers no more time)."""
     key = model_key(status)
     rates = speeds(store, key, status.model)
     if rates.get("read") and prompt_tokens:
