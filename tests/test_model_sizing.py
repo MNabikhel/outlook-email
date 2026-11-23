@@ -266,3 +266,26 @@ def test_windows_cards_memory_is_read_from_the_registry_not_wmi(monkeypatch):
     assert model_roles._windows_card_memory() == 12 * GB
     values["0001"] = (12 * GB).to_bytes(8, "little")  # some drivers write it as binary
     assert model_roles._windows_card_memory() == 12 * GB
+
+
+def test_a_model_bigger_than_the_card_loads_into_the_card_and_the_computer_s_memory_together(settings, lm, monkeypatch):
+    """On a PC with 16 GB of memory and a 24 GB graphics card, a 26 GB model was judged against the 12 GB the
+    computer gives alone: cut to 4,096 tokens, never chosen by itself, and said to run out of memory naming the
+    card. LM Studio puts what fits on the card and the rest in the computer's memory, about 36 GB here."""
+    from controller_inbox import model_fit
+
+    _computer(monkeypatch, 16, card_gb=24)
+    lm.sizes = {BIG: 26 * GB}
+    status = check_model(settings, use_cache=False)
+    budget = model_roles.model_budget()
+    assert budget.runs_well == 24 * GB and budget.loads == 36 * GB
+    assert model_fit.auto_context(settings, status, BIG) == 16384
+    assert model_roles.fits(settings, status, BIG, budget, at_all=True, shorter=True)
+    warning = model_roles.too_big(settings, status)[BIG]
+    assert "run from the computer's memory" in warning and "run out of memory" not in warning
+
+    # One too big even for both says what both give.
+    lm.sizes = {BIG: 40 * GB}
+    warning = model_roles.too_big(settings, check_model(settings, use_cache=False))[BIG]
+    assert "run out of memory" in warning
+    assert "this PC can give a model about 36 GB: its graphics card's 24 GB and 12 GB of its 16 GB of memory" in warning

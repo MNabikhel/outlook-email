@@ -261,8 +261,10 @@ def gpu_memory() -> int:
 @dataclass(frozen=True)
 class Budget:
     """The memory a model can take on this computer. ``runs_well``: what it can take and still answer at speed (a
-    PC's graphics card, when it has one); ``loads``: what it can take at all (the computer's own memory); ``memory``:
-    the computer's memory in all; ``gpu``: the card's (0 without one); ``mac``: a Mac with Apple's chip."""
+    PC's graphics card, when it has one); ``loads``: what it can take at all (the computer's own memory, and on a PC
+    with a graphics card the card's beside it, as LM Studio puts what doesn't fit on the card in the computer's
+    memory); ``memory``: the computer's memory in all; ``gpu``: the card's (0 without one); ``mac``: a Mac with Apple's
+    chip."""
 
     runs_well: int
     loads: int
@@ -278,11 +280,22 @@ class Budget:
         # Rounded down, as what a model needs is rounded up: "needs about 5 GB, can give about 4 GB", never 4 and 4.
         return f"{where} can give a model about {int(self.runs_well // GB)} GB of its {round(self.memory / GB)} GB"
 
+    def said_at_all(self) -> str:
+        """What a model can take at all, in words for the out-of-memory warning: on a PC with a graphics card, the
+        card's memory and the computer's together."""
+        if not self.gpu:
+            return self.said()
+        return (
+            f"this PC can give a model about {int(self.loads // GB)} GB: its graphics card's {round(self.gpu / GB)} GB "
+            f"and {int((self.loads - self.gpu) // GB)} GB of its {round(self.memory / GB)} GB of memory"
+        )
+
 
 def model_budget() -> Budget | None:
     """What this computer can give a model (see ``Budget``), or None when its memory can't be told. A Mac with
     Apple's chip: the share macOS lets the graphics side use. A PC: three quarters of its memory, and with a graphics
-    card, the card's memory for running well. Either way at least KEPT_FOR_APPS is left for the rest."""
+    card, the card's memory for running well, and the card's and those three quarters together for loading at all.
+    Either way at least KEPT_FOR_APPS of the computer's memory is left for the rest."""
     memory = computer_memory()
     if not memory:
         return None
@@ -290,7 +303,7 @@ def model_budget() -> Budget | None:
     share = SMALL_MAC_SHARE if mac and memory <= SMALL_MAC else USABLE_SHARE
     usable = max(0, int(min(share * memory, memory - KEPT_FOR_APPS)))
     gpu = 0 if mac else gpu_memory()
-    return Budget(runs_well=gpu or usable, loads=usable, memory=memory, gpu=gpu, mac=mac)
+    return Budget(runs_well=gpu or usable, loads=gpu + usable, memory=memory, gpu=gpu, mac=mac)
 
 
 def memory_needed(size_bytes: int, context_tokens: int) -> int:
@@ -368,8 +381,10 @@ def too_big(settings: Settings, status: ModelStatus) -> dict[str, str]:
             what = f"{instead}, and most of it would run from the computer's memory and answer slowly"
         else:
             what = "most of it would run from the computer's memory and answer slowly"
+        # What it was compared against: for running out of memory, the card's and the computer's together.
+        compared = budget.said_at_all() if needed_asked > budget.loads else budget.said()
         found[key] = (
-            f"{key} needs about {math.ceil(needed / GB)} GB of memory{context}, and {budget.said()}, so {what}. "
+            f"{key} needs about {math.ceil(needed / GB)} GB of memory{context}, and {compared}, so {what}. "
             "CloseDesk only needs a small model: a 3B to 8B one is plenty and answers faster."
         )
     return found
