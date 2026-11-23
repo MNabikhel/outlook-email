@@ -56,15 +56,25 @@ def loaded_chat(status: ModelStatus) -> list[str]:
 def _best_fit(settings: Settings, status: ModelStatus, keys: list[str]) -> str:
     """The one of ``keys`` to choose for this computer: the largest that runs well on it and is at most
     ``AUTO_LARGEST`` (a 3B to 8B model is plenty, and answers faster), else the smallest that runs well; with none
-    that runs well on a PC's graphics card, the same among those that load at all. A general chat model before a
+    that runs well on a PC's graphics card, the same among those that load at all. With none that fits with the
+    context Setup asks for, the same among the small ones with the shortest context CloseDesk would ask for. A general chat model before a
     coding one. "" when none fits or this can't be told (no sizes, memory unknown, LM Studio on another computer)."""
     budget = model_roles.model_budget()
     if not status.chat_sizes or not budget or not model_roles.on_this_computer(settings, status):
         return ""
-    fitting = [key for key in keys if model_roles.fits(settings, status, key, budget)]
-    if not fitting and budget.gpu:
-        fitting = [key for key in keys if model_roles.fits(settings, status, key, budget, at_all=True)]
-    if not fitting:
+    # With Setup's context first; else with the shorter one CloseDesk would ask for (an 8 GB computer).
+    tries = [{}, {"shorter": True}]
+    if budget.gpu:
+        tries += [{"at_all": True}, {"at_all": True, "shorter": True}]
+    for how in tries:
+        fitting = [
+            key for key in keys if model_roles.fits(settings, status, key, budget, **how)
+            # A big model is never chosen by itself to run with less than Setup's context: only a small one is.
+            and (not how.get("shorter") or status.chat_sizes[key] <= AUTO_LARGEST)
+        ]
+        if fitting:
+            break
+    else:
         return ""
     small = [key for key in fitting if status.chat_sizes[key] <= AUTO_LARGEST]
     if small:

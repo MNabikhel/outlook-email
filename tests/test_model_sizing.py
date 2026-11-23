@@ -73,8 +73,13 @@ def test_a_31b_model_on_a_32_gb_mac_is_flagged_and_not_loaded_by_itself(settings
     status = check_model(settings, use_cache=False)
     warning = model_roles.too_big(settings, status)[BIG]
     assert "about 24 GB" in warning and "this Mac can give a model about 21 GB" in warning and "3B to 8B" in warning
+    # CloseDesk loads it with the context that fits (model_fit), so it doesn't say LM Studio runs out of memory.
+    assert "with a 4,096-token context instead" in warning and "run out of memory" not in warning
     assert CHAT not in model_roles.too_big(settings, status)
     assert model_choice.auto_choice(settings, status) == CHAT
+    lm.sizes = {BIG: 19 * GB}
+    assert model_choice.auto_choice(settings, check_model(settings, use_cache=False)) == "", "not even when it is the only one"
+    lm.sizes = dict(SIZES)
     # Loaded anyway (the user chose it in Settings): the suggestion says which memory it was compared against.
     tip = model_choice.recommendation(settings, store, _answering(lm, settings, BIG))
     assert tip["reason"] == "too_big" and tip["suggested"] == CHAT
@@ -114,6 +119,28 @@ def test_a_64_gb_mac_still_takes_a_27b_when_the_user_picks_it(settings, store, l
     assert model_roles.too_big(settings, status) == {}
     assert use_chat_model(settings, GEMMA27) == "" and GEMMA27 in lm.loaded
     assert model_choice.recommendation(settings, store, _answering(lm, settings, GEMMA27)) is None
+
+
+@pytest.mark.parametrize("mac", [True, False], ids=["8 GB Mac", "8 GB PC"])
+def test_an_8_gb_computer_still_chooses_a_small_model_with_a_shorter_context(settings, lm, monkeypatch, mac):
+    """An 8 GB computer can give a model about 4 GB: a 3B or a 1.5B doesn't fit with Setup's 16,384 tokens, but does
+    with 8,192, which is what CloseDesk asks for. Before, no model was chosen at the start and every one was marked
+    too big, the 1.5B with "needs about 4 GB ... can give about 4 GB, so LM Studio will likely run out of memory"."""
+    _computer(monkeypatch, 8, mac=mac)
+    small, tiny = "llama-3.2-3b-instruct", "qwen2.5-1.5b-instruct"
+    lm.extra = [small, tiny]
+    lm.sizes = {small: 2 * GB, tiny: int(1.1 * GB)}
+    status = check_model(settings, use_cache=False)
+    assert model_roles.too_big(settings, status) == {}
+    assert model_choice.auto_choice(settings, status) == small
+    assert model_choice.load_at_start(settings)["model"] == small
+    assert lm.calls[-1] == ("load", small, 8192)
+
+
+def test_a_model_that_doesnt_fit_even_with_the_shortest_context_still_says_it_runs_out_of_memory(settings, lm, monkeypatch):
+    _computer(monkeypatch, 8, mac=True)
+    warning = model_roles.too_big(settings, check_model(settings, use_cache=False))[CHAT]
+    assert "run out of memory" in warning and "needs about 8 GB" in warning, warning
 
 
 def test_a_small_mac_keeps_memory_for_macos_and_outlook(monkeypatch):

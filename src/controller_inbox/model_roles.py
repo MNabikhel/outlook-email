@@ -4,6 +4,7 @@ the OCR engine that reads scans the moment they arrive."""
 
 from __future__ import annotations
 
+import math
 import os
 import platform
 import shutil
@@ -274,7 +275,8 @@ class Budget:
         if self.gpu:
             return f"this PC's graphics card has {round(self.gpu / GB)} GB"
         where = "this Mac" if self.mac else "this computer"
-        return f"{where} can give a model about {round(self.runs_well / GB)} GB of its {round(self.memory / GB)} GB"
+        # Rounded down, as what a model needs is rounded up: "needs about 5 GB, can give about 4 GB", never 4 and 4.
+        return f"{where} can give a model about {int(self.runs_well // GB)} GB of its {round(self.memory / GB)} GB"
 
 
 def model_budget() -> Budget | None:
@@ -316,17 +318,31 @@ def context_for(settings: Settings, status: ModelStatus, key: str) -> int:
     return min(settings.min_context_tokens, most) if settings.min_context_tokens and most else settings.min_context_tokens
 
 
-def fits(settings: Settings, status: ModelStatus, key: str, budget: Budget, *, at_all: bool = False) -> bool:
+def fits(
+    settings: Settings, status: ModelStatus, key: str, budget: Budget, *, at_all: bool = False, shorter: bool = False
+) -> bool:
     """``key`` runs well in this computer's ``budget`` with the context Setup asks for (False when its size isn't
-    known). ``at_all``: it loads at all, though partly from the computer's memory beside the graphics card."""
+    known). ``at_all``: it loads at all, though partly from the computer's memory beside the graphics card.
+    ``shorter``: with the shortest context CloseDesk would ask for it (``model_fit.auto_context`` steps a model too
+    big for Setup's down to that), rather than Setup's."""
+    from controller_inbox import model_fit  # it imports this module
+
     size = status.chat_sizes.get(key, 0)
     room = budget.loads if at_all else budget.runs_well
-    return bool(size) and memory_needed(size, context_for(settings, status, key)) <= room
+    tokens = context_for(settings, status, key)
+    if shorter and tokens:
+        tokens = min(tokens, model_fit.SMALLEST_CONTEXT)
+    return bool(size) and memory_needed(size, tokens) <= room
 
 
 def too_big(settings: Settings, status: ModelStatus) -> dict[str, str]:
     """The downloaded chat models too big to run well on this computer with the context Setup asks for, each with
-    why. Nothing when LM Studio doesn't give the sizes, the memory can't be read, or LM Studio is on another computer."""
+    why: CloseDesk loads it with a shorter context, it runs slowly from the computer's memory, or it doesn't fit at
+    all. A small model (``model_choice.AUTO_LARGEST`` or less) that runs well with the shorter context isn't listed:
+    a smaller one wouldn't help. Nothing when LM Studio doesn't give the sizes, the memory can't be read, or LM Studio
+    is on another computer."""
+    from controller_inbox import model_choice, model_fit  # they import this module
+
     budget = model_budget()
     if not status.chat_sizes or not budget or not on_this_computer(settings, status):
         return {}
@@ -334,16 +350,28 @@ def too_big(settings: Settings, status: ModelStatus) -> dict[str, str]:
     for key, size in status.chat_sizes.items():
         tokens = context_for(settings, status, key)
         needed = memory_needed(size, tokens)
-        if needed > budget.runs_well:
-            context = f" with a {tokens:,}-token context" if tokens else ""
-            if needed > budget.loads:
-                what = "LM Studio will likely run out of memory with it"
-            else:
-                what = "most of it would run from the computer's memory and answer slowly"
-            found[key] = (
-                f"{key} needs about {round(needed / GB)} GB of memory{context}, and {budget.said()}, so {what}. "
-                "CloseDesk only needs a small model: a 3B to 8B one is plenty and answers faster."
-            )
+        if needed <= budget.runs_well:
+            continue
+        # What CloseDesk would ask LM Studio for: the most of Setup's context that fits.
+        asked = model_fit.auto_context(settings, status, key)
+        shorter = 0 < asked < tokens
+        needed_asked = memory_needed(size, asked) if shorter else needed
+        context = f" with a {tokens:,}-token context" if tokens else ""
+        instead = f"CloseDesk loads it with a {asked:,}-token context instead, so long attachments are read a section at a time"
+        if shorter and needed_asked <= budget.runs_well:
+            if size <= model_choice.AUTO_LARGEST:
+                continue
+            what = instead
+        elif needed_asked > budget.loads:
+            what = "LM Studio will likely run out of memory with it"
+        elif shorter:
+            what = f"{instead}, and most of it would run from the computer's memory and answer slowly"
+        else:
+            what = "most of it would run from the computer's memory and answer slowly"
+        found[key] = (
+            f"{key} needs about {math.ceil(needed / GB)} GB of memory{context}, and {budget.said()}, so {what}. "
+            "CloseDesk only needs a small model: a 3B to 8B one is plenty and answers faster."
+        )
     return found
 
 
