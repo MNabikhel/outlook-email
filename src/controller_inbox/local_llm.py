@@ -534,11 +534,12 @@ class Thought:
         self.text = text
 
 
-def _reasoning_text(part: dict) -> str:
-    """LM Studio calls it ``reasoning_content``; OpenRouter and newer builds ``reasoning``."""
+def _reasoning_text(part: dict, *, spaces: bool = False) -> str:
+    """LM Studio calls it ``reasoning_content``; OpenRouter and newer builds ``reasoning``. ``spaces``: a piece that is
+    only a line break or a space is kept too (once the reasoning has begun, streamed a token at a time)."""
     for key in ("reasoning_content", "reasoning"):
         value = part.get(key)
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and (value.strip() or (spaces and value)):
             return value
     return ""
 
@@ -1293,7 +1294,8 @@ def _stream_pieces(
         choice = _first_choice(data)
         part = choice.get("delta") if isinstance(choice.get("delta"), dict) else choice.get("message")
         part = part if isinstance(part, dict) else {}
-        reasoned = _reasoning_text(part)
+        # A line break or a space between the reasoning's words is kept, for the Thinking box to show as sent.
+        reasoned = _reasoning_text(part, spaces=bool(reply.reasoning))
         if reasoned:
             reply.reasoning += reasoned
         if choice.get("finish_reason"):
