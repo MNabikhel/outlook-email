@@ -476,6 +476,10 @@ class EmptyReply(RuntimeError):
     """The server answered 200 but wrote no answer, usually because the model only reasoned."""
 
 
+class ThinksTooLong(EmptyReply):
+    """A model that can't be told not to think used all its room thinking, even with twice the usual room."""
+
+
 # Reasoning models (Qwen3.x, DeepSeek-R1, gpt-oss) think before answering. That
 # needs far more than the usual token budget unless thinking can be turned off.
 THINKING_ROOM = 2048
@@ -570,8 +574,11 @@ def _thinks(settings: Settings, model: str, effort: str | None) -> bool:
 
 
 def _timeout(settings: Settings, budget: int) -> float:
-    """A laptop writing 2,048 tokens of thinking can take minutes."""
-    return max(settings.llm_timeout, THINKING_TIMEOUT) if budget >= THINKING_ROOM else settings.llm_timeout
+    """A laptop writing 2,048 tokens of thinking can take minutes, and twice the room takes twice as long: a model
+    that can't stop thinking, given 4,096 tokens, is waited for 10 minutes rather than taken for one still loading."""
+    if budget < THINKING_ROOM:
+        return settings.llm_timeout
+    return max(settings.llm_timeout, THINKING_TIMEOUT * budget / THINKING_ROOM)
 
 
 def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> httpx.Response:
@@ -580,21 +587,26 @@ def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> 
     The model is only remembered as refusing ``reasoning_effort`` when the same request
     without it goes through. When that retry fails too, something else (``response_format``,
     ``tools``) was the problem: the first answer comes back and the payload keeps its effort.
+    A busy server (500, 404) is asked once more as it was, with the effort kept: without it, a model that can turn
+    thinking off would think again with the same room. A model out of memory isn't asked again at all.
     """
     with _using(str(payload.get("model"))):
         response = post(url, json=payload, headers=auth_headers(settings), **options)
         if response.status_code >= 400 and _OVERFLOW_RE.search(response.text[:600]):
             # A prompt too long for the context is no shorter without the effort (or the schema): not sent again.
             _raise_for(response)
-        if "reasoning_effort" in payload and response.status_code in _RETRYABLE:
+        if "reasoning_effort" in payload and response.status_code in _REFUSES:
             effort = payload.pop("reasoning_effort")
             retry = post(url, json=payload, headers=auth_headers(settings), **options)
             if retry.status_code < 400:
-                # Remembered only when the server said no to the request itself, not when it was busy for a moment.
-                if response.status_code in _REFUSES:
-                    _effort_rejected.add(str(payload.get("model")))
+                # Remembered only when the request without it goes through.
+                _effort_rejected.add(str(payload.get("model")))
                 return retry
             payload["reasoning_effort"] = effort
+        elif "reasoning_effort" in payload and response.status_code in _RETRYABLE and not out_of_memory(response.text):
+            retry = post(url, json=payload, headers=auth_headers(settings), **options)
+            if retry.status_code < 400:
+                return retry
         return response
 
 
@@ -668,6 +680,9 @@ class LocalReader:
         except ContextOverflow as exc:
             return self._failed(str(exc))
         if parsed is None:
+            if isinstance(stuck := _empty_reply(self.settings, self.model, self._max_tokens, reply), ThinksTooLong):
+                # Every email would go the same way, minutes each: the run stops, and says why once.
+                self.stats.stopped_reason = str(stuck)
             return self._failed(reply.why_unusable())
         self._consecutive_failures = 0
         took = time.monotonic() - started
@@ -680,7 +695,7 @@ class LocalReader:
         self.stats.failed += 1
         self.stats.last_error = reason
         self._consecutive_failures += 1
-        if self._consecutive_failures >= 3:
+        if self._consecutive_failures >= 3 and not self.stats.stopped_reason:
             self.stats.stopped_reason = f"three messages in a row failed ({reason})"
         return None
 
@@ -695,6 +710,10 @@ class LocalReader:
             self._effort, changed = "none", True
         if self._max_tokens < THINKING_ROOM:
             self._max_tokens, changed = THINKING_ROOM, True
+        elif reply.finish == "length" and reply.reasoning and not reply.content and self._max_tokens < 2 * THINKING_ROOM:
+            # All its room went on thinking: a model that can't turn thinking off (DeepSeek-R1 allows only ``on``)
+            # thinks as long with the effort turned down, so it gets twice the room, once, for the rest of the run.
+            self._max_tokens, changed = self._max_tokens * 2, True
         if self._structured and not reply.content:
             # LM Studio can route schema-constrained output into the reasoning
             # stream and leave the answer empty; plain prompts answer normally.
@@ -896,6 +915,22 @@ def _retry_plan(model: str, effort: str | None, budget: int, reply: Reply) -> tu
     return new_effort, new_budget
 
 
+def _empty_reply(settings: Settings, model: str, budget: int, reply: Reply) -> EmptyReply:
+    """What to raise for a reply with no answer. A model that can't be told not to think (LM Studio lists no "off"
+    for it: DeepSeek-R1 distills, QwQ) that used all of twice the usual room thinking will go on doing so: that is
+    said plainly, with what to do, rather than only that it ran out of room."""
+    if reply.content or not reply.reasoning or reply.finish != "length" or budget < 2 * THINKING_ROOM:
+        return EmptyReply(reply.why_unusable())
+    status = check_model(settings)
+    options = status.reasoning if status.model == model else status.reasoning_options.get(model, [])
+    if not options or "off" in options:
+        return EmptyReply(reply.why_unusable())
+    return ThinksTooLong(
+        f"{model} thinks before every answer and can't be told not to, and it ran out of room even with {budget:,} "
+        "tokens. Choose one that can, like Qwen3, or a smaller one in Settings"
+    )
+
+
 def complete_text(
     settings: Settings, messages: list[dict], *, max_tokens: int = 400, temperature: float | None = None, think: bool = False
 ) -> str:
@@ -904,6 +939,7 @@ def complete_text(
     model, effort, budget = _chat_plan(settings, max_tokens, think=think)
     for _attempt in range(2):
         url, payload = _chat_request(settings, messages, budget, stream=False)
+        sent = budget
         if temperature is not None:
             payload["temperature"] = temperature
         if effort:
@@ -921,7 +957,7 @@ def complete_text(
         if plan is None:
             break
         effort, budget = plan
-    raise EmptyReply(reply.why_unusable())
+    raise _empty_reply(settings, model, sent, reply)
 
 
 def stream_text(
@@ -948,7 +984,7 @@ def stream_text(
     """
     model, effort, budget = _chat_plan(settings, max_tokens, model=model)
     for _attempt in range(2):
-        reply = Reply(content="")
+        reply, sent = Reply(content=""), budget
         if token_probs is not None:
             token_probs.clear()
         for piece in _stream_once(
@@ -965,7 +1001,7 @@ def stream_text(
         if plan is None:
             break
         effort, budget = plan
-    raise EmptyReply(reply.why_unusable())
+    raise _empty_reply(settings, model, sent, reply)
 
 
 def _stream_once(
@@ -982,9 +1018,11 @@ def _stream_once(
     sampling: dict | None = None,
     model: str | None = None,
     token_probs: list | None = None,
+    again: bool = False,
 ):
     """``rejected_effort`` names the model whose ``reasoning_effort`` the last try sent; it is
-    remembered as refusing it only if this try, without it, is accepted. ``rejected_probs``: the same for ``logprobs``."""
+    remembered as refusing it only if this try, without it, is accepted. ``rejected_probs``: the same for ``logprobs``.
+    ``again``: this is the one more try a busy server gets."""
     url, payload = _chat_request(settings, messages, budget, stream=True, model=model)
     if effort:
         payload["reasoning_effort"] = effort
@@ -999,7 +1037,7 @@ def _stream_once(
     # Nothing comes until the model has read the whole prompt (and LM Studio has loaded it, if it wasn't), so a laptop
     # reading a long prompt isn't taken for a model that stopped.
     timeout = httpx.Timeout(max(settings.llm_timeout, CHAT_TIMEOUT, wait or 0.0), connect=5.0)
-    without_probs = False
+    without_probs = busy = False
     with _using(str(payload.get("model"))), http_method("stream")("POST", url, json=payload, headers=auth_headers(settings), timeout=timeout) as response:
         if response.status_code >= 400:
             response.read()
@@ -1010,9 +1048,12 @@ def _stream_once(
             # A server that doesn't know ``logprobs``: the reading matters, how sure it was is a nice-to-have.
             rejected = False
             without_probs = True
-        elif effort and response.status_code in _RETRYABLE:
+        elif effort and response.status_code in _REFUSES:
             rejected = True
-            refused = response.status_code in _REFUSES
+        elif effort and response.status_code in _RETRYABLE and not again and not out_of_memory(response.text):
+            # A busy server: asked once more as it was. Without the effort, a model that can turn thinking off would
+            # think again with the same room; a model out of memory isn't asked again at all.
+            rejected, busy = False, True
         else:
             rejected = False
             _raise_for(response)
@@ -1029,11 +1070,17 @@ def _stream_once(
             sampling=sampling, model=model,
         )
     elif rejected:
-        # Only a refusal is remembered; a busy server (500) is just tried again without the effort.
+        # Remembered as refusing the effort only if the request without it goes through.
         yield from _stream_once(
             settings, messages, budget, None, reply,
-            rejected_effort=str(payload.get("model")) if refused else "", rejected_probs=rejected_probs, wait=wait,
+            rejected_effort=str(payload.get("model")), rejected_probs=rejected_probs, wait=wait,
             temperature=temperature, sampling=sampling, model=model, token_probs=token_probs,
+        )
+    elif busy:
+        yield from _stream_once(
+            settings, messages, budget, effort, reply,
+            rejected_effort=rejected_effort, rejected_probs=rejected_probs, wait=wait,
+            temperature=temperature, sampling=sampling, model=model, token_probs=token_probs, again=True,
         )
 
 
@@ -1112,11 +1159,14 @@ def _stream_error(error) -> None:
     if isinstance(error, dict):
         error = error.get("error") or error
     if isinstance(error, dict):
-        error = error.get("message") or json.dumps(error)
-    text = " ".join(str(error or "unknown error").split())[:200]
-    if _OVERFLOW_RE.search(text):
+        error = error.get("message") or error.get("detail") or json.dumps(error)
+    said = " ".join(str(error or "unknown error").split())
+    text = said[:200]
+    if _OVERFLOW_RE.search(said):
         raise ContextOverflow(text)
-    raise httpx.HTTPError(f"the model server stopped with an error ({text})")
+    failed = httpx.HTTPError(f"the model server stopped with an error ({text})")
+    failed.said = said  # all of it: a memory error can be named only past the first 200 characters
+    raise failed
 
 
 class ContextOverflow(RuntimeError):
@@ -1400,18 +1450,35 @@ def forget_reader_failures() -> None:
     _reader_failed.clear()
 
 
+def _server_words(exc: httpx.HTTPError) -> str:
+    """All of what the model server said about a failure, or "" when it said nothing: ``{"error": "..."}``,
+    ``{"error": {"message": "..."}}``, ``{"message": "..."}`` (llama.cpp) or ``{"detail": "..."}``, a reply in plain
+    text, or the error it wrote into a stream."""
+    if isinstance(getattr(exc, "said", None), str):
+        return exc.said
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return ""
+    try:
+        data = exc.response.json()
+    except (ValueError, httpx.StreamError):  # not JSON, or a streamed reply that wasn't read
+        data = None
+    if isinstance(data, dict):
+        error = data.get("error")
+        for said in (error.get("message") if isinstance(error, dict) else error, data.get("message"), data.get("detail")):
+            if isinstance(said, str) and said.strip():
+                return said.strip()
+        return ""
+    try:
+        text = exc.response.text.strip()
+    except httpx.StreamError:
+        return ""
+    return "" if data is not None or text.startswith("<") else text  # a web page isn't words to show
+
+
 def _lm_studio_said(exc: httpx.HTTPError) -> str:
-    """LM Studio's own reason for refusing (``{"error": "..."}`` or ``{"error": {"message": "..."}}``), such as
-    running short of memory, rather than the bare status code."""
-    if isinstance(exc, httpx.HTTPStatusError):
-        try:
-            error = exc.response.json().get("error")
-        except (ValueError, AttributeError, httpx.StreamError):  # a streamed reply that wasn't read
-            error = None
-        said = error.get("message") if isinstance(error, dict) else error
-        if isinstance(said, str) and said.strip():
-            return said.strip()[:200]
-    return _short_error(exc)
+    """LM Studio's own reason for refusing, such as running short of memory, rather than the bare status code."""
+    said = _server_words(exc)
+    return said[:200] if said else _short_error(exc)
 
 
 # Chat models LM Studio couldn't load lately, with when: not asked for again on CloseDesk's own (the start's automatic
@@ -1518,6 +1585,7 @@ def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict],
     ]
     for _attempt in range(2):
         url, payload = _chat_request(settings, messages, budget, stream=False)
+        sent = budget
         payload["tools"] = tools
         if effort:
             payload["reasoning_effort"] = effort
@@ -1541,7 +1609,7 @@ def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict],
         if plan is None:
             break
         effort, budget = plan
-    raise EmptyReply(Reply(reply.content, reply.reasoning, reply.finish).why_unusable())
+    raise _empty_reply(settings, model, sent, Reply(reply.content, reply.reasoning, reply.finish))
 
 
 _TEXT_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*(?:</tool_call>|\Z)", re.S)
@@ -1737,12 +1805,16 @@ def _short_error(exc: Exception) -> str:
 
 
 # How LM Studio (llama.cpp, MLX) and other servers say the model ran short of memory: LM Studio's bare "Compute error"
-# is a Mac's graphics memory running out partway through an answer, most often with a model too big for it.
+# is a Mac's graphics memory running out partway through an answer, most often with a model too big for it. With a
+# large model: llama.cpp's "llama_decode returned -3" (the answer couldn't be worked out in the memory there was),
+# Vulkan's "ErrorOutOfDeviceMemory", MLX's "greater than the maximum allowed buffer size", C++'s "bad_alloc", and
+# LM Studio's "has crashed" or an exit code near 2^64 (a Windows crash code, most often memory running out).
 _MEMORY_RE = re.compile(
-    r"compute\W*error|out of (?:device |gpu )?memory|outofmemory|insufficient (?:system |gpu )?memory|"
+    r"compute\W*error|out\W*of\W*(?:device\W*|gpu\W*|host\W*)?memory|insufficient (?:system |gpu )?memory|"
     r"not enough (?:system |gpu )?memory|failed to allocate|unable to allocate|cannot allocate|alloc(?:ation)? failed|"
     r"memory (?:is )?exhausted|kiogpucommandbuffercallbackerror|insufficient system resources|"
-    r"requires? more (?:system |gpu )?memory",
+    r"requires? more (?:system |gpu )?memory|llama_decode returned -3\b|maximum allowed buffer size|bad_alloc|"
+    r"model has crashed|exit code:?\s*18446744\d{12}",
     re.I,
 )
 MEMORY_ADVICE = (
@@ -1757,18 +1829,23 @@ def out_of_memory(text: str) -> bool:
 
 
 def ran_out_of_memory(exc: Exception) -> bool:
-    """Whether a model's failure was the server running short of memory, by what it said."""
-    said = _lm_studio_said(exc) if isinstance(exc, httpx.HTTPError) else str(exc)
-    return out_of_memory(said) or out_of_memory(str(exc))
+    """Whether a model's failure was the server running short of memory, by what it said (all of it: a long Metal or
+    CUDA message can name the memory only at its end)."""
+    said = _server_words(exc) if isinstance(exc, httpx.HTTPError) else ""
+    return out_of_memory(said) or out_of_memory(getattr(exc, "said", "")) or out_of_memory(str(exc))
 
 
 def failure_note(exc: Exception) -> str:
     """Why the chat's model didn't answer, in words a person can act on."""
     if ran_out_of_memory(exc):
         return "The local model ran out of memory partway through. " + MEMORY_ADVICE
+    if isinstance(exc, ThinksTooLong):
+        return f"The local model didn't answer. {exc}."
     if isinstance(exc, httpx.TimeoutException):
         return (
             "The local model took too long to start answering: LM Studio may still be loading it or reading a long "
             "prompt. Ask again in a minute; on a slow computer, give it longer with CONTROLLER_INBOX_LLM_TIMEOUT."
         )
-    return f"The local model didn't answer ({str(exc)[:120]})."
+    # The server's own words (LM Studio's "Model is reloading"), not httpx's "Server error '500 ...' for url ...".
+    said = _lm_studio_said(exc) if isinstance(exc, httpx.HTTPError) else str(exc)
+    return f"The local model didn't answer ({' '.join(said.split())[:120]})."
