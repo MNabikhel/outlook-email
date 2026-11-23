@@ -129,7 +129,7 @@ export function createChat({ root, onToggle, visionRead }) {
     const now = turn.progress;
     if (!now) return null;
     if (now.state === "writing") return h("span", { class: "typing" }, "Writing the answer…");
-    if (now.state === "thinking") return h("span", { class: "typing" }, "Thinking…");
+    if (now.state === "thinking") return turn.thinking ? null : h("span", { class: "typing" }, "Thinking…");
     const elapsed = Math.max(0, (Date.now() - now.at) / 1000);
     const timed = Number(now.seconds) > 0;
     const late = timed && elapsed >= Number(now.seconds);
@@ -141,6 +141,22 @@ export function createChat({ root, onToggle, visionRead }) {
       late ? h("span", { class: "progress-late" }, "Taking longer than usual…") : null,
       h("span", { class: `progress-bar${timed && !late ? "" : " busy"}`, "aria-hidden": "true" }, h("i", fill))
     );
+  }
+
+  /* A model that reasons before it answers: its reasoning as it streams, in a small box showing the last few lines,
+     which closes when the answer starts and stays there as "Thought for 40 s" (click to read it). Model output:
+     set as text, never as HTML. */
+  function thinkingEl(turn) {
+    const thought = turn.thinking;
+    if (!thought || !thought.text) return null;
+    const live = turn.pending && !thought.ended;
+    const seconds = Math.max(1, Math.round(((thought.ended || Date.now()) - thought.started) / 1000));
+    const body = h("div", { class: "think-text" }, thought.text);
+    const box = h("details", { class: `msg-thinking${live ? " live" : ""}` }, h("summary", null, live ? "Thinking…" : `Thought for ${seconds} s`), body);
+    box.open = thought.open === undefined ? live : thought.open;
+    box.addEventListener("toggle", () => (thought.open = box.open));
+    if (live) requestAnimationFrame(() => (body.scrollTop = body.scrollHeight));
+    return box;
   }
 
   function readingEl(reading) {
@@ -255,7 +271,8 @@ export function createChat({ root, onToggle, visionRead }) {
     else if (!reading) {
       const steps = turn.steps || [];
       const working = turn.pending ? progressEl(turn) : null;
-      append(answer, working || h("span", { class: "typing" }, steps.length ? `${steps[steps.length - 1]}…` : "Thinking…"));
+      const thinking = turn.pending && turn.thinking && !turn.thinking.ended; // the box above says it
+      if (!thinking) append(answer, working || h("span", { class: "typing" }, steps.length ? `${steps[steps.length - 1]}…` : "Thinking…"));
     }
     const cited = turn.mode === "model" && !turn.pending ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
     replace(
@@ -264,6 +281,7 @@ export function createChat({ root, onToggle, visionRead }) {
       turn.note ? h("p", { class: "msg-note" }, turn.note) : null,
       reading ? readingNowEl(reading) : readingEl(turn.reading),
       stepsEl(turn),
+      thinkingEl(turn),
       answer,
       turn.checks && turn.checks.length ? h("ul", { class: "msg-check" }, turn.checks.map((item) => h("li", null, icon("ok", 13), h("span", null, item)))) : null,
       turn.context ? h("p", { class: "msg-context" }, turn.context, " ", h("a", { href: "/app/settings", dataset: { nav: "" } }, "Settings")) : null,
@@ -464,6 +482,7 @@ export function createChat({ root, onToggle, visionRead }) {
               answer.notes.push(event.text);
               break;
             case "delta":
+              endThinking(answer);
               answer.text += event.text;
               break;
             case "revise":
@@ -481,7 +500,12 @@ export function createChat({ root, onToggle, visionRead }) {
             case "more_time":
               answer.more_time = { ...event };
               break;
+            case "thinking":
+              if (!answer.thinking) answer.thinking = { text: "", started: Date.now() };
+              answer.thinking.text += event.text || "";
+              break;
             case "progress":
+              if (event.state === "writing") endThinking(answer);
               answer.progress = { ...event, at: Date.now() };
               clearTimeout(lateTimer);
               if (Number(event.seconds) > 0) lateTimer = setTimeout(paint, Number(event.seconds) * 1000 + 50);
@@ -527,6 +551,14 @@ export function createChat({ root, onToggle, visionRead }) {
 
   function stop() {
     if (controller) controller.abort();
+  }
+
+  // The answer started: the thinking box closes, and says how long the model thought.
+  function endThinking(answer) {
+    if (answer.thinking && !answer.thinking.ended) {
+      answer.thinking.ended = Date.now();
+      answer.thinking.open = false;
+    }
   }
 
   /* ---------- Past conversations ---------- */

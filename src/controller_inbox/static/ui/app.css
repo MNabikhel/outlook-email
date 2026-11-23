@@ -1153,6 +1153,11 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .timeline li.noted::before { border-color: var(--ok); }
 @keyframes pulse { 50% { box-shadow: 0 0 0 4px var(--accent-soft); } }
 .typing { color: var(--muted); font-size: 12.5px; }
+.msg-thinking { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); font-size: 12px; color: var(--muted); }
+.msg-thinking summary { cursor: pointer; padding: 4px 8px; font-weight: 550; }
+.msg-thinking.live summary::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; vertical-align: 1px; }
+.msg-thinking .think-text { padding: 0 8px 6px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 16em; overflow: auto; }
+.msg-thinking.live .think-text { max-height: 4.6em; overflow: hidden; }
 .msg-progress { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 12.5px; }
 .msg-progress .progress-text { color: var(--text-2); }
 .msg-progress .progress-late { color: var(--warn); }

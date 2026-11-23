@@ -35,6 +35,7 @@ from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
     ContextOverflow,
     EmptyReply,
+    Thought,
     ToolsUnsupported,
     chat_with_tools,
     check_model,
@@ -1938,7 +1939,8 @@ class _Recorded:
 
     def __iter__(self) -> Iterator[str]:
         for piece in self.pieces:
-            self.text += piece
+            if not isinstance(piece, Thought):  # the model's reasoning, passed on to be shown: not its reply
+                self.text += piece
             yield piece
         self.whole = True
 
@@ -1947,6 +1949,8 @@ class _Recorded:
         start = len(self.text)
         try:
             for piece in self.pieces:
+                if isinstance(piece, Thought):
+                    continue
                 self.text += piece
                 if not _lone_close(self.text) and len(self.text) - start > self.LOOK_AHEAD:
                     break
@@ -2037,10 +2041,20 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
     _calling(state.get("call"), messages)
     if state.get("call") is not None:
         yield _reading_progress(state.get("store"), state["call"])
-    raw = _Recorded(stream_text(settings, messages, max_tokens=settings.chat_max_tokens, finished=finished, limit=_limit(state)))
+    # The reasoning of a model that thinks first comes too, to show as it streams: never part of the answer's text.
+    raw = _Recorded(stream_text(
+        settings, messages, max_tokens=settings.chat_max_tokens, finished=finished, limit=_limit(state), thoughts=True
+    ))
+    thought = False
     echoed = True
     try:
         for piece in without_echo(raw):
+            if isinstance(piece, Thought):
+                if not thought:
+                    thought = True
+                    yield {"type": "progress", "state": "thinking", "text": "Thinking"}
+                yield {"type": "thinking", "text": piece.text}
+                continue
             if not state["wrote"] and state.get("call") is not None:
                 yield WRITING
             state["wrote"] = True
@@ -2171,6 +2185,9 @@ def without_echo(pieces: Iterator[str]) -> Iterator[str]:
     pending = ""
     sent = False
     for piece in pieces:
+        if isinstance(piece, Thought):  # the reasoning goes on to the chat as it comes; only the answer is checked
+            yield piece
+            continue
         pending += piece
         echo = _ECHO_RE.search(pending)
         if echo:

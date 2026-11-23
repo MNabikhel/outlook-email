@@ -290,6 +290,12 @@
       const now = turn.pending && !turn.text ? turn.readingNow : null;
       html += now ? renderReadingNow(now) : renderReading(turn.reading);
       html += renderSteps(turn);
+      if (turn.thinking && turn.thinking.text) {
+        // The model's reasoning as it streams (escaped: it is model output); it closes once the answer starts.
+        const live = turn.pending && !turn.thinking.ended;
+        const seconds = Math.max(1, Math.round(((turn.thinking.ended || Date.now()) - turn.thinking.started) / 1000));
+        html += `<details class="msg-thinking"${live ? " open" : ""}><summary>${live ? "Thinking…" : `Thought for ${seconds} s`}</summary><div class="think-text">${escapeHtml(turn.thinking.text)}</div></details>`;
+      }
       const waiting = turn.progress ? progressLine(turn.progress) : turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
       if (turn.text || !now) html += `<div class="msg-text">${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
       if (turn.checks && turn.checks.length) {
@@ -458,7 +464,12 @@
           answer.mode = event.mode;
           answer.note = event.note || "";
           renderTurn(answer, bubble);
+        } else if (event.type === "thinking") {
+          if (!answer.thinking) answer.thinking = { text: "", started: Date.now() };
+          answer.thinking.text += event.text || "";
+          renderTurn(answer, bubble);
         } else if (event.type === "progress") {
+          if (event.state === "writing" && answer.thinking && !answer.thinking.ended) answer.thinking.ended = Date.now();
           answer.progress = { ...event, at: Date.now() };
           renderTurn(answer, bubble);
           clearTimeout(answer.lateTimer);
@@ -479,6 +490,7 @@
           answer.text = (answer.text ? answer.text + "\n\n" : "") + event.text;
           renderTurn(answer, bubble);
         } else if (event.type === "delta") {
+          if (answer.thinking && !answer.thinking.ended) answer.thinking.ended = Date.now();
           answer.text += event.text;
           renderTurn(answer, bubble);
         }
