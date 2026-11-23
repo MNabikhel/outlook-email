@@ -1,9 +1,10 @@
 """CloseDesk choosing the model that answers by itself, and suggesting a better fit.
 
 At the start, when LM Studio answers with no chat model loaded and none is named in the settings file (.env),
-CloseDesk has it load one: the one used last if it is still downloaded, else the most capable downloaded chat model
-that fits this computer's memory. Any size can still be chosen in Settings; the automatic choice only prefers one
-that fits. A model the user loaded is never unloaded or replaced without their click.
+CloseDesk has it load one: the one used last if it is still downloaded, else the largest downloaded chat model of
+up to about 10 GB (an 8B) that fits this computer's memory, or the smallest that fits when none is that small. Any
+size can still be chosen in Settings; the automatic choice only prefers one that fits. A model the user loaded is
+never unloaded or replaced without their click.
 
 When the model answering is too big for this computer's memory (with the context it was loaded with), or slow at
 reading mail (over ``SLOW_SECONDS`` an email), and a smaller downloaded one would fit, Settings and Today suggest it once: "Load" switches, "Keep" stops asking
@@ -28,6 +29,9 @@ SLOW_SECONDS = 45.0
 SPEED_MIN_EMAILS = 3
 SPEED_KEY = "model_speed"  # {model: {"seconds": average an email, "emails": how many}}, the last reading of each
 KEPT_KEY = "model_kept"  # models the user chose to keep when another was suggested: not suggested against again
+# The largest download the automatic choice prefers: an 8B at Q8 is about 9 GB. A bigger one is chosen only when
+# none this small fits; any size can still be chosen in Settings.
+AUTO_LARGEST = 10 * 1024**3
 
 
 def pinned(settings: Settings) -> bool:
@@ -50,15 +54,22 @@ def loaded_chat(status: ModelStatus) -> list[str]:
 
 
 def _best_fit(settings: Settings, status: ModelStatus, keys: list[str]) -> str:
-    """The most capable of ``keys`` that fits this computer: the largest that does, a general chat model before a
+    """The one of ``keys`` to choose for this computer: the largest that runs well on it and is at most
+    ``AUTO_LARGEST`` (a 3B to 8B model is plenty, and answers faster), else the smallest that runs well; with none
+    that runs well on a PC's graphics card, the same among those that load at all. A general chat model before a
     coding one. "" when none fits or this can't be told (no sizes, memory unknown, LM Studio on another computer)."""
-    memory = model_roles.computer_memory()
-    if not status.chat_sizes or not memory or not model_roles.on_this_computer(settings, status):
+    budget = model_roles.model_budget()
+    if not status.chat_sizes or not budget or not model_roles.on_this_computer(settings, status):
         return ""
-    fitting = [key for key in keys if model_roles.fits(settings, status, key, memory)]
+    fitting = [key for key in keys if model_roles.fits(settings, status, key, budget)]
+    if not fitting and budget.gpu:
+        fitting = [key for key in keys if model_roles.fits(settings, status, key, budget, at_all=True)]
     if not fitting:
         return ""
-    return max(fitting, key=lambda key: (not _coder(key), status.chat_sizes[key]))
+    small = [key for key in fitting if status.chat_sizes[key] <= AUTO_LARGEST]
+    if small:
+        return max(small, key=lambda key: (not _coder(key), status.chat_sizes[key]))
+    return min(fitting, key=lambda key: (_coder(key), status.chat_sizes[key]))
 
 
 def auto_choice(settings: Settings, status: ModelStatus) -> str:
@@ -154,10 +165,8 @@ def recommendation(settings: Settings, store: Store, status: ModelStatus | None 
     # The memory it takes with the context LM Studio loaded it with (Setup's when LM Studio doesn't say).
     tokens = loaded_context or model_roles.context_for(settings, status, current)
     needed = model_roles.memory_needed(size, tokens)
-    memory = model_roles.computer_memory()
-    too_big = bool(
-        size and memory and model_roles.on_this_computer(settings, status) and needed > model_roles.USABLE_SHARE * memory
-    )
+    budget = model_roles.model_budget()
+    too_big = bool(size and budget and model_roles.on_this_computer(settings, status) and needed > budget.runs_well)
     if not (slow or too_big) or not size:
         return None
     smaller = [key for key in _chat_keys(status) if key != current and 0 < status.chat_sizes.get(key, 0) < size]
@@ -169,8 +178,10 @@ def recommendation(settings: Settings, store: Store, status: ModelStatus | None 
     else:
         # It loaded and answers: only what is known is said, not that it will fail or that the other is faster.
         context = f" with a {tokens:,}-token context" if tokens else ""
+        runs_on_card = budget.gpu and model_roles.fits(settings, status, suggested, budget)
+        where = "on its graphics card" if runs_on_card else "in its memory"
         message = (
-            f"{current} needs about {round(needed / 1024**3)} GB of memory{context} and this computer has "
-            f"{round(memory / 1024**3)} GB, so the computer may slow down while it answers. {suggested} fits in its memory."
+            f"{current} needs about {round(needed / 1024**3)} GB of memory{context} and {budget.said()}, so the "
+            f"computer may slow down while it answers. {suggested} fits {where}."
         )
     return {"current": current, "suggested": suggested, "reason": "slow" if slow else "too_big", "message": message}

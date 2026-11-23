@@ -57,6 +57,16 @@ def _fresh_model_memory():
 
 
 @pytest.fixture(autouse=True)
+def _a_pc_without_a_graphics_card(monkeypatch):
+    """Tests size models for the same computer whatever runs them (a Mac in CI, a PC with a graphics card): a PC
+    whose memory is the one a model runs in. A test for a Mac or a card says so."""
+    from controller_inbox import model_roles
+
+    monkeypatch.setattr(model_roles, "_apple_silicon", lambda: False, raising=False)
+    monkeypatch.setattr(model_roles, "_gpu_found", 0, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_table_finder_download(monkeypatch):
     """Tests never fetch the layout model from the internet: without it, tables are found as before."""
     from controller_inbox import table_finder

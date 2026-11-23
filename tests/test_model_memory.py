@@ -61,7 +61,7 @@ def test_a_model_too_big_for_this_computer_is_flagged_before_it_is_loaded(settin
     assert status.chat_sizes == {CHAT: 19 * GB, CODER: 4 * GB}
     choice = model_roles.chat_choices(settings, status)
     warning = choice["too_big"][CHAT]
-    assert "about 21 GB" in warning and "16 GB" in warning and "3B to 8B" in warning
+    assert "about 24 GB" in warning and "about 12 GB of its 16 GB" in warning and "3B to 8B" in warning
     assert CODER not in choice["too_big"], "a 4 GB model fits in 16 GB"
 
 
@@ -103,16 +103,16 @@ def test_both_settings_pages_mark_a_model_too_big_and_still_offer_it(settings, s
     page = client.get("/settings").text
     form = page.split('id="chat-model"')[1].split("</form>")[0]
     assert f"{CODER} (likely too big for this computer)</option>" in form and f"{CHAT} (loaded)</option>" in form
-    assert f'data-too-big="{CODER} needs about 21 GB' in form
+    assert f'data-too-big="{CODER} needs about 24 GB' in form
     assert '<p class="warn-box small" data-too-big-note hidden></p>' in form, "the one loaded fits: no warning yet"
     chat = client.get("/api/settings", headers={"X-CloseDesk": "1"}).json()["chat"]
     flagged = {item["key"]: item["too_big"] for item in chat["models"]}
-    assert flagged[CHAT] == "" and flagged[CODER].startswith(f"{CODER} needs about 21 GB")
+    assert flagged[CHAT] == "" and flagged[CODER].startswith(f"{CODER} needs about 24 GB")
     # Still loads when asked: the warning is advice, not a refusal.
     reply = client.post("/settings/chat-model", data={"model": CODER}, headers={"Origin": "http://testserver"}, follow_redirects=False)
     assert reply.headers["location"] == "/settings?notice=chat-model#chat-model" and CODER in server.loaded
     page = client.get("/settings").text
-    assert f'<p class="warn-box small" data-too-big-note>{CODER} needs about 21 GB' in page, "the loaded one is too big: said"
+    assert f'<p class="warn-box small" data-too-big-note>{CODER} needs about 24 GB' in page, "the loaded one is too big: said"
 
 
 @pytest.mark.parametrize("said", [
