@@ -1557,11 +1557,13 @@ def answer_stream(
     wait = model_fit.chat_wait(store, settings)
     ws.wait = wait.seconds
     ws.call["model"] = wait.model
-    # A model LM Studio unloaded while idle is loaded again by the first call: that load isn't timed as reading.
+    # A model LM Studio unloaded while idle is loaded again by the first call: that load isn't timed as reading, and
+    # the first call's line says it loads rather than give an estimate of the reading alone.
     state: dict[str, Any] = {
         "wrote": False, "text": "", "store": store, "wait": wait, "call": ws.call,
         "loaded": loaded_now(check_model(settings), wait.model),
     }
+    ws.call["loading"] = not state["loaded"]
     offer = None
     if current is not None and _should_read_files(ws, question, focus if about_today else None):
         outcome: dict[str, Any] = {}
@@ -2054,12 +2056,16 @@ def _reading_progress(store: Store | None, call: dict, *, written: int = 0) -> d
     written too, so its estimate is for both."""
     tokens = int(call.get("tokens") or 0)
     model = str(call.get("model") or "")
+    reading = call.get("reading") or "Reading"
+    if call.pop("loading", False):  # the first call loads the model, for as long as LM Studio takes: no estimate
+        text = f"Loading the model in LM Studio, then {reading[:1].lower()}{reading[1:]}"
+        return {"type": "progress", "state": "reading", "text": text, "tokens": tokens, "seconds": None, "about": ""}
     if written:
         seconds = model_fit.estimate_call(store, model, tokens=tokens, written=written)
     else:
         seconds = model_fit.estimate(store, model, tokens=tokens)
     return {
-        "type": "progress", "state": "reading", "text": call.get("reading") or "Reading", "tokens": tokens,
+        "type": "progress", "state": "reading", "text": reading, "tokens": tokens,
         "seconds": round(seconds, 1) if seconds else None, "about": model_fit.about(seconds),
     }
 

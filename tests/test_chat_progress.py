@@ -94,6 +94,23 @@ def test_the_time_lm_studio_takes_to_load_the_model_isnt_taken_for_reading(setti
     assert "read" not in rates and rates["write"] > 0
 
 
+def test_a_model_lm_studio_unloaded_is_said_to_load_rather_than_to_take_longer_than_usual(settings, loaded, lm):  # noqa: F811
+    """The estimate was the reading alone: for a 31B that LM Studio unloaded while idle, "about 20 seconds", then
+    "Taking longer than usual…" for the minute or two LM Studio took to load it, though nothing was wrong."""
+    server = lm(first_delay=0.1)
+    model_fit.record_speed(loaded, KEY, prompt_tokens=5000, read_seconds=100.0)  # measured before
+    server.loaded = False
+    local_llm.remember_model(settings, KEY)
+    first = _progress(_ask(loaded, settings))[0]
+    assert first["state"] == "reading" and first["seconds"] is None and first["about"] == ""
+    assert re.fullmatch(r"Loading the model in LM Studio, then reading \d+ emails?", first["text"]), first["text"]
+    # Loaded now: the next question has its estimate.
+    server.loaded = True
+    local_llm._status_cache.clear()
+    again = _progress(_ask(loaded, settings))[0]
+    assert again["seconds"] and again["text"].startswith("Reading ")
+
+
 def test_a_call_that_isnt_streamed_is_timed_for_its_reading_and_its_writing(settings, loaded, lm):  # noqa: F811
     """A call that asks for tools sends nothing until the model has read the prompt and written its whole reply, so
     an estimate of the reading alone said "Taking longer than usual…" on every normal question about files."""
