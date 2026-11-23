@@ -67,6 +67,21 @@ def test_a_prompt_the_model_had_read_before_isnt_taken_for_a_fast_model(settings
     assert model_fit.speeds(loaded, KEY)["read"] == 65
 
 
+def test_fast_readings_replace_a_slow_first_one_only_when_the_server_says_what_it_read_anew(settings, loaded, lm):  # noqa: F811
+    """Three readings in a row far faster than the one kept are the model's own speed (the one kept waited behind
+    another request) only when the server said how much of each prompt it had read before; when it didn't, they may
+    be prompts it had read, and the speed kept stays."""
+    server = lm(first_delay=0.2)
+    model_fit.record_speed(loaded, KEY, prompt_tokens=8000, read_seconds=800.0)  # 10 tokens a second
+    for _ in range(3):
+        _ask(loaded, settings)
+    assert model_fit.speeds(loaded, KEY)["read"] == 10, "not said: kept"
+    server.usage = {"prompt_tokens": 9000, "completion_tokens": 40, "prompt_tokens_details": {"cached_tokens": 0}}
+    for _ in range(3):
+        _ask(loaded, settings)
+    assert model_fit.speeds(loaded, KEY)["read"] > 1000
+
+
 def test_the_time_lm_studio_takes_to_load_the_model_isnt_taken_for_reading(settings, loaded, lm):  # noqa: F811
     """After LM Studio unloaded the model while idle, the question has it load again before the model reads: that
     load isn't counted as reading (a prompt of seconds would be said to take minutes)."""

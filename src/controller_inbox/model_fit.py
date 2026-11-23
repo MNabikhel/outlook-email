@@ -50,7 +50,8 @@ NEW_WEIGHT = 0.5
 # before (the server doesn't always say), and kept, one such question would cut the wait for the next to a fraction.
 FASTEST_JUMP = 4.0
 # But this many such readings in a row are the model's own speed (the one kept was slow: its first question waited
-# behind another request, say), and the slowest of them is kept instead.
+# behind another request, say), and the slowest of them is kept instead: only readings where the server said how much
+# of the prompt it had read before, as follow-up questions about the same mail look just as fast when it doesn't.
 FAST_IN_A_ROW = 3
 
 WAIT_KEY = "model_wait"  # {model: seconds} the user chose
@@ -134,11 +135,12 @@ def speeds(store: Store | None, *names: str) -> dict[str, float]:
 
 
 def record_speed(store: Store, model: str, *, prompt_tokens: int, read_seconds: float, written: int = 0,
-                 write_seconds: float = 0.0) -> None:
+                 write_seconds: float = 0.0, counted: bool = False) -> None:
     """Keep how fast ``model`` read a prompt of ``prompt_tokens`` (its first word came ``read_seconds`` after the
     question went) and wrote ``written`` tokens in ``write_seconds``, so the next estimate and wait are nearer. A
     reading ``FASTEST_JUMP`` times faster than the one kept isn't kept (a prompt LM Studio had read before), unless
-    ``FAST_IN_A_ROW`` come in a row: then the slowest of them replaces the one kept."""
+    ``FAST_IN_A_ROW`` come in a row that the server ``counted`` (it said how much of the prompt it had read before,
+    so ``prompt_tokens`` are the ones it read anew): then the slowest of them replaces the one kept."""
     if not model:
         return
     rates = _read(store, RATES_KEY)
@@ -154,6 +156,8 @@ def record_speed(store: Store, model: str, *, prompt_tokens: int, read_seconds: 
         before = entry.get(kind)
         rate = min(rate, 1e6)
         if kind == "read" and isinstance(before, (int, float)) and rate > before * FASTEST_JUMP:
+            if not counted:  # most likely a prompt it had read before: not kept, and not one of a run
+                continue
             fast = [value for value in entry.get("read_fast", []) if isinstance(value, (int, float))] + [rate]
             if len(fast) < FAST_IN_A_ROW:
                 entry["read_fast"] = fast  # a list: speeds() leaves it out

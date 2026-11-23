@@ -2086,6 +2086,7 @@ def _record_speed(state: dict, messages: list[dict], finished: dict) -> None:
     model_fit.record_speed(
         store, wait.model, prompt_tokens=0 if loading else tokens, read_seconds=finished["read_seconds"],
         written=finished.get("written", 0), write_seconds=finished.get("write_seconds", 0.0),
+        counted=bool(finished.get("prompt_counted")),
     )
 
 

@@ -1132,6 +1132,7 @@ def stream_text(
                 finished["written"] = _int(reply.usage.get("completion_tokens")) or reply.pieces
                 if "prompt_tokens" in reply.usage:
                     finished["prompt_tokens"] = _prompt_read(reply.usage)
+                    finished["prompt_counted"] = _cache_said(reply.usage)
         if reply.content:
             return
         plan = _retry_plan(model, effort if model not in _effort_rejected else None, budget, reply)
@@ -1148,6 +1149,13 @@ def _prompt_read(usage: dict) -> int:
     details = usage.get("prompt_tokens_details")
     cached = _int(details.get("cached_tokens")) if isinstance(details, dict) else 0
     return max(0, _int(usage.get("prompt_tokens")) - cached)
+
+
+def _cache_said(usage: dict) -> bool:
+    """The server said how much of the prompt it had read before (``cached_tokens``, 0 included), so the tokens
+    ``_prompt_read`` gives are the ones it read for this reply. LM Studio doesn't always say."""
+    details = usage.get("prompt_tokens_details")
+    return isinstance(details, dict) and isinstance(details.get("cached_tokens"), int)
 
 
 def loaded_now(status: ModelStatus, model: str) -> bool:

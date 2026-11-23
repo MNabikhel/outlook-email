@@ -291,17 +291,29 @@ def test_one_slow_first_reading_doesn_t_keep_a_model_slow_for_good(store):
     readings in a row are the model's own speed, and the slowest of them is kept."""
     model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=60.0)
     assert model_fit.speeds(store, BIG)["read"] == 50
-    model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=3.0)
-    model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=2.5)
+    model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=3.0, counted=True)
+    model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=2.5, counted=True)
     assert model_fit.speeds(store, BIG) == {"read": 50}, "one or two may be prompts read before"
-    model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=2.8)
+    model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=2.8, counted=True)
     assert model_fit.speeds(store, BIG) == {"read": 1000}
     assert model_fit.estimate(store, BIG, tokens=3000) == 3
 
     # A reading in reach between fast ones starts the count again.
     model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=60.0)
-    model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=3.0)
+    model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=3.0, counted=True)
     model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=40.0)
-    model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=3.0)
-    model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=3.0)
+    model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=3.0, counted=True)
+    model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=3.0, counted=True)
     assert model_fit.speeds(store, EIGHT)["read"] == 62.5
+
+
+def test_fast_readings_in_a_row_replace_the_speed_only_when_the_server_said_what_it_read_anew(store):
+    """When the server doesn't say how much of the prompt it had read before, follow-up questions about the same mail
+    look many times faster than the model reads. Three in a row replaced its true speed: 100 tokens a second became
+    700, the wait for a fresh 20,000-token prompt fell from 200 seconds to 29, and the next question with new mail
+    ran out of time."""
+    model_fit.record_speed(store, BIG, prompt_tokens=20000, read_seconds=200.0)
+    for tokens in (21000, 22000, 23000, 24000):
+        model_fit.record_speed(store, BIG, prompt_tokens=tokens, read_seconds=30.0)
+    assert model_fit.speeds(store, BIG) == {"read": 100}
+    assert model_fit.estimate(store, BIG, tokens=20000) == 200
