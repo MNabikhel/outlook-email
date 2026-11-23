@@ -514,7 +514,10 @@ def test_settings_api_without_classic_outlook(store, settings):
 
 
 def test_settings_api_check_and_sync_now(store, settings, connected):
-    connected.add("e1", "Invoice INV-7741 from Northwind", minutes=1)
+    # Sync now reads Outlook as of the real clock, back the days set in Settings: the email is a minute old by it,
+    # not by this file's NOW (it stopped being in the window 30 days after NOW).
+    minutes_before_now = (NOW - datetime.now(timezone.utc)).total_seconds() / 60 + 1
+    connected.add("e1", "Invoice INV-7741 from Northwind", minutes=minutes_before_now)
     client = TestClient(web.create_app(settings, store))
     reply = client.post("/api/settings/outlook/check", headers=PAGE)
     assert reply.status_code == 200 and "maya@taz.com" in reply.json()["message"] and "3 mail folders" in reply.json()["message"]
