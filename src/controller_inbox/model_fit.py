@@ -68,9 +68,7 @@ def auto_context(settings: Settings, status: ModelStatus, key: str, *, want: int
     supports, or for a model too big for that on this computer, the largest of Setup's steps that fits its memory
     (never under 4,096 tokens or the model's own most). 0 when Setup asks for none (the model as LM Studio loads it).
     Setup's minimum as it is when the model's size, this computer's memory, or where LM Studio runs can't be told."""
-    want = settings.min_context_tokens if want is None else want
-    most = status.chat_models.get(key, 0) or (status.max_context if key and key == status.key else 0)
-    target = min(want, most) if want and most else want
+    target, most = _wanted(settings, status, key, want)
     if not target:
         return 0
     size = status.chat_sizes.get(key, 0)
@@ -81,12 +79,31 @@ def auto_context(settings: Settings, status: ModelStatus, key: str, *, want: int
     sizes = [target, *sorted((step for step in _steps() if floor <= step < target), reverse=True)]
     if floor not in sizes:
         sizes.append(floor)
-    # What runs at speed first (a PC's graphics card); a model that doesn't at any size, what loads at all.
-    for room in (budget.runs_well, budget.loads):
-        for tokens in sizes:
-            if model_roles.memory_needed(size, tokens) <= room:
-                return tokens
+    # What runs at speed (a PC's graphics card); a model that doesn't at any size, what loads at all.
+    room = model_roles.room_for(size, floor, budget)
+    for tokens in sizes:
+        if model_roles.memory_needed(size, tokens) <= room:
+            return tokens
     return floor
+
+
+def _wanted(settings: Settings, status: ModelStatus, key: str, want: int | None = None) -> tuple[int, int]:
+    """Setup's minimum (or ``want``) no more than ``key`` supports, and the most it supports (0 when not told)."""
+    want = settings.min_context_tokens if want is None else want
+    most = status.chat_models.get(key, 0) or (status.max_context if key and key == status.key else 0)
+    return (min(want, most) if want and most else want), most
+
+
+def fits_with(settings: Settings, status: ModelStatus, key: str, tokens: int) -> bool:
+    """``key`` fits this computer with a ``tokens`` context, judged against the same memory ``auto_context`` fits it
+    into. True when that can't be told (its size, this computer's memory, or where LM Studio runs isn't known)."""
+    size = status.chat_sizes.get(key, 0)
+    budget = model_roles.model_budget()
+    if not size or budget is None or not model_roles.on_this_computer(settings, status):
+        return True
+    target, most = _wanted(settings, status, key)
+    floor = min(SMALLEST_CONTEXT, most or SMALLEST_CONTEXT, target) if target else 0
+    return model_roles.memory_needed(size, tokens) <= model_roles.room_for(size, floor, budget)
 
 
 def _read(store: Store | None, key: str) -> dict:

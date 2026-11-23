@@ -1578,16 +1578,15 @@ def context_fits(settings: Settings, status: ModelStatus | None = None) -> bool:
     """Whether the loaded model still fits in this computer's memory with the context CloseDesk would raise it to, by
     model_roles' estimate. True when that can't be told: LM Studio doesn't give the model's size, it runs on another
     computer, or this computer's memory can't be read."""
-    from controller_inbox import model_roles  # it imports this module
+    from controller_inbox import model_fit  # it imports this module
 
     status = status or check_model(settings)
-    budget = model_roles.model_budget()
-    if not status.chat_sizes.get(status.key) or budget is None or not model_roles.on_this_computer(settings, status):
+    if not status.key:
         return True
-    # What it can take and still answer at speed: on a PC, a context past its graphics card's memory slows every answer.
-    # With the context CloseDesk asks for it (model_fit): Setup's minimum, or what fits of it for a big model.
-    needed = model_roles.memory_needed(status.chat_sizes[status.key], context_target(settings, status))
-    return needed <= budget.runs_well
+    # Against the memory model_fit fits it into: on a PC, its graphics card when it runs there (a context past the
+    # card's memory slows every answer), else the computer's memory, as Load and use loads it. With the context
+    # CloseDesk asks for: Setup's minimum, or what fits of it for a big model.
+    return model_fit.fits_with(settings, status, status.key, context_target(settings, status))
 
 
 def step_back_context(settings: Settings) -> str:

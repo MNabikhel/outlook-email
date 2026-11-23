@@ -298,6 +298,13 @@ def memory_needed(size_bytes: int, context_tokens: int) -> int:
     return size_bytes + max(0, context_tokens) * per_token + COMPUTE_BYTES
 
 
+def room_for(size_bytes: int, smallest: int, budget: Budget) -> int:
+    """The memory a model of ``size_bytes`` is fitted into: what runs at speed (a PC's graphics card) when it fits
+    there with the ``smallest`` context CloseDesk would ask for, else what this computer can give it at all (it runs
+    partly from the computer's memory at any context, so a longer one doesn't slow it more)."""
+    return budget.runs_well if memory_needed(size_bytes, smallest) <= budget.runs_well else budget.loads
+
+
 def on_this_computer(settings: Settings, status: ModelStatus) -> bool:
     """LM Studio runs on this computer, so this computer's memory is the one a model loads into."""
     return (urlparse(status.base_url or settings.llm_base_url).hostname or "") in _THIS_COMPUTER

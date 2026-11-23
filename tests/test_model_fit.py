@@ -200,3 +200,28 @@ def test_settings_say_what_was_chosen_and_take_a_wait_on_both_pages(settings, st
     reply = client.post("/settings/model-wait", data={"model": BIG, "automatic": "1"}, headers=ORIGIN, follow_redirects=False)
     assert line in client.get(reply.headers["location"]).text
     assert json.loads(store.get_state(model_fit.WAIT_KEY)) == {}
+
+
+@pytest.mark.parametrize(
+    ("memory_gb", "card_gb", "key"),
+    [(64, 8, BIG), (16, 6, EIGHT)],
+    ids=["31B on a 64 GB PC with an 8 GB card", "8B on a 16 GB PC with a 6 GB card"],
+)
+def test_a_model_that_never_fits_the_graphics_card_is_raised_as_far_as_load_and_use_loads_it(
+    settings, monkeypatch, memory_gb, card_gb, key
+):
+    """It runs partly from the computer's memory at any context, so it is fitted to that, as Load and use fits it.
+    Before, the chat compared the raise against the card alone: it kept the model at 4,096 tokens and said 16,384
+    wouldn't fit in this computer's memory, though Load and use loaded it with 16,384."""
+    settings.llm = None
+    _computer(monkeypatch, memory_gb, mac=False)
+    monkeypatch.setattr(model_roles, "_gpu_found", card_gb * GB, raising=False)
+    server = _lm_studio(monkeypatch, loaded=[key])
+    server.contexts[key] = 4096
+    status = check_model(settings)
+    assert local_llm.context_target(settings, status) == model_fit.auto_context(settings, status, key) == 16384
+    assert local_llm.context_fits(settings, status)
+    assert needs_more_context(settings)
+    said = ensure_context(settings)
+    assert "wouldn't fit" not in said
+    assert server.calls == [("unload", key), ("load", key, 16384)]
