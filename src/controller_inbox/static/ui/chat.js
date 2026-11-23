@@ -150,7 +150,7 @@ export function createChat({ root, onToggle, visionRead }) {
     const thought = turn.thinking;
     if (!thought || !thought.text) return null;
     const live = turn.pending && !thought.ended;
-    const seconds = Math.max(1, Math.round(((thought.ended || Date.now()) - thought.started) / 1000));
+    const seconds = Math.max(1, Math.round(((thought.spent || 0) + (thought.ended || Date.now()) - thought.started) / 1000));
     const body = h("div", { class: "think-text" }, thought.text);
     const box = h("details", { class: `msg-thinking${live ? " live" : ""}` }, h("summary", null, live ? "Thinking…" : `Thought for ${seconds} s`), body);
     box.open = thought.open === undefined ? live : thought.open;
@@ -513,11 +513,12 @@ export function createChat({ root, onToggle, visionRead }) {
               answer.more_time = { ...event };
               break;
             case "thinking":
-              if (!answer.thinking) answer.thinking = { text: "", started: Date.now() };
+              startThinking(answer);
               answer.thinking.text += event.text || "";
               break;
             case "progress":
-              if (event.state === "writing") endThinking(answer);
+              // Writing, or reading again (asked again after the model stopped): the thinking so far has ended.
+              if (event.state === "writing" || event.state === "reading") endThinking(answer);
               answer.progress = { ...event, at: Date.now() };
               clearTimeout(lateTimer);
               if (Number(event.seconds) > 0) lateTimer = setTimeout(paint, Number(event.seconds) * 1000 + 50);
@@ -569,6 +570,20 @@ export function createChat({ root, onToggle, visionRead }) {
   }
 
   // The answer started: the thinking box closes, and says how long the model thought.
+  /* The model thinks: a new box, or after it was asked again, the same box going on below a blank line. "Thought for
+     N s" then counts the thinking of both, not the reading between. */
+  function startThinking(answer) {
+    const thought = answer.thinking;
+    if (!thought) answer.thinking = { text: "", started: Date.now() };
+    else if (thought.ended) {
+      thought.spent = (thought.spent || 0) + (thought.ended - thought.started);
+      if (thought.text) thought.text += "\n\n";
+      thought.started = Date.now();
+      thought.ended = 0;
+      thought.open = undefined;
+    }
+  }
+
   function endThinking(answer) {
     if (answer.thinking && !answer.thinking.ended) {
       answer.thinking.ended = Date.now();

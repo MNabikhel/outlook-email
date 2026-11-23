@@ -279,6 +279,28 @@
     return late ? `${now.text}… Taking longer than usual…` : `${now.text}…${now.about ? ` ${now.about}` : ""}`;
   }
 
+  /* The model thinks: a new box, or after it was asked again, the same box going on below a blank line. "Thought for
+     N s" then counts the thinking of both, not the reading between. */
+  function startThinking(answer) {
+    const thought = answer.thinking;
+    if (!thought) answer.thinking = { text: "", started: Date.now() };
+    else if (thought.ended) {
+      thought.spent = (thought.spent || 0) + (thought.ended - thought.started);
+      if (thought.text) thought.text += "\n\n";
+      thought.started = Date.now();
+      thought.ended = 0;
+      thought.open = undefined;
+    }
+  }
+
+  /* The thinking has ended: the box closes (the user can open it again) and keeps how long it took. */
+  function endThinking(answer) {
+    if (answer.thinking && !answer.thinking.ended) {
+      answer.thinking.ended = Date.now();
+      answer.thinking.open = false;
+    }
+  }
+
   function renderTurn(turn, bubble) {
     const el = bubble || document.createElement("div");
     el.className = `msg ${turn.role}${turn.pending ? " pending" : ""}`;
@@ -291,10 +313,13 @@
       html += now ? renderReadingNow(now) : renderReading(turn.reading);
       html += renderSteps(turn);
       if (turn.thinking && turn.thinking.text) {
-        // The model's reasoning as it streams (escaped: it is model output); it closes once the answer starts.
-        const live = turn.pending && !turn.thinking.ended;
-        const seconds = Math.max(1, Math.round(((turn.thinking.ended || Date.now()) - turn.thinking.started) / 1000));
-        html += `<details class="msg-thinking${live ? " live" : ""}"${live ? " open" : ""}><summary>${live ? "Thinking…" : `Thought for ${seconds} s`}</summary><div class="think-text">${escapeHtml(turn.thinking.text)}</div></details>`;
+        // The model's reasoning as it streams (escaped: it is model output); it closes once the answer starts. A box
+        // the user opened or closed stays so, though the bubble is drawn again with every piece that comes.
+        const thought = turn.thinking;
+        const live = turn.pending && !thought.ended;
+        const seconds = Math.max(1, Math.round(((thought.spent || 0) + (thought.ended || Date.now()) - thought.started) / 1000));
+        const open = thought.open === undefined ? live : thought.open;
+        html += `<details class="msg-thinking${live ? " live" : ""}"${open ? " open" : ""}><summary>${live ? "Thinking…" : `Thought for ${seconds} s`}</summary><div class="think-text">${escapeHtml(turn.thinking.text)}</div></details>`;
       }
       const waiting = turn.progress ? progressLine(turn.progress) : turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
       if (turn.text || !now) html += `<div class="msg-text">${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
@@ -323,9 +348,20 @@
           "</ul>";
       }
       el.innerHTML = html;
-      // While it thinks, the box shows the latest lines of the reasoning, not its first.
-      const thinking = $(".msg-thinking.live .think-text", el);
-      if (thinking) thinking.scrollTop = thinking.scrollHeight;
+      const box = $(".msg-thinking", el);
+      if (box) {
+        const thought = turn.thinking;
+        const text = $(".think-text", box);
+        // While it thinks, the box shows the latest lines of the reasoning, not its first; once done, where the user
+        // had scrolled to.
+        if (box.classList.contains("live")) text.scrollTop = text.scrollHeight;
+        else if (thought.scrolled) text.scrollTop = thought.scrolled;
+        text.addEventListener("scroll", () => (thought.scrolled = text.scrollTop));
+        // Drawn open, a box says so a moment later: only a box still on the page is the user's choice.
+        box.addEventListener("toggle", () => {
+          if (box.isConnected) thought.open = box.open;
+        });
+      }
     }
     if (!bubble) chatLog.append(el);
     chatLog.scrollTop = chatLog.scrollHeight;
@@ -470,11 +506,12 @@
           answer.note = event.note || "";
           renderTurn(answer, bubble);
         } else if (event.type === "thinking") {
-          if (!answer.thinking) answer.thinking = { text: "", started: Date.now() };
+          startThinking(answer);
           answer.thinking.text += event.text || "";
           renderTurn(answer, bubble);
         } else if (event.type === "progress") {
-          if (event.state === "writing" && answer.thinking && !answer.thinking.ended) answer.thinking.ended = Date.now();
+          // Writing, or reading again (asked again after the model stopped): the thinking so far has ended.
+          if (event.state === "writing" || event.state === "reading") endThinking(answer);
           answer.progress = { ...event, at: Date.now() };
           renderTurn(answer, bubble);
           clearTimeout(answer.lateTimer);
@@ -495,7 +532,7 @@
           answer.text = (answer.text ? answer.text + "\n\n" : "") + event.text;
           renderTurn(answer, bubble);
         } else if (event.type === "delta") {
-          if (answer.thinking && !answer.thinking.ended) answer.thinking.ended = Date.now();
+          endThinking(answer);
           answer.text += event.text;
           renderTurn(answer, bubble);
         }
@@ -504,7 +541,7 @@
       answer.text = (answer.text ? answer.text + "\n\n" : "") + `Something went wrong (${error.message}). Try again.`;
     }
     // Ended while it still thought (out of time, an error): the box keeps how long it thought, not a growing count.
-    if (answer.thinking && !answer.thinking.ended) answer.thinking.ended = Date.now();
+    endThinking(answer);
     busy = false;
     $("button[type='submit']", chatForm).disabled = false;
     if (round !== chatRound) return;

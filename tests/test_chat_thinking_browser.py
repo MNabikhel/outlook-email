@@ -123,3 +123,84 @@ def test_stopped_while_it_thinks_the_box_keeps_how_long_it_thought(settings, sto
         page.press("#chat textarea", "Enter")
         page.wait_for_selector(".msg.bot .msg-text:has-text('Nothing else is due')")
         assert page.locator(".msg-thinking").first.locator("summary").inner_text().strip() == said
+
+
+# Asked again after the model stopped while it thought ----------------------------------------------------------------
+
+
+def _retry_script():
+    """The model thinks, LM Studio stops it (the prompt was too long, or it ran out of memory), and CloseDesk asks
+    again: a new reading, with its estimate, then new reasoning and the answer."""
+    return [
+        {"type": "sources", "sources": [], "mode": "model"},
+        {"type": "progress", "state": "reading", "text": "Reading 1 email", "tokens": 900, "seconds": None, "about": ""},
+        {"type": "progress", "state": "thinking", "text": "Thinking"},
+        {"type": "thinking", "text": "First try: the invoice is from Northwind."}, 0.5,
+        {"type": "step", "text": "The question was too long for the model: trying again with less text"},
+        {"type": "progress", "state": "reading", "text": "Reading 1 email", "tokens": 450, "seconds": 30, "about": "about 30 seconds"},
+        2.0,
+        {"type": "progress", "state": "thinking", "text": "Thinking"},
+        {"type": "thinking", "text": "Second try: it is due Friday."}, 0.5,
+        {"type": "progress", "state": "writing", "text": "Writing the answer"},
+        {"type": "delta", "text": "The Northwind invoice is due Friday."},
+    ]
+
+
+def test_asked_again_the_old_thinking_box_ends_and_the_new_reading_shows(settings, store, page, monkeypatch):
+    """After LM Studio stopped a model that was thinking and CloseDesk asked again, the old box stayed live and hid
+    the new "Reading 1 email… about 30 seconds" line for the whole re-read; the new reasoning was run onto the old."""
+    _scripted(monkeypatch, _retry_script())
+    with serving(web.create_app(settings, store)) as base:
+        _ask(page, base, "What is due?")
+        page.wait_for_selector(".msg.bot .msg-progress:has-text('about 30 seconds')")
+        box = page.locator(".msg-thinking")
+        assert "live" not in (box.get_attribute("class") or "") and not box.evaluate("el => el.open")
+        page.wait_for_selector(".msg.bot .msg-text:has-text('due Friday')")
+        text = page.locator(".msg-thinking .think-text").text_content()
+        assert "Northwind.\n\nSecond try" in text, text
+        assert re.fullmatch(r"Thought for [12] s", page.locator(".msg-thinking summary").inner_text().strip())
+
+
+def test_asked_again_the_classic_chat_ends_the_old_thinking_box_too(settings, store, page, monkeypatch):
+    _scripted(monkeypatch, _retry_script())
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/chat/window")
+        page.fill("#chat textarea", "What is due?")
+        page.press("#chat textarea", "Enter")
+        page.wait_for_selector(".msg:has-text('about 30 seconds')")
+        box = page.locator(".msg-thinking")
+        assert "live" not in (box.get_attribute("class") or "") and not box.evaluate("el => el.open")
+        page.wait_for_selector(".msg .msg-text:has-text('Northwind invoice is due Friday')")
+        text = page.locator(".msg-thinking .think-text").text_content()
+        assert "Northwind.\n\nSecond try" in text, text
+        assert re.fullmatch(r"Thought for [12] s", page.locator(".msg-thinking summary").inner_text().strip())
+
+
+# The classic chat keeps the box as the user left it -------------------------------------------------------------------
+
+
+def test_the_classic_chat_keeps_the_thinking_box_open_or_closed_as_the_user_left_it(settings, store, page, monkeypatch):
+    """The classic page drew the box again on every piece of reasoning and every word of the answer: closed while the
+    model thought, it opened again at once; opened once the answer came, it closed again at the next word."""
+    slow_thinking = [{"type": "thinking", "text": f"Step {n}.\n"} for n in range(1, 6)]
+    slow_answer = [{"type": "delta", "text": f"Word {n}. "} for n in range(1, 6)]
+    _scripted(monkeypatch, [
+        {"type": "sources", "sources": [], "mode": "model"},
+        {"type": "progress", "state": "thinking", "text": "Thinking"},
+        *[part for piece in slow_thinking for part in (piece, 0.4)],
+        *[part for piece in slow_answer for part in (piece, 0.4)],
+    ])
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/chat/window")
+        page.fill("#chat textarea", "What is due?")
+        page.press("#chat textarea", "Enter")
+        page.wait_for_selector(".msg-thinking.live .think-text:has-text('Step 1.')")
+        page.locator(".msg-thinking summary").click()  # closed while it thinks
+        page.wait_for_selector(".msg-thinking .think-text:has-text('Step 3.')", state="attached")
+        assert not page.locator(".msg-thinking").evaluate("el => el.open"), "it stays closed"
+        page.wait_for_selector(".msg:has-text('Word 1.')")
+        page.locator(".msg-thinking summary").click()  # opened to read it as the answer comes
+        page.wait_for_selector(".msg:has-text('Word 3.')")
+        assert page.locator(".msg-thinking").evaluate("el => el.open"), "it stays open"
