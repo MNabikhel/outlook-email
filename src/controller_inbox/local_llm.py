@@ -1490,10 +1490,11 @@ def context_fits(settings: Settings, status: ModelStatus | None = None) -> bool:
     from controller_inbox import model_roles  # it imports this module
 
     status = status or check_model(settings)
-    memory = model_roles.computer_memory()
-    if not status.chat_sizes.get(status.key) or not memory or not model_roles.on_this_computer(settings, status):
+    budget = model_roles.model_budget()
+    if not status.chat_sizes.get(status.key) or budget is None or not model_roles.on_this_computer(settings, status):
         return True
-    return model_roles.fits(settings, status, status.key, memory)
+    # What it can take and still answer at speed: on a PC, a context past its graphics card's memory slows every answer.
+    return model_roles.fits(settings, status, status.key, budget)
 
 
 def step_back_context(settings: Settings) -> str:
