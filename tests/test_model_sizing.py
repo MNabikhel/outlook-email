@@ -111,6 +111,18 @@ def test_with_no_model_running_well_on_the_card_one_that_loads_is_still_chosen(s
     assert model_choice.auto_choice(settings, check_model(settings, use_cache=False)) == CHAT
 
 
+def test_a_smaller_model_just_as_much_too_big_for_the_card_isn_t_suggested(settings, store, lm, monkeypatch):
+    """A 14B on a PC with an 8 GB card: the only smaller one, a 12B, doesn't fit the card either. It was suggested as
+    "fits in its memory", while the same page said it would run from the computer's memory and answer slowly."""
+    _computer(monkeypatch, 32, card_gb=8)
+    fourteen, twelve = "qwen/qwen3-14b", "google/gemma-3-12b"
+    lm.extra = [fourteen, twelve]
+    lm.sizes = {fourteen: 9 * GB, twelve: int(7.5 * GB)}
+    status = check_model(settings, use_cache=False)
+    assert twelve in model_roles.too_big(settings, status)
+    assert model_choice.recommendation(settings, store, _answering(lm, settings, fourteen)) is None
+
+
 def test_a_64_gb_mac_still_takes_a_27b_when_the_user_picks_it(settings, store, lm, monkeypatch):
     _computer(monkeypatch, 64, mac=True)
     lm.extra = [GEMMA27]

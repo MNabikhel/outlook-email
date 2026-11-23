@@ -54,18 +54,20 @@ def loaded_chat(status: ModelStatus) -> list[str]:
     return [key for instance, (key, _context) in status.instances.items() if not document_reader(key) and not document_reader(instance)]
 
 
-def _best_fit(settings: Settings, status: ModelStatus, keys: list[str]) -> str:
+def _best_fit(settings: Settings, status: ModelStatus, keys: list[str], *, runs_well: bool = False) -> str:
     """The one of ``keys`` to choose for this computer: the largest that runs well on it and is at most
     ``AUTO_LARGEST`` (a 3B to 8B model is plenty, and answers faster), else the smallest that runs well; with none
     that runs well on a PC's graphics card, the same among those that load at all. With none that fits with the
     context Setup asks for, the same among the small ones with the shortest context CloseDesk would ask for. A general chat model before a
-    coding one. "" when none fits or this can't be told (no sizes, memory unknown, LM Studio on another computer)."""
+    coding one. "" when none fits or this can't be told (no sizes, memory unknown, LM Studio on another computer).
+    With ``runs_well``, only one that runs well: on a PC's graphics card, never one that loads only partly from the
+    computer's memory."""
     budget = model_roles.model_budget()
     if not status.chat_sizes or not budget or not model_roles.on_this_computer(settings, status):
         return ""
     # With Setup's context first; else with the shorter one CloseDesk would ask for (an 8 GB computer).
     tries = [{}, {"shorter": True}]
-    if budget.gpu:
+    if budget.gpu and not runs_well:
         tries += [{"at_all": True}, {"at_all": True, "shorter": True}]
     for how in tries:
         fitting = [
@@ -197,10 +199,12 @@ def _whole(seconds: float) -> str:
 
 
 def faster_model(settings: Settings, status: ModelStatus, current: str) -> str:
-    """A downloaded chat model smaller than ``current`` that fits this computer (the most capable such), or ""."""
+    """A downloaded chat model smaller than ``current`` that runs well on this computer (the most capable such), or "".
+    Never one that, like ``current``, would run partly from the computer's memory beside a graphics card too small
+    for it: that is no better."""
     size = status.chat_sizes.get(current, 0)
     smaller = [key for key in _chat_keys(status) if key != current and 0 < status.chat_sizes.get(key, 0) < size]
-    return _best_fit(settings, status, smaller)
+    return _best_fit(settings, status, smaller, runs_well=True)
 
 
 def recommendation(settings: Settings, store: Store, status: ModelStatus | None = None) -> dict | None:
@@ -231,8 +235,8 @@ def recommendation(settings: Settings, store: Store, status: ModelStatus | None 
     else:
         # It loaded and answers: only what is known is said, not that it will fail or that the other is faster.
         context = f" with a {tokens:,}-token context" if tokens else ""
-        runs_on_card = budget.gpu and model_roles.fits(settings, status, suggested, budget)
-        where = "on its graphics card" if runs_on_card else "in its memory"
+        # With a graphics card, the suggestion is always one that runs on it (faster_model).
+        where = "on its graphics card" if budget.gpu else "in its memory"
         message = (
             # Rounded up, as budget.said() rounds down: never "needs about 21 GB" and "can give about 21 GB".
             f"{current} needs about {math.ceil(needed / 1024**3)} GB of memory{context} and {budget.said()}, so the "
