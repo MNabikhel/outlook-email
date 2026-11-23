@@ -1,0 +1,241 @@
+"""How much memory a model takes, how much this computer can give it, and which model CloseDesk loads by itself.
+
+Every model was counted at 128 KB of context a token (an 8B's figure; a 31B takes about twice that) against three
+quarters of the computer's memory, whatever the computer. So a 19 GB 31B model on a 32 GB Mac looked like it fitted
+at 16k (21 GB of 24 GB) though macOS lets a model use only about 21 GB there: no warning, and the automatic start-up
+choice (the largest that fits) loaded it itself. The same on a Windows PC with 32 GB and an 8 GB graphics card,
+where the model runs at speed only in the card's 8 GB.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+import types
+
+import pytest
+from test_lm_studio_models import CHAT, CODER, LMStudio, _serve
+
+from controller_inbox import model_choice, model_roles
+from controller_inbox.local_llm import check_model, use_chat_model
+
+GB = 1024**3
+BIG, MID, GEMMA27 = "google/gemma-4-31b", "mistral-small-24b", "google/gemma-3-27b"
+# Download sizes at about Q4_K_M.
+SIZES = {CHAT: int(4.9 * GB), CODER: int(4.7 * GB), BIG: 19 * GB, MID: int(14.3 * GB)}
+
+
+@pytest.fixture
+def lm(settings, monkeypatch):
+    settings.llm = None
+    settings.ensure_data_dir()
+    server = LMStudio(loaded=[])
+    server.extra = [BIG, MID]
+    server.sizes = dict(SIZES)
+    _serve(monkeypatch, server)
+    return server
+
+
+def _computer(monkeypatch, memory_gb: float, *, mac: bool = False, card_gb: float = 0) -> None:
+    monkeypatch.setattr(model_roles, "computer_memory", lambda: int(memory_gb * GB))
+    monkeypatch.setattr(model_roles, "_apple_silicon", lambda: mac, raising=False)
+    monkeypatch.setattr(model_roles, "_gpu_found", int(card_gb * GB), raising=False)
+
+
+def _answering(lm, settings, key):
+    from controller_inbox import local_llm
+
+    lm.loaded = [key]
+    lm.contexts = {key: 16384}
+    local_llm._status_cache.clear()
+    return check_model(settings)
+
+
+# What a model takes ------------------------------------------------------------------------------------------
+
+
+def test_a_bigger_model_takes_more_memory_for_each_token_of_context():
+    per_token = lambda size: (model_roles.memory_needed(size, 16384) - model_roles.memory_needed(size, 0)) / 16384  # noqa: E731
+    assert per_token(int(4.9 * GB)) == pytest.approx(128 * 1024, rel=0.05), "Llama 3.1 8B: 128 KB a token"
+    assert per_token(int(19.9 * GB)) >= 230 * 1024, "Qwen 2.5 32B: 256 KB a token"
+    assert per_token(int(42.5 * GB)) >= 320 * 1024, "Llama 3.1 70B: 320 KB a token"
+
+
+def test_the_working_memory_beside_the_model_is_counted():
+    assert model_roles.memory_needed(5 * GB, 0) >= 5.9 * GB
+
+
+# What this computer can give -----------------------------------------------------------------------------------
+
+
+def test_a_31b_model_on_a_32_gb_mac_is_flagged_and_not_loaded_by_itself(settings, store, lm, monkeypatch):
+    _computer(monkeypatch, 32, mac=True)
+    status = check_model(settings, use_cache=False)
+    warning = model_roles.too_big(settings, status)[BIG]
+    assert "about 24 GB" in warning and "this Mac can give a model about 21 GB" in warning and "3B to 8B" in warning
+    assert CHAT not in model_roles.too_big(settings, status)
+    assert model_choice.auto_choice(settings, status) == CHAT
+    # Loaded anyway (the user chose it in Settings): the suggestion says which memory it was compared against.
+    tip = model_choice.recommendation(settings, store, _answering(lm, settings, BIG))
+    assert tip["reason"] == "too_big" and tip["suggested"] == CHAT
+    assert "this Mac can give a model about 21 GB" in tip["message"]
+
+
+def test_a_pc_with_an_8_gb_graphics_card_flags_a_19_gb_model(settings, store, lm, monkeypatch):
+    _computer(monkeypatch, 32, card_gb=8)
+    status = check_model(settings, use_cache=False)
+    flagged = model_roles.too_big(settings, status)
+    assert "this PC's graphics card has 8 GB" in flagged[BIG] and "3B to 8B" in flagged[BIG]
+    assert "this PC's graphics card has 8 GB" in flagged[MID]
+    assert CHAT not in flagged, "an 8B at 16k (about 8 GB) runs on the card"
+    assert model_choice.auto_choice(settings, status) == CHAT
+    tip = model_choice.recommendation(settings, store, _answering(lm, settings, BIG))
+    assert tip["reason"] == "too_big" and "this PC's graphics card has 8 GB" in tip["message"]
+    assert tip["message"].endswith(f"{CHAT} fits on its graphics card.")
+
+
+def test_a_model_too_big_for_the_card_but_not_the_pc_is_said_to_run_slowly(settings, lm, monkeypatch):
+    _computer(monkeypatch, 64, card_gb=8)
+    warning = model_roles.too_big(settings, check_model(settings, use_cache=False))[MID]
+    assert "run from the computer's memory" in warning and "run out of memory" not in warning
+
+
+def test_with_no_model_running_well_on_the_card_one_that_loads_is_still_chosen(settings, lm, monkeypatch):
+    _computer(monkeypatch, 32, card_gb=4)
+    lm.sizes = {CHAT: int(6.6 * GB), BIG: 19 * GB}
+    assert model_choice.auto_choice(settings, check_model(settings, use_cache=False)) == CHAT
+
+
+def test_a_64_gb_mac_still_takes_a_27b_when_the_user_picks_it(settings, store, lm, monkeypatch):
+    _computer(monkeypatch, 64, mac=True)
+    lm.extra = [GEMMA27]
+    lm.sizes = {CHAT: int(4.9 * GB), GEMMA27: 17 * GB}
+    status = check_model(settings, use_cache=False)
+    assert model_roles.too_big(settings, status) == {}
+    assert use_chat_model(settings, GEMMA27) == "" and GEMMA27 in lm.loaded
+    assert model_choice.recommendation(settings, store, _answering(lm, settings, GEMMA27)) is None
+
+
+def test_a_small_mac_keeps_memory_for_macos_and_outlook(monkeypatch):
+    _computer(monkeypatch, 8, mac=True)
+    assert model_roles.model_budget().runs_well == 4 * GB, "8 GB less 4 GB, under two thirds"
+    _computer(monkeypatch, 36, mac=True)
+    assert model_roles.model_budget().runs_well == 24 * GB
+    _computer(monkeypatch, 64, mac=True)
+    assert model_roles.model_budget().runs_well == 48 * GB
+
+
+def test_a_pc_without_a_graphics_card_counts_its_memory(monkeypatch):
+    _computer(monkeypatch, 32)
+    budget = model_roles.model_budget()
+    assert budget.runs_well == budget.loads == 24 * GB
+    _computer(monkeypatch, 8)
+    assert model_roles.model_budget().runs_well == 4 * GB
+    _computer(monkeypatch, 0)
+    assert model_roles.model_budget() is None
+
+
+# The automatic choice ------------------------------------------------------------------------------------------
+
+
+def test_the_automatic_choice_prefers_an_8b_to_a_31b_on_a_64_gb_computer(settings, lm, monkeypatch):
+    _computer(monkeypatch, 64)
+    status = check_model(settings, use_cache=False)
+    assert model_roles.too_big(settings, status) == {}, "all of them fit"
+    assert model_choice.auto_choice(settings, status) == CHAT
+    assert model_choice.load_at_start(settings)["model"] == CHAT and lm.loaded == [CHAT]
+
+
+def test_with_only_big_models_the_smallest_that_fits_is_chosen(settings, lm, monkeypatch):
+    _computer(monkeypatch, 64)
+    lm.sizes = {BIG: 19 * GB, MID: int(14.3 * GB)}
+    assert model_choice.auto_choice(settings, check_model(settings, use_cache=False)) == MID
+
+
+# Finding the graphics card -------------------------------------------------------------------------------------
+
+
+def _nvidia(monkeypatch, answer):
+    """nvidia-smi on the PATH, answering with ``answer`` (text, or an exception to raise). Returns the calls."""
+    calls = []
+
+    def run(command, **kw):
+        calls.append((command, kw))
+        if isinstance(answer, BaseException):
+            raise answer
+        return subprocess.CompletedProcess(command, 0, stdout=answer, stderr="")
+
+    monkeypatch.setattr(model_roles, "_gpu_found", None, raising=False)
+    monkeypatch.setattr(model_roles.shutil, "which", lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None)
+    monkeypatch.setattr(model_roles.subprocess, "run", run)
+    monkeypatch.setattr(model_roles, "_linux_card_memory", lambda: 0)
+    return calls
+
+
+def test_an_nvidia_card_is_asked_once_a_run(settings, store, lm, monkeypatch):
+    monkeypatch.setattr(model_roles, "computer_memory", lambda: 32 * GB)
+    calls = _nvidia(monkeypatch, "8192\n")
+    status = check_model(settings, use_cache=False)
+    for _ in range(3):
+        assert "this PC's graphics card has 8 GB" in model_roles.too_big(settings, status)[BIG]
+        model_choice.auto_choice(settings, status)
+        model_roles.chat_choices(settings, status)
+        model_choice.recommendation(settings, store, status)
+    assert len(calls) == 1
+    command, kw = calls[0]
+    assert command[1:] == ["--query-gpu=memory.total", "--format=csv,noheader,nounits"] and kw["timeout"] <= 2
+
+
+@pytest.mark.parametrize("answer", [
+    subprocess.TimeoutExpired("nvidia-smi", 2), OSError("not allowed"), "[N/A]\n", "", "NVIDIA-SMI has failed\n",
+])
+def test_a_graphics_card_that_cant_be_read_falls_back_to_the_computers_memory(settings, lm, monkeypatch, answer):
+    monkeypatch.setattr(model_roles, "computer_memory", lambda: 24 * GB)
+    calls = _nvidia(monkeypatch, answer)
+    assert model_roles.gpu_memory() == 0 and model_roles.gpu_memory() == 0 and len(calls) == 1
+    budget = model_roles.model_budget()
+    assert budget.runs_well == budget.loads == 18 * GB and budget.gpu == 0
+    assert "this computer can give a model about 18 GB of its 24 GB" in model_roles.too_big(settings, check_model(settings, use_cache=False))[BIG]
+
+
+def test_a_card_built_into_the_processor_doesnt_count(monkeypatch):
+    _nvidia(monkeypatch, "2048\n")
+    assert model_roles.gpu_memory() == 0
+    _nvidia(monkeypatch, "4096\n24576\n")  # two cards: the bigger one
+    assert model_roles.gpu_memory() == 24 * GB
+
+
+def test_windows_cards_memory_is_read_from_the_registry_not_wmi(monkeypatch):
+    """WMI's AdapterRAM stops at 4 GB; the driver's qwMemorySize in the registry is the card's own figure."""
+    values = {"0000": 512 * 1024**2, "0001": 12 * GB, "Properties": None}
+
+    class Key:
+        def __init__(self, name):
+            self.name = name
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def open_key(parent, name):
+        if isinstance(parent, Key) and values.get(name) is None:
+            raise OSError("no such key")
+        return Key(name)
+
+    def enum_key(_key, index):
+        names = list(values)
+        if index >= len(names):
+            raise OSError("no more")
+        return names[index]
+
+    def query(key, value):
+        assert value == "HardwareInformation.qwMemorySize"
+        return values[key.name], 11
+
+    fake = types.SimpleNamespace(HKEY_LOCAL_MACHINE="HKLM", OpenKey=open_key, EnumKey=enum_key, QueryValueEx=query)
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    assert model_roles._windows_card_memory() == 12 * GB
+    values["0001"] = (12 * GB).to_bytes(8, "little")  # some drivers write it as binary
+    assert model_roles._windows_card_memory() == 12 * GB

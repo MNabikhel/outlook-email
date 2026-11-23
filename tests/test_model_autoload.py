@@ -57,10 +57,11 @@ def test_with_none_used_before_the_most_capable_that_fits_is_loaded(settings, lm
     assert _loads(lm) == [CHAT] and local_llm.remembered_model(settings) == CHAT
 
 
-def test_a_bigger_computer_gets_the_bigger_model(settings, lm, monkeypatch):
+def test_a_bigger_computer_still_gets_a_small_model_first(settings, lm, monkeypatch):
+    # The 27B fits in 64 GB, but an 8B is plenty and answers faster; the 27B can still be chosen in Settings.
     monkeypatch.setattr(model_roles, "computer_memory", lambda: 64 * GB)
     lm.sizes = {CODER: 9 * GB, CHAT: 6 * GB, QWEN8: 5 * GB, GEMMA27: 17 * GB}
-    assert model_choice.load_at_start(settings)["model"] == GEMMA27, "not limited to small models"
+    assert model_choice.load_at_start(settings)["model"] == CHAT
 
 
 def test_document_readers_embeddings_and_coders_are_never_the_first_choice(settings, lm):
@@ -281,21 +282,21 @@ def test_a_model_too_big_gets_one_that_fits_suggested(settings, store, lm):
     assert tip["reason"] == "too_big" and tip["suggested"] == CHAT
     # Only what is known: it loaded and answers, so nothing is said about running out of memory or answering faster.
     assert tip["message"] == (
-        f"{GEMMA27} needs about 19 GB of memory with a 16,384-token context and this computer has 16 GB, so the "
-        f"computer may slow down while it answers. {CHAT} fits in its memory."
+        f"{GEMMA27} needs about 21 GB of memory with a 16,384-token context and this computer can give a model about 12 GB "
+        f"of its 16 GB, so the computer may slow down while it answers. {CHAT} fits in its memory."
     )
 
 
 def test_the_context_the_model_was_loaded_with_is_the_one_counted(settings, store, lm):
-    # Setup asks for 32,768 tokens (13 GB with a 9 GB model: too big for 12 GB), but LM Studio loaded it with 16,384
-    # (11 GB): it fits as it is.
+    # Setup asks for 32,768 tokens (14 GB with a 9 GB model: too big for 12 GB), but LM Studio loaded it with 16,384
+    # (12 GB): it fits as it is.
     settings.min_context_tokens = 32768
     lm.contexts = {QWEN8: 16384}
     status = _answering(lm, settings, QWEN8, **{QWEN8: 9 * GB, CHAT: 5 * GB})
     assert model_choice.recommendation(settings, store, status) is None
     lm.contexts = {QWEN8: 32768}
     tip = model_choice.recommendation(settings, store, _answering(lm, settings, QWEN8, **{QWEN8: 9 * GB, CHAT: 5 * GB}))
-    assert tip["reason"] == "too_big" and "about 13 GB of memory with a 32,768-token context" in tip["message"]
+    assert tip["reason"] == "too_big" and "about 14 GB of memory with a 32,768-token context" in tip["message"]
 
 
 def test_nothing_is_suggested_without_a_smaller_model_that_fits(settings, store, lm):
