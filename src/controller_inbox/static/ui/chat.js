@@ -209,7 +209,7 @@ export function createChat({ root, onToggle, visionRead }) {
   function moreTimeEl(turn) {
     const offer = turn.more_time;
     if (!offer) return null;
-    const minutes = h("input", { type: "number", class: "more-time-minutes", min: "1", max: "120", step: "1", inputmode: "numeric", value: String(offer.suggest || ""), "aria-label": "Minutes to wait" });
+    const minutes = h("input", { type: "number", class: "more-time-minutes", min: "2", max: "120", step: "1", inputmode: "numeric", value: String(offer.suggest || ""), "aria-label": "Minutes to wait" });
     const said = h("p", { class: `more-time-status${offer.failed ? " error" : ""}`, role: "status", "aria-live": "polite" }, offer.message || "");
     const button = h("button", { type: "submit", class: "btn btn-sm btn-primary", disabled: Boolean(offer.saved) }, icon("refresh", 14), h("span", null, "Save and ask again"));
     const save = async (event) => {

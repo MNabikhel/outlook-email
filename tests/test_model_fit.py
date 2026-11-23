@@ -163,12 +163,27 @@ def test_the_reading_waits_between_words_as_long_as_the_model_needs(settings, st
 
 def test_minutes_typed_are_checked(store):
     assert model_fit.parse_minutes("12") == 12 and model_fit.parse_minutes(" 3 ") == 3
-    for bad in ("", "abc", "0", "-5", "121", "2.5", "nan", "1e9", None):
+    for bad in ("", "abc", "0", "1", "-5", "121", "2.5", "nan", "1e9", None):
         with pytest.raises(ValueError):
             model_fit.parse_minutes(bad)
     with pytest.raises(ValueError):
         model_fit.set_wait(store, BIG, "lots")
     assert model_fit.chosen_wait(store, BIG) == 0
+
+
+def test_a_wait_shorter_than_every_call_s_own_is_said_as_the_wait_that_runs(store, settings):
+    """A 1-minute wait was taken, and Settings said "waits up to 1 minute", while every call waits at least
+    settings.llm_timeout (90 seconds), and the offer of more time then said CloseDesk gave it 2 minutes. The least
+    is now 2 minutes, and a wait kept from before is said as the one that runs."""
+    from controller_inbox.local_llm import ModelStatus
+
+    with pytest.raises(ValueError, match="from 2 to 120"):
+        model_fit.set_wait(store, BIG, 1)
+    store.set_state(model_fit.WAIT_KEY, json.dumps({BIG: 60.0}))  # kept from before
+    status = ModelStatus(mode="on", reachable=True, model=BIG, context_length=16384, server="ollama")
+    wait = model_fit.chat_wait(store, settings, status)
+    assert wait.seconds == settings.llm_timeout == 90 and wait.yours
+    assert "waits up to 2 minutes (set by you)" in model_fit.describe(store, settings, status)["line"]
 
 
 def test_settings_say_what_was_chosen_and_take_a_wait_on_both_pages(settings, store, monkeypatch):
@@ -186,7 +201,7 @@ def test_settings_say_what_was_chosen_and_take_a_wait_on_both_pages(settings, st
     fit = client.get("/api/settings", headers=PAGE).json()["fit"]
     assert fit["line"] == "qwen3-32b: 16,384-token context, waits up to 15 minutes (set by you)."
     bad = client.post("/api/settings/model-wait", json={"model": BIG, "minutes": "soon"}, headers=PAGE)
-    assert bad.status_code == 400 and bad.json()["detail"] == "Type a number of minutes, from 1 to 120."
+    assert bad.status_code == 400 and bad.json()["detail"] == "Type a number of minutes, from 2 to 120."
     assert client.post("/api/settings/model-wait", json={"model": BIG, "minutes": None}, headers=PAGE).status_code == 200
     assert not client.get("/api/settings", headers=PAGE).json()["fit"]["yours"]
 
@@ -196,7 +211,7 @@ def test_settings_say_what_was_chosen_and_take_a_wait_on_both_pages(settings, st
     page = client.get(reply.headers["location"]).text
     assert "waits up to 9 minutes (set by you)" in page
     reply = client.post("/settings/model-wait", data={"model": BIG, "minutes": "500"}, headers=ORIGIN, follow_redirects=False)
-    assert "Type a number of minutes from 1 to 120." in client.get(reply.headers["location"]).text
+    assert "Type a number of minutes from 2 to 120." in client.get(reply.headers["location"]).text
     reply = client.post("/settings/model-wait", data={"model": BIG, "automatic": "1"}, headers=ORIGIN, follow_redirects=False)
     assert line in client.get(reply.headers["location"]).text
     assert json.loads(store.get_state(model_fit.WAIT_KEY)) == {}

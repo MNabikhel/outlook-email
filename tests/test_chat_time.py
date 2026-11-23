@@ -197,8 +197,8 @@ def test_saving_the_wait_keeps_it_for_the_model_and_the_next_question_waits_that
     turn = loaded.chat_turns(chat_id)[-1]
     assert turn["more_time"]["suggest"] == offer["suggest"]
 
-    for bad, said in (("abc", "Type a number of minutes, from 1 to 120."), (0, "Type a number of minutes from 1 to 120."),
-                      (500, "Type a number of minutes from 1 to 120."), (2.5, "Type a whole number of minutes, from 1 to 120.")):
+    for bad, said in (("abc", "Type a number of minutes, from 2 to 120."), (0, "Type a number of minutes from 2 to 120."),
+                      (500, "Type a number of minutes from 2 to 120."), (2.5, "Type a whole number of minutes, from 2 to 120.")):
         refused = client.post("/chat/wait", json={"model": KEY, "minutes": bad}, headers=PAGE)
         assert refused.status_code == 400 and refused.json()["detail"] == said
     assert client.post("/chat/wait", json={"minutes": 12}, headers=PAGE).status_code == 400, "no model named"

@@ -524,7 +524,7 @@
     return (
       `<form class="more-time" novalidate data-more-time data-model="${escapeHtml(offer.model)}" data-question="${escapeHtml(offer.question || "")}" data-email="${escapeHtml(offer.email_id || "")}">` +
       `<p>${escapeHtml(offer.text)}</p>` +
-      `<label>Minutes <input type="number" name="minutes" min="1" max="120" step="1" inputmode="numeric" value="${Number(offer.suggest) || ""}"></label> ` +
+      `<label>Minutes <input type="number" name="minutes" min="2" max="120" step="1" inputmode="numeric" value="${Number(offer.suggest) || ""}"></label> ` +
       `<button type="submit">Save and ask again</button>` +
       `<span class="more-time-status" role="status" aria-live="polite"></span></form>`
     );

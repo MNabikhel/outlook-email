@@ -473,7 +473,7 @@ export function createSettings(ctx) {
   function modelWait() {
     const fit = data.fit;
     if (!fit) return null;
-    const minutes = h("input", { type: "number", id: "set-wait-minutes", class: "set-input set-minutes", min: "1", max: "120", step: "1", inputmode: "numeric", value: String(fit.minutes), "aria-describedby": "set-wait-help" });
+    const minutes = h("input", { type: "number", id: "set-wait-minutes", class: "set-input set-minutes", min: "2", max: "120", step: "1", inputmode: "numeric", value: String(fit.minutes), "aria-describedby": "set-wait-help" });
     return h(
       "form",
       {

@@ -33,7 +33,8 @@ SMALLEST_CONTEXT = 4096
 # The worked-out wait stays between these. A user's own wait is from 1 to 120 minutes.
 WAIT_FLOOR = 120.0
 WAIT_CEILING = 1800.0
-MIN_MINUTES, MAX_MINUTES = 1, 120
+# Not less than 2: every call waits at least settings.llm_timeout (90 seconds) whatever the wait set.
+MIN_MINUTES, MAX_MINUTES = 2, 120
 # Seconds of wait for each GB of the model, when nothing is measured yet: 2 minutes for an 8B (about 5 GB at Q4),
 # about 7 minutes for a 30B (about 18 GB). A model that thinks before it answers gets half as long again.
 SECONDS_PER_GB = 24.0
@@ -220,7 +221,7 @@ def chosen_wait(store: Store | None, *names: str) -> float:
 
 
 def parse_minutes(value) -> int:
-    """A wait typed in minutes, as a whole number from 1 to 120. Raises ``ValueError`` with what to type instead."""
+    """A wait typed in minutes, as a whole number from 2 to 120. Raises ``ValueError`` with what to type instead."""
     text = str(value if value is not None else "").strip().replace(",", ".")
     try:
         number = float(text)
@@ -266,7 +267,8 @@ def chat_wait(store: Store | None, settings: Settings, status: ModelStatus | Non
     status = status or check_model(settings)
     key = model_key(status)
     if yours := chosen_wait(store, key, status.model):
-        return Wait(key, yours, True)
+        # Never said as less than every call waits anyway (a wait of 1 minute kept from before).
+        return Wait(key, max(yours, settings.llm_timeout), True)
     return Wait(key, max(local_llm.CHAT_TIMEOUT, automatic_wait(settings, status, key, store)), False)
 
 
@@ -327,7 +329,7 @@ def suggested_minutes(
     a bit over the ``elapsed`` seconds it had taken when it was cut off. ``written``: the tokens the call that ran out
     might write (thinking included) when it isn't streamed, so nothing came back until it was all written: the time
     to write them is added (from the measured writing speed, else half as long again). More than the ``waited`` it
-    had, in whole minutes from 1 to 120: so not more when it had 120 already (the chat then offers no more time)."""
+    had, in whole minutes from 2 to 120: so not more when it had 120 already (the chat then offers no more time)."""
     key = model_key(status)
     rates = speeds(store, key, status.model)
     if rates.get("read") and prompt_tokens:
