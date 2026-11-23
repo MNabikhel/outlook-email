@@ -2012,17 +2012,22 @@ def _calling(call: dict | None, messages: list[dict]) -> None:
 
 
 def _reading_text(ws: agent.Workspace, about_files: bool) -> str:
-    """What the model reads before it answers, in words: "Reading 3 emails and 2 files"."""
+    """What the model reads before it answers, in words: "Reading 3 emails and 2 files", "Reading your calendar";
+    just "Reading" when none of these is counted."""
     mail = [email for email in ws.sources if email.source != "calendar" and not email.id.startswith("chat-")]
     files = 0
     if about_files:
         files = sum(
             1 for email in ws.sources if not attachments_locked(email) for att in email.attachments if (att.extracted_text or "").strip()
         )
-    said = f"Reading {len(mail)} email{'s' if len(mail) != 1 else ''}" if mail or not files else "Reading"
+    parts = [f"{len(mail)} email{'s' if len(mail) != 1 else ''}"] if mail else []
+    if any(email.source == "calendar" for email in ws.sources):
+        parts.append("your calendar")
     if files:
-        said += f"{' and' if mail else ''} {files} file{'s' if files != 1 else ''}"
-    return said
+        parts.append(f"{files} file{'s' if files != 1 else ''}")
+    if not parts:
+        return "Reading"
+    return "Reading " + (", ".join(parts[:-1]) + " and " + parts[-1] if len(parts) > 1 else parts[0])
 
 
 def _reading_progress(store: Store | None, call: dict, *, written: int = 0) -> dict[str, Any]:

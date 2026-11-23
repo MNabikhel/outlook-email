@@ -99,6 +99,22 @@ def test_a_call_that_isnt_streamed_is_timed_for_its_reading_and_its_writing(sett
     assert reading["seconds"] is None and reading["about"] == ""
 
 
+def test_the_line_says_what_is_read_without_a_count_of_none():
+    """A question about meetings, with only the calendar to read, said "Reading 0 emails"."""
+    from types import SimpleNamespace as N
+
+    from controller_inbox.assistant import _reading_text
+
+    calendar = N(source="calendar", id="calendar", attachments=[], flags=[], category=None)
+    email = N(source="outlook", id="m1", attachments=[], flags=[], category=None)
+    upload = N(source="chat", id="chat-1", attachments=[N(extracted_text="Rent 1,500")], flags=[], category=None)
+    assert _reading_text(N(sources=[calendar]), False) == "Reading your calendar"
+    assert _reading_text(N(sources=[email, calendar]), False) == "Reading 1 email and your calendar"
+    assert _reading_text(N(sources=[]), False) == "Reading"
+    assert _reading_text(N(sources=[upload]), False) == "Reading"
+    assert _reading_text(N(sources=[upload, email]), True) == "Reading 1 email and 1 file"
+
+
 def test_about_says_seconds_or_minutes():
     assert model_fit.about(None) == "" and model_fit.about(0) == ""
     assert model_fit.about(3) == "about 5 seconds" and model_fit.about(42) == "about 40 seconds"
