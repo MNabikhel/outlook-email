@@ -324,6 +324,16 @@ def estimate(store: Store | None, *names: str, tokens: int) -> float | None:
     return tokens / rate if rate and tokens > 0 else None
 
 
+def estimate_call(store: Store | None, *names: str, tokens: int, written: int) -> float | None:
+    """About how many seconds a call that isn't streamed takes the model under any of ``names``: reading a prompt of
+    ``tokens`` and writing up to ``written`` tokens (thinking included), since nothing comes back until both are
+    done. None when either speed hasn't been measured here."""
+    rates = speeds(store, *names)
+    if not rates.get("read") or not rates.get("write") or tokens <= 0:
+        return None
+    return tokens / rates["read"] + max(0, written) / rates["write"]
+
+
 def about(seconds: float | None) -> str:
     """An estimate in words: "about 40 seconds", "about 3 minutes"; "" for none."""
     if not seconds or seconds <= 0:

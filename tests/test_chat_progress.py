@@ -79,6 +79,26 @@ def test_the_time_lm_studio_takes_to_load_the_model_isnt_taken_for_reading(setti
     assert "read" not in rates and rates["write"] > 0
 
 
+def test_a_call_that_isnt_streamed_is_timed_for_its_reading_and_its_writing(settings, loaded, lm):  # noqa: F811
+    """A call that asks for tools sends nothing until the model has read the prompt and written its whole reply, so
+    an estimate of the reading alone said "Taking longer than usual…" on every normal question about files."""
+    from controller_inbox import agent, assistant
+
+    lm()
+    model_fit.record_speed(loaded, KEY, prompt_tokens=5000, read_seconds=100.0, written=100, write_seconds=20.0)
+    ws = agent.Workspace(loaded, settings, [], question="What is the October rent?")
+    ws.call["model"] = KEY
+    messages = [{"role": "user", "content": "x" * 4000}]
+    reading = next(assistant._tool_loop(ws, messages, 4000))
+    tokens = reading["tokens"]
+    writes = local_llm.reply_budget(settings, settings.chat_max_tokens)
+    assert reading["seconds"] == pytest.approx(tokens / 50 + writes / 5, rel=0.01)
+    # With no writing speed measured yet, no time is said: a bar that keeps moving, never "longer than usual".
+    loaded.set_state(model_fit.RATES_KEY, '{"%s": {"read": 50}}' % KEY)
+    reading = next(assistant._tool_loop(ws, messages, 4000))
+    assert reading["seconds"] is None and reading["about"] == ""
+
+
 def test_about_says_seconds_or_minutes():
     assert model_fit.about(None) == "" and model_fit.about(0) == ""
     assert model_fit.about(3) == "about 5 seconds" and model_fit.about(42) == "about 40 seconds"

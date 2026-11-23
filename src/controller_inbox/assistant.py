@@ -2025,11 +2025,17 @@ def _reading_text(ws: agent.Workspace, about_files: bool) -> str:
     return said
 
 
-def _reading_progress(store: Store | None, call: dict) -> dict[str, Any]:
+def _reading_progress(store: Store | None, call: dict, *, written: int = 0) -> dict[str, Any]:
     """The chat's line while the model reads the prompt: what it reads and, once this model's speed has been
-    measured here, about how long that takes (the page fills a bar on it, and says when it takes longer)."""
+    measured here, about how long that takes (the page fills a bar on it, and says when it takes longer). A call that
+    isn't streamed (``written``: the most it may write, thinking included) says nothing more until the reply is
+    written too, so its estimate is for both."""
     tokens = int(call.get("tokens") or 0)
-    seconds = model_fit.estimate(store, str(call.get("model") or ""), tokens=tokens)
+    model = str(call.get("model") or "")
+    if written:
+        seconds = model_fit.estimate_call(store, model, tokens=tokens, written=written)
+    else:
+        seconds = model_fit.estimate(store, model, tokens=tokens)
     return {
         "type": "progress", "state": "reading", "text": call.get("reading") or "Reading", "tokens": tokens,
         "seconds": round(seconds, 1) if seconds else None, "about": model_fit.about(seconds),
@@ -2282,6 +2288,8 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         draft = yield from _tool_loop(ws, messages, budget)
     except ToolsUnsupported:
         messages = build_messages(question, ws.sources, budget=budget, files=files, **base)
+        _calling(ws.call, messages)
+        yield _reading_progress(ws.store, ws.call, written=reply_budget(settings, settings.chat_max_tokens))
         draft = complete_text(settings, messages, max_tokens=settings.chat_max_tokens, limit=ws.wait or None)
     except EmptyReply:
         # A turn with no answer (a thinking model out of room) after the tools have read something: answer
@@ -2397,7 +2405,7 @@ def _tool_loop(ws: agent.Workspace, messages: list[dict], budget: int):
     asked: set[str] = set()  # the calls already run: a small model can ask for the same one again and again
     for _step in range(agent.MAX_STEPS):
         _calling(ws.call, messages)
-        yield _reading_progress(ws.store, ws.call)
+        yield _reading_progress(ws.store, ws.call, written=reply_budget(ws.settings, ws.settings.chat_max_tokens))
         reply = chat_with_tools(ws.settings, messages, agent.TOOLS, max_tokens=ws.settings.chat_max_tokens, limit=ws.wait or None)
         if not reply.calls:
             return reply.content
