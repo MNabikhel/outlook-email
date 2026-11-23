@@ -1591,6 +1591,7 @@ def answer_stream(
                 yield {"type": "step", "text": f"Reloading the model in LM Studio with a {context_target(settings):,}-token context (once)"}
             if reloaded := ensure_context(settings):
                 yield {"type": "step", "text": reloaded}
+                _wait_again(store, settings, ws, state)  # for the longer prompt the longer context takes
         try:
             yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
         except Exception as exc:
@@ -1598,6 +1599,7 @@ def answer_stream(
             if state["wrote"] or not ran_out_of_memory(exc) or not (back := step_back_context(settings)):
                 raise
             yield {"type": "step", "text": back}
+            _wait_again(store, settings, ws, state)
             ws.evidence.clear()
             yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
     except Exception as exc:  # any model failure falls back to the lookup answer
@@ -1994,6 +1996,14 @@ def _more_time(state: dict, settings: Settings, exc: Exception, question: str, e
         "suggest": suggest, "tokens": tokens, "text": model_fit.more_time_text(wait.model, waited, suggest),
         "question": question, "email_id": email_id or "",
     }
+
+
+def _wait_again(store: Store, settings: Settings, ws: agent.Workspace, state: dict) -> None:
+    """The model was loaded again with another context: how long its calls wait is worked out again for it (a longer
+    context takes a longer prompt, and the wait was worked out from the one it had)."""
+    wait = model_fit.chat_wait(store, settings)
+    ws.wait, state["wait"] = wait.seconds, wait
+    ws.call["model"] = wait.model
 
 
 def _had_longest_wait(state: dict, settings: Settings, exc: Exception) -> bool:

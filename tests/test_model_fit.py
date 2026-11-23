@@ -225,3 +225,25 @@ def test_a_model_that_never_fits_the_graphics_card_is_raised_as_far_as_load_and_
     said = ensure_context(settings)
     assert "wouldn't fit" not in said
     assert server.calls == [("unload", key), ("load", key, 16384)]
+
+
+def test_the_wait_is_worked_out_again_once_the_question_raises_the_context(settings, store, monkeypatch):
+    """A 31B loaded at 4,096 tokens and measured reading 15 tokens a second: the wait was worked out from 4,096
+    before the same question reloaded the model with 8,192, so that question's longer prompt ran out of time."""
+    from controller_inbox import assistant
+
+    settings.llm = None
+    _computer(monkeypatch, 32, mac=True)
+    server = _lm_studio(monkeypatch, loaded=[BIG])
+    server.contexts[BIG] = 4096
+    model_fit.record_speed(store, BIG, prompt_tokens=6000, read_seconds=400.0)  # 15 tokens a second
+    waits = []
+
+    def answer(ws, *_a, **_k):
+        waits.append(ws.wait)
+        yield {"type": "delta", "text": "Due Friday."}
+
+    monkeypatch.setattr(assistant, "_model_answer", answer)
+    events = list(assistant.answer_stream(store, settings, "What is due?"))
+    assert ("load", BIG, 8192) in server.calls, events
+    assert waits == [pytest.approx(8192 / 15 * model_fit.MARGIN + model_fit.SPARE_SECONDS)]
