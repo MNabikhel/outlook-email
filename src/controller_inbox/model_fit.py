@@ -268,16 +268,28 @@ def minutes_said(seconds: float) -> str:
 
 
 def describe(store: Store | None, settings: Settings, status: ModelStatus | None = None) -> dict | None:
-    """What Settings shows for the model answering: ``model``, ``context`` (tokens CloseDesk asks for, 0 for LM
-    Studio's own), ``minutes`` (its wait), ``yours`` (the user set it) and ``line``, in words. None with no model."""
+    """What Settings shows for the model answering: ``model``, ``context`` (the tokens it is loaded with, or when it
+    isn't loaded the tokens CloseDesk asks for; 0 for LM Studio's own), ``minutes`` (its wait), ``yours`` (the user
+    set it) and ``line``, in words. None with no model."""
+    from controller_inbox import local_llm  # it imports this module
+
     status = status or check_model(settings)
     if not status.active:
         return None
     wait = chat_wait(store, settings, status)
     key = wait.model
-    context = auto_context(settings, status, key) if status.lm_studio else 0
+    loaded = status.context_length if status.lm_studio else 0
+    context = loaded or (auto_context(settings, status, key) if status.lm_studio else 0)
     name = key.split("/")[-1]
     held = f"{context:,}-token context" if context else "the context LM Studio loaded it with"
+    # Loaded with less than CloseDesk asks for, and the next question reloads it: the line says both.
+    wanted = auto_context(settings, status, key) if loaded else 0
+    if (
+        0 < loaded < wanted
+        and status.model not in local_llm._context_raised
+        and local_llm.context_fits(settings, status)
+    ):
+        held += f" ({wanted:,} from the next question)"
     how = "set by you" if wait.yours else "set automatically"
     return {
         "model": key,

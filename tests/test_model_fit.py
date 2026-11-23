@@ -176,7 +176,7 @@ def test_settings_say_what_was_chosen_and_take_a_wait_on_both_pages(settings, st
     _computer(monkeypatch, 32, mac=True)
     _lm_studio(monkeypatch, loaded=[BIG])
     client = TestClient(web.create_app(settings, store))
-    line = "qwen3-32b: 8,192-token context, waits up to 7 minutes (set automatically)."
+    line = "qwen3-32b: 16,384-token context, waits up to 7 minutes (set automatically)."  # as LM Studio loaded it
     fit = client.get("/api/settings", headers=PAGE).json()["fit"]
     assert fit["line"] == line and fit["minutes"] == 7 and not fit["yours"]
     assert line in client.get("/settings").text
@@ -184,7 +184,7 @@ def test_settings_say_what_was_chosen_and_take_a_wait_on_both_pages(settings, st
     reply = client.post("/api/settings/model-wait", json={"model": BIG, "minutes": 15}, headers=PAGE)
     assert reply.status_code == 200, reply.text
     fit = client.get("/api/settings", headers=PAGE).json()["fit"]
-    assert fit["line"] == "qwen3-32b: 8,192-token context, waits up to 15 minutes (set by you)."
+    assert fit["line"] == "qwen3-32b: 16,384-token context, waits up to 15 minutes (set by you)."
     bad = client.post("/api/settings/model-wait", json={"model": BIG, "minutes": "soon"}, headers=PAGE)
     assert bad.status_code == 400 and bad.json()["detail"] == "Type a number of minutes, from 1 to 120."
     assert client.post("/api/settings/model-wait", json={"model": BIG, "minutes": None}, headers=PAGE).status_code == 200
@@ -247,3 +247,26 @@ def test_the_wait_is_worked_out_again_once_the_question_raises_the_context(setti
     events = list(assistant.answer_stream(store, settings, "What is due?"))
     assert ("load", BIG, 8192) in server.calls, events
     assert waits == [pytest.approx(8192 / 15 * model_fit.MARGIN + model_fit.SPARE_SECONDS)]
+
+
+def test_settings_say_the_context_the_model_is_loaded_with(settings, store, monkeypatch):
+    """Settings said the context CloseDesk would ask for (8,192 tokens for a 31B on a 32 GB Mac) though the model
+    ran with another one: one the user loaded with more (left as it is), or one loaded back after running out of
+    memory."""
+    settings.llm = None
+    _computer(monkeypatch, 32, mac=True)
+    server = _lm_studio(monkeypatch, loaded=[BIG])
+    server.contexts[BIG] = 32768
+    fit = model_fit.describe(store, settings)
+    assert fit["context"] == 32768 and fit["line"].startswith("qwen3-32b: 32,768-token context, waits up to")
+
+    # Loaded with less: the next question reloads it with what fits, and the line says so.
+    server.contexts[BIG] = 4096
+    local_llm._status_cache.clear()
+    fit = model_fit.describe(store, settings)
+    assert fit["context"] == 4096
+    assert fit["line"].startswith("qwen3-32b: 4,096-token context (8,192 from the next question), waits up to")
+
+    # Loaded back after running out of memory: not raised again, so only what it has.
+    local_llm._context_raised.add(BIG)
+    assert model_fit.describe(store, settings)["line"].startswith("qwen3-32b: 4,096-token context, waits up to")
