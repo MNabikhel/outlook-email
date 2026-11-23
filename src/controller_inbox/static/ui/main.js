@@ -1207,8 +1207,15 @@ function finished(job) {
   if (result.kind === "index") return toast(`Indexed for search: ${result.indexed} emails and file sections.`, { tone: "ok" });
   if (result.kind === "vision") return visionDone(result);
   if (result.kind === "outlook") {
+    // The new mail had the model loaded in LM Studio first (or couldn't, and the mail was filed without it): said
+    // with what was synced, and a failed load is never kept quiet.
+    const load = result.model_load || null;
+    const failed = Boolean((result.outlook && result.outlook.note) || (load && load.failed));
     // An automatic sync that found nothing new says nothing.
-    if (!result.quiet || !(job.about && job.about.auto)) toast(result.message || "Outlook synced.", { tone: result.outlook && result.outlook.note ? "error" : "ok", ms: 7000 });
+    if (!result.quiet || !(job.about && job.about.auto) || failed) {
+      const said = `${result.message || "Outlook synced."}${load ? ` ${load.message}` : ""}`;
+      toast(said, { tone: failed ? "error" : "ok", ms: load ? 12000 : 7000 });
+    }
     return;
   }
   const read = typeof result.ingested === "number" ? `Read ${plural(result.ingested, "new file")}.` : "";

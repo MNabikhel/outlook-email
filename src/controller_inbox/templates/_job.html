@@ -34,6 +34,9 @@
 <section class="job done"><strong>Read with the vision model.</strong> <span>{{ job.result.message }} <a href="{{ job.result.href }}">See the file</a></span></section>
 {% elif job.state == 'done' and job.result and job.result.kind == 'index' %}
 <section class="job done"><strong>Indexed for search.</strong> <span>{{ job.result.indexed }} email{{ '' if job.result.indexed == 1 else 's' }} and file sections added. <a href="/settings#search">See Setup</a></span></section>
+{% elif job.state == 'done' and job.result and job.result.kind == 'outlook' %}
+{# Sync now or the automatic sync: what it copied, and whether the model could be loaded to read the new mail. #}
+<section class="job {{ 'error' if (job.result.outlook and job.result.outlook.note) or (job.result.model_load and job.result.model_load.failed) else 'done' }}"><strong>{{ job.result.message or 'Outlook synced.' }}</strong>{% if job.result.model_load %} <span>{{ job.result.model_load.message }}</span>{% endif %}</section>
 {% elif job.state == 'done' and job.result %}
 <section class="job done">
   <strong>Processed.</strong>

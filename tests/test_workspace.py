@@ -1260,3 +1260,41 @@ def test_the_shortcut_sheet_lines_up_on_a_phone_and_a_failed_sync_leaves_one_mes
         page.wait_for_timeout(300)
         texts = page.locator("#toasts .toast:not(.leaving)").all_inner_texts()
         assert len(texts) == 1 and "couldn't find a message" in texts[0], texts
+
+
+def test_sync_now_says_when_the_model_couldn_t_be_loaded(loaded, settings, page, monkeypatch):
+    """Sync now loads the model before it reads the new mail. When that failed, the toast said only "Outlook
+    synced: 2 new." in green: never that the mail was filed without a model, or why."""
+    from liveserver import serving
+
+    from controller_inbox import outlook_desktop, outlook_sync, overnight
+
+    said = "CloseDesk couldn't load google/gemma-4-31b in LM Studio. The mail is filed without a model for now."
+
+    def synced(*_args, **_kw):
+        time.sleep(1)  # Outlook takes a moment: the page sees the sync running, then finish
+        return {"kind": "outlook", "outlook": {"new": 2}, "message": "Outlook synced: 2 new.", "model_load": {"message": said, "failed": True}}
+
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    monkeypatch.setattr(overnight, "outlook_run", synced)
+    outlook_sync.connect(loaded, calendar=False)
+    with serving(web.create_app(settings, loaded)) as base:
+        page.set_viewport_size({"width": 1280, "height": 900})
+        page.goto(f"{base}/app/settings#set-outlook")
+        page.click("#set-outlook button:has-text('Sync now')")
+        page.wait_for_selector(".toast.error:has-text('Outlook synced: 2 new.')", timeout=20000)
+        assert said in page.inner_text(".toast.error:has-text('Outlook synced: 2 new.')")
+
+
+def test_the_classic_page_says_what_a_sync_did_and_that_the_model_couldn_t_be_loaded(client):
+    """The classic page showed a finished sync as "Processed. Read  new files", with none of what it said."""
+    said = "CloseDesk couldn't load google/gemma-4-31b in LM Studio. The mail is filed without a model for now."
+    result = {"kind": "outlook", "outlook": {"new": 2}, "message": "Outlook synced: 2 new.", "model_load": {"message": said, "failed": True}}
+    job = client.app.state.job
+    assert job.start(lambda progress: result, about={"kind": "outlook"})
+    deadline = time.monotonic() + 5
+    while job.snapshot()["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+    page = client.get("/").text
+    assert "Outlook synced: 2 new." in page and said in page.replace("&#39;", "'")
+    assert "Processed." not in page
