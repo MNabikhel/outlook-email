@@ -14,6 +14,7 @@ about that model.
 from __future__ import annotations
 
 import json
+import math
 from typing import TYPE_CHECKING, Callable
 
 from controller_inbox import local_llm, model_roles
@@ -233,7 +234,8 @@ def recommendation(settings: Settings, store: Store, status: ModelStatus | None 
         runs_on_card = budget.gpu and model_roles.fits(settings, status, suggested, budget)
         where = "on its graphics card" if runs_on_card else "in its memory"
         message = (
-            f"{current} needs about {round(needed / 1024**3)} GB of memory{context} and {budget.said()}, so the "
+            # Rounded up, as budget.said() rounds down: never "needs about 21 GB" and "can give about 21 GB".
+            f"{current} needs about {math.ceil(needed / 1024**3)} GB of memory{context} and {budget.said()}, so the "
             f"computer may slow down while it answers. {suggested} fits {where}."
         )
     return {"current": current, "suggested": suggested, "reason": "slow" if slow else "too_big", "message": message}

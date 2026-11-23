@@ -282,7 +282,7 @@ def test_a_model_too_big_gets_one_that_fits_suggested(settings, store, lm):
     assert tip["reason"] == "too_big" and tip["suggested"] == CHAT
     # Only what is known: it loaded and answers, so nothing is said about running out of memory or answering faster.
     assert tip["message"] == (
-        f"{GEMMA27} needs about 21 GB of memory with a 16,384-token context and this computer can give a model about 12 GB "
+        f"{GEMMA27} needs about 22 GB of memory with a 16,384-token context and this computer can give a model about 12 GB "
         f"of its 16 GB, so the computer may slow down while it answers. {CHAT} fits in its memory."
     )
 

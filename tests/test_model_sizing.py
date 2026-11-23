@@ -289,3 +289,18 @@ def test_a_model_bigger_than_the_card_loads_into_the_card_and_the_computer_s_mem
     warning = model_roles.too_big(settings, check_model(settings, use_cache=False))[BIG]
     assert "run out of memory" in warning
     assert "this PC can give a model about 36 GB: its graphics card's 24 GB and 12 GB of its 16 GB of memory" in warning
+
+
+def test_the_suggestion_never_says_a_model_needs_what_the_mac_can_give(settings, store, lm, monkeypatch):
+    """A 19 GB model loaded with 6,144 tokens on a 32 GB Mac needs 21.3 GB, a little over the 21.3 GB macOS lets it
+    use: the line said it "needs about 21 GB" and the Mac "can give a model about 21 GB", and still warned."""
+    from controller_inbox import local_llm
+
+    _computer(monkeypatch, 32, mac=True)
+    _answering(lm, settings, BIG)
+    lm.contexts = {BIG: 6144}
+    local_llm._status_cache.clear()
+    tip = model_choice.recommendation(settings, store, check_model(settings))
+    assert tip and tip["reason"] == "too_big"
+    assert "needs about 22 GB of memory with a 6,144-token context" in tip["message"]
+    assert "this Mac can give a model about 21 GB" in tip["message"]
