@@ -49,6 +49,7 @@ from controller_inbox.local_llm import (
     failure_note,
     ran_out_of_memory,
     llm_active,
+    loaded_now,
     needs_more_context,
     reader_load_problem,
     reply_budget,
@@ -1555,7 +1556,11 @@ def answer_stream(
     wait = model_fit.chat_wait(store, settings)
     ws.wait = wait.seconds
     ws.call["model"] = wait.model
-    state: dict[str, Any] = {"wrote": False, "text": "", "store": store, "wait": wait, "call": ws.call}
+    # A model LM Studio unloaded while idle is loaded again by the first call: that load isn't timed as reading.
+    state: dict[str, Any] = {
+        "wrote": False, "text": "", "store": store, "wait": wait, "call": ws.call,
+        "loaded": loaded_now(check_model(settings), wait.model),
+    }
     offer = None
     if current is not None and _should_read_files(ws, question, focus if about_today else None):
         outcome: dict[str, Any] = {}
@@ -2027,9 +2032,13 @@ def _record_speed(state: dict, messages: list[dict], finished: dict) -> None:
     wait, store = state.get("wait"), state.get("store")
     if wait is None or store is None or not finished.get("read_seconds"):
         return
-    tokens = finished.get("prompt_tokens") or prompt_chars(messages) // agent.CHARS_PER_TOKEN
+    # As the server counted what it read (without what it had read before); else about the prompt's size.
+    tokens = finished["prompt_tokens"] if "prompt_tokens" in finished else prompt_chars(messages) // agent.CHARS_PER_TOKEN
+    # The first call to a model that wasn't loaded waited for LM Studio to load it too: only its writing is timed.
+    loading = not state.get("loaded", True)
+    state["loaded"] = True
     model_fit.record_speed(
-        store, wait.model, prompt_tokens=tokens, read_seconds=finished["read_seconds"],
+        store, wait.model, prompt_tokens=0 if loading else tokens, read_seconds=finished["read_seconds"],
         written=finished.get("written", 0), write_seconds=finished.get("write_seconds", 0.0),
     )
 

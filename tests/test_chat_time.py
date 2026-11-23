@@ -37,13 +37,15 @@ class ChatLMStudio:
         self.first_delay, self.gap = first_delay, gap  # seconds before the first piece (reading the prompt), between pieces
         self.waits: list[float] = []
         self.prompts: list[int] = []
+        self.loaded = True  # False: LM Studio unloaded it while idle, and the question has it load the model again
+        self.usage: dict = {}  # the token counts sent with the last piece, if any
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": KEY}]})
         if path == "/api/v1/models":
-            instances = [{"id": KEY, "config": {"context_length": 8192}}]
+            instances = [{"id": KEY, "config": {"context_length": 8192}}] if self.loaded else []
             return httpx.Response(200, json={"models": [
                 {"type": "llm", "key": KEY, "loaded_instances": instances, "max_context_length": 131072, "size_bytes": 18 * GB},
             ]})
@@ -65,7 +67,7 @@ class ChatLMStudio:
             text = "<think>" + "".join(REASONING) + "</think>"
             chunks += [{"choices": [{"delta": {"content": text[i:i + 9]}}]} for i in range(0, len(text), 9)]
         chunks += [{"choices": [{"delta": {"content": ANSWER[i:i + 8]}}]} for i in range(0, len(ANSWER), 8)]
-        chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        chunks.append({"choices": [{"delta": {}, "finish_reason": "stop"}], **({"usage": self.usage} if self.usage else {})})
         lines = [f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks]
 
         def body():

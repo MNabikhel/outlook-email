@@ -9,7 +9,7 @@ import re
 import pytest
 from test_chat_time import KEY, _ask, lm  # noqa: F401 - lm is the fixture
 
-from controller_inbox import model_fit
+from controller_inbox import local_llm, model_fit
 
 
 def _progress(events: list[dict]) -> list[dict]:
@@ -49,6 +49,34 @@ def test_the_speeds_are_measured_from_the_chat_s_own_answers(settings, loaded, l
     assert 10 < rates["write"] < 200
     # The next question's estimate comes from it.
     assert _progress(_ask(loaded, settings))[0]["seconds"] > 0
+
+
+def test_a_prompt_the_model_had_read_before_isnt_taken_for_a_fast_model(settings, loaded, lm):  # noqa: F811
+    """LM Studio keeps the start of a prompt it has read: one asked again comes back almost at once. Counted as read,
+    one such question made a 31B that reads 50 tokens a second look like it read thousands, and cut its wait to 5
+    minutes. Only the tokens it read are counted; when the server doesn't say, a reading far faster than measured
+    before isn't kept."""
+    server = lm(first_delay=0.4)
+    model_fit.record_speed(loaded, KEY, prompt_tokens=8000, read_seconds=160.0)  # 50 tokens a second
+    server.usage = {"prompt_tokens": 9000, "completion_tokens": 40, "prompt_tokens_details": {"cached_tokens": 8990}}
+    _ask(loaded, settings)
+    assert model_fit.speeds(loaded, KEY)["read"] == 50, "10 tokens read: too few to tell"
+    model_fit.record_speed(loaded, KEY, prompt_tokens=8500, read_seconds=0.5)  # not said: cached, most likely
+    assert model_fit.speeds(loaded, KEY)["read"] == 50
+    model_fit.record_speed(loaded, KEY, prompt_tokens=8000, read_seconds=100.0)  # faster, but not out of reach
+    assert model_fit.speeds(loaded, KEY)["read"] == 65
+
+
+def test_the_time_lm_studio_takes_to_load_the_model_isnt_taken_for_reading(settings, loaded, lm):  # noqa: F811
+    """After LM Studio unloaded the model while idle, the question has it load again before the model reads: that
+    load isn't counted as reading (a prompt of seconds would be said to take minutes)."""
+    server = lm(first_delay=0.4, gap=0.02)
+    server.loaded = False
+    local_llm.remember_model(settings, KEY)  # the model used last: LM Studio loads it when the question names it
+    events = _ask(loaded, settings)
+    assert any(event["type"] == "delta" for event in events) and server.prompts, "the model answered"
+    rates = model_fit.speeds(loaded, KEY)
+    assert "read" not in rates and rates["write"] > 0
 
 
 def test_about_says_seconds_or_minutes():

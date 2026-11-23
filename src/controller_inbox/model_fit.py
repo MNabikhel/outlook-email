@@ -46,6 +46,9 @@ SPARE_SECONDS = 30.0
 EMAIL_TOKENS = 2000
 # The chat's own calls: each prompt read and each answer written moves the speeds kept for the model this much.
 NEW_WEIGHT = 0.5
+# A prompt read this many times faster than the model was measured reading isn't kept: LM Studio had read most of it
+# before (the server doesn't always say), and kept, one such question would cut the wait for the next to a fraction.
+FASTEST_JUMP = 4.0
 
 WAIT_KEY = "model_wait"  # {model: seconds} the user chose
 RATES_KEY = "model_rates"  # {model: {"read": prompt tokens a second, "write": tokens written a second}}
@@ -130,7 +133,8 @@ def speeds(store: Store | None, *names: str) -> dict[str, float]:
 def record_speed(store: Store, model: str, *, prompt_tokens: int, read_seconds: float, written: int = 0,
                  write_seconds: float = 0.0) -> None:
     """Keep how fast ``model`` read a prompt of ``prompt_tokens`` (its first word came ``read_seconds`` after the
-    question went) and wrote ``written`` tokens in ``write_seconds``, so the next estimate and wait are nearer."""
+    question went) and wrote ``written`` tokens in ``write_seconds``, so the next estimate and wait are nearer. A
+    reading ``FASTEST_JUMP`` times faster than the one kept isn't kept (a prompt LM Studio had read before)."""
     if not model:
         return
     rates = _read(store, RATES_KEY)
@@ -145,6 +149,8 @@ def record_speed(store: Store, model: str, *, prompt_tokens: int, read_seconds: 
     for kind, rate in found.items():
         before = entry.get(kind)
         rate = min(rate, 1e6)
+        if kind == "read" and isinstance(before, (int, float)) and rate > before * FASTEST_JUMP:
+            continue
         entry[kind] = round(rate if not isinstance(before, (int, float)) else before * (1 - NEW_WEIGHT) + rate * NEW_WEIGHT, 2)
     rates[model] = entry
     store.set_state(RATES_KEY, json.dumps(rates))

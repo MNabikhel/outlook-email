@@ -1115,7 +1115,8 @@ def stream_text(
                 finished["read_seconds"] = reply.first_at - started
                 finished["write_seconds"] = reply.last_at - reply.first_at
                 finished["written"] = _int(reply.usage.get("completion_tokens")) or reply.pieces
-                finished["prompt_tokens"] = _int(reply.usage.get("prompt_tokens"))
+                if "prompt_tokens" in reply.usage:
+                    finished["prompt_tokens"] = _prompt_read(reply.usage)
         if reply.content:
             return
         plan = _retry_plan(model, effort if model not in _effort_rejected else None, budget, reply)
@@ -1123,6 +1124,23 @@ def stream_text(
             break
         effort, budget = plan
     raise _empty_reply(settings, model, sent, reply)
+
+
+def _prompt_read(usage: dict) -> int:
+    """The prompt tokens the model read for this reply, from the server's counts. LM Studio keeps
+    the start of a prompt it read before and doesn't read it again: those tokens (``cached_tokens``) aren't counted,
+    or a prompt asked again would make the model look many times faster than it reads."""
+    details = usage.get("prompt_tokens_details")
+    cached = _int(details.get("cached_tokens")) if isinstance(details, dict) else 0
+    return max(0, _int(usage.get("prompt_tokens")) - cached)
+
+
+def loaded_now(status: ModelStatus, model: str) -> bool:
+    """``model`` (an instance id or key) is loaded in LM Studio now, by ``status``; True when that can't be told (not
+    LM Studio)."""
+    if not status.lm_studio:
+        return True
+    return any(model in (instance, key) for instance, (key, _context) in status.instances.items())
 
 
 def _stream_once(
