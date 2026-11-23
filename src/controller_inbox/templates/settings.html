@@ -128,7 +128,9 @@
       Enough to read whole attachments when you ask about them.
       {% else %}
       Ask CloseDesk reads long attachments a section at a time with this.
-      {% if model.key and model.context_length and window < context_target %}
+      {% if model.key and model.context_length and window < context_target and not context_fits %}
+      {{ model.key }} with {{ '{:,}'.format(context_target) }} tokens wouldn't fit in this computer's memory, so CloseDesk keeps it as LM Studio loaded it. Pick a smaller model, or a smaller minimum below.
+      {% elif model.key and model.context_length and window < context_target %}
       LM Studio couldn't load {{ model.key }} with {{ '{:,}'.format(context_target) }} tokens. Close other apps or pick a smaller minimum below, then Save to try again.
       {% elif model.key and model.max_context and model.max_context < recommended_context %}
       {{ model.key }} supports at most {{ '{:,}'.format(model.max_context) }} tokens. For whole workbooks and PDFs, load a model with a longer context.
@@ -224,7 +226,8 @@
       </div>
       <p id="context-capacity" class="context-capacity {{ chosen.tier }}" data-context-text aria-live="polite">{{ chosen.text }}</p>
       <button type="submit">Save</button>
-      <span class="muted"><small>LM Studio models loaded with less are reloaded with this on the next question. Other servers: set the context length there.</small></span>
+      <span class="muted"><small>LM Studio models loaded with less are reloaded with this on the next question; one CloseDesk loaded with more is reloaded with it now. Other servers: set the context length there.</small></span>
+      {% if context_change %}<p class="small">{{ context_change }}</p>{% endif %}
     </form>
     <p><a href="/settings?recheck=1">Check again</a></p>
     <p>The fast scripts pull text, amounts, dates, and file types, then file a draft. The model reads that short packet — never the raw files — and writes the category, folder, a one-line summary, and tasks. The most important mail is read first.</p>

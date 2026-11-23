@@ -39,8 +39,10 @@ from controller_inbox.local_llm import (
     check_model,
     complete_text,
     context_length,
+    context_fits,
     context_target,
     ensure_context,
+    step_back_context,
     MEMORY_ADVICE,
     failure_note,
     ran_out_of_memory,
@@ -1573,13 +1575,24 @@ def answer_stream(
         return
     try:
         if needs_more_context(settings):
-            yield {"type": "step", "text": f"Reloading the model in LM Studio with a {context_target(settings):,}-token context (once)"}
+            if context_fits(settings):  # otherwise it is left as it is, and the step below says so
+                yield {"type": "step", "text": f"Reloading the model in LM Studio with a {context_target(settings):,}-token context (once)"}
             if reloaded := ensure_context(settings):
                 yield {"type": "step", "text": reloaded}
-        yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
+        try:
+            yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
+        except Exception as exc:
+            # A context CloseDesk raised that ran out of memory: the model is loaded back as it was and asked once more.
+            if state["wrote"] or not ran_out_of_memory(exc) or not (back := step_back_context(settings)):
+                raise
+            yield {"type": "step", "text": back}
+            ws.evidence.clear()
+            yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
     except Exception as exc:  # any model failure falls back to the lookup answer
         if state["wrote"]:
             why = f" {MEMORY_ADVICE}" if ran_out_of_memory(exc) else ""
+            if why and (back := step_back_context(settings)):  # the next question has the room it needs
+                why = f" {back} Ask again."
             yield {"type": "delta", "text": f"\n\n(The local model stopped answering partway.{why})"}
         else:
             note = failure_note(exc)

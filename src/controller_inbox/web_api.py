@@ -33,7 +33,7 @@ from controller_inbox import (
     semantic, services, table_lookup, updates, version, vision,
 )
 from controller_inbox.extract import extraction_failed
-from controller_inbox.local_llm import check_model, context_target, needs_more_context
+from controller_inbox.local_llm import check_model, context_fits, context_target, needs_more_context
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
 from controller_inbox.profile import active_profile, set_profile
 from controller_inbox.clock import effective_timezone, format_when, offset_label, on_daylight_time, set_timezone, zone_name
@@ -1084,7 +1084,8 @@ def register_workspace(
         window = model.context_length or settings.chat_context_tokens
         target = context_target(settings, model)
         recommended = agent.RECOMMENDED_CONTEXT
-        if needs_more_context(settings):
+        fits = context_fits(settings, model)
+        if needs_more_context(settings) and fits:
             advice = (
                 f"The next time you ask something, CloseDesk reloads {model.key} in LM Studio with {target:,} tokens "
                 "(the minimum set below). If your computer runs short of memory, it goes back to the current size."
@@ -1093,7 +1094,12 @@ def register_workspace(
             advice = "Enough to read whole attachments when you ask about them."
         else:
             advice = "Ask CloseDesk reads long attachments a section at a time with this."
-            if model.key and model.context_length and window < target:
+            if model.key and model.context_length and window < target and not fits:
+                advice += (
+                    f" {model.key} with {target:,} tokens wouldn't fit in this computer's memory, so CloseDesk keeps it "
+                    "as LM Studio loaded it. Pick a smaller model, or a smaller minimum below."
+                )
+            elif model.key and model.context_length and window < target:
                 advice += (
                     f" LM Studio couldn't load {model.key} with {target:,} tokens. "
                     "Close other apps or pick a smaller minimum below, then Save to try again."
@@ -1279,6 +1285,8 @@ def register_workspace(
             notice = setup["save_context_step"](step)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
+        if notice == "context-reloaded":  # what the smaller minimum did to the model loaded in LM Studio
+            return {**saved(notice), "message": f"{NOTICES[notice]} {setup['context_change']()}"}
         return saved(notice)
 
     @api.post("/settings/index")

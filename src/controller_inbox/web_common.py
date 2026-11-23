@@ -22,6 +22,7 @@ NOTICES = {
     "timezone": "Saved. Times and “today” now use this time zone.",
     "context": "Saved. If the model in LM Studio is loaded with less, the next question reloads it with this context.",
     "context-off": "Saved. CloseDesk now uses the model as LM Studio loaded it.",
+    "context-reloaded": "Saved.",
     "fraud-safe": "Saved as not fraud. Mail it covers was checked again, and the fraud check learns from it.",
     "fraud-reported": "Reported as fraud. Its files stay locked, and the fraud check learns from it.",
     "fraud-freemail": "That is a free email service anyone can sign up for, so it can't be trusted as a whole. "

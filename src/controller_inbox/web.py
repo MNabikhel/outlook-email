@@ -52,7 +52,7 @@ from controller_inbox.clock import (
 )
 from controller_inbox.config import PROFILES, Settings
 from controller_inbox.digest import write_digest_files
-from controller_inbox.local_llm import check_model, context_target, needs_more_context, set_min_context, use_chat_model
+from controller_inbox.local_llm import check_model, context_fits, context_target, needs_more_context, set_min_context, use_chat_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.profile import active_profile, set_profile
 from controller_inbox.services import Invalid, Missing
@@ -1063,6 +1063,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     # Why the last change of chat model in Setup didn't happen, shown with its notice.
     chat_switch = {"problem": ""}
+    # What saving a smaller minimum context did to the model loaded in LM Studio, shown with its notice.
+    context_change = {"said": ""}
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, recheck: int = 0):
@@ -1077,7 +1079,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             context_steps=[agent.context_capacity(tokens, settings.chat_max_tokens) for tokens in agent.CONTEXT_STEPS],
             context_step=nearest_step(settings.min_context_tokens),
             context_target=context_target(settings, model),
-            will_reload=needs_more_context(settings),
+            context_fits=context_fits(settings, model),
+            will_reload=needs_more_context(settings) and context_fits(settings, model),
+            context_change=context_change["said"] if request.query_params.get("notice") == "context-reloaded" else "",
             ocr_engine=ocr.engine_name(),
             ocr_missing=ocr.missing_note(),
             models=model_roles.models_in_use(settings, status=model),
@@ -1174,7 +1178,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise ValueError("Unknown context size")
         tokens = agent.CONTEXT_STEPS[step]
         store.set_state(MIN_CONTEXT_KEY, str(tokens))
-        set_min_context(settings, tokens)
+        # A model CloseDesk loaded with more than this is reloaded with it now: what happened shows with the notice.
+        context_change["said"] = set_min_context(settings, tokens)
+        if context_change["said"]:
+            return "context-reloaded"
         return "context" if tokens else "context-off"
 
     def load_sample_mailbox() -> str:
@@ -1275,6 +1282,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "vision_setup": vision_setup,
             "switch_chat_model": switch_chat_model,
             "chat_problem": lambda: chat_switch["problem"],
+            "context_change": lambda: context_change["said"],
             "start_indexing": start_indexing,
             "save_context_step": save_context_step,
             "load_sample_mailbox": load_sample_mailbox,

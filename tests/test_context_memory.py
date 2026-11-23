@@ -1,0 +1,234 @@
+"""The context CloseDesk asks LM Studio for, and memory.
+
+A big model the user loaded with LM Studio's default 4,096 tokens was reloaded with 16,384 on the first question. On a
+Mac the load goes through (the graphics side over-commits the shared memory) but every answer then fails with LM
+Studio's "Compute error.", and CloseDesk never stepped back. Lowering the minimum in Settings didn't reload anything
+either, though the out-of-memory advice says to do just that.
+
+The fake LM Studio below is a 32 GB Mac (about 24 GB for the graphics side): loads always go through, and an answer
+fails with "Compute error." when the model and its context take more than that.
+"""
+
+from __future__ import annotations
+
+import json
+
+import httpx
+from fastapi.testclient import TestClient
+
+from controller_inbox import agent, local_llm, model_roles, web
+from controller_inbox.assistant import answer_stream
+
+GB = 1024**3
+BIG = "google/gemma-3-27b"
+SMALL = "qwen/qwen3-8b"
+SIZES = {BIG: int(17.0 * GB), SMALL: int(5.0 * GB)}
+# What the context really takes per token (layers x KV heads x head size x K and V x 2 bytes): more than CloseDesk's
+# estimate for a model this big, so the estimate says 16,384 fits on 32 GB and the answer runs out of memory.
+KV = {BIG: 62 * 16 * 128 * 2 * 2, SMALL: 36 * 8 * 128 * 2 * 2}
+GRAPHICS_MEMORY = 24 * GB
+
+
+class MacLMStudio:
+    def __init__(self, loaded: dict[str, int]):
+        self.loaded = dict(loaded)  # key -> the context it is loaded with
+        self.calls: list[tuple] = []  # loads and unloads, in order
+        self.chats: list[tuple[str, int, str]] = []  # (model, its context, "ok" or "Compute error")
+        self.partway = False  # the answer runs out of memory after its first words, not before them
+
+    def need(self, key: str) -> int:
+        return SIZES[key] + self.loaded[key] * KV[key]
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": key} for key in SIZES]})
+        if path == "/api/v1/models":
+            models = []
+            for key in SIZES:
+                instances = [{"id": key, "config": {"context_length": self.loaded[key]}}] if key in self.loaded else []
+                models.append({"type": "llm", "key": key, "loaded_instances": instances, "size_bytes": SIZES[key],
+                               "max_context_length": 131072})
+            return httpx.Response(200, json={"models": models})
+        if path == "/api/v1/models/load":
+            body = json.loads(request.content)
+            self.calls.append(("load", body["model"], body.get("context_length")))
+            self.loaded[body["model"]] = body.get("context_length") or 4096
+            return httpx.Response(200, json={"status": "loaded"})
+        if path == "/api/v1/models/unload":
+            instance = json.loads(request.content)["instance_id"]
+            self.calls.append(("unload", instance))
+            self.loaded.pop(instance, None)
+            return httpx.Response(200, json={"status": "unloaded"})
+        if path == "/v1/chat/completions":
+            body = json.loads(request.content)
+            key = body["model"]
+            ok = key in self.loaded and self.need(key) <= GRAPHICS_MEMORY
+            self.chats.append((key, self.loaded.get(key, 0), "ok" if ok else "Compute error"))
+            if not ok and self.partway and body.get("stream"):
+                words = "The total is in the summary tab, where each department's line is added up. " * 8
+                text = ('data: {"choices": [{"delta": {"content": "' + words + '"}}]}\n\n'
+                        'data: {"error": {"code": 500, "message": "Compute error."}}\n\n')
+                return httpx.Response(200, text=text, headers={"content-type": "text/event-stream"})
+            if not ok:
+                return httpx.Response(500, json={"error": {"code": 500, "message": "Compute error."}})
+            if body.get("stream"):
+                text = 'data: {"choices": [{"delta": {"content": "The total is $12,480."}}]}\n\ndata: [DONE]\n\n'
+                return httpx.Response(200, text=text, headers={"content-type": "text/event-stream"})
+            return httpx.Response(200, json={"choices": [{"message": {"content": "The total is $12,480."}, "finish_reason": "stop"}]})
+        return httpx.Response(404)
+
+
+def _serve(monkeypatch, server, memory_gb: int = 32) -> None:
+    client = httpx.Client(transport=httpx.MockTransport(server))
+    monkeypatch.setattr(local_llm.httpx, "get", lambda url, **kw: client.get(url, headers=kw.get("headers"), timeout=kw.get("timeout")))
+    monkeypatch.setattr(local_llm.httpx, "post", lambda url, **kw: client.post(url, json=kw.get("json"), headers=kw.get("headers"), timeout=kw.get("timeout")))
+    monkeypatch.setattr(local_llm.httpx, "stream", lambda method, url, **kw: client.stream(method, url, json=kw.get("json"), headers=kw.get("headers"), timeout=kw.get("timeout")))
+    monkeypatch.setattr(model_roles, "computer_memory", lambda: memory_gb * GB)
+
+
+def _ask(store, settings, question: str, email_id: int):
+    local_llm._status_cache.clear()
+    events = list(answer_stream(store, settings, question, email_id=email_id))
+    steps = [e["text"] for e in events if e["type"] == "step"]
+    modes = [e for e in events if e["type"] == "mode"]
+    text = "".join(e["text"] for e in events if e["type"] == "delta")
+    return steps, modes, text
+
+
+def test_a_model_raised_past_the_memory_is_loaded_back_and_the_answer_asked_again(store, settings, mail, monkeypatch):
+    settings.llm = True
+    server = MacLMStudio({BIG: 4096})
+    _serve(monkeypatch, server)
+    budget = mail["Q4 budget draft"].id
+    assert settings.min_context_tokens == 16384
+
+    steps, modes, text = _ask(store, settings, "What is the total in this budget?", budget)
+    assert f"Reloaded {BIG} in LM Studio with a 16,384-token context so whole attachments fit." in steps
+    assert f"Loaded {BIG} back with a 4,096-token context: 16,384 didn't fit in this computer's memory." in steps
+    assert server.calls == [("unload", BIG), ("load", BIG, 16384), ("unload", BIG), ("load", BIG, 4096)]
+    assert not modes, "answered by the model, not the lookup"
+    assert "$12,480" in text
+    assert server.chats[0][1:] == (16384, "Compute error") and server.chats[-1][1:] == (4096, "ok")
+
+    # The next question doesn't raise it again.
+    steps, modes, text = _ask(store, settings, "And the total again?", budget)
+    assert not modes and "$12,480" in text and len(server.calls) == 4
+    assert not any("Reload" in step or "Loaded" in step for step in steps)
+    assert not local_llm.needs_more_context(settings)
+    # Until the minimum is changed in Settings.
+    local_llm.set_min_context(settings, 16384)
+    local_llm._status_cache.clear()
+    assert local_llm.needs_more_context(settings)
+
+
+def test_an_answer_cut_off_by_memory_isnt_asked_again_but_the_next_question_has_the_room(store, settings, mail, monkeypatch):
+    settings.llm = True
+    server = MacLMStudio({BIG: 4096})
+    server.partway = True
+    _serve(monkeypatch, server)
+    budget = mail["Q4 budget draft"].id
+    _steps, _modes, text = _ask(store, settings, "Who sent this?", budget)
+    assert text.startswith("The total") and "stopped answering partway" in text
+    assert f"Loaded {BIG} back with a 4,096-token context: 16,384 didn't fit in this computer's memory. Ask again." in text
+    assert server.calls[-2:] == [("unload", BIG), ("load", BIG, 4096)]
+    calls = len(server.calls)
+    _steps, modes, text = _ask(store, settings, "Who sent this?", budget)
+    assert not modes and "The total is $12,480." in text and len(server.calls) == calls
+
+
+def test_a_model_the_user_loaded_that_runs_out_of_memory_is_left_as_it_is(store, settings, mail, monkeypatch):
+    settings.llm = True
+    server = MacLMStudio({BIG: 32768})  # loaded with 32,768 in LM Studio: CloseDesk didn't raise it
+    _serve(monkeypatch, server)
+    steps, modes, _text = _ask(store, settings, "What is the total in this budget?", mail["Q4 budget draft"].id)
+    assert server.calls == [] and modes and modes[0]["mode"] == "lookup"
+    assert "ran out of memory" in modes[0]["note"]
+
+
+def test_a_model_that_wouldnt_fit_with_more_context_keeps_its_own(store, settings, mail, monkeypatch):
+    settings.llm = True
+    server = MacLMStudio({BIG: 4096})
+    _serve(monkeypatch, server, memory_gb=16)  # 17 GB of model and 2 GB of context: more than a 16 GB computer has
+    budget = mail["Q4 budget draft"].id
+    steps, modes, text = _ask(store, settings, "What is the total in this budget?", budget)
+    assert server.calls == [], "not reloaded"
+    assert steps.count(f"Kept {BIG} at its 4,096-token context: a 16,384-token one wouldn't fit in this computer's memory.") == 1
+    assert not any(step.startswith("Reloading the model") for step in steps)
+    assert not modes and "$12,480" in text
+    # Said once.
+    steps, _modes, _text = _ask(store, settings, "And the total again?", budget)
+    assert not any(BIG in step for step in steps) and server.calls == []
+    # Settings doesn't say the next question reloads it.
+    client = TestClient(web.create_app(settings, store))
+    page = client.get("/settings").text
+    assert "The next time you ask something, CloseDesk reloads" not in page
+    assert f"{BIG} with 16,384 tokens wouldn't fit in this computer's memory, so CloseDesk keeps it as LM Studio loaded it." in page
+    window = client.get("/api/settings", headers={"X-CloseDesk": "1"}).json()["context"]["window"]
+    assert "wouldn't fit in this computer's memory" in str(window) and "next time you ask" not in str(window)
+
+
+def test_lowering_the_minimum_reloads_a_model_closedesk_raised(store, settings, mail, monkeypatch):
+    settings.llm = True
+    server = MacLMStudio({SMALL: 4096})
+    _serve(monkeypatch, server)
+    local_llm.set_min_context(settings, 32768)
+    steps, modes, _text = _ask(store, settings, "What is the total in this budget?", mail["Q4 budget draft"].id)
+    assert not modes and server.loaded[SMALL] == 32768
+
+    client = TestClient(web.create_app(settings, store))
+    eight = agent.CONTEXT_STEPS.index(8192)
+    saved = client.post("/settings/context", data={"step": eight}, headers={"Origin": "http://testserver"}, follow_redirects=False)
+    assert saved.status_code == 303 and "notice=context-reloaded" in saved.headers["location"]
+    assert server.calls[-2:] == [("unload", SMALL), ("load", SMALL, 8192)] and server.loaded[SMALL] == 8192
+    assert f"Reloaded {SMALL} in LM Studio with an 8,192-token context." in client.get(saved.headers["location"]).text
+
+    # The workspace's Settings says the same.
+    four = agent.CONTEXT_STEPS.index(4096)
+    local_llm._context_given[SMALL] = 8192  # as if raised again
+    local_llm._context_before[SMALL] = 2048
+    reply = client.post("/api/settings/context", json={"step": four}, headers={"X-CloseDesk": "1", "Origin": "http://testserver"})
+    assert reply.json()["message"] == f"Saved. Reloaded {SMALL} in LM Studio with a 4,096-token context."
+    assert server.loaded[SMALL] == 4096
+
+    # Lowered to its own size or below (or Off): loaded back as the user had it, and then it is theirs again.
+    server.loaded[SMALL] = 32768
+    local_llm._context_given[SMALL] = 32768
+    local_llm._context_before[SMALL] = 4096
+    local_llm._status_cache.clear()
+    calls = len(server.calls)
+    assert local_llm.set_min_context(settings, 0) == f"Reloaded {SMALL} in LM Studio with a 4,096-token context."
+    assert server.calls[calls:] == [("unload", SMALL), ("load", SMALL, 4096)]
+    assert local_llm.set_min_context(settings, 4096) == "" and len(server.calls) == calls + 2
+
+
+def test_lowering_the_minimum_reloads_a_model_chosen_in_settings(settings, monkeypatch):
+    settings.llm = True
+    server = MacLMStudio({})
+    _serve(monkeypatch, server)
+    assert local_llm.use_chat_model(settings, SMALL) == ""
+    assert server.calls == [("load", SMALL, 16384)]
+    assert local_llm.set_min_context(settings, 8192) == f"Reloaded {SMALL} in LM Studio with an 8,192-token context."
+    assert server.calls[1:] == [("unload", SMALL), ("load", SMALL, 8192)]
+    # Raising it isn't done here: the next question does that, as before.
+    assert local_llm.set_min_context(settings, 32768) == "" and len(server.calls) == 3
+    # Off: a model CloseDesk loaded has no size of the user's to go back to, so it stays as it is.
+    assert local_llm.set_min_context(settings, 0) == "" and len(server.calls) == 3
+
+
+def test_lowering_the_minimum_leaves_a_model_the_user_loaded_alone(store, settings, mail, monkeypatch):
+    settings.llm = True
+    server = MacLMStudio({SMALL: 32768})
+    _serve(monkeypatch, server)
+    assert local_llm.set_min_context(settings, 8192) == ""
+    assert server.calls == [] and server.loaded[SMALL] == 32768
+
+    # One CloseDesk raised, and then the user loaded again in LM Studio at a size they chose: theirs, left alone.
+    server.loaded = {SMALL: 4096}
+    local_llm.set_min_context(settings, 16384)
+    _ask(store, settings, "What is the total in this budget?", mail["Q4 budget draft"].id)
+    assert server.loaded[SMALL] == 16384
+    server.loaded[SMALL] = 65536
+    local_llm._status_cache.clear()
+    calls = len(server.calls)
+    assert local_llm.set_min_context(settings, 8192) == "" and len(server.calls) == calls

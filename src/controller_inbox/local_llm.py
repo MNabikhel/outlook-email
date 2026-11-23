@@ -1134,6 +1134,12 @@ _OVERFLOW_RE = re.compile(
 )
 _tools_rejected: set[str] = set()
 _context_raised: set[str] = set()
+# The context CloseDesk itself gave each chat model (raising it, or loading it when chosen in Settings), by LM Studio's
+# key. A model the user loaded at a size they chose isn't here, nor is one they loaded again since: it is left alone.
+_context_given: dict[str, int] = {}
+# The context a model CloseDesk raised had before, by key: it is loaded back with it when the longer one runs out of
+# memory, or when the minimum is lowered to it.
+_context_before: dict[str, int] = {}
 _context_lock = threading.Lock()
 
 # Models answering a request right now (a chat answer, the overnight reading, a page read), by the name the request
@@ -1277,10 +1283,109 @@ def needs_more_context(settings: Settings) -> bool:
     )
 
 
-def set_min_context(settings: Settings, tokens: int) -> None:
-    """Change the minimum while running; a model that couldn't be raised before is tried again at the new size."""
+def set_min_context(settings: Settings, tokens: int) -> str:
+    """Change the minimum while running; a model that couldn't be raised before is tried again at the new size.
+
+    A model CloseDesk loaded or raised with more than the new minimum is reloaded with it now (one it raised, with no
+    less than it had before; at Off, with what it had before). A model the user loaded at a size they chose is left as
+    it is. Returns what happened ("" when nothing did)."""
     settings.min_context_tokens = tokens
     _context_raised.clear()
+    if not _context_given:  # nothing CloseDesk sized (at the start, always): LM Studio isn't asked
+        return ""
+    with _context_lock:
+        return _fit_to_minimum(settings, tokens)
+
+
+def _fit_to_minimum(settings: Settings, tokens: int) -> str:
+    status = check_model(settings, use_cache=False)
+    said = []
+    for instance, (key, size) in status.instances.items():
+        if not size or _context_given.get(key) != size:
+            continue  # the user's own, or loaded again in LM Studio since
+        before = _context_before.get(key, 0)
+        want = max(tokens, before) if tokens else before
+        most = status.chat_models.get(key, 0)
+        want = min(want, most) if want and most else want
+        if not 0 < want < size:
+            continue
+        if model_busy(instance, key):
+            said.append(f"Left {key} at {size:,} tokens for now: it is answering another request. Save again once it is done.")
+            continue
+        problem = _reload_at(settings, status, instance, key, want)
+        if problem:
+            said.append(problem)
+            continue
+        if want == before:  # as the user had it: theirs again
+            _context_given.pop(key, None)
+            _context_before.pop(key, None)
+        else:
+            _context_given[key] = want
+        said.append(f"Reloaded {key} in LM Studio with {'an' if str(want).startswith('8') else 'a'} {want:,}-token context.")
+    return " ".join(said)
+
+
+def _reload_at(settings: Settings, status: ModelStatus, instance: str, key: str, size: int) -> str:
+    """Unload ``instance`` and load ``key`` again with ``size`` tokens. Returns what went wrong, or ""."""
+    root = lm_studio_root(status.base_url)
+    timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
+    try:
+        _no_load_pending(settings)
+        http_method("post")(root + "/api/v1/models/unload", json={"instance_id": instance}, headers=auth_headers(settings), timeout=timeout).raise_for_status()
+    except StillLoading as exc:
+        return str(exc)
+    except httpx.HTTPError as exc:
+        return f"Couldn't reload {key} with a {size:,}-token context ({_short_error(exc)})."
+    try:
+        _load(settings, root, key, size, timeout)
+    except StillLoading as exc:
+        return str(exc)
+    except httpx.HTTPError as exc:
+        _context_given.pop(key, None)
+        _context_before.pop(key, None)
+        return f"LM Studio couldn't load {key} again with a {size:,}-token context ({_lm_studio_said(exc)}). Load it again in LM Studio."
+    finally:
+        _status_cache.clear()
+    return ""
+
+
+def context_fits(settings: Settings, status: ModelStatus | None = None) -> bool:
+    """Whether the loaded model still fits in this computer's memory with the context CloseDesk would raise it to, by
+    model_roles' estimate. True when that can't be told: LM Studio doesn't give the model's size, it runs on another
+    computer, or this computer's memory can't be read."""
+    from controller_inbox import model_roles  # it imports this module
+
+    status = status or check_model(settings)
+    memory = model_roles.computer_memory()
+    if not status.chat_sizes.get(status.key) or not memory or not model_roles.on_this_computer(settings, status):
+        return True
+    return model_roles.fits(settings, status, status.key, memory)
+
+
+def step_back_context(settings: Settings) -> str:
+    """An answer ran out of memory: a model whose context CloseDesk raised is loaded back with the context it had
+    before (the size it last answered with, rather than a step down that may not fit either), and isn't raised again
+    until the minimum is changed in Settings. Returns what happened, or "" when the model's context isn't CloseDesk's
+    doing (there is nothing to go back to) or it can't be reloaded now."""
+    if not _context_lock.acquire(timeout=CONTEXT_WAIT_SECONDS):
+        return ""
+    try:
+        status = check_model(settings, use_cache=False)
+        key, raised = status.key, status.context_length
+        before = _context_before.get(key, 0)
+        if not (key and 0 < before < raised and _context_given.get(key) == raised):
+            return ""
+        if model_busy(status.model, key):  # unloading it would cut off another answer or the overnight reading
+            return ""
+        _context_raised.add(status.model)
+        problem = _reload_at(settings, status, status.model, key, before)
+        if problem:
+            return problem
+        _context_given.pop(key, None)
+        _context_before.pop(key, None)
+        return f"Loaded {key} back with a {before:,}-token context: {raised:,} didn't fit in this computer's memory."
+    finally:
+        _context_lock.release()
 
 
 def ensure_context(settings: Settings) -> str:
@@ -1307,6 +1412,9 @@ def ensure_context(settings: Settings) -> str:
 def _reload_with_context(settings: Settings) -> str:
     status = check_model(settings)
     want = context_target(settings, status)
+    if not context_fits(settings, status):
+        _context_raised.add(status.model)  # said once
+        return f"Kept {status.key} at its {status.context_length:,}-token context: a {want:,}-token one wouldn't fit in this computer's memory."
     if model_busy(status.model, status.key):
         # Unloading it would cut off the overnight reading, a page read or another chat partway; tried again later.
         return f"Left {status.key} as it is for now: it is answering another request. The longer context is tried on a later question."
@@ -1335,6 +1443,8 @@ def _reload_with_context(settings: Settings) -> str:
     finally:
         _status_cache.clear()
     if not errors:
+        _context_before.setdefault(status.key, status.context_length)  # the earliest: the size the user had it at
+        _context_given[status.key] = want
         most = " (the most it supports)" if want < settings.min_context_tokens else ""
         return f"Reloaded {status.key} in LM Studio with a {want:,}-token context{most} so whole attachments fit."
     if len(errors) == 1:
@@ -1487,8 +1597,9 @@ def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) 
                 unloaded.append((model, size))
             if not any(model == key for model, _size in status.instances.values()):
                 want, most = settings.min_context_tokens, status.chat_models[key]
+                size = min(want, most) if want and most else want
                 try:
-                    load(key, min(want, most) if want and most else want)
+                    load(key, size)
                 except StillLoading as exc:  # nothing is loaded back beside it
                     return str(exc)
                 except httpx.HTTPError as exc:
@@ -1496,6 +1607,12 @@ def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) 
                     said = _lm_studio_said(exc)
                     advice = f" {MEMORY_ADVICE}" if out_of_memory(said) else ""
                     return f"LM Studio couldn't load {key} ({said}).{load_back(unloaded)}{advice}"
+                # Loaded by CloseDesk: lowering the minimum reloads it smaller. There is no size of the user's to go back to.
+                _context_before.pop(key, None)
+                if size:
+                    _context_given[key] = size
+                else:
+                    _context_given.pop(key, None)
         finally:
             _status_cache.clear()
         _context_raised.discard(key)  # loaded afresh: a longer context may be tried again
@@ -1747,7 +1864,8 @@ _MEMORY_RE = re.compile(
 )
 MEMORY_ADVICE = (
     "The model is likely too big for this computer's memory. CloseDesk only needs a small one: a 3B to 8B model is "
-    "plenty and answers faster. Choose one in Settings, or lower the minimum context there to 8k."
+    "plenty and answers faster. Choose one in Settings, or lower the minimum context there to 8k: a model CloseDesk "
+    "loaded is reloaded with it (one you loaded in LM Studio, reload there with a smaller Context Length)."
 )
 
 
