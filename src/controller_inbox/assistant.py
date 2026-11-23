@@ -1983,11 +1983,12 @@ def _more_time(state: dict, settings: Settings, exc: Exception, question: str, e
     if wait is None or not isinstance(exc, httpx.TimeoutException) or ran_out_of_memory(exc):
         return None
     call = state.get("call") or {}
-    waited = max(wait.seconds, settings.llm_timeout)
+    waited = _waited(wait, settings, exc)
     elapsed = time.monotonic() - call["started"] if call.get("started") else waited
     tokens = int(call.get("tokens") or 0)
     suggest = model_fit.suggested_minutes(
-        state.get("store"), settings, check_model(settings), prompt_tokens=tokens, waited=waited, elapsed=elapsed
+        state.get("store"), settings, check_model(settings), prompt_tokens=tokens, waited=waited, elapsed=elapsed,
+        written=int(getattr(exc, "written", 0) or 0),
     )
     if suggest * 60 <= waited:  # it had the longest wait already: the same again would run out the same way
         return None
@@ -2006,12 +2007,18 @@ def _wait_again(store: Store, settings: Settings, ws: agent.Workspace, state: di
     ws.call["model"] = wait.model
 
 
+def _waited(wait: model_fit.Wait, settings: Settings, exc: Exception) -> float:
+    """How long the call that ran out of time (``exc``) waited: the chat's wait, or longer for a call that isn't
+    streamed with room for a model to think (``local_llm._timeout``), as the timeout says."""
+    return max(wait.seconds, settings.llm_timeout, float(getattr(exc, "waited", 0) or 0))
+
+
 def _had_longest_wait(state: dict, settings: Settings, exc: Exception) -> bool:
     """The model ran out of time (``exc``) with the longest wait CloseDesk gives (``model_fit.MAX_MINUTES``)."""
     wait = state.get("wait")
     return (
         wait is not None and isinstance(exc, httpx.TimeoutException) and not ran_out_of_memory(exc)
-        and max(wait.seconds, settings.llm_timeout) >= model_fit.MAX_MINUTES * 60
+        and _waited(wait, settings, exc) >= model_fit.MAX_MINUTES * 60
     )
 
 

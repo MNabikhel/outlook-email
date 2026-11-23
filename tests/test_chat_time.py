@@ -220,3 +220,61 @@ def test_the_timeout_notes_no_longer_send_people_to_a_settings_file():
     started = httpx.ReadTimeout("timed out")
     started.reply_started = "writing"
     assert "CONTROLLER_INBOX" not in local_llm.failure_note(started)
+
+
+class ThinkingLMStudio(ChatLMStudio):
+    """A model that can't turn thinking off (LM Studio lists only "on"): a call that isn't streamed uses up its 2,048
+    tokens thinking, and the one with twice the room runs out of time."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/models":
+            return httpx.Response(200, json={"models": [
+                {"type": "llm", "key": KEY, "loaded_instances": [{"id": KEY, "config": {"context_length": 8192}}],
+                 "max_context_length": 131072, "size_bytes": 18 * GB,
+                 "capabilities": {"reasoning": {"allowed_options": ["on"], "default": "on"}}},
+            ]})
+        if path != "/v1/chat/completions":
+            return super().__call__(request)
+        payload = json.loads(request.content)
+        self.waits.append(request.extensions["timeout"]["read"])
+        if payload.get("stream") or payload["max_tokens"] > local_llm.THINKING_ROOM:
+            raise httpx.ReadTimeout("timed out", request=request)
+        message = {"content": "", "reasoning_content": "Let me think about the auditor's email. " * 40}
+        return httpx.Response(200, json={"choices": [{"message": message, "finish_reason": "length"}]})
+
+
+def test_the_offer_says_the_wait_that_ran_out_and_suggests_one_that_changes_it(settings, loaded, monkeypatch):
+    """A thinking model's second try, with twice the room, waits 10 minutes, more than the wait worked out for it
+    (about 7 here). The offer said it was given those 7 minutes and suggested 8, from reading the prompt alone:
+    saved, the second try still waited 10 minutes and ran out the same way. Now it says the 10 minutes and suggests
+    enough for reading the prompt and writing all the call may write, and more than the 10."""
+    from controller_inbox import assistant
+
+    server = ThinkingLMStudio()
+    client = httpx.Client(transport=httpx.MockTransport(server))
+    monkeypatch.setattr(local_llm.httpx, "get", lambda url, **kw: client.get(url, headers=kw.get("headers"), timeout=kw.get("timeout")))
+    monkeypatch.setattr(local_llm.httpx, "post", lambda url, **kw: client.post(url, json=kw.get("json"), headers=kw.get("headers"), timeout=kw.get("timeout")))
+    settings.llm = True
+    model_fit.record_speed(loaded, KEY, prompt_tokens=6000, read_seconds=40.0, written=700, write_seconds=100.0)
+    wait = model_fit.chat_wait(loaded, settings)
+    assert 300 < wait.seconds < 600
+    messages = [{"role": "user", "content": QUESTION}]
+    tools = [{"type": "function", "function": {"name": "read_file", "parameters": {"type": "object", "properties": {}}}}]
+    calls = (
+        lambda: local_llm.chat_with_tools(settings, messages, tools, limit=wait.seconds),
+        lambda: local_llm.complete_text(settings, messages, limit=wait.seconds),
+    )
+    for call in calls:
+        server.waits.clear()
+        with pytest.raises(httpx.TimeoutException) as ran_out:
+            call()
+        assert server.waits == [wait.seconds, 600]
+        assert ran_out.value.waited == 600 and ran_out.value.written == 2 * local_llm.THINKING_ROOM
+
+        state = {"wait": wait, "store": loaded, "call": {"tokens": 8000, "started": time.monotonic() - 600}}
+        offer = assistant._more_time(state, settings, ran_out.value, QUESTION, None)
+        assert offer["minutes"] == 10 and "(10 minutes)" in offer["text"]
+        assert offer["suggest"] * 60 > 600
+        # Reading the prompt at 150 tokens a second, and writing the 4,096 tokens it may write at 7 a second.
+        assert offer["suggest"] * 60 >= 8000 / 150 * model_fit.MARGIN + 4096 / 7

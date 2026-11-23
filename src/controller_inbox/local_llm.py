@@ -610,7 +610,21 @@ def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> 
     ``tools``) was the problem: the first answer comes back and the payload keeps its effort.
     A busy server (500, 404) is asked once more as it was, with the effort kept: without it, a model that can turn
     thinking off would think again with the same room. A model out of memory isn't asked again at all.
+
+    A request that runs out of time carries how long it waited (``waited``, in seconds) and how many tokens it might
+    write (``written``): a thinking model's call waits longer than the chat's wait, and the chat's offer of more time
+    says and suggests from these.
     """
+    try:
+        return _post_chat_once(post, url, payload, settings, **options)
+    except httpx.TimeoutException as exc:
+        timeout = options.get("timeout")
+        exc.waited = float(timeout.read or 0) if isinstance(timeout, httpx.Timeout) else float(timeout or 0)
+        exc.written = int(payload.get("max_tokens") or 0)
+        raise
+
+
+def _post_chat_once(post, url: str, payload: dict, settings: Settings, **options) -> httpx.Response:
     with _using(str(payload.get("model")), options.get("timeout")):
         response = post(url, json=payload, headers=auth_headers(settings), **options)
         if response.status_code >= 400 and _OVERFLOW_RE.search(response.text[:600]):

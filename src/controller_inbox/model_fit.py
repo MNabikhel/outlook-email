@@ -313,16 +313,21 @@ def describe(store: Store | None, settings: Settings, status: ModelStatus | None
 
 
 def suggested_minutes(
-    store: Store | None, settings: Settings, status: ModelStatus, *, prompt_tokens: int, waited: float, elapsed: float
+    store: Store | None, settings: Settings, status: ModelStatus, *, prompt_tokens: int, waited: float, elapsed: float,
+    written: int = 0,
 ) -> int:
     """How many minutes to suggest for the model answering after it ran out of time on a question: from its measured
     prompt-reading speed and this question's prompt (``prompt_tokens``) when both are known, else from its size, else
-    a bit over the ``elapsed`` seconds it had taken when it was cut off. More than the ``waited`` it had, in whole
-    minutes from 1 to 120: so not more when it had 120 already (the chat then offers no more time)."""
+    a bit over the ``elapsed`` seconds it had taken when it was cut off. ``written``: the tokens the call that ran out
+    might write (thinking included) when it isn't streamed, so nothing came back until it was all written: the time
+    to write them is added (from the measured writing speed, else half as long again). More than the ``waited`` it
+    had, in whole minutes from 1 to 120: so not more when it had 120 already (the chat then offers no more time)."""
     key = model_key(status)
     rates = speeds(store, key, status.model)
     if rates.get("read") and prompt_tokens:
         seconds = prompt_tokens / rates["read"] * MARGIN + SPARE_SECONDS
+        if written > 0:
+            seconds = seconds + written / rates["write"] if rates.get("write") else seconds * THINKING_SHARE
     elif size := status.chat_sizes.get(key, 0):
         thinks = _thinks(settings, status, status.model) or _thinks(settings, status, key)
         seconds = size / GB * SECONDS_PER_GB * (THINKING_SHARE if thinks else 1.0)
