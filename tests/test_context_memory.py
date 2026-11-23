@@ -218,6 +218,19 @@ def test_lowering_the_minimum_reloads_a_model_chosen_in_settings(settings, monke
     assert local_llm.set_min_context(settings, 0) == "" and len(server.calls) == 3
 
 
+def test_lowering_the_minimum_while_a_model_loads_says_so_rather_than_wait(settings, monkeypatch):
+    settings.llm = True
+    server = MacLMStudio({})
+    _serve(monkeypatch, server)
+    assert local_llm.use_chat_model(settings, SMALL) == ""
+    monkeypatch.setattr(local_llm, "CONTEXT_WAIT_SECONDS", 0.05)
+    with local_llm._context_lock:  # another load, as long as LM Studio takes
+        said = local_llm.set_min_context(settings, 8192)
+    assert said.startswith("Left the model as it is for now: LM Studio is loading a model.")
+    assert server.calls == [("load", SMALL, 16384)]
+    assert settings.min_context_tokens == 8192, "the new minimum is kept all the same"
+
+
 def test_lowering_the_minimum_leaves_a_model_the_user_loaded_alone(store, settings, mail, monkeypatch):
     settings.llm = True
     server = MacLMStudio({SMALL: 32768})

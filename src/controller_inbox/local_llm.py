@@ -1563,8 +1563,13 @@ def set_min_context(settings: Settings, tokens: int) -> str:
     _context_raised.clear()
     if not _context_given:  # nothing CloseDesk sized (at the start, always): LM Studio isn't asked
         return ""
-    with _context_lock:
+    # Another load holds the lock for as long as LM Studio takes: say so rather than wait for it.
+    if not _context_lock.acquire(timeout=CONTEXT_WAIT_SECONDS):
+        return "Left the model as it is for now: LM Studio is loading a model. Save again once it is done."
+    try:
         return _fit_to_minimum(settings, tokens)
+    finally:
+        _context_lock.release()
 
 
 def _fit_to_minimum(settings: Settings, tokens: int) -> str:

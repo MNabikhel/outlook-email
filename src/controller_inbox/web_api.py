@@ -1303,7 +1303,8 @@ def register_workspace(
         if not isinstance(step, int) or isinstance(step, bool):
             raise HTTPException(status_code=400, detail="Unknown context size")
         try:
-            notice = setup["save_context_step"](step)
+            # A smaller minimum can reload the model in LM Studio, which takes minutes: off the event loop.
+            notice = await run_in_threadpool(setup["save_context_step"], step)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         if notice == "context-reloaded":  # what the smaller minimum did to the model loaded in LM Studio
