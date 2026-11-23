@@ -270,3 +270,26 @@ def test_settings_say_the_context_the_model_is_loaded_with(settings, store, monk
     # Loaded back after running out of memory: not raised again, so only what it has.
     local_llm._context_raised.add(BIG)
     assert model_fit.describe(store, settings)["line"].startswith("qwen3-32b: 4,096-token context, waits up to")
+
+
+def test_one_slow_first_reading_doesn_t_keep_a_model_slow_for_good(store):
+    """The first question waited behind another request (the reading of mail) before the model read it: 3,000 tokens
+    in 60 seconds were kept as 50 tokens a second, and every true reading after it (about 1,000 a second) was more
+    than FASTEST_JUMP times faster, so it was taken for a prompt read before and dropped, for good. A few such
+    readings in a row are the model's own speed, and the slowest of them is kept."""
+    model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=60.0)
+    assert model_fit.speeds(store, BIG)["read"] == 50
+    model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=3.0)
+    model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=2.5)
+    assert model_fit.speeds(store, BIG) == {"read": 50}, "one or two may be prompts read before"
+    model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=2.8)
+    assert model_fit.speeds(store, BIG) == {"read": 1000}
+    assert model_fit.estimate(store, BIG, tokens=3000) == 3
+
+    # A reading in reach between fast ones starts the count again.
+    model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=60.0)
+    model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=3.0)
+    model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=40.0)
+    model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=3.0)
+    model_fit.record_speed(store, EIGHT, prompt_tokens=3000, read_seconds=3.0)
+    assert model_fit.speeds(store, EIGHT)["read"] == 62.5

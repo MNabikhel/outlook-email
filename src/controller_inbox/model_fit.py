@@ -49,6 +49,9 @@ NEW_WEIGHT = 0.5
 # A prompt read this many times faster than the model was measured reading isn't kept: LM Studio had read most of it
 # before (the server doesn't always say), and kept, one such question would cut the wait for the next to a fraction.
 FASTEST_JUMP = 4.0
+# But this many such readings in a row are the model's own speed (the one kept was slow: its first question waited
+# behind another request, say), and the slowest of them is kept instead.
+FAST_IN_A_ROW = 3
 
 WAIT_KEY = "model_wait"  # {model: seconds} the user chose
 RATES_KEY = "model_rates"  # {model: {"read": prompt tokens a second, "write": tokens written a second}}
@@ -134,7 +137,8 @@ def record_speed(store: Store, model: str, *, prompt_tokens: int, read_seconds: 
                  write_seconds: float = 0.0) -> None:
     """Keep how fast ``model`` read a prompt of ``prompt_tokens`` (its first word came ``read_seconds`` after the
     question went) and wrote ``written`` tokens in ``write_seconds``, so the next estimate and wait are nearer. A
-    reading ``FASTEST_JUMP`` times faster than the one kept isn't kept (a prompt LM Studio had read before)."""
+    reading ``FASTEST_JUMP`` times faster than the one kept isn't kept (a prompt LM Studio had read before), unless
+    ``FAST_IN_A_ROW`` come in a row: then the slowest of them replaces the one kept."""
     if not model:
         return
     rates = _read(store, RATES_KEY)
@@ -150,7 +154,15 @@ def record_speed(store: Store, model: str, *, prompt_tokens: int, read_seconds: 
         before = entry.get(kind)
         rate = min(rate, 1e6)
         if kind == "read" and isinstance(before, (int, float)) and rate > before * FASTEST_JUMP:
+            fast = [value for value in entry.get("read_fast", []) if isinstance(value, (int, float))] + [rate]
+            if len(fast) < FAST_IN_A_ROW:
+                entry["read_fast"] = fast  # a list: speeds() leaves it out
+                continue
+            entry.pop("read_fast", None)
+            entry[kind] = round(min(fast), 2)
             continue
+        if kind == "read":
+            entry.pop("read_fast", None)
         entry[kind] = round(rate if not isinstance(before, (int, float)) else before * (1 - NEW_WEIGHT) + rate * NEW_WEIGHT, 2)
     rates[model] = entry
     store.set_state(RATES_KEY, json.dumps(rates))
