@@ -113,20 +113,34 @@ def read_queue(
     reader: LocalReader | None = None,
     on_progress: Progress | None = None,
 ) -> dict:
-    """Let the local model read waiting messages, most important first."""
+    """Let the local model read waiting messages, most important first. ``load`` in the result: what loading the model
+    first said (``model_choice.ready_to_read``), when it was loaded or couldn't be."""
     now = now or datetime.now(timezone.utc)
-    result = {"read_ids": [], "model": "", "note": "", "stats": None}
+    result = {"read_ids": [], "model": "", "note": "", "stats": None, "load": None}
+    batch = limit if limit is not None else settings.overnight_batch
+    # 0 means read none (SQLite would read everything for a negative LIMIT).
+    # Held mail is never read by the model, its text no more than its files (waiting_for_reading leaves it out).
+    waiting = waiting_for_reading(store, batch)
+    if waiting and settings.llm_mode != "off":
+        # LM Studio may have unloaded the model since (idle auto-unload, a restart): loaded before the first email,
+        # so that email isn't kept waiting while it loads. Nothing to read, nothing loaded.
+        load = model_choice.ready_to_read(settings, reader.model if reader else "", on_progress)
+        if load.get("message"):
+            result["load"] = load
     if reader is None:
         if not llm_active(settings):
             result["note"] = check_model(settings).describe()
             return result
         with LocalReader(settings) as own_reader:
-            return read_queue(store, settings, limit=limit, now=now, reader=own_reader, on_progress=on_progress)
+            return _read_waiting(store, settings, waiting, own_reader, now, on_progress, result)
+    return _read_waiting(store, settings, waiting, reader, now, on_progress, result)
+
+
+def _read_waiting(
+    store: Store, settings: Settings, waiting: list, reader: LocalReader, now: datetime, on_progress: Progress | None,
+    result: dict,
+) -> dict:
     result["model"] = reader.model
-    batch = limit if limit is not None else settings.overnight_batch
-    # 0 means read none (SQLite would read everything for a negative LIMIT).
-    # Held mail is never read by the model, its text no more than its files (waiting_for_reading leaves it out).
-    waiting = waiting_for_reading(store, batch)
     corrections = store.list_corrections()
     for index, email in enumerate(waiting, start=1):
         if on_progress:
@@ -155,6 +169,15 @@ def read_queue(
     model_choice.record_speed(store, reader.model, reader.stats.typical_seconds, reader.stats.read)
     if reader.stats.stopped_reason:
         result["note"] = f"Stopped reading: {reader.stats.stopped_reason}."
+        if reader.stats.too_slow:
+            status = check_model(settings)
+            current = status.instances.get(reader.model, (reader.model, 0))[0]
+            faster = model_choice.faster_model(settings, status, current)
+            result["note"] += (
+                f" {faster} would fit and answer faster: choose it in Settings → Local model."
+                if faster
+                else " A smaller model answers faster: a 3B to 8B model is plenty. Choose one in Settings → Local model."
+            )
     return result
 
 
@@ -226,6 +249,8 @@ def outlook_run(
         )
         write_digest_files(payload, settings.digest_dir, as_of.isoformat())
         result["read_by_bionic"] = len(reading["read_ids"])
+        if reading.get("load"):
+            result["model_load"] = {"message": reading["load"]["message"], "failed": bool(reading["load"].get("failed"))}
         return result
 
 
@@ -403,6 +428,8 @@ def _run_overnight(
         "avg_seconds": round(stats.average_seconds, 1) if stats else 0.0,
         "llm_enabled": bool(reading["model"]),
     }
+    if reading.get("load"):  # the model was loaded first (or couldn't be): the page says so, as at the start
+        summary["model_load"] = {"message": reading["load"]["message"], "failed": bool(reading["load"].get("failed"))}
     log_path = settings.overnight_dir / f"{as_of.isoformat()}.md"
     log_path.write_text(_log(summary, store=store), encoding="utf-8")
     summary["log_path"] = str(log_path)
