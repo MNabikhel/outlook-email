@@ -437,7 +437,9 @@
     // A newer round (a new or another conversation opened meanwhile) stops reading this answer.
     const stop = new AbortController();
     try {
-      const body = { message: question, chat_id: chatId, email_id: emailId || chatInput.dataset.emailId || currentEmailId() };
+      // null: about all mail, whatever is open; none given: the email open.
+      const about = emailId === null ? null : emailId || chatInput.dataset.emailId || currentEmailId();
+      const body = { message: question, chat_id: chatId, email_id: about };
       await shared().postStream("/chat", body, (event) => {
         if (round !== chatRound) return stop.abort();
         if (event.type === "chat") {
@@ -539,7 +541,8 @@
       const reply = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(reply.detail || `the server said ${response.status}`);
       status.textContent = reply.message || "Saved.";
-      ask(form.dataset.question, form.dataset.email || undefined);
+      // The same question about the same email, or about all mail (null) if it was: not whatever is open now.
+      ask(form.dataset.question, form.dataset.email || null);
     } catch (error) {
       status.textContent = error.message;
       button.disabled = false;

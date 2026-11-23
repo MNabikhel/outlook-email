@@ -220,7 +220,8 @@ export function createChat({ root, onToggle, visionRead }) {
         offer.message = reply.message || "Saved.";
         offer.suggest = Number(minutes.value);
         repaint(turn);
-        ask(offer.question, offer.email_id || undefined);
+        // The same question about the same email, or about all mail (null) if it was: not whatever is open now.
+        ask(offer.question, offer.email_id || null);
       } catch (error) {
         offer.failed = true;
         offer.message = error.message;
@@ -440,7 +441,8 @@ export function createChat({ root, onToggle, visionRead }) {
     setBusy(true);
     await ready();
     const mine = ++round;
-    const about = emailId || (scope && !scopeOff ? scope.id : null);
+    // null: about all mail, whatever is open; none given: the email in scope.
+    const about = emailId === null ? null : emailId || (scope && !scopeOff ? scope.id : null);
     turns.push({ role: "user", text: question });
     const answer = { role: "assistant", text: "", sources: [], steps: [], notes: [], pending: true };
     turns.push(answer);

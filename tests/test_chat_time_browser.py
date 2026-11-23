@@ -23,8 +23,9 @@ def _scripted(monkeypatch, *answers):
     asked: list[str] = []
     queue = list(answers)
 
-    def fake(_store, _settings, question, **_kw):
+    def fake(_store, _settings, question, **kw):
         asked.append(question)
+        ABOUT.append(kw.get("email_id"))
         for event in queue.pop(0) if queue else [{"type": "delta", "text": "No more answers scripted."}]:
             if isinstance(event, (int, float)):
                 time.sleep(event)
@@ -33,7 +34,11 @@ def _scripted(monkeypatch, *answers):
         yield {"type": "done"}
 
     monkeypatch.setattr(web, "answer_stream", fake)
+    ABOUT.clear()
     return asked
+
+
+ABOUT: list[str | None] = []  # the email each scripted question was about, in order
 
 
 def _ask(page, base: str, question: str) -> None:
@@ -99,6 +104,44 @@ def test_the_classic_chat_offers_more_time_too(settings, store, page, monkeypatc
         form.locator("button").click()
         page.wait_for_selector(".msg:has-text('Due Friday.')")
         assert asked == ["What is due?", "What is due?"] and model_fit.chosen_wait(store, MODEL) == 600
+
+
+def _offer_without_an_email() -> list:
+    offer = {
+        "type": "more_time", "model": MODEL, "minutes": 5, "suggest": 9, "tokens": 6000, "question": "What needs a reply?",
+        "email_id": "", "text": "The local model needed more time than CloseDesk gives it (5 minutes).",
+    }
+    return [{"type": "delta", "text": "Here's a straight lookup instead."}, offer]
+
+
+def test_asked_again_a_question_about_all_mail_stays_about_all_mail(settings, loaded, page, monkeypatch):
+    """Asked with no email open, then an email opened before "Save and ask again": the question went again about
+    that email, and was answered about it instead of all the mail."""
+    asked = _scripted(monkeypatch, _offer_without_an_email(), [{"type": "delta", "text": "Two need a reply."}])
+    with serving(web.create_app(settings, loaded)) as base:
+        _ask(page, base, "What needs a reply?")
+        form = page.locator(".msg-more-time")
+        form.wait_for()
+        page.click("#list a[href^='/app/mail/demo-pbc?']")
+        page.wait_for_selector(".scope-chip")
+        form.locator("button", has_text="Save and ask again").click()
+        page.wait_for_selector(".msg.bot:last-child .msg-text:has-text('Two need a reply')")
+    assert asked == ["What needs a reply?", "What needs a reply?"] and ABOUT == [None, None]
+
+
+def test_asked_again_in_the_classic_chat_a_question_about_all_mail_stays_about_all_mail(settings, loaded, page, monkeypatch):
+    asked = _scripted(monkeypatch, _offer_without_an_email(), [{"type": "delta", "text": "Two need a reply."}])
+    with serving(web.create_app(settings, loaded)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/chat/window")
+        page.fill("#chat textarea", "What needs a reply?")
+        page.press("#chat textarea", "Enter")
+        form = page.locator("form.more-time")
+        form.wait_for()
+        page.evaluate("document.body.dataset.emailId = 'demo-pbc'")  # an email opened meanwhile
+        form.locator("button").click()
+        page.wait_for_selector(".msg:has-text('Two need a reply.')")
+    assert asked == ["What needs a reply?", "What needs a reply?"] and ABOUT == [None, None]
 
 
 # The estimate while the model reads ---------------------------------------------------------------------------------
