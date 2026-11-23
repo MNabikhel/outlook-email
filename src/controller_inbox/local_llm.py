@@ -1349,6 +1349,9 @@ _context_given: dict[str, int] = {}
 # The context a model CloseDesk raised had before, by key: it is loaded back with it when the longer one runs out of
 # memory, or when the minimum is lowered to it.
 _context_before: dict[str, int] = {}
+# The context a model CloseDesk raised last answered with, by key: when the longer one runs out of memory it is loaded
+# back with this (after a second raise, the size that worked rather than the user's first one).
+_context_back: dict[str, int] = {}
 _context_lock = threading.Lock()
 
 # Models answering a request right now (a chat answer, the overnight reading, a page read), by the name the request
@@ -1571,8 +1574,11 @@ def _fit_to_minimum(settings: Settings, tokens: int) -> str:
         if want == before:  # as the user had it: theirs again
             _context_given.pop(key, None)
             _context_before.pop(key, None)
+            _context_back.pop(key, None)
         else:
             _context_given[key] = want
+            if _context_back.get(key, 0) >= want:
+                _context_back.pop(key, None)
         said.append(f"Reloaded {key} in LM Studio with {'an' if str(want).startswith('8') else 'a'} {want:,}-token context.")
     return " ".join(said)
 
@@ -1595,6 +1601,7 @@ def _reload_at(settings: Settings, status: ModelStatus, instance: str, key: str,
     except httpx.HTTPError as exc:
         _context_given.pop(key, None)
         _context_before.pop(key, None)
+        _context_back.pop(key, None)
         return f"LM Studio couldn't load {key} again with a {size:,}-token context ({_lm_studio_said(exc)}). Load it again in LM Studio."
     finally:
         _status_cache.clear()
@@ -1616,28 +1623,50 @@ def context_fits(settings: Settings, status: ModelStatus | None = None) -> bool:
     return model_fit.fits_with(settings, status, status.key, context_target(settings, status))
 
 
+def _smaller_context(size: int) -> int:
+    """The next of Setup's steps below ``size``, no smaller than 4,096 tokens; 0 when there is none."""
+    from controller_inbox import model_fit  # it imports this module
+
+    smaller = [step for step in model_fit._steps() if model_fit.SMALLEST_CONTEXT <= step < size]
+    return max(smaller, default=0)
+
+
 def step_back_context(settings: Settings) -> str:
-    """An answer ran out of memory: a model whose context CloseDesk raised is loaded back with the context it had
-    before (the size it last answered with, rather than a step down that may not fit either), and isn't raised again
-    until the minimum is changed in Settings. Returns what happened, or "" when the model's context isn't CloseDesk's
-    doing (there is nothing to go back to) or it can't be reloaded now."""
+    """An answer ran out of memory: a model whose context CloseDesk raised is loaded back with the context it last
+    answered with (rather than a step down that may not fit either); one CloseDesk loaded itself (at the start, or
+    with Load and use), or one already loaded back, is loaded again with the next smaller of Setup's steps, down to
+    4,096 tokens. Either way it isn't raised again until the minimum is changed in Settings. Returns what happened, or
+    "" when the model's context isn't CloseDesk's doing (the user loaded it as it is), there is no smaller size to
+    go to, or it can't be reloaded now."""
     if not _context_lock.acquire(timeout=CONTEXT_WAIT_SECONDS):
         return ""
     try:
         status = check_model(settings, use_cache=False)
-        key, raised = status.key, status.context_length
+        key, loaded = status.key, status.context_length
+        if not (key and loaded > 0 and _context_given.get(key) == loaded):
+            return ""
         before = _context_before.get(key, 0)
-        if not (key and 0 < before < raised and _context_given.get(key) == raised):
+        back = _context_back.get(key, 0)
+        answered = 0 < back < loaded
+        if not answered:  # no size it answered with: a step down, never below the size the user had it at
+            back = max(_smaller_context(loaded), before)
+        if not 0 < back < loaded:
             return ""
         if model_busy(status.model, key):  # unloading it would cut off another answer or the overnight reading
             return ""
         _context_raised.add(status.model)
-        problem = _reload_at(settings, status, status.model, key, before)
+        problem = _reload_at(settings, status, status.model, key, back)
         if problem:
             return problem
-        _context_given.pop(key, None)
-        _context_before.pop(key, None)
-        return f"Loaded {key} back with a {before:,}-token context: {raised:,} didn't fit in this computer's memory."
+        _context_back.pop(key, None)
+        if back == before:  # as the user had it: theirs again
+            _context_given.pop(key, None)
+            _context_before.pop(key, None)
+        else:
+            _context_given[key] = back
+        how = "back" if answered else "again"
+        article = "an" if str(back).startswith("8") else "a"
+        return f"Loaded {key} {how} with {article} {back:,}-token context: {loaded:,} didn't fit in this computer's memory."
     finally:
         _context_lock.release()
 
@@ -1698,6 +1727,7 @@ def _reload_with_context(settings: Settings) -> str:
         _status_cache.clear()
     if not errors:
         _context_before.setdefault(status.key, status.context_length)  # the earliest: the size the user had it at
+        _context_back[status.key] = status.context_length  # the latest: the size it answered with before this
         _context_given[status.key] = want
         supported = min(settings.min_context_tokens, status.max_context) if status.max_context else settings.min_context_tokens
         most = (
@@ -1884,6 +1914,7 @@ def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) 
                     return f"LM Studio couldn't load {key} ({said}).{load_back(unloaded)}{advice}"
                 # Loaded by CloseDesk: lowering the minimum reloads it smaller. There is no size of the user's to go back to.
                 _context_before.pop(key, None)
+                _context_back.pop(key, None)
                 if size:
                     _context_given[key] = size
                 else:

@@ -234,3 +234,53 @@ def test_lowering_the_minimum_leaves_a_model_the_user_loaded_alone(store, settin
     local_llm._status_cache.clear()
     calls = len(server.calls)
     assert local_llm.set_min_context(settings, 8192) == "" and len(server.calls) == calls
+
+
+def test_a_second_raise_that_runs_out_of_memory_goes_back_to_the_size_that_answered(store, settings, mail, monkeypatch):
+    """Raised to 8,192 (it answers), then to 16,384 (it runs out): loaded back with 8,192, not the user's 4,096."""
+    settings.llm = True
+    server = MacLMStudio({BIG: 4096})
+    _serve(monkeypatch, server)
+    budget = mail["Q4 budget draft"].id
+    local_llm.set_min_context(settings, 8192)
+    _steps, modes, text = _ask(store, settings, "What is the total in this budget?", budget)
+    assert not modes and "$12,480" in text and server.loaded[BIG] == 8192
+
+    local_llm.set_min_context(settings, 16384)
+    steps, modes, text = _ask(store, settings, "And the total again?", budget)
+    assert f"Loaded {BIG} back with an 8,192-token context: 16,384 didn't fit in this computer's memory." in steps
+    assert server.calls[-2:] == [("unload", BIG), ("load", BIG, 8192)] and server.loaded[BIG] == 8192
+    assert not modes and "$12,480" in text
+    assert not local_llm.needs_more_context(settings)
+
+    # Lowering the minimum to the size the user had it at still loads it back as theirs.
+    assert local_llm.set_min_context(settings, 4096) == f"Reloaded {BIG} in LM Studio with a 4,096-token context."
+    assert server.loaded[BIG] == 4096 and BIG not in local_llm._context_given
+
+
+def test_a_model_closedesk_loaded_that_runs_out_of_memory_steps_down(store, settings, mail, monkeypatch):
+    """Load and use (or the start) loads a big model with what the estimate says fits; when its answers still run out
+    of memory it is loaded again one step smaller, rather than every question failing."""
+    settings.llm = True
+    server = MacLMStudio({})
+    _serve(monkeypatch, server)
+    assert local_llm.use_chat_model(settings, BIG) == ""
+    assert server.calls == [("load", BIG, 16384)]
+    budget = mail["Q4 budget draft"].id
+    steps, modes, text = _ask(store, settings, "What is the total in this budget?", budget)
+    assert f"Loaded {BIG} again with an 8,192-token context: 16,384 didn't fit in this computer's memory." in steps
+    assert server.calls[1:] == [("unload", BIG), ("load", BIG, 8192)]
+    assert not modes and "$12,480" in text
+    # The next question neither raises it nor reloads it.
+    _steps, modes, text = _ask(store, settings, "And the total again?", budget)
+    assert not modes and "$12,480" in text and len(server.calls) == 3
+    # Still CloseDesk's: lowering the minimum reloads it smaller.
+    assert local_llm.set_min_context(settings, 4096) == f"Reloaded {BIG} in LM Studio with a 4,096-token context."
+
+
+def test_a_model_closedesk_loaded_at_the_smallest_context_isnt_stepped_below_it(settings, monkeypatch):
+    settings.llm = True
+    server = MacLMStudio({BIG: 4096})
+    _serve(monkeypatch, server)
+    local_llm._context_given[BIG] = 4096
+    assert local_llm.step_back_context(settings) == "" and server.calls == []
