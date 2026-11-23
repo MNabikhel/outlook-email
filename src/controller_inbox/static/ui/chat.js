@@ -537,6 +537,9 @@ export function createChat({ root, onToggle, visionRead }) {
       if (error.name === "AbortError") answer.stopped = true;
       else answer.text = (answer.text ? answer.text + "\n\n" : "") + `Something went wrong (${error.message}). Try again.`;
     }
+    // Stopped, out of time or failed while it still thought: the box closes and keeps how long it thought, rather
+    // than count up to each later repaint.
+    endThinking(answer);
     controller = null;
     clearTimeout(lateTimer);
     if (frame) cancelAnimationFrame(frame);

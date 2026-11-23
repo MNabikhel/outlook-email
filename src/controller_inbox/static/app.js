@@ -294,7 +294,7 @@
         // The model's reasoning as it streams (escaped: it is model output); it closes once the answer starts.
         const live = turn.pending && !turn.thinking.ended;
         const seconds = Math.max(1, Math.round(((turn.thinking.ended || Date.now()) - turn.thinking.started) / 1000));
-        html += `<details class="msg-thinking"${live ? " open" : ""}><summary>${live ? "Thinking…" : `Thought for ${seconds} s`}</summary><div class="think-text">${escapeHtml(turn.thinking.text)}</div></details>`;
+        html += `<details class="msg-thinking${live ? " live" : ""}"${live ? " open" : ""}><summary>${live ? "Thinking…" : `Thought for ${seconds} s`}</summary><div class="think-text">${escapeHtml(turn.thinking.text)}</div></details>`;
       }
       const waiting = turn.progress ? progressLine(turn.progress) : turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
       if (turn.text || !now) html += `<div class="msg-text">${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
@@ -323,6 +323,9 @@
           "</ul>";
       }
       el.innerHTML = html;
+      // While it thinks, the box shows the latest lines of the reasoning, not its first.
+      const thinking = $(".msg-thinking.live .think-text", el);
+      if (thinking) thinking.scrollTop = thinking.scrollHeight;
     }
     if (!bubble) chatLog.append(el);
     chatLog.scrollTop = chatLog.scrollHeight;
@@ -500,6 +503,8 @@
     } catch (error) {
       answer.text = (answer.text ? answer.text + "\n\n" : "") + `Something went wrong (${error.message}). Try again.`;
     }
+    // Ended while it still thought (out of time, an error): the box keeps how long it thought, not a growing count.
+    if (answer.thinking && !answer.thinking.ended) answer.thinking.ended = Date.now();
     busy = false;
     $("button[type='submit']", chatForm).disabled = false;
     if (round !== chatRound) return;

@@ -67,3 +67,59 @@ def test_the_classic_chat_shows_the_thinking_escaped(settings, store, page, monk
         page.wait_for_selector(".msg:has-text('due Friday')")
         assert not page.locator(".msg-thinking").evaluate("el => el.open")
         assert re.fullmatch(r"Thought for \d+ s", page.locator(".msg-thinking summary").inner_text().strip())
+
+
+def _long_thinking(pause: float = 0.0):
+    lines = [{"type": "thinking", "text": f"Step {n}: checking the invoice dates and the amounts again.\n"} for n in range(1, 25)]
+    return [
+        {"type": "sources", "sources": [], "mode": "model"},
+        {"type": "progress", "state": "thinking", "text": "Thinking"},
+        *lines,
+        {"type": "thinking", "text": "The last line of the reasoning."}, 0.6,
+        *([pause] if pause else [{"type": "delta", "text": "The Northwind invoice is due Friday."}]),
+    ]
+
+
+def test_the_classic_chat_shows_the_latest_reasoning_and_all_of_it_once_done(settings, store, page, monkeypatch):
+    """The classic page clipped every thinking box to its first three lines, live or done, with no way to scroll:
+    the reasoning looked frozen while it came, and the rest couldn't be read after."""
+    _scripted(monkeypatch, _long_thinking())
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/chat/window")
+        page.fill("#chat textarea", "What is due?")
+        page.press("#chat textarea", "Enter")
+        page.wait_for_selector(".msg-thinking.live .think-text:has-text('The last line of the reasoning.')")
+        live = page.locator(".msg-thinking.live .think-text")
+        assert live.evaluate("el => el.scrollTop > 0 && el.scrollTop + el.clientHeight >= el.scrollHeight - 2"), "the latest lines show"
+        page.wait_for_selector(".msg:has-text('due Friday')")
+        done = page.locator(".msg-thinking")
+        assert "live" not in (done.get_attribute("class") or "")
+        done.locator("summary").click()
+        text = done.locator(".think-text")
+        assert text.evaluate("el => getComputedStyle(el).overflowY") == "auto", "the whole reasoning can be scrolled"
+        assert text.evaluate("el => el.clientHeight") > live_height(page)
+
+
+def live_height(page) -> float:
+    """About three lines of the thinking box's text, in pixels."""
+    return page.evaluate("parseFloat(getComputedStyle(document.querySelector('.msg-thinking .think-text')).fontSize) * 4.6")
+
+
+def test_stopped_while_it_thinks_the_box_keeps_how_long_it_thought(settings, store, page, monkeypatch):
+    """Stopped while the model thought, the box never got an end: each later repaint (the next question) said it
+    had thought for longer, up to the moment of that repaint."""
+    _scripted(monkeypatch, _long_thinking(pause=8), [{"type": "delta", "text": "Nothing else is due."}])
+    with serving(web.create_app(settings, store)) as base:
+        _ask(page, base, "What is due?")
+        page.wait_for_selector(".msg-thinking.live .think-text:has-text('The last line of the reasoning.')")
+        page.click("[aria-label='Stop answering']")
+        page.wait_for_selector(".msg-stopped")
+        first = page.locator(".msg-thinking").first
+        said = first.locator("summary").inner_text().strip()
+        assert re.fullmatch(r"Thought for \d+ s", said) and not first.evaluate("el => el.open")
+        page.wait_for_timeout(2500)
+        page.fill("#chat textarea", "Anything else?")
+        page.press("#chat textarea", "Enter")
+        page.wait_for_selector(".msg.bot .msg-text:has-text('Nothing else is due')")
+        assert page.locator(".msg-thinking").first.locator("summary").inner_text().strip() == said
