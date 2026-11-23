@@ -270,6 +270,8 @@ def test_windows_cards_memory_is_read_from_the_registry_not_wmi(monkeypatch):
         return names[index]
 
     def query(key, value):
+        if value == "DriverDesc":
+            raise OSError("not written")
         assert value == "HardwareInformation.qwMemorySize"
         return values[key.name], 11
 
@@ -278,6 +280,68 @@ def test_windows_cards_memory_is_read_from_the_registry_not_wmi(monkeypatch):
     assert model_roles._windows_card_memory() == 12 * GB
     values["0001"] = (12 * GB).to_bytes(8, "little")  # some drivers write it as binary
     assert model_roles._windows_card_memory() == 12 * GB
+
+
+def _windows_cards(monkeypatch, cards: dict[str, tuple[str, int]]) -> None:
+    """The registry as Windows has it: each card's name (DriverDesc) and memory (qwMemorySize)."""
+
+    class Key:
+        def __init__(self, name):
+            self.name = name
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def enum_key(_key, index):
+        names = list(cards)
+        if index >= len(names):
+            raise OSError("no more")
+        return names[index]
+
+    def query(key, value):
+        name, memory = cards[key.name]
+        return (name, 1) if value == "DriverDesc" else (memory, 11)
+
+    fake = types.SimpleNamespace(HKEY_LOCAL_MACHINE="HKLM", OpenKey=lambda _parent, name: Key(name), EnumKey=enum_key, QueryValueEx=query)
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+
+
+@pytest.mark.parametrize("name", [
+    "AMD Radeon(TM) Graphics", "AMD Radeon 780M Graphics", "AMD Radeon(TM) Vega 8 Graphics",
+    "Intel(R) UHD Graphics", "Intel(R) Iris(R) Xe Graphics", "Intel(R) Arc(TM) Graphics",
+])
+def test_windows_doesn_t_count_graphics_built_into_the_processor(monkeypatch, name):
+    """A Ryzen laptop's built-in graphics with 4 or 8 GB of the computer's memory set aside: the driver writes that
+    share as its memory, and it was taken for a card, so an 8B was said to run slowly from the computer's memory."""
+    _windows_cards(monkeypatch, {"0000": (name, 8 * GB)})
+    assert model_roles._windows_card_memory() == 0
+
+
+@pytest.mark.parametrize("name", [
+    "AMD Radeon RX 7800 XT", "AMD Radeon PRO W7600", "Intel(R) Arc(TM) A770 Graphics", "Intel(R) Arc(TM) B580 Graphics",
+    "NVIDIA GeForce RTX 4060",
+])
+def test_windows_counts_a_card_with_memory_of_its_own(monkeypatch, name):
+    _windows_cards(monkeypatch, {"0000": ("AMD Radeon(TM) Graphics", 4 * GB), "0001": (name, 16 * GB)})
+    assert model_roles._windows_card_memory() == 16 * GB
+
+
+def test_linux_doesn_t_count_graphics_built_into_the_processor(monkeypatch, tmp_path):
+    """The AMD driver gives the share set aside for built-in graphics as mem_info_vram_total too, but writes who made
+    the memory (mem_info_vram_vendor) only for a card with memory of its own."""
+    built_in = tmp_path / "card0" / "device"
+    built_in.mkdir(parents=True)
+    (built_in / "mem_info_vram_total").write_text(f"{8 * GB}\n")
+    monkeypatch.setattr(model_roles, "DRM_CARDS", tmp_path)
+    assert model_roles._linux_card_memory() == 0
+    card = tmp_path / "card1" / "device"
+    card.mkdir(parents=True)
+    (card / "mem_info_vram_total").write_text(f"{16 * GB}\n")
+    (card / "mem_info_vram_vendor").write_text("samsung\n")
+    assert model_roles._linux_card_memory() == 16 * GB
 
 
 def test_a_model_bigger_than_the_card_loads_into_the_card_and_the_computer_s_memory_together(settings, lm, monkeypatch):

@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -128,9 +129,15 @@ SMALL_MAC_SHARE = 2 / 3
 SMALL_MAC = 36 * GB
 # Kept for the system, Outlook and the browser, whatever the share leaves.
 KEPT_FOR_APPS = 4 * GB
-# A graphics card with less is built into the processor (or too small to hold a model): the model runs in the
-# computer's memory.
+# A graphics card with less is too small to hold a model: the model runs in the computer's memory.
 SMALLEST_CARD = 4 * GB
+# Graphics built into the processor, by the name its driver gives it on Windows: "AMD Radeon(TM) Graphics", "AMD
+# Radeon 780M Graphics", "Intel(R) UHD Graphics", "Intel(R) Arc(TM) Graphics". Its memory is a share of the
+# computer's set aside for it, so a model there runs no faster than from the computer's memory. A card of its own
+# is named by its model: "AMD Radeon RX 7800 XT", "AMD Radeon PRO W7600", "Intel(R) Arc(TM) A770 Graphics".
+_BUILT_IN = re.compile(r"graphics", re.IGNORECASE)
+_A_CARD = re.compile(r"\bRX\b|\bPRO\b|\bArc(\(TM\))?\s+[AB]\d|NVIDIA|GeForce|Quadro", re.IGNORECASE)
+DRM_CARDS = Path("/sys/class/drm")
 PROBE_SECONDS = 2
 _THIS_COMPUTER = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
@@ -210,7 +217,13 @@ def _windows_card_memory() -> int:
                 try:
                     with winreg.OpenKey(listed, name) as card:
                         value, _kind = winreg.QueryValueEx(card, "HardwareInformation.qwMemorySize")
+                        try:
+                            said, _kind = winreg.QueryValueEx(card, "DriverDesc")
+                        except OSError:
+                            said = ""
                 except OSError:
+                    continue
+                if _built_in(str(said or "")):
                     continue
                 if isinstance(value, bytes):  # some drivers write it as 8 bytes
                     value = int.from_bytes(value[:8], "little")
@@ -221,10 +234,19 @@ def _windows_card_memory() -> int:
     return best
 
 
+def _built_in(name: str) -> bool:
+    """The graphics named ``name`` is built into the processor (see _BUILT_IN)."""
+    return bool(_BUILT_IN.search(name)) and not _A_CARD.search(name)
+
+
 def _linux_card_memory() -> int:
-    """The memory of the biggest AMD card on Linux, as its driver gives it, or 0."""
+    """The memory of the biggest AMD card on Linux, as its driver gives it, or 0. Graphics built into the processor
+    is left out: the driver gives the share of the computer's memory set aside for it as its memory too, but says
+    who made the memory (mem_info_vram_vendor) only for a card with memory of its own."""
     best = 0
-    for path in Path("/sys/class/drm").glob("card*/device/mem_info_vram_total"):
+    for path in DRM_CARDS.glob("card*/device/mem_info_vram_total"):
+        if not (path.parent / "mem_info_vram_vendor").exists():
+            continue
         try:
             best = max(best, int(path.read_text().strip()))
         except (OSError, ValueError):
