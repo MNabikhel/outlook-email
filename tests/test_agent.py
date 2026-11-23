@@ -189,6 +189,45 @@ def test_a_file_whose_name_starts_another_is_not_read_for_it(store, settings, ma
     assert ws.file(budget, "invoice").filename == "Invoice.pdf"
 
 
+def test_running_out_of_memory_while_checking_steps_the_model_back(store, settings, mail, monkeypatch):
+    """The check pass sends the fullest prompt. When the model ran out of memory there, the draft was shown with
+    "stopped while checking" and the context was never stepped back, so every later question about files ran out of
+    memory in the same place."""
+    budget = mail["Q4 budget draft"]
+    turns = []
+
+    def fake_tools(_settings, messages, tools, *, max_tokens, **_kw):
+        turns.append(1)
+        if len(turns) == 1:
+            return ToolReply("", [{"id": "c1", "name": "note", "arguments": {"text": "D4 (total change) = D2+D3 (Q4 budget.xlsx, Budget)."}}])
+        return ToolReply("The total change is D2+D3 [1].")
+
+    def out_of_memory(_settings, messages, *, max_tokens, **_k):
+        error = httpx.HTTPError("LM Studio stopped")
+        error.said = "Compute error."
+        raise error
+        yield ""
+
+    stepped = []
+
+    def step_back(_settings):
+        stepped.append(True)
+        return "Loaded qwen/qwen3-32b back in LM Studio with an 8,192-token context."
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
+    monkeypatch.setattr(assistant, "chat_with_tools", fake_tools)
+    monkeypatch.setattr(assistant, "stream_text", out_of_memory)
+    monkeypatch.setattr(assistant, "step_back_context", step_back)
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "Plan: none.\nSQL: NONE")
+    events = _events(answer_stream(store, settings, "How is the total change worked out?", email_id=budget.id))
+    text = _text(events)
+    assert local_llm.ran_out_of_memory(httpx.HTTPError("Compute error."))
+    assert stepped == [True], "the context was stepped back"
+    assert "The total change is D2+D3 [1]." in text, "the draft is still the answer"
+    assert "ran out of memory while checking this answer" in text and "with an 8,192-token context" in text, text
+
+
 def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monkeypatch):
     budget = mail["Q4 budget draft"]
     turns = []

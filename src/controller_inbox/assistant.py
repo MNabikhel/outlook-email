@@ -2372,7 +2372,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         state["text"] += draft
         yield {"type": "delta", "text": draft}
         return
-    except httpx.HTTPError:
+    except httpx.HTTPError as exc:
         # The model server stopped partway through the check pass: the finished draft is the answer, not half a
         # sentence of its check, and the user is told it wasn't read over again.
         if not draft:
@@ -2380,7 +2380,13 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         if state["text"][before:]:
             state["text"] = state["text"][:before]
             yield {"type": "revise", "text": state["text"]}
-        added = draft + "\n\n(The local model stopped while checking this answer, so it wasn't read over a second time.)"
+        why, back = "stopped", ""
+        if ran_out_of_memory(exc):
+            # The check pass sends the fullest prompt: a context CloseDesk raised is stepped back here, or every later
+            # question about files would run out of memory in the same place.
+            why, back = "ran out of memory", step_back_context(settings)
+        after = f" {back}" if back else ""
+        added = draft + f"\n\n(The local model {why} while checking this answer, so it wasn't read over a second time.{after})"
         state["wrote"] = True
         state["text"] += added
         yield {"type": "delta", "text": added}
