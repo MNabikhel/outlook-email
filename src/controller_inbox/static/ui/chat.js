@@ -204,6 +204,8 @@ export function createChat({ root, onToggle, visionRead }) {
 
   /* The model ran out of time: how long it was given and how long it likely needs (prefilled, in minutes). Save and
      ask again keeps that wait for the model and asks the same question again in this conversation. */
+  const BUSY_AGAIN = "Another answer is being written. Once it is done, save and ask again.";
+
   function moreTimeEl(turn) {
     const offer = turn.more_time;
     if (!offer) return null;
@@ -212,6 +214,14 @@ export function createChat({ root, onToggle, visionRead }) {
     const button = h("button", { type: "submit", class: "btn btn-sm btn-primary", disabled: Boolean(offer.saved) }, icon("refresh", 14), h("span", null, "Save and ask again"));
     const save = async (event) => {
       event.preventDefault();
+      if (busy) {
+        // The chat asks one question at a time: nothing is saved, so the button still works once the answer is done.
+        offer.failed = true;
+        offer.message = BUSY_AGAIN;
+        offer.suggest = minutes.value;
+        repaint(turn);
+        return;
+      }
       button.disabled = true;
       try {
         const reply = await postJSON("/chat/wait", { model: offer.model, minutes: minutes.value.trim() });

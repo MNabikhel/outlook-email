@@ -194,3 +194,61 @@ def test_the_classic_chat_says_what_it_reads(settings, store, page, monkeypatch)
         page.press("#chat textarea", "Enter")
         page.wait_for_selector(".msg .typing:has-text('Reading 2 emails… about 1 minute')")
         page.wait_for_selector(".msg:has-text('Done.')")
+
+
+BUSY = "Another answer is being written. Once it is done, save and ask again."
+
+
+def test_save_and_ask_again_while_another_answer_is_written_says_to_wait(settings, store, page, monkeypatch):
+    """Clicked while another question's answer streamed, the wait was saved and the button greyed out, but the
+    question was never asked again (the chat asks one at a time) and nothing said so."""
+    asked = _scripted(
+        monkeypatch,
+        _offer_without_an_email(),
+        [{"type": "delta", "text": "Working on it."}, 3.0, {"type": "delta", "text": " Two are due."}],
+        [{"type": "delta", "text": "Two need a reply."}],
+    )
+    with serving(web.create_app(settings, store)) as base:
+        _ask(page, base, "What needs a reply?")
+        form = page.locator(".msg-more-time")
+        form.wait_for()
+        page.fill("#chat textarea", "What is due?")
+        page.press("#chat textarea", "Enter")
+        page.wait_for_selector(".msg.bot:last-child .msg-text:has-text('Working on it')")
+        form.locator("input[type=number]").fill("12")
+        form.locator("button", has_text="Save and ask again").click()
+        page.wait_for_selector(f".msg-more-time .more-time-status:has-text('{BUSY}')")
+        assert model_fit.chosen_wait(store, MODEL) == 0, "not saved"
+        page.wait_for_selector(".msg.bot:last-child .msg-text:has-text('Two are due')")
+        button = page.locator(".msg-more-time button", has_text="Save and ask again")
+        assert button.is_enabled() and page.locator(".msg-more-time input[type=number]").input_value() == "12"
+        button.click()
+        page.wait_for_selector(".msg.bot:last-child .msg-text:has-text('Two need a reply')")
+    assert asked == ["What needs a reply?", "What is due?", "What needs a reply?"]
+    assert model_fit.chosen_wait(store, MODEL) == 720
+
+
+def test_the_classic_chat_says_to_wait_too(settings, store, page, monkeypatch):
+    asked = _scripted(
+        monkeypatch,
+        _offer_without_an_email(),
+        [{"type": "delta", "text": "Working on it."}, 3.0, {"type": "delta", "text": " Two are due."}],
+        [{"type": "delta", "text": "Two need a reply."}],
+    )
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/chat/window")
+        page.fill("#chat textarea", "What needs a reply?")
+        page.press("#chat textarea", "Enter")
+        form = page.locator("form.more-time")
+        form.wait_for()
+        page.fill("#chat textarea", "What is due?")
+        page.press("#chat textarea", "Enter")
+        page.wait_for_selector(".msg:has-text('Working on it')")
+        form.locator("button").click()
+        page.wait_for_selector(f"form.more-time .more-time-status:has-text('{BUSY}')")
+        assert model_fit.chosen_wait(store, MODEL) == 0 and form.locator("button").is_enabled()
+        page.wait_for_selector(".msg:has-text('Two are due.')")
+        form.locator("button").click()
+        page.wait_for_selector(".msg:has-text('Two need a reply.')")
+    assert asked == ["What needs a reply?", "What is due?", "What needs a reply?"]

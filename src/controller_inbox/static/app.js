@@ -536,6 +536,11 @@
     event.preventDefault();
     const status = $(".more-time-status", form);
     const button = $("button", form);
+    if (busy) {
+      // The chat asks one question at a time: nothing is saved, so the button still works once the answer is done.
+      status.textContent = "Another answer is being written. Once it is done, save and ask again.";
+      return;
+    }
     button.disabled = true;
     try {
       const response = await fetch("/chat/wait", {
