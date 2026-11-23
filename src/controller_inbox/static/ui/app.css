@@ -1153,6 +1153,15 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .timeline li.noted::before { border-color: var(--ok); }
 @keyframes pulse { 50% { box-shadow: 0 0 0 4px var(--accent-soft); } }
 .typing { color: var(--muted); font-size: 12.5px; }
+.msg-progress { display: flex; flex-direction: column; gap: 6px; color: var(--muted); font-size: 12.5px; }
+.msg-progress .progress-text { color: var(--text-2); }
+.msg-progress .progress-late { color: var(--warn); }
+.progress-bar { position: relative; display: block; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.progress-bar i { display: block; height: 100%; width: 0; background: var(--accent); animation: progress-fill linear forwards; }
+.progress-bar.busy i { width: 30%; animation: progress-busy 1.6s ease-in-out infinite; }
+@keyframes progress-fill { from { width: 0; } to { width: 100%; } }
+@keyframes progress-busy { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { .progress-bar.busy i { animation-duration: 4s; } }
 .typing::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s ease-in-out infinite; vertical-align: 1px; }
 .model-state { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11.5px; font-weight: 600; }
 .model-state.on { background: var(--ok-soft); color: var(--ok); }

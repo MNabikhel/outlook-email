@@ -271,6 +271,14 @@
     return `<div class="msg-reading fallback" role="note"><b>${escapeHtml(reading.label)}</b><span>${escapeHtml(reading.text)}</span></div>`;
   }
 
+  /* While the model works: what it reads and about how long, then that it writes (the workspace also draws a bar). */
+  function progressLine(now) {
+    if (now.state === "writing") return "Writing the answer…";
+    if (now.state === "thinking") return "Thinking…";
+    const late = Number(now.seconds) > 0 && (Date.now() - now.at) / 1000 >= Number(now.seconds);
+    return late ? `${now.text}… Taking longer than usual…` : `${now.text}…${now.about ? ` ${now.about}` : ""}`;
+  }
+
   function renderTurn(turn, bubble) {
     const el = bubble || document.createElement("div");
     el.className = `msg ${turn.role}${turn.pending ? " pending" : ""}`;
@@ -282,7 +290,7 @@
       const now = turn.pending && !turn.text ? turn.readingNow : null;
       html += now ? renderReadingNow(now) : renderReading(turn.reading);
       html += renderSteps(turn);
-      const waiting = turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
+      const waiting = turn.progress ? progressLine(turn.progress) : turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
       if (turn.text || !now) html += `<div class="msg-text">${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
       if (turn.checks && turn.checks.length) {
         html += `<ul class="msg-check">${turn.checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
@@ -450,6 +458,11 @@
           answer.mode = event.mode;
           answer.note = event.note || "";
           renderTurn(answer, bubble);
+        } else if (event.type === "progress") {
+          answer.progress = { ...event, at: Date.now() };
+          renderTurn(answer, bubble);
+          clearTimeout(answer.lateTimer);
+          if (Number(event.seconds) > 0) answer.lateTimer = setTimeout(() => answer.pending && renderTurn(answer, bubble), Number(event.seconds) * 1000 + 50);
         } else if (event.type === "more_time") {
           answer.more_time = event;
           renderTurn(answer, bubble);
@@ -478,6 +491,7 @@
     if (round !== chatRound) return;
     answer.pending = false;
     if (!answer.text) answer.text = "I didn't get an answer. Try asking another way.";
+    clearTimeout(answer.lateTimer);
     turns.push(answer);
     renderTurn(answer, bubble);
     chatInput.focus({ preventScroll: true });

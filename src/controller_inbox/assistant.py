@@ -1553,6 +1553,7 @@ def answer_stream(
     # How long the model answering may take, worked out for it or set by the user (model_fit): every call waits that.
     wait = model_fit.chat_wait(store, settings)
     ws.wait = wait.seconds
+    ws.call["model"] = wait.model
     state: dict[str, Any] = {"wrote": False, "text": "", "store": store, "wait": wait, "call": ws.call}
     offer = None
     if current is not None and _should_read_files(ws, question, focus if about_today else None):
@@ -1875,6 +1876,7 @@ def _model_answer(ws: agent.Workspace, question: str, state: dict, *, history, f
     """Answer with the model; when the prompt overflows its context, try once more with half the text."""
     settings = ws.settings
     about_files = _should_read_files(ws, question, focus)
+    ws.call["reading"] = _reading_text(ws, about_files)
     known = len(ws.sources)
     for attempt in range(2):
         shrink = 2**attempt
@@ -1982,6 +1984,34 @@ def _calling(call: dict | None, messages: list[dict]) -> None:
         call.update(tokens=prompt_chars(messages) // agent.CHARS_PER_TOKEN, started=time.monotonic())
 
 
+def _reading_text(ws: agent.Workspace, about_files: bool) -> str:
+    """What the model reads before it answers, in words: "Reading 3 emails and 2 files"."""
+    mail = [email for email in ws.sources if email.source != "calendar" and not email.id.startswith("chat-")]
+    files = 0
+    if about_files:
+        files = sum(
+            1 for email in ws.sources if not attachments_locked(email) for att in email.attachments if (att.extracted_text or "").strip()
+        )
+    said = f"Reading {len(mail)} email{'s' if len(mail) != 1 else ''}" if mail or not files else "Reading"
+    if files:
+        said += f"{' and' if mail else ''} {files} file{'s' if files != 1 else ''}"
+    return said
+
+
+def _reading_progress(store: Store | None, call: dict) -> dict[str, Any]:
+    """The chat's line while the model reads the prompt: what it reads and, once this model's speed has been
+    measured here, about how long that takes (the page fills a bar on it, and says when it takes longer)."""
+    tokens = int(call.get("tokens") or 0)
+    seconds = model_fit.estimate(store, str(call.get("model") or ""), tokens=tokens)
+    return {
+        "type": "progress", "state": "reading", "text": call.get("reading") or "Reading", "tokens": tokens,
+        "seconds": round(seconds, 1) if seconds else None, "about": model_fit.about(seconds),
+    }
+
+
+WRITING = {"type": "progress", "state": "writing", "text": "Writing the answer"}
+
+
 def _limit(state: dict) -> float | None:
     """How long this chat's calls wait for the model (``model_fit.chat_wait``), or None for the usual."""
     wait = state.get("wait")
@@ -2005,10 +2035,14 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
     wrote = state["wrote"]
     finished: dict[str, Any] = {}
     _calling(state.get("call"), messages)
+    if state.get("call") is not None:
+        yield _reading_progress(state.get("store"), state["call"])
     raw = _Recorded(stream_text(settings, messages, max_tokens=settings.chat_max_tokens, finished=finished, limit=_limit(state)))
     echoed = True
     try:
         for piece in without_echo(raw):
+            if not state["wrote"] and state.get("call") is not None:
+                yield WRITING
             state["wrote"] = True
             state["text"] += piece
             yield {"type": "delta", "text": piece}
@@ -2319,6 +2353,7 @@ def _tool_loop(ws: agent.Workspace, messages: list[dict], budget: int):
     asked: set[str] = set()  # the calls already run: a small model can ask for the same one again and again
     for _step in range(agent.MAX_STEPS):
         _calling(ws.call, messages)
+        yield _reading_progress(ws.store, ws.call)
         reply = chat_with_tools(ws.settings, messages, agent.TOOLS, max_tokens=ws.settings.chat_max_tokens, limit=ws.wait or None)
         if not reply.calls:
             return reply.content

@@ -570,7 +570,7 @@ def test_a_tool_call_quoted_from_an_email_is_not_run(store, settings, mail, monk
             events.append(next(loop))
     except StopIteration as stop:
         draft = stop.value
-    assert events == [] and store.findings(email.id) == [], "no note was planted"
+    assert [e for e in events if e["type"] != "progress"] == [] and store.findings(email.id) == [], "no note was planted"
     assert len(sent) == 1 and draft.startswith("The email says:") and "Thanks, Maya" in draft
     assert "<tool_call>" not in sent[0], "the email's tags are neutralized before the model sees them"
 

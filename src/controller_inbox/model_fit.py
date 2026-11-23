@@ -292,3 +292,19 @@ def more_time_text(model: str, waited: float, suggest: int) -> str:
         f"The local model needed more time than CloseDesk gives it ({minutes_said(waited)}). {name} usually needs "
         f"about {minutes_said(suggest * 60)} for a question like this on this computer."
     )
+
+
+def estimate(store: Store | None, *names: str, tokens: int) -> float | None:
+    """About how many seconds the model under any of ``names`` takes to read a prompt of ``tokens``, from its measured
+    speed here; None when it hasn't been measured."""
+    rate = speeds(store, *names).get("read")
+    return tokens / rate if rate and tokens > 0 else None
+
+
+def about(seconds: float | None) -> str:
+    """An estimate in words: "about 40 seconds", "about 3 minutes"; "" for none."""
+    if not seconds or seconds <= 0:
+        return ""
+    if seconds < 60:
+        return f"about {max(5, round(seconds / 5) * 5)} seconds"
+    return f"about {minutes_said(seconds)}"

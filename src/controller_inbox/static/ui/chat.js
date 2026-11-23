@@ -122,6 +122,27 @@ export function createChat({ root, onToggle, visionRead }) {
     );
   }
 
+  /* While the model works on the question: what it reads and about how long that takes, with a bar that fills on
+     that estimate; past it, "Taking longer than usual…" and a bar that keeps moving rather than one stuck full.
+     Then "Writing the answer…" until the words arrive. */
+  function progressEl(turn) {
+    const now = turn.progress;
+    if (!now) return null;
+    if (now.state === "writing") return h("span", { class: "typing" }, "Writing the answer…");
+    if (now.state === "thinking") return h("span", { class: "typing" }, "Thinking…");
+    const elapsed = Math.max(0, (Date.now() - now.at) / 1000);
+    const timed = Number(now.seconds) > 0;
+    const late = timed && elapsed >= Number(now.seconds);
+    const fill = timed && !late ? { style: `animation-duration:${Number(now.seconds)}s;animation-delay:-${elapsed.toFixed(2)}s` } : null;
+    return h(
+      "div",
+      { class: `msg-progress${late ? " late" : ""}${timed ? "" : " untimed"}`, role: "status" },
+      h("span", { class: "progress-text" }, `${now.text}…`, !late && now.about ? h("span", { class: "progress-about" }, ` ${now.about}`) : null),
+      late ? h("span", { class: "progress-late" }, "Taking longer than usual…") : null,
+      h("span", { class: `progress-bar${timed && !late ? "" : " busy"}`, "aria-hidden": "true" }, h("i", fill))
+    );
+  }
+
   function readingEl(reading) {
     if (!reading || !reading.label) return null;
     if (reading.state === "vision")
@@ -233,7 +254,8 @@ export function createChat({ root, onToggle, visionRead }) {
     if (turn.text) answer.innerHTML = formatAnswer(turn.text, turn.sources); // escaped first, see format.js
     else if (!reading) {
       const steps = turn.steps || [];
-      append(answer, h("span", { class: "typing" }, steps.length ? `${steps[steps.length - 1]}…` : "Thinking…"));
+      const working = turn.pending ? progressEl(turn) : null;
+      append(answer, working || h("span", { class: "typing" }, steps.length ? `${steps[steps.length - 1]}…` : "Thinking…"));
     }
     const cited = turn.mode === "model" && !turn.pending ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
     replace(
@@ -418,6 +440,7 @@ export function createChat({ root, onToggle, visionRead }) {
       });
     };
     controller = new AbortController();
+    let lateTimer = 0; // repaints the answer when the model's estimate has passed, to say it is taking longer
     try {
       await postStream(
         "/chat",
@@ -458,6 +481,11 @@ export function createChat({ root, onToggle, visionRead }) {
             case "more_time":
               answer.more_time = { ...event };
               break;
+            case "progress":
+              answer.progress = { ...event, at: Date.now() };
+              clearTimeout(lateTimer);
+              if (Number(event.seconds) > 0) lateTimer = setTimeout(paint, Number(event.seconds) * 1000 + 50);
+              break;
             case "reading":
               if (event.state === "running") answer.readingNow = event;
               else {
@@ -484,6 +512,7 @@ export function createChat({ root, onToggle, visionRead }) {
       else answer.text = (answer.text ? answer.text + "\n\n" : "") + `Something went wrong (${error.message}). Try again.`;
     }
     controller = null;
+    clearTimeout(lateTimer);
     if (frame) cancelAnimationFrame(frame);
     frame = 0;
     setBusy(false);
