@@ -1278,7 +1278,7 @@ function finished(job) {
     return;
   }
   const read =
-    (typeof result.ingested === "number" ? `Read ${plural(result.ingested, "new file")}.` : "") +
+    (typeof result.ingested === "number" ? (result.ingested ? `Read ${plural(result.ingested, "new file")}.` : "No new files.") : "") +
     (result.files_summarized ? ` Summarized ${plural(result.files_summarized, "file")}.` : "");
   const synced = result.outlook_message ? ` ${result.outlook_message}` : "";
   // The start loaded a model in LM Studio (or couldn't, and says why).

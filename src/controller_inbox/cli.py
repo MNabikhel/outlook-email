@@ -525,12 +525,19 @@ def _port_to_use(host: str, port: int) -> tuple[int, bool]:
     return other, False
 
 
+def new_files_said(count: int) -> str:
+    """How many new files a run read, as its message starts: "No new files", "Read 1 new file", "Read 3 new files"."""
+    if not count:
+        return "No new files"
+    return f"Read {count} new file{'' if count == 1 else 's'}"
+
+
 def _print_overnight(result: dict) -> None:
     print(result["headline"])
     if result.get("outlook_message"):
         print(result["outlook_message"])
     print(
-        f"Read {result['ingested']} new file(s)"
+        new_files_said(result["ingested"])
         + (f", {result['already_read']} already filed" if result.get("already_read") else "")
         + ". The local model"
         + (f" ({result['model']})" if result.get("model") else "")

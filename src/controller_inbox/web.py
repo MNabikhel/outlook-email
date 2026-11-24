@@ -39,7 +39,7 @@ from controller_inbox import (
 )
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
-from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
+from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest, new_files_said
 from controller_inbox.clock import (
     AUTO,
     apply_saved_timezone,
@@ -93,6 +93,7 @@ templates.env.filters["shortdt"] = _shortdt
 templates.env.globals["ui_import_map"] = ui_import_map()
 templates.env.globals["coding_choices"] = cost_codes.choices
 templates.env.filters["money"] = lambda value: "" if value is None else f"${value:,.2f}"
+templates.env.filters["new_files"] = new_files_said
 templates.env.filters["label_doc"] = lambda value: DOCUMENT_LABELS.get(
     value if isinstance(value, DocumentType) else DocumentType(value), value
 )
