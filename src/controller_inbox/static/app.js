@@ -330,7 +330,7 @@
       if (turn.text) html += `<div class="msg-text">${formatAnswer(turn.text, turn.sources)}</div>`;
       else if (!now) html += `<div class="msg-text">${thinking ? "" : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
       if (turn.checks && turn.checks.length) {
-        html += `<ul class="msg-check">${turn.checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+        html += `<ul class="msg-check">${turn.checks.map((item) => `<li>${escapeHtml(item.text)}</li>`).join("")}</ul>`;
       }
       if (turn.context) html += `<p class="msg-context">${escapeHtml(turn.context)} <a href="/settings">Setup</a></p>`;
       if (turn.vision && !turn.pending) html += visionOffer(turn.vision);

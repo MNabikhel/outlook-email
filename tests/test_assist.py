@@ -105,7 +105,7 @@ def test_a_figure_only_in_the_focus_list_counts_only_when_the_model_was_given_it
     monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
     monkeypatch.setattr(assistant, "stream_text", fake_stream)
     events = list(answer_stream(loaded, settings, "What does Maya want?", email_id="demo-question", focus=focus))
-    checks = [item for event in events if event["type"] == "check" for item in event["items"]]
+    checks = [item["text"] for event in events if event["type"] == "check" for item in event["items"]]
     assert "4,250" not in seen["prompt"], "a question that isn't about today gets no focus list"
     assert checks == ["$4,250.00 isn't in the emails or files I read; check it before relying on it."]
     # About today, the model is given the list, and its figures are what it read.

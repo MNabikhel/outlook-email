@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from controller_inbox import documents
+from controller_inbox import answer_check, documents
 from controller_inbox.config import Settings
 from controller_inbox.folder_mail import safe_filename
 from controller_inbox.models import AttachmentRecord, DocumentType, EmailRecord, Importance
@@ -144,6 +144,16 @@ def chat_mail(store: Store, chat_id: str) -> EmailRecord | None:
         source="chat",
         attachments=attachments,
     )
+
+
+def shown_turns(store: Store, chat_id: str) -> list[dict[str, Any]]:
+    """The conversation's turns for the chat pages. Each answer's checks are marked as a warning or not, as a new
+    answer's are: one saved before checks were marked has them as plain words (``answer_check.check_items``)."""
+    turns = store.chat_turns(chat_id)
+    for turn in turns:
+        if turn.get("checks"):
+            turn["checks"] = answer_check.check_items(turn["checks"])
+    return turns
 
 
 def file_cards(store: Store, chat_id: str) -> list[dict[str, Any]]:

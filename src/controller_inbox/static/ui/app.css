@@ -1188,6 +1188,9 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .msg-check { list-style: none; margin: 0; padding: 7px 10px; background: var(--ok-soft); border-radius: var(--radius-sm); font-size: 12px; display: flex; flex-direction: column; gap: 3px; }
 .msg-check li { display: flex; gap: 6px; align-items: flex-start; color: var(--text-2); }
 .msg-check .ic { color: var(--ok); margin-top: 2px; }
+/* A figure to check before relying on it: the warning sign, and the box amber when any check is one. */
+.msg-check.warn { background: var(--warn-soft); }
+.msg-check li.warn .ic { color: var(--warn); }
 .msg-cited { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
 .msg-cited li { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .cite-file { display: inline-flex; align-items: center; gap: 3px; font-size: 11.5px; }

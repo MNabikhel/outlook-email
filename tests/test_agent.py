@@ -787,7 +787,7 @@ def test_the_chat_corrects_slips_in_the_finished_answer(store, settings, mail, m
     events = list(answer_stream(store, settings, "Did Marketing go from 84,000 to 115,500?", email_id=budget.id))
     revised = [e["text"] for e in events if e["type"] == "revise"]
     assert revised == ["Marketing went from 84,000 to 115,500, an increase of 31,500. Travel is $97,250."]
-    checks = next(e["items"] for e in events if e["type"] == "check")
+    checks = [item["text"] for item in next(e["items"] for e in events if e["type"] == "check")]
     assert checks[0] == "Corrected 31,200 to 31,500 (115,500 − 84,000)."
     assert "$97,250 isn't in the emails or files I read" in checks[1]
     assert events[-1] == {"type": "done"}

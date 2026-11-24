@@ -943,7 +943,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.get("/chats/{chat_id}")
     def chat_show(chat_id: str):
         found = known_chat(chat_id)
-        return JSONResponse({**found, "turns": store.chat_turns(chat_id), "files": chats.file_cards(store, chat_id)})
+        return JSONResponse({**found, "turns": chats.shown_turns(store, chat_id), "files": chats.file_cards(store, chat_id)})
 
     @app.post("/chats/{chat_id}/step-back-closed")
     def chat_step_back_closed(request: Request, chat_id: str):

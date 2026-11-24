@@ -8,6 +8,8 @@ now and then. After the answer is written:
   corrected. A number that is in that material is never changed;
 - "page N" or a cell like Summary!B12 or "cell B12" is corrected when the figures in that
   sentence are not on the cited page or in the cited cell but on one other page or cell.
+
+Each correction and flag is listed under the answer, marked as a warning or not (``check_items``).
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import itertools
 import re
 from dataclasses import dataclass, field
 from itertools import permutations
+from typing import Any
 
 from controller_inbox import memo
 from controller_inbox.documents import PAGE_MARKER_RE
@@ -70,6 +73,26 @@ class Review:
 
     def changed(self, original: str) -> bool:
         return self.text != original
+
+
+# A check that put something right in the answer starts so ("Corrected 31,200 to 31,500 (115,500 − 84,000).").
+_CORRECTED = "Corrected "
+
+
+def check_items(checks: list) -> list[dict[str, Any]]:
+    """The checks under an answer as the chat pages show and keep them: each one's words, and whether it is a warning.
+    A correction the check made is a confirmation, shown with a tick; every other check asks for a figure to be checked
+    before it is relied on ("$12,480 isn't in the emails or files I read; check it before relying on it.") and is a
+    warning. Also used on a saved conversation: a check kept as plain words, from before checks were marked, is marked
+    the same way, and one already marked is kept as it is."""
+    items = []
+    for check in checks or []:
+        said = check if isinstance(check, dict) else {"text": check}
+        text = str(said.get("text") or "")
+        if text:
+            warning = said["warning"] if "warning" in said else not text.startswith(_CORRECTED)
+            items.append({"text": text, "warning": bool(warning)})
+    return items
 
 
 def numbers_in(text: str) -> list[Number]:
