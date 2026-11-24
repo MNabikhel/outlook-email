@@ -241,6 +241,18 @@ def main() -> int:
             stop(process)
             raise SystemExit(f"FAILED: the dashboard didn't answer: {answer!r}\n{process.stdout.read().decode(errors='replace')}")
         print(f"--- the dashboard answers on port {port}: {answer}", flush=True)
+        # As it opened, CloseDesk asked GitHub behind the page, for the question its first page asks: answered, or
+        # given up on, within seconds (whether a newer version is out depends on GitHub, so it is only shown).
+        question = {"checking": True}
+        for _ in range(30):
+            ask = urllib.request.Request(f"http://127.0.0.1:{port}/api/update/question", headers={"X-CloseDesk": "1"})
+            with urllib.request.urlopen(ask, timeout=10) as reply:
+                question = json.load(reply)
+            if not question["checking"]:
+                break
+            time.sleep(1)
+        assert not question["checking"], f"the asking as CloseDesk opened didn't end: {question!r}"
+        print(f"--- the update question as it opened: ask={question['ask']} {question['message']!r}", flush=True)
         # A second CloseDesk started while this one is open shows it and leaves, instead of failing on the port.
         out = run(folder, "--no-browser", "--port", str(port))
         assert "already open in another window" in out, out
