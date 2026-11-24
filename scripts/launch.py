@@ -15,7 +15,14 @@ it offers that button only then.
 The Python is whichever the launcher found on the computer; none is ever downloaded unasked. (The launcher's
 ``--get-python`` downloads one for CloseDesk alone, when the person asks for it.)
 
+The CloseDesk app (``--app``, what the CloseDesk shortcut runs with pythonw, no console window) sets up the same way,
+without a word on screen: what it says goes to its log (``app_log_path``), nothing it runs opens a console window
+(CREATE_NO_WINDOW), and what goes wrong is said in a message box. Then it opens the CloseDesk window
+(``controller_inbox app``, app_window.py), which handles ``UPDATE`` itself; ``REBUILD`` is left to the double-click
+launcher, opened in its window, since a Python running from ``.venv`` can't remove it.
+
     launch.py                 set up if needed, then run CloseDesk
+    launch.py --app           the same, silently, then open the CloseDesk window
     launch.py --check         set up if needed, then say what is and isn't in order (no dashboard)
     launch.py --update        fetch the newest CloseDesk, keeping mail and settings, then check it
     launch.py --command NAME  set up if needed, then run that command (``overnight`` for the scheduler)
@@ -36,6 +43,8 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 import tomllib
 import zipfile
 from pathlib import Path
@@ -52,6 +61,23 @@ LOG = VENV / "closedesk-setup.log"
 REBUILD = 76
 UPDATE = 75
 
+WINDOWS = os.name == "nt"
+# The app (``--app``): set for what it runs, so none of it opens a console window. The names are
+# controller_inbox.updates' APP_ENV and APP_LOG_ENV.
+APP_ENV = "CLOSEDESK_APP"
+APP_LOG_ENV = "CLOSEDESK_APP_LOG"
+# A console program started without this flashes a console window up from the app on Windows (0 elsewhere).
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+# Windows and macOS open the app with no console (the shortcut, the Dock): what it says goes to its log there. On
+# Linux, where only a developer runs --app, the terminal shows it.
+APP_LOGS = sys.platform in ("win32", "darwin")
+APP_LOG_LIMIT = 2_000_000  # a log grown past this starts afresh (the one before is kept as .old)
+INSTALLING = "CloseDesk is installing what it needs. This takes a minute or two; it opens by itself when it is done."
+SETUP_FAILED = (
+    "CloseDesk couldn't install what it needs. Most often the internet connection (or a company proxy) stopped a "
+    "download: try again when it is back. What went wrong is written in {log}."
+)
+
 REPO = "MNabikhel/outlook-email"
 BRANCH = "main"
 # What an update never touches: the mail, the settings and the environment. (Anything else the new version
@@ -63,8 +89,26 @@ def say(text: str = "") -> None:
     print(text, flush=True)
 
 
+def _flush() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (AttributeError, OSError, ValueError):  # no console (pythonw): nothing to flush
+            pass
+
+
 def venv_python() -> Path:
-    return VENV / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    return VENV / ("Scripts/python.exe" if WINDOWS else "bin/python")
+
+
+def app_python() -> Path:
+    """The Python the CloseDesk window runs on: Windows' pythonw, which has no console window, where the environment
+    has it."""
+    if WINDOWS:
+        windowless = VENV / "Scripts" / "pythonw.exe"
+        if windowless.exists():
+            return windowless
+    return venv_python()
 
 
 def in_venv() -> bool:
@@ -81,6 +125,105 @@ def tools_dir() -> Path:
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / "CloseDesk"
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "CloseDesk"
+
+
+def app_mode() -> bool:
+    return os.environ.get(APP_ENV) == "1"
+
+
+def app_log_path() -> Path:
+    """The app's log: in this person's own folder, kept through updates and a new environment."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Logs" / "CloseDesk" / "CloseDesk-app.log"
+    return tools_dir() / "CloseDesk-app.log"
+
+
+_app_log = None
+
+
+def use_app_log() -> None:
+    """What the app says goes to its log (there is no console; under pythonw print and flush would fail)."""
+    global _app_log
+    path = app_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > APP_LOG_LIMIT:
+            path.replace(path.with_name(path.name + ".old"))
+        _app_log = open(path, "a", encoding="utf-8", errors="replace", buffering=1)  # noqa: SIM115 (kept open)
+    except OSError:
+        _app_log = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
+    sys.stdout = sys.stderr = _app_log
+
+
+def _quiet() -> dict:
+    """In the app: no console window for a program it runs, and no console to read from."""
+    if not app_mode():
+        return {}
+    return {"creationflags": NO_WINDOW, "stdin": subprocess.DEVNULL}
+
+
+def _output() -> dict:
+    """In the app, where a program it hands over to writes: its log (a Python file object isn't passed on by itself)."""
+    if app_mode() and _app_log is not None:
+        return {"stdout": _app_log, "stderr": subprocess.STDOUT}
+    return {}
+
+
+def tell(text: str) -> None:
+    """Say ``text`` where a person sees it with no console: a message box (Windows), an alert (macOS). Also logged."""
+    say(text)
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            ctypes.windll.user32.MessageBoxW(None, text, "CloseDesk", 0x30 | 0x10000)  # a warning, brought to the front
+        elif sys.platform == "darwin":
+            # The words are passed as they are, never written into the script.
+            subprocess.run(
+                ["/usr/bin/osascript", "-e", "on run argv", "-e", "display alert (item 1 of argv) message (item 2 of argv)",
+                 "-e", "end run", "CloseDesk", text],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=3600,
+            )
+    except (OSError, AttributeError, ValueError, subprocess.SubprocessError):
+        pass
+
+
+def notice(text: str) -> None:
+    """Say ``text`` without waiting for an answer, while the app carries on (installing): a notification on macOS, a
+    message box on Windows that stays until it is closed."""
+    say(text)
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            threading.Thread(
+                target=ctypes.windll.user32.MessageBoxW, args=(None, text, "CloseDesk", 0x40 | 0x10000), daemon=True
+            ).start()
+        elif sys.platform == "darwin":
+            subprocess.Popen(
+                ["/usr/bin/osascript", "-e", "on run argv", "-e", 'display notification (item 1 of argv) with title "CloseDesk"',
+                 "-e", "end run", text],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
+def open_launcher() -> None:
+    """Open the double-click launcher in its window (CloseDesk.bat; CloseDesk.command in Terminal), as if it were
+    double-clicked: what the app can't do (make the environment again) is done there, as it goes, then CloseDesk
+    opens."""
+    for name in (APP_ENV, APP_LOG_ENV, "CLOSEDESK_LAUNCHER"):
+        os.environ.pop(name, None)
+    try:
+        if WINDOWS:
+            os.startfile(str(ROOT / "CloseDesk.bat"))  # noqa: S606
+        elif sys.platform == "darwin":
+            subprocess.Popen(["/usr/bin/open", "-a", "Terminal", str(ROOT / "CloseDesk.command")], stdin=subprocess.DEVNULL)
+        else:
+            say(f"Run {ROOT / 'CloseDesk.command'} to set CloseDesk up again.")
+    except OSError as exc:
+        tell(f"CloseDesk has to set itself up again. Double-click {'CloseDesk.bat' if WINDOWS else 'CloseDesk.command'} in {ROOT} ({exc}).")
 
 
 def find_uv() -> str:
@@ -100,7 +243,9 @@ def _run(cmd: list[str], *, quiet: bool = True) -> bool:
         with LOG.open("a", encoding="utf-8", errors="replace") as log:
             log.write(f"\n$ {' '.join(cmd)}\n")
             log.flush()
-            done = subprocess.run(cmd, cwd=ROOT, stdout=log if quiet else None, stderr=subprocess.STDOUT if quiet else None)
+            done = subprocess.run(
+                cmd, cwd=ROOT, stdout=log if quiet else None, stderr=subprocess.STDOUT if quiet else None, **_quiet()
+            )
         return done.returncode == 0
     except OSError as exc:
         say(f"Couldn't run {cmd[0]}: {exc}")
@@ -176,6 +321,8 @@ def ensure_packages() -> int:
     installed = False
     if wrong or not here:
         installed = True
+        if app_mode():
+            notice(INSTALLING)  # nothing else is on screen until the window opens
         if first:
             say("Installing what CloseDesk needs. This takes a minute or two.")
         elif not here:
@@ -203,8 +350,9 @@ def ensure_packages() -> int:
         if check_deps.extra_installed(extras.get(extra, [])):
             if any(check_deps.problem(req) for req in wanted):
                 install(*wanted)
-        elif tried.get(extra) != key:
-            # Optional: installed where it can be, tried once where it can't (an older Mac has no build of it).
+        elif tried.get(extra) != key or (extra == "window" and app_mode()):
+            # Optional: installed where it can be, tried once where it can't (an older Mac has no build of it). The
+            # window's is tried at each start of the app until it installs: without it the app is the browser.
             install(*wanted)
         tried[extra] = key
     write_state({"extras": tried, "python": ".".join(map(str, sys.version_info[:3]))})
@@ -221,7 +369,7 @@ def create_environment(args: list[str]) -> int:
     else:
         say(f"First run: setting up CloseDesk with Python {version[0]}.{version[1]}.")
     shutil.rmtree(VENV, ignore_errors=True)
-    made = subprocess.run([sys.executable, "-m", "venv", str(VENV)], cwd=ROOT, capture_output=True, text=True)
+    made = subprocess.run([sys.executable, "-m", "venv", str(VENV)], cwd=ROOT, capture_output=True, text=True, **_quiet())
     if made.returncode != 0 or not venv_python().exists():
         shutil.rmtree(VENV, ignore_errors=True)
         say((made.stdout + made.stderr).strip()[-800:])
@@ -233,14 +381,17 @@ def create_environment(args: list[str]) -> int:
 
 def _hand_over(cmd: list[str]) -> int:
     """Run ``cmd`` in this one's place (its exit code is this one's)."""
-    sys.stdout.flush()
-    sys.stderr.flush()
-    if os.name == "nt":  # no exec that waits on Windows
+    _flush()
+    if WINDOWS:  # no exec that waits on Windows
         try:
-            return subprocess.call(cmd, cwd=ROOT)
+            return subprocess.call(cmd, cwd=ROOT, **_quiet(), **_output())
         except KeyboardInterrupt:
             return 130
     os.chdir(ROOT)
+    if app_mode() and _app_log is not None:
+        # What runs next writes where this one did: the log.
+        for fd in (1, 2):
+            os.dup2(_app_log.fileno(), fd)
     os.execv(cmd[0], cmd)
     return 1  # pragma: no cover
 
@@ -253,7 +404,7 @@ def _fetch(url: str, dest: Path) -> bool:
     with Python."""
     curl = shutil.which("curl")
     if curl:
-        done = subprocess.run([curl, "-fsSL", "--retry", "2", "-o", str(dest), url], capture_output=True, text=True)
+        done = subprocess.run([curl, "-fsSL", "--retry", "2", "-o", str(dest), url], capture_output=True, text=True, **_quiet())
         if done.returncode == 0:
             return True
     try:
@@ -367,8 +518,33 @@ def update() -> int:
 # ----------------------------------------------------------------------------------------------------------
 
 
+def app(args: list[str]) -> int:
+    """``--app``: set up as every start does, silently, then open the CloseDesk window."""
+    os.environ[APP_ENV] = "1"
+    if APP_LOGS or sys.stdout is None:
+        os.environ[APP_LOG_ENV] = str(app_log_path())
+        use_app_log()
+    say(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} CloseDesk opening (the app), in {ROOT}")
+    if not in_venv():
+        return create_environment(["--app", *args])
+    code = ensure_packages()
+    if code == REBUILD:
+        say("CloseDesk's environment has to be made again: the double-click launcher does that, in its window.")
+        open_launcher()
+        return 0
+    if code:
+        tell(SETUP_FAILED.format(log=LOG))
+        return code
+    # The window acts on CloseDesk's UPDATE exit code itself, so CloseDesk offers its Update button.
+    os.environ["CLOSEDESK_LAUNCHER"] = "1"
+    return _hand_over([str(app_python()), "-m", "controller_inbox", "app", *args])
+
+
 def main(argv: list[str]) -> int:
     args = list(argv)
+    if "--app" in args:
+        args.remove("--app")
+        return app(args)
     if "--update" in args:
         args.remove("--update")
         code = update()
