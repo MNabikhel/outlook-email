@@ -64,6 +64,10 @@ WAIT_KEY = "model_wait"  # {model: seconds} the user chose
 RATES_KEY = "model_rates"  # {model: {"read": prompt tokens a second, "write": tokens written a second}}
 # {model: {"seconds": the chat's wait that ran out before it began its answer, "tokens": the prompt it was reading}}
 RAN_OUT_KEY = "model_ran_out"
+# {model: seconds} the longest wait that ran out on a call made while mail was processed (a file's summary)
+BACKGROUND_RAN_OUT_KEY = "model_background_ran_out"
+# The wait's field as both Settings pages name it, for the notes that point to it.
+WAIT_FIELD = "Wait up to … minutes"
 
 
 def model_key(status: ModelStatus, model: str = "") -> str:
@@ -312,6 +316,51 @@ def reading_wait(store: Store | None, settings: Settings, model: str, status: Mo
     status = status or check_model(settings)
     key = model_key(status, model)
     return chosen_wait(store, key, model) or automatic_wait(settings, status, key, store)
+
+
+def background_wait(
+    store: Store | None, settings: Settings, model: str, status: ModelStatus | None = None, *, tokens: int = 0,
+    written: int = 0,
+) -> Wait:
+    """How long a call that isn't streamed, made while mail is processed (a file's summary, a question about related
+    mail), waits for ``model``: nothing comes back until it has read the prompt (``tokens``) and written its reply
+    (up to ``written`` tokens, thinking included). The user's own wait for the model when set; else the worked-out one
+    (``reading_wait``), longer when the model's measured speeds say this call takes longer, and twice the wait that
+    ran out on such a call before (``background_ran_out``), up to ``WAIT_CEILING``. Never less than such calls waited
+    before (``CHAT_TIMEOUT``)."""
+    from controller_inbox import local_llm
+
+    status = status or check_model(settings)
+    key = model_key(status, model)
+    if yours := chosen_wait(store, key, model):
+        return Wait(key, max(yours, local_llm.CHAT_TIMEOUT), True)
+    seconds = reading_wait(store, settings, model, status)
+    if call := estimate_call(store, key, model, tokens=tokens, written=written):
+        seconds = max(seconds, call * MARGIN + SPARE_SECONDS)
+    ran_out = _read(store, BACKGROUND_RAN_OUT_KEY)
+    before = next((ran_out[name] for name in (key, model) if isinstance(ran_out.get(name), (int, float))), 0)
+    seconds = max(seconds, min(WAIT_CEILING, before * 2))
+    return Wait(key, max(local_llm.CHAT_TIMEOUT, seconds), False)
+
+
+def background_ran_out(store: Store | None, model: str, *, seconds: float) -> None:
+    """A call made while mail was processed waited ``seconds`` for ``model`` and ran out: the next one waits twice as
+    long (``background_wait``), unless the user set a wait of their own."""
+    if store is None or not model or seconds <= 0:
+        return
+    ran_out = _read(store, BACKGROUND_RAN_OUT_KEY)
+    ran_out[model] = round(seconds, 1)
+    store.set_state(BACKGROUND_RAN_OUT_KEY, json.dumps(ran_out))
+
+
+def stopped_note(what: str, wait: Wait, waited: float, on: str) -> str:
+    """What a run says when ``what`` ("summarizing files") stopped because ``wait`` ran out after ``waited`` seconds
+    on ``on`` (a file's name, "one question"), and where to give the model longer."""
+    name = wait.model.split("/")[-1]
+    said = f"Stopped {what}: {name} took longer than {minutes_said(waited or wait.seconds)} on {on}. "
+    if wait.yours:
+        return said + f"Settings → Local model → {WAIT_FIELD} can give it longer."
+    return said + f"CloseDesk gives it longer next time, or Settings → Local model → {WAIT_FIELD} can give it longer now."
 
 
 def minutes_said(seconds: float) -> str:

@@ -375,6 +375,8 @@ def _run_overnight(
         except Exception:  # the rest of the run (search index, digest) still happens
             log.warning("Reading scans with the vision model failed", exc_info=True)
     summarized = 0
+    # Why the summaries or the linking stopped partway (the model took longer than its wait), said with the reading's.
+    stopped_notes: list[str] = []
     if reading["model"] and not (stats and stats.stopped_reason) and settings.overnight_file_summaries:
         summarized = summarize_files(
             store,
@@ -382,6 +384,7 @@ def _run_overnight(
             limit=settings.overnight_file_summaries,
             model=reading["model"],
             on_progress=(lambda i, n, name: on_progress("summarizing", i, n, name)) if on_progress else None,
+            notes=stopped_notes,
         )
     # Runs whenever an embedding model answers, even with no chat model loaded.
     indexed = max(0, index_mail(store, settings, on_progress=(lambda i, n, _name: on_progress("indexing", i, n, "")) if on_progress else None))
@@ -432,7 +435,7 @@ def _run_overnight(
         "digest_path": digest_md,
         "headline": payload["headline"],
         "model": reading["model"],
-        "model_note": reading["note"],
+        "model_note": " ".join(note for note in [reading["note"], *stopped_notes] if note),
         "avg_seconds": round(stats.average_seconds, 1) if stats else 0.0,
         "llm_enabled": bool(reading["model"]),
     }

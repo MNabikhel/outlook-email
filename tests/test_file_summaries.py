@@ -143,9 +143,12 @@ def test_a_file_the_model_fails_on_is_remembered_and_the_others_still_get_summar
 
 def test_a_file_that_times_out_is_tried_again_another_night(store, settings, two_files, monkeypatch):
     calls = _failing_on_first(monkeypatch, store, two_files, httpx.ReadTimeout("timed out"))
-    assert file_summaries.summarize_files(store, settings, limit=10, model="m") == 1, "the other file is summarized"
-    assert len(calls) == 2
-    assert len(store.files_to_summarize(min_chars=agent.SUMMARY_MIN_CHARS, limit=10, model="m")) == 1, "not marked"
+    assert file_summaries.summarize_files(store, settings, limit=10, model="m") == 0
+    assert len(calls) == 1, "the next long file isn't tried tonight: it would only run out of time the same way"
+    assert len(store.files_to_summarize(min_chars=agent.SUMMARY_MIN_CHARS, limit=10, model="m")) == 2, "not marked"
+    calls.clear()
+    monkeypatch.setattr(file_summaries, "complete_text", lambda *_a, **_k: "- The team reviewed onboarding.")
+    assert file_summaries.summarize_files(store, settings, limit=10, model="m") == 2, "both are summarized next night"
 
 
 @pytest.mark.parametrize("error", [httpx.ConnectError("refused"), _status(503)])
@@ -221,7 +224,7 @@ def test_files_on_flagged_mail_do_not_use_up_the_nights_summaries(store: Store, 
     assert all("fraud_risk" in _mail_with_long_file(store, settings, n, scam=True).flags for n in range(3))
     _mail_with_long_file(store, settings, 9, scam=False)
     calls: list[str] = []
-    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.filename) or "- Freight for September")
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att, **_k: calls.append(att.filename) or "- Freight for September")
     assert file_summaries.summarize_files(store, settings, limit=3, model="m") == 1
     assert calls == ["file9.txt"]
 
@@ -231,7 +234,7 @@ def test_a_file_the_model_cannot_summarize_is_not_tried_every_night(store: Store
 
     _mail_with_long_file(store, settings, 1, scam=False)
     calls: list[str] = []
-    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.id) or "")
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att, **_k: calls.append(att.id) or "")
     for _night in range(3):
         assert file_summaries.summarize_files(store, settings, limit=5, model="small") == 0
     assert calls == ["m1:f.txt"]
@@ -251,7 +254,7 @@ def test_a_file_with_a_nul_in_its_text_is_summarized_once(store: Store, settings
     record = process_message(_raw("Export attached", received=NOW, attachments=[export]), store, settings, now=NOW)
     assert "\x00" not in record.attachments[0].extracted_text
     calls: list[str] = []
-    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att: calls.append(att.id) or "- Wires to Alpha Freight")
+    monkeypatch.setattr(file_summaries, "summarize_file", lambda _settings, att, **_k: calls.append(att.id) or "- Wires to Alpha Freight")
     for _night in range(3):
         file_summaries.summarize_files(store, settings, limit=20, model="m")
     assert calls == ["raw-1:export.txt"]

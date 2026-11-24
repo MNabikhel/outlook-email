@@ -15,11 +15,19 @@ from datetime import datetime, timezone
 
 import httpx
 
-from controller_inbox import answer_check, documents
-from controller_inbox.agent import SUMMARY_MIN_CHARS, clip, prompt_budget, prompt_size, summary_key
+from controller_inbox import answer_check, documents, model_fit
+from controller_inbox.agent import CHARS_PER_TOKEN, SUMMARY_MIN_CHARS, clip, prompt_budget, prompt_size, summary_key
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
-from controller_inbox.local_llm import ContextOverflow, EmptyReply, complete_text, context_length, reply_budget
+from controller_inbox.local_llm import (
+    ContextOverflow,
+    EmptyReply,
+    ModelStatus,
+    check_model,
+    complete_text,
+    context_length,
+    reply_budget,
+)
 from controller_inbox.models import AttachmentRecord
 from controller_inbox.store import Store
 
@@ -34,11 +42,16 @@ PROMPT = (
 _NOT_FOUND = re.compile(r"^(.+?) isn't in the emails or files I read")
 
 
-def summarize_file(settings: Settings, att: AttachmentRecord) -> str:
-    """A checked bullet summary of one file, or "" when the model gave nothing usable."""
+def summarize_file(
+    settings: Settings, att: AttachmentRecord, *, store: Store | None = None, model: str = "",
+    status: ModelStatus | None = None, waits: list | None = None,
+) -> str:
+    """A checked bullet summary of one file, or "" when the model gave nothing usable. Waits as long as ``model``
+    needs for it (``model_fit.background_wait``; the wait used is added to ``waits``) when ``model`` is given."""
     text = att.extracted_text or ""
     # The reply room as the request will ask for it: a reasoning model is given room to think first.
-    room = prompt_budget(context_length(settings), reply_budget(settings, MAX_TOKENS), tools=False) - len(PROMPT) - 300
+    budget = reply_budget(settings, MAX_TOKENS)
+    room = prompt_budget(context_length(settings), budget, tools=False) - len(PROMPT) - 300
     parts = documents.split_parts(text)
     # Room is counted the way prompt_size counts it (figures cost more than words), not in characters.
     if prompt_size(text) <= room or len(parts) < 3:
@@ -52,7 +65,16 @@ def summarize_file(settings: Settings, att: AttachmentRecord) -> str:
         {"role": "system", "content": PROMPT},
         {"role": "user", "content": f"File: {att.filename}\n\n{shown}"},
     ]
-    draft = complete_text(settings, messages, max_tokens=MAX_TOKENS)
+    limit = None
+    if model:
+        # Nothing comes back until the model has read the file and written the summary, thinking included: on a
+        # laptop that can take a slow model longer than the usual 5 minutes, so it waits as long as this model needs.
+        tokens = sum(prompt_size(message["content"]) for message in messages) // CHARS_PER_TOKEN
+        wait = model_fit.background_wait(store, settings, model, status, tokens=tokens, written=budget)
+        if waits is not None:
+            waits.append(wait)
+        limit = wait.seconds
+    draft = complete_text(settings, messages, max_tokens=MAX_TOKENS, limit=limit)
     return _checked(draft, att.filename, text)
 
 
@@ -76,16 +98,21 @@ def summarize_files(
     limit: int,
     model: str = "",
     on_progress: Callable[[int, int, str], None] | None = None,
+    notes: list[str] | None = None,
 ) -> int:
     """Summarize long attachments that have no summary yet, most important mail first. Returns how many were written.
 
-    When the model gives nothing usable for a file, or refuses it (too long for its context, a 4xx error), that is
-    remembered (as an empty summary), so the file isn't tried again every night; it is tried again when its text
-    changes or another model is loaded. A file that times out is left for another night and the next one is tried.
-    When the server is down (no connection, a 5xx error) the night's run stops and nothing is saved.
+    Each waits as long as the model needs (``model_fit.background_wait``: the wait set in Settings → Local model, or
+    the one worked out for the model). When the model gives nothing usable for a file, or refuses it (too long for its
+    context, a 4xx error), that is remembered (as an empty summary), so the file isn't tried again every night; it is
+    tried again when its text changes or another model is loaded. A file that runs out of time is left for the next
+    run, and the run's summaries stop there: the next long file would only run out the same way. That is added to
+    ``notes``, and the next run waits longer for the model (unless the user set its wait). When the server is down
+    (no connection, a 5xx error) the run's summaries stop too and nothing is saved.
     """
     written = 0
     queue = store.files_to_summarize(min_chars=SUMMARY_MIN_CHARS, limit=limit, model=model)
+    status = check_model(settings) if queue and model else None
     for index, (email_id, attachment_id) in enumerate(queue, start=1):
         email = store.get_email(email_id)
         att = next((a for a in email.attachments if a.id == attachment_id), None) if email else None
@@ -93,8 +120,9 @@ def summarize_files(
             continue
         if on_progress:
             on_progress(index, len(queue), att.filename)
+        waits: list[model_fit.Wait] = []
         try:
-            summary = summarize_file(settings, att)
+            summary = summarize_file(settings, att, store=store, model=model, status=status, waits=waits)
         except (ContextOverflow, EmptyReply):
             # Remembered like an empty summary: this file mustn't be first in line, and fail, every night.
             summary = ""
@@ -102,8 +130,15 @@ def summarize_files(
             if exc.response.status_code >= 500:
                 break  # the server is down or still loading: tomorrow night
             summary = ""
-        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):
-            continue  # this file took too long tonight; the others still get their turn
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
+            # Not saved: the file is tried again next run, which waits longer for the model.
+            if waits:
+                waited = float(getattr(exc, "waited", 0) or 0) or waits[0].seconds
+                if not waits[0].yours:
+                    model_fit.background_ran_out(store, waits[0].model, seconds=waited)
+                if notes is not None:
+                    notes.append(model_fit.stopped_note("summarizing files", waits[0], waited, att.filename))
+            break
         except httpx.HTTPError:
             break
         store.save_file_summary(att.id, summary_key(att), summary, model=model, at=datetime.now(timezone.utc).isoformat())
