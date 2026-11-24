@@ -99,6 +99,7 @@ def _appearance_attrs(context) -> str:
 
 
 templates.env.globals["appearance_attrs"] = _appearance_attrs
+
 # The classic chat formats answers with the workspace's own module (static/ui/classic.js loads it).
 templates.env.globals["ui_import_map"] = ui_import_map()
 templates.env.globals["coding_choices"] = cost_codes.choices
