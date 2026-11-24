@@ -48,15 +48,23 @@ Each copy has a version number, its date year first, shown with the first charac
 2026.11.16 (e8926db)**. You see it at the bottom of the side bar, in **Settings → This copy and its check**, and on the
 first line of the self-check. The date is the commit's day in UTC, as GitHub gives it.
 
-Once a day, while CloseDesk is open, it asks GitHub for the newest version's number; nothing about your mail is sent.
-When a newer one is out, the top bar shows a small **Update ready** link, and Settings says **A newer CloseDesk is
-ready (2026.11.16; you have 2026.11.13)** with an **Update** button. To stop it asking, put
-`CONTROLLER_INBOX_UPDATE_CHECK=false` in the `.env` file in CloseDesk's folder. When GitHub can't be reached (no
-internet, or a company network that blocks it), Settings says so under the version, and CloseDesk-Update still works.
+When CloseDesk opens, and once a day while it is open, it asks GitHub for the newest version's number; nothing about
+your mail is sent. When a newer one is out, the first page CloseDesk shows asks: **A new version of CloseDesk is
+ready**, with the new and the current version, what changed last, and two buttons. **Update now** updates as below;
+**Not now** closes the question and CloseDesk opens as normal, and it asks again the next time you open CloseDesk (not
+on every page). Opening CloseDesk with no internet, or when GitHub is slow, nothing is asked and nothing waits on it:
+the asking gives up after a few seconds. If an update didn't finish, the next start says **CloseDesk wasn't updated**
+and opens as it was.
+
+The top bar also shows a small **Update ready** link, and Settings says **A newer CloseDesk is ready (2026.11.16; you
+have 2026.11.13)** with an **Update** button. To stop the asking, put `CONTROLLER_INBOX_UPDATE_CHECK=false` in the
+`.env` file in CloseDesk's folder: then no question comes up either. When GitHub can't be reached (no internet, or a
+company network that blocks it), Settings says so under the version, and CloseDesk-Update still works.
 
 Any of these works, and none needs admin rights:
 
-- **Click Update in Settings.** CloseDesk closes, fetches the newest version, and opens again by itself in a minute or two, in the same browser tab. Your mail and settings are kept. It waits while mail is being processed. (This needs CloseDesk started by double-clicking it; started some other way, Settings says to use CloseDesk-Update instead.)
+- **Click Update now when CloseDesk asks as it opens.** The same as Update in Settings, next.
+- **Click Update in Settings.** CloseDesk closes, fetches the newest version, and opens again by itself in a minute or two, in the same browser tab. Your mail and settings are kept. It waits while mail is being processed, and offers the update again once that is done. (This needs CloseDesk started by double-clicking it; started some other way, it doesn't ask as it opens, and Settings says to use CloseDesk-Update instead.)
 - **Double-click `CloseDesk-Update.command`** (Mac) or **`CloseDesk-Update.bat`** (Windows). It fetches the newest CloseDesk and replaces CloseDesk's own files. Your mail (`data`, `inbox`), your settings (`.env`) and the `AP cost codes` folder are not touched, and the files it replaced are kept in `.previous`.
 - **Or by hand:** download the ZIP again and swap the folders, keeping `data`, `inbox`, `.env` and `AP cost codes` from the old one. (On a Mac the Terminal line from the setup does this for you: run again, it updates.)
 
