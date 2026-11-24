@@ -447,8 +447,9 @@ def test_ctrl_k_turns_the_colors_for_color_blindness_on_and_off(settings, store,
             page.fill(".palette input", "color blind")
             page.wait_for_selector(f".pal-item.on:has-text('{want}')")
             page.keyboard.press("Enter")
-            page.wait_for_selector(f".toast:has-text('{web.NOTICES['colors']}')")
             on = want.startswith("Turn on")
-            assert page.evaluate("() => document.documentElement.dataset.colors || ''") == ("color-blind" if on else "")
-            assert page.is_checked("#set-colors") == on, "Settings, open beside it, says so"
+            page.wait_for_function("on => (document.documentElement.dataset.colors === 'color-blind') === on", arg=on)
+            page.wait_for_selector(f".toast:has-text('{web.NOTICES['colors']}')")
+            # Settings, open beside it, says so.
+            page.wait_for_function("on => { const box = document.querySelector('#set-colors'); return Boolean(box) && box.checked === on; }", arg=on)
             assert appearance.current(store)["colors"] == ("color-blind" if on else "standard")
