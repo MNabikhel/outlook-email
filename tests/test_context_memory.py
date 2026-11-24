@@ -379,3 +379,31 @@ def test_settings_after_a_step_back_says_the_answer_ran_out_of_memory_not_that_t
     # Choosing it again in Settings, or changing the minimum, forgets it.
     assert local_llm.use_chat_model(settings, BIG) == ""
     assert BIG not in local_llm._context_stepped
+
+
+def test_the_out_of_memory_note_fits_the_model_loaded(store, settings, mail, monkeypatch):
+    """A model CloseDesk loaded at 4,096 tokens ran out of memory before writing a word. The chat said it "ran out of
+    memory partway through" and to lower the minimum context to 8k, which reloads nothing: 4,096 is already all
+    CloseDesk gives it on this computer."""
+    settings.llm = True
+    monkeypatch.setitem(globals(), "GRAPHICS_MEMORY", 18 * GB)
+    server = MacLMStudio({BIG: 4096})
+    local_llm._context_given[BIG] = 4096  # loaded by CloseDesk
+    _serve(monkeypatch, server, memory_gb=24)
+    budget = mail["Q4 budget draft"].id
+    _steps, modes, _text = _ask(store, settings, "What is the total in this budget?", budget)
+    note = modes[0]["note"]
+    assert "ran out of memory" in note and "partway" not in note, note
+    assert "8k" not in note and "minimum context" not in note, note
+    assert "Choose one in Settings" in note
+    assert local_llm.set_min_context(settings, 8192) == "", "as the note no longer says, lowering it does nothing"
+
+    # One the user loaded with more than fits: the note says what to reload it with in LM Studio.
+    monkeypatch.setitem(globals(), "GRAPHICS_MEMORY", 24 * GB)
+    server = MacLMStudio({BIG: 32768})
+    local_llm._context_given.clear()
+    settings.min_context_tokens = 16384
+    _serve(monkeypatch, server)
+    _steps, modes, _text = _ask(store, settings, "What is the total in this budget?", budget)
+    note = modes[0]["note"]
+    assert f"reload {BIG} in LM Studio with Context Length 16,384" in note, note

@@ -2256,6 +2256,36 @@ MEMORY_ADVICE = (
 )
 
 
+def memory_advice(settings: Settings) -> str:
+    """``MEMORY_ADVICE`` fitted to the model loaded in LM Studio: a shorter minimum context is offered only when it
+    would reload the model with less (one CloseDesk sized), and one the user loaded is told the Context Length to
+    reload it with in LM Studio (the most that fits here, when CloseDesk can tell)."""
+    try:
+        status = check_model(settings)
+    except Exception:  # noqa: BLE001 - the advice is said all the same
+        return MEMORY_ADVICE
+    key, loaded = status.key, status.context_length
+    if not (status.lm_studio and key and loaded > 0):
+        return MEMORY_ADVICE
+    first = (
+        "The model is likely too big for this computer's memory. CloseDesk only needs a small one: a 3B to 8B model "
+        "is plenty and answers faster."
+    )
+    if _context_given.get(key) == loaded:  # sized by CloseDesk: lowering the minimum reloads it, when that shortens it
+        before = _context_before.get(key, 0)
+        for step in (8192, 4096):
+            if 0 < max(_fitting_context(settings, status, key, want=step), before) < loaded:
+                return (
+                    f"{first} Choose one in Settings, or lower the minimum context there to {step // 1024}k: CloseDesk "
+                    f"reloads {key} with it."
+                )
+        return f"{first} Choose one in Settings."
+    target = context_target(settings, status)
+    if 0 < target < loaded:
+        return f"{first} Choose one in Settings, or reload {key} in LM Studio with Context Length {target:,}, the most that fits here."
+    return f"{first} Choose one in Settings, or reload {key} in LM Studio with a smaller Context Length."
+
+
 def out_of_memory(text: str) -> bool:
     """Whether a model server's error says it ran short of memory."""
     return bool(_MEMORY_RE.search(text or ""))
@@ -2268,10 +2298,12 @@ def ran_out_of_memory(exc: Exception) -> bool:
     return out_of_memory(said) or out_of_memory(getattr(exc, "said", "")) or out_of_memory(str(exc))
 
 
-def failure_note(exc: Exception) -> str:
-    """Why the chat's model didn't answer, in words a person can act on."""
+def failure_note(exc: Exception, settings: Settings | None = None) -> str:
+    """Why the chat's model didn't answer (it wrote nothing), in words a person can act on. With ``settings``, the
+    memory advice is fitted to the model loaded (``memory_advice``)."""
     if ran_out_of_memory(exc):
-        return "The local model ran out of memory partway through. " + MEMORY_ADVICE
+        advice = memory_advice(settings) if settings is not None else MEMORY_ADVICE
+        return "The local model ran out of memory before it could answer. " + advice
     if isinstance(exc, ThinksTooLong):
         return f"The local model didn't answer. {exc}."
     if isinstance(exc, httpx.TimeoutException) and getattr(exc, "reply_started", ""):

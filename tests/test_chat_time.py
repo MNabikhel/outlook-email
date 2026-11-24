@@ -198,7 +198,7 @@ def test_out_of_memory_keeps_the_memory_advice_and_offers_no_more_time(settings,
     events = _ask(loaded, settings)
     assert not any(event["type"] == "more_time" for event in events)
     mode = next(event for event in events if event["type"] == "mode")
-    assert local_llm.MEMORY_ADVICE in mode["note"]
+    assert "ran out of memory" in mode["note"] and "3B to 8B model is plenty" in mode["note"]
 
 
 def test_saving_the_wait_keeps_it_for_the_model_and_the_next_question_waits_that_long(settings, loaded, lm):

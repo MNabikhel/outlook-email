@@ -44,8 +44,8 @@ from controller_inbox.local_llm import (
     context_target,
     ensure_context,
     step_back_context,
-    MEMORY_ADVICE,
     failure_note,
+    memory_advice,
     ran_out_of_memory,
     llm_active,
     loaded_now,
@@ -1608,12 +1608,12 @@ def answer_stream(
         # how long it likely needs, under the answer.
         more_time = _more_time(state, settings, exc, question, asked_about)
         if state["wrote"]:
-            why = f" {MEMORY_ADVICE}" if ran_out_of_memory(exc) else ""
+            why = f" {memory_advice(settings)}" if ran_out_of_memory(exc) else ""
             if why and (back := step_back_context(settings)):  # the next question has the room it needs
                 why = f" {back} Ask again."
             yield {"type": "delta", "text": f"\n\n(The local model stopped answering partway.{why})"}
         else:
-            note = failure_note(exc)
+            note = failure_note(exc, settings)
             if isinstance(exc, ContextOverflow):
                 note = "The question and its files didn't fit the model's context window. " + agent.context_advice(
                     context_length(settings), ["the emails and files"], model_server(settings)
