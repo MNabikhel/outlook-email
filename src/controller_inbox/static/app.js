@@ -335,7 +335,8 @@
       if (turn.context) html += `<p class="msg-context">${escapeHtml(turn.context)} <a href="/settings">Setup</a></p>`;
       if (turn.vision && !turn.pending) html += visionOffer(turn.vision);
       if (turn.more_time) html += moreTimeOffer(turn.more_time);
-      if (turn.step_back && !turn.pending && !turn.step_back.dismissed) html += stepBackOffer(turn.step_back);
+      // Closed: answered before (reloaded, or kept as is), and saved so with the conversation.
+      if (turn.step_back && !turn.pending && !turn.step_back.dismissed && !turn.step_back.closed) html += stepBackOffer(turn.step_back);
       const cited =
         turn.mode === "model" ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
       if (!turn.pending && cited.length) {
@@ -627,6 +628,8 @@
     if (!box) return;
     if (button.dataset.action === "step-back-keep") {
       box.remove(); // nothing changes: the model stays as it is
+      // Kept for good: not offered again when the conversation is opened again.
+      if (chatId) fetch(`/chats/${encodeURIComponent(chatId)}/step-back-closed`, { method: "POST", headers: JSON_HEADERS, body: "{}" }).catch(() => {});
       return;
     }
     const status = $(".step-back-status", box);
@@ -649,7 +652,7 @@
       const response = await fetch("/chat/step-back", {
         method: "POST",
         headers: JSON_HEADERS,
-        body: JSON.stringify({ model: box.dataset.model, size: Number(box.dataset.size) }),
+        body: JSON.stringify({ model: box.dataset.model, size: Number(box.dataset.size), chat_id: chatId }),
       });
       const reply = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(reply.detail || `the server said ${response.status}`);

@@ -273,3 +273,26 @@ def test_an_old_offer_pressed_after_the_reload_says_an_8192_token_context(store,
     refused = TestClient(web.create_app(settings, store)).post("/chat/step-back", json={"model": BIG, "size": 8192}, headers=PAGE)
     assert refused.status_code == 409
     assert f"{BIG} is loaded with an 8,192-token context now" in refused.json()["detail"], refused.json()
+
+
+def test_the_choice_made_on_the_offer_is_saved_with_the_conversation(store, settings, mail, monkeypatch):
+    _closedesk_loaded(settings, monkeypatch)
+    client = TestClient(web.create_app(settings, store))
+    budget = mail["Q4 budget draft"].id
+    lines = [json.loads(line) for line in client.post("/chat", json={"message": QUESTION, "email_id": budget}, headers=PAGE).text.splitlines()]
+    chat_id = lines[0]["id"]
+    assert not store.chat_turns(chat_id)[-1]["step_back"].get("closed")
+
+    # Keep as is: put away for good, nothing reloaded.
+    assert client.post(f"/chats/{chat_id}/step-back-closed").status_code == 403
+    assert client.post("/chats/nope/step-back-closed", headers=PAGE).status_code == 404
+    assert client.post(f"/chats/{chat_id}/step-back-closed", headers=PAGE).status_code == 200
+    assert store.chat_turns(chat_id)[-1]["step_back"]["closed"] is True
+    assert client.get(f"/chats/{chat_id}").json()["turns"][-1]["step_back"]["closed"] is True
+
+    # Reload and ask again: the offer it came from is done once the model is reloaded.
+    lines = [json.loads(line) for line in client.post("/chat", json={"message": QUESTION, "chat_id": chat_id, "email_id": budget}, headers=PAGE).text.splitlines()]
+    assert not store.chat_turns(chat_id)[-1]["step_back"].get("closed")
+    done = client.post("/chat/step-back", json={"model": BIG, "size": 8192, "chat_id": chat_id}, headers=PAGE)
+    assert done.status_code == 200, done.json()
+    assert all(turn["step_back"]["closed"] for turn in store.chat_turns(chat_id) if turn.get("step_back"))

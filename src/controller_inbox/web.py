@@ -896,6 +896,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise HTTPException(status_code=400, detail=str(exc)) from None
         except local_llm.StepBackRefused as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from None
+        chat_id = str(data.get("chat_id") or "")
+        if chats.valid_id(chat_id) and store.chat(chat_id) is not None:
+            store.close_step_backs(chat_id)  # done: not offered again with the conversation
         return JSONResponse({"ok": True, "message": said})
 
     @app.get("/chats")
@@ -919,6 +922,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     def chat_show(chat_id: str):
         found = known_chat(chat_id)
         return JSONResponse({**found, "turns": store.chat_turns(chat_id), "files": chats.file_cards(store, chat_id)})
+
+    @app.post("/chats/{chat_id}/step-back-closed")
+    def chat_step_back_closed(request: Request, chat_id: str):
+        """The chat's "Keep as is": the offer to reload the model smaller is put away for good in this conversation."""
+        require_page(request)
+        known_chat(chat_id)
+        store.close_step_backs(chat_id)
+        return JSONResponse({"ok": True})
 
     @app.post("/chats/{chat_id}/delete")
     def chat_delete(request: Request, chat_id: str):

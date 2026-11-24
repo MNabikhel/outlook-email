@@ -259,7 +259,8 @@ export function createChat({ root, onToggle, visionRead }) {
      conversation; Keep as is puts the offer away and changes nothing. */
   function stepBackEl(turn) {
     const offer = turn.step_back;
-    if (!offer || offer.dismissed || turn.pending) return null;
+    // Closed: answered before (reloaded, or kept as is), and saved so with the conversation.
+    if (!offer || offer.dismissed || offer.closed || turn.pending) return null;
     const said = h("p", { class: `step-back-status${offer.failed ? " error" : ""}`, role: "status", "aria-live": "polite" }, offer.message || "");
     const reload = async (event) => {
       if (busy) {
@@ -280,7 +281,7 @@ export function createChat({ root, onToggle, visionRead }) {
         send.disabled = false;
       };
       try {
-        const reply = await postJSON("/chat/step-back", { model: offer.model, size: offer.size });
+        const reply = await postJSON("/chat/step-back", { model: offer.model, size: offer.size, chat_id: chatId });
         offer.done = true;
         offer.message = reply.message || "Reloaded.";
         repaint(turn);
@@ -297,6 +298,8 @@ export function createChat({ root, onToggle, visionRead }) {
     const keep = () => {
       offer.dismissed = true;
       repaint(turn);
+      // Kept for good: not offered again when the conversation is opened again.
+      if (chatId) postJSON(`/chats/${encodeURIComponent(chatId)}/step-back-closed`, {}).catch(() => {});
     };
     const working = !offer.failed && Boolean(offer.message) && !offer.done;
     return h(

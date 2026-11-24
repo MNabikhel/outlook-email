@@ -56,6 +56,10 @@ def test_the_chat_offers_the_reload_and_asks_again(settings, store, page, monkey
         assert asked == ["What is due?", "What is due?"] and ABOUT == [None, None]
         assert "Loaded google/gemma-3-27b again with an 8,192-token context" in page.inner_text(".msg-step-back")
         assert page.locator(".msg-step-back button").count() == 0
+        # Done: the offer isn't offered again when the conversation is opened again.
+        page.reload()
+        page.wait_for_selector(".msg-text:has-text('due Friday')")
+        assert page.locator(".msg-step-back button").count() == 0
 
 
 def test_keep_as_is_puts_the_offer_away_and_reloads_nothing(settings, store, page, monkeypatch):
@@ -68,6 +72,11 @@ def test_keep_as_is_puts_the_offer_away_and_reloads_nothing(settings, store, pag
         box.locator("button", has_text="Keep as is").click()
         page.wait_for_selector(".msg-step-back", state="detached")
         assert done == [] and asked == ["What is due?"]
+        # Kept as is for good: not offered again when the conversation is opened again.
+        page.wait_for_timeout(300)
+        page.reload()
+        page.wait_for_selector(".msg-text:has-text('straight lookup')")
+        assert page.locator(".msg-step-back").count() == 0
 
 
 def test_the_chat_says_why_the_reload_was_refused(settings, store, page, monkeypatch):
@@ -118,6 +127,11 @@ def test_the_classic_chat_offers_the_reload_too(settings, store, page, monkeypat
         page.locator(".step-back button", has_text="Keep as is").last.click()
         page.wait_for_function("document.querySelectorAll('.step-back [data-action=step-back-keep]').length === 0")
         assert done == [(MODEL, 8192)]
+        # Both choices are kept: neither offer comes back when the conversation is opened again.
+        page.wait_for_timeout(300)
+        page.reload()
+        page.wait_for_selector(".msg:has-text('Due Friday.')")
+        assert page.locator(".step-back button").count() == 0
 
 
 def _offered_in_settings(monkeypatch) -> list:
