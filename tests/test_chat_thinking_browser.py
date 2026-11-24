@@ -204,3 +204,32 @@ def test_the_classic_chat_keeps_the_thinking_box_open_or_closed_as_the_user_left
         page.locator(".msg-thinking summary").click()  # opened to read it as the answer comes
         page.wait_for_selector(".msg:has-text('Word 3.')")
         assert page.locator(".msg-thinking").evaluate("el => el.open"), "it stays open"
+
+
+# The steps box ----------------------------------------------------------------------------------------------------
+
+
+def _steps_script():
+    return [
+        {"type": "sources", "sources": [], "mode": "model"},
+        {"type": "step", "text": "Searched your mail by words only (no embedding model loaded)"},
+        {"type": "step", "text": "Reloading the model in LM Studio with a 4,096-token context (once)"},
+        {"type": "step", "text": "Read invite.ics as the meeting it holds"},
+        {"type": "delta", "text": "The meeting is on Friday."},
+    ]
+
+
+def test_the_steps_box_counts_steps_on_both_chat_pages(settings, store, page, monkeypatch):
+    """It said "Read 3 things" over three steps, one of them reading anything (the others a search and a reload)."""
+    _scripted(monkeypatch, _steps_script())
+    with serving(web.create_app(settings, store)) as base:
+        _ask(page, base, "When is the meeting?")
+        page.wait_for_selector(".msg.bot .msg-text:has-text('on Friday')")
+        assert page.locator(".msg.bot .msg-steps summary").inner_text().strip() == "3 steps"
+
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/chat/window")
+        page.fill("#chat textarea", "When is the meeting?")
+        page.press("#chat textarea", "Enter")
+        page.wait_for_selector(".msg:has-text('on Friday')")
+        assert page.locator(".msg-steps summary").last.inner_text().strip() == "3 steps"

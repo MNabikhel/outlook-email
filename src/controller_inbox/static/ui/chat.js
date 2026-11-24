@@ -102,7 +102,7 @@ export function createChat({ root, onToggle, visionRead }) {
       ),
       ...notes.map((note) => h("li", { class: "noted" }, `Noted: ${note}`)),
     ];
-    const label = `Read ${plural(steps.length, "thing")}${notes.length ? `, noted ${notes.length}` : ""}`;
+    const label = `${plural(steps.length, "step")}${notes.length ? `, noted ${notes.length}` : ""}`;
     const box = h("details", { class: "msg-steps" }, h("summary", null, label), h("ol", { class: "timeline" }, items));
     if (turn.pending || turn.stepsOpen) box.open = true;
     box.addEventListener("toggle", () => (turn.stepsOpen = box.open));

@@ -251,7 +251,7 @@
     const items =
       steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("") +
       notes.map((note) => `<li class="noted">Noted: ${escapeHtml(note)}</li>`).join("");
-    const label = `Read ${steps.length} thing${steps.length === 1 ? "" : "s"}${notes.length ? `, noted ${notes.length}` : ""}`;
+    const label = `${steps.length} step${steps.length === 1 ? "" : "s"}${notes.length ? `, noted ${notes.length}` : ""}`;
     return `<details class="msg-steps"${turn.pending ? " open" : ""}><summary>${label}</summary><ul>${items}</ul></details>`;
   }
 

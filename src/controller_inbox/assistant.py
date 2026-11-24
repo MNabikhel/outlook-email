@@ -1593,8 +1593,9 @@ def answer_stream(
             if reloaded := ensure_context(settings):
                 yield {"type": "step", "text": reloaded}
                 _wait_again(store, settings, ws, state)  # for the longer prompt the longer context takes
+        shown: set[str] = set()  # the steps listed so far: asked again, the same file read again isn't listed twice
         try:
-            yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
+            yield from _steps_once(_model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today), shown)
         except Exception as exc:
             # A context CloseDesk raised that ran out of memory: the model is loaded back as it was and asked once more.
             if state["wrote"] or not ran_out_of_memory(exc) or not (back := step_back_context(settings)):
@@ -1602,7 +1603,7 @@ def answer_stream(
             yield {"type": "step", "text": back}
             _wait_again(store, settings, ws, state)
             ws.evidence.clear()
-            yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
+            yield from _steps_once(_model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today), shown)
     except Exception as exc:  # any model failure falls back to the lookup answer
         # Out of time (not out of memory: then the memory advice stands): the chat offers the model more time, with
         # how long it likely needs, under the answer.
@@ -1886,6 +1887,16 @@ def _should_read_files(ws: agent.Workspace, question: str, focus) -> bool:
         or agent.named_files(primary.attachments, question)
         or answered_here(primary, question)
     )
+
+
+def _steps_once(events: Iterator[dict[str, Any]], shown: set[str]) -> Iterator[dict[str, Any]]:
+    """``events`` with each step listed once: one already in ``shown`` is left out."""
+    for event in events:
+        if event.get("type") == "step":
+            if event.get("text") in shown:
+                continue
+            shown.add(event.get("text"))
+        yield event
 
 
 def _model_answer(ws: agent.Workspace, question: str, state: dict, *, history, focus, today) -> Iterator[dict[str, Any]]:

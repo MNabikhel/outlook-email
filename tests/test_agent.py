@@ -1099,3 +1099,28 @@ def test_an_ordinary_question_naming_an_original_is_no_history_question():
     assert not _HISTORY.search("What was the original due date?")
     assert not _HISTORY.search("Which version of the template is this?")
     assert _HISTORY.search("What happened on this so far?") and _HISTORY.search("How did this start? Show the earlier emails")
+
+
+def test_a_step_back_doesnt_list_the_files_read_twice(store, settings, mail, monkeypatch):
+    """After an answer ran out of memory and the model was loaded back, the answer is asked again and read the same
+    file again: the steps listed "Read invite.ics as the meeting it holds" twice."""
+    budget = mail["Q4 budget draft"]
+    calls = []
+
+    def answer(*_a, **_k):
+        calls.append(1)
+        yield {"type": "step", "text": "Read invite.ics as the meeting it holds"}
+        if len(calls) == 1:
+            raise RuntimeError("Compute error.")
+        yield {"type": "delta", "text": "ok"}
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _settings: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _settings: False)
+    monkeypatch.setattr(assistant, "step_back_context", lambda _settings: "Loaded m back with a 2,048-token context: 4,096 didn't fit in this computer's memory.")
+    monkeypatch.setattr(assistant, "_wait_again", lambda *a, **k: None)
+    monkeypatch.setattr(assistant, "_model_answer", answer)
+    steps = [e["text"] for e in answer_stream(store, settings, "summarize this", email_id=budget.id) if e["type"] == "step"]
+    assert len(calls) == 2
+    assert steps.count("Read invite.ics as the meeting it holds") == 1, steps
+    assert any(step.startswith("Loaded m back") for step in steps)
+
