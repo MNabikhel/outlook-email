@@ -276,3 +276,20 @@ def test_the_thinking_box_isnt_opened_again_by_a_late_toggle(settings, store, pa
         page.wait_for_timeout(100)
         assert page.locator(".msg-thinking").evaluate("el => el.open")
 
+
+def test_a_stopped_answer_shows_no_working_line(settings, store, page, monkeypatch):
+    """Stopped while it thought, the bubble kept the last step with its pulsing dot above "Stopped.", as if it were
+    still working, until the page was reloaded."""
+    _scripted(monkeypatch, [
+        {"type": "sources", "sources": [], "mode": "model"},
+        {"type": "step", "text": "Read INV-10482.pdf in full (1 section)"},
+        {"type": "progress", "state": "thinking", "text": "Thinking"},
+        {"type": "thinking", "text": "The invoice says Friday."}, 8,
+    ])
+    with serving(web.create_app(settings, store)) as base:
+        _ask(page, base, "What is due?")
+        page.wait_for_selector(".msg-thinking.live")
+        page.click("[aria-label='Stop answering']")
+        page.wait_for_selector(".msg-stopped")
+        assert page.locator(".msg.bot .typing").count() == 0, page.inner_text(".msg.bot")
+

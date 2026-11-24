@@ -282,10 +282,11 @@ export function createChat({ root, onToggle, visionRead }) {
     const answer = h("div", { class: "msg-text" });
     const reading = turn.pending && !turn.text ? turn.readingNow : null;
     if (turn.text) answer.innerHTML = formatAnswer(turn.text, turn.sources); // escaped first, see format.js
-    else if (!reading) {
+    else if (!reading && turn.pending) {
+      // Still working (an answer stopped before its first words has no working line: "Stopped." says it all).
       const steps = turn.steps || [];
-      const working = turn.pending ? progressEl(turn) : null;
-      const thinking = turn.pending && turn.thinking && !turn.thinking.ended; // the box above says it
+      const working = progressEl(turn);
+      const thinking = turn.thinking && !turn.thinking.ended; // the box above says it
       if (!thinking) append(answer, working || h("span", { class: "typing" }, steps.length ? `${steps[steps.length - 1]}…` : "Thinking…"));
     }
     const cited = turn.mode === "model" && !turn.pending ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
