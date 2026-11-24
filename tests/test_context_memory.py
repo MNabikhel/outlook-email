@@ -126,6 +126,9 @@ def test_an_answer_cut_off_by_memory_isnt_asked_again_but_the_next_question_has_
     settings.llm = True
     server = MacLMStudio({BIG: 4096})
     server.partway = True
+    # The answer itself runs out of memory partway: no table query before it (that one would run out first, and the
+    # model be loaded back before the answer is asked).
+    settings.table_queries = False
     _serve(monkeypatch, server)
     budget = mail["Q4 budget draft"].id
     _steps, _modes, text = _ask(store, settings, "Who sent this?", budget)
@@ -314,3 +317,14 @@ def test_a_model_closedesk_loaded_and_then_raised_is_still_closedesks_when_the_m
     assert server.loaded[SMALL] == 8192 and local_llm._context_given.get(SMALL) == 8192
     assert local_llm.set_min_context(settings, 4096) == f"Reloaded {SMALL} in LM Studio with a 4,096-token context."
     assert server.loaded[SMALL] == 4096
+
+
+def test_a_table_query_that_runs_out_of_memory_has_the_model_loaded_back_before_the_answer(store, settings, mail, monkeypatch):
+    """The table query ran out of memory, was let go without a word, and the answer's own call ran out the same way."""
+    settings.llm = True
+    server = MacLMStudio({BIG: 4096})
+    _serve(monkeypatch, server)
+    steps, modes, text = _ask(store, settings, "What is the total in this budget?", mail["Q4 budget draft"].id)
+    assert f"Loaded {BIG} back with a 4,096-token context: 16,384 didn't fit in this computer's memory." in steps
+    assert [chat[2] for chat in server.chats].count("Compute error") == 1, "asked again at the size that fits"
+    assert not modes and "$12,480" in text

@@ -15,7 +15,6 @@ conversation, and "Ask about this meeting" lists the mail about that meeting.
 
 from __future__ import annotations
 
-import functools
 import json
 import logging
 import re
@@ -2280,7 +2279,13 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     notes = agent.earlier_findings(ws, primary) if primary is not None else ""
     notes = "\n\n".join(part for part in (notes, ws.past) if part)
     base = dict(history=history, today=today, current_id=ws.current_id, notes=notes, tz=settings.tz)
-    yield from agent.query_tables(ws, question, functools.partial(complete_text, limit=ws.wait or None))
+
+    def query_call(settings: Settings, messages: list[dict], **options) -> str:
+        # Noted as the call under way, for the offer of more time.
+        _calling(ws.call, messages)
+        return complete_text(settings, messages, limit=ws.wait or None, **options)
+
+    yield from agent.query_tables(ws, question, query_call)
     plain = _budget(settings, tools=False) // shrink
     room = int((plain - prompt_chars(build_messages(question, ws.sources, budget=plain, bodies=False, **base))) * 0.85)
     if primary is not None and ws.worked.get(primary.id):

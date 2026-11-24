@@ -278,3 +278,17 @@ def test_the_offer_says_the_wait_that_ran_out_and_suggests_one_that_changes_it(s
         assert offer["suggest"] * 60 > 600
         # Reading the prompt at 150 tokens a second, and writing the 4,096 tokens it may write at 7 a second.
         assert offer["suggest"] * 60 >= 8000 / 150 * model_fit.MARGIN + 4096 / 7
+
+
+def test_a_table_query_that_runs_out_of_time_is_the_wait_the_offer_speaks_of(settings, store, mail, lm):
+    """A question about a workbook has the model write a query over its tables first. That call ran out of the whole
+    wait and was let go without a word, then the answer's own call waited the whole wait again: the user waited twice
+    what the offer of more time said CloseDesk gave the model."""
+    server = lm(timeout="start")
+    local_llm._status_cache.clear()
+    events = list(answer_stream(store, settings, "What is the total in this budget?", email_id=mail["Q4 budget draft"].id))
+    steps = [event["text"] for event in events if event["type"] == "step"]
+    assert "Writing a query over the tables for the question" in steps
+    assert len(server.waits) == 1, "the model was asked again after the table query ran out of time"
+    offer = next(event for event in events if event["type"] == "more_time")
+    assert offer["minutes"] == model_fit.chat_wait(store, settings).minutes
