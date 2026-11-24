@@ -47,7 +47,7 @@ def summarize_file(
     status: ModelStatus | None = None, waits: list | None = None,
 ) -> str:
     """A checked bullet summary of one file, or "" when the model gave nothing usable. Waits as long as ``model``
-    needs for it (``model_fit.background_wait``; the wait used is added to ``waits``) when ``model`` is given."""
+    needs for it (``model_fit.background_wait``; each wait used is added to ``waits``) when ``model`` is given."""
     text = att.extracted_text or ""
     # The reply room as the request will ask for it: a reasoning model is given room to think first.
     budget = reply_budget(settings, MAX_TOKENS)
@@ -65,16 +65,18 @@ def summarize_file(
         {"role": "system", "content": PROMPT},
         {"role": "user", "content": f"File: {att.filename}\n\n{shown}"},
     ]
-    limit = None
-    if model:
+    tokens = sum(prompt_size(message["content"]) for message in messages) // CHARS_PER_TOKEN
+
+    def wait_for(room: int) -> float:
         # Nothing comes back until the model has read the file and written the summary, thinking included: on a
         # laptop that can take a slow model longer than the usual 5 minutes, so it waits as long as this model needs.
-        tokens = sum(prompt_size(message["content"]) for message in messages) // CHARS_PER_TOKEN
-        wait = model_fit.background_wait(store, settings, model, status, tokens=tokens, written=budget)
+        # Worked out for each try's own room to write: one asked again with more room to think waits longer.
+        wait = model_fit.background_wait(store, settings, model, status, tokens=tokens, written=room)
         if waits is not None:
             waits.append(wait)
-        limit = wait.seconds
-    draft = complete_text(settings, messages, max_tokens=MAX_TOKENS, limit=limit)
+        return wait.seconds
+
+    draft = complete_text(settings, messages, max_tokens=MAX_TOKENS, limit=wait_for if model else None)
     return _checked(draft, att.filename, text)
 
 
@@ -102,17 +104,21 @@ def summarize_files(
 ) -> int:
     """Summarize long attachments that have no summary yet, most important mail first. Returns how many were written.
 
-    Each waits as long as the model needs (``model_fit.background_wait``: the wait set in Settings → Local model, or
-    the one worked out for the model). When the model gives nothing usable for a file, or refuses it (too long for its
-    context, a 4xx error), that is remembered (as an empty summary), so the file isn't tried again every night; it is
-    tried again when its text changes or another model is loaded. A file that runs out of time is left for the next
-    run, and the run's summaries stop there: the next long file would only run out the same way. That is added to
-    ``notes``, and the next run waits longer for the model (unless the user set its wait). When the server is down
+    Each waits as long as the model needs (``model_fit.background_wait``: at least the wait set in Settings → Local
+    model, longer when the model needs it). When the model gives nothing usable for a file, or refuses it (too long
+    for its context, a 4xx error), that is remembered (as an empty summary), so the file isn't tried again every night;
+    it is tried again when its text changes or another model is loaded. A file that runs out of time is left for the
+    next run, and the run's summaries stop there: the next long file would only run out the same way. That is added
+    to ``notes``. The file is set aside (``model_fit.call_ran_out``): the next run summarizes the others first, and
+    tries it after them only when it would wait longer than it had (twice as long, up to 30 minutes, unless the user's
+    wait was the one used; or a longer wait set in Settings), so it never holds up the rest. When the server is down
     (no connection, a 5xx error) the run's summaries stop too and nothing is saved.
     """
     written = 0
-    queue = store.files_to_summarize(min_chars=SUMMARY_MIN_CHARS, limit=limit, model=model)
+    aside = model_fit.set_aside(store, model)
+    queue = store.files_to_summarize(min_chars=SUMMARY_MIN_CHARS, limit=limit + len(aside), model=model)
     status = check_model(settings) if queue and model else None
+    queue = _in_turn(store, settings, queue, aside, model=model, status=status)[:limit]
     for index, (email_id, attachment_id) in enumerate(queue, start=1):
         email = store.get_email(email_id)
         att = next((a for a in email.attachments if a.id == attachment_id), None) if email else None
@@ -131,16 +137,42 @@ def summarize_files(
                 break  # the server is down or still loading: tomorrow night
             summary = ""
         except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
-            # Not saved: the file is tried again next run, which waits longer for the model.
+            # Not saved: the file is tried again after the others, once the model can wait longer for it.
             if waits:
-                waited = float(getattr(exc, "waited", 0) or 0) or waits[0].seconds
-                if not waits[0].yours:
-                    model_fit.background_ran_out(store, waits[0].model, seconds=waited)
+                note = model_fit.call_ran_out(
+                    store, settings, model, status, waits[-1], exc, item=att.id, key=summary_key(att),
+                    what="summarizing files", on=att.filename,
+                )
                 if notes is not None:
-                    notes.append(model_fit.stopped_note("summarizing files", waits[0], waited, att.filename))
+                    notes.append(note)
             break
         except httpx.HTTPError:
             break
         store.save_file_summary(att.id, summary_key(att), summary, model=model, at=datetime.now(timezone.utc).isoformat())
+        if att.id in aside:
+            model_fit.done_with(store, model, att.id)
         written += bool(summary)
     return written
+
+
+def _in_turn(
+    store: Store, settings: Settings, queue: list[tuple[str, str]], aside: dict[str, dict], *, model: str,
+    status: ModelStatus | None,
+) -> list[tuple[str, str]]:
+    """``queue`` with the files a summary ran out of time on before (``aside``) after the others, and left out while
+    the wait they would get is no longer than the one that ran out (``model_fit.can_wait_longer``)."""
+    if not aside:
+        return queue
+    first, after = [], []
+    for email_id, attachment_id in queue:
+        entry = aside.get(attachment_id)
+        if entry is None:
+            first.append((email_id, attachment_id))
+            continue
+        email = store.get_email(email_id)
+        att = next((a for a in email.attachments if a.id == attachment_id), None) if email else None
+        if att is not None and entry.get("key") != summary_key(att):
+            first.append((email_id, attachment_id))  # its text changed since: to the model, another file
+        elif model_fit.can_wait_longer(store, settings, model, status, entry):
+            after.append((email_id, attachment_id))
+    return first + after

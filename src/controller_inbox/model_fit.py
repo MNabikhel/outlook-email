@@ -6,20 +6,24 @@ than 4,096 tokens (or the most the model supports): the minimum is "at most" for
 Load and use in Settings, and the chat raising the context all ask for this. A load that still runs out of memory
 steps back (``local_llm.step_back_context``).
 
-The wait. How long the chat waits for the model's first word (it reads the whole prompt before it writes one), how
-long the reading of mail waits between words, and how long a file's summary or a question about related mail waits
-for the whole reply while mail is processed (``background_wait``: twice as long after one ran out). Worked out per model: from how fast it read prompts and wrote
+The wait. How long the chat waits for the model's first word (it reads the whole prompt before it writes one), and
+how long the reading of mail waits between words. Worked out per model: from how fast it read prompts and wrote
 answers on this computer, as measured from the chat's own questions (``record_speed``); else from how long it took
 an email in the last reading (``model_choice.seconds_an_email``); else from its size (about 2 minutes for an 8B, 6 to
 10 for a 27B to 32B, half as long again for one that thinks first). A wait the user set (in Settings, or the chat's
 "Save and ask again") wins over the worked-out one, for that model.
+
+A file's summary or a question about related mail while mail is processed waits for the whole reply
+(``background_wait``): at least the user's wait, longer when the model's speeds say the call needs it, and twice as
+long after one ran out. The file or email it ran out on is set aside (``set_aside``) and tried again, after the
+others, only once the wait it would get is longer, so one that keeps running out doesn't hold up the rest.
 """
 
 from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from controller_inbox import local_llm, model_choice, model_roles
@@ -67,6 +71,11 @@ RATES_KEY = "model_rates"  # {model: {"read": prompt tokens a second, "write": t
 RAN_OUT_KEY = "model_ran_out"
 # {model: seconds} the longest wait that ran out on a call made while mail was processed (a file's summary)
 BACKGROUND_RAN_OUT_KEY = "model_background_ran_out"
+# {model: {item: {"key", "seconds", "tokens", "written"}}}: the files and emails such a call ran out of time on (a file's
+# or an email's id; what it was asked from; the wait it had; the prompt's tokens and the reply's room), kept until
+# they are done, at most SET_ASIDE_MOST a model.
+SET_ASIDE_KEY = "model_set_aside"
+SET_ASIDE_MOST = 100
 # The wait's field as both Settings pages name it, for the notes that point to it.
 WAIT_FIELD = "Wait up to … minutes"
 
@@ -287,11 +296,15 @@ def set_wait(store: Store, model: str, minutes: int | None) -> None:
 
 @dataclass(frozen=True)
 class Wait:
-    """How long the chat waits for ``model``: ``seconds``, and whether the user set it (``yours``)."""
+    """How long the chat waits for ``model``: ``seconds``, and whether the user set it (``yours``). One worked out for
+    a call made while mail is processed (``background_wait``) also keeps what it was for: a prompt of ``tokens`` and a
+    reply of up to ``written`` tokens."""
 
     model: str
     seconds: float
     yours: bool
+    tokens: int = 0
+    written: int = 0
 
     @property
     def minutes(self) -> int:
@@ -325,43 +338,113 @@ def background_wait(
 ) -> Wait:
     """How long a call that isn't streamed, made while mail is processed (a file's summary, a question about related
     mail), waits for ``model``: nothing comes back until it has read the prompt (``tokens``) and written its reply
-    (up to ``written`` tokens, thinking included). The user's own wait for the model when set; else the worked-out one
-    (``reading_wait``), longer when the model's measured speeds say this call takes longer, and twice the wait that
-    ran out on such a call before (``background_ran_out``), up to ``WAIT_CEILING``. Never less than such calls waited
-    before (``CHAT_TIMEOUT``)."""
+    (up to ``written`` tokens, thinking included). The worked-out wait (``automatic_wait``), longer when the model's
+    measured speeds say this call takes longer, and twice the wait that ran out on such a call before
+    (``background_ran_out``) up to ``WAIT_CEILING``; never less than such calls waited before (``CHAT_TIMEOUT``). The
+    user's own wait for the model (Settings, or the chat's "Save and ask again") when it is longer (``yours``): it was
+    set for the chat's first word, so it never cuts such a call shorter than CloseDesk already knows it needs."""
     from controller_inbox import local_llm
 
     status = status or check_model(settings)
     key = model_key(status, model)
-    if yours := chosen_wait(store, key, model):
-        return Wait(key, max(yours, local_llm.CHAT_TIMEOUT), True)
-    seconds = reading_wait(store, settings, model, status)
+    seconds = max(local_llm.CHAT_TIMEOUT, automatic_wait(settings, status, key, store))
     if call := estimate_call(store, key, model, tokens=tokens, written=written):
         seconds = max(seconds, call * MARGIN + SPARE_SECONDS)
     ran_out = _read(store, BACKGROUND_RAN_OUT_KEY)
     before = next((ran_out[name] for name in (key, model) if isinstance(ran_out.get(name), (int, float))), 0)
     seconds = max(seconds, min(WAIT_CEILING, before * 2))
-    return Wait(key, max(local_llm.CHAT_TIMEOUT, seconds), False)
+    yours = chosen_wait(store, key, model)
+    return Wait(key, max(yours, seconds), yours > seconds, tokens, written)
 
 
 def background_ran_out(store: Store | None, model: str, *, seconds: float) -> None:
     """A call made while mail was processed waited ``seconds`` for ``model`` and ran out: the next one waits twice as
-    long (``background_wait``), unless the user set a wait of their own."""
+    long (``background_wait``) as the longest that ran out, up to ``WAIT_CEILING``."""
     if store is None or not model or seconds <= 0:
         return
     ran_out = _read(store, BACKGROUND_RAN_OUT_KEY)
-    ran_out[model] = round(seconds, 1)
+    before = ran_out.get(model)
+    ran_out[model] = round(max(seconds, before if isinstance(before, (int, float)) else 0), 1)
     store.set_state(BACKGROUND_RAN_OUT_KEY, json.dumps(ran_out))
 
 
-def stopped_note(what: str, wait: Wait, waited: float, on: str) -> str:
+def set_aside(store: Store | None, model: str) -> dict[str, dict]:
+    """The files and emails a call made while mail was processed ran out of time on with ``model``
+    (``call_ran_out``), by their id: each with what it was asked from (``key``) and the wait it had (``seconds``,
+    ``tokens``, ``written``)."""
+    found = _read(store, SET_ASIDE_KEY).get(model) if model else None
+    if not isinstance(found, dict):
+        return {}
+    return {
+        item: entry for item, entry in found.items()
+        if isinstance(entry, dict) and isinstance(entry.get("seconds"), (int, float))
+    }
+
+
+def _keep_set_aside(store: Store, model: str, items: dict[str, dict]) -> None:
+    every = _read(store, SET_ASIDE_KEY)
+    if items:
+        every[model] = dict(list(items.items())[-SET_ASIDE_MOST:])  # the oldest go first
+    else:
+        every.pop(model, None)
+    store.set_state(SET_ASIDE_KEY, json.dumps(every))
+
+
+def done_with(store: Store | None, model: str, item: str) -> None:
+    """``item`` was summarized or weighed (or given up on) with ``model``: no longer set aside."""
+    items = set_aside(store, model)
+    if store is not None and items.pop(item, None) is not None:
+        _keep_set_aside(store, model, items)
+
+
+def can_wait_longer(store: Store | None, settings: Settings, model: str, status: ModelStatus | None, entry: dict) -> bool:
+    """The call that ran out on a file or email set aside (its ``entry``) would now wait longer than it had: the wait
+    grew after a run-out, or the user set a longer one. Until then it would only run out again."""
+    tokens, written = entry.get("tokens"), entry.get("written")
+    wait = background_wait(
+        store, settings, model, status, tokens=tokens if isinstance(tokens, int) else 0,
+        written=written if isinstance(written, int) else 0,
+    )
+    return wait.seconds > float(entry["seconds"])
+
+
+def call_ran_out(
+    store: Store | None, settings: Settings, model: str, status: ModelStatus | None, wait: Wait, exc: BaseException, *,
+    item: str, key: str, what: str, on: str,
+) -> str:
+    """A call made while mail was processed (``what``: "summarizing files") ran out of ``wait`` on ``item`` (a file's
+    or an email's id, ``on`` in words: its name, "one question"; ``key``: what it was asked from). Keeps that: the
+    next such call waits longer (``background_ran_out``) unless the user's wait was the one used, and ``item`` is set
+    aside until the wait it would get is longer than the one it had (``can_wait_longer``). Returns the run's note."""
+    waited = float(getattr(exc, "waited", 0) or 0) or wait.seconds  # what it waited (``local_llm._post_chat``)
+    written = int(getattr(exc, "written", 0) or 0) or wait.written
+    # A try that waited longer than the user's wait (its room to think needed more) ran out of CloseDesk's own wait.
+    wait = replace(wait, yours=wait.yours and waited <= wait.seconds)
+    if not wait.yours:
+        background_ran_out(store, wait.model, seconds=waited)
+    if store is not None and model and item:
+        items = set_aside(store, model)
+        items.pop(item, None)
+        items[item] = {"key": key, "seconds": round(waited, 1), "tokens": wait.tokens, "written": written}
+        _keep_set_aside(store, model, items)
+    after = background_wait(store, settings, model, status, tokens=wait.tokens, written=written)
+    return stopped_note(what, wait, waited, on, after)
+
+
+def stopped_note(what: str, wait: Wait, waited: float, on: str, after: Wait) -> str:
     """What a run says when ``what`` ("summarizing files") stopped because ``wait`` ran out after ``waited`` seconds
-    on ``on`` (a file's name, "one question"), and where to give the model longer."""
+    on ``on`` (a file's name, "one question"), and where to give the model longer. ``after``: the wait the same call
+    gets next time; a longer one is promised only when it is longer."""
     name = wait.model.split("/")[-1]
-    said = f"Stopped {what}: {name} took longer than {minutes_said(waited or wait.seconds)} on {on}. "
+    waited = waited or wait.seconds
+    said = f"Stopped {what}: {name} took longer than {minutes_said(waited)} on {on}"
+    field = f"Settings → Local model → {WAIT_FIELD} can give it longer"
+    if after.seconds > waited:
+        return f"{said}. CloseDesk waits up to {minutes_said(after.seconds)} next time, or {field} now."
+    left = "The next run goes on with the rest and leaves it until the model can wait longer"
     if wait.yours:
-        return said + f"Settings → Local model → {WAIT_FIELD} can give it longer."
-    return said + f"CloseDesk gives it longer next time, or Settings → Local model → {WAIT_FIELD} can give it longer now."
+        return f"{said}, the wait you set. {left}: {field}."
+    return f"{said}, the most CloseDesk gives it by itself. {left}: {field}, or a smaller model is quicker."
 
 
 def minutes_said(seconds: float) -> str:
@@ -395,13 +478,27 @@ def describe(store: Store | None, settings: Settings, status: ModelStatus | None
     ):
         held += f" ({wanted:,} from the next question)"
     how = "set by you" if wait.yours else "set automatically"
+    line = f"{name}: {held}, waits up to {minutes_said(wait.seconds)} ({how})"
+    # A file's summary is written whole before anything comes back, so it can wait longer than the chat's first word.
+    summary = summary_wait(store, settings, status, key)
+    if summary.minutes > wait.minutes:
+        line += f", and up to {minutes_said(summary.seconds)} for a file's summary"
     return {
         "model": key,
         "context": context,
         "minutes": wait.minutes,
         "yours": wait.yours,
-        "line": f"{name}: {held}, waits up to {minutes_said(wait.seconds)} ({how}).",
+        "line": line + ".",
     }
+
+
+def summary_wait(store: Store | None, settings: Settings, status: ModelStatus, key: str) -> Wait:
+    """How long a file's summary waits for ``key`` at most (``background_wait``): one as long as the context it is
+    loaded with, and the summary's first try's room to write."""
+    from controller_inbox.file_summaries import MAX_TOKENS  # it imports this module
+
+    budget = local_llm.reply_budget(settings, MAX_TOKENS)
+    return background_wait(store, settings, key, status, tokens=_context_tokens(settings, status, key), written=budget)
 
 
 def suggested_minutes(

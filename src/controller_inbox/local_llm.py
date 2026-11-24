@@ -23,6 +23,7 @@ import statistics
 import threading
 import weakref
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -1277,11 +1278,13 @@ def _empty_reply(settings: Settings, model: str, budget: int, reply: Reply) -> E
 
 def complete_text(
     settings: Settings, messages: list[dict], *, max_tokens: int = 400, temperature: float | None = None, think: bool = False,
-    limit: float | None = None,
+    limit: float | Callable[[int], float] | None = None,
 ) -> str:
     """One plain-text answer. Raises ``httpx.HTTPError`` or ``EmptyReply`` when there is none. ``temperature``:
     other than the usual 0.2, for a second, differently worded try; ``think``: see ``_chat_plan``. ``limit``: how
-    long the model may take, worked out for it (``model_fit.chat_wait``), in place of the usual ``CHAT_TIMEOUT``."""
+    long the model may take, worked out for it (``model_fit.chat_wait``), in place of the usual ``CHAT_TIMEOUT``; or
+    what works that out for the tokens a try may write (``model_fit.background_wait``), since nothing comes back
+    until they are all written: a try asked again with more room to think then waits as long as that room needs."""
     model, effort, budget = _chat_plan(settings, max_tokens, think=think)
     for _attempt in range(2):
         url, payload = _chat_request(settings, messages, budget, stream=False)
@@ -1290,7 +1293,8 @@ def complete_text(
             payload["temperature"] = temperature
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(_model_http("post"), url, payload, settings, timeout=max(_timeout(settings, budget), limit or CHAT_TIMEOUT))
+        wait = limit(budget) if callable(limit) else limit
+        response = _post_chat(_model_http("post"), url, payload, settings, timeout=max(_timeout(settings, budget), wait or CHAT_TIMEOUT))
         _raise_for(response)
         try:
             data = response.json()
