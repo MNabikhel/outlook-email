@@ -2281,9 +2281,14 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     base = dict(history=history, today=today, current_id=ws.current_id, notes=notes, tz=settings.tz)
 
     def query_call(settings: Settings, messages: list[dict], **options) -> str:
-        # Noted as the call under way, for the offer of more time.
+        # Noted as the call under way, for the offer of more time. When LM Studio had unloaded the model, this call
+        # has it load the model: the answer's call after it neither says it loads nor leaves its reading untimed.
         _calling(ws.call, messages)
-        return complete_text(settings, messages, limit=ws.wait or None, **options)
+        ws.call.pop("loading", None)
+        try:
+            return complete_text(settings, messages, limit=ws.wait or None, **options)
+        finally:
+            state["loaded"] = True
 
     yield from agent.query_tables(ws, question, query_call)
     plain = _budget(settings, tools=False) // shrink

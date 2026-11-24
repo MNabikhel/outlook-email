@@ -151,3 +151,21 @@ def test_about_says_seconds_or_minutes():
     assert model_fit.about(None) == "" and model_fit.about(0) == ""
     assert model_fit.about(3) == "about 5 seconds" and model_fit.about(42) == "about 40 seconds"
     assert model_fit.about(80) == "about 1 minute" and model_fit.about(200) == "about 3 minutes"
+
+
+def test_a_table_query_that_had_lm_studio_load_the_model_is_the_load(settings, store, mail, lm):  # noqa: F811
+    """The table query for a question about a workbook was the call that had LM Studio load the model it had
+    unloaded while idle. The answer's call after it still said "Loading the model in LM Studio" with no estimate, and
+    its reading wasn't timed, as if it were loading the model."""
+    from controller_inbox.assistant import answer_stream
+
+    server = lm(first_delay=0.1)
+    model_fit.record_speed(store, KEY, prompt_tokens=5000, read_seconds=0.5)  # measured before
+    server.loaded = False
+    local_llm.remember_model(settings, KEY)
+    local_llm._status_cache.clear()
+    events = list(answer_stream(store, settings, "What is the total in this budget?", email_id=mail["Q4 budget draft"].id))
+    assert "Writing a query over the tables for the question" in [event["text"] for event in events if event["type"] == "step"]
+    assert len(server.waits) >= 2, "the table query and the answer"
+    assert not [event for event in _progress(events) if event["text"].startswith("Loading the model")]
+    assert model_fit.speeds(store, KEY)["read"] != 10000, "the answer's reading was timed"
