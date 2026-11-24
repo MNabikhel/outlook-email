@@ -505,6 +505,10 @@ _RETRYABLE = {400, 404, 415, 422, 500, 501}
 # A server that refuses a parameter says so with one of these; a 500 or 404 can be a busy or reloading server.
 _REFUSES = {400, 415, 422, 501}
 _reasoning_seen: set[str] = set()
+# Models whose chat template opens <think> in the prompt, on a server that doesn't separate the reasoning: a reply of
+# theirs once closed a think tag it never opened. Their replies are read as reasoning until that "</think>", so
+# reasoning cut off before it is never taken for the answer.
+_opens_think: set[str] = set()
 _effort_rejected: set[str] = set()
 # Models whose server refused ``logprobs`` (how sure the model was of each word it wrote): asked without it from then on.
 _logprobs_rejected: set[str] = set()
@@ -523,6 +527,10 @@ class Reply:
     last_at: float = 0.0
     pieces: int = 0
     usage: dict = field(default_factory=dict)
+    # The content closed a think tag it never opened (``_opens_think``); or, read as opening with one, it never closed
+    # it and ended as usual: it didn't think, and what it wrote was the answer.
+    lone_close: bool = False
+    unclosed: bool = False
 
     def why_unusable(self) -> str:
         if not self.content and self.reasoning and self.finish == "length":
@@ -556,17 +564,37 @@ def _reasoning_text(part: dict, *, spaces: bool = False) -> str:
     return ""
 
 
-def _reply_from(data) -> Reply:
+def _reply_from(data, *, opened: bool = False) -> Reply:
+    """``opened``: the model's template opens <think> in the prompt (``_opens_think``), so a reply cut off before its
+    "</think>" is all reasoning."""
     choice = _first_choice(data)
     message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
     raw = message.get("content") if isinstance(message.get("content"), str) else ""
     reasoning = _reasoning_text(message)
     tagged = "".join(_THINK_RE.findall(raw))
+    finish = str(choice.get("finish_reason") or "")
+    lone = _THINK_CLOSE in raw and _THINK_OPEN not in raw.split(_THINK_CLOSE, 1)[0]
+    if lone:
+        tagged = raw.split(_THINK_CLOSE, 1)[0] + tagged
+    elif opened and finish == "length" and _THINK_OPEN not in raw:
+        return Reply(content="", reasoning=(reasoning + raw).strip(), finish=finish)
     return Reply(
         content=strip_thinking(raw),
         reasoning=(reasoning + tagged).strip(),
-        finish=str(choice.get("finish_reason") or ""),
+        finish=finish,
+        lone_close=lone,
     )
+
+
+def _learn_think_tags(model: str, reply: Reply) -> None:
+    """A reply that closed a think tag it never opened: the model's template opens one (``_opens_think``), so it
+    thinks, and needs room for it. One read that way that never closed it didn't think this time: read as usual
+    again."""
+    if reply.lone_close:
+        _opens_think.add(model)
+        _reasoning_seen.add(model)
+    elif reply.unclosed:
+        _opens_think.discard(model)
 
 
 def reasoning_effort(settings: Settings, model: str) -> str | None:
@@ -977,11 +1005,13 @@ def strip_thinking(text: str) -> str:
 class ThinkFilter:
     """``strip_thinking`` for a stream, where a tag can arrive split across pieces."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, opened: bool = False) -> None:
+        """``opened``: the reply starts inside a think tag, opened in the prompt (``_opens_think``)."""
         self.buffer = ""
-        self.inside = False
+        self.inside = opened
         self.started = False
-        self.saw = False
+        self.saw = opened
+        self.closed = False  # a closing tag was read
         self._thought: list[str] = []  # the reasoning between the tags, as it comes (``take_thought``)
 
     def take_thought(self) -> str:
@@ -1003,6 +1033,7 @@ class ThinkFilter:
                 self._thought.append(self.buffer[:cut])
                 self.buffer = self.buffer[cut + len(_THINK_CLOSE) :]
                 self.inside = False
+                self.closed = True
                 continue
             cut = self.buffer.find(_THINK_OPEN)
             if cut < 0:
@@ -1096,7 +1127,8 @@ def complete_text(
             data = response.json()
         except ValueError as exc:
             raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
-        reply = _reply_from(data)
+        reply = _reply_from(data, opened=model in _opens_think)
+        _learn_think_tags(model, reply)
         if reply.content:
             return reply.content
         plan = _retry_plan(model, payload.get("reasoning_effort"), budget, reply)
@@ -1158,6 +1190,7 @@ def stream_text(
             if reply.content or reply.reasoning:
                 exc.reply_started = "writing" if reply.content else "thinking"
             raise
+        _learn_think_tags(model, reply)
         if finished is not None:
             finished["reason"], finished["thought"] = reply.finish, bool(reply.reasoning)
             if reply.first_at:
@@ -1271,7 +1304,10 @@ def _stream_once(
                 _effort_rejected.add(rejected_effort)
             if rejected_probs:
                 _logprobs_rejected.add(rejected_probs)
-            yield from _stream_pieces(response, reply, token_probs if asks_probs else None, thoughts=thoughts)
+            yield from _stream_pieces(
+                response, reply, token_probs if asks_probs else None, thoughts=thoughts,
+                opened=str(payload.get("model")) in _opens_think,
+            )
     if without_usage:
         yield from _stream_once(
             settings, messages, budget, effort, reply,
@@ -1317,23 +1353,28 @@ def _token_probs(choice: dict, into: list | None) -> None:
 
 
 def _stream_pieces(
-    response: httpx.Response, reply: Reply, token_probs: list | None = None, raw: list | None = None, *, thoughts: bool = False
+    response: httpx.Response, reply: Reply, token_probs: list | None = None, raw: list | None = None, *, thoughts: bool = False,
+    opened: bool = False,
 ):
     """The answer's pieces as they come. ``raw``: given a list, filled with the content as sent, think tags and all.
-    ``thoughts``: the reasoning is yielded too, as ``Thought`` pieces, whether in its own field or in think tags."""
+    ``thoughts``: the reasoning is yielded too, as ``Thought`` pieces, whether in its own field or in think tags.
+    ``opened``: the model's template opens <think> in the prompt (``_opens_think``): what comes before its "</think>"
+    is reasoning."""
     if "text/event-stream" not in response.headers.get("content-type", ""):
         try:
             data = json.loads(response.read() or b"{}")
         except ValueError as exc:
             raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
-        whole = _reply_from(data)
-        reply.reasoning, reply.finish = whole.reasoning, whole.finish
+        whole = _reply_from(data, opened=opened)
+        reply.reasoning, reply.finish, reply.lone_close = whole.reasoning, whole.finish, whole.lone_close
         if whole.content:
             if not whole.reasoning:
                 _token_probs(_first_choice(data), token_probs)
             yield whole.content
         return
-    thinking = ThinkFilter()
+    thinking = ThinkFilter(opened=opened)
+    held: list[str] = []  # read as reasoning because the template opened the tag: the answer if it never closes
+    sent = ""  # the content as sent, think tags and all
     for line in response.iter_lines():
         line = line.strip()
         if line.startswith("error:"):
@@ -1368,18 +1409,30 @@ def _stream_pieces(
             reply.pieces += 1
         if raw is not None and content:
             raw.append(content)
+        sent += content
         piece = thinking.feed(content)
         if thinking.saw and not reply.reasoning:
             reply.reasoning = "<think>"
-        if thoughts and (thought := reasoned + thinking.take_thought()):
+        tagged = thinking.take_thought()
+        if opened and not thinking.closed:
+            held.append(tagged)
+        if thoughts and (thought := reasoned + tagged):
             yield Thought(thought)
         if piece:
             # Only the answer's tokens: not its reasoning, which comes in its own field or between think tags.
             _token_probs(choice, token_probs)
             yield piece
     rest = thinking.flush()
-    if thoughts and (thought := thinking.take_thought()):
-        yield Thought(thought)
+    tagged = thinking.take_thought()
+    reply.lone_close = not opened and _THINK_CLOSE in sent and _THINK_OPEN not in sent.split(_THINK_CLOSE, 1)[0]
+    if opened and not thinking.closed and reply.finish != "length":
+        # Read as reasoning, but it never closed the tag and ended as usual: this time it didn't think, and that was
+        # the answer (shown in the Thinking box as it came, then as the answer).
+        reply.unclosed = True
+        reply.reasoning = "" if reply.reasoning == _THINK_OPEN else reply.reasoning
+        rest = "".join(held) + tagged + rest
+    elif thoughts and tagged:
+        yield Thought(tagged)
     if rest:
         yield rest
 

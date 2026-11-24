@@ -449,3 +449,78 @@ def test_a_model_that_always_thinks_and_ran_out_of_room_is_asked_again_with_more
         text = ""
     budgets = [(call["max_tokens"], call.get("reasoning_effort")) for call in server.calls]
     assert text, f"no answer: the retry was the same request that ran out of room ({budgets})"
+
+
+# A chat template that opens <think> in the prompt, on a server that doesn't separate reasoning -------------------
+class LoneCloseServer:
+    """A DeepSeek-R1 distill whose chat template opens <think> in the prompt, on a server that neither separates the
+    reasoning nor lists reasoning options: the reply's content is its reasoning, "</think>", then the answer. With
+    fewer than ``think_tokens`` tokens it is cut off while still reasoning."""
+
+    MODEL = "deepseek-r1-distill-qwen-7b"
+    REASONING = "REASONMARK Let me check the due date. "
+
+    def __init__(self, think_tokens: int = 200):
+        self.think_tokens = think_tokens
+        self.thinks = True
+        self.calls: list[dict] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"data": [{"id": self.MODEL}]})
+        if request.url.path.startswith("/api/"):
+            return httpx.Response(404, json={"error": "not found"})
+        payload = json.loads(request.content)
+        self.calls.append(payload)
+        if not self.thinks:
+            content, finish = "It is due on Friday [1].", "stop"
+        elif int(payload.get("max_tokens") or 0) < self.think_tokens:
+            content, finish = self.REASONING * 12, "length"
+        else:
+            content, finish = self.REASONING * 3 + "\n</think>\n\nIt is due on Friday [1].", "stop"
+        events = [{"choices": [{"delta": {"content": content[i : i + 9]}}]} for i in range(0, len(content), 9)]
+        events.append({"choices": [{"delta": {}, "finish_reason": finish}]})
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+
+def test_a_model_seen_closing_a_think_tag_it_never_opened_is_given_room_and_its_reasoning_kept_apart(auto, monkeypatch):
+    """Once such a model had closed a think tag it never opened, the next question still went out with 500 tokens,
+    was cut off while it reasoned, and the reasoning was shown, saved and sent back to the model as the answer."""
+    server = LoneCloseServer(think_tokens=1000)
+    _serve(monkeypatch, server)
+    messages = [{"role": "user", "content": "When is it due?"}]
+    first = list(stream_text(auto, messages, max_tokens=1200, thoughts=True))
+    assert "</think>" in "".join(p for p in first if isinstance(p, str)), "the first reply shows the model does this"
+    pieces = list(stream_text(auto, messages, max_tokens=500, thoughts=True))
+    answer = "".join(p for p in pieces if isinstance(p, str))
+    thought = "".join(p.text for p in pieces if isinstance(p, local_llm.Thought))
+    assert server.calls[1]["max_tokens"] >= local_llm.THINKING_ROOM, "it was given room to think"
+    assert answer.strip() == "It is due on Friday [1].", answer
+    assert "REASONMARK" in thought and "</think>" not in thought
+
+
+def test_a_known_lone_close_model_cut_off_while_reasoning_is_asked_again_not_answered_with_its_reasoning(auto, monkeypatch):
+    server = LoneCloseServer(think_tokens=3000)
+    _serve(monkeypatch, server)
+    messages = [{"role": "user", "content": "When is it due?"}]
+    server.think_tokens = 100
+    list(stream_text(auto, messages, max_tokens=500, thoughts=True))  # learned: it closes a tag it never opened
+    server.think_tokens = 3000
+    pieces = list(stream_text(auto, messages, max_tokens=500, thoughts=True))
+    answer = "".join(p for p in pieces if isinstance(p, str))
+    assert "REASONMARK" not in answer, "its reasoning was taken for the answer"
+    assert [call["max_tokens"] for call in server.calls[1:]] == [2048, 4096]
+    assert answer.strip() == "It is due on Friday [1]."
+
+
+def test_a_known_lone_close_model_that_answers_without_thinking_still_gives_its_answer(auto, monkeypatch):
+    server = LoneCloseServer(think_tokens=100)
+    _serve(monkeypatch, server)
+    messages = [{"role": "user", "content": "When is it due?"}]
+    list(stream_text(auto, messages, max_tokens=500, thoughts=True))
+    assert server.MODEL in local_llm._opens_think
+    server.thinks = False  # this time it doesn't think: no "</think>" at all
+    answer = "".join(p for p in stream_text(auto, messages, max_tokens=500, thoughts=True) if isinstance(p, str))
+    assert answer == "It is due on Friday [1]."
+    assert server.MODEL not in local_llm._opens_think
