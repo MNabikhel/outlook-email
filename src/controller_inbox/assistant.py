@@ -37,6 +37,7 @@ from controller_inbox.local_llm import (
     EmptyReply,
     Thought,
     ToolsUnsupported,
+    WasThinking,
     chat_with_tools,
     chat_load_size,
     check_model,
@@ -1996,9 +1997,14 @@ class _Recorded:
         self.whole = False  # read to its end, not stopped at an echo
 
     def __iter__(self) -> Iterator[str]:
+        begun = False
         for piece in self.pieces:
+            if isinstance(piece, WasThinking):  # what came so far was reasoning: kept as sent, up to its "</think>"
+                self.text += "</think>"
+                begun = False
             if isinstance(piece, str):  # not the model's reasoning, passed on to be shown: its reply
-                if piece and not self.text:
+                if piece and not begun:
+                    begun = True
                     yield _BEGUN
                 self.text += piece
             yield piece
@@ -2009,6 +2015,8 @@ class _Recorded:
         start = len(self.text)
         try:
             for piece in self.pieces:
+                if isinstance(piece, WasThinking):
+                    self.text += "</think>"
                 if not isinstance(piece, str):
                     continue
                 self.text += piece
@@ -2172,6 +2180,15 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
                 if not state["wrote"] and state.get("call") is not None:
                     yield WRITING
                 continue
+            if isinstance(piece, WasThinking):
+                # It closed a think tag it never opened: what was shown as the answer was its reasoning, which comes
+                # next for the Thinking box. The answer starts after the tag.
+                if len(state["text"]) > before:
+                    state["text"] = state["text"][:before]
+                    yield {"type": "revise", "text": state["text"]}
+                state["wrote"] = wrote
+                thought = False
+                continue
             if isinstance(piece, AskedAgain):
                 # It ran out of room thinking and is asked again: it reads the prompt again, and its thinking starts
                 # below the first try's (the pages end the thinking on reading, and start it again on thinking).
@@ -2206,9 +2223,11 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
             answer = "".join(without_echo(iter([raw.text.split("</think>")[-1].lstrip()])))
         except EmptyReply:
             answer = ""
-        state["text"] = state["text"][:before] + answer
+        revised = state["text"][:before] + answer
         state["wrote"] = wrote or bool(answer)
-        yield {"type": "revise", "text": state["text"]}
+        if revised != state["text"]:  # not when the answer was split from the reasoning as it came
+            state["text"] = revised
+            yield {"type": "revise", "text": state["text"]}
         if len(state["text"]) == before:
             # Only reasoning came back: no answer was written (the draft or the lookup answer takes its place).
             state["wrote"] = wrote
@@ -2217,7 +2236,12 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
         # The model ran out of room partway: the user is told, rather than given half an answer as if it were whole.
         cut = "\n\n(The answer was cut off here: the model ran out of room. Ask about one part at a time for the rest.)"
         state["text"] += cut
-        yield {"type": "delta", "text": cut}
+        event = {"type": "delta", "text": cut}
+        if not _lone_close(raw.text) and not finished.get("thought"):
+            # Nothing set reasoning apart: a model whose template opens <think> itself may have been cut off while it
+            # still reasoned. Once it is known to (``local_llm._opens_think``), this isn't sent back as its answer.
+            event["cut_off"] = str(finished.get("model") or "")
+        yield event
 
 
 def _keep_stated_figures(checked: str, draft: str, file_text: str) -> str:
@@ -2315,6 +2339,8 @@ def without_echo(pieces: Iterator[str]) -> Iterator[str]:
     pending = ""
     sent = False
     for piece in pieces:
+        if isinstance(piece, WasThinking):  # what was held back was reasoning too: the answer starts again after it
+            pending, sent = "", False
         if not isinstance(piece, str):  # the reasoning goes on to the chat as it comes; only the answer is checked
             yield piece
             continue

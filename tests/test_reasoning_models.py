@@ -478,6 +478,8 @@ class LoneCloseServer:
             content, finish = self.REASONING * 12, "length"
         else:
             content, finish = self.REASONING * 3 + "\n</think>\n\nIt is due on Friday [1].", "stop"
+        if not payload.get("stream"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": content}, "finish_reason": finish}]})
         events = [{"choices": [{"delta": {"content": content[i : i + 9]}}]} for i in range(0, len(content), 9)]
         events.append({"choices": [{"delta": {}, "finish_reason": finish}]})
         body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
@@ -491,7 +493,8 @@ def test_a_model_seen_closing_a_think_tag_it_never_opened_is_given_room_and_its_
     _serve(monkeypatch, server)
     messages = [{"role": "user", "content": "When is it due?"}]
     first = list(stream_text(auto, messages, max_tokens=1200, thoughts=True))
-    assert "</think>" in "".join(p for p in first if isinstance(p, str)), "the first reply shows the model does this"
+    assert any(isinstance(p, local_llm.WasThinking) for p in first), "the first reply shows the model does this"
+    assert "".join(p for p in first if isinstance(p, str)).endswith("It is due on Friday [1].")
     pieces = list(stream_text(auto, messages, max_tokens=500, thoughts=True))
     answer = "".join(p for p in pieces if isinstance(p, str))
     thought = "".join(p.text for p in pieces if isinstance(p, local_llm.Thought))

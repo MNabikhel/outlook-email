@@ -228,6 +228,8 @@ class _AnswerLog:
             self.data[kind + "s"].append(event.get("text", ""))
         elif kind == "delta":
             self.text += event.get("text", "")
+            if event.get("cut_off"):  # the model it was, for ``chats.history_for_model``
+                self.data["cut_off"] = event["cut_off"]
             if "stopped answering partway" in event.get("text", ""):
                 self.data["failed"] = True
         elif kind == "revise":
@@ -335,6 +337,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     store = store or Store(settings.db_path)
     apply_saved_timezone(settings, store)
     vision.apply_saved_mode(settings, store)
+    local_llm.remember_thinking(store)
     saved_context = store.get_state(MIN_CONTEXT_KEY)
     if saved_context and saved_context.isdigit():
         set_min_context(settings, int(saved_context))

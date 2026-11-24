@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 import socket
+import sqlite3
 import statistics
 import threading
 import weakref
@@ -591,6 +592,10 @@ _opens_think: set[str] = set()
 # Models that can't be told not to think and ran out of twice the usual room thinking in the chat (``ThinksTooLong``):
 # each later question gives them that room at once, and only once, rather than the usual room first and then twice it.
 _thinks_too_long: set[str] = set()
+# What CloseDesk learned of each model's thinking (the three sets above), kept in the database so the next start
+# doesn't learn it all over again: ``remember_thinking`` reads it back and keeps what is learned from then on there.
+THINKING_KEY = "model_thinking"
+_thinking_store = None
 _effort_rejected: set[str] = set()
 # Models whose server refused ``logprobs`` (how sure the model was of each word it wrote): asked without it from then on.
 _logprobs_rejected: set[str] = set()
@@ -634,6 +639,14 @@ class Thought:
 
     def __init__(self, text: str):
         self.text = text
+
+
+class WasThinking:
+    """Yielded by ``stream_text(thoughts=True)`` when the reply closed a think tag it never opened: what it yielded as
+    the answer until then was the model's reasoning (it comes again next, as a ``Thought``), and the answer starts
+    after the tag."""
+
+    __slots__ = ()
 
 
 class AskedAgain:
@@ -680,10 +693,46 @@ def _learn_think_tags(model: str, reply: Reply) -> None:
     thinks, and needs room for it. One read that way that never closed it didn't think this time: read as usual
     again."""
     if reply.lone_close:
-        _opens_think.add(model)
-        _reasoning_seen.add(model)
+        _learned(_opens_think, model)
+        _learned(_reasoning_seen, model)
     elif reply.unclosed:
-        _opens_think.discard(model)
+        _learned(_opens_think, model, False)
+
+
+def remember_thinking(store) -> None:
+    """Read back what earlier runs learned of each model's thinking (``THINKING_KEY``), and keep what this run learns
+    in ``store`` too. What can't be read is learned again, as before."""
+    global _thinking_store
+    _thinking_store = store
+    try:
+        saved = json.loads(store.get_state(THINKING_KEY) or "{}")
+    except (ValueError, sqlite3.Error):
+        return
+    saved = saved if isinstance(saved, dict) else {}
+    for name, kept in _thinking_sets().items():
+        found = saved.get(name)
+        kept.update(model for model in (found if isinstance(found, list) else []) if isinstance(model, str) and model)
+
+
+def _thinking_sets() -> dict[str, set[str]]:
+    return {"reasoning": _reasoning_seen, "opens_think": _opens_think, "thinks_too_long": _thinks_too_long}
+
+
+def _learned(kept: set[str], model: str, add: bool = True) -> None:
+    """Add ``model`` to (or take it from) one of the sets of what is learned of a model's thinking, and keep the change
+    in the database for the next start."""
+    if not model or (model in kept) == add:
+        return
+    if add:
+        kept.add(model)
+    else:
+        kept.discard(model)
+    if _thinking_store is None:
+        return
+    try:
+        _thinking_store.set_state(THINKING_KEY, json.dumps({name: sorted(found) for name, found in _thinking_sets().items()}))
+    except (sqlite3.Error, OSError):
+        pass  # learned again next time
 
 
 def reasoning_effort(settings: Settings, model: str) -> str | None:
@@ -907,7 +956,7 @@ class LocalReader:
         if reply.content and not reply.reasoning:
             return False
         if reply.reasoning:
-            _reasoning_seen.add(self.model)
+            _learned(_reasoning_seen, self.model)
         changed = False
         if self._effort is None and self.model not in _effort_rejected:
             self._effort, changed = "none", True
@@ -1001,7 +1050,7 @@ class LocalReader:
         response.raise_for_status()
         reply = self._partial
         if reply.reasoning:
-            _reasoning_seen.add(self.model)
+            _learned(_reasoning_seen, self.model)
         return reply
 
     def _send(self, url: str, *, json: dict, headers: dict, **options) -> httpx.Response:
@@ -1099,13 +1148,17 @@ def strip_thinking(text: str) -> str:
 class ThinkFilter:
     """``strip_thinking`` for a stream, where a tag can arrive split across pieces."""
 
-    def __init__(self, *, opened: bool = False) -> None:
-        """``opened``: the reply starts inside a think tag, opened in the prompt (``_opens_think``)."""
+    def __init__(self, *, opened: bool = False, lone: bool = False) -> None:
+        """``opened``: the reply starts inside a think tag, opened in the prompt (``_opens_think``). ``lone``: a closing
+        tag that comes before any opening one ends the reasoning there, though nothing said the reply began with it:
+        what was passed on as the answer until then was reasoning (``relabelled`` says so, once)."""
         self.buffer = ""
         self.inside = opened
         self.started = False
         self.saw = opened
         self.closed = False  # a closing tag was read
+        self.lone = lone and not opened
+        self.relabelled = False
         self._thought: list[str] = []  # the reasoning between the tags, as it comes (``take_thought``)
 
     def take_thought(self) -> str:
@@ -1130,8 +1183,19 @@ class ThinkFilter:
                 self.closed = True
                 continue
             cut = self.buffer.find(_THINK_OPEN)
+            close = self.buffer.find(_THINK_CLOSE) if self.lone and not self.saw else -1
+            if close >= 0 and (cut < 0 or close < cut):
+                # The reasoning ends here: all of it so far, this piece's included, was passed on or held as the answer.
+                out.clear()
+                self.buffer = self.buffer[close + len(_THINK_CLOSE) :]
+                self.saw = self.closed = self.relabelled = True
+                self.started = False
+                continue
             if cut < 0:
-                keep = next((k for k in range(len(_THINK_OPEN) - 1, 0, -1) if self.buffer.endswith(_THINK_OPEN[:k])), 0)
+                tags = (_THINK_OPEN, _THINK_CLOSE) if self.lone and not self.saw else (_THINK_OPEN,)
+                keep = max(
+                    next((k for k in range(len(tag) - 1, 0, -1) if self.buffer.endswith(tag[:k])), 0) for tag in tags
+                )  # a tag may be arriving split
                 out.append(self.buffer[: len(self.buffer) - keep])
                 self.buffer = self.buffer[len(self.buffer) - keep :]
                 break
@@ -1183,7 +1247,7 @@ def _retry_plan(
         return None
     if model in _thinks_too_long and budget >= 2 * THINKING_ROOM:
         return None
-    _reasoning_seen.add(model)
+    _learned(_reasoning_seen, model)
     options = _reasoning_options(settings, model)
     fixed = bool(options) and not {"off", "low"} & set(options)  # LM Studio lists no way to turn it down
     new_effort = effort or (None if model in _effort_rejected or fixed else "none")
@@ -1202,7 +1266,7 @@ def _empty_reply(settings: Settings, model: str, budget: int, reply: Reply) -> E
     options = _reasoning_options(settings, model)
     if not options or "off" in options:
         return EmptyReply(reply.why_unusable())
-    _thinks_too_long.add(model)
+    _learned(_thinks_too_long, model)
     # Not the family of the model that failed (a Qwen3 Thinking build, or a DeepSeek-R1 distilled from Qwen3).
     example = "Gemma 3" if "qwen" in model.lower() else "Qwen3"
     return ThinksTooLong(
@@ -1267,8 +1331,9 @@ def stream_text(
     given a list, filled with (piece of text, log probability) for each token of the answer, when the server sends
     them (llama.cpp does; a server that doesn't leaves it empty). ``limit``: how long the model may go quiet, worked
     out for it (``model_fit.chat_wait``), in place of the usual ``CHAT_TIMEOUT``. ``thoughts``: the model's reasoning
-    is yielded too as it comes, as ``Thought`` pieces (never added to the answer), and ``AskedAgain`` before a second
-    try with more room. ``finished`` is also given the
+    is yielded too as it comes, as ``Thought`` pieces (never added to the answer), ``WasThinking`` when a reply that
+    closes a think tag it never opened shows what came before as its reasoning, and ``AskedAgain`` before a second
+    try with more room. ``finished`` is also given the model asked (``model``) and the
     reply's timing: ``read_seconds`` (until its first piece), ``write_seconds``, ``written`` (tokens, thinking
     included) and ``prompt_tokens`` when the server counted them.
     """
@@ -1289,6 +1354,12 @@ def stream_text(
                 if isinstance(piece, Thought):
                     yield piece
                     continue
+                if isinstance(piece, WasThinking):
+                    reply.content = ""  # that was its reasoning: the answer starts after the tag
+                    if token_probs is not None:
+                        token_probs.clear()
+                    yield piece
+                    continue
                 reply.content += piece
                 yield piece
         except httpx.TimeoutException as exc:
@@ -1298,7 +1369,7 @@ def stream_text(
             raise
         _learn_think_tags(model, reply)
         if finished is not None:
-            finished["reason"], finished["thought"] = reply.finish, bool(reply.reasoning)
+            finished["reason"], finished["thought"], finished["model"] = reply.finish, bool(reply.reasoning), model
             if reply.first_at:
                 finished["write_seconds"] = reply.last_at - reply.first_at
                 finished["written"] = _int(reply.usage.get("completion_tokens")) or reply.pieces
@@ -1480,7 +1551,7 @@ def _stream_pieces(
                 _token_probs(_first_choice(data), token_probs)
             yield whole.content
         return
-    thinking = ThinkFilter(opened=opened)
+    thinking = ThinkFilter(opened=opened, lone=thoughts)
     held: list[str] = []  # read as reasoning because the template opened the tag: the answer if it never closes
     sent = ""  # the content as sent, think tags and all
     for line in response.iter_lines():
@@ -1522,6 +1593,11 @@ def _stream_pieces(
         if thinking.saw and not reply.reasoning:
             reply.reasoning = "<think>"
         tagged = thinking.take_thought()
+        if thinking.relabelled:
+            # A "</think>" it never opened: what came before it, passed on as the answer, was its reasoning.
+            thinking.relabelled = False
+            yield WasThinking()
+            tagged = sent.split(_THINK_CLOSE, 1)[0].strip() + tagged
         if opened and not thinking.closed:
             held.append(tagged)
         if thoughts and (thought := reasoned + tagged):

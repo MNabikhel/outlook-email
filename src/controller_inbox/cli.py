@@ -16,6 +16,7 @@ from pathlib import Path
 from controller_inbox.actions import local_today
 from controller_inbox.clock import apply_saved_timezone, parse_stamp
 from controller_inbox.vision import apply_saved_mode
+from controller_inbox import local_llm
 from controller_inbox.config import Settings, load_settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.fraud import _cell
@@ -150,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     apply_saved_timezone(settings, store)
     apply_saved_mode(settings, store)
+    local_llm.remember_thinking(store)
 
     if args.cmd == "run":
         return _run(settings, store, args)

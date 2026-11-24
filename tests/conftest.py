@@ -56,10 +56,12 @@ def _fresh_model_memory():
     for cache in caches:
         cache.clear()
     memo.clear_all()
+    local_llm._thinking_store = None  # each test's own database
     yield
     for cache in caches:
         cache.clear()
     memo.clear_all()
+    local_llm._thinking_store = None
 
 
 @pytest.fixture(autouse=True)
