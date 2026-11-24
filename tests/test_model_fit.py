@@ -74,7 +74,11 @@ def test_the_chat_raises_a_big_model_only_as_far_as_fits(settings, monkeypatch):
     server.contexts[BIG] = 4096
     assert needs_more_context(settings)
     said = ensure_context(settings)
-    assert said == f"Reloaded {BIG} in LM Studio with a 8,192-token context (the most that fits this computer) so whole attachments fit."
+    # Not "so whole attachments fit": at 8,192 tokens long ones are still read a section at a time.
+    assert said == (
+        f"Reloaded {BIG} in LM Studio with an 8,192-token context (the most that fits this computer). "
+        "Long attachments are still read a section at a time."
+    )
     assert server.calls == [("unload", BIG), ("load", BIG, 8192)]
     local_llm._status_cache.clear()
     assert not needs_more_context(settings)

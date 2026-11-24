@@ -1806,7 +1806,15 @@ def _reload_with_context(settings: Settings) -> str:
             " (the most that fits this computer)" if want < supported
             else " (the most it supports)" if want < settings.min_context_tokens else ""
         )
-        return f"Reloaded {status.key} in LM Studio with a {want:,}-token context{most} so whole attachments fit."
+        from controller_inbox.agent import RECOMMENDED_CONTEXT  # it imports the store and the rest
+
+        article = "an" if str(want).startswith("8") else "a"
+        # Whole attachments fit only with the recommended context or more; below it they are still read in sections.
+        why = (
+            " so whole attachments fit." if want >= RECOMMENDED_CONTEXT
+            else ". Long attachments are still read a section at a time."
+        )
+        return f"Reloaded {status.key} in LM Studio with {article} {want:,}-token context{most}{why}"
     if len(errors) == 1:
         return f"LM Studio couldn't load {status.key} with a {want:,}-token context ({errors[0]}), so it stays at {status.context_length:,}."
     return f"LM Studio couldn't reload {status.key} ({errors[-1]}). Load it again in LM Studio."
