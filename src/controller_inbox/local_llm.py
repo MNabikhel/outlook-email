@@ -1108,6 +1108,9 @@ def stream_text(
     included) and ``prompt_tokens`` when the server counted them.
     """
     model, effort, budget = _chat_plan(settings, max_tokens, model=model)
+    # The first attempt that got going timed the reading of the prompt. One asked again finds the prompt still read
+    # (LM Studio keeps it) and starts at once, which would look like the model reading thousands of tokens a second.
+    read_timed = False
     for _attempt in range(2):
         reply, sent = Reply(content=""), budget
         if token_probs is not None:
@@ -1131,9 +1134,11 @@ def stream_text(
         if finished is not None:
             finished["reason"], finished["thought"] = reply.finish, bool(reply.reasoning)
             if reply.first_at:
-                finished["read_seconds"] = reply.first_at - started
                 finished["write_seconds"] = reply.last_at - reply.first_at
                 finished["written"] = _int(reply.usage.get("completion_tokens")) or reply.pieces
+            if reply.first_at and not read_timed:
+                read_timed = True
+                finished["read_seconds"] = reply.first_at - started
                 if "prompt_tokens" in reply.usage:
                     finished["prompt_tokens"] = _prompt_read(reply.usage)
                     finished["prompt_counted"] = _cache_said(reply.usage)

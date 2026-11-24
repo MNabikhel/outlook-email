@@ -317,3 +317,33 @@ def test_a_stream_asks_for_the_token_counts_and_goes_on_without_them_where_refus
     replies = iter([_streamed("ok")])
     assert "".join(local_llm.stream_text(settings, [{"role": "user", "content": "hi"}])) == "ok"
     assert "stream_options" not in calls[0], "asked again after the server refused it"
+
+
+def test_a_retry_keeps_the_first_attempt_s_reading_time(settings, monkeypatch):
+    """A thinking model that ran out of room is asked again with more. LM Studio still has the prompt from the first
+    time and starts the second at once, so that time was recorded as the model's reading of the whole prompt, and a
+    model that reads 30 tokens a second was taken to read thousands."""
+    clock = iter([0.0, 270.0, 280.0, 300.0, 301.0, 310.0])
+    monkeypatch.setattr(local_llm.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(local_llm, "_chat_plan", lambda *a, **k: ("thinker", None, 4000))
+    attempts = []
+
+    def stream_once(settings, messages, budget, effort, reply, **kwargs):
+        attempts.append(budget)
+        reply.first_at, reply.last_at = local_llm.time.monotonic(), local_llm.time.monotonic()
+        reply.pieces = 40
+        if len(attempts) == 1:
+            reply.reasoning, reply.finish = "thinking...", "length"
+            reply.usage = {"prompt_tokens": 8000}
+            return
+        reply.finish = "stop"
+        reply.usage = {"prompt_tokens": 8000, "completion_tokens": 40}
+        yield "ok"
+
+    monkeypatch.setattr(local_llm, "_stream_once", stream_once)
+    finished: dict = {}
+    assert "".join(local_llm.stream_text(settings, [{"role": "user", "content": "hi"}], finished=finished)) == "ok"
+    assert len(attempts) == 2
+    assert finished["read_seconds"] == 270.0, "the cached second reading was recorded as the model's reading speed"
+    assert finished["prompt_tokens"] == 8000
+    assert finished["write_seconds"] == 9.0 and finished["written"] == 40
