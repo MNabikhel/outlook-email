@@ -37,6 +37,10 @@ def chat_row(status: ModelStatus) -> dict:
     row = {"role": "Answers your questions", "model": "", "state": "off", "status": "", "note": ""}
     if status.mode == "off":
         row["status"] = "Turned off in CloseDesk's settings file (.env): answers come from looking things up."
+    elif status.active and status.lm_studio and not status.key and status.model in status.chat_models:
+        # The model used last, downloaded but not loaded now: LM Studio loads it when a question asks for it.
+        row["model"], row["state"] = status.model, "on"
+        row["status"] = "Downloaded: LM Studio loads it when you ask something."
     elif status.active:
         row["model"], row["state"] = status.model, "on"
         context = f" with a {status.context_length:,}-token context" if status.context_length else ""

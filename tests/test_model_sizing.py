@@ -480,3 +480,39 @@ def test_a_7b_that_runs_on_the_card_with_a_shorter_context_is_chosen_over_a_1_5b
     lm.extra = [tiny, seven]
     lm.sizes = {tiny: int(1.1e9), seven: int(4.36 * GB)}
     assert model_choice.auto_choice(settings, check_model(settings, use_cache=False)) == seven
+
+
+def test_settings_for_a_remembered_model_not_loaded_says_what_closedesk_will_ask_for(settings, store, lm, monkeypatch):
+    """Nothing loaded in LM Studio, and the model used last remembered: Settings said the context was "not
+    reported", told the user to reload the model at 16,384 tokens (a size the same page said doesn't fit a 31B on
+    a 32 GB Mac) and to set a settings variable by name, and listed the model as "Loaded"."""
+    import html
+
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import local_llm, model_fit, web
+
+    _computer(monkeypatch, 32, mac=True)
+    lm.sizes = {BIG: 19 * GB}
+    settings.llm = True
+    local_llm.remember_model(settings, BIG)
+    status = check_model(settings, use_cache=False)
+    assert status.model == BIG and not status.instances
+    line = model_fit.context_line(settings, status)
+    assert "CONTROLLER_INBOX" not in line["advice"] and "16,384" not in line["advice"], line["advice"]
+    assert f"{BIG} isn't loaded in LM Studio right now" in line["advice"]
+    assert "CloseDesk asks for 4,096 tokens (the most that fits this computer)" in line["advice"], line["advice"]
+    assert model_roles.chat_row(status)["status"] == "Downloaded: LM Studio loads it when you ask something."
+
+    page = html.unescape(TestClient(web.create_app(settings, store)).get("/settings").text)
+    assert "CONTROLLER_INBOX" not in page and f"{BIG} isn't loaded in LM Studio right now" in page
+
+
+def test_a_server_that_doesnt_say_its_context_isnt_answered_with_a_settings_variable(settings):
+    from controller_inbox import model_fit
+    from controller_inbox.local_llm import ModelStatus
+
+    settings.chat_context_tokens = 0
+    status = ModelStatus(mode="auto", reachable=True, model="llama3", base_url="http://127.0.0.1:11434/v1")
+    advice = model_fit.context_line(settings, status)["advice"]
+    assert "CONTROLLER_INBOX" not in advice and "doesn't say" in advice, advice

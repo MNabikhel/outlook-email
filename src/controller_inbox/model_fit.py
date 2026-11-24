@@ -420,7 +420,28 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
     recommended = RECOMMENDED_CONTEXT
     fits = context_fits(settings, model)
     capped = context_capped(settings, model)
-    if needs_more_context(settings) and fits:
+    # The model used last, not loaded now: LM Studio loads it when it is asked, and CloseDesk then sizes it.
+    waiting = bool(model.lm_studio and model.model and not model.key and model.model in model.chat_models)
+    if waiting:
+        asked = auto_context(settings, model, model.model)
+        supported, _most = _wanted(settings, model, model.model)
+        if asked:
+            most = " (the most that fits this computer)" if asked < supported else ""
+            advice = (
+                f"{model.model} isn't loaded in LM Studio right now. It is loaded when you ask something, and "
+                f"CloseDesk asks for {asked:,} tokens{most}."
+            )
+            if asked < recommended:
+                advice += " Long attachments are then read a section at a time."
+        else:
+            advice = f"{model.model} isn't loaded in LM Studio right now. It is loaded when you ask something, with the context set in LM Studio."
+        window = asked
+    elif not window:
+        advice = (
+            "The model server doesn't say how long its context is. For whole workbooks and PDFs, load the model "
+            f"there with a context length of {recommended:,} or more."
+        )
+    elif needs_more_context(settings) and fits:
         why = "the most that fits this computer" if capped else "the minimum set below"
         advice = (
             f"The next time you ask something, CloseDesk reloads {model.key} in LM Studio with {target:,} tokens "
@@ -454,12 +475,10 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
                 f" For whole workbooks and PDFs, reload the model in LM Studio with Context Length {recommended:,} or more "
                 "(My Models → the model's settings → Context Length)."
             )
-        if not window:
-            advice += " If your server doesn't report it, set CONTROLLER_INBOX_CHAT_CONTEXT_TOKENS."
     return {
         "shown": model.active,
         "tokens": window,
-        "label": f"{window:,} tokens" if window else "not reported",
+        "label": "not loaded yet" if waiting else f"{window:,} tokens" if window else "not reported",
         "tone": "ok" if window >= recommended else "short",
         "advice": advice,
     }
