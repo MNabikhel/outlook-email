@@ -434,3 +434,21 @@ def test_the_classic_chat_marks_a_figure_to_check_as_a_warning(settings, store, 
     assert [(item["text"], item["warn"]) for item in items] == [(CORRECTED, False), (NOT_FOUND, True)]
     assert "⚠" in items[1]["sign"] and items[1]["color"] == rgb(tokens["--warn"])
     assert box["warn"] and box["background"] == rgb(tokens["--warn-soft"])
+
+
+def test_ctrl_k_turns_the_colors_for_color_blindness_on_and_off(settings, store, page):
+    from controller_inbox import appearance
+
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector("body.ready")
+        for want in ("Turn on colors for color blindness", "Turn off colors for color blindness"):
+            page.keyboard.press("Control+k")
+            page.fill(".palette input", "color blind")
+            page.wait_for_selector(f".pal-item.on:has-text('{want}')")
+            page.keyboard.press("Enter")
+            page.wait_for_selector(f".toast:has-text('{web.NOTICES['colors']}')")
+            on = want.startswith("Turn on")
+            assert page.evaluate("() => document.documentElement.dataset.colors || ''") == ("color-blind" if on else "")
+            assert page.is_checked("#set-colors") == on, "Settings, open beside it, says so"
+            assert appearance.current(store)["colors"] == ("color-blind" if on else "standard")

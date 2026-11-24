@@ -311,7 +311,7 @@ async function toggleColors() {
     const reply = await postJSON("/api/settings/colors", { colors: root.dataset.colors === "color-blind" ? "standard" : "color-blind" });
     applyAppearance(reply.appearance, { mine: true });
     toast(reply.message, { tone: "ok" });
-    if (S.route && S.route.view === "settings") settings.open();
+    if (S.route && S.route.view === "settings") settings.redraw();
   } catch (error) {
     toast(error.message, { tone: "error" });
   }

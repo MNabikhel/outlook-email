@@ -47,9 +47,10 @@ function zoneNow(zone) {
 }
 
 /**
- * ctx: appearance() → { theme, railCollapsed, colors, importanceWords } as the page shows them now, setTheme(value), toggleRail(), processMail(), job() → the job now,
- * show(node, { keepScroll }) puts the page in the reading pane, isShown() says it is still there, and
- * changed(reply) is told about a change the rest of the workspace should pick up (a new time zone or profile).
+ * ctx: appearance() → { theme, railCollapsed, colors, importanceWords } as the page shows them now, setTheme(value),
+ * toggleRail(), processMail(), job() → the job now, show(node, { keepScroll }) puts the page in the reading pane,
+ * isShown() says it is still there, and changed(reply) is told about a change the rest of the workspace should pick up
+ * (a new time zone, profile or colors).
  */
 export function createSettings(ctx) {
   let data = null;
