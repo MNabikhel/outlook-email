@@ -73,10 +73,14 @@ BOXES = """() => {
 }"""
 
 
-def test_the_boxes_on_a_page_show_on_its_white_paper_in_dark_mode(settings, store, page, monkeypatch):
+@pytest.mark.parametrize("colors", ["standard", "color-blind"])
+def test_the_boxes_on_a_page_show_on_its_white_paper_in_dark_mode(settings, store, page, monkeypatch, colors):
     """The page is white paper in both themes, but its boxes took the dark theme's pastel colours: an amber box was
     1.95:1 on the white page. They keep the light colours, and an amber box has a dashed edge and a red one a ring."""
+    from controller_inbox import appearance
+
     email = scan_to_check(settings, store, monkeypatch)
+    appearance.save(store, colors=colors)
     page.emulate_media(color_scheme="dark")
     with serving(web.create_app(settings, store)) as base:
         _open_page_tab(page, base, email)
@@ -85,8 +89,99 @@ def test_the_boxes_on_a_page_show_on_its_white_paper_in_dark_mode(settings, stor
     assert shown["sheet"] == "rgb(255, 255, 255)"
     seen = {name: round(pm.contrast(hex_of(shown[name]), "#ffffff"), 2) for name in ("check", "differs", "ok")}
     assert all(ratio >= 3 for ratio in seen.values()), seen
-    paper = pm.workspace("light")
+    paper = pm.workspace("light", colors)
     assert shown["check"] == rgb(paper["--paper-check"]) and shown["differs"] == rgb(paper["--paper-differs"])
     assert shown["ok"] == rgb(paper["--paper-ok"])
     assert shown["checkStyle"] == "dashed" and shown["okStyle"] == "solid"
     assert rgb(paper["--paper-differs"]) in shown["differsRing"]
+
+
+# The two settings ----------------------------------------------------------------------------------------------------
+
+EDGE = """() => { const row = document.querySelector('.items .item.imp-critical:not(.is-locked)');
+  return row ? getComputedStyle(row, '::before').backgroundColor : 'missing'; }"""
+TOKEN = "name => getComputedStyle(document.documentElement).getPropertyValue(name).trim().toLowerCase()"
+# How the theme is chosen: the computer's, or the workspace's own (saved in this browser as closedesk-theme).
+THEMES = {"light": ("light", ""), "dark from the computer": ("dark", ""), "dark chosen here": ("light", "dark")}
+
+
+def _context(browser, system: str, chosen: str = ""):
+    context = browser.new_context(viewport={"width": 1280, "height": 900}, color_scheme=system)
+    context.set_default_timeout(15000)
+    if chosen:
+        context.add_init_script(f"try {{ localStorage.setItem('closedesk-theme', '{chosen}'); }} catch (e) {{}}")
+    return context
+
+
+@pytest.mark.parametrize("how", list(THEMES))
+def test_the_workspace_box_changes_the_colors_at_once_and_the_classic_pages_too(browser, settings, loaded, how):
+    system, chosen = THEMES[how]
+    theme = chosen or system
+    standard, blind = pm.workspace(theme, "standard"), pm.workspace(theme, "color-blind")
+    context = _context(browser, system, chosen)
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/app/all")
+        page.wait_for_selector(".items .item.imp-critical")
+        assert page.evaluate(EDGE) == rgb(standard["--imp-critical"])
+        page.evaluate("() => { window.notReloaded = true; }")
+        page.click(".rail-item[data-id='settings']")
+        page.check("#set-colors")
+        page.wait_for_selector("html[data-colors='color-blind']")
+        page.wait_for_selector("#set-appearance [data-status='colors'].ok")
+        assert "now look this way" in page.inner_text("#set-appearance [data-status='colors']")
+        assert page.is_checked("#set-colors") and not page.is_checked("#set-importance-words")
+        page.click(".rail-item[data-id='all']")
+        page.wait_for_selector(".items .item.imp-critical")
+        assert page.evaluate(EDGE) == rgb(blind["--imp-critical"]), "the list follows without a reload"
+        assert page.evaluate("() => window.notReloaded === true")
+        page.reload()
+        page.wait_for_selector(".items .item.imp-critical")
+        assert page.evaluate(EDGE) == rgb(blind["--imp-critical"]), "and stays after one"
+        classic = context.new_page()
+        classic.goto(f"{base}/inbox")
+        assert classic.evaluate(TOKEN, "--imp-critical") == pm.classic("color-blind")["--imp-critical"]
+        classic.close()
+        # Unticked, the standard colors come back.
+        page.click(".rail-item[data-id='settings']")
+        page.uncheck("#set-colors")
+        page.wait_for_selector("html:not([data-colors])")
+        page.click(".rail-item[data-id='all']")
+        page.wait_for_selector(".items .item.imp-critical")
+        assert page.evaluate(EDGE) == rgb(standard["--imp-critical"])
+    context.close()
+
+
+def test_a_tab_left_open_follows_a_change_made_on_the_classic_page(browser, settings, loaded):
+    context = _context(browser, "light")
+    page = context.new_page()
+    page.clock.install()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/app/all")
+        page.wait_for_selector(".items .item.imp-critical")
+        other = context.new_page()
+        other.goto(f"{base}/settings")
+        other.evaluate("() => fetch('/settings/colors', { method: 'POST', body: new URLSearchParams({ colors: 'color-blind', importance_words: '1' }) })")
+        other.close()
+        page.clock.run_for(16000)  # the next status check
+        page.wait_for_selector("html[data-colors='color-blind'][data-importance-words='on']")
+    context.close()
+
+
+def test_the_colors_are_on_the_page_before_any_script_runs(browser, settings, loaded):
+    """No flash of the other colors, and nothing kept in the browser: the server writes them on <html>. Here the
+    workspace's script never loads and the browser keeps nothing (as in a private window)."""
+    from controller_inbox import appearance
+
+    appearance.save(loaded, colors="color-blind", importance_words=True)
+    context = browser.new_context()
+    context.add_init_script("Object.defineProperty(window, 'localStorage', { get() { throw new Error('no storage'); } });")
+    context.route("**/main.js*", lambda route: route.abort())
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        for path, ui in (("/app", "workspace"), ("/", "classic"), ("/settings", "classic")):
+            page.goto(f"{base}{path}", wait_until="domcontentloaded")
+            assert page.evaluate("() => [document.documentElement.dataset.colors, document.documentElement.dataset.importanceWords]") == ["color-blind", "on"], path
+            want = pm.workspace("light", "color-blind") if ui == "workspace" else pm.classic("color-blind")
+            assert page.evaluate(TOKEN, "--imp-critical") == want["--imp-critical"], path
+    context.close()

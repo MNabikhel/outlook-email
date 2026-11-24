@@ -355,6 +355,8 @@ CREATE INDEX IF NOT EXISTS idx_att_hash ON attachments(sha256);
 SETTING_KEYS = frozenset(
     {
         "timezone", "profile", "min_context_tokens", "vision_mode", "vision_model",
+        # Settings → Appearance (appearance.py)
+        "colors", "importance_words",
         # Settings → Sync inbox (outlook_sync.py)
         "outlook_auto", "outlook_interval", "outlook_days", "outlook_folders", "outlook_subfolders",
         "outlook_folder_list", "outlook_account",

@@ -776,9 +776,13 @@ CONTRAST = """sel => {
 }"""
 
 
+@pytest.mark.parametrize("colors", ["standard", "color-blind"])
 @pytest.mark.parametrize("dark", [True, False])
-def test_badges_and_buttons_keep_their_contrast_in_dark_mode(browser, serve, store, settings, as_of_now, dark):
+def test_badges_and_buttons_keep_their_contrast_in_dark_mode(browser, serve, store, settings, as_of_now, dark, colors):
+    from controller_inbox import appearance
+
     ingest_demo(store, settings, now=as_of_now)
+    appearance.save(store, colors=colors)
     base = serve()
     page = _page(browser, width=1280, dark=dark)
     checks = {

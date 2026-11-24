@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, local_llm, model_choice, model_fit, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
+    agent, appearance, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, local_llm, model_choice, model_fit, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
     semantic, services, table_lookup, updates, version, vision,
 )
 from controller_inbox.extract import extraction_failed
@@ -299,6 +299,8 @@ def register_workspace(
             "outlook_ready": not outlook_desktop.available() or settings.graph_configured,
             "folders": [{"key": key, "label": label} for key, label in FOLDER_LABELS.items()],
             "categories": [{"value": key.value, "label": label} for key, label in DOCUMENT_LABELS.items()],
+            # The colors and importance words chosen in Settings, so a page left open follows a change made elsewhere.
+            "appearance": appearance.current(store),
             # Changes whenever a count does, so the page knows when its lists are out of date.
             "version": hashlib.sha256(
                 json.dumps([counts, coding, last_run, snapshot["finished_at"], tip and [tip["current"], tip["suggested"]]], sort_keys=True).encode()
@@ -1091,6 +1093,7 @@ def register_workspace(
         counts = store.counts()
         snapshot = job.snapshot()
         return {
+            "appearance": appearance.current(store),
             "profile": {"current": active_profile(settings, store), "choices": [{"value": key, "label": label} for key, label in PROFILES.items()]},
             "timezone": {
                 "choice": settings.timezone,
@@ -1342,6 +1345,17 @@ def register_workspace(
         outlook_sync.disconnect(store)
         return {"ok": True, "message": "Disconnected. CloseDesk no longer reads Outlook; the mail it copied stays here."}
 
+    @api.post("/settings/colors")
+    async def settings_colors(request: Request):
+        """Settings → Appearance: the colors for color blindness, and the importance on each email; each saved on its
+        own, as its box is ticked."""
+        data = await json_body(request)
+        colors, words = data.get("colors"), data.get("importance_words")
+        if (colors is None and words is None) or (colors is not None and colors not in appearance.COLORS):
+            raise HTTPException(status_code=400, detail="Choose the standard colors or the colors for color blindness.")
+        look = appearance.save(store, colors=colors, importance_words=None if words is None else _yes(words))
+        return saved("colors", appearance=look)
+
     @api.post("/settings/outlook/calendar")
     async def settings_outlook_calendar(request: Request):
         must_be_connected()
@@ -1449,7 +1463,7 @@ def register_workspace(
         return templates.TemplateResponse(
             request,
             "app.html",
-            {"ui_version": UI_VERSION, "import_map": ui_import_map(), "tz": settings.tz.key},
+            {"ui_version": UI_VERSION, "import_map": ui_import_map(), "tz": settings.tz.key, "appearance": appearance.current(store)},
             headers={"Cache-Control": "no-store"},
         )
 

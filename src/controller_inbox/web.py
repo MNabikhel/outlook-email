@@ -35,7 +35,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, chats, cost_codes, documents, fraud, local_llm, model_choice, model_fit, model_roles, ocr, semantic, services, updates, version, vision,
+    agent, appearance, chats, cost_codes, documents, fraud, local_llm, model_choice, model_fit, model_roles, ocr, semantic, services, updates, version, vision,
 )
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
@@ -89,6 +89,16 @@ def _shortdt(context, value) -> str:
 
 
 templates.env.filters["shortdt"] = _shortdt
+
+
+@pass_context
+def _appearance_attrs(context) -> str:
+    """The colors and importance words chosen in Settings, on <html> (``ctx`` and the workspace pass ``appearance``);
+    nothing for a page rendered without them."""
+    return appearance.html_attrs(context.get("appearance"))
+
+
+templates.env.globals["appearance_attrs"] = _appearance_attrs
 # The classic chat formats answers with the workspace's own module (static/ui/classic.js loads it).
 templates.env.globals["ui_import_map"] = ui_import_map()
 templates.env.globals["coding_choices"] = cost_codes.choices
@@ -420,6 +430,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "finance": profile == "finance",
             "coding_counts": store.coding_counts(),
             "closedesk": updates.status(store, settings),
+            "appearance": appearance.current(store),
         }
         base["llm_enabled"] = base["model"].active
         base.update(extra)
@@ -1337,6 +1348,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if why:
             return render(request, "settings_update.html", page="settings", refused=why, status_code=409)
         return render(request, "settings_update.html", page="settings", refused="", commit=version.installed()[0], message=updates.UPDATING)
+
+    @app.post("/settings/colors")
+    def save_colors(colors: str = Form(""), importance_words: str = Form("")):
+        """Setup → Colors: a box left unticked sends nothing, which is off."""
+        appearance.save(store, colors="color-blind" if colors == "color-blind" else "standard", importance_words=importance_words in ("1", "on"))
+        return RedirectResponse("/settings?notice=colors#colors", status_code=303)
 
     @app.post("/settings/profile")
     def save_profile(profile: str = Form(...)):

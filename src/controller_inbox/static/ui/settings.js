@@ -29,7 +29,7 @@ const SECTIONS = [
 
 const STATE_LABELS = { on: "Ready", fallback: "Older method", off: "Off" };
 // The section a change's message shows in, when it isn't the change's own name.
-const SECTION_OF = { chat: "model", wait: "model", "step-back": "context", "outlook-more": "outlook" };
+const SECTION_OF = { chat: "model", wait: "model", "step-back": "context", "outlook-more": "outlook", colors: "appearance" };
 const b = (text) => h("b", null, text);
 const code = (text) => h("code", null, text);
 
@@ -236,13 +236,45 @@ export function createSettings(ctx) {
   function appearance() {
     const { theme, railCollapsed } = ctx.appearance();
     const segment = (value, label) => h("button", { type: "button", class: `seg${theme === value ? " on" : ""}`, "aria-pressed": String(theme === value), onclick: () => ctx.setTheme(value) }, label);
+    // Saved on the server the moment a box is ticked, like the calendar's box; the page changes colour at once.
+    const look = data.appearance || { colors: "standard", importance_words: false };
+    const colorBlind = h("input", {
+      type: "checkbox",
+      id: "set-colors",
+      checked: look.colors === "color-blind",
+      onchange: (event) => save("colors", "/api/settings/colors", { colors: event.currentTarget.checked ? "color-blind" : "standard" }, event.currentTarget),
+    });
+    const words = h("input", {
+      type: "checkbox",
+      id: "set-importance-words",
+      checked: Boolean(look.importance_words),
+      onchange: (event) => save("colors", "/api/settings/colors", { importance_words: event.currentTarget.checked }, event.currentTarget),
+    });
     return section(
       "appearance",
       "Appearance",
       "sun",
-      "Saved in this browser only.",
+      "The theme and side bar are saved in this browser only. Colors are saved for CloseDesk on this computer, so the classic pages use them too.",
       h("div", { class: "set-row" }, h("span", { class: "set-row-label" }, "Theme"), h("div", { class: "segs", role: "group", "aria-label": "Theme" }, segment("system", "Match the computer"), segment("light", "Light"), segment("dark", "Dark"))),
-      h("div", { class: "set-row" }, h("span", { class: "set-row-label" }, "Side bar"), h("button", { type: "button", class: "btn btn-sm", onclick: ctx.toggleRail }, icon("sidebar", 14), railCollapsed ? "Show labels" : "Collapse to icons"))
+      h("div", { class: "set-row" }, h("span", { class: "set-row-label" }, "Side bar"), h("button", { type: "button", class: "btn btn-sm", onclick: ctx.toggleRail }, icon("sidebar", 14), railCollapsed ? "Show labels" : "Collapse to icons")),
+      h(
+        "div",
+        { class: "set-row set-row-stack" },
+        h("span", { class: "set-row-label" }, "Colors"),
+        h(
+          "label",
+          { class: "set-check" },
+          colorBlind,
+          h("span", { class: "set-check-text" }, b("Colors for color blindness"), h("span", null, "Swaps the red, orange and green for colors that people with color blindness can tell apart: Critical and fraud stay red, High and warnings turn yellow, and done turns blue-green."))
+        ),
+        h(
+          "label",
+          { class: "set-check" },
+          words,
+          h("span", { class: "set-check-text" }, b("Show Critical, High, Medium or Low on each email"), h("span", null, "Writes the importance beside each email in the lists, as well as the colored edge."))
+        ),
+        status("colors")
+      )
     );
   }
 

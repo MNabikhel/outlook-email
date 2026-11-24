@@ -291,6 +291,27 @@ function themeButton() {
 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", themeButton);
 
+/** The colors and importance words chosen in Settings (saved on the server, which writes them on <html> as it sends
+    the page): put on <html> again when they change here, or in another window or the classic pages. */
+function applyAppearance(look) {
+  if (!look) return;
+  if (look.colors === "color-blind") root.dataset.colors = "color-blind";
+  else delete root.dataset.colors;
+  if (look.importance_words) root.dataset.importanceWords = "on";
+  else delete root.dataset.importanceWords;
+}
+
+async function toggleColors() {
+  try {
+    const reply = await postJSON("/api/settings/colors", { colors: root.dataset.colors === "color-blind" ? "standard" : "color-blind" });
+    applyAppearance(reply.appearance);
+    toast(reply.message, { tone: "ok" });
+    if (S.route && S.route.view === "settings") settings.open();
+  } catch (error) {
+    toast(error.message, { tone: "error" });
+  }
+}
+
 /* ---------- The list ---------- */
 
 function visible() {
@@ -856,6 +877,8 @@ const settings = createSettings({
     if (keepScroll) reader.scrollTop = top;
   },
   changed(reply) {
+    // New colors or importance words: on <html> at once. Nothing else follows from them.
+    if (reply.appearance) return applyAppearance(reply.appearance);
     // A new time zone shows in every date the workspace writes; a new profile in the top bar and Today.
     if (reply.tz) document.body.dataset.tz = reply.tz;
     if (reply.job && S.meta) {
@@ -1150,6 +1173,7 @@ async function poll() {
     if (seq !== S.jobSeq) throw new Error("a job started while this was on its way: ask again");
     const before = S.meta;
     S.meta = meta;
+    applyAppearance(meta.appearance);
     renderTop();
     updateRail(navId());
     chat.setModel(meta.model);
@@ -1430,6 +1454,7 @@ const overlays = createOverlays({
     { label: "Ask CloseDesk", icon: "chat", keywords: "chat question", run: () => chat.open() },
     { label: "Process new mail", icon: "refresh", keywords: "import run", run: processMail },
     { label: isDark() ? "Switch to light theme" : "Switch to dark theme", icon: isDark() ? "sun" : "moon", keywords: "theme dark light", run: () => setTheme(isDark() ? "light" : "dark") },
+    { label: root.dataset.colors === "color-blind" ? "Turn off colors for color blindness" : "Turn on colors for color blindness", icon: "eye", keywords: "color colour blind red orange green", run: toggleColors },
     { label: root.dataset.rail === "collapsed" ? "Show the side bar labels" : "Collapse the side bar", icon: "sidebar", keywords: "rail sidebar", run: toggleRail },
     { label: "Keyboard shortcuts", icon: "help", keywords: "keys help", run: () => overlays.help() },
     { label: "Classic view", icon: "classic", keywords: "old dashboard", run: () => (location.href = "/") },
