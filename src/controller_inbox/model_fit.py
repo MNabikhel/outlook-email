@@ -6,8 +6,9 @@ than 4,096 tokens (or the most the model supports): the minimum is "at most" for
 Load and use in Settings, and the chat raising the context all ask for this. A load that still runs out of memory
 steps back (``local_llm.step_back_context``).
 
-The wait. How long the chat waits for the model's first word (it reads the whole prompt before it writes one), and
-how long the reading of mail waits between words. Worked out per model: from how fast it read prompts and wrote
+The wait. How long the chat waits for the model's first word (it reads the whole prompt before it writes one), how
+long the reading of mail waits between words, and how long a file's summary or a question about related mail waits
+for the whole reply while mail is processed (``background_wait``: twice as long after one ran out). Worked out per model: from how fast it read prompts and wrote
 answers on this computer, as measured from the chat's own questions (``record_speed``); else from how long it took
 an email in the last reading (``model_choice.seconds_an_email``); else from its size (about 2 minutes for an 8B, 6 to
 10 for a 27B to 32B, half as long again for one that thinks first). A wait the user set (in Settings, or the chat's

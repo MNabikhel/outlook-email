@@ -489,7 +489,7 @@ export function createSettings(ctx) {
       h("p", { class: "set-fit", id: "set-fit-line" }, fit.line),
       h("div", { class: "set-inline" }, h("label", { class: "set-label", for: "set-wait-minutes" }, "Wait up to"), minutes, h("span", null, "minutes"), h("button", { type: "submit", class: "btn btn-primary btn-sm" }, "Save"),
         fit.yours ? h("button", { type: "button", class: "btn btn-sm", onclick: (event) => save("wait", "/api/settings/model-wait", { model: fit.model, minutes: null }, event.currentTarget) }, "Automatic") : null),
-      h("p", { class: "set-help", id: "set-wait-help" }, "How long Ask CloseDesk waits for this model to read a question and its files before it writes a word. CloseDesk works it out from how fast the model has been on this computer, or from its size; a wait you set is kept for this model."),
+      h("p", { class: "set-help", id: "set-wait-help" }, "How long CloseDesk waits for this model: for Ask CloseDesk to read a question and its files before it writes a word, between words while it reads new mail, and for each file summary and related-mail check while mail is processed. CloseDesk works it out from how fast the model has been on this computer, or from its size; a wait you set is kept for this model."),
       h("div", { class: "set-actions" }, status("wait"))
     );
   }
