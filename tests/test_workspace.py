@@ -802,8 +802,13 @@ def test_badges_and_buttons_keep_their_contrast_in_dark_mode(browser, serve, sto
     page.context.close()
 
 
-def test_the_classic_pages_fit_a_phone(browser, serve, store, settings, as_of_now):
+@pytest.mark.parametrize("chosen", [False, True])
+def test_the_classic_pages_fit_a_phone(browser, serve, store, settings, as_of_now, chosen):
+    from controller_inbox import appearance
+
     ingest_demo(store, settings, now=as_of_now)
+    if chosen:  # the colors for color blindness and the importance words on
+        appearance.save(store, colors="color-blind", importance_words=True)
     base = serve()
     page = _page(browser, width=390, height=844)
     wide = {}

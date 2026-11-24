@@ -31,6 +31,17 @@
   </form>
   <p class="muted" data-tz-preview>Time there now: <b>{{ now_local }}</b> · {{ active_zone_name }} is {{ active_offset }} right now{% if active_daylight %} (daylight saving time){% endif %}.</p>
 </section>
+<section class="panel" id="colors">
+  <h3>Colors</h3>
+  <p>Saved for CloseDesk on this computer: these pages and the workspace both use them.</p>
+  <form method="post" action="/settings/colors" class="profile-form color-form">
+    <label class="choice"><input type="checkbox" name="colors" value="color-blind" {{ 'checked' if appearance.colors == 'color-blind' }}/>
+      <span><b>Colors for color blindness</b> <small class="muted">Critical and fraud stay red, High and warnings turn yellow, and done turns blue-green.</small></span></label>
+    <label class="choice"><input type="checkbox" name="importance_words" value="1" {{ 'checked' if appearance.importance_words }}/>
+      <span><b>Show Critical, High, Medium or Low on each email</b> <small class="muted">In the workspace's lists. These pages already show it in the Importance column.</small></span></label>
+    <button type="submit">Save</button>
+  </form>
+</section>
 <section class="split">
   <article class="panel">
     <h3>Getting mail in (no Outlook add-in or IT approval needed)</h3>

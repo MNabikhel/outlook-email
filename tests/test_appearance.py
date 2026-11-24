@@ -110,3 +110,24 @@ def test_todays_rows_carry_the_importance_in_words(client, demo):
         assert row["importance"] == email.importance.value
         assert row["importance_label"] == IMPORTANCE_LABELS[email.importance], row
     assert {row["importance_label"] for row in rows} >= {"Critical", "High"}
+
+
+def test_the_classic_setup_page_saves_both(client, demo):
+    """Setup → Colors on the classic pages: a form that works without JavaScript. A box left unticked sends nothing,
+    which is off."""
+    page = client.get("/settings").text
+    assert 'id="colors"' in page and "Colors for color blindness" in page and "Show Critical, High, Medium or Low on each email" in page
+    assert 'name="colors" value="color-blind" checked' not in page
+
+    saved = client.post("/settings/colors", data={"colors": "color-blind", "importance_words": "1"}, headers=SAME, follow_redirects=False)
+    assert saved.status_code == 303 and saved.headers["location"] == "/settings?notice=colors#colors"
+    assert appearance.current(demo) == {"colors": "color-blind", "importance_words": True}
+    page = client.get("/settings?notice=colors").text
+    assert web.NOTICES["colors"] in page
+    assert 'name="colors" value="color-blind" checked' in page and 'name="importance_words" value="1" checked' in page
+    assert page.startswith('<!DOCTYPE html>\n<html lang="en" data-colors="color-blind" data-importance-words="on">')
+
+    client.post("/settings/colors", data={}, headers=SAME, follow_redirects=False)
+    assert appearance.current(demo) == {"colors": "standard", "importance_words": False}
+    page = client.get("/settings").text
+    assert 'value="color-blind" checked' not in page and 'value="1" checked' not in page

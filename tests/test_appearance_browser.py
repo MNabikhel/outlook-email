@@ -281,3 +281,29 @@ def test_the_words_fit_each_row_at_every_width(browser, settings, loaded, width)
             problems[path] = page.evaluate(FIT)
     context.close()
     assert problems == {path: [] for path in problems}
+
+
+ROW_EDGE = """() => { const row = document.querySelector('table.mail tr.critical');
+  return row ? getComputedStyle(row).boxShadow : 'missing'; }"""
+
+
+def test_the_classic_setup_page_ticks_both_and_the_lists_follow(browser, settings, loaded):
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/inbox")
+        assert rgb(pm.classic("standard")["--imp-critical"]) in page.evaluate(ROW_EDGE)
+        page.goto(f"{base}/settings")
+        page.check("#colors input[name='colors']")
+        page.check("#colors input[name='importance_words']")
+        page.click("#colors button[type='submit']")
+        page.wait_for_url("**/settings?notice=colors#colors")
+        assert "now look this way" in page.inner_text(".notice")
+        assert page.evaluate("() => document.documentElement.dataset.colors") == "color-blind"
+        assert page.is_checked("#colors input[name='colors']") and page.is_checked("#colors input[name='importance_words']")
+        # A ticked box's choice is outlined, as the inbox profile's is.
+        outline = page.evaluate("() => getComputedStyle(document.querySelector('#colors .choice')).borderTopColor")
+        assert outline == rgb(pm.classic()["--navy"])
+        page.goto(f"{base}/inbox")
+        assert rgb(pm.classic("color-blind")["--imp-critical"]) in page.evaluate(ROW_EDGE)
+    context.close()
