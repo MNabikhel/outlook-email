@@ -151,9 +151,18 @@ def ready_to_read(settings: Settings, model: str = "", on_progress: Callable[[st
         return {"model": "", "message": ""}
     # With just-in-time loading off, LM Studio lists only what is loaded: the model used last is still the one to load.
     remembered = remembered_model(settings)
-    if remembered not in status.chat_models or pinned(settings) or local_llm.load_failed_lately(remembered):
+    refused = remembered if remembered in status.chat_models and not pinned(settings) and local_llm.load_failed_lately(remembered) else ""
+    if remembered not in status.chat_models or pinned(settings) or refused:
         remembered = ""
     key = model or status.model or remembered
+    if not key and refused:
+        # Not asked again so soon (it would fail again): said each time, not only the first, so a second Process new
+        # mail doesn't leave the mail unread by a model without a word. Not a new failure: an automatic sync keeps quiet.
+        return {
+            "model": "",
+            "message": f"LM Studio couldn't load {refused} a little while ago, so the mail is filed without a model for "
+            "now. Choose another in Settings → Local model, or load one in LM Studio.",
+        }
     if not key:  # nothing to ask for: Settings says to choose a model (the start chooses one itself)
         return {"model": "", "message": ""}
     if any(key in (instance, loaded) for instance, (loaded, _context) in status.instances.items()):

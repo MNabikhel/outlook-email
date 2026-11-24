@@ -428,3 +428,21 @@ def test_mail_isn_t_read_with_a_model_the_load_said_it_couldn_t_get_ready(settin
     result = read_queue(loaded, settings, limit=5)
     assert result["load"]["failed"] and "filed without a model for now" in result["load"]["message"]
     assert result["model"] == "" and result["stats"] is None and result["read_ids"] == [], "no email was sent to it"
+
+
+def test_processing_again_after_a_failed_load_still_says_the_mail_is_filed_without_a_model(settings, loaded, lm):
+    """Right after LM Studio couldn't load the model, a second Process new mail said only "Processed. Read 0 new
+    files.": nothing said the waiting mail still wasn't read by a model, or why."""
+    from controller_inbox.overnight import read_queue, waiting_for_reading
+
+    remember_model(settings, CHAT)
+    lm.fails_to_load = {CHAT}
+    assert waiting_for_reading(loaded, 5)
+    first = read_queue(loaded, settings, limit=5)
+    assert first["load"]["failed"]
+    again = read_queue(loaded, settings, limit=5)
+    load = again["load"]
+    assert load and f"LM Studio couldn't load {CHAT} a little while ago" in load["message"], again
+    assert "filed without a model for now" in load["message"] and "Settings" in load["message"]
+    assert not load.get("failed"), "not said as a new failure (an automatic sync keeps quiet about it)"
+    assert len([call for call in lm.calls if call[0] == "load"]) == 1, "LM Studio isn't asked to load it again so soon"
