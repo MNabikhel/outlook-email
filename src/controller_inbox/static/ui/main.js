@@ -1207,8 +1207,17 @@ function finished(job) {
   if (result.kind === "index") return toast(`Indexed for search: ${result.indexed} emails and file sections.`, { tone: "ok" });
   if (result.kind === "vision") return visionDone(result);
   if (result.kind === "outlook") {
+    // The new mail had the model loaded in LM Studio first (or couldn't, and the mail was filed without it): said
+    // with what was synced, and a failed load is never kept quiet.
+    const load = result.model_load || null;
+    // The model stopped reading the new mail partway (it ran out of memory, say): why, as Process new mail says.
+    const stopped = result.model && result.model_note ? ` ${result.model_note}` : "";
+    const failed = Boolean((result.outlook && result.outlook.note) || (load && load.failed) || stopped);
     // An automatic sync that found nothing new says nothing.
-    if (!result.quiet || !(job.about && job.about.auto)) toast(result.message || "Outlook synced.", { tone: result.outlook && result.outlook.note ? "error" : "ok", ms: 7000 });
+    if (!result.quiet || !(job.about && job.about.auto) || failed) {
+      const said = `${result.message || "Outlook synced."}${load ? ` ${load.message}` : ""}${stopped}`;
+      toast(said, { tone: failed ? "error" : "ok", ms: load || stopped ? 12000 : 7000 });
+    }
     return;
   }
   const read = typeof result.ingested === "number" ? `Read ${plural(result.ingested, "new file")}.` : "";
@@ -1216,11 +1225,15 @@ function finished(job) {
   // The start loaded a model in LM Studio (or couldn't, and says why).
   const load = result.model_load || null;
   const loaded = load ? ` ${load.message}` : "";
+  // The model stopped reading partway (it ran out of memory, say): why, and what to do, never a toast that says all
+  // is well while the mail waits unread.
+  const stopped = result.model && result.model_note ? ` ${result.model_note}` : "";
   const failed = (result.failed_files || []).length;
-  if (!failed) return toast(`Processed. ${read}${synced}${loaded}`, { tone: load && load.failed ? "error" : "ok", ms: load ? 12000 : 6000 });
+  const wrong = Boolean((load && load.failed) || stopped);
+  if (!failed) return toast(`Processed. ${read}${synced}${loaded}${stopped}`, { tone: wrong ? "error" : "ok", ms: load || stopped ? 12000 : 6000 });
   // A file that can't be read is moved aside, not retried: say so, and where it went.
   const where = (S.meta && S.meta.failed_folder) || "inbox/failed";
-  toast(`Processed. ${read}${synced}${loaded} ${failed === 1 ? "1 file couldn't be read and was" : `${failed} files couldn't be read and were`} moved to ${where}.`, { tone: "error", ms: 12000 });
+  toast(`Processed. ${read}${synced}${loaded}${stopped} ${failed === 1 ? "1 file couldn't be read and was" : `${failed} files couldn't be read and were`} moved to ${where}.`, { tone: "error", ms: 12000 });
 }
 
 async function syncOutlook() {

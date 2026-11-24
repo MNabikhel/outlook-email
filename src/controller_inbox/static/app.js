@@ -251,7 +251,7 @@
     const items =
       steps.map((step) => `<li>${escapeHtml(step)}</li>`).join("") +
       notes.map((note) => `<li class="noted">Noted: ${escapeHtml(note)}</li>`).join("");
-    const label = `Read ${steps.length} thing${steps.length === 1 ? "" : "s"}${notes.length ? `, noted ${notes.length}` : ""}`;
+    const label = `${steps.length} step${steps.length === 1 ? "" : "s"}${notes.length ? `, noted ${notes.length}` : ""}`;
     return `<details class="msg-steps"${turn.pending ? " open" : ""}><summary>${label}</summary><ul>${items}</ul></details>`;
   }
 
@@ -271,6 +271,39 @@
     return `<div class="msg-reading fallback" role="note"><b>${escapeHtml(reading.label)}</b><span>${escapeHtml(reading.text)}</span></div>`;
   }
 
+  /* While the model works: what it reads and about how long, then that it writes (the workspace also draws a bar). */
+  /* "…" after a line still going on, but not after one that ends in a full stop ("…with less text." stays so). */
+  const going = (text) => (/[.…]$/.test(text) ? text : `${text}…`);
+
+  function progressLine(now) {
+    if (now.state === "writing") return "Writing the answer…";
+    if (now.state === "thinking") return "Thinking…";
+    const late = Number(now.seconds) > 0 && (Date.now() - now.at) / 1000 >= Number(now.seconds);
+    return late ? `${going(now.text)} Taking longer than usual…` : `${going(now.text)}${now.about ? ` ${now.about}` : ""}`;
+  }
+
+  /* The model thinks: a new box, or after it was asked again, the same box going on below a blank line. "Thought for
+     N s" then counts the thinking of both, not the reading between. */
+  function startThinking(answer) {
+    const thought = answer.thinking;
+    if (!thought) answer.thinking = { text: "", started: Date.now() };
+    else if (thought.ended) {
+      thought.spent = (thought.spent || 0) + (thought.ended - thought.started);
+      if (thought.text) thought.text += "\n\n";
+      thought.started = Date.now();
+      thought.ended = 0;
+      thought.open = undefined;
+    }
+  }
+
+  /* The thinking has ended: the box closes (the user can open it again) and keeps how long it took. */
+  function endThinking(answer) {
+    if (answer.thinking && !answer.thinking.ended) {
+      answer.thinking.ended = Date.now();
+      answer.thinking.open = false;
+    }
+  }
+
   function renderTurn(turn, bubble) {
     const el = bubble || document.createElement("div");
     el.className = `msg ${turn.role}${turn.pending ? " pending" : ""}`;
@@ -282,13 +315,26 @@
       const now = turn.pending && !turn.text ? turn.readingNow : null;
       html += now ? renderReadingNow(now) : renderReading(turn.reading);
       html += renderSteps(turn);
-      const waiting = turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
-      if (turn.text || !now) html += `<div class="msg-text">${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
+      if (turn.thinking && turn.thinking.text) {
+        // The model's reasoning as it streams (escaped: it is model output); it closes once the answer starts. A box
+        // the user opened or closed stays so, though the bubble is drawn again with every piece that comes.
+        const thought = turn.thinking;
+        const live = turn.pending && !thought.ended;
+        const seconds = Math.max(1, Math.round(((thought.spent || 0) + (thought.ended || Date.now()) - thought.started) / 1000));
+        const open = thought.open === undefined ? live : thought.open;
+        html += `<details class="msg-thinking${live ? " live" : ""}"${open ? " open" : ""}><summary>${live ? "Thinking…" : `Thought for ${seconds} s`}</summary><div class="think-text">${escapeHtml(turn.thinking.text)}</div></details>`;
+      }
+      const waiting = turn.progress ? progressLine(turn.progress) : turn.steps && turn.steps.length ? going(turn.steps[turn.steps.length - 1]) : "Thinking…";
+      // While the model thinks, the box above says "Thinking…": the line below doesn't say it again.
+      const thinking = turn.pending && turn.thinking && turn.thinking.text && !turn.thinking.ended;
+      if (turn.text) html += `<div class="msg-text">${formatAnswer(turn.text, turn.sources)}</div>`;
+      else if (!now) html += `<div class="msg-text">${thinking ? "" : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
       if (turn.checks && turn.checks.length) {
         html += `<ul class="msg-check">${turn.checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
       }
       if (turn.context) html += `<p class="msg-context">${escapeHtml(turn.context)} <a href="/settings">Setup</a></p>`;
       if (turn.vision && !turn.pending) html += visionOffer(turn.vision);
+      if (turn.more_time) html += moreTimeOffer(turn.more_time);
       const cited =
         turn.mode === "model" ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
       if (!turn.pending && cited.length) {
@@ -308,6 +354,19 @@
           "</ul>";
       }
       el.innerHTML = html;
+      const box = $(".msg-thinking", el);
+      if (box) {
+        const thought = turn.thinking;
+        const text = $(".think-text", box);
+        // While it thinks, the box shows the latest lines of the reasoning, not its first; once done, where the user
+        // had scrolled to.
+        if (box.classList.contains("live")) text.scrollTop = text.scrollHeight;
+        else if (thought.scrolled) text.scrollTop = thought.scrolled;
+        text.addEventListener("scroll", () => (thought.scrolled = text.scrollTop));
+        // Only the user's own click is kept: a box drawn open says so with a "toggle" a moment later, which can come
+        // after the thinking ended and would open the box again at the next drawing.
+        $("summary", box).addEventListener("click", () => (thought.open = !box.open));
+      }
     }
     if (!bubble) chatLog.append(el);
     chatLog.scrollTop = chatLog.scrollHeight;
@@ -422,7 +481,9 @@
     // A newer round (a new or another conversation opened meanwhile) stops reading this answer.
     const stop = new AbortController();
     try {
-      const body = { message: question, chat_id: chatId, email_id: emailId || chatInput.dataset.emailId || currentEmailId() };
+      // null: about all mail, whatever is open; none given: the email open.
+      const about = emailId === null ? null : emailId || chatInput.dataset.emailId || currentEmailId();
+      const body = { message: question, chat_id: chatId, email_id: about };
       await shared().postStream("/chat", body, (event) => {
         if (round !== chatRound) return stop.abort();
         if (event.type === "chat") {
@@ -449,6 +510,21 @@
           answer.mode = event.mode;
           answer.note = event.note || "";
           renderTurn(answer, bubble);
+        } else if (event.type === "thinking") {
+          startThinking(answer);
+          answer.thinking.text += event.text || "";
+          renderTurn(answer, bubble);
+        } else if (event.type === "progress") {
+          // Writing, or reading again (asked again after the model stopped): the thinking so far has ended.
+          if (event.state === "writing" || event.state === "reading") endThinking(answer);
+          answer.progress = { ...event, at: Date.now() };
+          renderTurn(answer, bubble);
+          clearTimeout(answer.lateTimer);
+          // Only while this conversation is still the one shown: another opened meanwhile isn't redrawn or scrolled.
+          if (Number(event.seconds) > 0) answer.lateTimer = setTimeout(() => answer.pending && round === chatRound && bubble.isConnected && renderTurn(answer, bubble), Number(event.seconds) * 1000 + 50);
+        } else if (event.type === "more_time") {
+          answer.more_time = event;
+          renderTurn(answer, bubble);
         } else if (event.type === "vision") {
           answer.vision = event;
         } else if (event.type === "reading") {
@@ -462,6 +538,7 @@
           answer.text = (answer.text ? answer.text + "\n\n" : "") + event.text;
           renderTurn(answer, bubble);
         } else if (event.type === "delta") {
+          endThinking(answer);
           answer.text += event.text;
           renderTurn(answer, bubble);
         }
@@ -469,6 +546,9 @@
     } catch (error) {
       answer.text = (answer.text ? answer.text + "\n\n" : "") + `Something went wrong (${error.message}). Try again.`;
     }
+    // Ended while it still thought (out of time, an error): the box keeps how long it thought, not a growing count.
+    endThinking(answer);
+    clearTimeout(answer.lateTimer);
     busy = false;
     $("button[type='submit']", chatForm).disabled = false;
     if (round !== chatRound) return;
@@ -478,6 +558,49 @@
     renderTurn(answer, bubble);
     chatInput.focus({ preventScroll: true });
   }
+
+  /* ---------- More time for a slow model ---------- */
+
+  /* The model ran out of time: how long it was given, how long it likely needs (prefilled), and Save and ask again,
+     which keeps the new wait for that model and asks the same question again in this conversation. */
+  function moreTimeOffer(offer) {
+    return (
+      `<form class="more-time" novalidate data-more-time data-model="${escapeHtml(offer.model)}" data-question="${escapeHtml(offer.question || "")}" data-email="${escapeHtml(offer.email_id || "")}">` +
+      `<p>${escapeHtml(offer.text)}</p>` +
+      `<label>Minutes <input type="number" name="minutes" min="2" max="120" step="1" inputmode="numeric" value="${Number(offer.suggest) || ""}"></label> ` +
+      `<button type="submit">Save and ask again</button>` +
+      `<span class="more-time-status" role="status" aria-live="polite"></span></form>`
+    );
+  }
+
+  document.addEventListener("submit", async (event) => {
+    const form = event.target.closest("[data-more-time]");
+    if (!form) return;
+    event.preventDefault();
+    const status = $(".more-time-status", form);
+    const button = $("button", form);
+    if (busy) {
+      // The chat asks one question at a time: nothing is saved, so the button still works once the answer is done.
+      status.textContent = "Another answer is being written. Once it is done, save and ask again.";
+      return;
+    }
+    button.disabled = true;
+    try {
+      const response = await fetch("/chat/wait", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ model: form.dataset.model, minutes: $("input", form).value.trim() }),
+      });
+      const reply = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(reply.detail || `the server said ${response.status}`);
+      status.textContent = reply.message || "Saved.";
+      // The same question about the same email, or about all mail (null) if it was: not whatever is open now.
+      ask(form.dataset.question, form.dataset.email || null);
+    } catch (error) {
+      status.textContent = error.message;
+      button.disabled = false;
+    }
+  });
 
   /* ---------- Reading a scan with the vision model ---------- */
 

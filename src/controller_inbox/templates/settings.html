@@ -99,7 +99,7 @@
       <button type="submit" data-loading="Loading in LM Studio…">Load and use</button>
       {% set too_big_now = chat_choice.too_big.get(chat_choice.current, '') %}
       <p class="warn-box small" data-too-big-note{% if not too_big_now %} hidden{% endif %}>{{ too_big_now }}</p>
-      <p class="muted small">CloseDesk has LM Studio load it{% if settings.min_context_tokens %} with a {{ '{:,}'.format(settings.min_context_tokens) }}-token context (or the most it supports){% endif %} and unload the other chat model, so the two don't share the memory. The page reader and the search model are left as they are. Loading can take a minute or two, and an answer being written then stops.</p>
+      <p class="muted small">CloseDesk has LM Studio load it{% if settings.min_context_tokens %} with up to a {{ '{:,}'.format(settings.min_context_tokens) }}-token context (less for a model too big for that on this computer, or the most it supports){% endif %} and unload the other chat model, so the two don't share the memory. The page reader and the search model are left as they are. Loading can take a minute or two, and an answer being written then stops.</p>
       {% endif %}
     </form>
     <script>
@@ -117,29 +117,21 @@
       });
     </script>
     {% endif %}
-    {% if model.active %}
-    {% set window = model.context_length or settings.chat_context_tokens %}
-    <p class="context-line {{ 'ok' if window >= recommended_context else 'short' }}">
-      Context window: <b>{{ '{:,}'.format(window) + ' tokens' if window else 'not reported' }}</b>.
-      {% if will_reload %}
-      The next time you ask something, CloseDesk reloads {{ model.key }} in LM Studio with <b>{{ '{:,}'.format(context_target) }} tokens</b> (the minimum set below).
-      If your computer runs short of memory, it goes back to the current size.
-      {% elif window >= recommended_context %}
-      Enough to read whole attachments when you ask about them.
-      {% else %}
-      Ask CloseDesk reads long attachments a section at a time with this.
-      {% if model.key and model.context_length and window < context_target %}
-      LM Studio couldn't load {{ model.key }} with {{ '{:,}'.format(context_target) }} tokens. Close other apps or pick a smaller minimum below, then Save to try again.
-      {% elif model.key and model.max_context and model.max_context < recommended_context %}
-      {{ model.key }} supports at most {{ '{:,}'.format(model.max_context) }} tokens. For whole workbooks and PDFs, load a model with a longer context.
-      {% elif model.key %}
-      For whole workbooks and PDFs, move the minimum below to 16k or more and Save.
-      {% else %}
-      For whole workbooks and PDFs, reload the model in LM Studio with
-      <b>Context Length {{ '{:,}'.format(recommended_context) }}</b> or more (My Models → the model's settings → Context Length).
-      {% endif %}
-      {% if not window %}If your server doesn't report it, set <code>CONTROLLER_INBOX_CHAT_CONTEXT_TOKENS</code>.{% endif %}
-      {% endif %}
+    {% if model_fit %}
+    <form method="post" action="/settings/model-wait" class="model-wait" id="model-wait">
+      <p class="small" data-model-fit>{{ model_fit.line }}</p>
+      {% if wait_problem %}<p class="warn-box small">{{ wait_problem }}</p>{% endif %}
+      <input type="hidden" name="model" value="{{ model_fit.model }}">
+      <label>Wait for it up to <input type="number" name="minutes" min="2" max="120" step="1" value="{{ model_fit.minutes }}" inputmode="numeric" style="width:5em"> minutes</label>
+      <button type="submit">Save</button>
+      {% if model_fit.yours %}<button type="submit" name="automatic" value="1" class="ghost" formnovalidate>Automatic</button>{% endif %}
+      <p class="muted small">How long Ask CloseDesk waits for this model to read a question and its files before it writes a word. CloseDesk works it out from how fast the model has been on this computer, or from its size; a wait you set is kept for this model.</p>
+    </form>
+    {% endif %}
+    {% if context_line.shown %}
+    <p class="context-line {{ context_line.tone }}">
+      Context window: <b>{{ context_line.label }}</b>.
+      {{ context_line.advice }}
     </p>
     {% endif %}
     <div class="search-box" id="search">
@@ -224,7 +216,8 @@
       </div>
       <p id="context-capacity" class="context-capacity {{ chosen.tier }}" data-context-text aria-live="polite">{{ chosen.text }}</p>
       <button type="submit">Save</button>
-      <span class="muted"><small>LM Studio models loaded with less are reloaded with this on the next question. Other servers: set the context length there.</small></span>
+      <span class="muted"><small>A model loaded in LM Studio with less is reloaded with this on the next question, and one CloseDesk loaded with more is reloaded with it now. A model too big for that is loaded with the most this computer fits. Other servers: set the context length there.</small></span>
+      {% if context_change %}<p class="small">{{ context_change }}</p>{% endif %}
     </form>
     <p><a href="/settings?recheck=1">Check again</a></p>
     <p>The fast scripts pull text, amounts, dates, and file types, then file a draft. The model reads that short packet — never the raw files — and writes the category, folder, a one-line summary, and tasks. The most important mail is read first.</p>

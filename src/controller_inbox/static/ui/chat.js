@@ -102,7 +102,7 @@ export function createChat({ root, onToggle, visionRead }) {
       ),
       ...notes.map((note) => h("li", { class: "noted" }, `Noted: ${note}`)),
     ];
-    const label = `Read ${plural(steps.length, "thing")}${notes.length ? `, noted ${notes.length}` : ""}`;
+    const label = `${plural(steps.length, "step")}${notes.length ? `, noted ${notes.length}` : ""}`;
     const box = h("details", { class: "msg-steps" }, h("summary", null, label), h("ol", { class: "timeline" }, items));
     if (turn.pending || turn.stepsOpen) box.open = true;
     box.addEventListener("toggle", () => (turn.stepsOpen = box.open));
@@ -120,6 +120,49 @@ export function createChat({ root, onToggle, visionRead }) {
       h("span", { class: "reading-text" }, now.text),
       h("span", { class: "reading-bar", "aria-hidden": "true" }, h("i", { style: `width:${Math.round(done * 100)}%` }))
     );
+  }
+
+  /* While the model works on the question: what it reads and about how long that takes, with a bar that fills on
+     that estimate; past it, "Taking longer than usual…" and a bar that keeps moving rather than one stuck full.
+     Then "Writing the answer…" until the words arrive. */
+  /* "…" after a line still going on, but not after one that ends in a full stop ("…with less text." stays so). */
+  const going = (text) => (/[.…]$/.test(text) ? text : `${text}…`);
+
+  function progressEl(turn) {
+    const now = turn.progress;
+    if (!now) return null;
+    if (now.state === "writing") return h("span", { class: "typing" }, "Writing the answer…");
+    if (now.state === "thinking") return turn.thinking && turn.thinking.text ? null : h("span", { class: "typing" }, "Thinking…");
+    const elapsed = Math.max(0, (Date.now() - now.at) / 1000);
+    const timed = Number(now.seconds) > 0;
+    const late = timed && elapsed >= Number(now.seconds);
+    const fill = timed && !late ? { style: `animation-duration:${Number(now.seconds)}s;animation-delay:-${elapsed.toFixed(2)}s` } : null;
+    return h(
+      "div",
+      { class: `msg-progress${late ? " late" : ""}${timed ? "" : " untimed"}`, role: "status" },
+      h("span", { class: "progress-text" }, going(now.text), !late && now.about ? h("span", { class: "progress-about" }, ` ${now.about}`) : null),
+      late ? h("span", { class: "progress-late" }, "Taking longer than usual…") : null,
+      h("span", { class: `progress-bar${timed && !late ? "" : " busy"}`, "aria-hidden": "true" }, h("i", fill))
+    );
+  }
+
+  /* A model that reasons before it answers: its reasoning as it streams, in a small box showing the last few lines,
+     which closes when the answer starts and stays there as "Thought for 40 s" (click to read it). Model output:
+     set as text, never as HTML. */
+  function thinkingEl(turn) {
+    const thought = turn.thinking;
+    if (!thought || !thought.text) return null;
+    const live = turn.pending && !thought.ended;
+    const seconds = Math.max(1, Math.round(((thought.spent || 0) + (thought.ended || Date.now()) - thought.started) / 1000));
+    const body = h("div", { class: "think-text" }, thought.text);
+    const summary = h("summary", null, live ? "Thinking…" : `Thought for ${seconds} s`);
+    const box = h("details", { class: `msg-thinking${live ? " live" : ""}` }, summary, body);
+    box.open = thought.open === undefined ? live : thought.open;
+    // Only the user's own click is kept: a box drawn open says so with a "toggle" a moment later, which can come
+    // after the thinking ended and would open the box again at the next repaint.
+    summary.addEventListener("click", () => (thought.open = !box.open));
+    if (live) requestAnimationFrame(() => (body.scrollTop = body.scrollHeight));
+    return box;
   }
 
   function readingEl(reading) {
@@ -165,6 +208,52 @@ export function createChat({ root, onToggle, visionRead }) {
     );
   }
 
+  /* The model ran out of time: how long it was given and how long it likely needs (prefilled, in minutes). Save and
+     ask again keeps that wait for the model and asks the same question again in this conversation. */
+  const BUSY_AGAIN = "Another answer is being written. Once it is done, save and ask again.";
+
+  function moreTimeEl(turn) {
+    const offer = turn.more_time;
+    if (!offer) return null;
+    const minutes = h("input", { type: "number", class: "more-time-minutes", min: "2", max: "120", step: "1", inputmode: "numeric", value: String(offer.suggest || ""), "aria-label": "Minutes to wait" });
+    const said = h("p", { class: `more-time-status${offer.failed ? " error" : ""}`, role: "status", "aria-live": "polite" }, offer.message || "");
+    const button = h("button", { type: "submit", class: "btn btn-sm btn-primary", disabled: Boolean(offer.saved) }, icon("refresh", 14), h("span", null, "Save and ask again"));
+    const save = async (event) => {
+      event.preventDefault();
+      if (busy) {
+        // The chat asks one question at a time: nothing is saved, so the button still works once the answer is done.
+        offer.failed = true;
+        offer.message = BUSY_AGAIN;
+        offer.suggest = minutes.value;
+        repaint(turn);
+        return;
+      }
+      button.disabled = true;
+      try {
+        const reply = await postJSON("/chat/wait", { model: offer.model, minutes: minutes.value.trim() });
+        offer.saved = true;
+        offer.failed = false;
+        offer.message = reply.message || "Saved.";
+        offer.suggest = Number(minutes.value);
+        repaint(turn);
+        // The same question about the same email, or about all mail (null) if it was: not whatever is open now.
+        ask(offer.question, offer.email_id || null);
+      } catch (error) {
+        offer.failed = true;
+        offer.message = error.message;
+        offer.suggest = minutes.value;
+        repaint(turn);
+      }
+    };
+    return h(
+      "form",
+      { class: "msg-more-time", novalidate: true, onsubmit: save },
+      h("p", null, offer.text),
+      h("div", { class: "more-time-row" }, h("label", null, minutes, h("span", null, "minutes")), button),
+      said
+    );
+  }
+
   // A read finished (or stopped, or failed): the offers for that file say so. Nothing read: offer it again.
   window.addEventListener("closedesk:vision", (event) => {
     const done = event.detail || {};
@@ -196,9 +285,12 @@ export function createChat({ root, onToggle, visionRead }) {
     const answer = h("div", { class: "msg-text" });
     const reading = turn.pending && !turn.text ? turn.readingNow : null;
     if (turn.text) answer.innerHTML = formatAnswer(turn.text, turn.sources); // escaped first, see format.js
-    else if (!reading) {
+    else if (!reading && turn.pending) {
+      // Still working (an answer stopped before its first words has no working line: "Stopped." says it all).
       const steps = turn.steps || [];
-      append(answer, h("span", { class: "typing" }, steps.length ? `${steps[steps.length - 1]}…` : "Thinking…"));
+      const working = progressEl(turn);
+      const thinking = turn.thinking && turn.thinking.text && !turn.thinking.ended; // the box above says it
+      if (!thinking) append(answer, working || h("span", { class: "typing" }, steps.length ? going(steps[steps.length - 1]) : "Thinking…"));
     }
     const cited = turn.mode === "model" && !turn.pending ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
     replace(
@@ -207,10 +299,12 @@ export function createChat({ root, onToggle, visionRead }) {
       turn.note ? h("p", { class: "msg-note" }, turn.note) : null,
       reading ? readingNowEl(reading) : readingEl(turn.reading),
       stepsEl(turn),
+      thinkingEl(turn),
       answer,
       turn.checks && turn.checks.length ? h("ul", { class: "msg-check" }, turn.checks.map((item) => h("li", null, icon("ok", 13), h("span", null, item)))) : null,
       turn.context ? h("p", { class: "msg-context" }, turn.context, " ", h("a", { href: "/app/settings", dataset: { nav: "" } }, "Settings")) : null,
       visionEl(turn),
+      moreTimeEl(turn),
       cited.length
         ? h(
             "ul",
@@ -364,7 +458,8 @@ export function createChat({ root, onToggle, visionRead }) {
     setBusy(true);
     await ready();
     const mine = ++round;
-    const about = emailId || (scope && !scopeOff ? scope.id : null);
+    // null: about all mail, whatever is open; none given: the email in scope.
+    const about = emailId === null ? null : emailId || (scope && !scopeOff ? scope.id : null);
     turns.push({ role: "user", text: question });
     const answer = { role: "assistant", text: "", sources: [], steps: [], notes: [], pending: true };
     turns.push(answer);
@@ -382,6 +477,7 @@ export function createChat({ root, onToggle, visionRead }) {
       });
     };
     controller = new AbortController();
+    let lateTimer = 0; // repaints the answer when the model's estimate has passed, to say it is taking longer
     try {
       await postStream(
         "/chat",
@@ -405,6 +501,7 @@ export function createChat({ root, onToggle, visionRead }) {
               answer.notes.push(event.text);
               break;
             case "delta":
+              endThinking(answer);
               answer.text += event.text;
               break;
             case "revise":
@@ -418,6 +515,20 @@ export function createChat({ root, onToggle, visionRead }) {
               break;
             case "vision":
               answer.vision = { ...event, state: "offered", message: "" };
+              break;
+            case "more_time":
+              answer.more_time = { ...event };
+              break;
+            case "thinking":
+              startThinking(answer);
+              answer.thinking.text += event.text || "";
+              break;
+            case "progress":
+              // Writing, or reading again (asked again after the model stopped): the thinking so far has ended.
+              if (event.state === "writing" || event.state === "reading") endThinking(answer);
+              answer.progress = { ...event, at: Date.now() };
+              clearTimeout(lateTimer);
+              if (Number(event.seconds) > 0) lateTimer = setTimeout(paint, Number(event.seconds) * 1000 + 50);
               break;
             case "reading":
               if (event.state === "running") answer.readingNow = event;
@@ -444,7 +555,11 @@ export function createChat({ root, onToggle, visionRead }) {
       if (error.name === "AbortError") answer.stopped = true;
       else answer.text = (answer.text ? answer.text + "\n\n" : "") + `Something went wrong (${error.message}). Try again.`;
     }
+    // Stopped, out of time or failed while it still thought: the box closes and keeps how long it thought, rather
+    // than count up to each later repaint.
+    endThinking(answer);
     controller = null;
+    clearTimeout(lateTimer);
     if (frame) cancelAnimationFrame(frame);
     frame = 0;
     setBusy(false);
@@ -459,6 +574,28 @@ export function createChat({ root, onToggle, visionRead }) {
 
   function stop() {
     if (controller) controller.abort();
+  }
+
+  // The answer started: the thinking box closes, and says how long the model thought.
+  /* The model thinks: a new box, or after it was asked again, the same box going on below a blank line. "Thought for
+     N s" then counts the thinking of both, not the reading between. */
+  function startThinking(answer) {
+    const thought = answer.thinking;
+    if (!thought) answer.thinking = { text: "", started: Date.now() };
+    else if (thought.ended) {
+      thought.spent = (thought.spent || 0) + (thought.ended - thought.started);
+      if (thought.text) thought.text += "\n\n";
+      thought.started = Date.now();
+      thought.ended = 0;
+      thought.open = undefined;
+    }
+  }
+
+  function endThinking(answer) {
+    if (answer.thinking && !answer.thinking.ended) {
+      answer.thinking.ended = Date.now();
+      answer.thinking.open = false;
+    }
   }
 
   /* ---------- Past conversations ---------- */

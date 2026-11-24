@@ -1,9 +1,10 @@
 """CloseDesk choosing the model that answers by itself, and suggesting a better fit.
 
 At the start, when LM Studio answers with no chat model loaded and none is named in the settings file (.env),
-CloseDesk has it load one: the one used last if it is still downloaded, else the most capable downloaded chat model
-that fits this computer's memory. Any size can still be chosen in Settings; the automatic choice only prefers one
-that fits. A model the user loaded is never unloaded or replaced without their click.
+CloseDesk has it load one: the one used last if it is still downloaded, else the largest downloaded chat model of
+up to about 9B (by LM Studio's count or the model's name, else of up to about 10 GB) that fits this computer's memory, or the smallest that fits when none is that small. Any
+size can still be chosen in Settings; the automatic choice only prefers one that fits. A model the user loaded is
+never unloaded or replaced without their click.
 
 When the model answering is too big for this computer's memory (with the context it was loaded with), or slow at
 reading mail (over ``SLOW_SECONDS`` an email), and a smaller downloaded one would fit, Settings and Today suggest it once: "Load" switches, "Keep" stops asking
@@ -13,6 +14,8 @@ about that model.
 from __future__ import annotations
 
 import json
+import math
+import re
 from typing import TYPE_CHECKING, Callable
 
 from controller_inbox import local_llm, model_roles
@@ -28,6 +31,34 @@ SLOW_SECONDS = 45.0
 SPEED_MIN_EMAILS = 3
 SPEED_KEY = "model_speed"  # {model: {"seconds": average an email, "emails": how many}}, the last reading of each
 KEPT_KEY = "model_kept"  # models the user chose to keep when another was suggested: not suggested against again
+# The largest model the automatic choice prefers: under 10B parameters (a 3B to 8B model is plenty, and answers
+# faster), by LM Studio's count or the model's name. When neither says, by its download: an 8B at Q8 is about 9 GB
+# (a 14B at Q4 is about the same, which is why the count goes first). A bigger one is chosen only when none this
+# small fits; any size can still be chosen in Settings.
+SMALL_BILLIONS = 10.0
+AUTO_LARGEST = 10 * 1024**3
+# "8B", "llama-3.1-8b-instruct", "qwen2.5-1.5b": a number of billions, not part of a version ("3.1") or a word.
+_BILLIONS = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)\s*b(?![a-z])", re.I)
+
+
+def billions(status: ModelStatus, key: str) -> float:
+    """How many billion parameters ``key`` has, by LM Studio's figure ("8B") or else its name; 0 when neither says."""
+    for text in (status.chat_params.get(key, ""), key.rsplit("/", 1)[-1]):
+        if found := _BILLIONS.search(text):
+            return float(found.group(1))
+    return 0.0
+
+
+def small(status: ModelStatus, key: str) -> bool:
+    """``key`` is a small model, the kind CloseDesk prefers: a download of up to ``AUTO_LARGEST``, and under
+    ``SMALL_BILLIONS`` parameters when that is told (a 14B at Q4 is under 10 GB too)."""
+    count = billions(status, key)
+    return 0 < status.chat_sizes.get(key, 0) <= AUTO_LARGEST and (not count or count < SMALL_BILLIONS)
+
+
+def _tiny(status: ModelStatus, key: str) -> bool:
+    """``key`` has fewer than 3B parameters, by its count or name: smaller than the 3B to 8B CloseDesk prefers."""
+    return 0 < billions(status, key) < 3
 
 
 def pinned(settings: Settings) -> bool:
@@ -49,16 +80,42 @@ def loaded_chat(status: ModelStatus) -> list[str]:
     return [key for instance, (key, _context) in status.instances.items() if not document_reader(key) and not document_reader(instance)]
 
 
-def _best_fit(settings: Settings, status: ModelStatus, keys: list[str]) -> str:
-    """The most capable of ``keys`` that fits this computer: the largest that does, a general chat model before a
-    coding one. "" when none fits or this can't be told (no sizes, memory unknown, LM Studio on another computer)."""
-    memory = model_roles.computer_memory()
-    if not status.chat_sizes or not memory or not model_roles.on_this_computer(settings, status):
+def _best_fit(settings: Settings, status: ModelStatus, keys: list[str], *, runs_well: bool = False) -> str:
+    """The one of ``keys`` to choose for this computer: the largest that runs well on it and is at most
+    small (``small``: a 3B to 8B model is plenty, and answers faster), else the smallest that runs well; with none
+    that runs well on a PC's graphics card, the same among those that load at all. With none that fits with the
+    context Setup asks for, the same among the small ones with the shortest context CloseDesk would ask for. A general chat model before a
+    coding one. A 3B to 8B model that fits in any of these ways comes before one under 3B. "" when none fits or this can't be told (no sizes, memory unknown, LM Studio on another computer).
+    With ``runs_well``, only one that runs well: on a PC's graphics card, never one that loads only partly from the
+    computer's memory."""
+    budget = model_roles.model_budget()
+    if not status.chat_sizes or not budget or not model_roles.on_this_computer(settings, status):
         return ""
-    fitting = [key for key in keys if model_roles.fits(settings, status, key, memory)]
-    if not fitting:
+    # With Setup's context first; else with the shorter one CloseDesk would ask for (an 8 GB computer).
+    tries = [{}, {"shorter": True}]
+    if budget.gpu and not runs_well:
+        tries += [{"at_all": True}, {"at_all": True, "shorter": True}]
+    # A 3B to 8B model first, the largest that fits, even with the shorter context or partly beside a graphics card
+    # (an 8B a little over a 6 GB card): a 1.5B that fits the card answers worse than either.
+    usual = [key for key in keys if small(status, key) and not _tiny(status, key)]
+    for how in tries:
+        fitting = [key for key in usual if model_roles.fits(settings, status, key, budget, **how)]
+        if fitting:
+            return max(fitting, key=lambda key: (not _coder(key), status.chat_sizes[key]))
+    for how in tries:
+        fitting = [
+            key for key in keys if model_roles.fits(settings, status, key, budget, **how)
+            # A big model is never chosen by itself to run with less than Setup's context: only a small one is.
+            and (not how.get("shorter") or small(status, key))
+        ]
+        if fitting:
+            break
+    else:
         return ""
-    return max(fitting, key=lambda key: (not _coder(key), status.chat_sizes[key]))
+    smaller = [key for key in fitting if small(status, key)]
+    if smaller:
+        return max(smaller, key=lambda key: (not _coder(key), status.chat_sizes[key]))
+    return min(fitting, key=lambda key: (_coder(key), status.chat_sizes[key]))
 
 
 def auto_choice(settings: Settings, status: ModelStatus) -> str:
@@ -79,6 +136,51 @@ def load_at_start(settings: Settings, on_progress: Callable[[str, int, int, str]
     key = auto_choice(settings, status)
     if not key:
         return {"model": "", "message": ""}
+    return _load(settings, key, on_progress)
+
+
+def ready_to_read(settings: Settings, model: str = "", on_progress: Callable[[str, int, int, str], None] | None = None) -> dict:
+    """Before the model reads mail (any reading: Process new mail, Sync now, the automatic sync, the scheduled run,
+    watch): when LM Studio has unloaded the model that reads it (``model``, else the one CloseDesk would ask for), it
+    is loaded first, with the context Setup asks for, and a load LM Studio has under way is waited for. Otherwise the
+    first email's own request has LM Studio load it, inside the time an email may take and with LM Studio's default
+    context. With no model to ask for, nothing is loaded: only the start chooses one by itself (``load_at_start``).
+    Returns what ``load_at_start`` does."""
+    status = check_model(settings, use_cache=False)
+    if status.mode == "off" or not status.reachable or not status.lm_studio:
+        return {"model": "", "message": ""}
+    # With just-in-time loading off, LM Studio lists only what is loaded: the model used last is still the one to load.
+    remembered = remembered_model(settings)
+    refused = remembered if remembered in status.chat_models and not pinned(settings) and local_llm.load_failed_lately(remembered) else ""
+    if remembered not in status.chat_models or pinned(settings) or refused:
+        remembered = ""
+    key = model or status.model or remembered
+    if not key and refused:
+        # Not asked again so soon (it would fail again): said each time, not only the first, so a second Process new
+        # mail doesn't leave the mail unread by a model without a word. Not a new failure: an automatic sync keeps quiet.
+        return {
+            "model": "",
+            "message": f"LM Studio couldn't load {refused} a little while ago, so the mail is filed without a model for "
+            "now. Choose another in Settings → Local model, or load one in LM Studio.",
+        }
+    if not key:  # nothing to ask for: Settings says to choose a model (the start chooses one itself)
+        return {"model": "", "message": ""}
+    if any(key in (instance, loaded) for instance, (loaded, _context) in status.instances.items()):
+        return {"model": "", "message": ""}
+    if key in local_llm._pending_loads or local_llm.model_busy(key):
+        # LM Studio is loading it already (for a chat question, or a load CloseDesk stopped waiting for): another
+        # load request beside it could load it twice.
+        if on_progress:
+            on_progress("model", 0, 0, f"{key}: LM Studio is loading it")
+        if local_llm.wait_for_load(settings, key):
+            return {"model": key, "message": ""}
+        return {"model": "", "message": f"LM Studio was still loading {key}. The mail is filed without a model for now.", "failed": True}
+    if key not in status.chat_models:  # not a model LM Studio has downloaded under this name: left to LM Studio
+        return {"model": "", "message": ""}
+    return _load(settings, key, on_progress)
+
+
+def _load(settings: Settings, key: str, on_progress: Callable[[str, int, int, str], None] | None) -> dict:
     if on_progress:
         on_progress("model", 0, 0, f"{key}: this can take a minute")
     problem = use_chat_model(settings, key, only_if_none=True)
@@ -86,13 +188,23 @@ def load_at_start(settings: Settings, on_progress: Callable[[str, int, int, str]
         # The user loaded one meanwhile: it answers, and nothing was loaded beside it.
         return {"model": "", "message": ""}
     if problem:
-        return {
-            "model": "",
-            "message": f"CloseDesk couldn't load {key} in LM Studio. {problem} The mail is filed without a model "
-            "for now; choose another in Settings → Local model.",
-            "failed": True,
-        }
+        # LM Studio's refusal already names the model (and, out of memory, what to choose in Settings): said once.
+        said = problem if problem.startswith(f"LM Studio couldn't load {key}") else f"CloseDesk couldn't load {key} in LM Studio. {problem}"
+        then = "The mail is filed without a model for now." if "Settings" in problem else (
+            "The mail is filed without a model for now; choose another in Settings → Local model."
+        )
+        return {"model": "", "message": f"{said} {then}", "failed": True}
     return {"model": key, "message": f"Loaded {key} in LM Studio: it answers your questions and reads the mail."}
+
+
+def load_said(load: dict, *, stopped: bool) -> dict:
+    """What loading the model said (``load_at_start`` or ``ready_to_read``), for the page: ``message`` and ``failed``.
+    A model that loaded but then stopped reading (``stopped``: it ran out of memory on the mail, say) is only said to
+    have loaded, not to read the mail."""
+    message, failed = str(load.get("message") or ""), bool(load.get("failed"))
+    if stopped and not failed and load.get("model"):
+        message = f"Loaded {load['model']} in LM Studio."
+    return {"message": message, "failed": failed}
 
 
 def _read_json(store: Store, key: str, default):
@@ -138,6 +250,15 @@ def _whole(seconds: float) -> str:
     return f"{round(seconds)} s"
 
 
+def faster_model(settings: Settings, status: ModelStatus, current: str) -> str:
+    """A downloaded chat model smaller than ``current`` that runs well on this computer (the most capable such), or "".
+    Never one that, like ``current``, would run partly from the computer's memory beside a graphics card too small
+    for it: that is no better."""
+    size = status.chat_sizes.get(current, 0)
+    smaller = [key for key in _chat_keys(status) if key != current and 0 < status.chat_sizes.get(key, 0) < size]
+    return _best_fit(settings, status, smaller, runs_well=True)
+
+
 def recommendation(settings: Settings, store: Store, status: ModelStatus | None = None) -> dict | None:
     """A better fit for this computer than the model answering, or None. ``current`` (the model answering),
     ``suggested`` (a downloaded chat model that fits and is smaller), ``reason`` ("slow" or "too_big") and
@@ -154,14 +275,15 @@ def recommendation(settings: Settings, store: Store, status: ModelStatus | None 
     # The memory it takes with the context LM Studio loaded it with (Setup's when LM Studio doesn't say).
     tokens = loaded_context or model_roles.context_for(settings, status, current)
     needed = model_roles.memory_needed(size, tokens)
-    memory = model_roles.computer_memory()
-    too_big = bool(
-        size and memory and model_roles.on_this_computer(settings, status) and needed > model_roles.USABLE_SHARE * memory
-    )
+    budget = model_roles.model_budget()
+    too_big = bool(size and budget and model_roles.on_this_computer(settings, status) and needed > budget.runs_well)
+    if too_big and small(status, current) and not _tiny(status, current) and needed <= budget.loads:
+        # A 3B to 8B model partly beside a graphics card: the one CloseDesk would load itself (``_best_fit``), not
+        # one to go down from.
+        too_big = False
     if not (slow or too_big) or not size:
         return None
-    smaller = [key for key in _chat_keys(status) if key != current and 0 < status.chat_sizes.get(key, 0) < size]
-    suggested = _best_fit(settings, status, smaller)
+    suggested = faster_model(settings, status, current)
     if not suggested:
         return None
     if slow:
@@ -169,8 +291,11 @@ def recommendation(settings: Settings, store: Store, status: ModelStatus | None 
     else:
         # It loaded and answers: only what is known is said, not that it will fail or that the other is faster.
         context = f" with a {tokens:,}-token context" if tokens else ""
+        # With a graphics card, the suggestion is always one that runs on it (faster_model).
+        where = "on its graphics card" if budget.gpu else "in its memory"
         message = (
-            f"{current} needs about {round(needed / 1024**3)} GB of memory{context} and this computer has "
-            f"{round(memory / 1024**3)} GB, so the computer may slow down while it answers. {suggested} fits in its memory."
+            # Rounded up, as budget.said() rounds down: never "needs about 21 GB" and "can give about 21 GB".
+            f"{current} needs about {math.ceil(needed / 1024**3)} GB of memory{context} and {budget.said()}, so the "
+            f"computer may slow down while it answers. {suggested} fits {where}."
         )
     return {"current": current, "suggested": suggested, "reason": "slow" if slow else "too_big", "message": message}

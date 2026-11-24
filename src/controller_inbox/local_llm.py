@@ -17,19 +17,26 @@ from __future__ import annotations
 
 import json
 import re
+import socket
+import sqlite3
 import statistics
 import threading
 import weakref
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
+from typing import TYPE_CHECKING
 
 import httpx
 
 from controller_inbox.config import Settings
 from controller_inbox.models import FOLDERS, DocumentType, Importance
 from controller_inbox.money import fmt_money
+
+if TYPE_CHECKING:
+    from controller_inbox.store import Store
 
 SYSTEM = (
     "You are the reader for CloseDesk, a local inbox assistant for a busy manager. "
@@ -95,6 +102,83 @@ def http_method(name: str):
     return call if call is not _ONE_OFF[name] else getattr(shared_client(), name)
 
 
+class HangUp:
+    """The connections to the model that one chat answer has open, to hang up on at once when the user stops it or
+    closes the page (``now``). LM Studio stops reading a prompt only once the connection closes; until then the next
+    question waits behind an answer nobody will read, and that wait is kept as the model's speed."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._streams: list = []
+        self.done = False
+
+    def trace(self, event: str, info: dict) -> None:
+        """httpx's trace of each request: notes the connection once it is made (hung up on at once if already done)."""
+        if event != "connection.connect_tcp.complete":
+            return
+        stream = info.get("return_value")
+        with self._lock:
+            if not self.done:
+                self._streams.append(stream)
+                return
+        _shut(stream)
+
+    def now(self) -> None:
+        with self._lock:
+            self.done = True
+            streams, self._streams = self._streams, []
+        for stream in streams:
+            _shut(stream)
+
+
+def _shut(stream) -> None:
+    """Close a connection under a request still waiting on it: the worker thread reading it is woken (closing the
+    socket alone wouldn't wake it) and gets an error."""
+    sock = stream.get_extra_info("socket") if stream is not None else None
+    try:
+        if sock is not None:
+            sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass  # already closed
+
+
+_hang_up: ContextVar[HangUp | None] = ContextVar("closedesk_hang_up", default=None)
+
+
+@contextmanager
+def hanging_up(handle: HangUp | None):
+    """The chat answer's model calls made inside go out on connections of their own, hung up on by ``handle.now()``."""
+    token = _hang_up.set(handle)
+    try:
+        yield
+    finally:
+        _hang_up.reset(token)
+
+
+def _model_http(name: str):
+    """``http_method`` for a call that asks the model for an answer: within ``hanging_up``, on a connection of its
+    own that the user's Stop can close (the shared client's connections are shared with other calls)."""
+    call = http_method(name)
+    handle = _hang_up.get()
+    if handle is None or call != getattr(shared_client(), name):
+        return call
+    trace = {"trace": handle.trace}
+    if name == "stream":
+
+        @contextmanager
+        def stream(method: str, url: str, **options):
+            with httpx.Client(cookies=_no_cookies(), transport=httpx.HTTPTransport(retries=1)) as client, client.stream(method, url, extensions=trace, **options) as response:
+                yield response
+
+        return stream
+
+    def post(url: str, **options) -> httpx.Response:
+        with httpx.Client(cookies=_no_cookies(), transport=httpx.HTTPTransport(retries=1)) as client:
+            return client.post(url, extensions=trace, **options)
+
+    return post
+
+
 def lm_studio_root(base: str) -> str:
     """The server's root from its OpenAI-style base ("http://127.0.0.1:1234/v1" is "http://127.0.0.1:1234"): LM
     Studio's own API, which lists, loads and unloads models, is under ``/api/v1`` there."""
@@ -138,6 +222,8 @@ class ModelStatus:
     chat_models: dict[str, int] = field(default_factory=dict)
     # How big each of those is on disk, in bytes, when LM Studio says (it is about what loading it takes).
     chat_sizes: dict[str, int] = field(default_factory=dict)
+    # How many parameters each has, as LM Studio puts it ("8B"), when it says.
+    chat_params: dict[str, str] = field(default_factory=dict)
     # LM Studio's loaded embedding models, by instance id and by key (kept apart from ``instances``: none answers).
     embeddings: set[str] = field(default_factory=set)
 
@@ -150,6 +236,9 @@ class ModelStatus:
     def describe(self) -> str:
         if self.mode == "off":
             return "The local model is turned off in CloseDesk's settings file (.env)."
+        if self.active and self.lm_studio and not loaded_now(self, self.model):
+            # The model used last, downloaded but unloaded (LM Studio's idle unload, a restart): not "ready".
+            return f"Local model: {self.model} at {self.base_url}. It isn't loaded now: LM Studio loads it when you ask something."
         if self.active:
             return f"Local model ready: {self.model} at {self.base_url}"
         if self.reachable:
@@ -218,6 +307,7 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         status.instances = {instance: (reloadable.get(instance, (instance, 0))[0], contexts.get(instance, 0)) for instance in loaded}
         status.chat_models = listing.chat if status.lm_studio else {}
         status.chat_sizes = listing.sizes if status.lm_studio else {}
+        status.chat_params = listing.params if status.lm_studio else {}
         status.embeddings = listing.embeddings
         status.vision = status.model in seeing
         # By model key, so a model is listed once whether or not it is loaded. A downloaded one when LM Studio loads it
@@ -276,6 +366,7 @@ class _Listing:
     chat: dict[str, int] = field(default_factory=dict)  # see ModelStatus.chat_models
     embeddings: set[str] = field(default_factory=set)  # see ModelStatus.embeddings
     sizes: dict[str, int] = field(default_factory=dict)  # see ModelStatus.chat_sizes
+    params: dict[str, str] = field(default_factory=dict)  # see ModelStatus.chat_params
 
 
 def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing:
@@ -308,6 +399,7 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
         downloaded: list[str] = []
         chat: dict[str, int] = {}
         sizes: dict[str, int] = {}
+        params: dict[str, str] = {}
         embeddings: set[str] = set()
         if isinstance(data.get("models"), list):
             for item in data["models"]:
@@ -331,6 +423,8 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
                         chat[str(item["key"])] = _int(item.get("max_context_length"))
                         if _int(item.get("size_bytes")) > 0:
                             sizes[str(item["key"])] = _int(item.get("size_bytes"))
+                        if isinstance(item.get("params_string"), str) and item["params_string"].strip():
+                            params[str(item["key"])] = item["params_string"].strip()
                 for instance in item.get("loaded_instances") or []:
                     if isinstance(instance, dict) and instance.get("id"):
                         loaded.append(str(instance["id"]))
@@ -340,7 +434,7 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
                         reloadable[str(instance["id"])] = (str(item.get("key") or instance["id"]), _int(item.get("max_context_length")))
                         if sees:
                             seeing.add(str(instance["id"]))
-            return _Listing("v1", loaded, reasoning, contexts, reloadable, seeing, downloaded, chat=chat, embeddings=embeddings, sizes=sizes)
+            return _Listing("v1", loaded, reasoning, contexts, reloadable, seeing, downloaded, chat=chat, embeddings=embeddings, sizes=sizes, params=params)
         # LM Studio's older route says of each model whether it is loaded; a server that answers it with a plain list
         # of the models it serves isn't LM Studio.
         if isinstance(data.get("data"), list) and any(isinstance(item, dict) and "state" in item for item in data["data"]):
@@ -476,6 +570,10 @@ class EmptyReply(RuntimeError):
     """The server answered 200 but wrote no answer, usually because the model only reasoned."""
 
 
+class ThinksTooLong(EmptyReply):
+    """A model that can't be told not to think used all its room thinking, even with twice the usual room."""
+
+
 # Reasoning models (Qwen3.x, DeepSeek-R1, gpt-oss) think before answering. That
 # needs far more than the usual token budget unless thinking can be turned off.
 THINKING_ROOM = 2048
@@ -487,9 +585,22 @@ _RETRYABLE = {400, 404, 415, 422, 500, 501}
 # A server that refuses a parameter says so with one of these; a 500 or 404 can be a busy or reloading server.
 _REFUSES = {400, 415, 422, 501}
 _reasoning_seen: set[str] = set()
+# Models whose chat template opens <think> in the prompt, on a server that doesn't separate the reasoning: a reply of
+# theirs once closed a think tag it never opened. Their replies are read as reasoning until that "</think>", so
+# reasoning cut off before it is never taken for the answer.
+_opens_think: set[str] = set()
+# Models that can't be told not to think and ran out of twice the usual room thinking in the chat (``ThinksTooLong``):
+# each later question gives them that room at once, and only once, rather than the usual room first and then twice it.
+_thinks_too_long: set[str] = set()
+# What CloseDesk learned of each model's thinking (the three sets above), kept in the database so the next start
+# doesn't learn it all over again: ``remember_thinking`` reads it back and keeps what is learned from then on there.
+THINKING_KEY = "model_thinking"
+_thinking_store = None
 _effort_rejected: set[str] = set()
 # Models whose server refused ``logprobs`` (how sure the model was of each word it wrote): asked without it from then on.
 _logprobs_rejected: set[str] = set()
+# Models whose server refused ``stream_options`` (asking for the token counts at the end of a stream).
+_usage_rejected: set[str] = set()
 
 
 @dataclass
@@ -497,6 +608,16 @@ class Reply:
     content: str
     reasoning: str = ""
     finish: str = ""
+    # A streamed reply's timing (time.perf_counter(), which on Windows moves finer than time.monotonic()'s 15 ms): when its first piece came (the model had read the prompt) and its
+    # last, how many pieces (about a token each, thinking included) and the token counts the server gave, if any.
+    first_at: float = 0.0
+    last_at: float = 0.0
+    pieces: int = 0
+    usage: dict = field(default_factory=dict)
+    # The content closed a think tag it never opened (``_opens_think``); or, read as opening with one, it never closed
+    # it and ended as usual: it didn't think, and what it wrote was the answer.
+    lone_close: bool = False
+    unclosed: bool = False
 
     def why_unusable(self) -> str:
         if not self.content and self.reasoning and self.finish == "length":
@@ -509,26 +630,109 @@ class Reply:
         return f"reply was not the JSON shape: “{snippet}”"
 
 
-def _reasoning_text(part: dict) -> str:
-    """LM Studio calls it ``reasoning_content``; OpenRouter and newer builds ``reasoning``."""
+class Thought:
+    """A piece of the model's reasoning as it streams (``text``), kept apart from its answer: ``stream_text(thoughts=
+    True)`` yields these between the answer's pieces, for the chat to show it thinking. Not a string, so it can't be
+    added to the answer's text by mistake."""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+class WasThinking:
+    """Yielded by ``stream_text(thoughts=True)`` when the reply closed a think tag it never opened: what it yielded as
+    the answer until then was the model's reasoning (it comes again next, as a ``Thought``), and the answer starts
+    after the tag."""
+
+    __slots__ = ()
+
+
+class AskedAgain:
+    """Yielded by ``stream_text(thoughts=True)`` when the model ran out of room thinking and is asked again with more:
+    the chat says so, and the second try's reasoning starts apart from the first's."""
+
+    __slots__ = ()
+
+
+def _reasoning_text(part: dict, *, spaces: bool = False) -> str:
+    """LM Studio calls it ``reasoning_content``; OpenRouter and newer builds ``reasoning``. ``spaces``: a piece that is
+    only a line break or a space is kept too (once the reasoning has begun, streamed a token at a time)."""
     for key in ("reasoning_content", "reasoning"):
         value = part.get(key)
-        if isinstance(value, str) and value.strip():
+        if isinstance(value, str) and (value.strip() or (spaces and value)):
             return value
     return ""
 
 
-def _reply_from(data) -> Reply:
+def _reply_from(data, *, opened: bool = False) -> Reply:
+    """``opened``: the model's template opens <think> in the prompt (``_opens_think``), so a reply cut off before its
+    "</think>" is all reasoning."""
     choice = _first_choice(data)
     message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
     raw = message.get("content") if isinstance(message.get("content"), str) else ""
     reasoning = _reasoning_text(message)
     tagged = "".join(_THINK_RE.findall(raw))
+    finish = str(choice.get("finish_reason") or "")
+    lone = _THINK_CLOSE in raw and _THINK_OPEN not in raw.split(_THINK_CLOSE, 1)[0]
+    if lone:
+        tagged = raw.split(_THINK_CLOSE, 1)[0] + tagged
+    elif opened and finish == "length" and _THINK_OPEN not in raw:
+        return Reply(content="", reasoning=(reasoning + raw).strip(), finish=finish)
     return Reply(
         content=strip_thinking(raw),
         reasoning=(reasoning + tagged).strip(),
-        finish=str(choice.get("finish_reason") or ""),
+        finish=finish,
+        lone_close=lone,
     )
+
+
+def _learn_think_tags(model: str, reply: Reply) -> None:
+    """A reply that closed a think tag it never opened: the model's template opens one (``_opens_think``), so it
+    thinks, and needs room for it. One read that way that never closed it didn't think this time: read as usual
+    again."""
+    if reply.lone_close:
+        _learned(_opens_think, model)
+        _learned(_reasoning_seen, model)
+    elif reply.unclosed:
+        _learned(_opens_think, model, False)
+
+
+def remember_thinking(store) -> None:
+    """Read back what earlier runs learned of each model's thinking (``THINKING_KEY``), and keep what this run learns
+    in ``store`` too. What can't be read is learned again, as before."""
+    global _thinking_store
+    _thinking_store = store
+    try:
+        saved = json.loads(store.get_state(THINKING_KEY) or "{}")
+    except (ValueError, sqlite3.Error):
+        return
+    saved = saved if isinstance(saved, dict) else {}
+    for name, kept in _thinking_sets().items():
+        found = saved.get(name)
+        kept.update(model for model in (found if isinstance(found, list) else []) if isinstance(model, str) and model)
+
+
+def _thinking_sets() -> dict[str, set[str]]:
+    return {"reasoning": _reasoning_seen, "opens_think": _opens_think, "thinks_too_long": _thinks_too_long}
+
+
+def _learned(kept: set[str], model: str, add: bool = True) -> None:
+    """Add ``model`` to (or take it from) one of the sets of what is learned of a model's thinking, and keep the change
+    in the database for the next start."""
+    if not model or (model in kept) == add:
+        return
+    if add:
+        kept.add(model)
+    else:
+        kept.discard(model)
+    if _thinking_store is None:
+        return
+    try:
+        _thinking_store.set_state(THINKING_KEY, json.dumps({name: sorted(found) for name, found in _thinking_sets().items()}))
+    except (sqlite3.Error, OSError):
+        pass  # learned again next time
 
 
 def reasoning_effort(settings: Settings, model: str) -> str | None:
@@ -539,15 +743,20 @@ def reasoning_effort(settings: Settings, model: str) -> str | None:
     """
     if model in _effort_rejected:
         return None
-    status = check_model(settings)
-    options = status.reasoning if status.model == model else status.reasoning_options.get(model, [])
+    options = _reasoning_options(settings, model)
     if "off" in options:
         return "none"
     if "low" in options:
         return "low"
-    if model in _reasoning_seen:
+    if model in _reasoning_seen and not options:  # listed options without "off" or "low": it can't be turned down
         return "none"
     return None
+
+
+def _reasoning_options(settings: Settings, model: str) -> list[str]:
+    """The ``reasoning_effort`` values LM Studio lists for ``model`` (empty when it lists none)."""
+    status = check_model(settings)
+    return list(status.reasoning if status.model == model else status.reasoning_options.get(model, []))
 
 
 def thinking_effort(settings: Settings, model: str) -> str | None:
@@ -570,8 +779,11 @@ def _thinks(settings: Settings, model: str, effort: str | None) -> bool:
 
 
 def _timeout(settings: Settings, budget: int) -> float:
-    """A laptop writing 2,048 tokens of thinking can take minutes."""
-    return max(settings.llm_timeout, THINKING_TIMEOUT) if budget >= THINKING_ROOM else settings.llm_timeout
+    """A laptop writing 2,048 tokens of thinking can take minutes, and twice the room takes twice as long: a model
+    that can't stop thinking, given 4,096 tokens, is waited for 10 minutes rather than taken for one still loading."""
+    if budget < THINKING_ROOM:
+        return settings.llm_timeout
+    return max(settings.llm_timeout, THINKING_TIMEOUT * budget / THINKING_ROOM)
 
 
 def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> httpx.Response:
@@ -580,21 +792,40 @@ def _post_chat(post, url: str, payload: dict, settings: Settings, **options) -> 
     The model is only remembered as refusing ``reasoning_effort`` when the same request
     without it goes through. When that retry fails too, something else (``response_format``,
     ``tools``) was the problem: the first answer comes back and the payload keeps its effort.
+    A busy server (500, 404) is asked once more as it was, with the effort kept: without it, a model that can turn
+    thinking off would think again with the same room. A model out of memory isn't asked again at all.
+
+    A request that runs out of time carries how long it waited (``waited``, in seconds) and how many tokens it might
+    write (``written``): a thinking model's call waits longer than the chat's wait, and the chat's offer of more time
+    says and suggests from these.
     """
-    with _using(str(payload.get("model"))):
+    try:
+        return _post_chat_once(post, url, payload, settings, **options)
+    except httpx.TimeoutException as exc:
+        timeout = options.get("timeout")
+        exc.waited = float(timeout.read or 0) if isinstance(timeout, httpx.Timeout) else float(timeout or 0)
+        exc.written = int(payload.get("max_tokens") or 0)
+        raise
+
+
+def _post_chat_once(post, url: str, payload: dict, settings: Settings, **options) -> httpx.Response:
+    with _using(str(payload.get("model")), options.get("timeout")):
         response = post(url, json=payload, headers=auth_headers(settings), **options)
         if response.status_code >= 400 and _OVERFLOW_RE.search(response.text[:600]):
             # A prompt too long for the context is no shorter without the effort (or the schema): not sent again.
             _raise_for(response)
-        if "reasoning_effort" in payload and response.status_code in _RETRYABLE:
+        if "reasoning_effort" in payload and response.status_code in _REFUSES:
             effort = payload.pop("reasoning_effort")
             retry = post(url, json=payload, headers=auth_headers(settings), **options)
             if retry.status_code < 400:
-                # Remembered only when the server said no to the request itself, not when it was busy for a moment.
-                if response.status_code in _REFUSES:
-                    _effort_rejected.add(str(payload.get("model")))
+                # Remembered only when the request without it goes through.
+                _effort_rejected.add(str(payload.get("model")))
                 return retry
             payload["reasoning_effort"] = effort
+        elif "reasoning_effort" in payload and response.status_code in _RETRYABLE and not out_of_memory(response.text):
+            retry = post(url, json=payload, headers=auth_headers(settings), **options)
+            if retry.status_code < 400:
+                return retry
         return response
 
 
@@ -606,6 +837,7 @@ class ReaderStats:
     stopped_reason: str = ""
     last_error: str = ""
     times: list[float] = field(default_factory=list)  # seconds each email read took, in order
+    too_slow: bool = False  # stopped because the model sent nothing for longer than even the longer wait allows
 
     @property
     def average_seconds(self) -> float:
@@ -621,7 +853,9 @@ class ReaderStats:
 class LocalReader:
     """One reader per run. Holds the resolved model and stops on a dead server."""
 
-    def __init__(self, settings: Settings, *, model: str | None = None, client: httpx.Client | None = None):
+    def __init__(
+        self, settings: Settings, *, model: str | None = None, client: httpx.Client | None = None, store: Store | None = None
+    ):
         self.settings = settings
         self.model = model or resolve_model(settings)
         self.client = client or httpx.Client(timeout=settings.llm_timeout)
@@ -634,6 +868,21 @@ class LocalReader:
         if _thinks(settings, self.model, self._effort):
             self._max_tokens = max(self._max_tokens, THINKING_ROOM)
         self._consecutive_failures = 0
+        self._memory_failures = 0  # of those, the ones that ran out of memory
+        self._stepped_back = False  # a context that ran out of memory was loaded back smaller in this run
+        # The reply is streamed, so the time limit is how long the model may go without a word, not how long the whole
+        # reply may take: a big model writing slowly is never cut off. A server that refuses streaming is asked for
+        # the whole reply in one piece instead.
+        self._streams = True
+        self._longer = 0.0  # the longer wait, once a model needed it: kept for the rest of the run
+        # How long this model may need, worked out for it (a big model on a laptop reads an email for minutes before it
+        # writes a word) or set by the user: the reading waits at least that long between words.
+        self._model_wait = 0.0
+        if store is not None and self.model:
+            from controller_inbox import model_fit  # it imports this module
+
+            self._model_wait = model_fit.reading_wait(store, settings, self.model)
+        self._partial = Reply(content="")
 
     def close(self) -> None:
         if self._closer is not None:
@@ -664,24 +913,42 @@ class LocalReader:
             self.stats.stopped_reason = str(exc)
             return None
         except httpx.HTTPError as exc:
-            return self._failed(_short_error(exc))
+            if not ran_out_of_memory(exc):
+                return self._failed(_short_error(exc))
+            if not self._stepped_back:
+                # A context CloseDesk gave the model that ran out of memory: loaded back smaller, and this email asked
+                # once more (once a run: a model too big at any size isn't reloaded again and again).
+                self._stepped_back = True
+                if step_back_context(self.settings):
+                    return self.read(packet)
+            return self._failed("the local model ran out of memory", memory=True)
         except ContextOverflow as exc:
             return self._failed(str(exc))
         if parsed is None:
+            if isinstance(stuck := _empty_reply(self.settings, self.model, self._max_tokens, reply), ThinksTooLong):
+                # Every email would go the same way, minutes each: the run stops, and says why once.
+                self.stats.stopped_reason = str(stuck)
             return self._failed(reply.why_unusable())
-        self._consecutive_failures = 0
+        self._consecutive_failures = self._memory_failures = 0
         took = time.monotonic() - started
         self.stats.read += 1
         self.stats.seconds += took
         self.stats.times.append(took)
         return parsed
 
-    def _failed(self, reason: str) -> None:
+    def _failed(self, reason: str, *, memory: bool = False) -> None:
         self.stats.failed += 1
         self.stats.last_error = reason
         self._consecutive_failures += 1
-        if self._consecutive_failures >= 3:
-            self.stats.stopped_reason = f"three messages in a row failed ({reason})"
+        self._memory_failures = self._memory_failures + 1 if memory else 0
+        if self._consecutive_failures >= 3 and not self.stats.stopped_reason:
+            if self._memory_failures >= 3:
+                # Not LM Studio's "Server error '500 ...' for url ...": what happened, and what to do about it.
+                self.stats.stopped_reason = (
+                    f"the local model ran out of memory on three messages in a row. {memory_advice(self.settings)}"
+                )
+            else:
+                self.stats.stopped_reason = f"three messages in a row failed ({reason})"
         return None
 
     def _adapt(self, reply: Reply) -> bool:
@@ -689,12 +956,16 @@ class LocalReader:
         if reply.content and not reply.reasoning:
             return False
         if reply.reasoning:
-            _reasoning_seen.add(self.model)
+            _learned(_reasoning_seen, self.model)
         changed = False
         if self._effort is None and self.model not in _effort_rejected:
             self._effort, changed = "none", True
         if self._max_tokens < THINKING_ROOM:
             self._max_tokens, changed = THINKING_ROOM, True
+        elif reply.finish == "length" and reply.reasoning and not reply.content and self._max_tokens < 2 * THINKING_ROOM:
+            # All its room went on thinking: a model that can't turn thinking off (DeepSeek-R1 allows only ``on``)
+            # thinks as long with the effort turned down, so it gets twice the room, once, for the rest of the run.
+            self._max_tokens, changed = self._max_tokens * 2, True
         if self._structured and not reply.content:
             # LM Studio can route schema-constrained output into the reasoning
             # stream and leave the answer empty; plain prompts answer normally.
@@ -703,6 +974,44 @@ class LocalReader:
 
     def _complete(self, user: str) -> Reply:
         url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
+        loads_waited = 0
+        while True:
+            try:
+                return self._ask(url, user)
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as exc:
+                raise ModelUnavailable(f"the local model server stopped answering ({_short_error(exc)})") from exc
+            except httpx.TimeoutException as exc:
+                # Nothing came for the whole wait: asked again once the reason is known, or the reading stops.
+                loads_waited += self._after_timeout(exc, loads_waited)
+
+    def _after_timeout(self, exc: httpx.TimeoutException, loads_waited: int) -> int:
+        """Why the model sent nothing in time, and what to do: returns 1 after waiting for LM Studio to load the model,
+        0 when it is to be asked again with the longer wait. Raises ``ModelUnavailable`` to stop the reading."""
+        root = lm_studio_root(self.settings.llm_base_url.rstrip("/"))
+        if _gone(self.settings, root):
+            raise ModelUnavailable(f"the local model server stopped answering ({_short_error(exc)})") from exc
+        status = check_model(self.settings, use_cache=False)
+        if status.lm_studio and not _is_loaded(self.settings, self.model) and loads_waited < 2:
+            # LM Studio unloaded the model (idle auto-unload, a restart) and this request had it load it again: the
+            # load goes on after the request stopped waiting. Waited for, then the email is asked again.
+            if wait_for_load(self.settings, self.model):
+                return 1
+            raise ModelUnavailable(
+                f"LM Studio was still loading {self.model} after {LOAD_WAIT_SECONDS / 60:.0f} minutes. Check LM Studio, "
+                "and process the mail again once it shows the model loaded"
+            ) from exc
+        if not self._longer:
+            # A big model reading a long email can take a while to start. Given longer, for the rest of the run.
+            self._longer = max(self._wait() * 2, CHAT_TIMEOUT)
+            return 0
+        self.stats.too_slow = True
+        raise ModelUnavailable(f"{self.model} takes over {self._wait():.0f} s an email on this computer") from exc
+
+    def _wait(self) -> float:
+        """How long the model may go without sending a word: longer with room to think, longer still once needed."""
+        return max(_timeout(self.settings, self._max_tokens), self._longer, self._model_wait)
+
+    def _ask(self, url: str, user: str) -> Reply:
         payload = {
             "model": self.model,
             "temperature": 0,
@@ -712,46 +1021,60 @@ class LocalReader:
                 {"role": "user", "content": user},
             ],
         }
+        if self._streams:
+            payload["stream"] = True
         if self._structured:
             payload["response_format"] = {"type": "json_schema", "json_schema": _schema()}
         if self._effort:
             payload["reasoning_effort"] = self._effort
-        try:
-            response = _post_chat(self.client.post, url, payload, self.settings, timeout=_timeout(self.settings, self._max_tokens))
-            # A busy moment (a 500 the same request without the effort got past) is not a refusal: the effort and the
-            # schema are only dropped for the rest of the run when the server said no to them.
+        response = _post_chat(self._send, url, payload, self.settings, timeout=httpx.Timeout(self._wait(), connect=5.0))
+        # A busy moment (a 500 the same request without the effort got past) is not a refusal: the effort and the
+        # schema are only dropped for the rest of the run when the server said no to them.
+        if self.model in _effort_rejected:
+            self._effort = None
+        if self._structured and response.status_code in _RETRYABLE:
+            # Older LM Studio / Ollama builds reject response_format. Ask again, plain.
+            refused = response.status_code in _REFUSES
+            payload.pop("response_format", None)
+            response = _post_chat(self._send, url, payload, self.settings, timeout=httpx.Timeout(self._wait(), connect=5.0))
+            if refused and response.status_code < 400:
+                self._structured = False
             if self.model in _effort_rejected:
                 self._effort = None
-            if self._structured and response.status_code in _RETRYABLE:
-                # Older LM Studio / Ollama builds reject response_format. Ask again, plain.
-                refused = response.status_code in _REFUSES
-                payload.pop("response_format", None)
-                response = _post_chat(
-                    self.client.post, url, payload, self.settings, timeout=_timeout(self.settings, self._max_tokens)
-                )
-                if refused and response.status_code < 400:
-                    self._structured = False
-                if self.model in _effort_rejected:
-                    self._effort = None
-            response.raise_for_status()
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.RemoteProtocolError) as exc:
-            raise ModelUnavailable(f"the local model server stopped answering ({_short_error(exc)})") from exc
-        except httpx.ReadTimeout as exc:
-            if self._consecutive_failures >= 1:
-                raise ModelUnavailable(
-                    f"the model took longer than {_timeout(self.settings, self._max_tokens):.0f}s twice in a row"
-                ) from exc
-            raise
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
-        if not _first_choice(data):
-            raise httpx.DecodingError("unexpected reply: no choices")
-        reply = _reply_from(data)
+        if self._streams and response.status_code in _REFUSES:
+            # A server that doesn't stream: the whole reply in one piece, from then on.
+            payload.pop("stream", None)
+            response = _post_chat(self._send, url, payload, self.settings, timeout=httpx.Timeout(self._wait(), connect=5.0))
+            if response.status_code < 400:
+                self._streams = False
+        response.raise_for_status()
+        reply = self._partial
         if reply.reasoning:
-            _reasoning_seen.add(self.model)
+            _learned(_reasoning_seen, self.model)
         return reply
+
+    def _send(self, url: str, *, json: dict, headers: dict, **options) -> httpx.Response:
+        """One request, read as it comes (``_post_chat`` sends it, and again without what the server refused). The
+        reply goes into ``self._partial``; a refusal is returned read, so its text can be looked at."""
+        reply = self._partial = Reply(content="")
+        raw: list[str] = []
+        with self.client.stream("POST", url, json=json, headers=headers, **options) as response:
+            if response.status_code >= 400:
+                response.read()
+                return response
+            whole = "text/event-stream" not in response.headers.get("content-type", "")
+            pieces = list(_stream_pieces(response, reply, raw=raw))
+        if raw:
+            # Streamed: the content as sent, think tags and all, read as a reply in one piece is.
+            sent = "".join(raw)
+            reasoning = "" if reply.reasoning == _THINK_OPEN else reply.reasoning
+            reply.content = strip_thinking(sent)
+            reply.reasoning = (reasoning + "".join(_THINK_RE.findall(sent))).strip()
+        else:
+            reply.content = "".join(pieces)
+            if whole and not reply.content and not reply.reasoning and not reply.finish:
+                raise httpx.DecodingError("unexpected reply: no choices")
+        return response
 
 
 def _find_reading(reply: Reply) -> dict | None:
@@ -825,11 +1148,23 @@ def strip_thinking(text: str) -> str:
 class ThinkFilter:
     """``strip_thinking`` for a stream, where a tag can arrive split across pieces."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, opened: bool = False, lone: bool = False) -> None:
+        """``opened``: the reply starts inside a think tag, opened in the prompt (``_opens_think``). ``lone``: a closing
+        tag that comes before any opening one ends the reasoning there, though nothing said the reply began with it:
+        what was passed on as the answer until then was reasoning (``relabelled`` says so, once)."""
         self.buffer = ""
-        self.inside = False
+        self.inside = opened
         self.started = False
-        self.saw = False
+        self.saw = opened
+        self.closed = False  # a closing tag was read
+        self.lone = lone and not opened
+        self.relabelled = False
+        self._thought: list[str] = []  # the reasoning between the tags, as it comes (``take_thought``)
+
+    def take_thought(self) -> str:
+        """The reasoning read inside think tags since the last call."""
+        thought, self._thought = "".join(self._thought), []
+        return thought
 
     def feed(self, piece: str) -> str:
         self.buffer += piece
@@ -838,14 +1173,29 @@ class ThinkFilter:
             if self.inside:
                 cut = self.buffer.find(_THINK_CLOSE)
                 if cut < 0:
-                    self.buffer = self.buffer[-(len(_THINK_CLOSE) - 1) :]
+                    keep = len(_THINK_CLOSE) - 1  # a closing tag may be arriving split
+                    self._thought.append(self.buffer[:-keep])
+                    self.buffer = self.buffer[-keep:]
                     break
+                self._thought.append(self.buffer[:cut])
                 self.buffer = self.buffer[cut + len(_THINK_CLOSE) :]
                 self.inside = False
+                self.closed = True
                 continue
             cut = self.buffer.find(_THINK_OPEN)
+            close = self.buffer.find(_THINK_CLOSE) if self.lone and not self.saw else -1
+            if close >= 0 and (cut < 0 or close < cut):
+                # The reasoning ends here: all of it so far, this piece's included, was passed on or held as the answer.
+                out.clear()
+                self.buffer = self.buffer[close + len(_THINK_CLOSE) :]
+                self.saw = self.closed = self.relabelled = True
+                self.started = False
+                continue
             if cut < 0:
-                keep = next((k for k in range(len(_THINK_OPEN) - 1, 0, -1) if self.buffer.endswith(_THINK_OPEN[:k])), 0)
+                tags = (_THINK_OPEN, _THINK_CLOSE) if self.lone and not self.saw else (_THINK_OPEN,)
+                keep = max(
+                    next((k for k in range(len(tag) - 1, 0, -1) if self.buffer.endswith(tag[:k])), 0) for tag in tags
+                )  # a tag may be arriving split
                 out.append(self.buffer[: len(self.buffer) - keep])
                 self.buffer = self.buffer[len(self.buffer) - keep :]
                 break
@@ -856,6 +1206,8 @@ class ThinkFilter:
 
     def flush(self) -> str:
         rest = "" if self.inside else self.buffer
+        if self.inside:  # the reasoning stopped before its closing tag: the characters held back are reasoning too
+            self._thought.append(self.buffer)
         self.buffer = ""
         return self._lead(rest)
 
@@ -874,6 +1226,8 @@ def _chat_plan(
     (the one that reads pages)."""
     model = model or check_model(settings).model or settings.llm_model
     effort = thinking_effort(settings, model) if think else reasoning_effort(settings, model)
+    if model in _thinks_too_long:
+        return model, effort, max(max_tokens, 2 * THINKING_ROOM)
     return model, effort, max(max_tokens, THINKING_ROOM) if _thinks(settings, model, effort) else max_tokens
 
 
@@ -882,46 +1236,75 @@ def reply_budget(settings: Settings, max_tokens: int) -> int:
     return _chat_plan(settings, max_tokens)[2]
 
 
-def _retry_plan(model: str, effort: str | None, budget: int, reply: Reply) -> tuple[str | None, int] | None:
+def _retry_plan(
+    settings: Settings, model: str, effort: str | None, budget: int, reply: Reply
+) -> tuple[str | None, int] | None:
     """A reasoning model wrote no answer: turn thinking down and give it room, once. One that ran out of room
     thinking gets twice the room: a model that can't turn thinking off (DeepSeek-R1 allows only ``on``) thinks as long
-    with the effort turned down, so the same budget would only run out again."""
+    with the effort turned down, so the same budget would only run out again; it isn't sent an effort it doesn't
+    allow. One that ran out of twice the room before (``_thinks_too_long``) was given that at once: not asked again."""
     if reply.content or not reply.reasoning:
         return None
-    _reasoning_seen.add(model)
-    new_effort = effort or (None if model in _effort_rejected else "none")
+    if model in _thinks_too_long and budget >= 2 * THINKING_ROOM:
+        return None
+    _learned(_reasoning_seen, model)
+    options = _reasoning_options(settings, model)
+    fixed = bool(options) and not {"off", "low"} & set(options)  # LM Studio lists no way to turn it down
+    new_effort = effort or (None if model in _effort_rejected or fixed else "none")
     new_budget = max(budget * 2 if reply.finish == "length" else budget, THINKING_ROOM)
     if (new_effort, new_budget) == (effort, budget):
         return None
     return new_effort, new_budget
 
 
+def _empty_reply(settings: Settings, model: str, budget: int, reply: Reply) -> EmptyReply:
+    """What to raise for a reply with no answer. A model that can't be told not to think (LM Studio lists no "off"
+    for it: DeepSeek-R1 distills, QwQ) that used all of twice the usual room thinking will go on doing so: that is
+    said plainly, with what to do, rather than only that it ran out of room."""
+    if reply.content or not reply.reasoning or reply.finish != "length" or budget < 2 * THINKING_ROOM:
+        return EmptyReply(reply.why_unusable())
+    options = _reasoning_options(settings, model)
+    if not options or "off" in options:
+        return EmptyReply(reply.why_unusable())
+    _learned(_thinks_too_long, model)
+    # Not the family of the model that failed (a Qwen3 Thinking build, or a DeepSeek-R1 distilled from Qwen3).
+    example = "Gemma 3" if "qwen" in model.lower() else "Qwen3"
+    return ThinksTooLong(
+        f"{model} thinks before every answer and can't be told not to, and it ran out of room even with {budget:,} "
+        f"tokens. Choose one that doesn't have to think first, like {example}, or a smaller one in Settings"
+    )
+
+
 def complete_text(
-    settings: Settings, messages: list[dict], *, max_tokens: int = 400, temperature: float | None = None, think: bool = False
+    settings: Settings, messages: list[dict], *, max_tokens: int = 400, temperature: float | None = None, think: bool = False,
+    limit: float | None = None,
 ) -> str:
     """One plain-text answer. Raises ``httpx.HTTPError`` or ``EmptyReply`` when there is none. ``temperature``:
-    other than the usual 0.2, for a second, differently worded try; ``think``: see ``_chat_plan``."""
+    other than the usual 0.2, for a second, differently worded try; ``think``: see ``_chat_plan``. ``limit``: how
+    long the model may take, worked out for it (``model_fit.chat_wait``), in place of the usual ``CHAT_TIMEOUT``."""
     model, effort, budget = _chat_plan(settings, max_tokens, think=think)
     for _attempt in range(2):
         url, payload = _chat_request(settings, messages, budget, stream=False)
+        sent = budget
         if temperature is not None:
             payload["temperature"] = temperature
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(http_method("post"), url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
+        response = _post_chat(_model_http("post"), url, payload, settings, timeout=max(_timeout(settings, budget), limit or CHAT_TIMEOUT))
         _raise_for(response)
         try:
             data = response.json()
         except ValueError as exc:
             raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
-        reply = _reply_from(data)
+        reply = _reply_from(data, opened=model in _opens_think)
+        _learn_think_tags(model, reply)
         if reply.content:
             return reply.content
-        plan = _retry_plan(model, payload.get("reasoning_effort"), budget, reply)
+        plan = _retry_plan(settings, model, payload.get("reasoning_effort"), budget, reply)
         if plan is None:
             break
         effort, budget = plan
-    raise EmptyReply(reply.why_unusable())
+    raise _empty_reply(settings, model, sent, reply)
 
 
 def stream_text(
@@ -935,6 +1318,8 @@ def stream_text(
     sampling: dict | None = None,
     model: str | None = None,
     token_probs: list | None = None,
+    limit: float | None = None,
+    thoughts: bool = False,
 ):
     """Yield the answer as it is written. Servers that ignore ``stream`` send it in one piece.
 
@@ -944,28 +1329,91 @@ def stream_text(
     "thought" to whether the model reasoned first; ``sampling``: more settings sent as they are (top_p, top_k,
     presence_penalty); ``model``: another model than the chat one (LM Studio loads it when asked); ``token_probs``:
     given a list, filled with (piece of text, log probability) for each token of the answer, when the server sends
-    them (llama.cpp does; a server that doesn't leaves it empty).
+    them (llama.cpp does; a server that doesn't leaves it empty). ``limit``: how long the model may go quiet, worked
+    out for it (``model_fit.chat_wait``), in place of the usual ``CHAT_TIMEOUT``. ``thoughts``: the model's reasoning
+    is yielded too as it comes, as ``Thought`` pieces (never added to the answer), ``WasThinking`` when a reply that
+    closes a think tag it never opened shows what came before as its reasoning, and ``AskedAgain`` before a second
+    try with more room. ``finished`` is also given the model asked (``model``) and the
+    reply's timing: ``read_seconds`` (until its first piece), ``write_seconds``, ``written`` (tokens, thinking
+    included) and ``prompt_tokens`` when the server counted them.
     """
     model, effort, budget = _chat_plan(settings, max_tokens, model=model)
+    # The first attempt that got going timed the reading of the prompt. One asked again finds the prompt still read
+    # (LM Studio keeps it) and starts at once, which would look like the model reading thousands of tokens a second.
+    read_timed = False
     for _attempt in range(2):
-        reply = Reply(content="")
+        reply, sent = Reply(content=""), budget
         if token_probs is not None:
             token_probs.clear()
-        for piece in _stream_once(
-            settings, messages, budget, effort, reply, wait=wait, temperature=temperature, sampling=sampling, model=model,
-            token_probs=token_probs,
-        ):
-            reply.content += piece
-            yield piece
+        started = time.perf_counter()
+        try:
+            for piece in _stream_once(
+                settings, messages, budget, effort, reply, wait=wait, temperature=temperature, sampling=sampling, model=model,
+                token_probs=token_probs, limit=limit, thoughts=thoughts,
+            ):
+                if isinstance(piece, Thought):
+                    yield piece
+                    continue
+                if isinstance(piece, WasThinking):
+                    reply.content = ""  # that was its reasoning: the answer starts after the tag
+                    if token_probs is not None:
+                        token_probs.clear()
+                    yield piece
+                    continue
+                reply.content += piece
+                yield piece
+        except httpx.TimeoutException as exc:
+            # Went quiet after it had started: still writing (or thinking), not loading. ``failure_note`` says which.
+            if reply.content or reply.reasoning:
+                exc.reply_started = "writing" if reply.content else "thinking"
+            raise
+        _learn_think_tags(model, reply)
         if finished is not None:
-            finished["reason"], finished["thought"] = reply.finish, bool(reply.reasoning)
+            finished["reason"], finished["thought"], finished["model"] = reply.finish, bool(reply.reasoning), model
+            if reply.first_at:
+                finished["write_seconds"] = reply.last_at - reply.first_at
+                finished["written"] = _int(reply.usage.get("completion_tokens")) or reply.pieces
+            if reply.first_at and not read_timed:
+                read_timed = True
+                finished["read_seconds"] = reply.first_at - started
+                if "prompt_tokens" in reply.usage:
+                    finished["prompt_tokens"] = _prompt_read(reply.usage)
+                    finished["prompt_counted"] = _cache_said(reply.usage)
         if reply.content:
             return
-        plan = _retry_plan(model, effort if model not in _effort_rejected else None, budget, reply)
+        if _attempt:  # it was asked again already: no third try, so nothing says it is asked again
+            break
+        plan = _retry_plan(settings, model, effort if model not in _effort_rejected else None, budget, reply)
         if plan is None:
             break
         effort, budget = plan
-    raise EmptyReply(reply.why_unusable())
+        if thoughts:
+            yield AskedAgain()
+    raise _empty_reply(settings, model, sent, reply)
+
+
+def _prompt_read(usage: dict) -> int:
+    """The prompt tokens the model read for this reply, from the server's counts. LM Studio keeps
+    the start of a prompt it read before and doesn't read it again: those tokens (``cached_tokens``) aren't counted,
+    or a prompt asked again would make the model look many times faster than it reads."""
+    details = usage.get("prompt_tokens_details")
+    cached = _int(details.get("cached_tokens")) if isinstance(details, dict) else 0
+    return max(0, _int(usage.get("prompt_tokens")) - cached)
+
+
+def _cache_said(usage: dict) -> bool:
+    """The server said how much of the prompt it had read before (``cached_tokens``, 0 included), so the tokens
+    ``_prompt_read`` gives are the ones it read for this reply. LM Studio doesn't always say."""
+    details = usage.get("prompt_tokens_details")
+    return isinstance(details, dict) and isinstance(details.get("cached_tokens"), int)
+
+
+def loaded_now(status: ModelStatus, model: str) -> bool:
+    """``model`` (an instance id or key) is loaded in LM Studio now, by ``status``; True when that can't be told (not
+    LM Studio)."""
+    if not status.lm_studio:
+        return True
+    return any(model in (instance, key) for instance, (key, _context) in status.instances.items())
 
 
 def _stream_once(
@@ -982,9 +1430,13 @@ def _stream_once(
     sampling: dict | None = None,
     model: str | None = None,
     token_probs: list | None = None,
+    again: bool = False,
+    limit: float | None = None,
+    thoughts: bool = False,
 ):
     """``rejected_effort`` names the model whose ``reasoning_effort`` the last try sent; it is
-    remembered as refusing it only if this try, without it, is accepted. ``rejected_probs``: the same for ``logprobs``."""
+    remembered as refusing it only if this try, without it, is accepted. ``rejected_probs``: the same for ``logprobs``.
+    ``again``: this is the one more try a busy server gets."""
     url, payload = _chat_request(settings, messages, budget, stream=True, model=model)
     if effort:
         payload["reasoning_effort"] = effort
@@ -996,23 +1448,36 @@ def _stream_once(
     if asks_probs:
         # Each token's own chance; llama.cpp lists 20 runners-up for each unless told, which only makes the reply big.
         payload["logprobs"], payload["top_logprobs"] = True, 1
+    asks_usage = str(payload.get("model")) not in _usage_rejected
+    if asks_usage:
+        # The token counts at the end, which a stream leaves out unless asked: with them the reading speed is
+        # measured from the tokens the model read, and from those it read anew when the server says so.
+        payload["stream_options"] = {"include_usage": True}
     # Nothing comes until the model has read the whole prompt (and LM Studio has loaded it, if it wasn't), so a laptop
     # reading a long prompt isn't taken for a model that stopped.
-    timeout = httpx.Timeout(max(settings.llm_timeout, CHAT_TIMEOUT, wait or 0.0), connect=5.0)
-    without_probs = False
-    with _using(str(payload.get("model"))), http_method("stream")("POST", url, json=payload, headers=auth_headers(settings), timeout=timeout) as response:
+    timeout = httpx.Timeout(max(settings.llm_timeout, limit or CHAT_TIMEOUT, wait or 0.0), connect=5.0)
+    without_probs = without_usage = busy = False
+    with _using(str(payload.get("model")), timeout), _model_http("stream")("POST", url, json=payload, headers=auth_headers(settings), timeout=timeout) as response:
         if response.status_code >= 400:
             response.read()
             if _OVERFLOW_RE.search(response.text[:600]):
                 # A prompt too long for the context: not a refusal of logprobs or the effort, and no shorter without them.
                 _raise_for(response)
-        if asks_probs and response.status_code in _REFUSES:
+        if asks_usage and response.status_code in _REFUSES and re.search(r"stream_options|include_usage", response.text[:600]):
+            # A server that names ``stream_options`` as what it refused: asked without it from then on.
+            _usage_rejected.add(str(payload.get("model")))
+            rejected = False
+            without_usage = True
+        elif asks_probs and response.status_code in _REFUSES:
             # A server that doesn't know ``logprobs``: the reading matters, how sure it was is a nice-to-have.
             rejected = False
             without_probs = True
-        elif effort and response.status_code in _RETRYABLE:
+        elif effort and response.status_code in _REFUSES:
             rejected = True
-            refused = response.status_code in _REFUSES
+        elif effort and response.status_code in _RETRYABLE and not again and not out_of_memory(response.text):
+            # A busy server: asked once more as it was. Without the effort, a model that can turn thinking off would
+            # think again with the same room; a model out of memory isn't asked again at all.
+            rejected, busy = False, True
         else:
             rejected = False
             _raise_for(response)
@@ -1020,20 +1485,36 @@ def _stream_once(
                 _effort_rejected.add(rejected_effort)
             if rejected_probs:
                 _logprobs_rejected.add(rejected_probs)
-            yield from _stream_pieces(response, reply, token_probs if asks_probs else None)
-    if without_probs:
+            yield from _stream_pieces(
+                response, reply, token_probs if asks_probs else None, thoughts=thoughts,
+                opened=str(payload.get("model")) in _opens_think,
+            )
+    if without_usage:
+        yield from _stream_once(
+            settings, messages, budget, effort, reply,
+            rejected_effort=rejected_effort, rejected_probs=rejected_probs, wait=wait, temperature=temperature,
+            sampling=sampling, model=model, token_probs=token_probs, again=again, limit=limit, thoughts=thoughts,
+        )
+    elif without_probs:
         # Remembered only when the request without logprobs goes through, as the effort is.
         yield from _stream_once(
             settings, messages, budget, effort, reply,
             rejected_effort=rejected_effort, rejected_probs=str(payload.get("model")), wait=wait, temperature=temperature,
-            sampling=sampling, model=model,
+            sampling=sampling, model=model, limit=limit, thoughts=thoughts,
         )
     elif rejected:
-        # Only a refusal is remembered; a busy server (500) is just tried again without the effort.
+        # Remembered as refusing the effort only if the request without it goes through.
         yield from _stream_once(
             settings, messages, budget, None, reply,
-            rejected_effort=str(payload.get("model")) if refused else "", rejected_probs=rejected_probs, wait=wait,
-            temperature=temperature, sampling=sampling, model=model, token_probs=token_probs,
+            rejected_effort=str(payload.get("model")), rejected_probs=rejected_probs, wait=wait,
+            temperature=temperature, sampling=sampling, model=model, token_probs=token_probs, limit=limit, thoughts=thoughts,
+        )
+    elif busy:
+        yield from _stream_once(
+            settings, messages, budget, effort, reply,
+            rejected_effort=rejected_effort, rejected_probs=rejected_probs, wait=wait,
+            temperature=temperature, sampling=sampling, model=model, token_probs=token_probs, again=True, limit=limit,
+            thoughts=thoughts,
         )
 
 
@@ -1052,20 +1533,29 @@ def _token_probs(choice: dict, into: list | None) -> None:
             into.append((token, float(logprob)))
 
 
-def _stream_pieces(response: httpx.Response, reply: Reply, token_probs: list | None = None):
+def _stream_pieces(
+    response: httpx.Response, reply: Reply, token_probs: list | None = None, raw: list | None = None, *, thoughts: bool = False,
+    opened: bool = False,
+):
+    """The answer's pieces as they come. ``raw``: given a list, filled with the content as sent, think tags and all.
+    ``thoughts``: the reasoning is yielded too, as ``Thought`` pieces, whether in its own field or in think tags.
+    ``opened``: the model's template opens <think> in the prompt (``_opens_think``): what comes before its "</think>"
+    is reasoning."""
     if "text/event-stream" not in response.headers.get("content-type", ""):
         try:
             data = json.loads(response.read() or b"{}")
         except ValueError as exc:
             raise httpx.DecodingError(f"unexpected reply: {exc}") from exc
-        whole = _reply_from(data)
-        reply.reasoning, reply.finish = whole.reasoning, whole.finish
+        whole = _reply_from(data, opened=opened)
+        reply.reasoning, reply.finish, reply.lone_close = whole.reasoning, whole.finish, whole.lone_close
         if whole.content:
             if not whole.reasoning:
                 _token_probs(_first_choice(data), token_probs)
             yield whole.content
         return
-    thinking = ThinkFilter()
+    thinking = ThinkFilter(opened=opened, lone=thoughts)
+    held: list[str] = []  # read as reasoning because the template opened the tag: the answer if it never closes
+    sent = ""  # the content as sent, think tags and all
     for line in response.iter_lines():
         line = line.strip()
         if line.startswith("error:"):
@@ -1081,21 +1571,54 @@ def _stream_pieces(response: httpx.Response, reply: Reply, token_probs: list | N
             continue
         if isinstance(data, dict) and data.get("error") and not data.get("choices"):
             _stream_error(data["error"])
+        if isinstance(data, dict) and isinstance(data.get("usage"), dict):
+            reply.usage = data["usage"]
         choice = _first_choice(data)
         part = choice.get("delta") if isinstance(choice.get("delta"), dict) else choice.get("message")
         part = part if isinstance(part, dict) else {}
-        if _reasoning_text(part):
-            reply.reasoning += _reasoning_text(part)
+        # A line break or a space between the reasoning's words is kept, for the Thinking box to show as sent.
+        reasoned = _reasoning_text(part, spaces=bool(reply.reasoning))
+        if reasoned:
+            reply.reasoning += reasoned
         if choice.get("finish_reason"):
             reply.finish = str(choice["finish_reason"])
-        piece = thinking.feed(part.get("content") if isinstance(part.get("content"), str) else "")
+        content = part.get("content") if isinstance(part.get("content"), str) else ""
+        if content or reasoned:
+            # Timed for the estimates: the first piece comes once the model has read the prompt.
+            reply.last_at = time.perf_counter()
+            reply.first_at = reply.first_at or reply.last_at
+            reply.pieces += 1
+        if raw is not None and content:
+            raw.append(content)
+        sent += content
+        piece = thinking.feed(content)
         if thinking.saw and not reply.reasoning:
             reply.reasoning = "<think>"
+        tagged = thinking.take_thought()
+        if thinking.relabelled:
+            # A "</think>" it never opened: what came before it, passed on as the answer, was its reasoning.
+            thinking.relabelled = False
+            yield WasThinking()
+            tagged = sent.split(_THINK_CLOSE, 1)[0].strip() + tagged
+        if opened and not thinking.closed:
+            held.append(tagged)
+        if thoughts and (thought := reasoned + tagged):
+            yield Thought(thought)
         if piece:
             # Only the answer's tokens: not its reasoning, which comes in its own field or between think tags.
             _token_probs(choice, token_probs)
             yield piece
     rest = thinking.flush()
+    tagged = thinking.take_thought()
+    reply.lone_close = not opened and _THINK_CLOSE in sent and _THINK_OPEN not in sent.split(_THINK_CLOSE, 1)[0]
+    if opened and not thinking.closed and reply.finish != "length":
+        # Read as reasoning, but it never closed the tag and ended as usual: this time it didn't think, and that was
+        # the answer (shown in the Thinking box as it came, then as the answer).
+        reply.unclosed = True
+        reply.reasoning = "" if reply.reasoning == _THINK_OPEN else reply.reasoning
+        rest = "".join(held) + tagged + rest
+    elif thoughts and tagged:
+        yield Thought(tagged)
     if rest:
         yield rest
 
@@ -1112,11 +1635,14 @@ def _stream_error(error) -> None:
     if isinstance(error, dict):
         error = error.get("error") or error
     if isinstance(error, dict):
-        error = error.get("message") or json.dumps(error)
-    text = " ".join(str(error or "unknown error").split())[:200]
-    if _OVERFLOW_RE.search(text):
+        error = error.get("message") or error.get("detail") or json.dumps(error)
+    said = " ".join(str(error or "unknown error").split())
+    text = said[:200]
+    if _OVERFLOW_RE.search(said):
         raise ContextOverflow(text)
-    raise httpx.HTTPError(f"the model server stopped with an error ({text})")
+    failed = httpx.HTTPError(f"the model server stopped with an error ({text})")
+    failed.said = said  # all of it: a memory error can be named only past the first 200 characters
+    raise failed
 
 
 class ContextOverflow(RuntimeError):
@@ -1134,28 +1660,56 @@ _OVERFLOW_RE = re.compile(
 )
 _tools_rejected: set[str] = set()
 _context_raised: set[str] = set()
+# The context each model CloseDesk raised was loaded with by it, by instance: when LM Studio has loaded it again since
+# with another (it unloaded it while idle, the user ejected it, and a question had it loaded with LM Studio's own
+# default), it is a new instance, and the longer context is tried again.
+_context_tried: dict[str, int] = {}
+# The context CloseDesk itself gave each chat model (raising it, or loading it when chosen in Settings), by LM Studio's
+# key. A model the user loaded at a size they chose isn't here, nor is one they loaded again since: it is left alone.
+_context_given: dict[str, int] = {}
+# The context a model CloseDesk raised had before, by key: it is loaded back with it when the longer one runs out of
+# memory, or when the minimum is lowered to it.
+_context_before: dict[str, int] = {}
+# The context a model CloseDesk raised last answered with, by key: when the longer one runs out of memory it is loaded
+# back with this (after a second raise, the size that worked rather than the user's first one).
+_context_back: dict[str, int] = {}
+# The context each model CloseDesk loaded back ran out of memory answering with, by key, for Settings to say so (not
+# that LM Studio couldn't load it). Forgotten when the minimum is changed or the model is loaded afresh.
+_context_stepped: dict[str, int] = {}
+# The context a model CloseDesk loaded ran out of memory answering with when there was no smaller size to load it with
+# (4,096 tokens), by key: it doesn't fit this computer, and Settings says so. Forgotten as ``_context_stepped`` is.
+_context_no_smaller: dict[str, int] = {}
 _context_lock = threading.Lock()
 
 # Models answering a request right now (a chat answer, the overnight reading, a page read), by the name the request
-# gave, with when each request started: none of them is unloaded or reloaded under the request. A request older than
-# IN_USE_SECONDS no longer counts (a stream left unclosed must not keep the model "busy" for good).
-_in_use: dict[str, list[float]] = {}
+# gave, with when each request started and how long it may take: none of them is unloaded or reloaded under the
+# request. A request may take as long as it waits for the model (up to 2 hours, or 4 for the reading's longer wait)
+# and IN_USE_SECONDS more to write; past that it no longer counts (a stream left unclosed must not keep the model
+# "busy" for good).
+_in_use: dict[str, list[tuple[float, float]]] = {}
 _in_use_lock = threading.Lock()
 IN_USE_SECONDS = 1800.0
 
 
+def _wait_of(timeout) -> float:
+    """The seconds a request waits for the model, from its ``timeout`` (an httpx.Timeout or a number)."""
+    if isinstance(timeout, httpx.Timeout):
+        timeout = timeout.read
+    return float(timeout) if isinstance(timeout, (int, float)) and timeout > 0 else 0.0
+
+
 @contextmanager
-def _using(model: str):
-    started = time.monotonic()
+def _using(model: str, timeout=None):
+    entry = (time.monotonic(), IN_USE_SECONDS + _wait_of(timeout))
     with _in_use_lock:
-        _in_use.setdefault(model, []).append(started)
+        _in_use.setdefault(model, []).append(entry)
     try:
         yield
     finally:
         with _in_use_lock:
             requests = _in_use.get(model, [])
-            if started in requests:
-                requests.remove(started)
+            if entry in requests:
+                requests.remove(entry)
             if not requests:
                 _in_use.pop(model, None)
 
@@ -1164,7 +1718,7 @@ def model_busy(*names: str) -> bool:
     """A request is being answered by one of these models (instance ids or keys) right now."""
     now = time.monotonic()
     with _in_use_lock:
-        return any(now - started < IN_USE_SECONDS for name in names if name for started in _in_use.get(name, []))
+        return any(now - started < allowed for name in names if name for started, allowed in _in_use.get(name, []))
 
 
 # A big model can take LM Studio longer to load than CloseDesk waits for the answer to its load request. The load goes
@@ -1238,6 +1792,21 @@ def _load(settings: Settings, root: str, key: str, context: int, timeout: httpx.
         raise StillLoading(key) from exc
 
 
+def wait_for_load(settings: Settings, key: str, seconds: float | None = None) -> bool:
+    """Wait for a load LM Studio has under way (one a request started, or one CloseDesk stopped waiting for) to finish,
+    for up to ``seconds`` (``LOAD_WAIT_SECONDS``): True once the model is in, False when LM Studio stopped or the time
+    ran out."""
+    root = lm_studio_root(settings.llm_base_url.rstrip("/"))
+    deadline = time.monotonic() + (LOAD_WAIT_SECONDS if seconds is None else seconds)
+    while True:
+        if _is_loaded(settings, key):
+            _pending_loads.pop(key, None)
+            return True
+        if time.monotonic() >= deadline or _gone(settings, root):
+            return False
+        time.sleep(LOAD_POLL_SECONDS)
+
+
 def _raise_for(response: httpx.Response) -> None:
     if response.status_code >= 400:
         text = response.text[:600]
@@ -1259,11 +1828,38 @@ def context_length(settings: Settings) -> int:
     return check_model(settings).context_length or settings.chat_context_tokens
 
 
+def _fitting_context(settings: Settings, status: ModelStatus, key: str, *, want: int | None = None) -> int:
+    from controller_inbox import model_fit  # it imports this module
+
+    return model_fit.auto_context(settings, status, key, want=want)
+
+
 def context_target(settings: Settings, status: ModelStatus | None = None) -> int:
-    """The context the model should have: ``min_context_tokens``, but no more than the model supports."""
+    """The context the model should have: ``min_context_tokens``, but no more than the model supports, and for a
+    model too big for that on this computer, the most that fits (``model_fit.auto_context``)."""
     status = status or check_model(settings)
+    if status.key:
+        return _fitting_context(settings, status, status.key)
     want = settings.min_context_tokens
     return min(want, status.max_context) if want and status.max_context else want
+
+
+def context_capped(settings: Settings, status: ModelStatus | None = None) -> bool:
+    """The model answering is asked for less than Setup's minimum (and the most it supports) because it is too big for
+    this computer's memory with more."""
+    status = status or check_model(settings)
+    want = settings.min_context_tokens
+    supported = min(want, status.max_context) if want and status.max_context else want
+    return bool(status.key and want and context_target(settings, status) < supported)
+
+
+def raise_tried(status: ModelStatus) -> bool:
+    """CloseDesk has tried to raise the context of the model loaded now: not again, unless LM Studio has loaded it
+    again since with another size than CloseDesk gave it."""
+    if status.model not in _context_raised:
+        return False
+    given = _context_tried.get(status.model)
+    return not given or given == status.context_length
 
 
 def needs_more_context(settings: Settings) -> bool:
@@ -1273,14 +1869,154 @@ def needs_more_context(settings: Settings) -> bool:
         status.active
         and status.key
         and 0 < status.context_length < context_target(settings, status)
-        and status.model not in _context_raised
+        and not raise_tried(status)
     )
 
 
-def set_min_context(settings: Settings, tokens: int) -> None:
-    """Change the minimum while running; a model that couldn't be raised before is tried again at the new size."""
+def set_min_context(settings: Settings, tokens: int) -> str:
+    """Change the minimum while running; a model that couldn't be raised before is tried again at the new size.
+
+    A model CloseDesk loaded or raised with more than the new minimum is reloaded with it now (one it raised, with no
+    less than it had before; at Off, with what it had before). A model the user loaded at a size they chose is left as
+    it is. Returns what happened ("" when nothing did)."""
     settings.min_context_tokens = tokens
     _context_raised.clear()
+    _context_tried.clear()
+    _context_stepped.clear()
+    _context_no_smaller.clear()
+    if not _context_given:  # nothing CloseDesk sized (at the start, always): LM Studio isn't asked
+        return ""
+    # Another load holds the lock for as long as LM Studio takes: say so rather than wait for it.
+    if not _context_lock.acquire(timeout=CONTEXT_WAIT_SECONDS):
+        return "Left the model as it is for now: LM Studio is loading a model. Save again once it is done."
+    try:
+        return _fit_to_minimum(settings, tokens)
+    finally:
+        _context_lock.release()
+
+
+def _fit_to_minimum(settings: Settings, tokens: int) -> str:
+    status = check_model(settings, use_cache=False)
+    said = []
+    for instance, (key, size) in status.instances.items():
+        if not size or _context_given.get(key) != size:
+            continue  # the user's own, or loaded again in LM Studio since
+        before = _context_before.get(key, 0)
+        # The new minimum, or what fits of it for a model too big for it here; never less than the user had.
+        want = max(_fitting_context(settings, status, key, want=tokens), before) if tokens else before
+        most = status.chat_models.get(key, 0)
+        want = min(want, most) if want and most else want
+        if not 0 < want < size:
+            continue
+        if model_busy(instance, key):
+            said.append(f"Left {key} at {size:,} tokens for now: it is answering another request. Save again once it is done.")
+            continue
+        problem = _reload_at(settings, status, instance, key, want)
+        if problem:
+            said.append(problem)
+            continue
+        if want == before:  # as the user had it: theirs again
+            _context_given.pop(key, None)
+            _context_before.pop(key, None)
+            _context_back.pop(key, None)
+        else:
+            _context_given[key] = want
+            if _context_back.get(key, 0) >= want:
+                _context_back.pop(key, None)
+        said.append(f"Reloaded {key} in LM Studio with {'an' if str(want).startswith('8') else 'a'} {want:,}-token context.")
+    return " ".join(said)
+
+
+def _reload_at(settings: Settings, status: ModelStatus, instance: str, key: str, size: int) -> str:
+    """Unload ``instance`` and load ``key`` again with ``size`` tokens. Returns what went wrong, or ""."""
+    root = lm_studio_root(status.base_url)
+    timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
+    try:
+        _no_load_pending(settings)
+        http_method("post")(root + "/api/v1/models/unload", json={"instance_id": instance}, headers=auth_headers(settings), timeout=timeout).raise_for_status()
+    except StillLoading as exc:
+        return str(exc)
+    except httpx.HTTPError as exc:
+        return f"Couldn't reload {key} with a {size:,}-token context ({_short_error(exc)})."
+    try:
+        _load(settings, root, key, size, timeout)
+    except StillLoading as exc:
+        return str(exc)
+    except httpx.HTTPError as exc:
+        _context_given.pop(key, None)
+        _context_before.pop(key, None)
+        _context_back.pop(key, None)
+        return f"LM Studio couldn't load {key} again with a {size:,}-token context ({_lm_studio_said(exc)}). Load it again in LM Studio."
+    finally:
+        _status_cache.clear()
+    return ""
+
+
+def context_fits(settings: Settings, status: ModelStatus | None = None) -> bool:
+    """Whether the loaded model still fits in this computer's memory with the context CloseDesk would raise it to, by
+    model_roles' estimate. True when that can't be told: LM Studio doesn't give the model's size, it runs on another
+    computer, or this computer's memory can't be read."""
+    from controller_inbox import model_fit  # it imports this module
+
+    status = status or check_model(settings)
+    if not status.key:
+        return True
+    # Against the memory model_fit fits it into: on a PC, its graphics card when it runs there (a context past the
+    # card's memory slows every answer), else the computer's memory, as Load and use loads it. With the context
+    # CloseDesk asks for: Setup's minimum, or what fits of it for a big model.
+    return model_fit.fits_with(settings, status, status.key, context_target(settings, status))
+
+
+def _smaller_context(size: int) -> int:
+    """The next of Setup's steps below ``size``, no smaller than 4,096 tokens; 0 when there is none."""
+    from controller_inbox import model_fit  # it imports this module
+
+    smaller = [step for step in model_fit._steps() if model_fit.SMALLEST_CONTEXT <= step < size]
+    return max(smaller, default=0)
+
+
+def step_back_context(settings: Settings) -> str:
+    """An answer ran out of memory: a model whose context CloseDesk raised is loaded back with the context it last
+    answered with (rather than a step down that may not fit either); one CloseDesk loaded itself (at the start, or
+    with Load and use), or one already loaded back, is loaded again with the next smaller of Setup's steps, down to
+    4,096 tokens. Either way it isn't raised again until the minimum is changed in Settings. Returns what happened, or
+    "" when the model's context isn't CloseDesk's doing (the user loaded it as it is), there is no smaller size to
+    go to, or it can't be reloaded now."""
+    if not _context_lock.acquire(timeout=CONTEXT_WAIT_SECONDS):
+        return ""
+    try:
+        status = check_model(settings, use_cache=False)
+        key, loaded = status.key, status.context_length
+        if not (key and loaded > 0 and _context_given.get(key) == loaded):
+            return ""
+        before = _context_before.get(key, 0)
+        back = _context_back.get(key, 0)
+        answered = 0 < back < loaded
+        if not answered:  # no size it answered with: a step down, never below the size the user had it at
+            back = max(_smaller_context(loaded), before)
+        if not 0 < back < loaded:
+            if not answered and not _smaller_context(loaded):  # already the smallest: it doesn't fit at all
+                _context_no_smaller[key] = loaded
+            return ""
+        if model_busy(status.model, key):  # unloading it would cut off another answer or the overnight reading
+            return ""
+        _context_raised.add(status.model)
+        _context_tried.pop(status.model, None)  # ran out of memory: not raised again, however it is loaded next
+        problem = _reload_at(settings, status, status.model, key, back)
+        if problem:
+            return problem
+        _context_back.pop(key, None)
+        _context_stepped[key] = loaded
+        if back == before:  # as the user had it: theirs again
+            _context_given.pop(key, None)
+            _context_before.pop(key, None)
+        else:
+            _context_given[key] = back
+        how = "back" if answered else "again"
+        article = "an" if str(back).startswith("8") else "a"
+        return f"Loaded {key} {how} with {article} {back:,}-token context: {loaded:,} didn't fit in this computer's memory."
+    finally:
+        _context_lock.release()
 
 
 def ensure_context(settings: Settings) -> str:
@@ -1307,6 +2043,10 @@ def ensure_context(settings: Settings) -> str:
 def _reload_with_context(settings: Settings) -> str:
     status = check_model(settings)
     want = context_target(settings, status)
+    if not context_fits(settings, status):
+        _context_raised.add(status.model)  # said once
+        _context_tried.pop(status.model, None)
+        return f"Kept {status.key} at its {status.context_length:,}-token context: a {want:,}-token one wouldn't fit in this computer's memory."
     if model_busy(status.model, status.key):
         # Unloading it would cut off the overnight reading, a page read or another chat partway; tried again later.
         return f"Left {status.key} as it is for now: it is answering another request. The longer context is tried on a later question."
@@ -1315,6 +2055,7 @@ def _reload_with_context(settings: Settings) -> str:
     except StillLoading as exc:
         return str(exc)
     _context_raised.add(status.model)
+    _context_tried.pop(status.model, None)
     root = lm_studio_root(status.base_url)
     timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
     try:
@@ -1335,8 +2076,28 @@ def _reload_with_context(settings: Settings) -> str:
     finally:
         _status_cache.clear()
     if not errors:
-        most = " (the most it supports)" if want < settings.min_context_tokens else ""
-        return f"Reloaded {status.key} in LM Studio with a {want:,}-token context{most} so whole attachments fit."
+        # The earliest: the size the user had it at. A model CloseDesk loaded itself (sized by it, with no size of the
+        # user's kept) has none, so lowering the minimum or running out of memory goes on sizing it as CloseDesk's.
+        ours = _context_given.get(status.key) == status.context_length and status.key not in _context_before
+        if not ours:
+            _context_before.setdefault(status.key, status.context_length)
+        _context_back[status.key] = status.context_length  # the latest: the size it answered with before this
+        _context_given[status.key] = want
+        _context_tried[status.model] = want
+        supported = min(settings.min_context_tokens, status.max_context) if status.max_context else settings.min_context_tokens
+        most = (
+            " (the most that fits this computer)" if want < supported
+            else " (the most it supports)" if want < settings.min_context_tokens else ""
+        )
+        from controller_inbox.agent import RECOMMENDED_CONTEXT  # it imports the store and the rest
+
+        article = "an" if str(want).startswith("8") else "a"
+        # Whole attachments fit only with the recommended context or more; below it they are still read in sections.
+        why = (
+            " so whole attachments fit." if want >= RECOMMENDED_CONTEXT
+            else ". Long attachments are still read a section at a time."
+        )
+        return f"Reloaded {status.key} in LM Studio with {article} {want:,}-token context{most}{why}"
     if len(errors) == 1:
         return f"LM Studio couldn't load {status.key} with a {want:,}-token context ({errors[0]}), so it stays at {status.context_length:,}."
     return f"LM Studio couldn't reload {status.key} ({errors[-1]}). Load it again in LM Studio."
@@ -1400,18 +2161,35 @@ def forget_reader_failures() -> None:
     _reader_failed.clear()
 
 
+def _server_words(exc: httpx.HTTPError) -> str:
+    """All of what the model server said about a failure, or "" when it said nothing: ``{"error": "..."}``,
+    ``{"error": {"message": "..."}}``, ``{"message": "..."}`` (llama.cpp) or ``{"detail": "..."}``, a reply in plain
+    text, or the error it wrote into a stream."""
+    if isinstance(getattr(exc, "said", None), str):
+        return exc.said
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return ""
+    try:
+        data = exc.response.json()
+    except (ValueError, httpx.StreamError):  # not JSON, or a streamed reply that wasn't read
+        data = None
+    if isinstance(data, dict):
+        error = data.get("error")
+        for said in (error.get("message") if isinstance(error, dict) else error, data.get("message"), data.get("detail")):
+            if isinstance(said, str) and said.strip():
+                return said.strip()
+        return ""
+    try:
+        text = exc.response.text.strip()
+    except httpx.StreamError:
+        return ""
+    return "" if data is not None or text.startswith("<") else text  # a web page isn't words to show
+
+
 def _lm_studio_said(exc: httpx.HTTPError) -> str:
-    """LM Studio's own reason for refusing (``{"error": "..."}`` or ``{"error": {"message": "..."}}``), such as
-    running short of memory, rather than the bare status code."""
-    if isinstance(exc, httpx.HTTPStatusError):
-        try:
-            error = exc.response.json().get("error")
-        except (ValueError, AttributeError, httpx.StreamError):  # a streamed reply that wasn't read
-            error = None
-        said = error.get("message") if isinstance(error, dict) else error
-        if isinstance(said, str) and said.strip():
-            return said.strip()[:200]
-    return _short_error(exc)
+    """LM Studio's own reason for refusing, such as running short of memory, rather than the bare status code."""
+    said = _server_words(exc)
+    return said[:200] if said else _short_error(exc)
 
 
 # Chat models LM Studio couldn't load lately, with when: not asked for again on CloseDesk's own (the start's automatic
@@ -1423,6 +2201,26 @@ _chat_load_failed: dict[str, float] = {}
 def load_failed_lately(key: str) -> bool:
     failed = _chat_load_failed.get(key) if key else None
     return failed is not None and time.monotonic() - failed < READER_RETRY_SECONDS
+
+
+def chat_load_size(settings: Settings, key: str) -> int:
+    """The context to have LM Studio load ``key`` with before a question's first call, when it isn't loaded: Setup's
+    minimum, or what fits of it here. Left to LM Studio otherwise, which loads it with its own default when the question
+    names it (and the next question then unloads it and loads it again with the minimum: two loads, minutes each for a
+    big model). 0 when it is left to LM Studio: not LM Studio, not one of its downloaded chat models, another chat model
+    loaded, a load already under way, one that failed lately, or no minimum."""
+    status = check_model(settings)
+    if not (status.lm_studio and key in status.chat_models) or load_failed_lately(key):
+        return 0
+    reader = (settings.vision_model or "").strip()
+    if any(
+        not document_reader(model) and not document_reader(instance) and reader not in (model, instance)
+        for instance, (model, _size) in status.instances.items()
+    ):
+        return 0
+    if key in _pending_loads or model_busy(key):
+        return 0
+    return _fitting_context(settings, status, key)
 
 
 def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) -> str:
@@ -1486,9 +2284,10 @@ def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) 
                     return f"LM Studio couldn't unload {model} to make room ({_lm_studio_said(exc)}).{load_back(unloaded)}"
                 unloaded.append((model, size))
             if not any(model == key for model, _size in status.instances.values()):
-                want, most = settings.min_context_tokens, status.chat_models[key]
+                # Setup's minimum, or for a model too big for that on this computer the most that fits.
+                size = _fitting_context(settings, status, key)
                 try:
-                    load(key, min(want, most) if want and most else want)
+                    load(key, size)
                 except StillLoading as exc:  # nothing is loaded back beside it
                     return str(exc)
                 except httpx.HTTPError as exc:
@@ -1496,16 +2295,29 @@ def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) 
                     said = _lm_studio_said(exc)
                     advice = f" {MEMORY_ADVICE}" if out_of_memory(said) else ""
                     return f"LM Studio couldn't load {key} ({said}).{load_back(unloaded)}{advice}"
+                # Loaded by CloseDesk: lowering the minimum reloads it smaller. There is no size of the user's to go back to.
+                _context_before.pop(key, None)
+                _context_back.pop(key, None)
+                if size:
+                    _context_given[key] = size
+                else:
+                    _context_given.pop(key, None)
         finally:
             _status_cache.clear()
         _context_raised.discard(key)  # loaded afresh: a longer context may be tried again
+        _context_tried.pop(key, None)
+        _context_stepped.pop(key, None)
+        _context_no_smaller.pop(key, None)
         _chat_load_failed.pop(key, None)
         remember_model(settings, key)
         return ""
 
 
-def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict], *, max_tokens: int = 500) -> ToolReply:
-    """One non-streamed turn that may ask for tools. Raises ``ToolsUnsupported`` when tools are refused."""
+def chat_with_tools(
+    settings: Settings, messages: list[dict], tools: list[dict], *, max_tokens: int = 500, limit: float | None = None
+) -> ToolReply:
+    """One non-streamed turn that may ask for tools. Raises ``ToolsUnsupported`` when tools are refused. ``limit``: as
+    for ``complete_text``."""
     model, effort, budget = _chat_plan(settings, max_tokens)
     if model in _tools_rejected:
         raise ToolsUnsupported(model)
@@ -1518,10 +2330,11 @@ def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict],
     ]
     for _attempt in range(2):
         url, payload = _chat_request(settings, messages, budget, stream=False)
+        sent = budget
         payload["tools"] = tools
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(http_method("post"), url, payload, settings, timeout=max(_timeout(settings, budget), CHAT_TIMEOUT))
+        response = _post_chat(_model_http("post"), url, payload, settings, timeout=max(_timeout(settings, budget), limit or CHAT_TIMEOUT))
         text = response.text[:600]
         if response.status_code in _RETRYABLE and re.search(r"\btools?\b|function", text, re.I) and not _OVERFLOW_RE.search(text):
             # This question goes on without tools. The model is only remembered as having none when the server
@@ -1537,11 +2350,11 @@ def chat_with_tools(settings: Settings, messages: list[dict], tools: list[dict],
         reply = _tool_reply(data)
         if reply.content or reply.calls:
             return reply
-        plan = _retry_plan(model, payload.get("reasoning_effort"), budget, Reply(reply.content, reply.reasoning, reply.finish))
+        plan = _retry_plan(settings, model, payload.get("reasoning_effort"), budget, Reply(reply.content, reply.reasoning, reply.finish))
         if plan is None:
             break
         effort, budget = plan
-    raise EmptyReply(Reply(reply.content, reply.reasoning, reply.finish).why_unusable())
+    raise _empty_reply(settings, model, sent, Reply(reply.content, reply.reasoning, reply.finish))
 
 
 _TEXT_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*(?:</tool_call>|\Z)", re.S)
@@ -1737,18 +2550,53 @@ def _short_error(exc: Exception) -> str:
 
 
 # How LM Studio (llama.cpp, MLX) and other servers say the model ran short of memory: LM Studio's bare "Compute error"
-# is a Mac's graphics memory running out partway through an answer, most often with a model too big for it.
+# is a Mac's graphics memory running out partway through an answer, most often with a model too big for it. With a
+# large model: llama.cpp's "llama_decode returned -3" (the answer couldn't be worked out in the memory there was),
+# Vulkan's "ErrorOutOfDeviceMemory", MLX's "greater than the maximum allowed buffer size", C++'s "bad_alloc", and
+# LM Studio's "has crashed" or an exit code near 2^64 (a Windows crash code, most often memory running out).
 _MEMORY_RE = re.compile(
-    r"compute\W*error|out of (?:device |gpu )?memory|outofmemory|insufficient (?:system |gpu )?memory|"
+    r"compute\W*error|out\W*of\W*(?:device\W*|gpu\W*|host\W*)?memory|insufficient (?:system |gpu )?memory|"
     r"not enough (?:system |gpu )?memory|failed to allocate|unable to allocate|cannot allocate|alloc(?:ation)? failed|"
     r"memory (?:is )?exhausted|kiogpucommandbuffercallbackerror|insufficient system resources|"
-    r"requires? more (?:system |gpu )?memory",
+    r"requires? more (?:system |gpu )?memory|llama_decode returned -3\b|maximum allowed buffer size|bad_alloc|"
+    r"model has crashed|exit code:?\s*18446744\d{12}",
     re.I,
 )
 MEMORY_ADVICE = (
     "The model is likely too big for this computer's memory. CloseDesk only needs a small one: a 3B to 8B model is "
-    "plenty and answers faster. Choose one in Settings, or lower the minimum context there to 8k."
+    "plenty and answers faster. Choose one in Settings, or lower the minimum context there to 8k: a model CloseDesk "
+    "loaded is reloaded with it (one you loaded in LM Studio, reload there with a smaller Context Length)."
 )
+
+
+def memory_advice(settings: Settings) -> str:
+    """``MEMORY_ADVICE`` fitted to the model loaded in LM Studio: a shorter minimum context is offered only when it
+    would reload the model with less (one CloseDesk sized), and one the user loaded is told the Context Length to
+    reload it with in LM Studio (the most that fits here, when CloseDesk can tell)."""
+    try:
+        status = check_model(settings)
+    except Exception:  # noqa: BLE001 - the advice is said all the same
+        return MEMORY_ADVICE
+    key, loaded = status.key, status.context_length
+    if not (status.lm_studio and key and loaded > 0):
+        return MEMORY_ADVICE
+    first = (
+        "The model is likely too big for this computer's memory. CloseDesk only needs a small one: a 3B to 8B model "
+        "is plenty and answers faster."
+    )
+    if _context_given.get(key) == loaded:  # sized by CloseDesk: lowering the minimum reloads it, when that shortens it
+        before = _context_before.get(key, 0)
+        for step in (8192, 4096):
+            if 0 < max(_fitting_context(settings, status, key, want=step), before) < loaded:
+                return (
+                    f"{first} Choose one in Settings, or lower the minimum context there to {step // 1024}k: CloseDesk "
+                    f"reloads {key} with it."
+                )
+        return f"{first} Choose one in Settings."
+    target = context_target(settings, status)
+    if 0 < target < loaded:
+        return f"{first} Choose one in Settings, or reload {key} in LM Studio with Context Length {target:,}, the most that fits here."
+    return f"{first} Choose one in Settings, or reload {key} in LM Studio with a smaller Context Length."
 
 
 def out_of_memory(text: str) -> bool:
@@ -1757,18 +2605,31 @@ def out_of_memory(text: str) -> bool:
 
 
 def ran_out_of_memory(exc: Exception) -> bool:
-    """Whether a model's failure was the server running short of memory, by what it said."""
-    said = _lm_studio_said(exc) if isinstance(exc, httpx.HTTPError) else str(exc)
-    return out_of_memory(said) or out_of_memory(str(exc))
+    """Whether a model's failure was the server running short of memory, by what it said (all of it: a long Metal or
+    CUDA message can name the memory only at its end)."""
+    said = _server_words(exc) if isinstance(exc, httpx.HTTPError) else ""
+    return out_of_memory(said) or out_of_memory(getattr(exc, "said", "")) or out_of_memory(str(exc))
 
 
-def failure_note(exc: Exception) -> str:
-    """Why the chat's model didn't answer, in words a person can act on."""
+def failure_note(exc: Exception, settings: Settings | None = None) -> str:
+    """Why the chat's model didn't answer (it wrote nothing), in words a person can act on. With ``settings``, the
+    memory advice is fitted to the model loaded (``memory_advice``)."""
     if ran_out_of_memory(exc):
-        return "The local model ran out of memory partway through. " + MEMORY_ADVICE
+        advice = memory_advice(settings) if settings is not None else MEMORY_ADVICE
+        return "The local model ran out of memory before it could answer. " + advice
+    if isinstance(exc, ThinksTooLong):
+        return f"The local model didn't answer. {exc}."
+    if isinstance(exc, httpx.TimeoutException) and getattr(exc, "reply_started", ""):
+        doing = "still thinking" if exc.reply_started == "thinking" else "still writing its answer"
+        return (
+            f"The local model was {doing} when it went quiet for longer than CloseDesk waits between words: a big "
+            "model on a busy computer can pause. Ask again; on a slow computer, give it longer in Settings → Local model."
+        )
     if isinstance(exc, httpx.TimeoutException):
         return (
             "The local model took too long to start answering: LM Studio may still be loading it or reading a long "
-            "prompt. Ask again in a minute; on a slow computer, give it longer with CONTROLLER_INBOX_LLM_TIMEOUT."
+            "prompt. Ask again in a minute; on a slow computer, give it longer in Settings → Local model."
         )
-    return f"The local model didn't answer ({str(exc)[:120]})."
+    # The server's own words (LM Studio's "Model is reloading"), not httpx's "Server error '500 ...' for url ...".
+    said = _lm_studio_said(exc) if isinstance(exc, httpx.HTTPError) else str(exc)
+    return f"The local model didn't answer ({' '.join(said.split())[:120]})."

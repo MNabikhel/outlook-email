@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import html
 import json
 import re
 import threading
@@ -189,11 +190,50 @@ def test_a_file_whose_name_starts_another_is_not_read_for_it(store, settings, ma
     assert ws.file(budget, "invoice").filename == "Invoice.pdf"
 
 
+def test_running_out_of_memory_while_checking_steps_the_model_back(store, settings, mail, monkeypatch):
+    """The check pass sends the fullest prompt. When the model ran out of memory there, the draft was shown with
+    "stopped while checking" and the context was never stepped back, so every later question about files ran out of
+    memory in the same place."""
+    budget = mail["Q4 budget draft"]
+    turns = []
+
+    def fake_tools(_settings, messages, tools, *, max_tokens, **_kw):
+        turns.append(1)
+        if len(turns) == 1:
+            return ToolReply("", [{"id": "c1", "name": "note", "arguments": {"text": "D4 (total change) = D2+D3 (Q4 budget.xlsx, Budget)."}}])
+        return ToolReply("The total change is D2+D3 [1].")
+
+    def out_of_memory(_settings, messages, *, max_tokens, **_k):
+        error = httpx.HTTPError("LM Studio stopped")
+        error.said = "Compute error."
+        raise error
+        yield ""
+
+    stepped = []
+
+    def step_back(_settings):
+        stepped.append(True)
+        return "Loaded qwen/qwen3-32b back in LM Studio with an 8,192-token context."
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
+    monkeypatch.setattr(assistant, "chat_with_tools", fake_tools)
+    monkeypatch.setattr(assistant, "stream_text", out_of_memory)
+    monkeypatch.setattr(assistant, "step_back_context", step_back)
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "Plan: none.\nSQL: NONE")
+    events = _events(answer_stream(store, settings, "How is the total change worked out?", email_id=budget.id))
+    text = _text(events)
+    assert local_llm.ran_out_of_memory(httpx.HTTPError("Compute error."))
+    assert stepped == [True], "the context was stepped back"
+    assert "The total change is D2+D3 [1]." in text, "the draft is still the answer"
+    assert "ran out of memory while checking this answer" in text and "with an 8,192-token context" in text, text
+
+
 def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monkeypatch):
     budget = mail["Q4 budget draft"]
     turns = []
 
-    def fake_tools(_settings, messages, tools, *, max_tokens):
+    def fake_tools(_settings, messages, tools, *, max_tokens, **_kw):
         turns.append([dict(m) for m in messages])
         if len(turns) == 1:
             return ToolReply("", [{"id": "c1", "name": "trace_cell", "arguments": {"email": "1", "file": "Q4 budget.xlsx", "sheet": "Budget", "cell": "D4"}}])
@@ -315,7 +355,7 @@ def test_a_full_context_window_is_retried_smaller_and_explained(store, settings,
     monkeypatch.setattr(assistant, "context_length", lambda _s: 2048)
     monkeypatch.setattr(assistant, "reply_budget", lambda _s, _n: 100)
 
-    def tools(_s, messages, _tools, *, max_tokens):
+    def tools(_s, messages, _tools, *, max_tokens, **_kw):
         sizes.append(len(messages[-1]["content"]))
         if len(sizes) == 1:
             raise ContextOverflow("The number of tokens to keep from the initial prompt is greater than the context length")
@@ -335,7 +375,7 @@ def test_an_email_a_tool_found_before_the_context_filled_gets_its_card(store, se
     budget = mail["Q4 budget draft"]
     turns = []
 
-    def tools(_s, messages, _tools, *, max_tokens):
+    def tools(_s, messages, _tools, *, max_tokens, **_kw):
         turns.append(messages[-1]["content"])
         if len(turns) == 1:
             return ToolReply("", [{"id": "c1", "name": "search_mail", "arguments": {"query": "Acme quote"}}])
@@ -570,7 +610,7 @@ def test_a_tool_call_quoted_from_an_email_is_not_run(store, settings, mail, monk
             events.append(next(loop))
     except StopIteration as stop:
         draft = stop.value
-    assert events == [] and store.findings(email.id) == [], "no note was planted"
+    assert [e for e in events if e["type"] != "progress"] == [] and store.findings(email.id) == [], "no note was planted"
     assert len(sent) == 1 and draft.startswith("The email says:") and "Thanks, Maya" in draft
     assert "<tool_call>" not in sent[0], "the email's tags are neutralized before the model sees them"
 
@@ -681,9 +721,9 @@ def test_setup_says_what_will_happen_to_the_model(store, settings, monkeypatch):
     monkeypatch.setattr(local_llm.httpx, "post", server.post)
     settings.llm = True
     client = TestClient(web.create_app(settings, store))
-    assert "The next time you ask something, CloseDesk reloads qwen/qwen3-4b in LM Studio with <b>16,384 tokens</b>" in client.get("/settings").text
+    assert "The next time you ask something, CloseDesk reloads qwen/qwen3-4b in LM Studio with 16,384 tokens" in client.get("/settings").text
     local_llm.ensure_context(settings)
-    assert "LM Studio couldn't load qwen/qwen3-4b with 16,384 tokens. Close other apps or pick a smaller minimum" in client.get("/settings").text
+    assert "LM Studio couldn't load qwen/qwen3-4b with 16,384 tokens. Close other apps or pick a smaller minimum" in html.unescape(client.get("/settings").text)
 
     small = _FakeLMStudio(8192, max_context=8192)
     monkeypatch.setattr(local_llm.httpx, "get", small.get)
@@ -1059,3 +1099,28 @@ def test_an_ordinary_question_naming_an_original_is_no_history_question():
     assert not _HISTORY.search("What was the original due date?")
     assert not _HISTORY.search("Which version of the template is this?")
     assert _HISTORY.search("What happened on this so far?") and _HISTORY.search("How did this start? Show the earlier emails")
+
+
+def test_a_step_back_doesnt_list_the_files_read_twice(store, settings, mail, monkeypatch):
+    """After an answer ran out of memory and the model was loaded back, the answer is asked again and read the same
+    file again: the steps listed "Read invite.ics as the meeting it holds" twice."""
+    budget = mail["Q4 budget draft"]
+    calls = []
+
+    def answer(*_a, **_k):
+        calls.append(1)
+        yield {"type": "step", "text": "Read invite.ics as the meeting it holds"}
+        if len(calls) == 1:
+            raise RuntimeError("Compute error.")
+        yield {"type": "delta", "text": "ok"}
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _settings: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _settings: False)
+    monkeypatch.setattr(assistant, "step_back_context", lambda _settings: "Loaded m back with a 2,048-token context: 4,096 didn't fit in this computer's memory.")
+    monkeypatch.setattr(assistant, "_wait_again", lambda *a, **k: None)
+    monkeypatch.setattr(assistant, "_model_answer", answer)
+    steps = [e["text"] for e in answer_stream(store, settings, "summarize this", email_id=budget.id) if e["type"] == "step"]
+    assert len(calls) == 2
+    assert steps.count("Read invite.ics as the meeting it holds") == 1, steps
+    assert any(step.startswith("Loaded m back") for step in steps)
+

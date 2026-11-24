@@ -22,6 +22,7 @@ NOTICES = {
     "timezone": "Saved. Times and “today” now use this time zone.",
     "context": "Saved. If the model in LM Studio is loaded with less, the next question reloads it with this context.",
     "context-off": "Saved. CloseDesk now uses the model as LM Studio loaded it.",
+    "context-reloaded": "Saved.",
     "fraud-safe": "Saved as not fraud. Mail it covers was checked again, and the fraud check learns from it.",
     "fraud-reported": "Reported as fraud. Its files stay locked, and the fraud check learns from it.",
     "fraud-freemail": "That is a free email service anyone can sign up for, so it can't be trusted as a whole. "
@@ -40,6 +41,9 @@ NOTICES = {
     "chat-model-failed": "The model that answers wasn't changed.",
     "chat-model-busy": "Mail is being processed or a scan read with the model right now. Change the model when it finishes.",
     "chat-model-kept": "Kept. CloseDesk won't suggest another model in its place again.",
+    "model-wait": "Saved. Ask CloseDesk waits this long for this model from now on.",
+    "model-wait-auto": "Saved. CloseDesk works out how long to wait for this model again.",
+    "model-wait-refused": "The wait wasn't changed.",
     "index-failed": "The embedding model didn't answer, so nothing was indexed. Load one in LM Studio and try again.",
     "index-off": "No embedding model found. Load one in LM Studio (for example nomic-embed-text) and try again.",
     "coding-confirmed": "Cost code confirmed. The next invoice from this sender is suggested the same code.",

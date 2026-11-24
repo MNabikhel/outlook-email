@@ -241,7 +241,7 @@ def test_choosing_a_model_too_big_for_this_computer_says_so_on_both_settings_pag
             note = page.locator("#set-chat-too-big")
             assert not note.is_visible(), "the one loaded fits"
             page.select_option("#set-chat", CODER)
-            assert note.is_visible() and "needs about 21 GB" in note.inner_text() and "3B to 8B" in note.inner_text()
+            assert note.is_visible() and "needs about 24 GB" in note.inner_text() and "3B to 8B" in note.inner_text()
             assert page.evaluate("() => document.documentElement.scrollWidth <= innerWidth"), "no sideways scroll"
             page.select_option("#set-chat", CHAT)
             assert not note.is_visible()
@@ -249,7 +249,7 @@ def test_choosing_a_model_too_big_for_this_computer_says_so_on_both_settings_pag
         note = page.locator("[data-too-big-note]")
         assert not note.is_visible()
         page.select_option("#chat-model select[name=model]", CODER)
-        assert note.is_visible() and "needs about 21 GB" in note.inner_text()
+        assert note.is_visible() and "needs about 24 GB" in note.inner_text()
 
 
 def test_a_model_that_fits_better_is_suggested_and_loaded_only_on_a_click(settings, loaded, page, monkeypatch):

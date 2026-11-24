@@ -57,10 +57,11 @@ def test_with_none_used_before_the_most_capable_that_fits_is_loaded(settings, lm
     assert _loads(lm) == [CHAT] and local_llm.remembered_model(settings) == CHAT
 
 
-def test_a_bigger_computer_gets_the_bigger_model(settings, lm, monkeypatch):
+def test_a_bigger_computer_still_gets_a_small_model_first(settings, lm, monkeypatch):
+    # The 27B fits in 64 GB, but an 8B is plenty and answers faster; the 27B can still be chosen in Settings.
     monkeypatch.setattr(model_roles, "computer_memory", lambda: 64 * GB)
     lm.sizes = {CODER: 9 * GB, CHAT: 6 * GB, QWEN8: 5 * GB, GEMMA27: 17 * GB}
-    assert model_choice.load_at_start(settings)["model"] == GEMMA27, "not limited to small models"
+    assert model_choice.load_at_start(settings)["model"] == CHAT
 
 
 def test_document_readers_embeddings_and_coders_are_never_the_first_choice(settings, lm):
@@ -127,8 +128,10 @@ def test_a_load_that_fails_says_why_and_the_mail_is_read_without_a_model(setting
     lm.fails_to_load = {CHAT}
     loaded = model_choice.load_at_start(settings)
     assert loaded["model"] == "" and loaded["failed"]
-    assert loaded["message"].startswith(f"CloseDesk couldn't load {CHAT} in LM Studio. LM Studio couldn't load {CHAT} (not enough memory")
-    assert "filed without a model for now" in loaded["message"]
+    # Said once, not "CloseDesk couldn't load X in LM Studio. LM Studio couldn't load X (...)".
+    assert loaded["message"].startswith(f"LM Studio couldn't load {CHAT} (not enough memory"), loaded["message"]
+    assert loaded["message"].count("couldn't load") == 1 and "filed without a model for now" in loaded["message"]
+    assert loaded["message"].count("Settings") == 1, "told once where to choose another"
     # LM Studio isn't asked to load it again on its own for each email: the reading goes on without a model.
     assert check_model(settings, use_cache=False).model == "" and not llm_active(settings)
     assert read_queue(store, settings)["model"] == "" and lm.asked == []
@@ -281,21 +284,21 @@ def test_a_model_too_big_gets_one_that_fits_suggested(settings, store, lm):
     assert tip["reason"] == "too_big" and tip["suggested"] == CHAT
     # Only what is known: it loaded and answers, so nothing is said about running out of memory or answering faster.
     assert tip["message"] == (
-        f"{GEMMA27} needs about 19 GB of memory with a 16,384-token context and this computer has 16 GB, so the "
-        f"computer may slow down while it answers. {CHAT} fits in its memory."
+        f"{GEMMA27} needs about 22 GB of memory with a 16,384-token context and this computer can give a model about 12 GB "
+        f"of its 16 GB, so the computer may slow down while it answers. {CHAT} fits in its memory."
     )
 
 
 def test_the_context_the_model_was_loaded_with_is_the_one_counted(settings, store, lm):
-    # Setup asks for 32,768 tokens (13 GB with a 9 GB model: too big for 12 GB), but LM Studio loaded it with 16,384
-    # (11 GB): it fits as it is.
+    # Setup asks for 32,768 tokens (14 GB with a 9 GB model: too big for 12 GB), but LM Studio loaded it with 16,384
+    # (12 GB): it fits as it is.
     settings.min_context_tokens = 32768
     lm.contexts = {QWEN8: 16384}
     status = _answering(lm, settings, QWEN8, **{QWEN8: 9 * GB, CHAT: 5 * GB})
     assert model_choice.recommendation(settings, store, status) is None
     lm.contexts = {QWEN8: 32768}
     tip = model_choice.recommendation(settings, store, _answering(lm, settings, QWEN8, **{QWEN8: 9 * GB, CHAT: 5 * GB}))
-    assert tip["reason"] == "too_big" and "about 13 GB of memory with a 32,768-token context" in tip["message"]
+    assert tip["reason"] == "too_big" and "about 14 GB of memory with a 32,768-token context" in tip["message"]
 
 
 def test_nothing_is_suggested_without_a_smaller_model_that_fits(settings, store, lm):
@@ -410,3 +413,98 @@ def test_the_classic_today_page_offers_the_suggestion_too(settings, loaded, lm):
     # Another site's address isn't followed.
     reply = client.post("/settings/chat-model/keep", data={"model": QWEN8, "next": "//evil.example"}, headers=origin, follow_redirects=False)
     assert reply.headers["location"] == "/settings?notice=chat-model-kept#chat-model"
+
+
+def test_mail_isn_t_read_with_a_model_the_load_said_it_couldn_t_get_ready(settings, loaded, lm, monkeypatch):
+    """LM Studio was still loading the model when the wait for it ran out, and Sync now said the mail is filed without
+    a model for now; the same run then sent every email to that model all the same."""
+    from controller_inbox.overnight import read_queue, waiting_for_reading
+
+    remember_model(settings, CHAT)
+    assert waiting_for_reading(loaded, 5)
+    monkeypatch.setitem(local_llm._pending_loads, CHAT, 0.0)
+    monkeypatch.setattr(local_llm, "wait_for_load", lambda *_a, **_kw: False)
+    assert llm_active(settings), "LM Studio lists the model it is loading"
+    result = read_queue(loaded, settings, limit=5)
+    assert result["load"]["failed"] and "filed without a model for now" in result["load"]["message"]
+    assert result["model"] == "" and result["stats"] is None and result["read_ids"] == [], "no email was sent to it"
+
+
+def test_processing_again_after_a_failed_load_still_says_the_mail_is_filed_without_a_model(settings, loaded, lm):
+    """Right after LM Studio couldn't load the model, a second Process new mail said only "Processed. Read 0 new
+    files.": nothing said the waiting mail still wasn't read by a model, or why."""
+    from controller_inbox.overnight import read_queue, waiting_for_reading
+
+    remember_model(settings, CHAT)
+    lm.fails_to_load = {CHAT}
+    assert waiting_for_reading(loaded, 5)
+    first = read_queue(loaded, settings, limit=5)
+    assert first["load"]["failed"]
+    again = read_queue(loaded, settings, limit=5)
+    load = again["load"]
+    assert load and f"LM Studio couldn't load {CHAT} a little while ago" in load["message"], again
+    assert "filed without a model for now" in load["message"] and "Settings" in load["message"]
+    assert not load.get("failed"), "not said as a new failure (an automatic sync keeps quiet about it)"
+    assert len([call for call in lm.calls if call[0] == "load"]) == 1, "LM Studio isn't asked to load it again so soon"
+
+
+# A model that loaded but stopped reading -------------------------------------------------------------------------
+
+
+def _out_of_memory_run(settings, store, monkeypatch, *, kind: str):
+    """Process new mail (``kind`` "process") or Sync now ("outlook") with a model CloseDesk loaded first that then runs
+    out of memory on every email, as a 31B did at 4,096 tokens."""
+    from controller_inbox import outlook_sync, overnight
+    from controller_inbox.local_llm import LocalReader
+    from controller_inbox.pipeline import ingest_demo
+
+    ingest_demo(store, settings)
+    settings.llm = True
+    loaded = {"model": GEMMA27, "message": f"Loaded {GEMMA27} in LM Studio: it answers your questions and reads the mail."}
+    monkeypatch.setattr(model_choice, "ready_to_read", lambda *_a, **_k: dict(loaded))
+
+    def server(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "Compute error."})
+
+    reader = LocalReader(settings, model=GEMMA27, client=httpx.Client(transport=httpx.MockTransport(server)))
+    monkeypatch.setattr(overnight, "LocalReader", lambda *_a, **_k: reader)
+    monkeypatch.setattr(overnight, "llm_active", lambda _s: True)
+    if kind == "process":
+        return overnight.run_overnight(store, settings, sync_graph=False, limit=3, vision_minutes=0, reader=reader)
+    monkeypatch.setattr(overnight, "_sync_outlook", lambda *_a, **_k: {"new": 2})
+    monkeypatch.setattr(outlook_sync, "changed", lambda _report: True)
+    return overnight.outlook_run(store, settings)
+
+
+def test_a_model_that_loaded_but_read_none_of_the_mail_isn_t_said_to_read_it(settings, store, monkeypatch):
+    """0 of 18 emails read, out of memory, and the toast and the classic page still said "Loaded gemma-4-31b in LM
+    Studio: it answers your questions and reads the mail."."""
+    result = _out_of_memory_run(settings, store, monkeypatch, kind="process")
+    assert result["read_by_bionic"] == 0 and result["model_note"].startswith("Stopped reading")
+    assert result["model_load"] == {"message": f"Loaded {GEMMA27} in LM Studio.", "failed": False}
+    client = TestClient(web.create_app(settings, store))
+    job = client.app.state.job
+    assert job.start(lambda progress: result)
+    for _ in range(250):
+        if job.snapshot()["state"] != "running":
+            break
+        threading.Event().wait(0.02)
+    page = client.get("/").text.replace("&#39;", "'")
+    assert '<section class="job error">' in page and "reads the mail" not in page and result["model_note"] in page
+
+
+def test_sync_now_says_when_the_model_stopped_reading_the_new_mail(settings, store, monkeypatch):
+    """Sync now with a model that ran out of memory on every new email said only that Outlook synced and the model
+    loaded: why the mail wasn't read was said by Process new mail alone."""
+    result = _out_of_memory_run(settings, store, monkeypatch, kind="outlook")
+    assert result["model"] == GEMMA27 and result["model_note"].startswith("Stopped reading"), result
+    assert result["model_load"] == {"message": f"Loaded {GEMMA27} in LM Studio.", "failed": False}
+    client = TestClient(web.create_app(settings, store))
+    job = client.app.state.job
+    assert job.start(lambda progress: result, about={"kind": "outlook"})
+    for _ in range(250):
+        if job.snapshot()["state"] != "running":
+            break
+        threading.Event().wait(0.02)
+    page = client.get("/").text.replace("&#39;", "'")
+    assert '<section class="job error">' in page and result["model_note"] in page, page

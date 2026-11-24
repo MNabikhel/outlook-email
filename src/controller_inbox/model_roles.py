@@ -4,7 +4,17 @@ the OCR engine that reads scans the moment they arrive."""
 
 from __future__ import annotations
 
+import math
 import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import threading
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -27,6 +37,10 @@ def chat_row(status: ModelStatus) -> dict:
     row = {"role": "Answers your questions", "model": "", "state": "off", "status": "", "note": ""}
     if status.mode == "off":
         row["status"] = "Turned off in CloseDesk's settings file (.env): answers come from looking things up."
+    elif status.active and status.lm_studio and not status.key and status.model in status.chat_models:
+        # The model used last, downloaded but not loaded now: LM Studio loads it when a question asks for it.
+        row["model"], row["state"] = status.model, "on"
+        row["status"] = "Downloaded: LM Studio loads it when you ask something."
     elif status.active:
         row["model"], row["state"] = status.model, "on"
         context = f" with a {status.context_length:,}-token context" if status.context_length else ""
@@ -101,12 +115,37 @@ def chat_choices(settings: Settings, status: ModelStatus) -> dict | None:
     }
 
 
-# What a model takes beside itself for each token of context it is loaded with (its key-value cache). Models differ
-# a lot; this is about a mid-sized one's, enough to tell a model that fits from one that is far too big.
+GB = 1024**3
+# What a model takes beside its download for each token of context it is loaded with (its key-value cache, at LM
+# Studio's usual 16-bit size). It grows with the model: Llama 3.1 8B (about 5 GB at Q4) takes 128 KB a token, Qwen 2.5
+# 32B (about 20 GB) 256 KB, Llama 3.1 70B (about 43 GB) 320 KB, and older dense 27B to 32B models up to 500 KB. So it
+# is counted as 12 KB a token for each GB of the model, never less than an 8B's 128 KB: about right at 27B to 32B and
+# on the safe side for 70B, for Gemma 3 (most of its layers keep only the last 1,024 tokens) and for
+# mixture-of-experts models, which take less.
 CONTEXT_BYTES_PER_TOKEN = 128 * 1024
-# A share of the memory a model can count on: macOS lets the graphics side use about three quarters of it, and the
-# rest is the computer's, Outlook's and the browser's.
+CONTEXT_BYTES_PER_TOKEN_PER_GB = 12 * 1024
+# The working memory LM Studio sets aside beside the model and its context to work out each answer.
+COMPUTE_BYTES = 1 * GB
+# The share of a PC's memory a model can count on, and of a Mac's with more than 36 GB: macOS lets the graphics side
+# use about three quarters there, and about two thirds on a Mac with 36 GB or less.
 USABLE_SHARE = 0.75
+SMALL_MAC_SHARE = 2 / 3
+SMALL_MAC = 36 * GB
+# Kept for the system, Outlook and the browser, whatever the share leaves.
+KEPT_FOR_APPS = 4 * GB
+# A graphics card with less is too small to hold a model: the model runs in the computer's memory.
+SMALLEST_CARD = 4 * GB
+# Graphics built into the processor, by the name its driver gives it on Windows: "AMD Radeon(TM) Graphics", "AMD
+# Radeon 780M Graphics", "Intel(R) UHD Graphics", "Intel(R) Arc(TM) Graphics". Its memory is a share of the
+# computer's set aside for it, so a model there runs no faster than from the computer's memory. A card of its own
+# is named by its model: "AMD Radeon RX 7800 XT", "AMD Radeon PRO W7600", "Intel(R) Arc(TM) A770 Graphics". The
+# graphics built into Ryzen 2000 and 3000 processors carry RX too ("AMD Radeon(TM) RX Vega 10 Graphics"), so a Vega
+# with a number and then "Graphics" is built in, where a Vega card is named "Radeon RX Vega 64".
+_BUILT_IN = re.compile(r"graphics", re.IGNORECASE)
+_BUILT_IN_VEGA = re.compile(r"\bVega\s*\d+\s+Graphics", re.IGNORECASE)
+_A_CARD = re.compile(r"\bRX\b|\bPRO\b|\bArc(\(TM\))?\s+[AB]\d|NVIDIA|GeForce|Quadro", re.IGNORECASE)
+DRM_CARDS = Path("/sys/class/drm")
+PROBE_SECONDS = 2
 _THIS_COMPUTER = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 
 
@@ -128,9 +167,188 @@ def computer_memory() -> int:
         return 0
 
 
+@lru_cache(maxsize=1)
+def _apple_silicon() -> bool:
+    """A Mac with Apple's own chip, where the model and the computer share one memory."""
+    if sys.platform != "darwin":
+        return False
+    if platform.machine() == "arm64":
+        return True
+    # An Intel build of Python (under Rosetta) says x86_64 on an Apple chip too: the Mac itself says which it is.
+    try:
+        done = subprocess.run(
+            ["sysctl", "-n", "hw.optional.arm64"], capture_output=True, text=True, timeout=PROBE_SECONDS, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (done.stdout or "").strip() == "1"
+
+
+def _nvidia_memory() -> int:
+    """The memory of the biggest NVIDIA card, as nvidia-smi gives it, or 0."""
+    program = shutil.which("nvidia-smi")
+    if not program:
+        return 0
+    try:
+        done = subprocess.run(
+            [program, "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=PROBE_SECONDS, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),  # on Windows, no console flashes up
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    if done.returncode:
+        return 0
+    found = [int(line.strip()) for line in (done.stdout or "").splitlines() if line.strip().isdigit()]
+    return max(found, default=0) * 1024**2  # nvidia-smi gives MiB
+
+
+def _windows_card_memory() -> int:
+    """The memory of the biggest graphics card, as its driver wrote it in the registry, or 0. Windows' WMI
+    (Win32_VideoController.AdapterRAM) stops at 4 GB, so it isn't asked."""
+    try:
+        import winreg
+    except ImportError:
+        return 0
+    cards = r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}"
+    best = 0
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, cards) as listed:
+            for index in range(32):
+                try:
+                    name = winreg.EnumKey(listed, index)
+                except OSError:
+                    break
+                if not name.isdigit():  # "Properties" and the like: not a card
+                    continue
+                try:
+                    with winreg.OpenKey(listed, name) as card:
+                        value, _kind = winreg.QueryValueEx(card, "HardwareInformation.qwMemorySize")
+                        try:
+                            said, _kind = winreg.QueryValueEx(card, "DriverDesc")
+                        except OSError:
+                            said = ""
+                except OSError:
+                    continue
+                if _built_in(str(said or "")):
+                    continue
+                if isinstance(value, bytes):  # some drivers write it as 8 bytes
+                    value = int.from_bytes(value[:8], "little")
+                if isinstance(value, int):
+                    best = max(best, value)
+    except OSError:
+        return 0
+    return best
+
+
+def _built_in(name: str) -> bool:
+    """The graphics named ``name`` is built into the processor (see _BUILT_IN)."""
+    if _BUILT_IN_VEGA.search(name):
+        return True
+    return bool(_BUILT_IN.search(name)) and not _A_CARD.search(name)
+
+
+def _linux_card_memory() -> int:
+    """The memory of the biggest AMD card on Linux, as its driver gives it, or 0. Graphics built into the processor
+    is left out: the driver gives the share of the computer's memory set aside for it as its memory too, but says
+    who made the memory (mem_info_vram_vendor) only for a card with memory of its own."""
+    best = 0
+    for path in DRM_CARDS.glob("card*/device/mem_info_vram_total"):
+        if not (path.parent / "mem_info_vram_vendor").exists():
+            continue
+        try:
+            best = max(best, int(path.read_text().strip()))
+        except (OSError, ValueError):
+            continue
+    return best
+
+
+def _probe_gpu() -> int:
+    """The memory of this PC's graphics card in bytes: 0 when it has none a model runs on, or it can't be told."""
+    found = _nvidia_memory()
+    if not found and os.name == "nt":
+        found = _windows_card_memory()
+    if not found and sys.platform.startswith("linux"):
+        found = _linux_card_memory()
+    return found if found >= SMALLEST_CARD else 0
+
+
+_gpu_found: int | None = None  # what _probe_gpu found this run (None: not looked yet), so it is looked for once
+_gpu_lock = threading.Lock()
+
+
+def gpu_memory() -> int:
+    """The memory of this PC's graphics card (0 when there is none to count), looked for once a run."""
+    global _gpu_found
+    with _gpu_lock:
+        if _gpu_found is None:
+            try:
+                _gpu_found = _probe_gpu()
+            except (OSError, ValueError, subprocess.SubprocessError):
+                _gpu_found = 0
+        return _gpu_found
+
+
+@dataclass(frozen=True)
+class Budget:
+    """The memory a model can take on this computer. ``runs_well``: what it can take and still answer at speed (a
+    PC's graphics card, when it has one); ``loads``: what it can take at all (the computer's own memory, and on a PC
+    with a graphics card the card's beside it, as LM Studio puts what doesn't fit on the card in the computer's
+    memory); ``memory``: the computer's memory in all; ``gpu``: the card's (0 without one); ``mac``: a Mac with Apple's
+    chip."""
+
+    runs_well: int
+    loads: int
+    memory: int
+    gpu: int = 0
+    mac: bool = False
+
+    def said(self) -> str:
+        """Which memory a model was compared against, in words for the warnings."""
+        if self.gpu:
+            return f"this PC's graphics card has {round(self.gpu / GB)} GB"
+        where = "this Mac" if self.mac else "this computer"
+        # Rounded down, as what a model needs is rounded up: "needs about 5 GB, can give about 4 GB", never 4 and 4.
+        return f"{where} can give a model about {int(self.runs_well // GB)} GB of its {round(self.memory / GB)} GB"
+
+    def said_at_all(self) -> str:
+        """What a model can take at all, in words for the out-of-memory warning: on a PC with a graphics card, the
+        card's memory and the computer's together."""
+        if not self.gpu:
+            return self.said()
+        return (
+            f"this PC can give a model about {int(self.loads // GB)} GB: its graphics card's {round(self.gpu / GB)} GB "
+            f"and {int((self.loads - self.gpu) // GB)} GB of its {round(self.memory / GB)} GB of memory"
+        )
+
+
+def model_budget() -> Budget | None:
+    """What this computer can give a model (see ``Budget``), or None when its memory can't be told. A Mac with
+    Apple's chip: the share macOS lets the graphics side use. A PC: three quarters of its memory, and with a graphics
+    card, the card's memory for running well, and the card's and those three quarters together for loading at all.
+    Either way at least KEPT_FOR_APPS of the computer's memory is left for the rest."""
+    memory = computer_memory()
+    if not memory:
+        return None
+    mac = _apple_silicon()
+    share = SMALL_MAC_SHARE if mac and memory <= SMALL_MAC else USABLE_SHARE
+    usable = max(0, int(min(share * memory, memory - KEPT_FOR_APPS)))
+    gpu = 0 if mac else gpu_memory()
+    return Budget(runs_well=gpu or usable, loads=gpu + usable, memory=memory, gpu=gpu, mac=mac)
+
+
 def memory_needed(size_bytes: int, context_tokens: int) -> int:
-    """About what loading a model of ``size_bytes`` (its download) with ``context_tokens`` takes."""
-    return size_bytes + max(0, context_tokens) * CONTEXT_BYTES_PER_TOKEN
+    """About what loading a model of ``size_bytes`` (its download) with ``context_tokens`` takes: the model, its
+    context (more a token for a bigger model) and the working memory beside them."""
+    per_token = max(CONTEXT_BYTES_PER_TOKEN, size_bytes * CONTEXT_BYTES_PER_TOKEN_PER_GB // GB)
+    return size_bytes + max(0, context_tokens) * per_token + COMPUTE_BYTES
+
+
+def room_for(size_bytes: int, smallest: int, budget: Budget) -> int:
+    """The memory a model of ``size_bytes`` is fitted into: what runs at speed (a PC's graphics card) when it fits
+    there with the ``smallest`` context CloseDesk would ask for, else what this computer can give it at all (it runs
+    partly from the computer's memory at any context, so a longer one doesn't slow it more)."""
+    return budget.runs_well if memory_needed(size_bytes, smallest) <= budget.runs_well else budget.loads
 
 
 def on_this_computer(settings: Settings, status: ModelStatus) -> bool:
@@ -144,29 +362,73 @@ def context_for(settings: Settings, status: ModelStatus, key: str) -> int:
     return min(settings.min_context_tokens, most) if settings.min_context_tokens and most else settings.min_context_tokens
 
 
-def fits(settings: Settings, status: ModelStatus, key: str, memory: int) -> bool:
-    """``key`` loads in this computer's ``memory`` with the context Setup asks for (False when its size isn't known)."""
+def fits(
+    settings: Settings, status: ModelStatus, key: str, budget: Budget, *, at_all: bool = False, shorter: bool = False
+) -> bool:
+    """``key`` runs well in this computer's ``budget`` with the context Setup asks for (False when its size isn't
+    known). ``at_all``: it loads at all, though partly from the computer's memory beside the graphics card.
+    ``shorter``: with the shortest context CloseDesk would ask for it (``model_fit.auto_context`` steps a model too
+    big for Setup's down to that), rather than Setup's."""
+    from controller_inbox import model_fit  # it imports this module
+
     size = status.chat_sizes.get(key, 0)
-    return bool(size and memory) and memory_needed(size, context_for(settings, status, key)) <= USABLE_SHARE * memory
+    room = budget.loads if at_all else budget.runs_well
+    tokens = context_for(settings, status, key)
+    if shorter and tokens:
+        tokens = min(tokens, model_fit.SMALLEST_CONTEXT)
+    return bool(size) and memory_needed(size, tokens) <= room
 
 
 def too_big(settings: Settings, status: ModelStatus) -> dict[str, str]:
-    """The downloaded chat models too big to load on this computer with the context Setup asks for, each with why.
-    Nothing when LM Studio doesn't give the sizes, the memory can't be read, or LM Studio is on another computer."""
-    memory = computer_memory()
-    if not status.chat_sizes or not memory or not on_this_computer(settings, status):
+    """The downloaded chat models too big to run well on this computer with the context Setup asks for, each with
+    why: CloseDesk loads it with a shorter context, it runs slowly from the computer's memory, or it doesn't fit at
+    all. A small model (``model_choice.small``) that runs well with the shorter context, or that loads partly beside
+    a graphics card, isn't listed: a smaller one wouldn't help. Nothing when LM Studio doesn't give the sizes, the memory can't be read, or LM Studio
+    is on another computer."""
+    from controller_inbox import model_choice, model_fit  # they import this module
+
+    budget = model_budget()
+    if not status.chat_sizes or not budget or not on_this_computer(settings, status):
         return {}
     found = {}
     for key, size in status.chat_sizes.items():
         tokens = context_for(settings, status, key)
         needed = memory_needed(size, tokens)
-        if needed > USABLE_SHARE * memory:
-            context = f" with a {tokens:,}-token context" if tokens else ""
-            found[key] = (
-                f"{key} needs about {round(needed / 1024**3)} GB of memory{context}, and this computer has "
-                f"{round(memory / 1024**3)} GB in all, so LM Studio will likely run out of memory with it. CloseDesk "
-                "only needs a small model: a 3B to 8B one is plenty and answers faster."
-            )
+        if needed <= budget.runs_well:
+            continue
+        # What CloseDesk would ask LM Studio for: the most of Setup's context that fits.
+        asked = model_fit.auto_context(settings, status, key)
+        shorter = 0 < asked < tokens
+        needed_asked = memory_needed(size, asked) if shorter else needed
+        context = f" with a {tokens:,}-token context" if tokens else ""
+        # What CloseDesk does when it loads the model (at the start, or with Load and use), not what it did: a model
+        # the user loaded in LM Studio is left with the context they gave it.
+        instead = f"when CloseDesk loads it, it asks for a {asked:,}-token context and long attachments are read a section at a time"
+        is_small = model_choice.small(status, key)
+        # Beside a graphics card: how much of it the card can't hold.
+        share = "most" if needed_asked - budget.runs_well > needed_asked / 2 else "part"
+        slowly = f"{share} of it would run from the computer's memory and answer slowly"
+        if shorter and needed_asked <= budget.runs_well:
+            if is_small:
+                continue
+            what = instead
+        elif needed_asked > budget.loads:
+            what = "LM Studio will likely run out of memory with it"
+        elif is_small:
+            # A small model that loads, part of it beside the graphics card: CloseDesk loads one like it itself, and
+            # a smaller one would answer worse.
+            continue
+        elif shorter:
+            what = f"{instead}, and {slowly}"
+        else:
+            what = slowly
+        # What it was compared against: for running out of memory, the card's and the computer's together.
+        compared = budget.said_at_all() if needed_asked > budget.loads else budget.said()
+        smaller = (
+            "A smaller one, such as a 3B, fits better." if is_small
+            else "CloseDesk only needs a small model: a 3B to 8B one is plenty and answers faster."
+        )
+        found[key] = f"{key} needs about {math.ceil(needed / GB)} GB of memory{context}, and {compared}, so {what}. {smaller}"
     return found
 
 

@@ -76,6 +76,25 @@ def test_the_chat_model_isnt_switched_while_an_answer_is_being_written(settings,
     assert server.calls == [] and "Try again once it is done" in said
 
 
+def test_a_request_given_a_long_wait_keeps_the_model_busy_for_as_long(settings, monkeypatch):
+    """The chat can wait up to 2 hours for a big model now. A request counted as busy for 30 minutes only, so a model
+    chosen in Settings 31 minutes into an hour's wait unloaded the model under it and cut the answer off."""
+    settings.llm = None
+    server = LMStudio(loaded=[CODER])
+    _serve(monkeypatch, server)
+    clock = [1000.0]
+    monkeypatch.setattr(local_llm.time, "monotonic", lambda: clock[0])
+    with local_llm._using(CODER, httpx.Timeout(3600.0, connect=5.0)):
+        clock[0] += 31 * 60
+        assert local_llm.model_busy(CODER)
+        assert "Try again once it is done" in local_llm.use_chat_model(settings, CHAT) and server.calls == []
+        clock[0] += 3600
+        assert not local_llm.model_busy(CODER), "a stream left unclosed doesn't keep it busy for good"
+    with local_llm._using(CODER):
+        clock[0] += 31 * 60
+        assert not local_llm.model_busy(CODER), "with no wait of its own, 30 minutes as before"
+
+
 class _NeverShows(LMStudio):
     """A load that times out and doesn't show up in LM Studio's list within CloseDesk's wait."""
 
@@ -261,3 +280,70 @@ def test_reader_closes_its_own_client(settings):
     LocalReader(settings, model="tiny", client=mine).close()
     assert not mine.is_closed
     mine.close()
+
+
+def test_a_stream_asks_for_the_token_counts_and_goes_on_without_them_where_refused(settings, monkeypatch):
+    """A stream leaves the token counts out unless asked, so a reading was never counted and its speed was guessed
+    from the prompt's characters. They are asked for; a server that refuses the request by name is asked without."""
+    settings.llm = None
+    calls = []
+    usage = {"prompt_tokens": 6000, "completion_tokens": 30, "prompt_tokens_details": {"cached_tokens": 1000}}
+    body = (
+        f"data: {json.dumps({'choices': [{'delta': {'content': 'ok'}, 'finish_reason': 'stop'}]})}\n\n"
+        f"data: {json.dumps({'choices': [], 'usage': usage})}\n\ndata: [DONE]\n\n"
+    )
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    _stream_server(monkeypatch, handler)
+    finished: dict = {}
+    assert "".join(local_llm.stream_text(settings, [{"role": "user", "content": "hi"}], finished=finished)) == "ok"
+    assert calls[0]["stream_options"] == {"include_usage": True}
+    assert finished["prompt_tokens"] == 5000 and finished["prompt_counted"] is True
+
+    replies = iter([httpx.Response(400, json={"error": "unknown parameter: stream_options"}), _streamed("ok")])
+    calls.clear()
+
+    def refuses(request):
+        calls.append(json.loads(request.content))
+        return next(replies)
+
+    _stream_server(monkeypatch, refuses)
+    assert "".join(local_llm.stream_text(settings, [{"role": "user", "content": "hi"}])) == "ok"
+    assert "stream_options" in calls[0] and "stream_options" not in calls[1]
+    calls.clear()
+    replies = iter([_streamed("ok")])
+    assert "".join(local_llm.stream_text(settings, [{"role": "user", "content": "hi"}])) == "ok"
+    assert "stream_options" not in calls[0], "asked again after the server refused it"
+
+
+def test_a_retry_keeps_the_first_attempt_s_reading_time(settings, monkeypatch):
+    """A thinking model that ran out of room is asked again with more. LM Studio still has the prompt from the first
+    time and starts the second at once, so that time was recorded as the model's reading of the whole prompt, and a
+    model that reads 30 tokens a second was taken to read thousands."""
+    clock = iter([0.0, 270.0, 280.0, 300.0, 301.0, 310.0])
+    monkeypatch.setattr(local_llm.time, "perf_counter", lambda: next(clock))
+    monkeypatch.setattr(local_llm, "_chat_plan", lambda *a, **k: ("thinker", None, 4000))
+    attempts = []
+
+    def stream_once(settings, messages, budget, effort, reply, **kwargs):
+        attempts.append(budget)
+        reply.first_at, reply.last_at = local_llm.time.perf_counter(), local_llm.time.perf_counter()
+        reply.pieces = 40
+        if len(attempts) == 1:
+            reply.reasoning, reply.finish = "thinking...", "length"
+            reply.usage = {"prompt_tokens": 8000}
+            return
+        reply.finish = "stop"
+        reply.usage = {"prompt_tokens": 8000, "completion_tokens": 40}
+        yield "ok"
+
+    monkeypatch.setattr(local_llm, "_stream_once", stream_once)
+    finished: dict = {}
+    assert "".join(local_llm.stream_text(settings, [{"role": "user", "content": "hi"}], finished=finished)) == "ok"
+    assert len(attempts) == 2
+    assert finished["read_seconds"] == 270.0, "the cached second reading was recorded as the model's reading speed"
+    assert finished["prompt_tokens"] == 8000
+    assert finished["write_seconds"] == 9.0 and finished["written"] == 40

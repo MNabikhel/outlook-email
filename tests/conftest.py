@@ -32,9 +32,18 @@ def _fresh_model_memory():
     caches = (
         local_llm._status_cache,
         local_llm._reasoning_seen,
+        local_llm._opens_think,
+        local_llm._thinks_too_long,
         local_llm._effort_rejected,
         local_llm._tools_rejected,
+        local_llm._usage_rejected,
         local_llm._context_raised,
+        local_llm._context_tried,
+        local_llm._context_given,
+        local_llm._context_before,
+        local_llm._context_back,
+        local_llm._context_stepped,
+        local_llm._context_no_smaller,
         local_llm._reader_failed,
         local_llm._pending_loads,
         local_llm._chat_load_failed,
@@ -48,10 +57,22 @@ def _fresh_model_memory():
     for cache in caches:
         cache.clear()
     memo.clear_all()
+    local_llm._thinking_store = None  # each test's own database
     yield
     for cache in caches:
         cache.clear()
     memo.clear_all()
+    local_llm._thinking_store = None
+
+
+@pytest.fixture(autouse=True)
+def _a_pc_without_a_graphics_card(monkeypatch):
+    """Tests size models for the same computer whatever runs them (a Mac in CI, a PC with a graphics card): a PC
+    whose memory is the one a model runs in. A test for a Mac or a card says so."""
+    from controller_inbox import model_roles
+
+    monkeypatch.setattr(model_roles, "_apple_silicon", lambda: False, raising=False)
+    monkeypatch.setattr(model_roles, "_gpu_found", 0, raising=False)
 
 
 @pytest.fixture(autouse=True)

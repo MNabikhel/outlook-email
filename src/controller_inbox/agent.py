@@ -391,6 +391,12 @@ class Workspace:
     # The table rows picked out and worked out for the question, as the prompt gave them: an answer copying a
     # figure from them read it.
     picked: list[str] = field(default_factory=list)
+    # How long the model answering may take (``model_fit.chat_wait``), in seconds: each of the chat's calls waits this
+    # long for it. 0: the usual wait.
+    wait: float = 0.0
+    # The call to the model under way: its prompt's size in tokens and when it went (``time.monotonic()``), for the
+    # chat's offer of more time when it runs out.
+    call: dict = field(default_factory=dict)
     # What was worked out from a file for this question, by what it was worked out from (the file's text itself and
     # the question): the files are laid out for the prompt two or three times a question.
     _memo: dict = field(default_factory=dict, repr=False, compare=False)
@@ -558,7 +564,11 @@ def query_tables(ws: Workspace, question: str, complete) -> Iterator[dict]:
     """Have the model write a query over the tables in the files the question is about, and run it, once
     per question. Yields chat ``step`` events; the result is kept in ``ws.worked`` for ``file_context``.
     ``complete``: the model call. Anything going wrong leaves the answer to the file text: a model that is
-    down fails again on the answer, and says so there."""
+    down fails again on the answer, and says so there. A model that ran out of time or of memory is raised, so the
+    chat says so (and offers more time) after this call rather than wait as long again for the answer's."""
+    import httpx
+
+    from controller_inbox.local_llm import ran_out_of_memory  # it imports this module
     email = ws.primary()
     if not ws.settings.table_queries or email is None or email.id in ws.worked or not email.attachments:
         return
@@ -579,7 +589,10 @@ def query_tables(ws: Workspace, question: str, complete) -> Iterator[dict]:
         ws.worked[email.id] = tables.render(found)
         count = len(found.rows)
         yield {"type": "step", "text": f"Worked out from the tables with a query ({count} row{'s' if count != 1 else ''})"}
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, httpx.TimeoutException) or ran_out_of_memory(exc):
+            ws.worked.pop(email.id, None)  # asked again (at a smaller context), the query is tried again
+            raise
         return
     finally:
         if tables is not None:

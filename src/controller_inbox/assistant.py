@@ -28,27 +28,35 @@ from urllib.parse import quote
 
 import httpx
 
-from controller_inbox import agent, answer_check, chats, documents, memo, semantic, table_lookup, vision
+from controller_inbox import agent, answer_check, chats, documents, memo, model_fit, semantic, table_lookup, vision
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
+    AskedAgain,
     ContextOverflow,
     EmptyReply,
+    Thought,
     ToolsUnsupported,
+    WasThinking,
     chat_with_tools,
+    chat_load_size,
     check_model,
     complete_text,
     context_length,
+    context_fits,
     context_target,
     ensure_context,
-    MEMORY_ADVICE,
+    step_back_context,
     failure_note,
+    memory_advice,
     ran_out_of_memory,
     llm_active,
+    loaded_now,
     needs_more_context,
     reader_load_problem,
     reply_budget,
     stream_text,
+    use_chat_model,
 )
 from controller_inbox.models import DOCUMENT_LABELS, ActionStatus, DocumentType, EmailRecord, Importance
 from controller_inbox.money import fmt_money
@@ -1464,6 +1472,7 @@ def answer_stream(
     question = (question or "").strip()[:MAX_QUESTION]
     focus = focus or []
     searched: dict[str, Any] = {}
+    asked_about = email_id  # as the page sent it: the offer of more time asks again about the same email
     meeting = asked_meeting(store, settings, question, today, email_id)
     if meeting is not None:
         # "Ask about this meeting": the meeting and the mail about it, not every email that shares a word with its
@@ -1547,11 +1556,27 @@ def answer_stream(
         past = "\n\n".join(part for part in (_held_line(held, "about this meeting" if meeting is not None else "of this conversation")
                                                   + " Tell the user, and to verify by phone before acting on it.", past) if part)
     ws = agent.Workspace(store, settings, list(sources), question=question, current_id=email_id, past=past)
-    state = {"wrote": False, "text": ""}
+    # How long the model answering may take, worked out for it or set by the user (model_fit): every call waits that.
+    wait = model_fit.chat_wait(store, settings)
+    ws.wait = wait.seconds
+    ws.call["model"] = wait.model
+    # A model LM Studio unloaded while idle is loaded again by the first call: that load isn't timed as reading, and
+    # the first call's line says it loads rather than give an estimate of the reading alone. Asked of LM Studio now,
+    # not from the last few seconds' check: a question just after LM Studio loaded the model (or unloaded it) would
+    # be told the model loads when it is in, or be timed with the load as reading.
+    state: dict[str, Any] = {
+        "wrote": False, "text": "", "store": store, "wait": wait, "call": ws.call,
+        "loaded": loaded_now(check_model(settings, use_cache=False), wait.model),
+    }
+    ws.call["loading"] = not state["loaded"]
     offer = None
     if current is not None and _should_read_files(ws, question, focus if about_today else None):
         outcome: dict[str, Any] = {}
         offer = yield from _vision_first(store, settings, ws, current, question, outcome)
+        if outcome.get("ran") and state["loaded"]:
+            # LM Studio loaded the page reader: with room for one model only, it may have unloaded this one for it.
+            state["loaded"] = loaded_now(check_model(settings, use_cache=False), wait.model)
+            ws.call["loading"] = not state["loaded"]
         # Which reading of a scan the answer rests on, for a question about what the files say, as the page reader
         # reads for one: not for "who sent this?".
         about = _ABOUT_FILES.search(question) or agent.named_files(current.attachments, question)
@@ -1571,24 +1596,66 @@ def answer_stream(
             yield offer
         yield {"type": "done"}
         return
+    if not state["loaded"] and (size := chat_load_size(settings, wait.model)):
+        # LM Studio unloaded the model: loaded now with the context CloseDesk asks for, as before mail is read, rather
+        # than by the first call with LM Studio's own default and again with the longer one on the next question.
+        article = "an" if str(size).startswith("8") else "a"
+        how = f"{article} {size:,}-token context"
+        yield {"type": "progress", "state": "reading", "text": f"Loading {wait.model} in LM Studio with {how}", "tokens": 0, "seconds": None, "about": ""}
+        if problem := use_chat_model(settings, wait.model, only_if_none=True):
+            yield {"type": "mode", "mode": "lookup", "note": f"CloseDesk couldn't load {wait.model} in LM Studio to answer. {problem}"
+                   if not problem.startswith("LM Studio couldn't load") else problem}
+            yield {"type": "delta", "text": offline_answer(question, sources, model_failed=True, **lookup)}
+            yield {"type": "done"}
+            return
+        state["loaded"] = True
+        ws.call["loading"] = False
+        yield {"type": "step", "text": f"Loaded {wait.model} in LM Studio with {how}"}
     try:
         if needs_more_context(settings):
-            yield {"type": "step", "text": f"Reloading the model in LM Studio with a {context_target(settings):,}-token context (once)"}
+            if context_fits(settings):  # otherwise it is left as it is, and the step below says so
+                yield {"type": "step", "text": f"Reloading the model in LM Studio with a {context_target(settings):,}-token context (once)"}
             if reloaded := ensure_context(settings):
                 yield {"type": "step", "text": reloaded}
-        yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
+                _wait_again(store, settings, ws, state)  # for the longer prompt the longer context takes
+        shown: set[str] = set()  # the steps listed so far: asked again, the same file read again isn't listed twice
+        try:
+            yield from _steps_once(_model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today), shown)
+        except Exception as exc:
+            # A context CloseDesk raised that ran out of memory: the model is loaded back as it was and asked once more.
+            if state["wrote"] or not ran_out_of_memory(exc) or not (back := step_back_context(settings)):
+                raise
+            yield {"type": "step", "text": back}
+            _wait_again(store, settings, ws, state)
+            ws.evidence.clear()
+            yield from _steps_once(_model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today), shown)
     except Exception as exc:  # any model failure falls back to the lookup answer
+        # Out of time (not out of memory: then the memory advice stands): the chat offers the model more time, with
+        # how long it likely needs, under the answer.
+        more_time = _more_time(state, settings, exc, question, asked_about)
         if state["wrote"]:
-            why = f" {MEMORY_ADVICE}" if ran_out_of_memory(exc) else ""
+            why = f" {memory_advice(settings)}" if ran_out_of_memory(exc) else ""
+            if why and (back := step_back_context(settings)):  # the next question has the room it needs
+                why = f" {back} Ask again."
             yield {"type": "delta", "text": f"\n\n(The local model stopped answering partway.{why})"}
         else:
-            note = failure_note(exc)
+            note = failure_note(exc, settings)
             if isinstance(exc, ContextOverflow):
                 note = "The question and its files didn't fit the model's context window. " + agent.context_advice(
                     context_length(settings), ["the emails and files"], model_server(settings)
                 )
+            elif more_time:
+                note = "The local model needed more time than CloseDesk gives it, so this answer comes from looking things up."
+            elif _had_longest_wait(state, settings, exc):
+                note = (
+                    f"The local model didn't answer within {model_fit.minutes_said(model_fit.MAX_MINUTES * 60)}, the "
+                    "longest CloseDesk waits, so this answer comes from looking things up. A smaller model, or a "
+                    "shorter question, answers sooner."
+                )
             yield {"type": "mode", "mode": "lookup", "note": note}
             yield {"type": "delta", "text": offline_answer(question, sources, model_failed=True, **lookup)}
+        if more_time:
+            yield more_time
     else:
         if not state["wrote"]:
             yield {"type": "mode", "mode": "lookup", "note": "The local model sent an empty answer."}
@@ -1847,10 +1914,21 @@ def _should_read_files(ws: agent.Workspace, question: str, focus) -> bool:
     )
 
 
+def _steps_once(events: Iterator[dict[str, Any]], shown: set[str]) -> Iterator[dict[str, Any]]:
+    """``events`` with each step listed once: one already in ``shown`` is left out."""
+    for event in events:
+        if event.get("type") == "step":
+            if event.get("text") in shown:
+                continue
+            shown.add(event.get("text"))
+        yield event
+
+
 def _model_answer(ws: agent.Workspace, question: str, state: dict, *, history, focus, today) -> Iterator[dict[str, Any]]:
     """Answer with the model; when the prompt overflows its context, try once more with half the text."""
     settings = ws.settings
     about_files = _should_read_files(ws, question, focus)
+    ws.call["reading"] = _reading_text(ws, about_files)
     known = len(ws.sources)
     for attempt in range(2):
         shrink = 2**attempt
@@ -1898,6 +1976,14 @@ def _lone_close(text: str) -> bool:
     return "</think>" in text and "<think>" not in text.split("</think>", 1)[0]
 
 
+class _Begun:
+    """Passed on (by ``_Recorded``, through ``without_echo``) when the model's first words come, before the echo check
+    lets any through: the chat says it is writing from then, not once the first 120 characters are past the check."""
+
+
+_BEGUN = _Begun()
+
+
 class _Recorded:
     """The model's reply as it streams, kept whole: the echo check stops reading where the reply starts repeating
     the instructions, but reasoning that quotes them can still be followed by a "</think>" and the answer."""
@@ -1911,8 +1997,16 @@ class _Recorded:
         self.whole = False  # read to its end, not stopped at an echo
 
     def __iter__(self) -> Iterator[str]:
+        begun = False
         for piece in self.pieces:
-            self.text += piece
+            if isinstance(piece, WasThinking):  # what came so far was reasoning: kept as sent, up to its "</think>"
+                self.text += "</think>"
+                begun = False
+            if isinstance(piece, str):  # not the model's reasoning, passed on to be shown: its reply
+                if piece and not begun:
+                    begun = True
+                    yield _BEGUN
+                self.text += piece
             yield piece
         self.whole = True
 
@@ -1921,6 +2015,10 @@ class _Recorded:
         start = len(self.text)
         try:
             for piece in self.pieces:
+                if isinstance(piece, WasThinking):
+                    self.text += "</think>"
+                if not isinstance(piece, str):
+                    continue
                 self.text += piece
                 if not _lone_close(self.text) and len(self.text) - start > self.LOOK_AHEAD:
                     break
@@ -1931,14 +2029,186 @@ class _Recorded:
             close()
 
 
+def _more_time(state: dict, settings: Settings, exc: Exception, question: str, email_id: str | None) -> dict | None:
+    """The chat's offer of more time after the model ran out of it (``exc``, a timeout), or None for any other
+    failure: how long it was given, how long it likely needs (``model_fit.suggested_minutes``), and the question to
+    ask again once the user saves the new wait."""
+    wait = state.get("wait")
+    if wait is None or not isinstance(exc, httpx.TimeoutException) or ran_out_of_memory(exc):
+        return None
+    # The call that ran out was the one having LM Studio load the model, before any of it came: the load took the
+    # time, not the question. Asked again a minute later it answers at the usual speed, so ``failure_note`` says
+    # that, and no longer wait is offered to be kept for every question after.
+    if not state.get("loaded", True) and not getattr(exc, "reply_started", None):
+        return None
+    call = state.get("call") or {}
+    waited = _waited(wait, settings, exc)
+    elapsed = time.monotonic() - call["started"] if call.get("started") else waited
+    tokens = int(call.get("tokens") or 0)
+    written = int(getattr(exc, "written", 0) or 0)
+    status = check_model(settings)
+    # Slower than its measured speed: it took longer to read the prompt than that speed allows. One that had started
+    # its reply spent some of the time writing, which the reading speed doesn't cover.
+    slower = not getattr(exc, "reply_started", None) and model_fit.slower_than_measured(
+        state.get("store"), status, prompt_tokens=tokens, elapsed=elapsed, written=written
+    )
+    suggest = model_fit.suggested_minutes(
+        state.get("store"), settings, status, prompt_tokens=tokens, waited=waited, elapsed=elapsed, written=written,
+        slower=slower,
+    )
+    if suggest * 60 <= waited:  # it had the longest wait already: the same again would run out the same way
+        return None
+    if not getattr(exc, "reply_started", None):
+        # Asked again, its reading isn't said to take less than the wait that just ran out.
+        model_fit.wait_ran_out(state.get("store"), wait.model, seconds=waited, tokens=tokens)
+    return {
+        "type": "more_time", "model": wait.model, "minutes": model_fit.Wait(wait.model, waited, wait.yours).minutes,
+        "suggest": suggest, "tokens": tokens, "text": model_fit.more_time_text(wait.model, waited, suggest, slower=slower),
+        "question": question, "email_id": email_id or "",
+    }
+
+
+def _wait_again(store: Store, settings: Settings, ws: agent.Workspace, state: dict) -> None:
+    """The model was loaded again with another context: how long its calls wait is worked out again for it (a longer
+    context takes a longer prompt, and the wait was worked out from the one it had)."""
+    wait = model_fit.chat_wait(store, settings)
+    ws.wait, state["wait"] = wait.seconds, wait
+    ws.call["model"] = wait.model
+
+
+def _waited(wait: model_fit.Wait, settings: Settings, exc: Exception) -> float:
+    """How long the call that ran out of time (``exc``) waited: the chat's wait, or longer for a call that isn't
+    streamed with room for a model to think (``local_llm._timeout``), as the timeout says."""
+    return max(wait.seconds, settings.llm_timeout, float(getattr(exc, "waited", 0) or 0))
+
+
+def _had_longest_wait(state: dict, settings: Settings, exc: Exception) -> bool:
+    """The model ran out of time (``exc``) with the longest wait CloseDesk gives (``model_fit.MAX_MINUTES``)."""
+    wait = state.get("wait")
+    return (
+        wait is not None and isinstance(exc, httpx.TimeoutException) and not ran_out_of_memory(exc)
+        and _waited(wait, settings, exc) >= model_fit.MAX_MINUTES * 60
+    )
+
+
+def _calling(call: dict | None, messages: list[dict]) -> None:
+    """Note the call about to go to the model (its prompt's size, when it went), for the offer of more time."""
+    if call is not None:
+        call.update(tokens=prompt_chars(messages) // agent.CHARS_PER_TOKEN, started=time.monotonic())
+
+
+def _reading_text(ws: agent.Workspace, about_files: bool) -> str:
+    """What the model reads before it answers, in words: "Reading 3 emails and 2 files", "Reading your calendar";
+    just "Reading" when none of these is counted."""
+    mail = [email for email in ws.sources if email.source != "calendar" and not email.id.startswith("chat-")]
+    files = 0
+    if about_files:
+        files = sum(
+            1 for email in ws.sources if not attachments_locked(email) for att in email.attachments if (att.extracted_text or "").strip()
+        )
+    parts = [f"{len(mail)} email{'s' if len(mail) != 1 else ''}"] if mail else []
+    if any(email.source == "calendar" for email in ws.sources):
+        parts.append("your calendar")
+    if files:
+        parts.append(f"{files} file{'s' if files != 1 else ''}")
+    if not parts:
+        return "Reading"
+    return "Reading " + (", ".join(parts[:-1]) + " and " + parts[-1] if len(parts) > 1 else parts[0])
+
+
+def _reading_progress(store: Store | None, call: dict, *, written: int = 0) -> dict[str, Any]:
+    """The chat's line while the model reads the prompt: what it reads and, once this model's speed has been
+    measured here, about how long that takes (the page fills a bar on it, and says when it takes longer). A call that
+    isn't streamed (``written``: the most it may write, thinking included) says nothing more until the reply is
+    written too, so its estimate is for both."""
+    tokens = int(call.get("tokens") or 0)
+    model = str(call.get("model") or "")
+    reading = call.get("reading") or "Reading"
+    if call.pop("loading", False):  # the first call loads the model, for as long as LM Studio takes: no estimate
+        text = f"Loading the model in LM Studio, then {reading[:1].lower()}{reading[1:]}"
+        return {"type": "progress", "state": "reading", "text": text, "tokens": tokens, "seconds": None, "about": ""}
+    if written:
+        seconds = model_fit.estimate_call(store, model, tokens=tokens, written=written)
+    else:
+        seconds = model_fit.estimate(store, model, tokens=tokens)
+    if seconds:  # slower now than measured: its wait ran out on the last question, so no shorter than that
+        seconds = max(seconds, model_fit.at_least(store, model, tokens=tokens))
+    return {
+        "type": "progress", "state": "reading", "text": reading, "tokens": tokens,
+        "seconds": round(seconds, 1) if seconds else None, "about": model_fit.about(seconds),
+    }
+
+
+WRITING = {"type": "progress", "state": "writing", "text": "Writing the answer"}
+
+
+def _limit(state: dict) -> float | None:
+    """How long this chat's calls wait for the model (``model_fit.chat_wait``), or None for the usual."""
+    wait = state.get("wait")
+    return wait.seconds if wait is not None else None
+
+
+def _record_speed(state: dict, messages: list[dict], finished: dict) -> None:
+    """Keep how fast the model read this prompt and wrote its answer, for the next wait and estimate."""
+    wait, store = state.get("wait"), state.get("store")
+    if wait is None or store is None or not finished.get("read_seconds"):
+        return
+    # As the server counted what it read (without what it had read before); else about the prompt's size.
+    tokens = finished["prompt_tokens"] if "prompt_tokens" in finished else prompt_chars(messages) // agent.CHARS_PER_TOKEN
+    # The first call to a model that wasn't loaded waited for LM Studio to load it too: only its writing is timed.
+    loading = not state.get("loaded", True)
+    state["loaded"] = True
+    model_fit.record_speed(
+        store, wait.model, prompt_tokens=0 if loading else tokens, read_seconds=finished["read_seconds"],
+        written=finished.get("written", 0), write_seconds=finished.get("write_seconds", 0.0),
+        counted=bool(finished.get("prompt_counted")),
+    )
+
+
 def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[dict[str, Any]]:
     before = len(state["text"])
     wrote = state["wrote"]
     finished: dict[str, Any] = {}
-    raw = _Recorded(stream_text(settings, messages, max_tokens=settings.chat_max_tokens, finished=finished))
+    _calling(state.get("call"), messages)
+    if state.get("call") is not None:
+        yield _reading_progress(state.get("store"), state["call"])
+    # The reasoning of a model that thinks first comes too, to show as it streams: never part of the answer's text.
+    raw = _Recorded(stream_text(
+        settings, messages, max_tokens=settings.chat_max_tokens, finished=finished, limit=_limit(state), thoughts=True
+    ))
+    thought = False
     echoed = True
     try:
         for piece in without_echo(raw):
+            if piece is _BEGUN:
+                # The model's first words: it is writing, though the echo check holds them back a moment.
+                if not state["wrote"] and state.get("call") is not None:
+                    yield WRITING
+                continue
+            if isinstance(piece, WasThinking):
+                # It closed a think tag it never opened: what was shown as the answer was its reasoning, which comes
+                # next for the Thinking box. The answer starts after the tag.
+                if len(state["text"]) > before:
+                    state["text"] = state["text"][:before]
+                    yield {"type": "revise", "text": state["text"]}
+                state["wrote"] = wrote
+                thought = False
+                continue
+            if isinstance(piece, AskedAgain):
+                # It ran out of room thinking and is asked again: it reads the prompt again, and its thinking starts
+                # below the first try's (the pages end the thinking on reading, and start it again on thinking).
+                yield {"type": "step", "text": "The model ran out of room while it thought; asking it again with more room"}
+                _calling(state.get("call"), messages)
+                if state.get("call") is not None:
+                    yield _reading_progress(state.get("store"), state["call"])
+                thought = False
+                continue
+            if isinstance(piece, Thought):
+                if not thought:
+                    thought = True
+                    yield {"type": "progress", "state": "thinking", "text": "Thinking"}
+                yield {"type": "thinking", "text": piece.text}
+                continue
             state["wrote"] = True
             state["text"] += piece
             yield {"type": "delta", "text": piece}
@@ -1949,6 +2219,7 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
     else:
         echoed = not raw.whole
         raw.read_on()
+    _record_speed(state, messages, finished)
     # A model whose chat template opens <think> in the prompt, on a server that doesn't separate reasoning,
     # writes its reasoning and then "</think>": what came before that tag is not the answer, even when it quoted
     # the instructions (taken for an echo, it would have been shown as the answer).
@@ -1957,9 +2228,11 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
             answer = "".join(without_echo(iter([raw.text.split("</think>")[-1].lstrip()])))
         except EmptyReply:
             answer = ""
-        state["text"] = state["text"][:before] + answer
+        revised = state["text"][:before] + answer
         state["wrote"] = wrote or bool(answer)
-        yield {"type": "revise", "text": state["text"]}
+        if revised != state["text"]:  # not when the answer was split from the reasoning as it came
+            state["text"] = revised
+            yield {"type": "revise", "text": state["text"]}
         if len(state["text"]) == before:
             # Only reasoning came back: no answer was written (the draft or the lookup answer takes its place).
             state["wrote"] = wrote
@@ -1968,7 +2241,12 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
         # The model ran out of room partway: the user is told, rather than given half an answer as if it were whole.
         cut = "\n\n(The answer was cut off here: the model ran out of room. Ask about one part at a time for the rest.)"
         state["text"] += cut
-        yield {"type": "delta", "text": cut}
+        event = {"type": "delta", "text": cut}
+        if not _lone_close(raw.text) and not finished.get("thought"):
+            # Nothing set reasoning apart: a model whose template opens <think> itself may have been cut off while it
+            # still reasoned. Once it is known to (``local_llm._opens_think``), this isn't sent back as its answer.
+            event["cut_off"] = str(finished.get("model") or "")
+        yield event
 
 
 def _keep_stated_figures(checked: str, draft: str, file_text: str) -> str:
@@ -2066,6 +2344,11 @@ def without_echo(pieces: Iterator[str]) -> Iterator[str]:
     pending = ""
     sent = False
     for piece in pieces:
+        if isinstance(piece, WasThinking):  # what was held back was reasoning too: the answer starts again after it
+            pending, sent = "", False
+        if not isinstance(piece, str):  # the reasoning goes on to the chat as it comes; only the answer is checked
+            yield piece
+            continue
         pending += piece
         echo = _ECHO_RE.search(pending)
         if echo:
@@ -2096,7 +2379,18 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
     notes = agent.earlier_findings(ws, primary) if primary is not None else ""
     notes = "\n\n".join(part for part in (notes, ws.past) if part)
     base = dict(history=history, today=today, current_id=ws.current_id, notes=notes, tz=settings.tz)
-    yield from agent.query_tables(ws, question, complete_text)
+
+    def query_call(settings: Settings, messages: list[dict], **options) -> str:
+        # Noted as the call under way, for the offer of more time. When LM Studio had unloaded the model, this call
+        # has it load the model: the answer's call after it neither says it loads nor leaves its reading untimed.
+        _calling(ws.call, messages)
+        ws.call.pop("loading", None)
+        try:
+            return complete_text(settings, messages, limit=ws.wait or None, **options)
+        finally:
+            state["loaded"] = True
+
+    yield from agent.query_tables(ws, question, query_call)
     plain = _budget(settings, tools=False) // shrink
     room = int((plain - prompt_chars(build_messages(question, ws.sources, budget=plain, bodies=False, **base))) * 0.85)
     if primary is not None and ws.worked.get(primary.id):
@@ -2133,12 +2427,17 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         draft = yield from _tool_loop(ws, messages, budget)
     except ToolsUnsupported:
         messages = build_messages(question, ws.sources, budget=budget, files=files, **base)
-        draft = complete_text(settings, messages, max_tokens=settings.chat_max_tokens)
+        _calling(ws.call, messages)
+        yield _reading_progress(ws.store, ws.call, written=reply_budget(settings, settings.chat_max_tokens))
+        draft = complete_text(settings, messages, max_tokens=settings.chat_max_tokens, limit=ws.wait or None)
     except EmptyReply:
         # A turn with no answer (a thinking model out of room) after the tools have read something: answer
         # from what was read below, rather than drop it all for the lookup answer.
         if not (ws.evidence or ws.read_files):
             raise
+    # The model answered the calls above, so it is loaded now: when LM Studio had unloaded it, the first of them had it
+    # load the model, and the check pass after them is a reading to time, not the load.
+    state["loaded"] = True
     if len(ws.sources) > known:
         yield {"type": "sources", "sources": source_cards(ws.sources, settings), "mode": "model"}
     draft = _TODAY_LINE.sub("", _ECHO_RE.split(draft, maxsplit=1)[0].rstrip()).rstrip()
@@ -2186,7 +2485,7 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         state["text"] += draft
         yield {"type": "delta", "text": draft}
         return
-    except httpx.HTTPError:
+    except httpx.HTTPError as exc:
         # The model server stopped partway through the check pass: the finished draft is the answer, not half a
         # sentence of its check, and the user is told it wasn't read over again.
         if not draft:
@@ -2194,7 +2493,13 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         if state["text"][before:]:
             state["text"] = state["text"][:before]
             yield {"type": "revise", "text": state["text"]}
-        added = draft + "\n\n(The local model stopped while checking this answer, so it wasn't read over a second time.)"
+        why, back = "stopped", ""
+        if ran_out_of_memory(exc):
+            # The check pass sends the fullest prompt: a context CloseDesk raised is stepped back here, or every later
+            # question about files would run out of memory in the same place.
+            why, back = "ran out of memory", step_back_context(settings)
+        after = f" {back}" if back else ""
+        added = draft + f"\n\n(The local model {why} while checking this answer, so it wasn't read over a second time.{after})"
         state["wrote"] = True
         state["text"] += added
         yield {"type": "delta", "text": added}
@@ -2247,7 +2552,9 @@ def _tool_loop(ws: agent.Workspace, messages: list[dict], budget: int):
     used = prompt_chars(messages)
     asked: set[str] = set()  # the calls already run: a small model can ask for the same one again and again
     for _step in range(agent.MAX_STEPS):
-        reply = chat_with_tools(ws.settings, messages, agent.TOOLS, max_tokens=ws.settings.chat_max_tokens)
+        _calling(ws.call, messages)
+        yield _reading_progress(ws.store, ws.call, written=reply_budget(ws.settings, ws.settings.chat_max_tokens))
+        reply = chat_with_tools(ws.settings, messages, agent.TOOLS, max_tokens=ws.settings.chat_max_tokens, limit=ws.wait or None)
         if not reply.calls:
             return reply.content
         problems = [agent.argument_problem(call["name"], call["arguments"]) for call in reply.calls]

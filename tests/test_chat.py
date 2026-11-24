@@ -66,7 +66,7 @@ def test_the_prompt_fits_a_4096_token_context_and_leaves_room_for_tools(store, s
     monkeypatch.setattr(semantic, "embedding_model", lambda _s: "")
     seen = []
 
-    def fake_tools(_settings, messages, _tools, *, max_tokens):
+    def fake_tools(_settings, messages, _tools, *, max_tokens, **_kw):
         seen.append([dict(m) for m in messages])
         if len(seen) == 1:
             return ToolReply("", [{"id": "c1", "name": "read_file", "arguments": {"email": "1", "file": "Offsite memo.docx", "part": "page 3"}}])
@@ -128,7 +128,7 @@ def test_bad_tool_arguments_go_back_to_the_model_instead_of_crashing(store, sett
     assert agent.step_label("open_email", ["1"], agent.Workspace(store, settings, [budget])) == "Opening [1] Q4 budget draft"
     seen = []
 
-    def fake_tools(_settings, messages, _tools, *, max_tokens):
+    def fake_tools(_settings, messages, _tools, *, max_tokens, **_kw):
         seen.append([dict(m) for m in messages])
         if len(seen) == 1:
             return ToolReply("", [
@@ -651,3 +651,34 @@ def test_meetings_in_an_answer_are_in_the_calendars_time_and_cite_the_meeting(lo
     source = assistant.calendar_source(loaded, settings, "2026-09-22")
     assert "2026-09-23 9:30am–9:45am · AP team standup" in source.body_text, "the model reads the calendar's times too"
     assert "(all day)" in source.body_text
+
+
+def test_the_check_pass_after_the_tools_had_lm_studio_load_the_model_is_timed(store, settings, monkeypatch):
+    """LM Studio had unloaded the model, and the first call asking for tools had it load the model again. The check
+    pass after it, a real reading of the fullest prompt, was still taken for the call that loaded the model, and its
+    reading wasn't kept."""
+    from controller_inbox import model_fit
+
+    chat = chats.new_id()
+    store.create_chat(chat)
+    chats.add_file(store, settings, chat, "rent.txt", "text/plain", RENT)
+    uploads = chats.chat_mail(store, chat)
+
+    monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
+    monkeypatch.setattr(assistant, "needs_more_context", lambda _s: False)
+    monkeypatch.setattr(assistant, "context_length", lambda _s: 16384)
+    monkeypatch.setattr(assistant, "loaded_now", lambda *_a, **_k: False)  # LM Studio unloaded it while idle
+    monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "SQL: NONE")
+    monkeypatch.setattr(assistant, "chat_with_tools", lambda *_a, **_k: ToolReply("The October rent is $1,200.00."))
+
+    def check_pass(*_a, finished=None, **_k):
+        finished.update(read_seconds=40.0, prompt_tokens=4000, prompt_counted=True, written=20, write_seconds=2.0)
+        yield "The October rent is $1,500.00 (rent.txt) [1]."
+
+    monkeypatch.setattr(assistant, "stream_text", check_pass)
+    kept = []
+    monkeypatch.setattr(model_fit, "record_speed", lambda *_a, **k: kept.append(k))
+
+    events = list(assistant.answer_stream(store, settings, "What is the October rent, and how did it change?", uploads=uploads))
+    assert "Checking the answer against what I read" in [e["text"] for e in events if e["type"] == "step"]
+    assert kept and kept[-1]["prompt_tokens"] == 4000, "the check pass's reading was taken for the load"

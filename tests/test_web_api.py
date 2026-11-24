@@ -403,6 +403,25 @@ def test_switching_the_chat_model_does_not_hold_up_other_requests(client, demo, 
     assert on_loop == [False]
 
 
+def test_saving_a_smaller_context_does_not_hold_up_other_requests(client, demo, monkeypatch):
+    # A smaller minimum can reload the model in LM Studio, which takes minutes: off the event loop, like the chat model.
+    import asyncio
+
+    on_loop = []
+
+    def reload(_settings, _tokens):
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return ""
+
+    monkeypatch.setattr(web, "set_min_context", reload)
+    assert post(client, "/api/settings/context", {"step": 1}).status_code == 200
+    assert on_loop == [False]
+
+
 def test_settings_wont_change_the_chat_model_or_load_the_sample_while_mail_is_processed(client, demo):
     job = client.app.state.job
     release = __import__("threading").Event()

@@ -31,9 +31,11 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
+from starlette.concurrency import run_in_threadpool
 
-from controller_inbox import agent, chats, cost_codes, documents, fraud, model_choice, model_roles, ocr, semantic, services, updates, version, vision
+from controller_inbox import (
+    agent, chats, cost_codes, documents, fraud, local_llm, model_choice, model_fit, model_roles, ocr, semantic, services, updates, version, vision,
+)
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
 from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
@@ -52,7 +54,7 @@ from controller_inbox.clock import (
 )
 from controller_inbox.config import PROFILES, Settings
 from controller_inbox.digest import write_digest_files
-from controller_inbox.local_llm import check_model, context_target, needs_more_context, set_min_context, use_chat_model
+from controller_inbox.local_llm import check_model, set_min_context, use_chat_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.profile import active_profile, set_profile
 from controller_inbox.services import Invalid, Missing
@@ -226,6 +228,8 @@ class _AnswerLog:
             self.data[kind + "s"].append(event.get("text", ""))
         elif kind == "delta":
             self.text += event.get("text", "")
+            if event.get("cut_off"):  # the model it was, for ``chats.history_for_model``
+                self.data["cut_off"] = event["cut_off"]
             if "stopped answering partway" in event.get("text", ""):
                 self.data["failed"] = True
         elif kind == "revise":
@@ -242,6 +246,8 @@ class _AnswerLog:
             self.data["note"] = event.get("note", "")
         elif kind == "vision":
             self.data["vision"] = {key: event.get(key) for key in ("email_id", "n", "file", "pages", "estimate", "text", "question")}
+        elif kind == "more_time":  # the offer of more time, shown again with the conversation
+            self.data["more_time"] = {key: event.get(key) for key in ("model", "minutes", "suggest", "text", "question", "email_id")}
         elif kind == "reading" and event.get("label"):  # which reading of the scans the answer used
             self.data["reading"] = {key: event.get(key) for key in ("state", "reader", "label", "text")}
 
@@ -331,6 +337,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     store = store or Store(settings.db_path)
     apply_saved_timezone(settings, store)
     vision.apply_saved_mode(settings, store)
+    local_llm.remember_thinking(store)
     saved_context = store.get_state(MIN_CONTEXT_KEY)
     if saved_context and saved_context.isdigit():
         set_min_context(settings, int(saved_context))
@@ -855,7 +862,24 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise HTTPException(status_code=400, detail="Ask a question first.")
         # The database and today's list take a moment: in a worker thread, so other pages aren't held up.
         lines = await run_in_threadpool(answer_lines, data, question)
-        return StreamingResponse(_closing(lines), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
+        return StreamingResponse(
+            _closing(lines, hang_up=local_llm.HangUp()), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"}
+        )
+
+    @app.post("/chat/wait")
+    async def chat_wait(request: Request):
+        """The chat's "Save and ask again": how long to wait for this model from now on, in minutes (1 to 120). The page
+        then asks the question again."""
+        require_page(request)
+        data = await json_body(request)
+        model = str(data.get("model") or "").strip()[:200]
+        try:
+            minutes = model_fit.parse_minutes(data.get("minutes"))
+            model_fit.set_wait(store, model, minutes)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        said = model_fit.minutes_said(minutes * 60)
+        return JSONResponse({"ok": True, "seconds": minutes * 60, "message": f"Saved: CloseDesk waits up to {said} for {model}."})
 
     @app.get("/chats")
     def chat_list(q: str = ""):
@@ -1063,6 +1087,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     # Why the last change of chat model in Setup didn't happen, shown with its notice.
     chat_switch = {"problem": ""}
+    # What saving a smaller minimum context did to the model loaded in LM Studio, shown with its notice.
+    context_change = {"said": ""}
+    # Why the wait typed in Settings wasn't saved, shown with its notice.
+    wait_problem = {"said": ""}
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, recheck: int = 0):
@@ -1073,17 +1101,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             page="settings",
             model=model,
             llm_enabled=model.active,
-            recommended_context=agent.RECOMMENDED_CONTEXT,
             context_steps=[agent.context_capacity(tokens, settings.chat_max_tokens) for tokens in agent.CONTEXT_STEPS],
             context_step=nearest_step(settings.min_context_tokens),
-            context_target=context_target(settings, model),
-            will_reload=needs_more_context(settings),
+            context_line=model_fit.context_line(settings, model),
+            context_change=context_change["said"] if request.query_params.get("notice") == "context-reloaded" else "",
             ocr_engine=ocr.engine_name(),
             ocr_missing=ocr.missing_note(),
             models=model_roles.models_in_use(settings, status=model),
             chat_choice=model_roles.chat_choices(settings, model),
             model_tip=model_choice.recommendation(settings, store, model),
             chat_problem=chat_switch["problem"] if request.query_params.get("notice") == "chat-model-failed" else "",
+            model_fit=model_fit.describe(store, settings, model),
+            wait_problem=wait_problem["said"] if request.query_params.get("notice") == "model-wait-refused" else "",
             vision_setup=vision_setup(model),
             search=semantic.coverage(store, settings),
             timezone_choice=settings.timezone,
@@ -1174,7 +1203,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise ValueError("Unknown context size")
         tokens = agent.CONTEXT_STEPS[step]
         store.set_state(MIN_CONTEXT_KEY, str(tokens))
-        set_min_context(settings, tokens)
+        # A model CloseDesk loaded with more than this is reloaded with it now: what happened shows with the notice.
+        context_change["said"] = set_min_context(settings, tokens)
+        if context_change["said"]:
+            return "context-reloaded"
         return "context" if tokens else "context-off"
 
     def load_sample_mailbox() -> str:
@@ -1208,6 +1240,16 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if back:
             return RedirectResponse(f"{back}?notice=chat-model-kept", status_code=303)
         return RedirectResponse("/settings?notice=chat-model-kept#chat-model", status_code=303)
+
+    @app.post("/settings/model-wait")
+    def save_model_wait(model: str = Form(""), minutes: str = Form(""), automatic: str = Form("")):
+        """How long the chat waits for the model answering, in minutes, or Automatic."""
+        try:
+            model_fit.set_wait(store, model.strip()[:200], None if automatic else model_fit.parse_minutes(minutes))
+        except ValueError as exc:
+            wait_problem["said"] = str(exc)
+            return RedirectResponse("/settings?notice=model-wait-refused#model-wait", status_code=303)
+        return RedirectResponse(f"/settings?notice={'model-wait-auto' if automatic else 'model-wait'}#model-wait", status_code=303)
 
     @app.post("/settings/index")
     def index_all():
@@ -1275,6 +1317,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "vision_setup": vision_setup,
             "switch_chat_model": switch_chat_model,
             "chat_problem": lambda: chat_switch["problem"],
+            "context_change": lambda: context_change["said"],
             "start_indexing": start_indexing,
             "save_context_step": save_context_step,
             "load_sample_mailbox": load_sample_mailbox,
@@ -1297,18 +1340,36 @@ def service_errors(*, missing: str = "Message not found", invalid: int | None = 
         raise HTTPException(status_code=invalid, detail=NOTICES.get(exc.notice) or str(exc)) from None
 
 
-async def _closing(lines: Generator[str, None, None]) -> AsyncIterator[str]:
+async def _closing(lines: Generator[str, None, None], *, hang_up: local_llm.HangUp | None = None) -> AsyncIterator[str]:
     """Streams a generator's lines from a worker thread, and closes it however the response ends.
 
     When the browser goes away mid-answer, the response stops reading without closing a plain generator,
-    so its cleanup (saving the answer so far, stopping the model) would never run."""
+    so its cleanup (saving the answer so far, stopping the model) would never run. ``hang_up``: the model calls the
+    lines make (``local_llm.hanging_up``), hung up on when the response is cancelled (Stop, or the page closed), so a
+    model still reading the prompt stops then rather than once it sends its first word."""
+    lock = threading.Lock()  # the generator is read by one thread at a time, and closed once its reading has stopped
+    done = object()
+
+    def step():
+        with lock, local_llm.hanging_up(hang_up):
+            return next(lines, done)
+
+    def close():
+        with lock, local_llm.hanging_up(hang_up):
+            lines.close()
+
+    ended = False
     try:
-        async for line in iterate_in_threadpool(lines):
+        # Not waited for once the response is cancelled: the thread may be waiting on the model, hung up on below.
+        while (line := await anyio.to_thread.run_sync(step, abandon_on_cancel=True)) is not done:
             yield line
+        ended = True
     finally:
         # Shielded: the response is being cancelled, which would otherwise cancel this as well.
         with anyio.CancelScope(shield=True):
-            await run_in_threadpool(lines.close)
+            if hang_up is not None and not ended:
+                hang_up.now()
+            await run_in_threadpool(close)
 
 
 def _ascii_name(subject: str) -> str:

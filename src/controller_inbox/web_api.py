@@ -29,11 +29,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, model_choice, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
+    agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, model_choice, model_fit, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
     semantic, services, table_lookup, updates, version, vision,
 )
 from controller_inbox.extract import extraction_failed
-from controller_inbox.local_llm import check_model, context_target, needs_more_context
+from controller_inbox.local_llm import check_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
 from controller_inbox.profile import active_profile, set_profile
 from controller_inbox.clock import effective_timezone, format_when, offset_label, on_daylight_time, set_timezone, zone_name
@@ -1081,41 +1081,7 @@ def register_workspace(
 
     def context_note(model) -> dict[str, Any]:
         """The line under the model saying whether its context window holds whole attachments, as Setup words it."""
-        window = model.context_length or settings.chat_context_tokens
-        target = context_target(settings, model)
-        recommended = agent.RECOMMENDED_CONTEXT
-        if needs_more_context(settings):
-            advice = (
-                f"The next time you ask something, CloseDesk reloads {model.key} in LM Studio with {target:,} tokens "
-                "(the minimum set below). If your computer runs short of memory, it goes back to the current size."
-            )
-        elif window >= recommended:
-            advice = "Enough to read whole attachments when you ask about them."
-        else:
-            advice = "Ask CloseDesk reads long attachments a section at a time with this."
-            if model.key and model.context_length and window < target:
-                advice += (
-                    f" LM Studio couldn't load {model.key} with {target:,} tokens. "
-                    "Close other apps or pick a smaller minimum below, then Save to try again."
-                )
-            elif model.key and model.max_context and model.max_context < recommended:
-                advice += f" {model.key} supports at most {model.max_context:,} tokens. For whole workbooks and PDFs, load a model with a longer context."
-            elif model.key:
-                advice += " For whole workbooks and PDFs, move the minimum below to 16k or more and Save."
-            else:
-                advice += (
-                    f" For whole workbooks and PDFs, reload the model in LM Studio with Context Length {recommended:,} or more "
-                    "(My Models → the model's settings → Context Length)."
-                )
-            if not window:
-                advice += " If your server doesn't report it, set CONTROLLER_INBOX_CHAT_CONTEXT_TOKENS."
-        return {
-            "shown": model.active,
-            "tokens": window,
-            "label": f"{window:,} tokens" if window else "not reported",
-            "tone": "ok" if window >= recommended else "short",
-            "advice": advice,
-        }
+        return model_fit.context_line(settings, model)
 
     def settings_state(recheck: bool = False) -> dict[str, Any]:
         model = check_model(settings, use_cache=not recheck)
@@ -1146,6 +1112,8 @@ def register_workspace(
                 "server": "LM Studio" if model.lm_studio else "the model server",
             },
             "models": model_roles.models_in_use(settings, status=model),
+            # The context and the wait CloseDesk chose for the model answering (model_fit), with the user's own wait.
+            "fit": model_fit.describe(store, settings, model),
             "chat": None
             if choice is None
             else {
@@ -1259,6 +1227,18 @@ def register_workspace(
         model_choice.keep(store, model)
         return saved("chat-model-kept")
 
+    @api.post("/settings/model-wait")
+    async def settings_model_wait(request: Request):
+        """How long the chat waits for a model, in minutes (1 to 120), or with ``minutes`` null, automatic again."""
+        data = await json_body(request)
+        model = str(data.get("model") or "").strip()[:200]
+        minutes = data.get("minutes")
+        try:
+            model_fit.set_wait(store, model, None if minutes is None else model_fit.parse_minutes(minutes))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        return saved("model-wait" if minutes is not None else "model-wait-auto")
+
     @api.post("/settings/vision")
     async def settings_vision(request: Request):
         data = await json_body(request)
@@ -1276,9 +1256,12 @@ def register_workspace(
         if not isinstance(step, int) or isinstance(step, bool):
             raise HTTPException(status_code=400, detail="Unknown context size")
         try:
-            notice = setup["save_context_step"](step)
+            # A smaller minimum can reload the model in LM Studio, which takes minutes: off the event loop.
+            notice = await run_in_threadpool(setup["save_context_step"], step)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
+        if notice == "context-reloaded":  # what the smaller minimum did to the model loaded in LM Studio
+            return {**saved(notice), "message": f"{NOTICES[notice]} {setup['context_change']()}"}
         return saved(notice)
 
     @api.post("/settings/index")

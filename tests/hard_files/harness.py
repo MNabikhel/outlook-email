@@ -73,7 +73,7 @@ def evidence(store, settings, email, question: str, monkeypatch, *, sql: str = "
     def record(messages) -> None:
         prompts.append("\n".join(str(m.get("content") or "") for m in messages))
 
-    def tools(_settings, messages, _tools, *, max_tokens):
+    def tools(_settings, messages, _tools, *, max_tokens, **_kw):
         record(messages)
         return ToolReply("I could not find it.")
 

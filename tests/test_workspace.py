@@ -632,6 +632,29 @@ def test_process_new_mail_says_how_many_files_could_not_be_read(browser, serve, 
     page.context.close()
 
 
+def test_process_new_mail_says_when_the_model_stopped_reading(browser, serve, settings, monkeypatch):
+    """A 31B ran out of memory on every email: the toast said only that it had loaded the model, "it answers your
+    questions and reads the mail", in green, though none of the mail was read."""
+    from controller_inbox import overnight
+
+    note = "Stopped reading: the local model ran out of memory on three messages in a row. Choose one in Settings."
+    loaded = "Loaded google/gemma-4-31b in LM Studio: it answers your questions and reads the mail."
+
+    def processed(*_args, **_kw):
+        time.sleep(1)  # the page sees the run going, then finish
+        return {"ingested": 0, "model": "google/gemma-4-31b", "model_note": note, "model_load": {"message": loaded, "failed": False}}
+
+    monkeypatch.setattr(overnight, "run_overnight", processed)
+    base = serve()
+    page = _page(browser)
+    page.goto(f"{base}/app")
+    page.wait_for_selector("body.ready")
+    page.click("#process-btn")
+    page.wait_for_selector(".toast:has-text('Processed')", timeout=60000)
+    toast = page.locator(".toast:has-text('Processed')")
+    assert note in toast.inner_text() and "error" in (toast.get_attribute("class") or "")
+
+
 # Toolbars fit the reading pane -----------------------------------------------------------------------
 OUTSIDE = """() => {
   const pane = document.querySelector('.reader-pane').getBoundingClientRect();
@@ -1260,3 +1283,100 @@ def test_the_shortcut_sheet_lines_up_on_a_phone_and_a_failed_sync_leaves_one_mes
         page.wait_for_timeout(300)
         texts = page.locator("#toasts .toast:not(.leaving)").all_inner_texts()
         assert len(texts) == 1 and "couldn't find a message" in texts[0], texts
+
+
+def test_sync_now_says_when_the_model_couldn_t_be_loaded(loaded, settings, page, monkeypatch):
+    """Sync now loads the model before it reads the new mail. When that failed, the toast said only "Outlook
+    synced: 2 new." in green: never that the mail was filed without a model, or why."""
+    from liveserver import serving
+
+    from controller_inbox import outlook_desktop, outlook_sync, overnight
+
+    said = "CloseDesk couldn't load google/gemma-4-31b in LM Studio. The mail is filed without a model for now."
+
+    def synced(*_args, **_kw):
+        time.sleep(1)  # Outlook takes a moment: the page sees the sync running, then finish
+        return {"kind": "outlook", "outlook": {"new": 2}, "message": "Outlook synced: 2 new.", "model_load": {"message": said, "failed": True}}
+
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    monkeypatch.setattr(overnight, "outlook_run", synced)
+    outlook_sync.connect(loaded, calendar=False)
+    with serving(web.create_app(settings, loaded)) as base:
+        page.set_viewport_size({"width": 1280, "height": 900})
+        page.goto(f"{base}/app/settings#set-outlook")
+        page.click("#set-outlook button:has-text('Sync now')")
+        page.wait_for_selector(".toast.error:has-text('Outlook synced: 2 new.')", timeout=20000)
+        assert said in page.inner_text(".toast.error:has-text('Outlook synced: 2 new.')")
+
+
+def test_sync_now_says_when_the_model_stopped_reading_the_new_mail(loaded, settings, page, monkeypatch):
+    """A model that ran out of memory on every new email: Sync now's toast said only that Outlook synced and the
+    model loaded, in green."""
+    from liveserver import serving
+
+    from controller_inbox import outlook_desktop, outlook_sync, overnight
+
+    note = "Stopped reading: the local model ran out of memory on three messages in a row. Choose one in Settings."
+
+    def synced(*_args, **_kw):
+        time.sleep(1)  # the page sees the sync running, then finish
+        return {
+            "kind": "outlook", "outlook": {"new": 2}, "message": "Outlook synced: 2 new.", "model": "google/gemma-4-31b",
+            "model_note": note, "model_load": {"message": "Loaded google/gemma-4-31b in LM Studio.", "failed": False},
+        }
+
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    monkeypatch.setattr(overnight, "outlook_run", synced)
+    outlook_sync.connect(loaded, calendar=False)
+    with serving(web.create_app(settings, loaded)) as base:
+        page.set_viewport_size({"width": 1280, "height": 900})
+        page.goto(f"{base}/app/settings#set-outlook")
+        page.click("#set-outlook button:has-text('Sync now')")
+        page.wait_for_selector(".toast.error:has-text('Outlook synced: 2 new.')", timeout=20000)
+        assert note in page.inner_text(".toast.error:has-text('Outlook synced: 2 new.')")
+
+
+def test_the_classic_page_shows_process_new_mail_with_a_failed_load_as_an_error(client):
+    """Process new mail with a model LM Studio couldn't load showed as done, in green, and said "No local model was
+    running" beside CloseDesk's own words that it had tried to load one."""
+    said = "LM Studio couldn't load google/gemma-3-27b (Not enough memory). The mail is filed without a model for now."
+    result = {"ingested": 0, "model": "", "model_note": said, "model_load": {"message": said, "failed": True}}
+    job = client.app.state.job
+    assert job.start(lambda progress: result)
+    deadline = time.monotonic() + 5
+    while job.snapshot()["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+    page = client.get("/").text.replace("&#39;", "'")
+    assert '<section class="job error">' in page and said in page and page.count("couldn't load") == 1
+    assert "No local model was running" not in page
+
+
+def test_the_classic_page_says_once_that_mail_is_filed_without_a_model_after_a_load_failed_lately(client):
+    """A second Process new mail soon after a failed load: the classic page said "No local model was running, so mail
+    is filed from the script draft." beside CloseDesk's own words that the mail is filed without a model."""
+    said = (
+        "LM Studio couldn't load google/gemma-3-27b a little while ago, so the mail is filed without a model for now. "
+        "Choose another in Settings → Local model, or load one in LM Studio."
+    )
+    result = {"ingested": 0, "model": "", "model_note": "No model loaded.", "model_load": {"message": said, "failed": False}}
+    job = client.app.state.job
+    assert job.start(lambda progress: result)
+    deadline = time.monotonic() + 5
+    while job.snapshot()["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+    page = client.get("/").text.replace("&#39;", "'")
+    assert said in page and "No local model was running" not in page and page.count("without a model") == 1
+
+
+def test_the_classic_page_says_what_a_sync_did_and_that_the_model_couldn_t_be_loaded(client):
+    """The classic page showed a finished sync as "Processed. Read  new files", with none of what it said."""
+    said = "CloseDesk couldn't load google/gemma-4-31b in LM Studio. The mail is filed without a model for now."
+    result = {"kind": "outlook", "outlook": {"new": 2}, "message": "Outlook synced: 2 new.", "model_load": {"message": said, "failed": True}}
+    job = client.app.state.job
+    assert job.start(lambda progress: result, about={"kind": "outlook"})
+    deadline = time.monotonic() + 5
+    while job.snapshot()["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+    page = client.get("/").text
+    assert "Outlook synced: 2 new." in page and said in page.replace("&#39;", "'")
+    assert "Processed." not in page

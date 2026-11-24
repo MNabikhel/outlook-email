@@ -31,6 +31,7 @@ class LMStudio:
         self.timeouts: list[float] = []
         self.fails_to_load: set[str] = set()  # not enough memory for these
         self.answer_error = ""  # "status": a 500 for the answer, "stream": an error written into the stream
+        self.error_body: dict = {"error": {"code": 500, "message": "Compute error."}}  # what that error says
         self.sizes: dict[str, int] = {}  # each model's download size, as LM Studio reports it
         self.calls: list[tuple] = []  # loads and unloads, in order
         self.extra: list[str] = []  # more downloaded chat models, listed after the others
@@ -76,9 +77,9 @@ class LMStudio:
             self.asked.append(payload["model"])
             self.timeouts.append(request.extensions["timeout"]["read"])
             if self.answer_error == "status":
-                return httpx.Response(500, json={"error": {"code": 500, "message": "Compute error."}})
+                return httpx.Response(500, json=self.error_body)
             if self.answer_error == "stream" and payload.get("stream"):
-                body = 'data: {"error": {"code": 500, "message": "Compute error."}}\n\n'
+                body = f"data: {json.dumps(self.error_body)}\n\n"
                 return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
             if payload.get("stream"):
                 body = 'data: {"choices": [{"delta": {"content": "It is $12,480."}}]}\n\ndata: [DONE]\n\n'
@@ -180,7 +181,7 @@ def test_the_chat_waits_minutes_for_a_long_prompt_to_be_read(settings, monkeypat
 
 def test_a_model_that_took_too_long_is_said_to_be_busy_not_broken():
     note = failure_note(httpx.ReadTimeout("timed out"))
-    assert "took too long to start answering" in note and "CONTROLLER_INBOX_LLM_TIMEOUT" in note
+    assert "took too long to start answering" in note and "Settings → Local model" in note
     assert failure_note(httpx.ConnectError("refused")) == "The local model didn't answer (refused)."
 
 

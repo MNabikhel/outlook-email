@@ -193,18 +193,32 @@ def _turn_cites_locked_mail(store: Store, turn: dict[str, Any]) -> bool:
 LOCKED_ANSWER = "(An earlier answer here drew on an email now held as possible payment fraud, so it is left out.)"
 
 
+CUT_OFF_THINKING = "(An earlier answer here was cut off while the model was still thinking, so it is left out.)"
+
+
 def history_for_model(store: Store, turns: list[dict[str, Any]], *, limit: int = 6) -> list[dict[str, str]]:
     """This conversation's last turns for the model. An answer that drew on an email flagged as possible payment
     fraud since (or while it was marked "Not fraud") may quote its text or files, so it is left out, as ``past_context``
-    leaves it out of other conversations."""
+    leaves it out of other conversations. The model's reasoning is never sent back as what it answered: the part
+    before a "</think>" it never opened is left out, and so is an answer cut off with nothing to set its reasoning
+    apart from a model since seen to open <think> itself (``local_llm._opens_think``)."""
     kept = turns[-limit:]
-    return [
-        {
-            "role": turn["role"],
-            "text": LOCKED_ANSWER if turn["role"] == "assistant" and _turn_cites_locked_mail(store, turn) else turn["text"],
-        }
-        for turn in kept
-    ]
+    return [{"role": turn["role"], "text": _sent_back(store, turn)} for turn in kept]
+
+
+def _sent_back(store: Store, turn: dict[str, Any]) -> str:
+    from controller_inbox import local_llm
+
+    text = turn["text"]
+    if turn["role"] != "assistant":
+        return text
+    if _turn_cites_locked_mail(store, turn):
+        return LOCKED_ANSWER
+    if turn.get("cut_off") and turn["cut_off"] in local_llm._opens_think:
+        return CUT_OFF_THINKING
+    if "</think>" in text and "<think>" not in text.split("</think>", 1)[0]:
+        return local_llm.strip_thinking(text) or CUT_OFF_THINKING
+    return text
 
 
 def past_context(store: Store, question: str, *, exclude: str = "", limit: int = 3) -> str:

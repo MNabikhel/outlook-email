@@ -16,6 +16,7 @@ from pathlib import Path
 from controller_inbox.actions import local_today
 from controller_inbox.clock import apply_saved_timezone, parse_stamp
 from controller_inbox.vision import apply_saved_mode
+from controller_inbox import local_llm
 from controller_inbox.config import Settings, load_settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.fraud import _cell
@@ -150,6 +151,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     apply_saved_timezone(settings, store)
     apply_saved_mode(settings, store)
+    local_llm.remember_thinking(store)
 
     if args.cmd == "run":
         return _run(settings, store, args)
@@ -414,7 +416,7 @@ def _run(settings: Settings, store: Store, args) -> int:
         print(f"  {label}{suffix}: {note[:70]}", flush=True)
 
     def read_new_mail(on_progress=progress) -> dict:
-        from controller_inbox.model_choice import load_at_start
+        from controller_inbox.model_choice import load_at_start, load_said
 
         loaded = {"message": ""}
 
@@ -428,7 +430,8 @@ def _run(settings: Settings, store: Store, args) -> int:
         # Nobody should wait on minutes-long page reads for the dashboard to open.
         result = run_overnight(store, settings, limit=args.limit, on_progress=on_progress, vision_minutes=0, before_reading=load_model)
         if loaded["message"]:
-            result["model_load"] = {"message": loaded["message"], "failed": bool(loaded.get("failed"))}
+            stopped = bool(result.get("model") and result.get("model_note"))
+            result["model_load"] = load_said(loaded, stopped=stopped)
         return result
 
     if args.no_serve:
