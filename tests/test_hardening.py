@@ -298,3 +298,26 @@ def test_today_explains_when_all_the_mail_is_older_than_the_window(settings: Set
     page = client.get("/").text
     assert f"Your {loaded.counts()['emails']} emails arrived before" in page and 'href="/inbox">All mail' in page
     assert "No new email since" in page and "of 0 emails" not in page
+
+
+def test_reasoning_cut_off_inside_think_tags_keeps_its_last_words():
+    """While inside think tags the last few characters wait in case a closing tag is arriving split; a model that
+    stopped before closing them lost those characters from the Thinking box."""
+    f = ThinkFilter()
+    out = "".join(f.feed(piece) for piece in ("<think>", "reasoning that is long and ends", ".")) + f.flush()
+    assert out == "" and f.take_thought() == "reasoning that is long and ends."
+
+
+def test_a_stream_cut_off_inside_think_tags_yields_all_its_reasoning(settings, monkeypatch):
+    from controller_inbox.local_llm import Thought
+
+    pieces = ["<think>", "reasoning that is long and ends", "."]
+    body = "".join(f"data: {json.dumps({'choices': [{'delta': {'content': piece}}]})}\n\n" for piece in pieces)
+    body += f"data: {json.dumps({'choices': [{'delta': {'content': ''}, 'finish_reason': 'length'}]})}\n\ndata: [DONE]\n\n"
+    _fake_server(monkeypatch, lambda _request: httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body))
+    thought = []
+    with pytest.raises(EmptyReply):
+        for piece in stream_text(settings, [{"role": "user", "content": "hi"}], thoughts=True):
+            if isinstance(piece, Thought):
+                thought.append(piece.text)
+    assert "".join(thought).startswith("reasoning that is long and ends."), thought

@@ -990,6 +990,8 @@ class ThinkFilter:
 
     def flush(self) -> str:
         rest = "" if self.inside else self.buffer
+        if self.inside:  # the reasoning stopped before its closing tag: the characters held back are reasoning too
+            self._thought.append(self.buffer)
         self.buffer = ""
         return self._lead(rest)
 
@@ -1344,6 +1346,8 @@ def _stream_pieces(
             _token_probs(choice, token_probs)
             yield piece
     rest = thinking.flush()
+    if thoughts and (thought := thinking.take_thought()):
+        yield Thought(thought)
     if rest:
         yield rest
 
