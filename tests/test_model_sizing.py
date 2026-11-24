@@ -74,7 +74,7 @@ def test_a_31b_model_on_a_32_gb_mac_is_flagged_and_not_loaded_by_itself(settings
     warning = model_roles.too_big(settings, status)[BIG]
     assert "about 24 GB" in warning and "this Mac can give a model about 21 GB" in warning and "3B to 8B" in warning
     # CloseDesk loads it with the context that fits (model_fit), so it doesn't say LM Studio runs out of memory.
-    assert "with a 4,096-token context instead" in warning and "run out of memory" not in warning
+    assert "it asks for a 4,096-token context" in warning and "run out of memory" not in warning
     assert CHAT not in model_roles.too_big(settings, status)
     assert model_choice.auto_choice(settings, status) == CHAT
     lm.sizes = {BIG: 19 * GB}

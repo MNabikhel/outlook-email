@@ -401,7 +401,9 @@ def too_big(settings: Settings, status: ModelStatus) -> dict[str, str]:
         shorter = 0 < asked < tokens
         needed_asked = memory_needed(size, asked) if shorter else needed
         context = f" with a {tokens:,}-token context" if tokens else ""
-        instead = f"CloseDesk loads it with a {asked:,}-token context instead, so long attachments are read a section at a time"
+        # What CloseDesk does when it loads the model (at the start, or with Load and use), not what it did: a model
+        # the user loaded in LM Studio is left with the context they gave it.
+        instead = f"when CloseDesk loads it, it asks for a {asked:,}-token context and long attachments are read a section at a time"
         is_small = model_choice.small(status, key)
         # Beside a graphics card: how much of it the card can't hold.
         share = "most" if needed_asked - budget.runs_well > needed_asked / 2 else "part"

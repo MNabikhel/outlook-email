@@ -329,3 +329,32 @@ def test_a_table_query_that_runs_out_of_memory_has_the_model_loaded_back_before_
     assert f"Loaded {BIG} back with a 4,096-token context: 16,384 didn't fit in this computer's memory." in steps
     assert [chat[2] for chat in server.chats].count("Compute error") == 1, "asked again at the size that fits"
     assert not modes and "$12,480" in text
+
+
+def test_settings_says_a_context_the_user_loaded_doesnt_fit(store, settings, mail, monkeypatch):
+    """A big model the user loaded in LM Studio with more context than fits this computer: every answer ran out of
+    memory, yet Settings said the window was "Enough to read whole attachments" (in green), and the line under the
+    model said CloseDesk loads it with less "instead", though CloseDesk leaves a model the user loaded as it is.
+    Nothing said to reload it in LM Studio with what fits."""
+    from controller_inbox import model_fit
+
+    settings.llm = True
+    server = MacLMStudio({BIG: 32768})
+    _serve(monkeypatch, server)
+    status = local_llm.check_model(settings, use_cache=False)
+    line = model_fit.context_line(settings, status)
+    assert line["tone"] == "short" and "Enough to read" not in line["advice"], line
+    assert f"{BIG} with 32,768 tokens likely doesn't fit in this computer's memory" in line["advice"]
+    assert "reload it in LM Studio with Context Length 16,384" in line["advice"], line["advice"]
+
+    # The line under the model says what CloseDesk asks for when it loads it, not that it did.
+    server.loaded = {}
+    SIZES_BEFORE = dict(SIZES)
+    try:
+        SIZES[BIG] = int(19.5 * GB)
+        local_llm._status_cache.clear()
+        warning = model_roles.too_big(settings, local_llm.check_model(settings, use_cache=False))[BIG]
+    finally:
+        SIZES.update(SIZES_BEFORE)
+    assert "instead" not in warning and warning.count(", so ") == 1, warning
+    assert "when CloseDesk loads it, it asks for a" in warning, warning

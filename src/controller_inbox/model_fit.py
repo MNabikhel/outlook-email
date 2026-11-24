@@ -21,7 +21,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from controller_inbox import model_roles
+from controller_inbox import local_llm, model_roles
 from controller_inbox.local_llm import ModelStatus, check_model
 
 if TYPE_CHECKING:
@@ -420,6 +420,7 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
     recommended = RECOMMENDED_CONTEXT
     fits = context_fits(settings, model)
     capped = context_capped(settings, model)
+    short = False  # the window can't be used as it is, however long it is
     # The model used last, not loaded now: LM Studio loads it when it is asked, and CloseDesk then sizes it.
     waiting = bool(model.lm_studio and model.model and not model.key and model.model in model.chat_models)
     if waiting:
@@ -441,6 +442,18 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
             "The model server doesn't say how long its context is. For whole workbooks and PDFs, load the model "
             f"there with a context length of {recommended:,} or more."
         )
+    elif (
+        model.key and model.context_length > target > 0
+        and local_llm._context_given.get(model.key) != model.context_length
+        and not fits_with(settings, model, model.key, model.context_length)
+    ):
+        # Loaded in LM Studio with more than fits this computer: CloseDesk leaves a model the user loaded as it is.
+        advice = (
+            f"{model.key} with {window:,} tokens likely doesn't fit in this computer's memory, so its answers may run "
+            f"out of memory. To fix it, reload it in LM Studio with Context Length {target:,} (My Models → the "
+            "model's settings → Context Length), the most that fits here."
+        )
+        short = True
     elif needs_more_context(settings) and fits:
         why = "the most that fits this computer" if capped else "the minimum set below"
         advice = (
@@ -479,7 +492,7 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
         "shown": model.active,
         "tokens": window,
         "label": "not loaded yet" if waiting else f"{window:,} tokens" if window else "not reported",
-        "tone": "ok" if window >= recommended else "short",
+        "tone": "ok" if window >= recommended and not short else "short",
         "advice": advice,
     }
 
