@@ -235,3 +235,43 @@ def test_the_overnight_reading_says_once_why_it_stopped(loaded, settings, monkey
         "even with 4,096 tokens. Choose one that can, like Qwen3, or a smaller one in Settings."
     )
     assert len(server.calls) == 2, "one email, at 2,048 tokens and then 4,096, before the run stopped"
+
+
+def test_a_reading_that_runs_out_of_memory_says_so_with_the_advice(loaded, settings, monkeypatch):
+    """A 31B on a 32 GB Mac: LM Studio's "Compute error." on every email. The note on the page and in the overnight
+    file read "Stopped reading: three messages in a row failed (Server error '500 Internal Server Error' for url
+    'http://127.0.0.1:1234/v1/chat/completions')": no word that the memory ran out, or what to do."""
+    from controller_inbox.overnight import read_queue
+
+    settings.llm = None
+    server = LMStudio(loaded=[CHAT])
+    server.answer_error = "status"  # {"error": {"message": "Compute error."}}
+    serve_lm_studio(monkeypatch, server)
+    reader = LocalReader(settings, client=httpx.Client(transport=httpx.MockTransport(server)))
+    result = read_queue(loaded, settings, limit=6, reader=reader)
+    note = result["note"]
+    assert note.startswith("Stopped reading: the local model ran out of memory on three messages in a row. "), note
+    assert "3B to 8B" in note and "Server error" not in note and "http" not in note and ".." not in note, note
+    assert reader.stats.failed == 3, "three emails, then the run stopped"
+
+
+def test_a_reading_that_runs_out_of_memory_with_a_context_closedesk_gave_is_loaded_back_and_goes_on(loaded, settings, monkeypatch):
+    """With a context CloseDesk raised the model to, the chat loads it back smaller and asks again; the reading only
+    failed email after email."""
+    from controller_inbox.overnight import read_queue
+
+    settings.llm = None
+    server = LMStudio(loaded=[CHAT])
+    local_llm._context_given[CHAT] = 16384  # CloseDesk loaded it with 16,384 tokens
+
+    def answering(request):
+        # Out of memory at 16,384 tokens; at 8,192 it answers.
+        server.answer_error = "status" if server.contexts.get(CHAT, 0) > 8192 else ""
+        return server(request)
+
+    serve_lm_studio(monkeypatch, answering)
+    reader = LocalReader(settings, client=httpx.Client(transport=httpx.MockTransport(answering)))
+    result = read_queue(loaded, settings, limit=3, reader=reader)
+    assert ("load", CHAT, 8192) in server.calls, server.calls
+    # The first email asked again after the reload, and the others after it: none of them ran out of memory again.
+    assert "memory" not in reader.stats.last_error + result["note"], reader.stats

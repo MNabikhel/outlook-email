@@ -173,7 +173,7 @@ def _read_waiting(
     # How long this model takes an email here, for Settings to suggest a faster one when it is slow.
     model_choice.record_speed(store, reader.model, reader.stats.typical_seconds, reader.stats.read)
     if reader.stats.stopped_reason:
-        result["note"] = f"Stopped reading: {reader.stats.stopped_reason}."
+        result["note"] = f"Stopped reading: {reader.stats.stopped_reason.rstrip('.')}."
         if reader.stats.too_slow:
             status = check_model(settings)
             current = status.instances.get(reader.model, (reader.model, 0))[0]

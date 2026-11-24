@@ -632,6 +632,29 @@ def test_process_new_mail_says_how_many_files_could_not_be_read(browser, serve, 
     page.context.close()
 
 
+def test_process_new_mail_says_when_the_model_stopped_reading(browser, serve, settings, monkeypatch):
+    """A 31B ran out of memory on every email: the toast said only that it had loaded the model, "it answers your
+    questions and reads the mail", in green, though none of the mail was read."""
+    from controller_inbox import overnight
+
+    note = "Stopped reading: the local model ran out of memory on three messages in a row. Choose one in Settings."
+    loaded = "Loaded google/gemma-4-31b in LM Studio: it answers your questions and reads the mail."
+
+    def processed(*_args, **_kw):
+        time.sleep(1)  # the page sees the run going, then finish
+        return {"ingested": 0, "model": "google/gemma-4-31b", "model_note": note, "model_load": {"message": loaded, "failed": False}}
+
+    monkeypatch.setattr(overnight, "run_overnight", processed)
+    base = serve()
+    page = _page(browser)
+    page.goto(f"{base}/app")
+    page.wait_for_selector("body.ready")
+    page.click("#process-btn")
+    page.wait_for_selector(".toast:has-text('Processed')", timeout=60000)
+    toast = page.locator(".toast:has-text('Processed')")
+    assert note in toast.inner_text() and "error" in (toast.get_attribute("class") or "")
+
+
 # Toolbars fit the reading pane -----------------------------------------------------------------------
 OUTSIDE = """() => {
   const pane = document.querySelector('.reader-pane').getBoundingClientRect();

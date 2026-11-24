@@ -694,6 +694,8 @@ class LocalReader:
         if _thinks(settings, self.model, self._effort):
             self._max_tokens = max(self._max_tokens, THINKING_ROOM)
         self._consecutive_failures = 0
+        self._memory_failures = 0  # of those, the ones that ran out of memory
+        self._stepped_back = False  # a context that ran out of memory was loaded back smaller in this run
         # The reply is streamed, so the time limit is how long the model may go without a word, not how long the whole
         # reply may take: a big model writing slowly is never cut off. A server that refuses streaming is asked for
         # the whole reply in one piece instead.
@@ -737,7 +739,15 @@ class LocalReader:
             self.stats.stopped_reason = str(exc)
             return None
         except httpx.HTTPError as exc:
-            return self._failed(_short_error(exc))
+            if not ran_out_of_memory(exc):
+                return self._failed(_short_error(exc))
+            if not self._stepped_back:
+                # A context CloseDesk gave the model that ran out of memory: loaded back smaller, and this email asked
+                # once more (once a run: a model too big at any size isn't reloaded again and again).
+                self._stepped_back = True
+                if step_back_context(self.settings):
+                    return self.read(packet)
+            return self._failed("the local model ran out of memory", memory=True)
         except ContextOverflow as exc:
             return self._failed(str(exc))
         if parsed is None:
@@ -745,19 +755,26 @@ class LocalReader:
                 # Every email would go the same way, minutes each: the run stops, and says why once.
                 self.stats.stopped_reason = str(stuck)
             return self._failed(reply.why_unusable())
-        self._consecutive_failures = 0
+        self._consecutive_failures = self._memory_failures = 0
         took = time.monotonic() - started
         self.stats.read += 1
         self.stats.seconds += took
         self.stats.times.append(took)
         return parsed
 
-    def _failed(self, reason: str) -> None:
+    def _failed(self, reason: str, *, memory: bool = False) -> None:
         self.stats.failed += 1
         self.stats.last_error = reason
         self._consecutive_failures += 1
+        self._memory_failures = self._memory_failures + 1 if memory else 0
         if self._consecutive_failures >= 3 and not self.stats.stopped_reason:
-            self.stats.stopped_reason = f"three messages in a row failed ({reason})"
+            if self._memory_failures >= 3:
+                # Not LM Studio's "Server error '500 ...' for url ...": what happened, and what to do about it.
+                self.stats.stopped_reason = (
+                    f"the local model ran out of memory on three messages in a row. {memory_advice(self.settings)}"
+                )
+            else:
+                self.stats.stopped_reason = f"three messages in a row failed ({reason})"
         return None
 
     def _adapt(self, reply: Reply) -> bool:
