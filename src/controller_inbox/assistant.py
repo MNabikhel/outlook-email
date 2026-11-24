@@ -1624,12 +1624,15 @@ def answer_stream(
         # how long it likely needs, under the answer.
         more_time = _more_time(state, settings, exc, question, asked_about)
         if ran_out_of_memory(exc):
+            # A context CloseDesk gave the model: the offer to load it again smaller follows the answer, and the note
+            # points to it rather than to another way to the same fix.
             state["ran_out"] = True
+            state["step_back"] = step_back_offer(settings)
         if state["wrote"]:
-            why = f" {memory_advice(settings)}" if ran_out_of_memory(exc) else ""
+            why = f" {memory_advice(settings, offer=state.get('step_back'))}" if ran_out_of_memory(exc) else ""
             yield {"type": "delta", "text": f"\n\n(The local model stopped answering partway.{why})"}
         else:
-            note = failure_note(exc, settings)
+            note = failure_note(exc, settings, offer=state.get("step_back"))
             if isinstance(exc, ContextOverflow):
                 note = "The question and its files didn't fit the model's context window. " + agent.context_advice(
                     context_length(settings), ["the emails and files"], model_server(settings)
@@ -1664,7 +1667,9 @@ def answer_stream(
         yield {"type": "context", "text": advice}
     if offer:
         yield offer
-    if state.get("ran_out") and (step_back := step_back_offer(settings)):
+    if state.get("ran_out") and "step_back" not in state:  # the check pass ran out of memory: no note was written
+        state["step_back"] = step_back_offer(settings)
+    if step_back := state.get("step_back"):
         # A context CloseDesk gave the model ran out of memory: the user is asked before it is loaded again smaller,
         # and the same question is asked again once it is.
         yield {"type": "step_back", **step_back, "question": question, "email_id": asked_about or ""}

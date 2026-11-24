@@ -296,3 +296,29 @@ def test_the_choice_made_on_the_offer_is_saved_with_the_conversation(store, sett
     done = client.post("/chat/step-back", json={"model": BIG, "size": 8192, "chat_id": chat_id}, headers=PAGE)
     assert done.status_code == 200, done.json()
     assert all(turn["step_back"]["closed"] for turn in store.chat_turns(chat_id) if turn.get("step_back"))
+
+
+def test_the_note_above_the_offer_points_to_it_and_not_to_the_minimum(store, settings, mail, monkeypatch):
+    """Above the offer to reload the model with a smaller context, the chat's note said the model was "too big for
+    this computer's memory" and to lower the minimum context in Settings: a lasting change, and another way to the fix
+    the offer just below it makes with one press."""
+    _closedesk_loaded(settings, monkeypatch)
+    events = _events(store, settings, QUESTION, mail["Q4 budget draft"].id)
+    note = next(e for e in events if e["type"] == "mode")["note"]
+    assert any(e["type"] == "step_back" for e in events)
+    assert "minimum context" not in note and "too big" not in note, note
+    assert note == (
+        f"The local model ran out of memory before it could answer. CloseDesk can load {BIG} again with a smaller "
+        "context: see below. Or choose a smaller model in Settings: a 3B to 8B model is plenty and answers faster."
+    )
+
+
+def test_the_partway_note_above_the_offer_points_to_it_too(store, settings, mail, monkeypatch):
+    server = _closedesk_loaded(settings, monkeypatch)
+    server.partway = True
+    settings.table_queries = False
+    events = _events(store, settings, "Who sent this?", mail["Q4 budget draft"].id)
+    text = "".join(e["text"] for e in events if e["type"] == "delta")
+    assert any(e["type"] == "step_back" for e in events)
+    assert "minimum context" not in text and "too big" not in text, text
+    assert f"CloseDesk can load {BIG} again with a smaller context: see below." in text, text

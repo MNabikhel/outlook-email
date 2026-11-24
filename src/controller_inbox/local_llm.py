@@ -2670,10 +2670,17 @@ MEMORY_ADVICE = (
 )
 
 
-def memory_advice(settings: Settings) -> str:
+def memory_advice(settings: Settings, offer: dict | None = None) -> str:
     """``MEMORY_ADVICE`` fitted to the model loaded in LM Studio: a shorter minimum context is offered only when it
     would reload the model with less (one CloseDesk sized), and one the user loaded is told the Context Length to
-    reload it with in LM Studio (the most that fits here, when CloseDesk can tell)."""
+    reload it with in LM Studio (the most that fits here, when CloseDesk can tell). With ``offer`` (the chat's offer
+    to load it again smaller, ``step_back_offer``, shown below the note) it points to that, and to nothing else that
+    makes the same fix: the model may well fit with the smaller context."""
+    if offer:
+        return (
+            f"CloseDesk can load {offer['model']} again with a smaller context: see below. Or choose a smaller model in "
+            "Settings: a 3B to 8B model is plenty and answers faster."
+        )
     try:
         status = check_model(settings)
     except Exception:  # noqa: BLE001 - the advice is said all the same
@@ -2712,11 +2719,11 @@ def ran_out_of_memory(exc: Exception) -> bool:
     return out_of_memory(said) or out_of_memory(getattr(exc, "said", "")) or out_of_memory(str(exc))
 
 
-def failure_note(exc: Exception, settings: Settings | None = None) -> str:
+def failure_note(exc: Exception, settings: Settings | None = None, offer: dict | None = None) -> str:
     """Why the chat's model didn't answer (it wrote nothing), in words a person can act on. With ``settings``, the
-    memory advice is fitted to the model loaded (``memory_advice``)."""
+    memory advice is fitted to the model loaded and to ``offer`` (``memory_advice``)."""
     if ran_out_of_memory(exc):
-        advice = memory_advice(settings) if settings is not None else MEMORY_ADVICE
+        advice = memory_advice(settings, offer) if settings is not None else MEMORY_ADVICE
         return "The local model ran out of memory before it could answer. " + advice
     if isinstance(exc, ThinksTooLong):
         return f"The local model didn't answer. {exc}."
