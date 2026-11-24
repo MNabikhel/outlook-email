@@ -252,3 +252,30 @@ def test_a_model_lm_studio_couldnt_load_gives_the_lookup_answer_and_says_why(set
     mode = next(event for event in events if event["type"] == "mode")
     assert mode["mode"] == "lookup" and mode["note"].startswith(f"LM Studio couldn't load {KEY} (Not enough memory"), mode
     assert not server.prompts, "nothing was sent to a model that isn't loaded"
+
+
+def test_writing_the_answer_shows_when_the_first_words_come_not_once_the_echo_check_lets_them_through(settings, loaded, lm, monkeypatch):  # noqa: F811
+    """The answer's first 120 characters are held back, in case the model goes on to copy its instructions. At 5 tokens
+    a second that is about 6 seconds: "Writing the answer…" came only then, so the reading estimate ran out first and
+    the chat said "Taking longer than usual…" on every answer while the model was writing all along."""
+    from controller_inbox import assistant
+
+    lm()
+    sent: list[str] = []
+
+    def stream_text(*_args, **_kwargs):
+        for word in ("INV-10482 ", "is ", "due ", "on ", "Friday ", "[1]."):
+            sent.append(word)
+            yield word
+
+    monkeypatch.setattr(assistant, "stream_text", stream_text)
+    from controller_inbox.assistant import answer_stream
+
+    local_llm._status_cache.clear()
+    seen = []
+    for event in answer_stream(loaded, settings, "When is INV-10482 due?"):
+        seen.append(event)
+        if event["type"] == "progress" and event.get("state") == "writing":
+            break
+    assert seen[-1]["state"] == "writing", "no writing step"
+    assert len(sent) == 1, f"the model had sent {''.join(sent)!r} before the chat said it was writing"

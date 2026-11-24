@@ -1974,6 +1974,14 @@ def _lone_close(text: str) -> bool:
     return "</think>" in text and "<think>" not in text.split("</think>", 1)[0]
 
 
+class _Begun:
+    """Passed on (by ``_Recorded``, through ``without_echo``) when the model's first words come, before the echo check
+    lets any through: the chat says it is writing from then, not once the first 120 characters are past the check."""
+
+
+_BEGUN = _Begun()
+
+
 class _Recorded:
     """The model's reply as it streams, kept whole: the echo check stops reading where the reply starts repeating
     the instructions, but reasoning that quotes them can still be followed by a "</think>" and the answer."""
@@ -1988,7 +1996,9 @@ class _Recorded:
 
     def __iter__(self) -> Iterator[str]:
         for piece in self.pieces:
-            if not isinstance(piece, Thought):  # the model's reasoning, passed on to be shown: not its reply
+            if isinstance(piece, str):  # not the model's reasoning, passed on to be shown: its reply
+                if piece and not self.text:
+                    yield _BEGUN
                 self.text += piece
             yield piece
         self.whole = True
@@ -1998,7 +2008,7 @@ class _Recorded:
         start = len(self.text)
         try:
             for piece in self.pieces:
-                if isinstance(piece, Thought):
+                if not isinstance(piece, str):
                     continue
                 self.text += piece
                 if not _lone_close(self.text) and len(self.text) - start > self.LOOK_AHEAD:
@@ -2156,14 +2166,17 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
     echoed = True
     try:
         for piece in without_echo(raw):
+            if piece is _BEGUN:
+                # The model's first words: it is writing, though the echo check holds them back a moment.
+                if not state["wrote"] and state.get("call") is not None:
+                    yield WRITING
+                continue
             if isinstance(piece, Thought):
                 if not thought:
                     thought = True
                     yield {"type": "progress", "state": "thinking", "text": "Thinking"}
                 yield {"type": "thinking", "text": piece.text}
                 continue
-            if not state["wrote"] and state.get("call") is not None:
-                yield WRITING
             state["wrote"] = True
             state["text"] += piece
             yield {"type": "delta", "text": piece}
@@ -2292,7 +2305,7 @@ def without_echo(pieces: Iterator[str]) -> Iterator[str]:
     pending = ""
     sent = False
     for piece in pieces:
-        if isinstance(piece, Thought):  # the reasoning goes on to the chat as it comes; only the answer is checked
+        if not isinstance(piece, str):  # the reasoning goes on to the chat as it comes; only the answer is checked
             yield piece
             continue
         pending += piece
