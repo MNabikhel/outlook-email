@@ -297,3 +297,20 @@ def test_a_model_closedesk_loaded_at_the_smallest_context_isnt_stepped_below_it(
     _serve(monkeypatch, server)
     local_llm._context_given[BIG] = 4096
     assert local_llm.step_back_context(settings) == "" and server.calls == []
+
+
+def test_a_model_closedesk_loaded_and_then_raised_is_still_closedesks_when_the_minimum_is_lowered(store, settings, mail, monkeypatch):
+    """Load and use loads it at Setup's minimum; a larger minimum has the next question raise it. Lowering the minimum
+    after that reloads it at the size chosen, not at the size Load and use gave it, and it stays CloseDesk's to size."""
+    settings.llm = True
+    server = MacLMStudio({})
+    _serve(monkeypatch, server)
+    assert local_llm.use_chat_model(settings, SMALL) == ""
+    assert server.loaded[SMALL] == 16384
+    local_llm.set_min_context(settings, 32768)
+    _ask(store, settings, "What is the total in this budget?", mail["Q4 budget draft"].id)
+    assert server.loaded[SMALL] == 32768
+    assert local_llm.set_min_context(settings, 8192) == f"Reloaded {SMALL} in LM Studio with an 8,192-token context."
+    assert server.loaded[SMALL] == 8192 and local_llm._context_given.get(SMALL) == 8192
+    assert local_llm.set_min_context(settings, 4096) == f"Reloaded {SMALL} in LM Studio with a 4,096-token context."
+    assert server.loaded[SMALL] == 4096

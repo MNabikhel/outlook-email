@@ -1755,7 +1755,11 @@ def _reload_with_context(settings: Settings) -> str:
     finally:
         _status_cache.clear()
     if not errors:
-        _context_before.setdefault(status.key, status.context_length)  # the earliest: the size the user had it at
+        # The earliest: the size the user had it at. A model CloseDesk loaded itself (sized by it, with no size of the
+        # user's kept) has none, so lowering the minimum or running out of memory goes on sizing it as CloseDesk's.
+        ours = _context_given.get(status.key) == status.context_length and status.key not in _context_before
+        if not ours:
+            _context_before.setdefault(status.key, status.context_length)
         _context_back[status.key] = status.context_length  # the latest: the size it answered with before this
         _context_given[status.key] = want
         supported = min(settings.min_context_tokens, status.max_context) if status.max_context else settings.min_context_tokens
