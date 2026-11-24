@@ -1418,6 +1418,10 @@ _OVERFLOW_RE = re.compile(
 )
 _tools_rejected: set[str] = set()
 _context_raised: set[str] = set()
+# The context each model CloseDesk raised was loaded with by it, by instance: when LM Studio has loaded it again since
+# with another (it unloaded it while idle, the user ejected it, and a question had it loaded with LM Studio's own
+# default), it is a new instance, and the longer context is tried again.
+_context_tried: dict[str, int] = {}
 # The context CloseDesk itself gave each chat model (raising it, or loading it when chosen in Settings), by LM Studio's
 # key. A model the user loaded at a size they chose isn't here, nor is one they loaded again since: it is left alone.
 _context_given: dict[str, int] = {}
@@ -1604,6 +1608,15 @@ def context_capped(settings: Settings, status: ModelStatus | None = None) -> boo
     return bool(status.key and want and context_target(settings, status) < supported)
 
 
+def raise_tried(status: ModelStatus) -> bool:
+    """CloseDesk has tried to raise the context of the model loaded now: not again, unless LM Studio has loaded it
+    again since with another size than CloseDesk gave it."""
+    if status.model not in _context_raised:
+        return False
+    given = _context_tried.get(status.model)
+    return not given or given == status.context_length
+
+
 def needs_more_context(settings: Settings) -> bool:
     """LM Studio loaded the model with less than the minimum and CloseDesk hasn't tried to raise it yet."""
     status = check_model(settings)
@@ -1611,7 +1624,7 @@ def needs_more_context(settings: Settings) -> bool:
         status.active
         and status.key
         and 0 < status.context_length < context_target(settings, status)
-        and status.model not in _context_raised
+        and not raise_tried(status)
     )
 
 
@@ -1623,6 +1636,7 @@ def set_min_context(settings: Settings, tokens: int) -> str:
     it is. Returns what happened ("" when nothing did)."""
     settings.min_context_tokens = tokens
     _context_raised.clear()
+    _context_tried.clear()
     _context_stepped.clear()
     if not _context_given:  # nothing CloseDesk sized (at the start, always): LM Studio isn't asked
         return ""
@@ -1739,6 +1753,7 @@ def step_back_context(settings: Settings) -> str:
         if model_busy(status.model, key):  # unloading it would cut off another answer or the overnight reading
             return ""
         _context_raised.add(status.model)
+        _context_tried.pop(status.model, None)  # ran out of memory: not raised again, however it is loaded next
         problem = _reload_at(settings, status, status.model, key, back)
         if problem:
             return problem
@@ -1782,6 +1797,7 @@ def _reload_with_context(settings: Settings) -> str:
     want = context_target(settings, status)
     if not context_fits(settings, status):
         _context_raised.add(status.model)  # said once
+        _context_tried.pop(status.model, None)
         return f"Kept {status.key} at its {status.context_length:,}-token context: a {want:,}-token one wouldn't fit in this computer's memory."
     if model_busy(status.model, status.key):
         # Unloading it would cut off the overnight reading, a page read or another chat partway; tried again later.
@@ -1791,6 +1807,7 @@ def _reload_with_context(settings: Settings) -> str:
     except StillLoading as exc:
         return str(exc)
     _context_raised.add(status.model)
+    _context_tried.pop(status.model, None)
     root = lm_studio_root(status.base_url)
     timeout = httpx.Timeout(max(settings.llm_timeout, 120.0), connect=5.0)
     try:
@@ -1818,6 +1835,7 @@ def _reload_with_context(settings: Settings) -> str:
             _context_before.setdefault(status.key, status.context_length)
         _context_back[status.key] = status.context_length  # the latest: the size it answered with before this
         _context_given[status.key] = want
+        _context_tried[status.model] = want
         supported = min(settings.min_context_tokens, status.max_context) if status.max_context else settings.min_context_tokens
         most = (
             " (the most that fits this computer)" if want < supported
@@ -2039,6 +2057,7 @@ def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) 
         finally:
             _status_cache.clear()
         _context_raised.discard(key)  # loaded afresh: a longer context may be tried again
+        _context_tried.pop(key, None)
         _context_stepped.pop(key, None)
         _chat_load_failed.pop(key, None)
         remember_model(settings, key)

@@ -407,3 +407,22 @@ def test_the_out_of_memory_note_fits_the_model_loaded(store, settings, mail, mon
     _steps, modes, _text = _ask(store, settings, "What is the total in this budget?", budget)
     note = modes[0]["note"]
     assert f"reload {BIG} in LM Studio with Context Length 16,384" in note, note
+
+
+def test_a_model_lm_studio_loaded_again_with_its_own_context_is_raised_again(store, settings, mail, monkeypatch):
+    """After CloseDesk raised the model to 16,384 tokens, LM Studio unloaded it and loaded it again with its default
+    4,096 when a question named it. No question raised it again for the rest of the session: Settings and the chat
+    showed 4,096, and long attachments were cut short."""
+    import test_context_memory as here
+
+    settings.llm = True
+    monkeypatch.setattr(here, "GRAPHICS_MEMORY", 200 * GB)  # 16,384 tokens answer here
+    server = MacLMStudio({BIG: 4096})
+    _serve(monkeypatch, server, memory_gb=64)
+    budget = mail["Q4 budget draft"].id
+    _ask(store, settings, "What is the total in this budget?", budget)
+    assert server.loaded[BIG] == 16384, server.calls
+    server.loaded[BIG] = 4096  # unloaded behind CloseDesk's back, and loaded again with LM Studio's default
+    steps, _modes, _text = _ask(store, settings, "And the total again?", budget)
+    assert any(step.startswith(f"Reloaded {BIG} in LM Studio with a 16,384-token context") for step in steps), steps
+    assert server.loaded[BIG] == 16384 and server.chats[-1][1] == 16384

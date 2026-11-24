@@ -335,7 +335,7 @@ def describe(store: Store | None, settings: Settings, status: ModelStatus | None
     wanted = auto_context(settings, status, key) if loaded and status.lm_studio else 0
     if (
         0 < loaded < wanted
-        and status.model not in local_llm._context_raised
+        and not local_llm.raise_tried(status)
         and local_llm.context_fits(settings, status)
     ):
         held += f" ({wanted:,} from the next question)"
