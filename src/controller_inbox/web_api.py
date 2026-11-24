@@ -33,7 +33,7 @@ from controller_inbox import (
     semantic, services, table_lookup, updates, version, vision,
 )
 from controller_inbox.extract import extraction_failed
-from controller_inbox.local_llm import check_model, context_capped, context_fits, context_target, needs_more_context
+from controller_inbox.local_llm import check_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, ActionStatus, EmailRecord
 from controller_inbox.profile import active_profile, set_profile
 from controller_inbox.clock import effective_timezone, format_when, offset_label, on_daylight_time, set_timezone, zone_name
@@ -1081,54 +1081,7 @@ def register_workspace(
 
     def context_note(model) -> dict[str, Any]:
         """The line under the model saying whether its context window holds whole attachments, as Setup words it."""
-        window = model.context_length or settings.chat_context_tokens
-        target = context_target(settings, model)
-        recommended = agent.RECOMMENDED_CONTEXT
-        fits = context_fits(settings, model)
-        capped = context_capped(settings, model)
-        if needs_more_context(settings) and fits:
-            why = "the most that fits this computer" if capped else "the minimum set below"
-            advice = (
-                f"The next time you ask something, CloseDesk reloads {model.key} in LM Studio with {target:,} tokens "
-                f"({why}). If your computer runs short of memory, it goes back to the current size."
-            )
-        elif window >= recommended:
-            advice = "Enough to read whole attachments when you ask about them."
-        else:
-            advice = "Ask CloseDesk reads long attachments a section at a time with this."
-            if model.key and model.context_length and window < target and not fits:
-                advice += (
-                    f" {model.key} with {target:,} tokens wouldn't fit in this computer's memory, so CloseDesk keeps it "
-                    "as LM Studio loaded it. Pick a smaller model, or a smaller minimum below."
-                )
-            elif model.key and model.context_length and window < target:
-                advice += (
-                    f" LM Studio couldn't load {model.key} with {target:,} tokens. "
-                    "Close other apps or pick a smaller minimum below, then Save to try again."
-                )
-            elif model.key and capped:
-                advice += (
-                    f" {model.key} is too big for this computer's memory with a longer context, so CloseDesk asks LM "
-                    f"Studio for {target:,} tokens. A smaller model reads whole workbooks and PDFs."
-                )
-            elif model.key and model.max_context and model.max_context < recommended:
-                advice += f" {model.key} supports at most {model.max_context:,} tokens. For whole workbooks and PDFs, load a model with a longer context."
-            elif model.key:
-                advice += " For whole workbooks and PDFs, move the minimum below to 16k or more and Save."
-            else:
-                advice += (
-                    f" For whole workbooks and PDFs, reload the model in LM Studio with Context Length {recommended:,} or more "
-                    "(My Models → the model's settings → Context Length)."
-                )
-            if not window:
-                advice += " If your server doesn't report it, set CONTROLLER_INBOX_CHAT_CONTEXT_TOKENS."
-        return {
-            "shown": model.active,
-            "tokens": window,
-            "label": f"{window:,} tokens" if window else "not reported",
-            "tone": "ok" if window >= recommended else "short",
-            "advice": advice,
-        }
+        return model_fit.context_line(settings, model)
 
     def settings_state(recheck: bool = False) -> dict[str, Any]:
         model = check_model(settings, use_cache=not recheck)

@@ -54,7 +54,7 @@ from controller_inbox.clock import (
 )
 from controller_inbox.config import PROFILES, Settings
 from controller_inbox.digest import write_digest_files
-from controller_inbox.local_llm import check_model, context_capped, context_fits, context_target, needs_more_context, set_min_context, use_chat_model
+from controller_inbox.local_llm import check_model, set_min_context, use_chat_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.profile import active_profile, set_profile
 from controller_inbox.services import Invalid, Missing
@@ -1096,13 +1096,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             page="settings",
             model=model,
             llm_enabled=model.active,
-            recommended_context=agent.RECOMMENDED_CONTEXT,
             context_steps=[agent.context_capacity(tokens, settings.chat_max_tokens) for tokens in agent.CONTEXT_STEPS],
             context_step=nearest_step(settings.min_context_tokens),
-            context_target=context_target(settings, model),
-            context_fits=context_fits(settings, model),
-            context_capped=context_capped(settings, model),
-            will_reload=needs_more_context(settings) and context_fits(settings, model),
+            context_line=model_fit.context_line(settings, model),
             context_change=context_change["said"] if request.query_params.get("notice") == "context-reloaded" else "",
             ocr_engine=ocr.engine_name(),
             ocr_missing=ocr.missing_note(),

@@ -128,33 +128,10 @@
       <p class="muted small">How long Ask CloseDesk waits for this model to read a question and its files before it writes a word. CloseDesk works it out from how fast the model has been on this computer, or from its size; a wait you set is kept for this model.</p>
     </form>
     {% endif %}
-    {% if model.active %}
-    {% set window = model.context_length or settings.chat_context_tokens %}
-    <p class="context-line {{ 'ok' if window >= recommended_context else 'short' }}">
-      Context window: <b>{{ '{:,}'.format(window) + ' tokens' if window else 'not reported' }}</b>.
-      {% if will_reload %}
-      The next time you ask something, CloseDesk reloads {{ model.key }} in LM Studio with <b>{{ '{:,}'.format(context_target) }} tokens</b> ({{ 'the most that fits this computer' if context_capped else 'the minimum set below' }}).
-      If your computer runs short of memory, it goes back to the current size.
-      {% elif window >= recommended_context %}
-      Enough to read whole attachments when you ask about them.
-      {% else %}
-      Ask CloseDesk reads long attachments a section at a time with this.
-      {% if model.key and model.context_length and window < context_target and not context_fits %}
-      {{ model.key }} with {{ '{:,}'.format(context_target) }} tokens wouldn't fit in this computer's memory, so CloseDesk keeps it as LM Studio loaded it. Pick a smaller model, or a smaller minimum below.
-      {% elif model.key and model.context_length and window < context_target %}
-      LM Studio couldn't load {{ model.key }} with {{ '{:,}'.format(context_target) }} tokens. Close other apps or pick a smaller minimum below, then Save to try again.
-      {% elif model.key and context_capped %}
-      {{ model.key }} is too big for this computer's memory with a longer context, so CloseDesk asks LM Studio for {{ '{:,}'.format(context_target) }} tokens. A smaller model reads whole workbooks and PDFs.
-      {% elif model.key and model.max_context and model.max_context < recommended_context %}
-      {{ model.key }} supports at most {{ '{:,}'.format(model.max_context) }} tokens. For whole workbooks and PDFs, load a model with a longer context.
-      {% elif model.key %}
-      For whole workbooks and PDFs, move the minimum below to 16k or more and Save.
-      {% else %}
-      For whole workbooks and PDFs, reload the model in LM Studio with
-      <b>Context Length {{ '{:,}'.format(recommended_context) }}</b> or more (My Models → the model's settings → Context Length).
-      {% endif %}
-      {% if not window %}If your server doesn't report it, set <code>CONTROLLER_INBOX_CHAT_CONTEXT_TOKENS</code>.{% endif %}
-      {% endif %}
+    {% if context_line.shown %}
+    <p class="context-line {{ context_line.tone }}">
+      Context window: <b>{{ context_line.label }}</b>.
+      {{ context_line.advice }}
     </p>
     {% endif %}
     <div class="search-box" id="search">

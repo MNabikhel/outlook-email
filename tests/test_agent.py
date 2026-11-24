@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import html
 import json
 import re
 import threading
@@ -720,9 +721,9 @@ def test_setup_says_what_will_happen_to_the_model(store, settings, monkeypatch):
     monkeypatch.setattr(local_llm.httpx, "post", server.post)
     settings.llm = True
     client = TestClient(web.create_app(settings, store))
-    assert "The next time you ask something, CloseDesk reloads qwen/qwen3-4b in LM Studio with <b>16,384 tokens</b>" in client.get("/settings").text
+    assert "The next time you ask something, CloseDesk reloads qwen/qwen3-4b in LM Studio with 16,384 tokens" in client.get("/settings").text
     local_llm.ensure_context(settings)
-    assert "LM Studio couldn't load qwen/qwen3-4b with 16,384 tokens. Close other apps or pick a smaller minimum" in client.get("/settings").text
+    assert "LM Studio couldn't load qwen/qwen3-4b with 16,384 tokens. Close other apps or pick a smaller minimum" in html.unescape(client.get("/settings").text)
 
     small = _FakeLMStudio(8192, max_context=8192)
     monkeypatch.setattr(local_llm.httpx, "get", small.get)

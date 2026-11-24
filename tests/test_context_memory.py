@@ -11,6 +11,7 @@ fails with "Compute error." when the model and its context take more than that.
 
 from __future__ import annotations
 
+import html
 import json
 
 import httpx
@@ -165,7 +166,7 @@ def test_a_model_that_wouldnt_fit_with_more_context_keeps_its_own(store, setting
     assert not any(BIG in step for step in steps) and server.calls == []
     # Settings doesn't say the next question reloads it, and says why it has no more.
     client = TestClient(web.create_app(settings, store))
-    page = client.get("/settings").text
+    page = html.unescape(client.get("/settings").text)
     assert "The next time you ask something, CloseDesk reloads" not in page
     said = f"{BIG} is too big for this computer's memory with a longer context, so CloseDesk asks LM Studio for 4,096 tokens."
     assert said in page
