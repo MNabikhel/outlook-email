@@ -1557,16 +1557,22 @@ def answer_stream(
     ws.wait = wait.seconds
     ws.call["model"] = wait.model
     # A model LM Studio unloaded while idle is loaded again by the first call: that load isn't timed as reading, and
-    # the first call's line says it loads rather than give an estimate of the reading alone.
+    # the first call's line says it loads rather than give an estimate of the reading alone. Asked of LM Studio now,
+    # not from the last few seconds' check: a question just after LM Studio loaded the model (or unloaded it) would
+    # be told the model loads when it is in, or be timed with the load as reading.
     state: dict[str, Any] = {
         "wrote": False, "text": "", "store": store, "wait": wait, "call": ws.call,
-        "loaded": loaded_now(check_model(settings), wait.model),
+        "loaded": loaded_now(check_model(settings, use_cache=False), wait.model),
     }
     ws.call["loading"] = not state["loaded"]
     offer = None
     if current is not None and _should_read_files(ws, question, focus if about_today else None):
         outcome: dict[str, Any] = {}
         offer = yield from _vision_first(store, settings, ws, current, question, outcome)
+        if outcome.get("ran") and state["loaded"]:
+            # LM Studio loaded the page reader: with room for one model only, it may have unloaded this one for it.
+            state["loaded"] = loaded_now(check_model(settings, use_cache=False), wait.model)
+            ws.call["loading"] = not state["loaded"]
         # Which reading of a scan the answer rests on, for a question about what the files say, as the page reader
         # reads for one: not for "who sent this?".
         about = _ABOUT_FILES.search(question) or agent.named_files(current.attachments, question)

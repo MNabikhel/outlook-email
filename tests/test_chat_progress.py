@@ -169,3 +169,40 @@ def test_a_table_query_that_had_lm_studio_load_the_model_is_the_load(settings, s
     assert len(server.waits) >= 2, "the table query and the answer"
     assert not [event for event in _progress(events) if event["text"].startswith("Loading the model")]
     assert model_fit.speeds(store, KEY)["read"] != 10000, "the answer's reading was timed"
+
+
+def test_a_question_just_after_lm_studio_loaded_the_model_isnt_said_to_load_it(settings, loaded, lm):  # noqa: F811
+    """The question after the one that had LM Studio load the model, asked within the half minute a check of LM
+    Studio is kept, still said "Loading the model in LM Studio…" with no estimate, and its reading wasn't timed."""
+    from controller_inbox.assistant import answer_stream
+
+    from test_chat_time import QUESTION
+
+    server = lm(first_delay=0.1)
+    settings.min_context_tokens = 0  # LM Studio loads it as it likes, when the question names it
+    model_fit.record_speed(loaded, KEY, prompt_tokens=5000, read_seconds=100.0)
+    server.loaded = False
+    local_llm.remember_model(settings, KEY)
+    assert _progress(_ask(loaded, settings))[0]["text"].startswith("Loading the model")
+    server.loaded = True  # LM Studio loaded it for that question
+    again = _progress(list(answer_stream(loaded, settings, QUESTION)))[0]  # straight after: nothing forgotten
+    assert again["text"].startswith("Reading ") and again["seconds"], again
+
+
+def test_a_question_just_after_lm_studio_unloaded_the_model_says_it_loads(settings, loaded, lm):  # noqa: F811
+    """Ejected in LM Studio (or dropped for another model) just after a question, the next one was given the
+    reading's estimate, then "Taking longer than usual…" for the whole load, and the load was timed as reading."""
+    from controller_inbox.assistant import answer_stream
+
+    from test_chat_time import QUESTION
+
+    server = lm(first_delay=0.1)
+    settings.min_context_tokens = 0
+    model_fit.record_speed(loaded, KEY, prompt_tokens=5000, read_seconds=100.0)
+    _ask(loaded, settings)
+    read = model_fit.speeds(loaded, KEY)["read"]
+    server.loaded = False
+    local_llm.remember_model(settings, KEY)
+    first = _progress(list(answer_stream(loaded, settings, QUESTION)))[0]
+    assert first["text"].startswith("Loading the model") and first["seconds"] is None, first
+    assert model_fit.speeds(loaded, KEY)["read"] == read, "the load wasn't timed as reading"
