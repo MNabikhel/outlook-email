@@ -51,9 +51,14 @@ NEW_WEIGHT = 0.5
 # before (the server doesn't always say), and kept, one such question would cut the wait for the next to a fraction.
 FASTEST_JUMP = 4.0
 # But this many such readings in a row are the model's own speed (the one kept was slow: its first question waited
-# behind another request, say), and the slowest of them is kept instead: only readings where the server said how much
-# of the prompt it had read before, as follow-up questions about the same mail look just as fast when it doesn't.
+# behind another request, say), and the slowest of them is kept instead, when the server said how much of the prompt
+# it had read before: follow-up questions about the same mail look just as fast when it doesn't.
 FAST_IN_A_ROW = 3
+# When it doesn't say (LM Studio often doesn't), the same many readings count when their prompts are of quite
+# different sizes (a follow-up's prompt is the last one and a little more), or this many in a row however they come,
+# so one slow first reading isn't kept for good.
+APART = 1.25
+GUESSED_IN_A_ROW = 8
 
 WAIT_KEY = "model_wait"  # {model: seconds} the user chose
 RATES_KEY = "model_rates"  # {model: {"read": prompt tokens a second, "write": tokens written a second}}
@@ -141,7 +146,9 @@ def record_speed(store: Store, model: str, *, prompt_tokens: int, read_seconds: 
     question went) and wrote ``written`` tokens in ``write_seconds``, so the next estimate and wait are nearer. A
     reading ``FASTEST_JUMP`` times faster than the one kept isn't kept (a prompt LM Studio had read before), unless
     ``FAST_IN_A_ROW`` come in a row that the server ``counted`` (it said how much of the prompt it had read before,
-    so ``prompt_tokens`` are the ones it read anew): then the slowest of them replaces the one kept."""
+    so ``prompt_tokens`` are the ones it read anew): then the slowest of them replaces the one kept. Readings it
+    didn't count do the same when ``FAST_IN_A_ROW`` of them had prompts of quite different sizes, or
+    ``GUESSED_IN_A_ROW`` came in a row."""
     if not model:
         return
     rates = _read(store, RATES_KEY)
@@ -157,20 +164,42 @@ def record_speed(store: Store, model: str, *, prompt_tokens: int, read_seconds: 
         before = entry.get(kind)
         rate = min(rate, 1e6)
         if kind == "read" and isinstance(before, (int, float)) and rate > before * FASTEST_JUMP:
-            if not counted:  # most likely a prompt it had read before: not kept, and not one of a run
-                continue
-            fast = [value for value in entry.get("read_fast", []) if isinstance(value, (int, float))] + [rate]
-            if len(fast) < FAST_IN_A_ROW:
-                entry["read_fast"] = fast  # a list: speeds() leaves it out
-                continue
+            if not counted:  # most likely a prompt it had read before: not kept unless enough such come in a row
+                guessed = _guessed(entry) + [[prompt_tokens, rate]]
+                apart = []  # those whose prompts are of quite different sizes
+                for tokens, value in guessed:
+                    if all(max(tokens, other) > min(tokens, other) * APART for other, _value in apart):
+                        apart.append([tokens, value])
+                taken = apart if len(apart) >= FAST_IN_A_ROW else guessed if len(guessed) >= GUESSED_IN_A_ROW else None
+                if taken is None:
+                    entry["read_guessed"] = guessed  # lists: speeds() leaves them out
+                    continue
+                rate = min(value for _tokens, value in taken)
+            else:
+                fast = [value for value in entry.get("read_fast", []) if isinstance(value, (int, float))] + [rate]
+                if len(fast) < FAST_IN_A_ROW:
+                    entry["read_fast"] = fast
+                    continue
+                rate = min(fast)
             entry.pop("read_fast", None)
-            entry[kind] = round(min(fast), 2)
+            entry.pop("read_guessed", None)
+            entry[kind] = round(rate, 2)
             continue
         if kind == "read":
             entry.pop("read_fast", None)
+            entry.pop("read_guessed", None)
         entry[kind] = round(rate if not isinstance(before, (int, float)) else before * (1 - NEW_WEIGHT) + rate * NEW_WEIGHT, 2)
     rates[model] = entry
     store.set_state(RATES_KEY, json.dumps(rates))
+
+
+def _guessed(entry: dict) -> list[list[float]]:
+    """The fast readings kept so far that the server didn't count, as [prompt tokens, tokens a second]."""
+    found = entry.get("read_guessed")
+    return [
+        [item[0], item[1]] for item in (found if isinstance(found, list) else [])
+        if isinstance(item, list) and len(item) == 2 and all(isinstance(value, (int, float)) for value in item)
+    ]
 
 
 def _thinks(settings: Settings, status: ModelStatus, model: str) -> bool:

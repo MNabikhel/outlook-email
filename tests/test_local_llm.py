@@ -280,3 +280,40 @@ def test_reader_closes_its_own_client(settings):
     LocalReader(settings, model="tiny", client=mine).close()
     assert not mine.is_closed
     mine.close()
+
+
+def test_a_stream_asks_for_the_token_counts_and_goes_on_without_them_where_refused(settings, monkeypatch):
+    """A stream leaves the token counts out unless asked, so a reading was never counted and its speed was guessed
+    from the prompt's characters. They are asked for; a server that refuses the request by name is asked without."""
+    settings.llm = None
+    calls = []
+    usage = {"prompt_tokens": 6000, "completion_tokens": 30, "prompt_tokens_details": {"cached_tokens": 1000}}
+    body = (
+        f"data: {json.dumps({'choices': [{'delta': {'content': 'ok'}, 'finish_reason': 'stop'}]})}\n\n"
+        f"data: {json.dumps({'choices': [], 'usage': usage})}\n\ndata: [DONE]\n\n"
+    )
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body)
+
+    _stream_server(monkeypatch, handler)
+    finished: dict = {}
+    assert "".join(local_llm.stream_text(settings, [{"role": "user", "content": "hi"}], finished=finished)) == "ok"
+    assert calls[0]["stream_options"] == {"include_usage": True}
+    assert finished["prompt_tokens"] == 5000 and finished["prompt_counted"] is True
+
+    replies = iter([httpx.Response(400, json={"error": "unknown parameter: stream_options"}), _streamed("ok")])
+    calls.clear()
+
+    def refuses(request):
+        calls.append(json.loads(request.content))
+        return next(replies)
+
+    _stream_server(monkeypatch, refuses)
+    assert "".join(local_llm.stream_text(settings, [{"role": "user", "content": "hi"}])) == "ok"
+    assert "stream_options" in calls[0] and "stream_options" not in calls[1]
+    calls.clear()
+    replies = iter([_streamed("ok")])
+    assert "".join(local_llm.stream_text(settings, [{"role": "user", "content": "hi"}])) == "ok"
+    assert "stream_options" not in calls[0], "asked again after the server refused it"

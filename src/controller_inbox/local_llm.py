@@ -498,6 +498,8 @@ _reasoning_seen: set[str] = set()
 _effort_rejected: set[str] = set()
 # Models whose server refused ``logprobs`` (how sure the model was of each word it wrote): asked without it from then on.
 _logprobs_rejected: set[str] = set()
+# Models whose server refused ``stream_options`` (asking for the token counts at the end of a stream).
+_usage_rejected: set[str] = set()
 
 
 @dataclass
@@ -1198,17 +1200,27 @@ def _stream_once(
     if asks_probs:
         # Each token's own chance; llama.cpp lists 20 runners-up for each unless told, which only makes the reply big.
         payload["logprobs"], payload["top_logprobs"] = True, 1
+    asks_usage = str(payload.get("model")) not in _usage_rejected
+    if asks_usage:
+        # The token counts at the end, which a stream leaves out unless asked: with them the reading speed is
+        # measured from the tokens the model read, and from those it read anew when the server says so.
+        payload["stream_options"] = {"include_usage": True}
     # Nothing comes until the model has read the whole prompt (and LM Studio has loaded it, if it wasn't), so a laptop
     # reading a long prompt isn't taken for a model that stopped.
     timeout = httpx.Timeout(max(settings.llm_timeout, limit or CHAT_TIMEOUT, wait or 0.0), connect=5.0)
-    without_probs = busy = False
+    without_probs = without_usage = busy = False
     with _using(str(payload.get("model")), timeout), http_method("stream")("POST", url, json=payload, headers=auth_headers(settings), timeout=timeout) as response:
         if response.status_code >= 400:
             response.read()
             if _OVERFLOW_RE.search(response.text[:600]):
                 # A prompt too long for the context: not a refusal of logprobs or the effort, and no shorter without them.
                 _raise_for(response)
-        if asks_probs and response.status_code in _REFUSES:
+        if asks_usage and response.status_code in _REFUSES and re.search(r"stream_options|include_usage", response.text[:600]):
+            # A server that names ``stream_options`` as what it refused: asked without it from then on.
+            _usage_rejected.add(str(payload.get("model")))
+            rejected = False
+            without_usage = True
+        elif asks_probs and response.status_code in _REFUSES:
             # A server that doesn't know ``logprobs``: the reading matters, how sure it was is a nice-to-have.
             rejected = False
             without_probs = True
@@ -1226,7 +1238,13 @@ def _stream_once(
             if rejected_probs:
                 _logprobs_rejected.add(rejected_probs)
             yield from _stream_pieces(response, reply, token_probs if asks_probs else None, thoughts=thoughts)
-    if without_probs:
+    if without_usage:
+        yield from _stream_once(
+            settings, messages, budget, effort, reply,
+            rejected_effort=rejected_effort, rejected_probs=rejected_probs, wait=wait, temperature=temperature,
+            sampling=sampling, model=model, token_probs=token_probs, again=again, limit=limit, thoughts=thoughts,
+        )
+    elif without_probs:
         # Remembered only when the request without logprobs goes through, as the effort is.
         yield from _stream_once(
             settings, messages, budget, effort, reply,

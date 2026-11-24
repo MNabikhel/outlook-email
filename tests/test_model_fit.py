@@ -332,3 +332,25 @@ def test_fast_readings_in_a_row_replace_the_speed_only_when_the_server_said_what
         model_fit.record_speed(store, BIG, prompt_tokens=tokens, read_seconds=30.0)
     assert model_fit.speeds(store, BIG) == {"read": 100}
     assert model_fit.estimate(store, BIG, tokens=20000) == 200
+
+
+def test_a_slow_first_reading_isn_t_kept_for_good_when_the_server_doesn_t_say_what_it_read_before(store):
+    """LM Studio's streams don't say how much of the prompt it had read before, so a fast reading was never counted:
+    one first question that waited 70 seconds behind the reading of mail kept a model that reads 6,000 tokens in 10
+    seconds at 86 tokens a second for good. Fast readings of prompts of quite different sizes (not follow-ups of one
+    prompt) are its own speed, and so is a long run of them however they come."""
+    model_fit.record_speed(store, BIG, prompt_tokens=6000, read_seconds=70.0)
+    model_fit.record_speed(store, BIG, prompt_tokens=6000, read_seconds=10.0)
+    model_fit.record_speed(store, BIG, prompt_tokens=12000, read_seconds=21.0)
+    assert model_fit.speeds(store, BIG) == {"read": 85.71}, "two may be prompts read before"
+    model_fit.record_speed(store, BIG, prompt_tokens=3000, read_seconds=5.0)
+    assert model_fit.speeds(store, BIG) == {"read": 571.43}
+    assert round(model_fit.estimate(store, BIG, tokens=6000)) == 10
+
+    # The same prompt size again and again: a long run of them all the same.
+    model_fit.record_speed(store, EIGHT, prompt_tokens=6000, read_seconds=70.0)
+    for _ in range(model_fit.GUESSED_IN_A_ROW - 1):
+        model_fit.record_speed(store, EIGHT, prompt_tokens=6000, read_seconds=10.0)
+    assert model_fit.speeds(store, EIGHT) == {"read": 85.71}
+    model_fit.record_speed(store, EIGHT, prompt_tokens=6000, read_seconds=10.0)
+    assert model_fit.speeds(store, EIGHT) == {"read": 600}

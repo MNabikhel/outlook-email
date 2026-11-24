@@ -34,6 +34,7 @@ def _fresh_model_memory():
         local_llm._reasoning_seen,
         local_llm._effort_rejected,
         local_llm._tools_rejected,
+        local_llm._usage_rejected,
         local_llm._context_raised,
         local_llm._context_given,
         local_llm._context_before,
