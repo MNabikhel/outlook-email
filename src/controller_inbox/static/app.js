@@ -335,6 +335,7 @@
       if (turn.context) html += `<p class="msg-context">${escapeHtml(turn.context)} <a href="/settings">Setup</a></p>`;
       if (turn.vision && !turn.pending) html += visionOffer(turn.vision);
       if (turn.more_time) html += moreTimeOffer(turn.more_time);
+      if (turn.step_back && !turn.pending && !turn.step_back.dismissed) html += stepBackOffer(turn.step_back);
       const cited =
         turn.mode === "model" ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
       if (!turn.pending && cited.length) {
@@ -525,6 +526,8 @@
         } else if (event.type === "more_time") {
           answer.more_time = event;
           renderTurn(answer, bubble);
+        } else if (event.type === "step_back") {
+          answer.step_back = event;
         } else if (event.type === "vision") {
           answer.vision = event;
         } else if (event.type === "reading") {
@@ -599,6 +602,56 @@
     } catch (error) {
       status.textContent = error.message;
       button.disabled = false;
+    }
+  });
+
+  /* ---------- Reloading a model that ran out of memory ---------- */
+
+  /* The model ran out of memory with the context CloseDesk gave it: nothing is reloaded until the user says so.
+     Reload and ask again loads it with the smaller context offered and asks the same question again in this
+     conversation; Keep as is puts the offer away and changes nothing. */
+  function stepBackOffer(offer) {
+    return (
+      `<div class="step-back" data-step-back data-model="${escapeHtml(offer.model)}" data-size="${Number(offer.size) || 0}" data-question="${escapeHtml(offer.question || "")}" data-email="${escapeHtml(offer.email_id || "")}">` +
+      `<p>${escapeHtml(offer.text)}</p>` +
+      `<button type="button" data-action="step-back">Reload and ask again</button> ` +
+      `<button type="button" class="ghost" data-action="step-back-keep">Keep as is</button> ` +
+      `<span class="step-back-status" role="status" aria-live="polite"></span></div>`
+    );
+  }
+
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-action='step-back'], [data-action='step-back-keep']");
+    if (!button) return;
+    const box = button.closest("[data-step-back]");
+    if (!box) return;
+    if (button.dataset.action === "step-back-keep") {
+      box.remove(); // nothing changes: the model stays as it is
+      return;
+    }
+    const status = $(".step-back-status", box);
+    if (busy) {
+      status.textContent = "Another answer is being written. Once it is done, reload and ask again.";
+      return;
+    }
+    const buttons = Array.from(box.querySelectorAll("button"));
+    buttons.forEach((each) => (each.disabled = true));
+    status.textContent = `Reloading ${box.dataset.model} in LM Studio with ${Number(box.dataset.size).toLocaleString("en-US")} tokens…`;
+    try {
+      const response = await fetch("/chat/step-back", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ model: box.dataset.model, size: Number(box.dataset.size) }),
+      });
+      const reply = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(reply.detail || `the server said ${response.status}`);
+      status.textContent = reply.message || "Reloaded.";
+      buttons.forEach((each) => each.remove());
+      // The same question about the same email, or about all mail (null) if it was: not whatever is open now.
+      ask(box.dataset.question, box.dataset.email || null);
+    } catch (error) {
+      status.textContent = error.message;
+      buttons.forEach((each) => (each.disabled = false));
     }
   });
 

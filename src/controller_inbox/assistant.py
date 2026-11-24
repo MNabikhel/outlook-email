@@ -46,7 +46,7 @@ from controller_inbox.local_llm import (
     context_fits,
     context_target,
     ensure_context,
-    step_back_context,
+    step_back_offer,
     failure_note,
     memory_advice,
     ran_out_of_memory,
@@ -1618,25 +1618,15 @@ def answer_stream(
             if reloaded := ensure_context(settings):
                 yield {"type": "step", "text": reloaded}
                 _wait_again(store, settings, ws, state)  # for the longer prompt the longer context takes
-        shown: set[str] = set()  # the steps listed so far: asked again, the same file read again isn't listed twice
-        try:
-            yield from _steps_once(_model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today), shown)
-        except Exception as exc:
-            # A context CloseDesk raised that ran out of memory: the model is loaded back as it was and asked once more.
-            if state["wrote"] or not ran_out_of_memory(exc) or not (back := step_back_context(settings)):
-                raise
-            yield {"type": "step", "text": back}
-            _wait_again(store, settings, ws, state)
-            ws.evidence.clear()
-            yield from _steps_once(_model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today), shown)
+        yield from _model_answer(ws, question, state, history=history, focus=focus if about_today else None, today=today)
     except Exception as exc:  # any model failure falls back to the lookup answer
         # Out of time (not out of memory: then the memory advice stands): the chat offers the model more time, with
         # how long it likely needs, under the answer.
         more_time = _more_time(state, settings, exc, question, asked_about)
+        if ran_out_of_memory(exc):
+            state["ran_out"] = True
         if state["wrote"]:
             why = f" {memory_advice(settings)}" if ran_out_of_memory(exc) else ""
-            if why and (back := step_back_context(settings)):  # the next question has the room it needs
-                why = f" {back} Ask again."
             yield {"type": "delta", "text": f"\n\n(The local model stopped answering partway.{why})"}
         else:
             note = failure_note(exc, settings)
@@ -1674,6 +1664,10 @@ def answer_stream(
         yield {"type": "context", "text": advice}
     if offer:
         yield offer
+    if state.get("ran_out") and (step_back := step_back_offer(settings)):
+        # A context CloseDesk gave the model ran out of memory: the user is asked before it is loaded again smaller,
+        # and the same question is asked again once it is.
+        yield {"type": "step_back", **step_back, "question": question, "email_id": asked_about or ""}
     yield {"type": "done"}
 
 
@@ -1912,16 +1906,6 @@ def _should_read_files(ws: agent.Workspace, question: str, focus) -> bool:
         or agent.named_files(primary.attachments, question)
         or answered_here(primary, question)
     )
-
-
-def _steps_once(events: Iterator[dict[str, Any]], shown: set[str]) -> Iterator[dict[str, Any]]:
-    """``events`` with each step listed once: one already in ``shown`` is left out."""
-    for event in events:
-        if event.get("type") == "step":
-            if event.get("text") in shown:
-                continue
-            shown.add(event.get("text"))
-        yield event
 
 
 def _model_answer(ws: agent.Workspace, question: str, state: dict, *, history, focus, today) -> Iterator[dict[str, Any]]:
@@ -2493,13 +2477,13 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         if state["text"][before:]:
             state["text"] = state["text"][:before]
             yield {"type": "revise", "text": state["text"]}
-        why, back = "stopped", ""
+        why = "stopped"
         if ran_out_of_memory(exc):
-            # The check pass sends the fullest prompt: a context CloseDesk raised is stepped back here, or every later
-            # question about files would run out of memory in the same place.
-            why, back = "ran out of memory", step_back_context(settings)
-        after = f" {back}" if back else ""
-        added = draft + f"\n\n(The local model {why} while checking this answer, so it wasn't read over a second time.{after})"
+            # The check pass sends the fullest prompt: the chat offers to load a context CloseDesk gave the model again
+            # smaller, or every later question about files would run out of memory in the same place.
+            why = "ran out of memory"
+            state["ran_out"] = True
+        added = draft + f"\n\n(The local model {why} while checking this answer, so it wasn't read over a second time.)"
         state["wrote"] = True
         state["text"] += added
         yield {"type": "delta", "text": added}

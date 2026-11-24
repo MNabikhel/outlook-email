@@ -1,0 +1,119 @@
+"""The offer to load a model again smaller after it ran out of memory, in a real browser: both chats. The answers
+are scripted (``answer_stream`` replaced) and the reload recorded (``step_back_context`` replaced), so the pages are what is tested; tests/test_step_back_ask.py tests the events and routes themselves. Skipped without
+Playwright's Chromium."""
+
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("playwright")
+
+from controller_inbox import local_llm, web  # noqa: E402
+from liveserver import serving  # noqa: E402
+from test_chat_time_browser import ABOUT, WIDE, _ask, _scripted  # noqa: E402
+
+MODEL = "google/gemma-3-27b"
+TEXT = (
+    f"{MODEL} ran out of memory with a 16,384-token context. Reload it with 8,192? "
+    "Long attachments are then read a section at a time."
+)
+
+
+def _offer(question: str, email_id: str = "") -> list:
+    return [
+        {"type": "sources", "sources": [], "mode": "model"},
+        {"type": "mode", "mode": "lookup", "note": "The local model ran out of memory before it could answer."},
+        {"type": "delta", "text": "Here's a straight lookup instead."},
+        {"type": "step_back", "model": MODEL, "loaded": 16384, "size": 8192, "text": TEXT, "question": question, "email_id": email_id},
+    ]
+
+
+def _reloads(monkeypatch) -> list:
+    """``step_back_context`` replaced: records the model and size the page asked for."""
+    done: list = []
+
+    def reload(_settings, key, size):
+        done.append((key, size))
+        return f"Loaded {key} again with an {size:,}-token context: 16,384 didn't fit in this computer's memory."
+
+    monkeypatch.setattr(local_llm, "step_back_context", reload)
+    return done
+
+
+def test_the_chat_offers_the_reload_and_asks_again(settings, store, page, monkeypatch):
+    asked = _scripted(monkeypatch, _offer("What is due?"), [{"type": "delta", "text": "The Northwind invoice is due Friday."}])
+    done = _reloads(monkeypatch)
+    with serving(web.create_app(settings, store)) as base:
+        _ask(page, base, "What is due?")
+        box = page.locator(".msg-step-back")
+        box.wait_for()
+        assert TEXT in box.inner_text()
+        assert done == [], "nothing reloaded before the user says so"
+        box.locator("button", has_text="Reload and ask again").click()
+        page.wait_for_selector(".msg.bot:last-child .msg-text:has-text('due Friday')")
+        assert done == [(MODEL, 8192)]
+        assert asked == ["What is due?", "What is due?"] and ABOUT == [None, None]
+        assert "Loaded google/gemma-3-27b again with an 8,192-token context" in page.inner_text(".msg-step-back")
+        assert page.locator(".msg-step-back button").count() == 0
+
+
+def test_keep_as_is_puts_the_offer_away_and_reloads_nothing(settings, store, page, monkeypatch):
+    asked = _scripted(monkeypatch, _offer("What is due?"))
+    done = _reloads(monkeypatch)
+    with serving(web.create_app(settings, store)) as base:
+        _ask(page, base, "What is due?")
+        box = page.locator(".msg-step-back")
+        box.wait_for()
+        box.locator("button", has_text="Keep as is").click()
+        page.wait_for_selector(".msg-step-back", state="detached")
+        assert done == [] and asked == ["What is due?"]
+
+
+def test_the_chat_says_why_the_reload_was_refused(settings, store, page, monkeypatch):
+    asked = _scripted(monkeypatch, _offer("What is due?"))
+
+    def refused(_settings, key, _size):
+        raise local_llm.StepBackRefused(f"{key} is answering another request. Once it is done, try again.")
+
+    monkeypatch.setattr(local_llm, "step_back_context", refused)
+    with serving(web.create_app(settings, store)) as base:
+        _ask(page, base, "What is due?")
+        page.locator(".msg-step-back button", has_text="Reload and ask again").click()
+        page.wait_for_selector(".step-back-status.error")
+        assert "is answering another request" in page.inner_text(".step-back-status")
+        assert asked == ["What is due?"], "not asked again"
+        assert page.locator(".msg-step-back button", has_text="Reload and ask again").is_enabled()
+
+
+def test_the_offer_is_shown_again_with_the_conversation(settings, store, page, monkeypatch):
+    _scripted(monkeypatch, _offer("What is due?"))
+    with serving(web.create_app(settings, store)) as base:
+        _ask(page, base, "What is due?")
+        page.locator(".msg-step-back").wait_for()
+        page.reload()
+        page.locator(".msg-step-back").wait_for()
+        assert TEXT in page.inner_text(".msg-step-back")
+
+
+def test_the_classic_chat_offers_the_reload_too(settings, store, page, monkeypatch):
+    asked = _scripted(monkeypatch, _offer("What is due?"), [{"type": "delta", "text": "Due Friday."}], _offer("And the total?"))
+    done = _reloads(monkeypatch)
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/chat/window")
+        page.fill("#chat textarea", "What is due?")
+        page.press("#chat textarea", "Enter")
+        box = page.locator(".step-back")
+        box.wait_for()
+        assert TEXT in box.inner_text() and done == []
+        box.locator("button", has_text="Reload and ask again").click()
+        page.wait_for_selector(".msg:has-text('Due Friday.')")
+        assert done == [(MODEL, 8192)] and asked == ["What is due?", "What is due?"]
+
+        # Keep as is: put away, nothing reloaded.
+        page.fill("#chat textarea", "And the total?")
+        page.press("#chat textarea", "Enter")
+        page.locator(".step-back button", has_text="Keep as is").last.wait_for()
+        page.locator(".step-back button", has_text="Keep as is").last.click()
+        page.wait_for_function("document.querySelectorAll('.step-back [data-action=step-back-keep]').length === 0")
+        assert done == [(MODEL, 8192)]

@@ -1,5 +1,5 @@
 /* Ask CloseDesk, docked beside the reading pane. Answers stream in as newline-delimited JSON events
-   (sources, step, note, delta, revise, check, context, vision, reading, mode, error, done) from POST /chat, the same
+   (sources, step, note, delta, revise, check, context, vision, more_time, step_back, reading, mode, error, done) from POST /chat, the same
    endpoint and events the classic chat uses. The question is about the open email unless you un-scope it. */
 
 import { h, icon, append, replace, toast, plural, reducedMotion } from "./dom.js";
@@ -254,6 +254,58 @@ export function createChat({ root, onToggle, visionRead }) {
     );
   }
 
+  /* The model ran out of memory with the context CloseDesk gave it: nothing is reloaded until the user says so.
+     Reload and ask again loads it with the smaller context offered and asks the same question again in this
+     conversation; Keep as is puts the offer away and changes nothing. */
+  function stepBackEl(turn) {
+    const offer = turn.step_back;
+    if (!offer || offer.dismissed || turn.pending) return null;
+    const said = h("p", { class: `step-back-status${offer.failed ? " error" : ""}`, role: "status", "aria-live": "polite" }, offer.message || "");
+    const reload = async (event) => {
+      if (busy) {
+        offer.failed = true;
+        offer.message = "Another answer is being written. Once it is done, reload and ask again.";
+        repaint(turn);
+        return;
+      }
+      event.currentTarget.disabled = true;
+      offer.failed = false;
+      offer.message = `Reloading ${offer.model} in LM Studio with ${Number(offer.size).toLocaleString("en-US")} tokens…`;
+      repaint(turn);
+      try {
+        const reply = await postJSON("/chat/step-back", { model: offer.model, size: offer.size });
+        offer.done = true;
+        offer.message = reply.message || "Reloaded.";
+        repaint(turn);
+        // The same question about the same email, or about all mail (null) if it was: not whatever is open now.
+        ask(offer.question, offer.email_id || null);
+      } catch (error) {
+        offer.failed = true;
+        offer.message = error.message;
+        repaint(turn);
+      }
+    };
+    const keep = () => {
+      offer.dismissed = true;
+      repaint(turn);
+    };
+    const working = !offer.failed && Boolean(offer.message) && !offer.done;
+    return h(
+      "div",
+      { class: "msg-step-back" },
+      h("p", null, offer.text),
+      offer.done
+        ? null
+        : h(
+            "div",
+            { class: "more-time-row" },
+            h("button", { type: "button", class: "btn btn-sm btn-primary", disabled: working, onclick: reload }, icon("refresh", 14), h("span", null, "Reload and ask again")),
+            h("button", { type: "button", class: "btn btn-sm", disabled: working, onclick: keep }, "Keep as is")
+          ),
+      said
+    );
+  }
+
   // A read finished (or stopped, or failed): the offers for that file say so. Nothing read: offer it again.
   window.addEventListener("closedesk:vision", (event) => {
     const done = event.detail || {};
@@ -305,6 +357,7 @@ export function createChat({ root, onToggle, visionRead }) {
       turn.context ? h("p", { class: "msg-context" }, turn.context, " ", h("a", { href: "/app/settings", dataset: { nav: "" } }, "Settings")) : null,
       visionEl(turn),
       moreTimeEl(turn),
+      stepBackEl(turn),
       cited.length
         ? h(
             "ul",
@@ -518,6 +571,9 @@ export function createChat({ root, onToggle, visionRead }) {
               break;
             case "more_time":
               answer.more_time = { ...event };
+              break;
+            case "step_back":
+              answer.step_back = { ...event };
               break;
             case "thinking":
               startThinking(answer);

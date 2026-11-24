@@ -246,6 +246,8 @@ class _AnswerLog:
             self.data["note"] = event.get("note", "")
         elif kind == "vision":
             self.data["vision"] = {key: event.get(key) for key in ("email_id", "n", "file", "pages", "estimate", "text", "question")}
+        elif kind == "step_back":  # the offer to reload the model smaller, shown again with the conversation
+            self.data["step_back"] = {key: event.get(key) for key in ("model", "loaded", "size", "text", "question", "email_id")}
         elif kind == "more_time":  # the offer of more time, shown again with the conversation
             self.data["more_time"] = {key: event.get(key) for key in ("model", "minutes", "suggest", "text", "question", "email_id")}
         elif kind == "reading" and event.get("label"):  # which reading of the scans the answer used
@@ -880,6 +882,21 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise HTTPException(status_code=400, detail=str(exc)) from None
         said = model_fit.minutes_said(minutes * 60)
         return JSONResponse({"ok": True, "seconds": minutes * 60, "message": f"Saved: CloseDesk waits up to {said} for {model}."})
+
+    @app.post("/chat/step-back")
+    async def chat_step_back(request: Request):
+        """The chat's "Reload and ask again" after the model ran out of memory: LM Studio loads it again with the
+        smaller context offered. The page then asks the question again."""
+        require_page(request)
+        data = await json_body(request)
+        try:
+            # Loading a model in LM Studio can take minutes: off the event loop.
+            said = await run_in_threadpool(local_llm.step_back_asked, settings, data)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except local_llm.StepBackRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return JSONResponse({"ok": True, "message": said})
 
     @app.get("/chats")
     def chat_list(q: str = ""):
