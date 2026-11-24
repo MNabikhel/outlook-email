@@ -44,7 +44,7 @@
   <strong>Processed.</strong>
   <span>
     Read {{ job.result.ingested }} new file{{ '' if job.result.ingested == 1 else 's' }}{% if job.result.already_read %}, {{ job.result.already_read }} already filed{% endif %}.
-    {% if job.result.model %}The local model read {{ job.result.read_by_bionic }}{% if job.result.avg_seconds %} (about {{ job.result.avg_seconds }}s each){% endif %}.{% elif not load_failed %}No local model was running, so mail is filed from the script draft.{% endif %}
+    {% if job.result.model %}The local model read {{ job.result.read_by_bionic }}{% if job.result.avg_seconds %} (about {{ job.result.avg_seconds }}s each){% endif %}.{% elif not job.result.model_load %}No local model was running, so mail is filed from the script draft.{% endif %}
     {% if job.result.failed_files %}{{ job.result.failed_files | length }} file(s) could not be read and were moved to <code>inbox/failed</code>.{% endif %}
     {% if job.result.model_note and job.result.model %}{{ job.result.model_note }}{% endif %}
     {% if job.result.model_load %}{{ job.result.model_load.message }}{% endif %}

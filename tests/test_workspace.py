@@ -1324,6 +1324,23 @@ def test_the_classic_page_shows_process_new_mail_with_a_failed_load_as_an_error(
     assert "No local model was running" not in page
 
 
+def test_the_classic_page_says_once_that_mail_is_filed_without_a_model_after_a_load_failed_lately(client):
+    """A second Process new mail soon after a failed load: the classic page said "No local model was running, so mail
+    is filed from the script draft." beside CloseDesk's own words that the mail is filed without a model."""
+    said = (
+        "LM Studio couldn't load google/gemma-3-27b a little while ago, so the mail is filed without a model for now. "
+        "Choose another in Settings → Local model, or load one in LM Studio."
+    )
+    result = {"ingested": 0, "model": "", "model_note": "No model loaded.", "model_load": {"message": said, "failed": False}}
+    job = client.app.state.job
+    assert job.start(lambda progress: result)
+    deadline = time.monotonic() + 5
+    while job.snapshot()["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+    page = client.get("/").text.replace("&#39;", "'")
+    assert said in page and "No local model was running" not in page and page.count("without a model") == 1
+
+
 def test_the_classic_page_says_what_a_sync_did_and_that_the_model_couldn_t_be_loaded(client):
     """The classic page showed a finished sync as "Processed. Read  new files", with none of what it said."""
     said = "CloseDesk couldn't load google/gemma-4-31b in LM Studio. The mail is filed without a model for now."
