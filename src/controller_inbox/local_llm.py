@@ -166,13 +166,13 @@ def _model_http(name: str):
 
         @contextmanager
         def stream(method: str, url: str, **options):
-            with httpx.Client(cookies=_no_cookies()) as client, client.stream(method, url, extensions=trace, **options) as response:
+            with httpx.Client(cookies=_no_cookies(), transport=httpx.HTTPTransport(retries=1)) as client, client.stream(method, url, extensions=trace, **options) as response:
                 yield response
 
         return stream
 
     def post(url: str, **options) -> httpx.Response:
-        with httpx.Client(cookies=_no_cookies()) as client:
+        with httpx.Client(cookies=_no_cookies(), transport=httpx.HTTPTransport(retries=1)) as client:
             return client.post(url, extensions=trace, **options)
 
     return post
