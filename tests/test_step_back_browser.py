@@ -91,6 +91,7 @@ def test_the_chat_says_why_the_reload_was_refused(settings, store, page, monkeyp
         page.locator(".msg-step-back button", has_text="Reload and ask again").click()
         page.wait_for_selector(".step-back-status.error")
         assert "is answering another request" in page.inner_text(".step-back-status")
+        assert page.locator(".step-back-status.error svg").count() == 1, "a warning sign, not only red words"
         assert asked == ["What is due?"], "not asked again"
         assert page.locator(".msg-step-back button", has_text="Reload and ask again").is_enabled()
 

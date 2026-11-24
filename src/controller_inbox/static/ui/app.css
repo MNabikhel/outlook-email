@@ -279,8 +279,9 @@ code { font: 12.5px var(--mono); }
 .rail-foot { padding: 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
 .rail-chip { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: var(--radius-sm); font-size: 12.5px; color: var(--muted); white-space: nowrap; text-decoration: none; }
 a.rail-chip:hover { background: var(--surface-3); text-decoration: none; }
-.rail-chip .dot, .btn-chat .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
-.rail-chip.model.on .dot, .btn-chat.live .dot { background: var(--ok); }
+/* No local model: a hollow ring; one running: a filled dot, so they differ by more than their colour. */
+.rail-chip .dot, .btn-chat .dot { width: 8px; height: 8px; border-radius: 50%; background: transparent; box-shadow: inset 0 0 0 1.5px var(--faint); flex: none; }
+.rail-chip.model.on .dot, .btn-chat.live .dot { background: var(--ok); box-shadow: none; }
 .rail-chip.close b { font-size: 15px; color: var(--gold); font-variant-numeric: tabular-nums; min-width: 18px; text-align: center; }
 .rail-classic { font-size: 12.5px; }
 .rail-version { padding: 2px 10px 0; font-size: 11px; color: var(--faint); white-space: nowrap; }
@@ -896,9 +897,10 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 .pv-field-value { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .pv-field-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pv-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--tone, var(--faint)); }
+/* Green a filled dot, amber a ring and red a square, as the boxes on the page are solid, dashed and ringed. */
 .pv-dot.ok { --tone: var(--ok); }
-.pv-dot.check { --tone: var(--imp-high); }
-.pv-dot.differs { --tone: var(--danger); }
+.pv-dot.check { --tone: var(--imp-high); background: transparent; box-shadow: inset 0 0 0 2px var(--tone); }
+.pv-dot.differs { --tone: var(--danger); border-radius: 1px; }
 
 /* A table opened from the page: kept in view at the top while the page scrolls under it. */
 .pv-panel {
@@ -968,6 +970,8 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 .more-time-row label { display: inline-flex; align-items: center; gap: 6px; }
 .more-time-minutes { width: 5em; height: 30px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); }
 .more-time-status:empty { display: none; }
+.more-time-status.error, .step-back-status.error { display: flex; gap: 5px; align-items: flex-start; }
+:is(.more-time-status, .step-back-status).error .ic { flex: none; margin-top: 2px; }
 .more-time-status.error { color: var(--danger); }
 .msg-step-back { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); font-size: 12.5px; }
 .msg-step-back p { margin: 0; }
@@ -1309,6 +1313,7 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .toast { background: #e7ebf1; color: #121820; } }
 /* Red in both themes (the dark theme's light toasts above would otherwise win), with a warning sign (dom.js). */
 :root .toast.error { background: var(--toast-error); color: #fff; }
+.toast.error > .ic { flex: none; }
 .toast.leaving { animation: toast-out 170ms var(--ease) forwards; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 @keyframes toast-out { to { opacity: 0; transform: translateY(8px); } }
@@ -1581,8 +1586,9 @@ dialog.consent p { margin: 0 0 10px; line-height: 1.5; }
   .cal-cell { height: 58px; padding: 2px; }
   .cal-daynum { display: block; padding: 1px 4px; }
   .cal-month .cal-chip { display: inline-block; width: 9px; height: 9px; margin: 1px; padding: 0; border: 0; border-radius: 50%; background: var(--accent); vertical-align: middle; }
-  .cal-month .cal-chip.all-day { background: var(--ok); }
-  .cal-month .cal-chip.cancelled { background: var(--faint); }
+  /* All day a square, cancelled a ring: told apart by shape as well as colour. */
+  .cal-month .cal-chip.all-day { background: var(--ok); border-radius: 2px; }
+  .cal-month .cal-chip.cancelled { background: transparent; box-shadow: inset 0 0 0 1.5px var(--faint); }
   .cal-month .cal-chip.open { outline: 2px solid var(--text); outline-offset: 1px; }
   .cal-month .cal-chip > * { display: none; }
   .cal-more { display: block; padding: 0 2px; font-size: 11px; }

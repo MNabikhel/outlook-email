@@ -307,3 +307,130 @@ def test_the_classic_setup_page_ticks_both_and_the_lists_follow(browser, setting
         page.goto(f"{base}/inbox")
         assert rgb(pm.classic("color-blind")["--imp-critical"]) in page.evaluate(ROW_EDGE)
     context.close()
+
+
+# Shapes and signs as well as colour ----------------------------------------------------------------------------------
+
+ALERT_PATH = "M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"
+TOAST = """async () => {
+  const { toast } = await import('/static/ui/dom.js');
+  toast('That conversation could not be deleted.', { tone: 'error', ms: 60000 });
+  const box = document.querySelector('.toast.error');
+  const sign = box.querySelector('.toast-text').previousElementSibling;
+  return { sign: sign && sign.tagName.toLowerCase() === 'svg' ? sign.querySelector('path').getAttribute('d') : null,
+           background: getComputedStyle(box).backgroundColor, color: getComputedStyle(box).color };
+}"""
+
+
+@pytest.mark.parametrize("how", list(THEMES))
+@pytest.mark.parametrize("colors", ["standard", "color-blind"])
+def test_an_error_message_has_a_warning_sign_and_is_red_in_every_theme(browser, settings, store, how, colors):
+    """An error message differed from any other by its red alone, and in the dark theme not even that: the dark
+    theme's light messages won over it."""
+    from controller_inbox import appearance
+
+    appearance.save(store, colors=colors)
+    system, chosen = THEMES[how]
+    context = _context(browser, system, chosen)
+    page = context.new_page()
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector("body.ready")
+        shown = page.evaluate(TOAST)
+    context.close()
+    assert shown["sign"] == ALERT_PATH
+    assert shown["background"] == rgb(pm.workspace(chosen or system, colors)["--toast-error"]) and shown["color"] == "rgb(255, 255, 255)"
+
+
+def test_a_self_check_note_has_the_info_sign_and_a_problem_the_warning_sign(settings, store, page, monkeypatch):
+    """A note ("No local model is running") and a problem had the same warning sign, told apart by colour alone."""
+    from controller_inbox import doctor
+
+    monkeypatch.setattr(doctor, "checks", lambda **_kw: [
+        doctor.Check("ok", "Python 3.12"), doctor.Check("note", "No local model is running."), doctor.Check("problem", "Port 8765 is busy.", "Close it.")])
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/app/settings#set-about")
+        page.click("#set-about button:has-text('Check')")
+        page.wait_for_selector("#set-about .set-check.is-problem")
+        shown = page.evaluate("""async () => {
+          const { icon } = await import('/static/ui/dom.js');
+          const d = (name) => icon(name).querySelector('path').getAttribute('d');
+          const signs = { [d('check')]: 'check', [d('info')]: 'info', [d('alert')]: 'alert' };
+          return [...document.querySelectorAll('#set-about .set-checks li')].map((li) => [li.className, signs[li.querySelector('svg path').getAttribute('d')]]);
+        }""")
+    assert shown == [["set-check is-ok", "check"], ["set-check is-note", "info"], ["set-check is-problem", "alert"]]
+
+
+DOTS = """() => {
+  const make = (html) => { const box = document.createElement('div'); box.innerHTML = html; document.body.append(box); return box; };
+  const shape = (el) => { const s = getComputedStyle(el); return { background: s.backgroundColor, shadow: s.boxShadow, radius: s.borderRadius }; };
+  const dots = make('<span class="pv-dot ok"></span><span class="pv-dot check"></span><span class="pv-dot differs"></span>');
+  const out = { ok: shape(dots.children[0]), check: shape(dots.children[1]), differs: shape(dots.children[2]),
+                chat: shape(document.querySelector('#chat-btn .dot')), chatTitle: document.querySelector('#chat-btn').title };
+  document.querySelector('#chat-btn').classList.add('live');
+  out.chatLive = shape(document.querySelector('#chat-btn .dot'));
+  return out;
+}"""
+
+
+def test_dots_differ_by_shape_as_well_as_colour(settings, store, page):
+    """The key details' dots on a page, and the dot saying whether a local model is running, were told apart by
+    colour alone."""
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/app/settings")
+        page.wait_for_function("() => document.querySelector('#chat-btn').title !== ''")  # after the first status check
+        shown = page.evaluate(DOTS)
+        page.goto(f"{base}/settings")
+        fab = page.evaluate("""() => { const dot = document.querySelector('#chat-toggle .dot'); const s = getComputedStyle(dot);
+          return { background: s.backgroundColor, shadow: s.boxShadow, title: document.querySelector('#chat-toggle').title }; }""")
+    clear = "rgba(0, 0, 0, 0)"
+    assert shown["ok"]["background"] != clear and shown["ok"]["radius"] == "50%"
+    assert shown["check"]["background"] == clear and "inset" in shown["check"]["shadow"], "a ring"
+    assert shown["differs"]["radius"] == "1px", "a square"
+    # No model running: a hollow ring, and words on hover; running, a filled dot.
+    assert shown["chat"]["background"] == clear and "inset" in shown["chat"]["shadow"]
+    assert shown["chatTitle"] == "No local model running"
+    assert shown["chatLive"]["background"] != clear and shown["chatLive"]["shadow"] == "none"
+    assert fab["background"] == clear and "inset" in fab["shadow"] and fab["title"] == "No local model running"
+
+
+MONTH_DOTS = """() => {
+  const box = document.createElement('table'); box.className = 'cal-month';
+  box.innerHTML = '<tr><td><button class="cal-chip"></button><button class="cal-chip all-day"></button><button class="cal-chip cancelled"></button></td></tr>';
+  document.body.append(box);
+  return [...box.querySelectorAll('.cal-chip')].map((el) => { const s = getComputedStyle(el); return { background: s.backgroundColor, shadow: s.boxShadow, radius: s.borderRadius }; });
+}"""
+
+
+def test_a_phones_month_marks_all_day_and_cancelled_meetings_by_shape(settings, store, page):
+    page.set_viewport_size({"width": 390, "height": 844})
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector("body.ready")
+        meeting, all_day, cancelled = page.evaluate(MONTH_DOTS)
+    assert meeting["radius"] == "50%" and all_day["radius"] == "2px", "all day: a square"
+    assert cancelled["background"] == "rgba(0, 0, 0, 0)" and "inset" in cancelled["shadow"], "cancelled: a ring"
+
+
+CHECKS = """() => [...document.querySelectorAll('#chat .msg-check li')].map((li) => ({
+  text: li.innerText.trim(), warn: li.classList.contains('warn'), sign: getComputedStyle(li, '::before').content,
+  color: getComputedStyle(li, '::before').color }))"""
+
+
+def test_the_classic_chat_marks_a_figure_to_check_as_a_warning(settings, store, page):
+    """The workspace showed a figure to check with the warning sign on amber; the classic chat showed it as any
+    other check."""
+    from test_check_warnings_browser import CORRECTED, NOT_FOUND, _saved
+
+    chat_id = _saved(store)
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/chat/window")
+        page.evaluate("id => localStorage.setItem('closedesk-chat-id', id)", chat_id)
+        page.reload()
+        page.wait_for_selector("#chat .msg-check li")
+        items = page.evaluate(CHECKS)
+        box = page.evaluate("() => { const b = document.querySelector('#chat .msg-check'); return { warn: b.classList.contains('warn'), background: getComputedStyle(b).backgroundColor }; }")
+    tokens = pm.classic()
+    assert [(item["text"], item["warn"]) for item in items] == [(CORRECTED, False), (NOT_FOUND, True)]
+    assert "⚠" in items[1]["sign"] and items[1]["color"] == rgb(tokens["--warn"])
+    assert box["warn"] and box["background"] == rgb(tokens["--warn-soft"])

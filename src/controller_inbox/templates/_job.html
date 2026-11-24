@@ -46,13 +46,17 @@
 {% elif job.state == 'done' and job.result and job.result.kind == 'outlook' %}
 {# Sync now or the automatic sync: what it copied, and whether the model could be loaded to read the new mail. #}
 {% set stopped = job.result.model and job.result.model_note %}
-<section class="job {{ 'error' if (job.result.outlook and job.result.outlook.note) or (job.result.model_load and job.result.model_load.failed) or stopped else 'done' }}"><strong>{{ job.result.message or 'Outlook synced.' }}</strong>{% if job.result.model_load or stopped %} <span>{% if job.result.model_load %}{{ job.result.model_load.message }}{% endif %}{% if stopped %} {{ job.result.model_note }}{% endif %}</span>{% endif %}</section>
+{% set needs_look = (job.result.outlook and job.result.outlook.note) or (job.result.model_load and job.result.model_load.failed) or stopped %}
+{# One that needs a look says so in words, not only with its red edge; its headline can be the problem itself. #}
+<section class="job {{ 'error' if needs_look else 'done' }}">{% if needs_look %}<b class="job-flag">Needs a look:</b> {% endif %}<strong>{{ job.result.message or 'Outlook synced.' }}</strong>{% if job.result.model_load or stopped %} <span>{% if job.result.model_load %}{{ job.result.model_load.message }}{% endif %}{% if stopped %} {{ job.result.model_note }}{% endif %}</span>{% endif %}</section>
 {% elif job.state == 'done' and job.result %}
 {# A model LM Studio couldn't load, or one that stopped reading partway, is never shown as all done. #}
 {% set load_failed = job.result.model_load and job.result.model_load.failed %}
-<section class="job {{ 'error' if load_failed or (job.result.model and job.result.model_note) else 'done' }}">
+{% set needs_look = load_failed or (job.result.model and job.result.model_note) %}
+<section class="job {{ 'error' if needs_look else 'done' }}">
   <strong>Processed.</strong>
   <span>
+    {% if needs_look %}<b class="job-flag">Needs a look:</b>{% endif %}
     {{ job.result | files_read }}
     {% if job.result.model %}The local model read {{ job.result.read_by_bionic }}{% if job.result.avg_seconds %} (about {{ job.result.avg_seconds }}s each){% endif %}.{% elif not job.result.model_load %}No local model was running, so mail is filed from the script draft.{% endif %}
     {% if job.result.files_summarized %}Summarized {{ job.result.files_summarized }} file{{ '' if job.result.files_summarized == 1 else 's' }}.{% endif %}

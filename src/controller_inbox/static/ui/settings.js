@@ -1049,7 +1049,8 @@ export function createSettings(ctx) {
         replace(
           list,
           reply.checks.map((item) =>
-            h("li", { class: `set-check is-${item.state}` }, icon(item.state === "ok" ? "check" : "alert", 14), h("span", null, item.text, item.todo ? h("span", { class: "set-help" }, ` ${item.todo}`) : null))
+            // A note has the info sign and a problem the warning sign, so they differ by more than their colour.
+            h("li", { class: `set-check is-${item.state}` }, icon(item.state === "ok" ? "check" : item.state === "note" ? "info" : "alert", 14), h("span", null, item.text, item.todo ? h("span", { class: "set-help" }, ` ${item.todo}`) : null))
           )
         );
       } catch (error) {

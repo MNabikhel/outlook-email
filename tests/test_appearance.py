@@ -131,3 +131,31 @@ def test_the_classic_setup_page_saves_both(client, demo):
     assert appearance.current(demo) == {"colors": "standard", "importance_words": False}
     page = client.get("/settings").text
     assert 'value="color-blind" checked' not in page and 'value="1" checked' not in page
+
+
+def test_a_processed_run_that_needs_a_look_says_so_in_words(client):
+    """The classic job box told a run that needs a look from one that went well by its red or green edge alone."""
+    import re
+    import threading
+
+    said = "Stopped reading: the local model ran out of memory on three messages in a row. Choose one in Settings."
+    for about, result in (
+        (None, {"ingested": 1, "model": "gemma", "read_by_bionic": 0, "model_note": said}),
+        ({"kind": "outlook"}, {"kind": "outlook", "message": "Outlook synced: 2 new.", "model": "gemma", "model_note": said}),
+    ):
+        job = client.app.state.job
+        assert job.start(lambda progress, result=result: result, about=about)
+        for _ in range(250):
+            if job.snapshot()["state"] != "running":
+                break
+            threading.Event().wait(0.02)
+        section = re.search(r'<section class="job error">(.*?)</section>', client.get("/").text, re.S)[1]
+        words = " ".join(re.sub(r"<[^>]+>", " ", section).split())
+        assert "Needs a look:" in words and said in words, words
+        assert '<b class="job-flag">Needs a look:</b>' in section
+    job.start(lambda progress: {"ingested": 1, "model": "", "read_by_bionic": 0})
+    for _ in range(250):
+        if job.snapshot()["state"] != "running":
+            break
+        threading.Event().wait(0.02)
+    assert "Needs a look" not in client.get("/").text, "a run that went well says nothing of the kind"

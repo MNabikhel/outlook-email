@@ -1171,6 +1171,13 @@ function doneSelected() {
 
 /* ---------- Live status ---------- */
 
+/** The dot on Ask CloseDesk: filled while a local model runs, a ring when none does, and words on hover. */
+function modelDot(model) {
+  const button = $("#chat-btn");
+  button.classList.toggle("live", model.active);
+  button.title = model.active ? "Local model running" : "No local model running";
+}
+
 async function poll() {
   clearTimeout(S.poll);
   if (S.updating) return; // CloseDesk is stopping to update: updating() waits for it instead
@@ -1188,7 +1195,7 @@ async function poll() {
     renderTop();
     updateRail(navId());
     chat.setModel(meta.model);
-    $("#chat-btn").classList.toggle("live", meta.model.active);
+    modelDot(meta.model);
     if (before && meta.job.state !== "running" && meta.job.finished_at && meta.job.finished_at !== before.job.finished_at) finished(meta.job);
     if (before && before.version !== meta.version) refreshData();
     if (S.route && S.route.view === "settings") settings.job(meta.job);
@@ -1647,6 +1654,7 @@ async function boot() {
   toldOnOpening(S.meta.job);
   updateRail("");
   chat.setModel(S.meta.model);
+  modelDot(S.meta.model);
   await sync();
   S.poll = setTimeout(poll, S.meta.job.state === "running" ? 1500 : 15000);
   document.body.classList.add("ready");

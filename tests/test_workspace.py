@@ -661,6 +661,7 @@ def test_process_new_mail_says_when_the_model_stopped_reading(browser, serve, se
     page.wait_for_selector(".toast:has-text('Processed')", timeout=60000)
     toast = page.locator(".toast:has-text('Processed')")
     assert note in toast.inner_text() and "error" in (toast.get_attribute("class") or "")
+    assert toast.locator("svg").count() >= 2, "a warning sign before the words, as well as the red (and the close button)"
 
 
 # Toolbars fit the reading pane -----------------------------------------------------------------------

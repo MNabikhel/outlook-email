@@ -1,6 +1,6 @@
 {% set chat_window = page == 'chat' %}
 {% if not chat_window %}
-<button type="button" class="chat-fab" id="chat-toggle" aria-controls="chat" aria-expanded="false">
+<button type="button" class="chat-fab" id="chat-toggle" aria-controls="chat" aria-expanded="false" title="{{ 'Local model running' if model.active else 'No local model running' }}">
   <span class="dot {{ 'on' if model.active else 'off' }}"></span> Ask CloseDesk
 </button>
 {% endif %}
