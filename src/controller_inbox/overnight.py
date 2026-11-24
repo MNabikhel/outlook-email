@@ -20,7 +20,7 @@ from controller_inbox.config import Settings
 from controller_inbox.digest import build_digest, write_digest_files
 from controller_inbox.file_summaries import summarize_files
 from controller_inbox.folder_mail import ingest_folder, reread_attachments
-from controller_inbox.local_llm import LocalReader, check_model, llm_active
+from controller_inbox.local_llm import LocalReader, check_model, llm_active, stoppable
 from controller_inbox.profile import is_finance
 from controller_inbox.fraud import as_model_reads, attachments_locked
 from controller_inbox.reading import build_packet, overlay_reading
@@ -377,22 +377,29 @@ def _run_overnight(
     summarized = 0
     # Why the summaries or the linking stopped partway (the model took longer than its wait), said with the reading's.
     stopped_notes: list[str] = []
+    # The model's work was cut short: a summary ran out of time, or Stop hung up on it. LM Studio goes on reading a
+    # prompt it was hung up on, so a related-mail question would wait behind it (with one request at a time), run out
+    # of time too and be blamed for it: none is asked this run.
+    cut_short = False
     if reading["model"] and not (stats and stats.stopped_reason) and settings.overnight_file_summaries:
-        summarized = summarize_files(
-            store,
-            settings,
-            limit=settings.overnight_file_summaries,
-            model=reading["model"],
-            on_progress=(lambda i, n, name: on_progress("summarizing", i, n, name)) if on_progress else None,
-            notes=stopped_notes,
-        )
+        with stoppable() as stop:  # the page's Stop hangs up on the summary being written
+            summarized = summarize_files(
+                store,
+                settings,
+                limit=settings.overnight_file_summaries,
+                model=reading["model"],
+                on_progress=(lambda i, n, name: on_progress("summarizing", i, n, name)) if on_progress else None,
+                notes=stopped_notes,
+            )
+        cut_short = bool(stopped_notes) or stop.done
     # Runs whenever an embedding model answers, even with no chat model loaded.
     indexed = max(0, index_mail(store, settings, on_progress=(lambda i, n, _name: on_progress("indexing", i, n, "")) if on_progress else None))
     ai_linked = 0
-    if reading["model"] and not (stats and stats.stopped_reason) and settings.overnight_ai_links:
+    if reading["model"] and not (stats and stats.stopped_reason) and settings.overnight_ai_links and not cut_short:
         if on_progress:
-            on_progress("linking", 1, 1, "Looking for related mail")
-        ai_linked = link_judge.judge_recent(store, settings, limit=settings.overnight_ai_links, now=now, notes=stopped_notes)
+            on_progress("linking", 1, 1, "")  # the stage's label says it all
+        with stoppable():  # and on the question being asked
+            ai_linked = link_judge.judge_recent(store, settings, limit=settings.overnight_ai_links, now=now, notes=stopped_notes)
 
     if on_progress:
         on_progress("digest", 1, 1, "Writing the digest")

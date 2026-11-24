@@ -411,9 +411,7 @@ def _run(settings: Settings, store: Store, args) -> int:
     print(f"CloseDesk — reading {settings.inbox_incoming}")
 
     def progress(stage: str, done: int, total: int, note: str) -> None:
-        label = {"model": "Loading a model in LM Studio", "outlook": "Outlook", "importing": "Reading file", "rereading": "Re-reading file", "reading": "Model reading", "digest": "Writing digest"}.get(stage, stage)
-        suffix = f" {done}/{total}" if total > 1 else ""
-        print(f"  {label}{suffix}: {note[:70]}", flush=True)
+        print(_progress_line(stage, done, total, note), flush=True)
 
     def read_new_mail(on_progress=progress) -> dict:
         from controller_inbox.model_choice import load_at_start, load_said
@@ -470,6 +468,21 @@ def _run(settings: Settings, store: Store, args) -> int:
     # The dashboard opens first; the new mail is read behind it, its progress on the page's top bar (a local model
     # can take a minute an email: it read all of it before the page opened).
     return _serve(settings, store, host=host, port=port, startup=lambda job_progress: _read_behind(read_new_mail, progress, job_progress))
+
+
+# What the launcher window calls each step of a run (shorter than the pages' web_api.STAGES for some).
+_STEPS = {
+    "model": "Loading a model in LM Studio", "outlook": "Outlook", "importing": "Reading file", "rereading": "Re-reading file",
+    "reading": "Model reading", "summarizing": "Summarizing attachments", "vision": "Reading scans with the vision model",
+    "indexing": "Indexing for search", "linking": "Looking for related mail", "digest": "Writing digest",
+}
+
+
+def _progress_line(stage: str, done: int, total: int, note: str) -> str:
+    """A step of a run as the launcher window prints it: "  Summarizing attachments 1/2: Q3 pack.pdf"."""
+    suffix = f" {done}/{total}" if total > 1 else ""
+    # The note can say how long the model may take on a file, after its name: kept whole.
+    return f"  {_STEPS.get(stage, stage)}{suffix}" + (f": {note[:100]}" if note else "")
 
 
 def _read_behind(read_new_mail, say, show) -> dict:

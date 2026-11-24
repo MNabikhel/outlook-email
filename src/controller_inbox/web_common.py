@@ -18,6 +18,8 @@ NOTICES = {
     "busy": "Already processing. This page updates as it goes.",
     "busy-vision": "The vision model is reading pages of a scan. Stop it from the bar at the top, or try again when it's done.",
     "stopping": "Stopping after the page being read now.",
+    # Stop while a file's summary or a related-mail question was being written: the model is hung up on at once.
+    "stopping-model": "Stopped the local model. The rest of the run carries on; what it didn't get to is done next run.",
     "profile": "Saved. The digest and Today page now use this profile; new mail is sorted with it.",
     "timezone": "Saved. Times and “today” now use this time zone.",
     "context": "Saved. If the model in LM Studio is loaded with less, the next question reloads it with this context.",
@@ -41,7 +43,7 @@ NOTICES = {
     "chat-model-failed": "The model that answers wasn't changed.",
     "chat-model-busy": "Mail is being processed or a scan read with the model right now. Change the model when it finishes.",
     "chat-model-kept": "Kept. CloseDesk won't suggest another model in its place again.",
-    "model-wait": "Saved. Ask CloseDesk waits this long for this model from now on.",
+    "model-wait": "Saved. CloseDesk waits at least this long for this model from now on.",
     "model-wait-auto": "Saved. CloseDesk works out how long to wait for this model again.",
     "model-wait-refused": "The wait wasn't changed.",
     "index-failed": "The embedding model didn't answer, so nothing was indexed. Load one in LM Studio and try again.",

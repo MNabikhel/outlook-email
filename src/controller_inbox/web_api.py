@@ -1074,8 +1074,9 @@ def register_workspace(
 
     @api.post("/process/stop")
     def process_stop():
-        """A vision read stops before its next page."""
-        return {"ok": True, "stopping": bool(services.stop_processing(job))}
+        """A vision read stops before its next page; a file's summary or a related-mail question is hung up on."""
+        notice = services.stop_processing(job)
+        return {"ok": True, "stopping": bool(notice), **({"message": NOTICES[notice]} if notice else {})}
 
     # Settings: everything the classic Setup page shows and changes.
 

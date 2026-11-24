@@ -44,10 +44,11 @@ _NOT_FOUND = re.compile(r"^(.+?) isn't in the emails or files I read")
 
 def summarize_file(
     settings: Settings, att: AttachmentRecord, *, store: Store | None = None, model: str = "",
-    status: ModelStatus | None = None, waits: list | None = None,
+    status: ModelStatus | None = None, waits: list | None = None, on_wait: Callable[[model_fit.Wait], None] | None = None,
 ) -> str:
     """A checked bullet summary of one file, or "" when the model gave nothing usable. Waits as long as ``model``
-    needs for it (``model_fit.background_wait``; each wait used is added to ``waits``) when ``model`` is given."""
+    needs for it (``model_fit.background_wait``; each wait used is added to ``waits`` and given to ``on_wait``, for
+    the run to say how long it may take) when ``model`` is given."""
     text = att.extracted_text or ""
     # The reply room as the request will ask for it: a reasoning model is given room to think first.
     budget = reply_budget(settings, MAX_TOKENS)
@@ -74,6 +75,8 @@ def summarize_file(
         wait = model_fit.background_wait(store, settings, model, status, tokens=tokens, written=room)
         if waits is not None:
             waits.append(wait)
+        if on_wait is not None:
+            on_wait(wait)
         return wait.seconds
 
     draft = complete_text(settings, messages, max_tokens=MAX_TOKENS, limit=wait_for if model else None)
@@ -110,9 +113,10 @@ def summarize_files(
     it is tried again when its text changes or another model is loaded. A file that runs out of time is left for the
     next run, and the run's summaries stop there: the next long file would only run out the same way. That is added
     to ``notes``. The file is set aside (``model_fit.call_ran_out``): the next run summarizes the others first, and
-    tries it after them only when it would wait longer than it had (twice as long, up to 30 minutes, unless the user's
-    wait was the one used; or a longer wait set in Settings), so it never holds up the rest. When the server is down
-    (no connection, a 5xx error) the run's summaries stop too and nothing is saved.
+    tries it after them only when it would wait longer than it had (twice as long, up to 30 minutes, or a longer
+    wait set in Settings), so it never holds up the rest. When the server is down (no connection, a 5xx error), or
+    the run's Stop hung up on the model (``local_llm.stoppable``), the run's summaries stop too and nothing is saved.
+    ``on_progress`` is told each file as it starts, and again with how long the model may take on it.
     """
     written = 0
     aside = model_fit.set_aside(store, model)
@@ -127,8 +131,14 @@ def summarize_files(
         if on_progress:
             on_progress(index, len(queue), att.filename)
         waits: list[model_fit.Wait] = []
+
+        def said(wait: model_fit.Wait, index=index, name=att.filename) -> None:
+            # Nothing comes back for minutes on a slow model: the page says how long it may be, not only the file.
+            if on_progress:
+                on_progress(index, len(queue), f"{name} (up to {model_fit.minutes_said(wait.seconds)})")
+
         try:
-            summary = summarize_file(settings, att, store=store, model=model, status=status, waits=waits)
+            summary = summarize_file(settings, att, store=store, model=model, status=status, waits=waits, on_wait=said)
         except (ContextOverflow, EmptyReply):
             # Remembered like an empty summary: this file mustn't be first in line, and fail, every night.
             summary = ""
@@ -141,7 +151,7 @@ def summarize_files(
             if waits:
                 note = model_fit.call_ran_out(
                     store, settings, model, status, waits[-1], exc, item=att.id, key=summary_key(att),
-                    what="summarizing files", on=att.filename,
+                    what="summarizing files", on=att.filename, name=att.filename,
                 )
                 if notes is not None:
                     notes.append(note)

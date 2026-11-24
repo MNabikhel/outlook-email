@@ -14,9 +14,11 @@ an email in the last reading (``model_choice.seconds_an_email``); else from its 
 "Save and ask again") wins over the worked-out one, for that model.
 
 A file's summary or a question about related mail while mail is processed waits for the whole reply
-(``background_wait``): at least the user's wait, longer when the model's speeds say the call needs it, and twice as
-long after one ran out. The file or email it ran out on is set aside (``set_aside``) and tried again, after the
-others, only once the wait it would get is longer, so one that keeps running out doesn't hold up the rest.
+(``background_wait``): at least the user's wait, longer when the model's speeds say the call needs it (the reading of
+new mail measures them too, ``local_llm.LocalReader``), and twice as long after one ran out, whoever's wait it was.
+The file or email it ran out on is set aside (``set_aside``) and tried again, after the others, only once the wait it
+would get is longer, so one that keeps running out doesn't hold up the rest; Settings names those left until a
+longer wait is set (``describe``).
 """
 
 from __future__ import annotations
@@ -71,9 +73,9 @@ RATES_KEY = "model_rates"  # {model: {"read": prompt tokens a second, "write": t
 RAN_OUT_KEY = "model_ran_out"
 # {model: seconds} the longest wait that ran out on a call made while mail was processed (a file's summary)
 BACKGROUND_RAN_OUT_KEY = "model_background_ran_out"
-# {model: {item: {"key", "seconds", "tokens", "written"}}}: the files and emails such a call ran out of time on (a file's
-# or an email's id; what it was asked from; the wait it had; the prompt's tokens and the reply's room), kept until
-# they are done, at most SET_ASIDE_MOST a model.
+# {model: {item: {"key", "seconds", "tokens", "written", "name"}}}: the files and emails such a call ran out of time on (a
+# file's or an email's id; what it was asked from; the wait it had; the prompt's tokens and the reply's room; what
+# Settings calls it), kept until they are done, at most SET_ASIDE_MOST a model.
 SET_ASIDE_KEY = "model_set_aside"
 SET_ASIDE_MOST = 100
 # The wait's field as both Settings pages name it, for the notes that point to it.
@@ -340,9 +342,10 @@ def background_wait(
     mail), waits for ``model``: nothing comes back until it has read the prompt (``tokens``) and written its reply
     (up to ``written`` tokens, thinking included). The worked-out wait (``automatic_wait``), longer when the model's
     measured speeds say this call takes longer, and twice the wait that ran out on such a call before
-    (``background_ran_out``) up to ``WAIT_CEILING``; never less than such calls waited before (``CHAT_TIMEOUT``). The
-    user's own wait for the model (Settings, or the chat's "Save and ask again") when it is longer (``yours``): it was
-    set for the chat's first word, so it never cuts such a call shorter than CloseDesk already knows it needs."""
+    (``background_ran_out``, the user's included) up to ``WAIT_CEILING``; never less than such calls waited before
+    (``CHAT_TIMEOUT``). The user's own wait for the model (Settings, or the chat's "Save and ask again") when it is
+    longer (``yours``): it was set for the chat's first word, so it never cuts such a call shorter than CloseDesk
+    already knows it needs, as Settings says ("at least this long, and longer when the model needs it")."""
     from controller_inbox import local_llm
 
     status = status or check_model(settings)
@@ -410,22 +413,23 @@ def can_wait_longer(store: Store | None, settings: Settings, model: str, status:
 
 def call_ran_out(
     store: Store | None, settings: Settings, model: str, status: ModelStatus | None, wait: Wait, exc: BaseException, *,
-    item: str, key: str, what: str, on: str,
+    item: str, key: str, what: str, on: str, name: str = "",
 ) -> str:
     """A call made while mail was processed (``what``: "summarizing files") ran out of ``wait`` on ``item`` (a file's
-    or an email's id, ``on`` in words: its name, "one question"; ``key``: what it was asked from). Keeps that: the
-    next such call waits longer (``background_ran_out``) unless the user's wait was the one used, and ``item`` is set
-    aside until the wait it would get is longer than the one it had (``can_wait_longer``). Returns the run's note."""
+    or an email's id, ``on`` in words: its name, "one question"; ``key``: what it was asked from; ``name``: what
+    Settings calls it while it is left). Keeps that: the next such call waits longer (``background_ran_out``), and
+    ``item`` is set aside until the wait it would get is longer than the one it had (``can_wait_longer``). Returns the
+    run's note."""
     waited = float(getattr(exc, "waited", 0) or 0) or wait.seconds  # what it waited (``local_llm._post_chat``)
     written = int(getattr(exc, "written", 0) or 0) or wait.written
     # A try that waited longer than the user's wait (its room to think needed more) ran out of CloseDesk's own wait.
     wait = replace(wait, yours=wait.yours and waited <= wait.seconds)
-    if not wait.yours:
-        background_ran_out(store, wait.model, seconds=waited)
+    # The user's wait too: Settings says a summary waits at least that long, and longer when the model needs it.
+    background_ran_out(store, wait.model, seconds=waited)
     if store is not None and model and item:
         items = set_aside(store, model)
         items.pop(item, None)
-        items[item] = {"key": key, "seconds": round(waited, 1), "tokens": wait.tokens, "written": written}
+        items[item] = {"key": key, "seconds": round(waited, 1), "tokens": wait.tokens, "written": written, "name": name or on}
         _keep_set_aside(store, model, items)
     after = background_wait(store, settings, model, status, tokens=wait.tokens, written=written)
     return stopped_note(what, wait, waited, on, after)
@@ -438,13 +442,14 @@ def stopped_note(what: str, wait: Wait, waited: float, on: str, after: Wait) -> 
     name = wait.model.split("/")[-1]
     waited = waited or wait.seconds
     said = f"Stopped {what}: {name} took longer than {minutes_said(waited)} on {on}"
-    field = f"Settings → Local model → {WAIT_FIELD} can give it longer"
+    field = f"Settings → Local model → {WAIT_FIELD}"
     if after.seconds > waited:
-        return f"{said}. CloseDesk waits up to {minutes_said(after.seconds)} next time, or {field} now."
-    left = "The next run goes on with the rest and leaves it until the model can wait longer"
+        return f"{said}. CloseDesk waits up to {minutes_said(after.seconds)} next time, or {field} can give it longer now."
+    # CloseDesk waits no longer by itself: only a longer wait typed in Settings has it tried again (Settings names it).
+    left = f"The next run goes on with the rest and leaves it until a longer wait is set in {field}"
     if wait.yours:
-        return f"{said}, the wait you set. {left}: {field}."
-    return f"{said}, the most CloseDesk gives it by itself. {left}: {field}, or a smaller model is quicker."
+        return f"{said}, the wait you set. {left}."
+    return f"{said}, the most CloseDesk gives it by itself. {left}, or a smaller model is quicker."
 
 
 def minutes_said(seconds: float) -> str:
@@ -479,17 +484,33 @@ def describe(store: Store | None, settings: Settings, status: ModelStatus | None
         held += f" ({wanted:,} from the next question)"
     how = "set by you" if wait.yours else "set automatically"
     line = f"{name}: {held}, waits up to {minutes_said(wait.seconds)} ({how})"
-    # A file's summary is written whole before anything comes back, so it can wait longer than the chat's first word.
+    # A file's summary is written whole before anything comes back, so it can wait longer than the chat's first word;
+    # a related-mail check too, for a shorter prompt.
     summary = summary_wait(store, settings, status, key)
     if summary.minutes > wait.minutes:
-        line += f", and up to {minutes_said(summary.seconds)} for a file's summary"
+        line += f", and up to {minutes_said(summary.seconds)} for a file's summary or a related-mail check"
+    line += "."
+    # What a run leaves out without a word until a longer wait is set: said here, where that wait is set.
+    if left := _left(store, settings, status, key):
+        shown = ", ".join(left[:3]) + (f" and {len(left) - 3} more" if len(left) > 3 else "")
+        line += f" Left until a longer wait is set: {shown}."
     return {
         "model": key,
         "context": context,
         "minutes": wait.minutes,
         "yours": wait.yours,
-        "line": line + ".",
+        "line": line,
     }
+
+
+def _left(store: Store | None, settings: Settings, status: ModelStatus, key: str) -> list[str]:
+    """What the files and emails set aside for ``key`` are called, of those the next run won't try again
+    (``can_wait_longer``): they wait for a longer wait set in Settings."""
+    found = {**set_aside(store, status.model), **set_aside(store, key)}  # kept under the name the run used
+    return [
+        str(entry.get("name") or "a file") for entry in found.values()
+        if not can_wait_longer(store, settings, key, status, entry)
+    ]
 
 
 def summary_wait(store: Store | None, settings: Settings, status: ModelStatus, key: str) -> Wait:

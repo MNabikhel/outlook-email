@@ -200,7 +200,7 @@ def judge_recent(
             )
             note = model_fit.call_ran_out(
                 store, settings, model, status, wait, exc, item=email.id, key=PROMPT_VERSION,
-                what="looking for related mail", on="one question",
+                what="looking for related mail", on="one question", name=f"related mail for “{email.subject}”",
             )
             if notes is not None:
                 notes.append(note)

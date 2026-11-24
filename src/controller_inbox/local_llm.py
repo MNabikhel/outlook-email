@@ -156,6 +156,44 @@ def hanging_up(handle: HangUp | None):
         _hang_up.reset(token)
 
 
+class StopSlot:
+    """Where a background job (``web.ProcessJob``) finds the model calls its Stop button can hang up on now: the
+    ``HangUp`` of the step running inside ``stoppable``, or None."""
+
+    def __init__(self) -> None:
+        self.handle: HangUp | None = None
+
+
+_stop_slot: ContextVar[StopSlot | None] = ContextVar("closedesk_stop_slot", default=None)
+
+
+@contextmanager
+def stop_slot(slot: StopSlot | None):
+    """A job's work runs inside: the steps in it that can be stopped (``stoppable``) put their hang-up in ``slot``."""
+    token = _stop_slot.set(slot)
+    try:
+        yield
+    finally:
+        _stop_slot.reset(token)
+
+
+@contextmanager
+def stoppable():
+    """A step of a run whose model calls the job's Stop hangs up on (a file's summary can take the model half an hour
+    on a laptop): the calls made inside go out on connections of their own, and the ``HangUp`` given says, once the
+    step is over, whether they were hung up on (``done``). Outside a job, nothing can stop them."""
+    handle = HangUp()
+    slot = _stop_slot.get()
+    if slot is not None:
+        slot.handle = handle
+    try:
+        with hanging_up(handle):
+            yield handle
+    finally:
+        if slot is not None:
+            slot.handle = None
+
+
 def _model_http(name: str):
     """``http_method`` for a call that asks the model for an answer: within ``hanging_up``, on a connection of its
     own that the user's Stop can close (the shared client's connections are shared with other calls)."""
@@ -884,6 +922,8 @@ class LocalReader:
 
             self._model_wait = model_fit.reading_wait(store, settings, self.model)
         self._partial = Reply(content="")
+        self._store = store
+        self._sent_at = 0.0  # when the request the reply in ``_partial`` answers went (time.perf_counter())
 
     def close(self) -> None:
         if self._closer is not None:
@@ -935,7 +975,27 @@ class LocalReader:
         self.stats.read += 1
         self.stats.seconds += took
         self.stats.times.append(took)
+        self._keep_speed(reply, prompt)
         return parsed
+
+    def _keep_speed(self, reply: Reply, prompt: str) -> None:
+        """Keep how fast the model read this email and wrote its reading (``model_fit.record_speed``), as the chat does
+        on every answer: a file's summary later in the same run waits as long as this model needs (a model never asked
+        in the chat was otherwise given the usual 5 minutes, too short for a slow one)."""
+        if self._store is None or not reply.first_at or not self._sent_at or reply.first_at < self._sent_at:
+            return
+        from controller_inbox import model_fit  # it imports this module
+        from controller_inbox.agent import CHARS_PER_TOKEN  # it imports this module
+
+        usage = reply.usage
+        # As the server counted what it read; else the email's part of the prompt (the same instructions come first
+        # every time, and LM Studio keeps those read).
+        tokens = _prompt_read(usage) if "prompt_tokens" in usage else len(prompt) // CHARS_PER_TOKEN
+        model_fit.record_speed(
+            self._store, model_fit.model_key(check_model(self.settings), self.model), prompt_tokens=tokens,
+            read_seconds=reply.first_at - self._sent_at, written=_int(usage.get("completion_tokens")) or reply.pieces,
+            write_seconds=reply.last_at - reply.first_at, counted=_cache_said(usage),
+        )
 
     def _failed(self, reason: str, *, memory: bool = False) -> None:
         self.stats.failed += 1
@@ -1059,6 +1119,7 @@ class LocalReader:
         reply goes into ``self._partial``; a refusal is returned read, so its text can be looked at."""
         reply = self._partial = Reply(content="")
         raw: list[str] = []
+        self._sent_at = time.perf_counter()  # the reply's first piece comes once the model has read the prompt
         with self.client.stream("POST", url, json=json, headers=headers, **options) as response:
             if response.status_code >= 400:
                 response.read()
