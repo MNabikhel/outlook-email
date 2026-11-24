@@ -31,10 +31,10 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
+from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, chats, cost_codes, documents, fraud, model_choice, model_fit, model_roles, ocr, semantic, services, updates, version, vision,
+    agent, chats, cost_codes, documents, fraud, local_llm, model_choice, model_fit, model_roles, ocr, semantic, services, updates, version, vision,
 )
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
@@ -859,7 +859,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             raise HTTPException(status_code=400, detail="Ask a question first.")
         # The database and today's list take a moment: in a worker thread, so other pages aren't held up.
         lines = await run_in_threadpool(answer_lines, data, question)
-        return StreamingResponse(_closing(lines), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"})
+        return StreamingResponse(
+            _closing(lines, hang_up=local_llm.HangUp()), media_type="application/x-ndjson", headers={"Cache-Control": "no-store"}
+        )
 
     @app.post("/chat/wait")
     async def chat_wait(request: Request):
@@ -1335,18 +1337,36 @@ def service_errors(*, missing: str = "Message not found", invalid: int | None = 
         raise HTTPException(status_code=invalid, detail=NOTICES.get(exc.notice) or str(exc)) from None
 
 
-async def _closing(lines: Generator[str, None, None]) -> AsyncIterator[str]:
+async def _closing(lines: Generator[str, None, None], *, hang_up: local_llm.HangUp | None = None) -> AsyncIterator[str]:
     """Streams a generator's lines from a worker thread, and closes it however the response ends.
 
     When the browser goes away mid-answer, the response stops reading without closing a plain generator,
-    so its cleanup (saving the answer so far, stopping the model) would never run."""
+    so its cleanup (saving the answer so far, stopping the model) would never run. ``hang_up``: the model calls the
+    lines make (``local_llm.hanging_up``), hung up on when the response is cancelled (Stop, or the page closed), so a
+    model still reading the prompt stops then rather than once it sends its first word."""
+    lock = threading.Lock()  # the generator is read by one thread at a time, and closed once its reading has stopped
+    done = object()
+
+    def step():
+        with lock, local_llm.hanging_up(hang_up):
+            return next(lines, done)
+
+    def close():
+        with lock, local_llm.hanging_up(hang_up):
+            lines.close()
+
+    ended = False
     try:
-        async for line in iterate_in_threadpool(lines):
+        # Not waited for once the response is cancelled: the thread may be waiting on the model, hung up on below.
+        while (line := await anyio.to_thread.run_sync(step, abandon_on_cancel=True)) is not done:
             yield line
+        ended = True
     finally:
         # Shielded: the response is being cancelled, which would otherwise cancel this as well.
         with anyio.CancelScope(shield=True):
-            await run_in_threadpool(lines.close)
+            if hang_up is not None and not ended:
+                hang_up.now()
+            await run_in_threadpool(close)
 
 
 def _ascii_name(subject: str) -> str:

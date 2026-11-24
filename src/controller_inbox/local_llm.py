@@ -17,11 +17,13 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import statistics
 import threading
 import weakref
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from typing import TYPE_CHECKING
@@ -97,6 +99,83 @@ def http_method(name: str):
     """``httpx.get``/``post``/``stream`` through the shared client."""
     call = getattr(httpx, name)
     return call if call is not _ONE_OFF[name] else getattr(shared_client(), name)
+
+
+class HangUp:
+    """The connections to the model that one chat answer has open, to hang up on at once when the user stops it or
+    closes the page (``now``). LM Studio stops reading a prompt only once the connection closes; until then the next
+    question waits behind an answer nobody will read, and that wait is kept as the model's speed."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._streams: list = []
+        self.done = False
+
+    def trace(self, event: str, info: dict) -> None:
+        """httpx's trace of each request: notes the connection once it is made (hung up on at once if already done)."""
+        if event != "connection.connect_tcp.complete":
+            return
+        stream = info.get("return_value")
+        with self._lock:
+            if not self.done:
+                self._streams.append(stream)
+                return
+        _shut(stream)
+
+    def now(self) -> None:
+        with self._lock:
+            self.done = True
+            streams, self._streams = self._streams, []
+        for stream in streams:
+            _shut(stream)
+
+
+def _shut(stream) -> None:
+    """Close a connection under a request still waiting on it: the worker thread reading it is woken (closing the
+    socket alone wouldn't wake it) and gets an error."""
+    sock = stream.get_extra_info("socket") if stream is not None else None
+    try:
+        if sock is not None:
+            sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass  # already closed
+
+
+_hang_up: ContextVar[HangUp | None] = ContextVar("closedesk_hang_up", default=None)
+
+
+@contextmanager
+def hanging_up(handle: HangUp | None):
+    """The chat answer's model calls made inside go out on connections of their own, hung up on by ``handle.now()``."""
+    token = _hang_up.set(handle)
+    try:
+        yield
+    finally:
+        _hang_up.reset(token)
+
+
+def _model_http(name: str):
+    """``http_method`` for a call that asks the model for an answer: within ``hanging_up``, on a connection of its
+    own that the user's Stop can close (the shared client's connections are shared with other calls)."""
+    call = http_method(name)
+    handle = _hang_up.get()
+    if handle is None or call != getattr(shared_client(), name):
+        return call
+    trace = {"trace": handle.trace}
+    if name == "stream":
+
+        @contextmanager
+        def stream(method: str, url: str, **options):
+            with httpx.Client(cookies=_no_cookies()) as client, client.stream(method, url, extensions=trace, **options) as response:
+                yield response
+
+        return stream
+
+    def post(url: str, **options) -> httpx.Response:
+        with httpx.Client(cookies=_no_cookies()) as client:
+            return client.post(url, extensions=trace, **options)
+
+    return post
 
 
 def lm_studio_root(base: str) -> str:
@@ -1147,7 +1226,7 @@ def complete_text(
             payload["temperature"] = temperature
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(http_method("post"), url, payload, settings, timeout=max(_timeout(settings, budget), limit or CHAT_TIMEOUT))
+        response = _post_chat(_model_http("post"), url, payload, settings, timeout=max(_timeout(settings, budget), limit or CHAT_TIMEOUT))
         _raise_for(response)
         try:
             data = response.json()
@@ -1305,7 +1384,7 @@ def _stream_once(
     # reading a long prompt isn't taken for a model that stopped.
     timeout = httpx.Timeout(max(settings.llm_timeout, limit or CHAT_TIMEOUT, wait or 0.0), connect=5.0)
     without_probs = without_usage = busy = False
-    with _using(str(payload.get("model")), timeout), http_method("stream")("POST", url, json=payload, headers=auth_headers(settings), timeout=timeout) as response:
+    with _using(str(payload.get("model")), timeout), _model_http("stream")("POST", url, json=payload, headers=auth_headers(settings), timeout=timeout) as response:
         if response.status_code >= 400:
             response.read()
             if _OVERFLOW_RE.search(response.text[:600]):
@@ -2170,7 +2249,7 @@ def chat_with_tools(
         payload["tools"] = tools
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(http_method("post"), url, payload, settings, timeout=max(_timeout(settings, budget), limit or CHAT_TIMEOUT))
+        response = _post_chat(_model_http("post"), url, payload, settings, timeout=max(_timeout(settings, budget), limit or CHAT_TIMEOUT))
         text = response.text[:600]
         if response.status_code in _RETRYABLE and re.search(r"\btools?\b|function", text, re.I) and not _OVERFLOW_RE.search(text):
             # This question goes on without tools. The model is only remembered as having none when the server
