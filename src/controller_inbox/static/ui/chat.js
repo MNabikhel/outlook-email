@@ -129,7 +129,7 @@ export function createChat({ root, onToggle, visionRead }) {
     const now = turn.progress;
     if (!now) return null;
     if (now.state === "writing") return h("span", { class: "typing" }, "Writing the answer…");
-    if (now.state === "thinking") return turn.thinking ? null : h("span", { class: "typing" }, "Thinking…");
+    if (now.state === "thinking") return turn.thinking && turn.thinking.text ? null : h("span", { class: "typing" }, "Thinking…");
     const elapsed = Math.max(0, (Date.now() - now.at) / 1000);
     const timed = Number(now.seconds) > 0;
     const late = timed && elapsed >= Number(now.seconds);
@@ -286,7 +286,7 @@ export function createChat({ root, onToggle, visionRead }) {
       // Still working (an answer stopped before its first words has no working line: "Stopped." says it all).
       const steps = turn.steps || [];
       const working = progressEl(turn);
-      const thinking = turn.thinking && !turn.thinking.ended; // the box above says it
+      const thinking = turn.thinking && turn.thinking.text && !turn.thinking.ended; // the box above says it
       if (!thinking) append(answer, working || h("span", { class: "typing" }, steps.length ? `${steps[steps.length - 1]}…` : "Thinking…"));
     }
     const cited = turn.mode === "model" && !turn.pending ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];

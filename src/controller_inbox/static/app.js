@@ -322,7 +322,10 @@
         html += `<details class="msg-thinking${live ? " live" : ""}"${open ? " open" : ""}><summary>${live ? "Thinking…" : `Thought for ${seconds} s`}</summary><div class="think-text">${escapeHtml(turn.thinking.text)}</div></details>`;
       }
       const waiting = turn.progress ? progressLine(turn.progress) : turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
-      if (turn.text || !now) html += `<div class="msg-text">${turn.text ? formatAnswer(turn.text, turn.sources) : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
+      // While the model thinks, the box above says "Thinking…": the line below doesn't say it again.
+      const thinking = turn.pending && turn.thinking && turn.thinking.text && !turn.thinking.ended;
+      if (turn.text) html += `<div class="msg-text">${formatAnswer(turn.text, turn.sources)}</div>`;
+      else if (!now) html += `<div class="msg-text">${thinking ? "" : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
       if (turn.checks && turn.checks.length) {
         html += `<ul class="msg-check">${turn.checks.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
       }

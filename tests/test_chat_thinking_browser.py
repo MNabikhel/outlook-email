@@ -293,3 +293,15 @@ def test_a_stopped_answer_shows_no_working_line(settings, store, page, monkeypat
         page.wait_for_selector(".msg-stopped")
         assert page.locator(".msg.bot .typing").count() == 0, page.inner_text(".msg.bot")
 
+
+def test_the_classic_chat_says_thinking_once(settings, store, page, monkeypatch):
+    """The classic page said "Thinking…" twice while the model thought: on the box and on the line below it."""
+    _scripted(monkeypatch, _long_thinking(pause=3))
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/chat/window")
+        page.fill("#chat textarea", "What is due?")
+        page.press("#chat textarea", "Enter")
+        page.wait_for_selector(".msg-thinking.live .think-text:has-text('The last line of the reasoning.')")
+        said = page.inner_text(".msg.pending")
+        assert said.count("Thinking…") == 1, said
