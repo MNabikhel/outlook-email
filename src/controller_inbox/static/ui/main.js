@@ -12,6 +12,7 @@ import { createChat } from "./chat.js";
 import { createOverlays } from "./palette.js";
 import { traceView } from "./trace.js";
 import { calendarView, isDay, rangeOf } from "./calendar.js";
+import { SLOW, askOnOpening, waitForCloseDesk } from "./update_ask.js";
 
 const enc = encodeURIComponent;
 const root = document.documentElement;
@@ -1169,9 +1170,9 @@ async function poll() {
 
 /* ---------- Updating ---------- */
 
-/** Settings' Update button was answered: CloseDesk stops, its launcher fetches the newest version and starts it
-    again. Say so, and load the page again once CloseDesk answers (with the new version, or as it was when the
-    update couldn't be done). */
+/** Settings' Update button (or the question as CloseDesk opened) was answered: CloseDesk stops, its launcher
+    fetches the newest version and starts it again. Say so, and load the page again once CloseDesk answers (with the
+    new version, or as it was when the update couldn't be done). */
 function updating(reply) {
   S.updating = true;
   clearTimeout(S.poll);
@@ -1191,21 +1192,7 @@ function updating(reply) {
     ),
     "updating"
   );
-  const before = reply.commit || "";
-  const started = Date.now();
-  let gone = false; // CloseDesk stopped answering: the next answer is the new one
-  const again = async () => {
-    try {
-      const response = await fetch("/health", { cache: "no-store" });
-      const health = await response.json();
-      if (health.app === "closedesk" && (gone || health.commit !== before)) return location.reload();
-    } catch (error) {
-      gone = true;
-      if (Date.now() - started > 5 * 60 * 1000) line.textContent = "CloseDesk hasn't opened again yet. Its window says what it is doing; if it has closed, double-click CloseDesk.";
-    }
-    setTimeout(again, 2000);
-  };
-  setTimeout(again, 2000);
+  waitForCloseDesk(reply.commit || "", { onBack: () => location.reload(), onSlow: () => (line.textContent = SLOW) });
 }
 
 function refreshData() {
@@ -1614,6 +1601,8 @@ async function boot() {
   await sync();
   S.poll = setTimeout(poll, S.meta.job.state === "running" ? 1500 : 15000);
   document.body.classList.add("ready");
+  // Each time CloseDesk opens, its first page asks whether to update when a newer version is out.
+  askOnOpening({ updating });
 }
 
 boot();

@@ -575,3 +575,18 @@ form.step-back { border: 0; padding: 0; margin-top: 6px; }
   table.mail td.nowrap { white-space: normal; }
   table.mail td:has(> .subj) { flex-basis: 100%; }
 }
+
+/* The update question as CloseDesk opens (static/ui/update_ask.js, shared with the workspace). */
+dialog.update-ask { max-width: min(480px, calc(100vw - 32px)); padding: 20px 22px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--ink); box-shadow: 0 18px 50px rgba(18, 36, 63, 0.3); }
+dialog.update-ask::backdrop { background: rgba(18, 36, 63, 0.45); }
+dialog.update-ask h2 { margin: 0 0 8px; font-family: var(--serif); font-size: 21px; color: var(--navy); }
+dialog.update-ask p { margin: 0 0 10px; line-height: 1.5; }
+.update-ask-help { color: var(--muted); font-size: 13px; }
+.update-ask-failed { background: #f3ecda; border-left: 3px solid var(--gold); padding: 8px 10px; }
+.update-ask-status { font-size: 13px; }
+.update-ask-status:empty { display: none; }
+.update-ask-status.error { color: var(--danger); }
+.update-ask-status.wait { color: var(--warn); }
+.update-ask-status.ok { color: var(--green); }
+.update-ask-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+dialog.update-ask progress { width: 100%; }

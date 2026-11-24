@@ -80,3 +80,5 @@ select = ["E9", "F"]
 [tool.ruff.lint.per-file-ignores]
 # Uses the fixtures it imports from test_teach_and_preview by name, which pyflakes reads as redefinitions.
 "tests/test_teach_edges.py" = ["F811"]
+# Uses the download fixture it imports from test_update_on_open, likewise.
+"tests/test_update_on_open_browser.py" = ["F811"]

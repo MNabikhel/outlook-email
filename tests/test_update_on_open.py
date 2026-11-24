@@ -338,7 +338,10 @@ def test_the_pages_ask_the_question_and_answer_not_now(download, settings, store
     monkeypatch.setattr(updates, "_ask_github", github())
     app = web.create_app(settings, store)
     client = TestClient(app)
-    # Before CloseDesk began asking (a page served some other way): nothing to ask.
+    # Served without CloseDesk opening (it never asked GitHub as it opened): nothing to ask, even with a newer version
+    # known from before.
+    updates.check(store, settings, now=NOW, ask=github())
+    assert updates.status(store, settings)["newer"] is True
     assert client.get("/api/update/question", headers=PAGE).json()["ask"] is False
     app.state.update_question = asked_at_start(store, settings)
     view = client.get("/api/update/question", headers=PAGE).json()
@@ -372,6 +375,18 @@ def test_update_now_is_refused_while_mail_is_processed_and_offered_when_done(dow
         time.sleep(0.01)
     assert client.get("/api/update/question", headers=PAGE).json()["busy"] is False
     assert client.post("/api/update", headers=PAGE).status_code == 200 and stopped == [1]
+
+
+def test_once_an_update_is_asked_for_the_page_that_waits_isnt_asked(download, settings, store, monkeypatch):
+    # Settings' Update button, pressed before the question came up: the classic page that waits for CloseDesk to stop
+    # (settings_update.html) is a page too, and isn't asked.
+    monkeypatch.setattr(updates, "_ask_github", github())
+    app = web.create_app(settings, store)
+    app.state.update_question = asked_at_start(store, settings)
+    app.state.stop_server = lambda: None
+    client = TestClient(app)
+    assert client.post("/settings/update", headers={"origin": "http://testserver"}).status_code == 200
+    assert client.get("/api/update/question", headers=PAGE).json()["ask"] is False
 
 
 # CloseDesk opening -------------------------------------------------------------------------------------------

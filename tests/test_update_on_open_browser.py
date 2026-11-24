@@ -1,0 +1,192 @@
+"""The update question in a real Chromium, on the first page shown in both UIs: "A new version of CloseDesk is ready",
+what's new, Update now and Not now. Not now asks again only the next time CloseDesk opens; Update now is refused while
+mail is processed and offered again when that is done; offline, with the check turned off, or started without a
+launcher, nothing is asked. Skipped without Playwright's Chromium."""
+
+from __future__ import annotations
+
+import threading
+import time
+
+import pytest
+
+pytest.importorskip("playwright")
+
+from controller_inbox import updates, web  # noqa: E402
+from liveserver import serving  # noqa: E402
+from test_update_on_open import NEWER, asked_at_start, download, github, no_github, offline  # noqa: E402,F401
+
+DIALOG = "#update-ask[open]"
+WHATS_NEW = "Wait as long as the model needs for file summaries, and stop instead of looking stuck"
+
+
+class Stopper:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __call__(self) -> None:
+        self.calls += 1
+
+
+def opened(settings, store, monkeypatch, ask=None, *, failed: bool = False):
+    """CloseDesk as it opens: GitHub asked (by ``ask``), and the app with its question; Update now stops it."""
+    monkeypatch.setattr(updates, "_ask_github", ask or github())
+    app = web.create_app(settings, store)
+    app.state.update_question = asked_at_start(store, settings, failed=failed)
+    app.state.stop_server = Stopper()
+    return app
+
+
+def answered(page, url: str) -> dict:
+    """Opens ``url`` and gives the question's last answer to the page (once GitHub's answer was in)."""
+    with page.expect_response(lambda r: "/api/update/question" in r.url and r.request.method == "GET" and not r.json()["checking"]) as reply:
+        page.goto(url)
+    page.wait_for_load_state("networkidle")
+    return reply.value.json()
+
+
+@pytest.mark.parametrize("first", ["/", "/app"])
+def test_the_first_page_asks_and_not_now_isnt_asked_again_this_run(download, settings, loaded, page, monkeypatch, first):
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + first)
+        page.wait_for_selector(DIALOG)
+        text = page.inner_text("#update-ask")
+        assert "A new version of CloseDesk is ready" in text
+        assert "CloseDesk 2026.11.16 is out; you have 2026.11.13." in text
+        assert WHATS_NEW in text
+        assert page.evaluate("document.activeElement.textContent") == "Update now"
+        page.click("#update-ask button:has-text('Not now')")
+        page.wait_for_selector("#update-ask", state="detached")
+        # CloseDesk carries on as normal, in this UI and the other, without asking again in this run.
+        for other in ("/", "/inbox", "/app", "/app/settings"):
+            assert answered(page, base + other)["ask"] is False
+            assert page.query_selector("#update-ask") is None
+        assert app.state.stop_server.calls == 0
+    # The next time CloseDesk opens, it asks again.
+    with serving(opened(settings, loaded, monkeypatch)) as base:
+        page.goto(base + first)
+        page.wait_for_selector(DIALOG)
+
+
+def test_escape_is_not_now(download, settings, loaded, page, monkeypatch):
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/app")
+        page.wait_for_selector(DIALOG)
+        page.keyboard.press("Escape")
+        page.wait_for_selector("#update-ask", state="detached")
+        # The key went to the dialog, not to the page behind it.
+        assert page.url == base + "/app"
+        assert answered(page, base + "/app")["ask"] is False
+
+
+def test_update_now_in_the_workspace_updates_and_opens_the_new_version(download, settings, loaded, page, monkeypatch):
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/app")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Update now')")
+        page.wait_for_selector("#updating")
+        assert updates.UPDATING in page.inner_text("#updating") and app.state.stop_server.calls == 1
+        assert page.query_selector("#update-ask") is None
+        # The launcher has put the new version in place and started it: the page loads again by itself.
+        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        page.wait_for_function("() => (document.querySelector('.rail-version') || {}).textContent === 'CloseDesk 2026.11.16 (bbbbbbb)'", timeout=20000)
+
+
+def test_update_now_on_a_classic_page_updates_and_opens_the_new_version(download, settings, loaded, page, monkeypatch):
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/inbox")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Update now')")
+        page.wait_for_selector("#update-ask.updating")
+        assert updates.UPDATING in page.inner_text("#update-ask") and app.state.stop_server.calls == 1
+        assert page.query_selector("#update-ask button") is None, "nothing to click while it updates"
+        page.keyboard.press("Escape")
+        assert page.query_selector("#update-ask.updating[open]") is not None, "it stays up until CloseDesk is back"
+        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        page.wait_for_function("() => document.body.innerText.includes('CloseDesk 2026.11.16 (bbbbbbb)')", timeout=20000)
+        assert page.url == base + "/inbox"
+
+
+def test_update_now_waits_while_mail_is_processed_and_is_offered_when_done(download, settings, loaded, page, monkeypatch):
+    app = opened(settings, loaded, monkeypatch)
+    release = threading.Event()
+    app.state.job.start(lambda progress: release.wait(30))
+    try:
+        with serving(app) as base:
+            page.goto(base + "/app")
+            page.wait_for_selector(DIALOG)
+            page.click("#update-ask button:has-text('Update now')")
+            page.wait_for_function(f"() => document.querySelector('#update-ask').innerText.includes({updates.BUSY!r})")
+            assert page.is_disabled("#update-ask button:has-text('Update now')")
+            assert app.state.stop_server.calls == 0
+            release.set()
+            page.wait_for_function("() => document.querySelector('#update-ask').innerText.includes('The mail is done: CloseDesk can update now.')")
+            assert page.is_enabled("#update-ask button:has-text('Update now')")
+            page.click("#update-ask button:has-text('Update now')")
+            page.wait_for_selector("#updating")
+            assert app.state.stop_server.calls == 1
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("first", ["/", "/app"])
+def test_offline_nothing_is_asked_and_nothing_is_in_the_way(download, settings, loaded, page, monkeypatch, first):
+    with serving(opened(settings, loaded, monkeypatch, offline)) as base:
+        assert answered(page, base + first)["ask"] is False
+        assert page.query_selector("#update-ask") is None
+
+
+def test_a_slow_github_asks_once_its_answer_is_in(download, settings, loaded, page, monkeypatch):
+    slow = threading.Event()
+    monkeypatch.setattr(updates, "_ask_github", github(hold=slow))
+    app = web.create_app(settings, loaded)
+    app.state.update_question = question = updates.Question()
+    question.begin(loaded, settings)
+    try:
+        with serving(app) as base:
+            page.goto(base + "/")
+            page.wait_for_selector("h1")
+            time.sleep(1)
+            assert page.query_selector("#update-ask") is None
+            slow.set()
+            page.wait_for_selector(DIALOG)
+    finally:
+        slow.set()
+
+
+def test_with_the_check_turned_off_nothing_is_asked(download, settings, loaded, page, monkeypatch):
+    settings.update_check = False
+    ask = github()
+    with serving(opened(settings, loaded, monkeypatch, ask)) as base:
+        for first in ("/", "/app"):
+            assert answered(page, base + first)["ask"] is False
+            assert page.query_selector("#update-ask") is None
+    assert ask.asked == []
+
+
+def test_started_without_a_launcher_nothing_is_asked_and_settings_say_how(download, settings, loaded, page, monkeypatch):
+    monkeypatch.delenv(updates.LAUNCHER_ENV)
+    with serving(opened(settings, loaded, monkeypatch)) as base:
+        for first in ("/", "/app"):
+            assert answered(page, base + first)["ask"] is False
+            assert page.query_selector("#update-ask") is None
+        page.goto(base + "/app/settings#set-about")
+        page.wait_for_selector("#set-update")
+        assert "double-click CloseDesk-Update" in page.inner_text("#set-update")
+
+
+@pytest.mark.parametrize("first", ["/", "/app"])
+def test_an_update_that_didnt_finish_is_said(download, settings, loaded, page, monkeypatch, first):
+    with serving(opened(settings, loaded, monkeypatch, offline, failed=True)) as base:
+        page.goto(base + first)
+        page.wait_for_selector(DIALOG)
+        text = page.inner_text("#update-ask")
+        assert "CloseDesk wasn't updated" in text and updates.UNFINISHED in text
+        assert page.query_selector("#update-ask button:has-text('Update now')") is None, "GitHub can't be reached now"
+        page.click("#update-ask button:has-text('OK')")
+        page.wait_for_selector("#update-ask", state="detached")
+        assert answered(page, base + first)["ask"] is False

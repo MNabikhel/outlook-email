@@ -267,6 +267,10 @@ def stop_to_update(app_state, job_state: str) -> str:
     if job is not None and not job.close():
         return BUSY
     app_state.update_asked = True
+    # Asked for (from Settings, say): the question isn't put to the page that waits for CloseDesk to stop.
+    question = getattr(app_state, "update_question", None)
+    if question is not None:
+        question.answer()
     stop()
     return ""
 
@@ -308,6 +312,7 @@ class Question:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._begun = False  # nothing is asked of a page served without CloseDesk opening (a test's, say)
         self._checking = False
         self._answered = False
         self._failed = False
@@ -316,6 +321,7 @@ class Question:
         """CloseDesk is opening: ask GitHub (``START_TIMEOUT_SECONDS`` at most) in the background, so the page opens
         meanwhile. ``failed``: the update asked for before CloseDesk stopped didn't finish (``update_unfinished``)."""
         self._failed = failed
+        self._begun = True
         if not asks(settings):
             return
         self._checking = True
@@ -344,7 +350,7 @@ class Question:
         shown = status(store, settings)
         here = launcher_here()
         with self._lock:
-            open_ = here and not self._answered
+            open_ = here and self._begun and not self._answered
         checking = open_ and self._checking
         newer = not checking and shown["newer"]
         failed = open_ and self._failed

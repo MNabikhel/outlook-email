@@ -94,5 +94,7 @@
   {% include "_chat.html" %}
   <div class="toast" id="toast" role="status" hidden></div>
   {% include "_scripts.html" %}
+  {# Each time CloseDesk opens, its first page asks whether to update when a newer version is out (static/ui/update_ask.js). #}
+  <script type="module">import { askOnOpening } from "/static/ui/update_ask.js"; askOnOpening();</script>
 </body>
 </html>
