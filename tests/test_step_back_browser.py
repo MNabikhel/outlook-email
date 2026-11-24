@@ -168,3 +168,29 @@ def test_the_setup_page_offers_the_reload(settings, store, page, monkeypatch):
         assert done == [(MODEL, 8192)]
         assert "Loaded google/gemma-3-27b again" in page.inner_text("[data-step-back-said]")
         assert page.locator("form[data-step-back]").count() == 0
+
+
+def test_the_setup_page_says_it_is_reloading_and_takes_one_press(settings, store, page, monkeypatch):
+    import threading
+
+    done = _offered_in_settings(monkeypatch)
+    recorded = local_llm.step_back_context
+    let_go = threading.Event()
+
+    def slow(settings_, key, size):  # LM Studio takes its time
+        let_go.wait(20)
+        return recorded(settings_, key, size)
+
+    monkeypatch.setattr(local_llm, "step_back_context", slow)
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/settings")
+        button = page.locator("form[data-step-back] button")
+        button.wait_for()
+        button.click(no_wait_after=True)
+        # The form is sent and its page not back yet: the button says what is happening and can't be pressed again.
+        assert page.evaluate("document.querySelector('form[data-step-back] button').disabled")
+        assert page.evaluate("document.querySelector('form[data-step-back] button').textContent.trim()") == "Reloading in LM Studio…"
+        let_go.set()
+        page.wait_for_selector("[data-step-back-said]")
+        assert done == [(MODEL, 8192)]
