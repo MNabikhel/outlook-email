@@ -314,3 +314,20 @@ def test_a_chat_answer_that_went_quiet_while_thinking_says_the_model_was_still_t
         list(stream_text(settings, [{"role": "user", "content": "What is due?"}]))
     note = failure_note(caught.value)
     assert "still thinking" in note and "may still be loading" not in note
+
+
+def test_reading_mail_measures_the_models_speeds_for_the_summaries_after_it(settings, loaded, lm_studio):
+    """A run's file summaries come after its reading of new mail. A model never asked a chat question had no measured
+    speeds, so its first long file was cut off at the usual 5 minutes (Gemma 4 12B writing 1,844 tokens at 6.8 a
+    second), only to be given longer next run. The reading measures how fast the model reads and writes, so the
+    summaries after it wait as long as this model needs."""
+    lm_studio(token_gap=0.01, tokens=80, first_token=0.2)
+    status = local_llm.check_model(settings)
+    before = model_fit.background_wait(loaded, settings, BIG, status, tokens=4000, written=2048)
+    result = read_queue(loaded, settings, limit=2)
+    assert len(result["read_ids"]) == 2, result["note"]
+    rates = model_fit.speeds(loaded, BIG)
+    assert 20 < rates.get("write", 0) < 200, rates  # about 100 words a second, a word every 10 ms
+    assert rates.get("read", 0) > 0, rates
+    after = model_fit.background_wait(loaded, settings, BIG, status, tokens=4000, written=2048)
+    assert after.seconds >= 2048 / rates["write"] > before.seconds

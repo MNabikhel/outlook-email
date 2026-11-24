@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import AsyncIterator, Generator, Iterator
 from contextlib import contextmanager
 from email.message import EmailMessage
@@ -255,9 +256,10 @@ class _AnswerLog:
 
 
 class ProcessJob:
-    """The dashboard's 'Process new mail' run, in a background thread so the page stays usable."""
+    """The dashboard's 'Process new mail' run, in a background thread so the page stays usable. ``clock``: seconds, for
+    how long the step being done has taken (time.monotonic)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock=time.monotonic) -> None:
         self._lock = threading.Lock()
         self.state = "idle"
         self.stage = ""
@@ -270,6 +272,10 @@ class ProcessJob:
         # What a job other than Process new mail is about (a vision read: its email and file), for the pages.
         self.about: dict | None = None
         self._stop = threading.Event()
+        # The model calls of the step running now that Stop hangs up on (a file's summary), if it is such a step.
+        self._slot = local_llm.StopSlot()
+        self.clock = clock
+        self._since = clock()  # when the step being done (its stage and count) began
         # CloseDesk is stopping to update: nothing new starts, so nothing is cut off when it stops.
         self._closed = False
 
@@ -280,14 +286,22 @@ class ProcessJob:
         return self._stop.is_set()
 
     def request_stop(self) -> bool:
+        """Stop: reading scans stops before its next page; a step whose model calls can be hung up on (a file's
+        summary, a related-mail question: ``local_llm.stoppable``) is hung up on now, and the run goes on without the
+        model's work."""
         with self._lock:
             if self.state != "running":
                 return False
         self._stop.set()
+        handle = self._slot.handle
+        if handle is not None:
+            handle.now()
         return True
 
     def snapshot(self) -> dict:
+        handle = self._slot.handle
         with self._lock:
+            running = self.state == "running"
             return {
                 "state": self.state,
                 "stage": self.stage,
@@ -299,6 +313,10 @@ class ProcessJob:
                 "finished_at": self.finished_at,
                 "about": self.about,
                 "stopping": self._stop.is_set(),
+                # How long the step being done has taken: a summary can keep the same line up for many minutes.
+                "step_seconds": max(0, int(self.clock() - self._since)) if running else 0,
+                # Stop would hang up on the model now (the pages offer it then, as they do while scans are read).
+                "can_stop": running and handle is not None and not handle.done,
             }
 
     def close(self) -> bool:
@@ -315,17 +333,21 @@ class ProcessJob:
                 return False
             self.state, self.stage, self.done, self.total = "running", "starting", 0, 0
             self.note, self.result, self.error, self.about = "", None, "", about
+            self._since = self.clock()
             self._stop.clear()
         threading.Thread(target=self._run, args=(target,), daemon=True).start()
         return True
 
     def progress(self, stage: str, done: int, total: int, note: str) -> None:
         with self._lock:
+            if (stage, done) != (self.stage, self.done):  # a new step; a note said again (with its wait) is the same
+                self._since = self.clock()
             self.stage, self.done, self.total, self.note = stage, done, total, note
 
     def _run(self, target) -> None:
         try:
-            result, state, error = target(self.progress), "done", ""
+            with local_llm.stop_slot(self._slot):
+                result, state, error = target(self.progress), "done", ""
         except Exception as exc:  # the page shows the error instead of a dead spinner
             result, state, error = None, "error", str(exc)
         with self._lock:  # all at once: a page that sees the job done also sees when it finished

@@ -194,8 +194,15 @@ function renderTop() {
   button.disabled = running;
   button.textContent = running ? "Processing…" : "Process new mail";
   $("#top").toggleAttribute("data-busy", running);
-  // Redrawn only when it changes, so a click on Stop isn't lost to a redraw between press and release.
-  const shown = JSON.stringify(running ? [job.stage_label, job.done, job.total, job.note, Boolean(job.about), job.stopping] : null);
+  // How long the step has taken, once it is a minute: a file's summary can keep the same line up for many minutes.
+  const minutes = Math.floor((job.step_seconds || 0) / 60);
+  const took = minutes ? `${minutes} minute${minutes === 1 ? "" : "s"} so far` : "";
+  // Stop: reading scans stops after its page; the model writing a file's summary (or answering a related-mail
+  // question) is hung up on at once (can_stop).
+  const stoppable = Boolean(job.can_stop) || (job.stage === "vision" && !job.stopping);
+  // Redrawn only when it changes (the time once a minute), so a click on Stop isn't lost to a redraw between press
+  // and release.
+  const shown = JSON.stringify(running ? [job.stage_label, job.done, job.total, job.note, Boolean(job.about), job.stopping, took, stoppable] : null);
   if (shown === S.topJob) return;
   S.topJob = shown;
   replace(
@@ -208,14 +215,26 @@ function renderTop() {
           // A long note (a file's name) is cut short, not the bar or Stop: the whole line is on hover.
           h(
             "span",
-            { class: "job-text", title: [job.stage_label || "Working", job.total > 1 ? `${job.done} of ${job.total}` : "", job.note || ""].filter(Boolean).join(" · ") },
+            { class: "job-text", title: [job.stage_label || "Working", job.total > 1 ? `${job.done} of ${job.total}` : "", job.note || "", took].filter(Boolean).join(" · ") },
             h("b", null, job.stage_label || "Working"),
             job.total > 1 ? ` · ${job.done} of ${job.total}` : "",
-            job.note ? h("span", { class: "muted" }, ` · ${job.note}`) : null
+            job.note ? h("span", { class: "muted" }, ` · ${job.note}`) : null,
+            took ? h("span", { class: "muted" }, ` · ${took}`) : null
           ),
           h("span", { class: "job-bar" }, h("span", { style: { width: job.total ? `${Math.round((100 * job.done) / job.total)}%` : "30%" }, class: job.total ? "" : "indeterminate" })),
-          job.stage === "vision" && !job.stopping
-            ? h("button", { type: "button", class: "btn btn-sm btn-quiet", title: "Stop reading pages with the vision model after the page being read now", onclick: stopJob }, "Stop")
+          stoppable
+            ? h(
+                "button",
+                {
+                  type: "button",
+                  class: "btn btn-sm btn-quiet",
+                  title: job.can_stop
+                    ? "Stop the local model now: the rest of the run carries on, and what it didn't get to is done next run"
+                    : "Stop reading pages with the vision model after the page being read now",
+                  onclick: stopJob,
+                },
+                "Stop"
+              )
             : null
         )
       : null
@@ -228,9 +247,9 @@ async function stopJob(event) {
   try {
     const reply = await postJSON("/api/process/stop");
     if (reply && reply.stopping === false) return toast("Nothing is running now.");
-    toast("Stopping after the page being read now.");
+    toast((reply && reply.message) || "Stopping after the page being read now.", { ms: 7000 });
     if (S.meta) {
-      S.meta.job = { ...S.meta.job, stopping: true };
+      S.meta.job = { ...S.meta.job, stopping: true, can_stop: false };
       renderTop();
     }
   } catch (error) {
@@ -1195,7 +1214,45 @@ function refreshData() {
   if (S.list && S.route && S.route.list !== null) ensureList(S.list.spec.key, { force: true, quiet: true });
 }
 
+// The run whose end this browser has said, so a run that went wrong is said once to a page opened after it.
+const TOLD_KEY = "closedesk-run-told";
+
+function told(job) {
+  try {
+    return localStorage.getItem(TOLD_KEY) === job.finished_at;
+  } catch (error) {
+    return true; // nowhere to remember it: never said on every visit
+  }
+}
+
+function remember(job) {
+  try {
+    if (job.finished_at) localStorage.setItem(TOLD_KEY, job.finished_at);
+  } catch (error) {
+    /* said now; maybe again on the next visit */
+  }
+}
+
+/* A page opened after a run ended (one at the start that nobody watched, say): what went wrong in it (the model
+   stopped partway, a model couldn't be loaded, files couldn't be read, the run failed) is said once, as it would
+   have been to a page that saw it end. A run that went well isn't said again. */
+function toldOnOpening(job) {
+  if (job.state === "running" || !job.finished_at || told(job)) return;
+  const result = job.result || {};
+  // A read of scans or an index started from a page: said there, to whoever started it.
+  const own = (job.about && job.about.kind === "vision") || result.kind === "vision" || result.kind === "index";
+  const wrong =
+    !own &&
+    (job.state === "error" ||
+      Boolean(result.model && result.model_note) ||
+      Boolean(result.model_load && result.model_load.failed) ||
+      Boolean((result.outlook && result.outlook.note) || (result.failed_files || []).length));
+  if (wrong) finished(job);
+  else remember(job);
+}
+
 function finished(job) {
+  remember(job);
   // "Syncing Outlook…" goes once the run has ended, however it ended: what it found (or why not) is said next.
   if (S.syncing) S.syncing();
   S.syncing = null;
@@ -1220,7 +1277,9 @@ function finished(job) {
     }
     return;
   }
-  const read = typeof result.ingested === "number" ? `Read ${plural(result.ingested, "new file")}.` : "";
+  const read =
+    (typeof result.ingested === "number" ? `Read ${plural(result.ingested, "new file")}.` : "") +
+    (result.files_summarized ? ` Summarized ${plural(result.files_summarized, "file")}.` : "");
   const synced = result.outlook_message ? ` ${result.outlook_message}` : "";
   // The start loaded a model in LM Studio (or couldn't, and says why).
   const load = result.model_load || null;
@@ -1542,6 +1601,7 @@ async function boot() {
     return;
   }
   renderTop();
+  toldOnOpening(S.meta.job);
   updateRail("");
   chat.setModel(S.meta.model);
   await sync();

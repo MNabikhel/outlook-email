@@ -23,6 +23,7 @@ import statistics
 import threading
 import weakref
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -153,6 +154,44 @@ def hanging_up(handle: HangUp | None):
         yield
     finally:
         _hang_up.reset(token)
+
+
+class StopSlot:
+    """Where a background job (``web.ProcessJob``) finds the model calls its Stop button can hang up on now: the
+    ``HangUp`` of the step running inside ``stoppable``, or None."""
+
+    def __init__(self) -> None:
+        self.handle: HangUp | None = None
+
+
+_stop_slot: ContextVar[StopSlot | None] = ContextVar("closedesk_stop_slot", default=None)
+
+
+@contextmanager
+def stop_slot(slot: StopSlot | None):
+    """A job's work runs inside: the steps in it that can be stopped (``stoppable``) put their hang-up in ``slot``."""
+    token = _stop_slot.set(slot)
+    try:
+        yield
+    finally:
+        _stop_slot.reset(token)
+
+
+@contextmanager
+def stoppable():
+    """A step of a run whose model calls the job's Stop hangs up on (a file's summary can take the model half an hour
+    on a laptop): the calls made inside go out on connections of their own, and the ``HangUp`` given says, once the
+    step is over, whether they were hung up on (``done``). Outside a job, nothing can stop them."""
+    handle = HangUp()
+    slot = _stop_slot.get()
+    if slot is not None:
+        slot.handle = handle
+    try:
+        with hanging_up(handle):
+            yield handle
+    finally:
+        if slot is not None:
+            slot.handle = None
 
 
 def _model_http(name: str):
@@ -882,6 +921,8 @@ class LocalReader:
 
             self._model_wait = model_fit.reading_wait(store, settings, self.model)
         self._partial = Reply(content="")
+        self._store = store
+        self._sent_at = 0.0  # when the request the reply in ``_partial`` answers went (time.perf_counter())
 
     def close(self) -> None:
         if self._closer is not None:
@@ -937,7 +978,27 @@ class LocalReader:
         self.stats.read += 1
         self.stats.seconds += took
         self.stats.times.append(took)
+        self._keep_speed(reply, prompt)
         return parsed
+
+    def _keep_speed(self, reply: Reply, prompt: str) -> None:
+        """Keep how fast the model read this email and wrote its reading (``model_fit.record_speed``), as the chat does
+        on every answer: a file's summary later in the same run waits as long as this model needs (a model never asked
+        in the chat was otherwise given the usual 5 minutes, too short for a slow one)."""
+        if self._store is None or not reply.first_at or not self._sent_at or reply.first_at < self._sent_at:
+            return
+        from controller_inbox import model_fit  # it imports this module
+        from controller_inbox.agent import CHARS_PER_TOKEN  # it imports this module
+
+        usage = reply.usage
+        # As the server counted what it read; else the email's part of the prompt (the same instructions come first
+        # every time, and LM Studio keeps those read).
+        tokens = _prompt_read(usage) if "prompt_tokens" in usage else len(prompt) // CHARS_PER_TOKEN
+        model_fit.record_speed(
+            self._store, model_fit.model_key(check_model(self.settings), self.model), prompt_tokens=tokens,
+            read_seconds=reply.first_at - self._sent_at, written=_int(usage.get("completion_tokens")) or reply.pieces,
+            write_seconds=reply.last_at - reply.first_at, counted=_cache_said(usage),
+        )
 
     def _failed(self, reason: str, *, memory: bool = False) -> None:
         self.stats.failed += 1
@@ -1061,6 +1122,7 @@ class LocalReader:
         reply goes into ``self._partial``; a refusal is returned read, so its text can be looked at."""
         reply = self._partial = Reply(content="")
         raw: list[str] = []
+        self._sent_at = time.perf_counter()  # the reply's first piece comes once the model has read the prompt
         with self.client.stream("POST", url, json=json, headers=headers, **options) as response:
             if response.status_code >= 400:
                 response.read()
@@ -1280,11 +1342,13 @@ def _empty_reply(settings: Settings, model: str, budget: int, reply: Reply) -> E
 
 def complete_text(
     settings: Settings, messages: list[dict], *, max_tokens: int = 400, temperature: float | None = None, think: bool = False,
-    limit: float | None = None,
+    limit: float | Callable[[int], float] | None = None,
 ) -> str:
     """One plain-text answer. Raises ``httpx.HTTPError`` or ``EmptyReply`` when there is none. ``temperature``:
     other than the usual 0.2, for a second, differently worded try; ``think``: see ``_chat_plan``. ``limit``: how
-    long the model may take, worked out for it (``model_fit.chat_wait``), in place of the usual ``CHAT_TIMEOUT``."""
+    long the model may take, worked out for it (``model_fit.chat_wait``), in place of the usual ``CHAT_TIMEOUT``; or
+    what works that out for the tokens a try may write (``model_fit.background_wait``), since nothing comes back
+    until they are all written: a try asked again with more room to think then waits as long as that room needs."""
     model, effort, budget = _chat_plan(settings, max_tokens, think=think)
     for _attempt in range(2):
         url, payload = _chat_request(settings, messages, budget, stream=False)
@@ -1293,7 +1357,8 @@ def complete_text(
             payload["temperature"] = temperature
         if effort:
             payload["reasoning_effort"] = effort
-        response = _post_chat(_model_http("post"), url, payload, settings, timeout=max(_timeout(settings, budget), limit or CHAT_TIMEOUT))
+        wait = limit(budget) if callable(limit) else limit
+        response = _post_chat(_model_http("post"), url, payload, settings, timeout=max(_timeout(settings, budget), wait or CHAT_TIMEOUT))
         _raise_for(response)
         try:
             data = response.json()

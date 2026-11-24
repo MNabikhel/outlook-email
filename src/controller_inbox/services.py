@@ -177,5 +177,9 @@ def start_processing(store: Store, settings: Settings, job) -> str:
 
 
 def stop_processing(job) -> str:
-    """Ask the running job to stop: "stopping", or "" when nothing is running."""
-    return "stopping" if job.request_stop() else ""
+    """Ask the running job to stop: "stopping" (reading scans stops after its page), "stopping-model" (the model was
+    hung up on: a file's summary or a related-mail question), or "" when nothing is running."""
+    model = bool((job.snapshot() or {}).get("can_stop"))
+    if not job.request_stop():
+        return ""
+    return "stopping-model" if model else "stopping"

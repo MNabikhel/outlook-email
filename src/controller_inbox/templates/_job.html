@@ -1,12 +1,16 @@
 {% set stage_labels = {'starting': 'Starting', 'model': 'Loading a model in LM Studio', 'outlook': 'Copying mail from Outlook', 'importing': 'Reading files', 'rereading': 'Re-reading attachments', 'reading': 'Local model reading', 'summarizing': 'Summarizing attachments', 'vision': 'Reading scans with the vision model', 'indexing': 'Indexing for search', 'linking': 'Looking for related mail', 'digest': 'Writing the digest'} %}
 {% if job.state == 'running' %}
+{# How long the step has taken, once it is a minute: a file's summary can keep the same line up for many minutes. #}
+{% set step_minutes = (job.step_seconds or 0) // 60 %}
 <section class="job running" data-poll="/process/status">
   <div>
     <strong>{{ stage_labels.get(job.stage, job.stage) }}{% if job.total > 1 %} · {{ job.done }} of {{ job.total }}{% endif %}</strong>
     <span>{{ job.note }}</span>
+    <span class="job-time">{% if step_minutes %}· {{ step_minutes }} minute{{ '' if step_minutes == 1 else 's' }} so far{% endif %}</span>
   </div>
-  {# Shown while scans are read, also when the run gets there after the page loaded. #}
-  <form method="post" action="/process/stop" class="job-stop" {{ '' if job.stage == 'vision' and not job.stopping else 'hidden' }}><button type="submit" class="ghost">Stop after this page</button></form>
+  {# Shown while scans are read, also when the run gets there after the page loaded; and while the model writes a
+     file's summary or answers a related-mail question, which Stop hangs up on at once. #}
+  <form method="post" action="/process/stop" class="job-stop" {{ '' if job.can_stop or (job.stage == 'vision' and not job.stopping) else 'hidden' }}><button type="submit" class="ghost">{{ 'Stop' if job.can_stop else 'Stop after this page' }}</button></form>
   <progress {% if job.total %}value="{{ job.done }}" max="{{ job.total }}"{% endif %}></progress>
 </section>
 <script>
@@ -18,10 +22,15 @@
           var labels = {{ stage_labels | tojson }};
           box.querySelector('strong').textContent = (labels[s.stage] || s.stage) + (s.total > 1 ? ' · ' + s.done + ' of ' + s.total : '');
           box.querySelector('span').textContent = s.note || '';
+          var minutes = Math.floor((s.step_seconds || 0) / 60);
+          box.querySelector('.job-time').textContent = minutes ? '· ' + minutes + ' minute' + (minutes === 1 ? '' : 's') + ' so far' : '';
           var bar = box.querySelector('progress');
           if (s.total) { bar.max = s.total; bar.value = s.done; }
           var stop = box.querySelector('.job-stop');
-          if (stop) { stop.hidden = !(s.stage === 'vision' && !s.stopping); }
+          if (stop) {
+            stop.hidden = !(s.can_stop || (s.stage === 'vision' && !s.stopping));
+            stop.querySelector('button').textContent = s.can_stop ? 'Stop' : 'Stop after this page';
+          }
           poll();
         } else {
           window.location.href = '/';
@@ -46,6 +55,7 @@
   <span>
     Read {{ job.result.ingested }} new file{{ '' if job.result.ingested == 1 else 's' }}{% if job.result.already_read %}, {{ job.result.already_read }} already filed{% endif %}.
     {% if job.result.model %}The local model read {{ job.result.read_by_bionic }}{% if job.result.avg_seconds %} (about {{ job.result.avg_seconds }}s each){% endif %}.{% elif not job.result.model_load %}No local model was running, so mail is filed from the script draft.{% endif %}
+    {% if job.result.files_summarized %}Summarized {{ job.result.files_summarized }} file{{ '' if job.result.files_summarized == 1 else 's' }}.{% endif %}
     {% if job.result.failed_files %}{{ job.result.failed_files | length }} file(s) could not be read and were moved to <code>inbox/failed</code>.{% endif %}
     {% if job.result.model_note and job.result.model %}{{ job.result.model_note }}{% endif %}
     {% if job.result.model_load %}{{ job.result.model_load.message }}{% endif %}
