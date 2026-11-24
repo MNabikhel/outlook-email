@@ -2058,6 +2058,9 @@ def _more_time(state: dict, settings: Settings, exc: Exception, question: str, e
     )
     if suggest * 60 <= waited:  # it had the longest wait already: the same again would run out the same way
         return None
+    if not getattr(exc, "reply_started", None):
+        # Asked again, its reading isn't said to take less than the wait that just ran out.
+        model_fit.wait_ran_out(state.get("store"), wait.model, seconds=waited, tokens=tokens)
     return {
         "type": "more_time", "model": wait.model, "minutes": model_fit.Wait(wait.model, waited, wait.yours).minutes,
         "suggest": suggest, "tokens": tokens, "text": model_fit.more_time_text(wait.model, waited, suggest, slower=slower),
@@ -2128,6 +2131,8 @@ def _reading_progress(store: Store | None, call: dict, *, written: int = 0) -> d
         seconds = model_fit.estimate_call(store, model, tokens=tokens, written=written)
     else:
         seconds = model_fit.estimate(store, model, tokens=tokens)
+    if seconds:  # slower now than measured: its wait ran out on the last question, so no shorter than that
+        seconds = max(seconds, model_fit.at_least(store, model, tokens=tokens))
     return {
         "type": "progress", "state": "reading", "text": reading, "tokens": tokens,
         "seconds": round(seconds, 1) if seconds else None, "about": model_fit.about(seconds),

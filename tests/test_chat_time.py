@@ -335,3 +335,23 @@ def test_a_model_slower_than_its_measured_speed_is_offered_much_more_time(settin
     assert "usually needs" not in text and "slower than it was earlier on this computer" in text
     # Cut off well within its measured time, the speed still stands.
     assert not model_fit.slower_than_measured(store, status, prompt_tokens=12000, elapsed=20)
+
+
+def test_asked_again_after_its_wait_ran_out_the_reading_estimate_is_no_shorter_than_that_wait(settings, loaded, lm):
+    """The model was slower than its measured speed and ran out of its wait. Asked again with more time, the chat
+    still said it reads in about 20 seconds from the old speed, then "Taking longer than usual…" for the whole wait."""
+    server = lm(timeout="start")
+    model_fit.record_speed(loaded, KEY, prompt_tokens=2000, read_seconds=20.0)  # 100 tokens a second, measured earlier
+    client = TestClient(web.create_app(settings, loaded))
+    lines = [json.loads(line) for line in client.post("/chat", json={"message": QUESTION}, headers=PAGE).text.splitlines()]
+    offer = next(line for line in lines if line["type"] == "more_time")
+    ran_out = offer["minutes"] * 60
+    client.post("/chat/wait", json={"model": KEY, "minutes": offer["suggest"]}, headers=PAGE)
+    server.timeout = ""
+    again = [json.loads(line) for line in client.post("/chat", json={"message": QUESTION, "chat_id": lines[0]["id"]}, headers=PAGE).text.splitlines()]
+    reading = [line for line in again if line["type"] == "progress" and line["state"] == "reading"]
+    assert reading and all(line["seconds"] is None or line["seconds"] >= ran_out * 0.9 for line in reading), reading
+    # Once it answered, its speed is what it was measured at again: the next question's estimate comes from it.
+    later = [json.loads(line) for line in client.post("/chat", json={"message": QUESTION}, headers=PAGE).text.splitlines()]
+    estimate = next(line for line in later if line["type"] == "progress" and line["state"] == "reading")["seconds"]
+    assert estimate is not None and estimate < ran_out / 2

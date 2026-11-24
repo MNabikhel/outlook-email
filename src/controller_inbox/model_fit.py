@@ -62,6 +62,8 @@ GUESSED_IN_A_ROW = 8
 
 WAIT_KEY = "model_wait"  # {model: seconds} the user chose
 RATES_KEY = "model_rates"  # {model: {"read": prompt tokens a second, "write": tokens written a second}}
+# {model: {"seconds": the chat's wait that ran out before it began its answer, "tokens": the prompt it was reading}}
+RAN_OUT_KEY = "model_ran_out"
 
 
 def model_key(status: ModelStatus, model: str = "") -> str:
@@ -151,6 +153,9 @@ def record_speed(store: Store, model: str, *, prompt_tokens: int, read_seconds: 
     ``GUESSED_IN_A_ROW`` came in a row."""
     if not model:
         return
+    ran_out = _read(store, RAN_OUT_KEY)
+    if ran_out.pop(model, None) is not None:  # it answered: its measured speed is the guide again
+        store.set_state(RAN_OUT_KEY, json.dumps(ran_out))
     rates = _read(store, RATES_KEY)
     entry = rates.get(model) if isinstance(rates.get(model), dict) else {}
     found = {}
@@ -412,6 +417,27 @@ def more_time_text(model: str, waited: float, suggest: int, *, slower: bool = Fa
         f"The local model needed more time than CloseDesk gives it ({minutes_said(waited)}). {name} usually needs "
         f"about {minutes_said(suggest * 60)} for a question like this on this computer."
     )
+
+
+def wait_ran_out(store: Store | None, model: str, *, seconds: float, tokens: int) -> None:
+    """The chat's wait of ``seconds`` ran out while ``model`` read a prompt of ``tokens``: it is slower now than its
+    measured speed says, so until it answers again its estimates are no shorter than that (``at_least``)."""
+    if store is None or not model or seconds <= 0:
+        return
+    ran_out = _read(store, RAN_OUT_KEY)
+    ran_out[model] = {"seconds": round(seconds, 1), "tokens": max(0, int(tokens))}
+    store.set_state(RAN_OUT_KEY, json.dumps(ran_out))
+
+
+def at_least(store: Store | None, model: str, *, tokens: int) -> float:
+    """The shortest the reading of a prompt of ``tokens`` can be said to take ``model`` after its wait ran out on one
+    (``wait_ran_out``): that wait, less for a shorter prompt. 0 when no wait ran out."""
+    entry = _read(store, RAN_OUT_KEY).get(model)
+    if not isinstance(entry, dict) or not isinstance(entry.get("seconds"), (int, float)):
+        return 0.0
+    before = entry.get("tokens") if isinstance(entry.get("tokens"), int) else 0
+    share = min(1.0, tokens / before) if before > 0 and tokens > 0 else 1.0
+    return float(entry["seconds"]) * share
 
 
 def estimate(store: Store | None, *names: str, tokens: int) -> float | None:
