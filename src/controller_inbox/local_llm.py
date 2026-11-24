@@ -1937,6 +1937,26 @@ def load_failed_lately(key: str) -> bool:
     return failed is not None and time.monotonic() - failed < READER_RETRY_SECONDS
 
 
+def chat_load_size(settings: Settings, key: str) -> int:
+    """The context to have LM Studio load ``key`` with before a question's first call, when it isn't loaded: Setup's
+    minimum, or what fits of it here. Left to LM Studio otherwise, which loads it with its own default when the question
+    names it (and the next question then unloads it and loads it again with the minimum: two loads, minutes each for a
+    big model). 0 when it is left to LM Studio: not LM Studio, not one of its downloaded chat models, another chat model
+    loaded, a load already under way, one that failed lately, or no minimum."""
+    status = check_model(settings)
+    if not (status.lm_studio and key in status.chat_models) or load_failed_lately(key):
+        return 0
+    reader = (settings.vision_model or "").strip()
+    if any(
+        not document_reader(model) and not document_reader(instance) and reader not in (model, instance)
+        for instance, (model, _size) in status.instances.items()
+    ):
+        return 0
+    if key in _pending_loads or model_busy(key):
+        return 0
+    return _fitting_context(settings, status, key)
+
+
 def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) -> str:
     """Make ``key`` (a downloaded model's key in LM Studio) the model that answers, chosen in Setup: the other chat
     models loaded are unloaded first, so two don't share the memory, then it is loaded with the context Setup asks

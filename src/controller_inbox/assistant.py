@@ -37,6 +37,7 @@ from controller_inbox.local_llm import (
     Thought,
     ToolsUnsupported,
     chat_with_tools,
+    chat_load_size,
     check_model,
     complete_text,
     context_length,
@@ -53,6 +54,7 @@ from controller_inbox.local_llm import (
     reader_load_problem,
     reply_budget,
     stream_text,
+    use_chat_model,
 )
 from controller_inbox.models import DOCUMENT_LABELS, ActionStatus, DocumentType, EmailRecord, Importance
 from controller_inbox.money import fmt_money
@@ -1592,6 +1594,21 @@ def answer_stream(
             yield offer
         yield {"type": "done"}
         return
+    if not state["loaded"] and (size := chat_load_size(settings, wait.model)):
+        # LM Studio unloaded the model: loaded now with the context CloseDesk asks for, as before mail is read, rather
+        # than by the first call with LM Studio's own default and again with the longer one on the next question.
+        article = "an" if str(size).startswith("8") else "a"
+        how = f"{article} {size:,}-token context"
+        yield {"type": "progress", "state": "reading", "text": f"Loading {wait.model} in LM Studio with {how}", "tokens": 0, "seconds": None, "about": ""}
+        if problem := use_chat_model(settings, wait.model, only_if_none=True):
+            yield {"type": "mode", "mode": "lookup", "note": f"CloseDesk couldn't load {wait.model} in LM Studio to answer. {problem}"
+                   if not problem.startswith("LM Studio couldn't load") else problem}
+            yield {"type": "delta", "text": offline_answer(question, sources, model_failed=True, **lookup)}
+            yield {"type": "done"}
+            return
+        state["loaded"] = True
+        ws.call["loading"] = False
+        yield {"type": "step", "text": f"Loaded {wait.model} in LM Studio with {how}"}
     try:
         if needs_more_context(settings):
             if context_fits(settings):  # otherwise it is left as it is, and the step below says so

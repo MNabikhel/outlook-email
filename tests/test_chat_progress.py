@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 
+import httpx
 import pytest
 from test_chat_time import KEY, _ask, lm  # noqa: F401 - lm is the fixture
 
@@ -86,6 +87,7 @@ def test_the_time_lm_studio_takes_to_load_the_model_isnt_taken_for_reading(setti
     """After LM Studio unloaded the model while idle, the question has it load again before the model reads: that
     load isn't counted as reading (a prompt of seconds would be said to take minutes)."""
     server = lm(first_delay=0.4, gap=0.02)
+    settings.min_context_tokens = 0  # no minimum: CloseDesk leaves the load to LM Studio
     server.loaded = False
     local_llm.remember_model(settings, KEY)  # the model used last: LM Studio loads it when the question names it
     events = _ask(loaded, settings)
@@ -98,6 +100,7 @@ def test_a_model_lm_studio_unloaded_is_said_to_load_rather_than_to_take_longer_t
     """The estimate was the reading alone: for a 31B that LM Studio unloaded while idle, "about 20 seconds", then
     "Taking longer than usual…" for the minute or two LM Studio took to load it, though nothing was wrong."""
     server = lm(first_delay=0.1)
+    settings.min_context_tokens = 0  # no minimum: CloseDesk leaves the load to LM Studio
     model_fit.record_speed(loaded, KEY, prompt_tokens=5000, read_seconds=100.0)  # measured before
     server.loaded = False
     local_llm.remember_model(settings, KEY)
@@ -206,3 +209,46 @@ def test_a_question_just_after_lm_studio_unloaded_the_model_says_it_loads(settin
     first = _progress(list(answer_stream(loaded, settings, QUESTION)))[0]
     assert first["text"].startswith("Loading the model") and first["seconds"] is None, first
     assert model_fit.speeds(loaded, KEY)["read"] == read, "the load wasn't timed as reading"
+
+
+def test_a_model_lm_studio_unloaded_is_loaded_once_with_the_context_closedesk_asks_for(settings, loaded, lm, monkeypatch):  # noqa: F811
+    """The first call had LM Studio load the model with its own default context; the next question then unloaded it
+    and loaded it again with 16,384 tokens: two full loads, minutes each for a big model. The chat now has LM Studio
+    load it with the minimum first, says so, and the reading after it is timed."""
+    from controller_inbox import model_roles
+
+    server = lm(first_delay=0.1)
+    monkeypatch.setattr(model_roles, "computer_memory", lambda: 64 * 1024**3)  # room for 16,384 tokens beside it
+    model_fit.record_speed(loaded, KEY, prompt_tokens=5000, read_seconds=100.0)
+    settings.min_context_tokens = 16384
+    server.loaded = False
+    local_llm.remember_model(settings, KEY)
+    events = _ask(loaded, settings)
+    assert server.loads == [16384], server.loads
+    texts = [event.get("text", "") for event in events]
+    assert f"Loading {KEY} in LM Studio with a 16,384-token context" in texts
+    assert f"Loaded {KEY} in LM Studio with a 16,384-token context" in texts
+    reading = [event for event in _progress(events) if event["text"].startswith("Reading")]
+    assert reading and reading[0]["seconds"], "the reading after the load has its estimate"
+    _ask(loaded, settings)
+    assert server.loads == [16384], "the next question doesn't load it again"
+
+
+def test_a_model_lm_studio_couldnt_load_gives_the_lookup_answer_and_says_why(settings, loaded, lm, monkeypatch):  # noqa: F811
+    server = lm(first_delay=0.1)
+    settings.min_context_tokens = 16384
+    server.loaded = False
+    local_llm.remember_model(settings, KEY)
+    real = server.__call__
+
+    def refusing(request):
+        if request.url.path == "/api/v1/models/load":
+            return httpx.Response(500, json={"error": "Not enough memory to load the model"})
+        return real(request)
+
+    client = httpx.Client(transport=httpx.MockTransport(refusing))
+    monkeypatch.setattr(local_llm.httpx, "post", lambda url, **kw: client.post(url, json=kw.get("json"), headers=kw.get("headers"), timeout=kw.get("timeout")))
+    events = _ask(loaded, settings)
+    mode = next(event for event in events if event["type"] == "mode")
+    assert mode["mode"] == "lookup" and mode["note"].startswith(f"LM Studio couldn't load {KEY} (Not enough memory"), mode
+    assert not server.prompts, "nothing was sent to a model that isn't loaded"

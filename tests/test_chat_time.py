@@ -39,16 +39,25 @@ class ChatLMStudio:
         self.prompts: list[int] = []
         self.loaded = True  # False: LM Studio unloaded it while idle, and the question has it load the model again
         self.usage: dict = {}  # the token counts sent with the last piece, if any
+        self.context = 8192  # the context it is loaded with
+        self.loads: list[int | None] = []  # the context each load CloseDesk asked for gave, in order
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/v1/models":
             return httpx.Response(200, json={"data": [{"id": KEY}]})
         if path == "/api/v1/models":
-            instances = [{"id": KEY, "config": {"context_length": 8192}}] if self.loaded else []
+            instances = [{"id": KEY, "config": {"context_length": self.context}}] if self.loaded else []
             return httpx.Response(200, json={"models": [
                 {"type": "llm", "key": KEY, "loaded_instances": instances, "max_context_length": 131072, "size_bytes": 18 * GB},
             ]})
+        if path == "/api/v1/models/load":
+            self.loads.append(json.loads(request.content).get("context_length"))
+            self.loaded, self.context = True, self.loads[-1] or 4096
+            return httpx.Response(200, json={"status": "loaded"})
+        if path == "/api/v1/models/unload":
+            self.loaded = False
+            return httpx.Response(200, json={"status": "unloaded"})
         if path != "/v1/chat/completions":
             return httpx.Response(404)
         payload = json.loads(request.content)
