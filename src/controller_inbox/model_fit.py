@@ -4,7 +4,7 @@ The context. Setup's minimum (``min_context_tokens``) is what a small model gets
 memory with that much is asked for the largest of Setup's steps (``agent.CONTEXT_STEPS``) that still fits, never less
 than 4,096 tokens (or the most the model supports): the minimum is "at most" for a big model. Loading at the start,
 Load and use in Settings, and the chat raising the context all ask for this. A load that still runs out of memory
-steps back (``local_llm.step_back_context``).
+is offered smaller (``local_llm.step_back_offer``) and loaded so once the user says yes (``step_back_context``).
 
 The wait. How long the chat waits for the model's first word (it reads the whole prompt before it writes one), and
 how long the reading of mail waits between words. Worked out per model: from how fast it read prompts and wrote
@@ -478,6 +478,8 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
     fits = context_fits(settings, model)
     capped = context_capped(settings, model)
     short = False  # the window can't be used as it is, however long it is
+    # It ran out of memory with the context CloseDesk gave it: Settings offers it smaller, as the chat did.
+    step_back = local_llm.settings_step_back(settings, model) if model.key else None
     # The model used last, not loaded now: LM Studio loads it when it is asked, and CloseDesk then sizes it.
     waiting = bool(model.lm_studio and model.model and not model.key and model.model in model.chat_models)
     if waiting:
@@ -499,6 +501,9 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
             "The model server doesn't say how long its context is. For whole workbooks and PDFs, load the model "
             f"there with a context length of {recommended:,} or more."
         )
+    elif step_back:
+        advice = f"{step_back['text']} Press Reload with {step_back['size']:,} to have it answer again."
+        short = True
     elif (
         model.key and model.context_length > target > 0
         and local_llm._context_given.get(model.key) != model.context_length
@@ -570,5 +575,6 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
         "label": "not loaded yet" if waiting else f"{window:,} tokens" if window else "not reported",
         "tone": "ok" if window >= recommended and not short else "short",
         "advice": advice,
+        "step_back": step_back,
     }
 

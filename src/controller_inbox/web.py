@@ -1108,6 +1108,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     context_change = {"said": ""}
     # Why the wait typed in Settings wasn't saved, shown with its notice.
     wait_problem = {"said": ""}
+    # What Setup's "Reload with ..." did, or why it didn't, for the page it goes back to.
+    step_back_said = {"said": ""}
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, recheck: int = 0):
@@ -1130,6 +1132,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             chat_problem=chat_switch["problem"] if request.query_params.get("notice") == "chat-model-failed" else "",
             model_fit=model_fit.describe(store, settings, model),
             wait_problem=wait_problem["said"] if request.query_params.get("notice") == "model-wait-refused" else "",
+            step_back_said=step_back_said["said"] if request.query_params.get("notice") in ("step-back", "step-back-refused") else "",
             vision_setup=vision_setup(model),
             search=semantic.coverage(store, settings),
             timezone_choice=settings.timezone,
@@ -1279,6 +1282,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return RedirectResponse(f"/settings?notice={notice}#context", status_code=303)
+
+    @app.post("/settings/step-back")
+    def save_step_back(model: str = Form(""), size: int = Form(0)):
+        """Setup's "Reload with ..." after the model ran out of memory with the context CloseDesk gave it."""
+        try:
+            step_back_said["said"] = local_llm.step_back_asked(settings, {"model": model, "size": size})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except local_llm.StepBackRefused as exc:
+            step_back_said["said"] = str(exc)
+            return RedirectResponse("/settings?notice=step-back-refused#context-line", status_code=303)
+        return RedirectResponse("/settings?notice=step-back#context-line", status_code=303)
 
     @app.post("/settings/update")
     def update_now(request: Request):

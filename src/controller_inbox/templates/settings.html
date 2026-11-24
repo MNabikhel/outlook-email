@@ -129,10 +129,18 @@
     </form>
     {% endif %}
     {% if context_line.shown %}
-    <p class="context-line {{ context_line.tone }}">
+    <p class="context-line {{ context_line.tone }}" id="context-line">
       Context window: <b>{{ context_line.label }}</b>.
       {{ context_line.advice }}
     </p>
+    {% if context_line.step_back %}
+    <form method="post" action="/settings/step-back" class="step-back" data-step-back>
+      <input type="hidden" name="model" value="{{ context_line.step_back.model }}">
+      <input type="hidden" name="size" value="{{ context_line.step_back.size }}">
+      <button type="submit">Reload with {{ "{:,}".format(context_line.step_back.size) }}</button>
+    </form>
+    {% endif %}
+    {% if step_back_said %}<p class="small" data-step-back-said>{{ step_back_said }}</p>{% endif %}
     {% endif %}
     <div class="search-box" id="search">
       <h4>Search by meaning</h4>

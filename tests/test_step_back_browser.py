@@ -1,5 +1,6 @@
-"""The offer to load a model again smaller after it ran out of memory, in a real browser: both chats. The answers
-are scripted (``answer_stream`` replaced) and the reload recorded (``step_back_context`` replaced), so the pages are what is tested; tests/test_step_back_ask.py tests the events and routes themselves. Skipped without
+"""The offer to load a model again smaller after it ran out of memory, in a real browser: both chats and both Settings
+pages. The answers are scripted (``answer_stream`` replaced) and the reload recorded (``step_back_context`` replaced),
+so the pages are what is tested; tests/test_step_back_ask.py tests the events and routes themselves. Skipped without
 Playwright's Chromium."""
 
 from __future__ import annotations
@@ -8,7 +9,7 @@ import pytest
 
 pytest.importorskip("playwright")
 
-from controller_inbox import local_llm, web  # noqa: E402
+from controller_inbox import local_llm, model_fit, web  # noqa: E402
 from liveserver import serving  # noqa: E402
 from test_chat_time_browser import ABOUT, WIDE, _ask, _scripted  # noqa: E402
 
@@ -117,3 +118,53 @@ def test_the_classic_chat_offers_the_reload_too(settings, store, page, monkeypat
         page.locator(".step-back button", has_text="Keep as is").last.click()
         page.wait_for_function("document.querySelectorAll('.step-back [data-action=step-back-keep]').length === 0")
         assert done == [(MODEL, 8192)]
+
+
+def _offered_in_settings(monkeypatch) -> list:
+    """Settings' context line with the offer until the reload is done."""
+    done = _reloads(monkeypatch)
+    real = model_fit.context_line
+
+    def line(settings, model):
+        found = real(settings, model)
+        if done:
+            return {**found, "shown": True, "step_back": None, "label": "8,192 tokens", "advice": "Ask CloseDesk reads long attachments a section at a time with this."}
+        offer = {"model": MODEL, "loaded": 16384, "size": 8192, "text": TEXT}
+        return {**found, "shown": True, "tokens": 16384, "label": "16,384 tokens", "tone": "short", "step_back": offer,
+                "advice": f"{TEXT} Press Reload with 8,192 to have it answer again."}
+
+    monkeypatch.setattr(model_fit, "context_line", line)
+    return done
+
+
+def test_settings_offers_the_reload(settings, store, page, monkeypatch):
+    done = _offered_in_settings(monkeypatch)
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/app/settings#set-context")
+        button = page.locator("#set-step-back")
+        button.wait_for()
+        assert button.inner_text().strip() == "Reload with 8,192"
+        assert TEXT in page.inner_text("#set-context")
+        assert done == []
+        button.click()
+        page.wait_for_selector("#set-context .set-status.ok")
+        assert done == [(MODEL, 8192)]
+        assert "Loaded google/gemma-3-27b again" in page.inner_text("#set-context")
+        assert page.locator("#set-step-back").count() == 0
+
+
+def test_the_setup_page_offers_the_reload(settings, store, page, monkeypatch):
+    done = _offered_in_settings(monkeypatch)
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/settings")
+        button = page.locator("form[data-step-back] button")
+        button.wait_for()
+        assert button.inner_text().strip() == "Reload with 8,192"
+        assert TEXT in page.inner_text("#context-line")
+        button.click()
+        page.wait_for_selector("[data-step-back-said]")
+        assert done == [(MODEL, 8192)]
+        assert "Loaded google/gemma-3-27b again" in page.inner_text("[data-step-back-said]")
+        assert page.locator("form[data-step-back]").count() == 0

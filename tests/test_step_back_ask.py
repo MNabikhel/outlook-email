@@ -18,7 +18,7 @@ import httpx
 from fastapi.testclient import TestClient
 from test_context_memory import BIG, GB, SMALL, MacLMStudio, _ask, _serve
 
-from controller_inbox import local_llm, web
+from controller_inbox import local_llm, model_fit, web
 
 PAGE = {"X-CloseDesk": "1"}
 QUESTION = "What is the total in this budget?"
@@ -149,6 +149,9 @@ def test_no_offer_at_the_smallest_size(store, settings, mail, monkeypatch):
     _serve(monkeypatch, server, memory_gb=24)
     events = _events(store, settings, QUESTION, mail["Q4 budget draft"].id)
     assert not any(e["type"] == "step_back" for e in events)
+    local_llm._status_cache.clear()
+    line = model_fit.context_line(settings, local_llm.check_model(settings))
+    assert line["step_back"] is None and f"{BIG} ran out of memory even with 4,096 tokens" in line["advice"]
 
 
 def test_a_model_the_user_loaded_is_never_offered_a_reload(store, settings, mail, monkeypatch):
@@ -162,6 +165,43 @@ def test_a_model_the_user_loaded_is_never_offered_a_reload(store, settings, mail
     assert server.calls == []
     refused = TestClient(web.create_app(settings, store)).post("/chat/step-back", json={"model": BIG, "size": 16384}, headers=PAGE)
     assert refused.status_code == 409 and server.calls == []
+
+
+def test_settings_offers_the_reload_after_an_answer_ran_out_of_memory(store, settings, mail, monkeypatch):
+    server = _closedesk_loaded(settings, monkeypatch)
+    local_llm._status_cache.clear()
+    assert model_fit.context_line(settings, local_llm.check_model(settings))["step_back"] is None, "nothing ran out yet"
+    _events(store, settings, QUESTION, mail["Q4 budget draft"].id)
+    local_llm._status_cache.clear()
+    line = model_fit.context_line(settings, local_llm.check_model(settings))
+    assert line["step_back"] == {"model": BIG, "loaded": 16384, "size": 8192, "text": OFFER_TEXT}
+    assert line["advice"].startswith(OFFER_TEXT) and "Reload with 8,192" in line["advice"], line["advice"]
+
+    client = TestClient(web.create_app(settings, store))
+    state = client.get("/api/settings", headers=PAGE).json()
+    assert state["context"]["window"]["step_back"]["size"] == 8192
+    page = client.get("/settings").text
+    assert "Reload with 8,192" in page and 'action="/settings/step-back"' in page
+
+    assert client.post("/api/settings/step-back", json={"model": BIG, "size": 5000}, headers=PAGE).status_code == 400
+    done = client.post("/api/settings/step-back", json={"model": BIG, "size": 8192}, headers=PAGE)
+    assert done.status_code == 200 and done.json()["message"].startswith(f"Loaded {BIG} again with an 8,192-token context")
+    assert server.calls[1:] == [("unload", BIG), ("load", BIG, 8192)]
+    local_llm._status_cache.clear()
+    assert model_fit.context_line(settings, local_llm.check_model(settings))["step_back"] is None
+
+
+def test_the_setup_page_reloads_with_the_size_offered(store, settings, mail, monkeypatch):
+    server = _closedesk_loaded(settings, monkeypatch)
+    _events(store, settings, QUESTION, mail["Q4 budget draft"].id)
+    client = TestClient(web.create_app(settings, store))
+    sent = client.post("/settings/step-back", data={"model": BIG, "size": "8192"}, follow_redirects=False)
+    assert sent.status_code == 303 and "notice=step-back" in sent.headers["location"]
+    assert server.calls[1:] == [("unload", BIG), ("load", BIG, 8192)]
+    page = client.get(sent.headers["location"]).text
+    assert f"Loaded {BIG} again with an 8,192-token context" in page
+    again = client.post("/settings/step-back", data={"model": BIG, "size": "8192"}, follow_redirects=False)
+    assert "notice=step-back-refused" in again.headers["location"] and len(server.calls) == 3
 
 
 def test_the_mail_reading_stops_using_the_model_and_says_where_to_reload_it(store, settings, mail, monkeypatch):
@@ -178,3 +218,5 @@ def test_the_mail_reading_stops_using_the_model_and_says_where_to_reload_it(stor
         "Stopped reading: the local model ran out of memory with a 16,384-token context. Settings → Local model can "
         f"reload {BIG} with 8,192."
     ), result["note"]
+    local_llm._status_cache.clear()
+    assert model_fit.context_line(settings, local_llm.check_model(settings))["step_back"]["size"] == 8192
