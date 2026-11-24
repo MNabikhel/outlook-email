@@ -125,6 +125,9 @@ export function createChat({ root, onToggle, visionRead }) {
   /* While the model works on the question: what it reads and about how long that takes, with a bar that fills on
      that estimate; past it, "Taking longer than usual…" and a bar that keeps moving rather than one stuck full.
      Then "Writing the answer…" until the words arrive. */
+  /* "…" after a line still going on, but not after one that ends in a full stop ("…with less text." stays so). */
+  const going = (text) => (/[.…]$/.test(text) ? text : `${text}…`);
+
   function progressEl(turn) {
     const now = turn.progress;
     if (!now) return null;
@@ -137,7 +140,7 @@ export function createChat({ root, onToggle, visionRead }) {
     return h(
       "div",
       { class: `msg-progress${late ? " late" : ""}${timed ? "" : " untimed"}`, role: "status" },
-      h("span", { class: "progress-text" }, `${now.text}…`, !late && now.about ? h("span", { class: "progress-about" }, ` ${now.about}`) : null),
+      h("span", { class: "progress-text" }, going(now.text), !late && now.about ? h("span", { class: "progress-about" }, ` ${now.about}`) : null),
       late ? h("span", { class: "progress-late" }, "Taking longer than usual…") : null,
       h("span", { class: `progress-bar${timed && !late ? "" : " busy"}`, "aria-hidden": "true" }, h("i", fill))
     );
@@ -287,7 +290,7 @@ export function createChat({ root, onToggle, visionRead }) {
       const steps = turn.steps || [];
       const working = progressEl(turn);
       const thinking = turn.thinking && turn.thinking.text && !turn.thinking.ended; // the box above says it
-      if (!thinking) append(answer, working || h("span", { class: "typing" }, steps.length ? `${steps[steps.length - 1]}…` : "Thinking…"));
+      if (!thinking) append(answer, working || h("span", { class: "typing" }, steps.length ? going(steps[steps.length - 1]) : "Thinking…"));
     }
     const cited = turn.mode === "model" && !turn.pending ? (turn.sources || []).filter((s) => turn.text.includes(`[${s.n}]`)) : [];
     replace(

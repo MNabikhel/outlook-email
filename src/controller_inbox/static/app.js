@@ -272,11 +272,14 @@
   }
 
   /* While the model works: what it reads and about how long, then that it writes (the workspace also draws a bar). */
+  /* "…" after a line still going on, but not after one that ends in a full stop ("…with less text." stays so). */
+  const going = (text) => (/[.…]$/.test(text) ? text : `${text}…`);
+
   function progressLine(now) {
     if (now.state === "writing") return "Writing the answer…";
     if (now.state === "thinking") return "Thinking…";
     const late = Number(now.seconds) > 0 && (Date.now() - now.at) / 1000 >= Number(now.seconds);
-    return late ? `${now.text}… Taking longer than usual…` : `${now.text}…${now.about ? ` ${now.about}` : ""}`;
+    return late ? `${going(now.text)} Taking longer than usual…` : `${going(now.text)}${now.about ? ` ${now.about}` : ""}`;
   }
 
   /* The model thinks: a new box, or after it was asked again, the same box going on below a blank line. "Thought for
@@ -321,7 +324,7 @@
         const open = thought.open === undefined ? live : thought.open;
         html += `<details class="msg-thinking${live ? " live" : ""}"${open ? " open" : ""}><summary>${live ? "Thinking…" : `Thought for ${seconds} s`}</summary><div class="think-text">${escapeHtml(turn.thinking.text)}</div></details>`;
       }
-      const waiting = turn.progress ? progressLine(turn.progress) : turn.steps && turn.steps.length ? turn.steps[turn.steps.length - 1] + "…" : "Thinking…";
+      const waiting = turn.progress ? progressLine(turn.progress) : turn.steps && turn.steps.length ? going(turn.steps[turn.steps.length - 1]) : "Thinking…";
       // While the model thinks, the box above says "Thinking…": the line below doesn't say it again.
       const thinking = turn.pending && turn.thinking && turn.thinking.text && !turn.thinking.ended;
       if (turn.text) html += `<div class="msg-text">${formatAnswer(turn.text, turn.sources)}</div>`;

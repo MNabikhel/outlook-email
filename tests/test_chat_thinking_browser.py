@@ -305,3 +305,36 @@ def test_the_classic_chat_says_thinking_once(settings, store, page, monkeypatch)
         page.wait_for_selector(".msg-thinking.live .think-text:has-text('The last line of the reasoning.')")
         said = page.inner_text(".msg.pending")
         assert said.count("Thinking…") == 1, said
+
+
+# The working line -------------------------------------------------------------------------------------------------
+
+
+def _full_stop_script():
+    return [
+        {"type": "sources", "sources": [], "mode": "model"},
+        {"type": "step", "text": "That was more than the model can take at once; trying again with less text."}, 1.5,
+        {"type": "progress", "state": "reading", "text": "Reading 1 email.", "tokens": 450, "seconds": None, "about": ""}, 1.5,
+        {"type": "delta", "text": "The Northwind invoice is due Friday."},
+    ]
+
+
+@pytest.mark.parametrize("where", ["workspace", "classic"])
+def test_the_working_line_puts_no_ellipsis_after_a_full_stop(settings, store, page, monkeypatch, where):
+    """The chat said "trying again with less text.…": a full stop and then an ellipsis."""
+    _scripted(monkeypatch, _full_stop_script())
+    with serving(web.create_app(settings, store)) as base:
+        if where == "workspace":
+            _ask(page, base, "What is due?")
+        else:
+            page.set_viewport_size(WIDE)
+            page.goto(f"{base}/chat/window")
+            page.fill("#chat textarea", "What is due?")
+            page.press("#chat textarea", "Enter")
+        bubble = ".msg.bot.pending" if where == "workspace" else ".msg.pending"
+        page.wait_for_selector(f"{bubble}:has-text('with less text.')")
+        said = page.inner_text(bubble)
+        assert ".…" not in said and "with less text." in said, said
+        page.wait_for_selector(f"{bubble}:has-text('Reading 1 email.')")
+        said = page.inner_text(bubble)
+        assert ".…" not in said, said
