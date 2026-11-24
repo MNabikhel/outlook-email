@@ -1685,6 +1685,10 @@ _context_no_smaller: dict[str, int] = {}
 # The context each model CloseDesk sized ran out of memory with, by key, for Settings to offer loading it again smaller
 # (the user is asked first). Only while it is still loaded with that context.
 _context_ran_out: dict[str, int] = {}
+# The context a model the user loaded in LM Studio (not CloseDesk) ran out of memory answering with, by key: Settings
+# says so and names the Context Length to reload it with there, and once it is, CloseDesk doesn't raise it back to
+# that size or more. Forgotten when the model is chosen again in Settings.
+_theirs_ran_out: dict[str, int] = {}
 _context_lock = threading.Lock()
 
 # Models answering a request right now (a chat answer, the overnight reading, a page read), by the name the request
@@ -1869,13 +1873,16 @@ def raise_tried(status: ModelStatus) -> bool:
 
 
 def needs_more_context(settings: Settings) -> bool:
-    """LM Studio loaded the model with less than the minimum and CloseDesk hasn't tried to raise it yet."""
+    """LM Studio loaded the model with less than the minimum and CloseDesk hasn't tried to raise it yet (nor has the
+    model run out of memory answering with that much, as the user loaded it)."""
     status = check_model(settings)
+    target = context_target(settings, status) if status.key else 0
     return bool(
         status.active
         and status.key
-        and 0 < status.context_length < context_target(settings, status)
+        and 0 < status.context_length < target
         and not raise_tried(status)
+        and not 0 < _theirs_ran_out.get(status.key, 0) <= target
     )
 
 
@@ -2019,6 +2026,8 @@ def step_back_offer(settings: Settings) -> dict | None:
         return None
     key, loaded = status.key, status.context_length
     if not (key and loaded > 0 and _context_given.get(key) == loaded):
+        if key and loaded > 0:  # the user's own size: Settings says what to reload it with in LM Studio
+            _theirs_ran_out[key] = loaded
         return None
     size, answered = _step_back_size(key, loaded)
     if not size:
@@ -2409,6 +2418,7 @@ def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) 
         _context_stepped.pop(key, None)
         _context_no_smaller.pop(key, None)
         _context_ran_out.pop(key, None)
+        _theirs_ran_out.pop(key, None)
         _chat_load_failed.pop(key, None)
         remember_model(settings, key)
         return ""
@@ -2704,7 +2714,10 @@ def memory_advice(settings: Settings, offer: dict | None = None) -> str:
     target = context_target(settings, status)
     if 0 < target < loaded:
         return f"{first} Choose one in Settings, or reload {key} in LM Studio with Context Length {target:,}, the most that fits here."
-    return f"{first} Choose one in Settings, or reload {key} in LM Studio with a smaller Context Length."
+    # Loaded with no more than CloseDesk's estimate says fits, and it ran out all the same: the next size down.
+    if smaller := _smaller_context(loaded):
+        return f"{first} Choose one in Settings, or reload {key} in LM Studio with Context Length {smaller:,}."
+    return f"{first} Choose one in Settings."
 
 
 def out_of_memory(text: str) -> bool:

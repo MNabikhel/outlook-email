@@ -45,6 +45,7 @@ def _fresh_model_memory():
         local_llm._context_stepped,
         local_llm._context_no_smaller,
         local_llm._context_ran_out,
+        local_llm._theirs_ran_out,
         local_llm._reader_failed,
         local_llm._pending_loads,
         local_llm._chat_load_failed,

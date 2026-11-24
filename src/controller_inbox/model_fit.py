@@ -516,6 +516,23 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
             "model's settings → Context Length), the most that fits here."
         )
         short = True
+    elif (
+        model.key and local_llm._theirs_ran_out.get(model.key) == window
+        and local_llm._context_given.get(model.key) != window
+    ):
+        # Loaded in LM Studio by the user, and an answer ran out of memory with it: CloseDesk leaves it as it is, and
+        # says what to reload it with there.
+        if smaller := local_llm._smaller_context(window):
+            advice = (
+                f"{model.key} ran out of memory answering with {window:,} tokens. To fix it, reload it in LM Studio "
+                f"with Context Length {smaller:,} (My Models → the model's settings → Context Length)."
+            )
+        else:
+            advice = (
+                f"{model.key} ran out of memory even with {window:,} tokens: it doesn't fit in this computer's "
+                "memory. Choose a smaller model."
+            )
+        short = True
     elif needs_more_context(settings) and fits:
         why = "the most that fits this computer" if capped else "the minimum set below"
         advice = (
@@ -534,7 +551,14 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
     else:
         advice = "Ask CloseDesk reads long attachments a section at a time with this."
         ran_out = local_llm._context_stepped.get(model.key, 0) if model.key else 0
-        if ran_out > window:
+        theirs = local_llm._theirs_ran_out.get(model.key, 0) if model.key else 0
+        if theirs > window and theirs <= target:
+            # Reloaded smaller in LM Studio after it ran out of memory there: not raised back to that size.
+            advice += (
+                f" {model.key} ran out of memory answering with {theirs:,} tokens, so CloseDesk leaves it at "
+                f"{window:,}. A smaller model has room for more."
+            )
+        elif ran_out > window:
             advice += (
                 f" {model.key} ran out of memory answering with {ran_out:,} tokens, so CloseDesk loaded it back with "
                 f"{window:,}. A smaller model has room for more."

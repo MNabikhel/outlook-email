@@ -322,3 +322,57 @@ def test_the_partway_note_above_the_offer_points_to_it_too(store, settings, mail
     assert any(e["type"] == "step_back" for e in events)
     assert "minimum context" not in text and "too big" not in text, text
     assert f"CloseDesk can load {BIG} again with a smaller context: see below." in text, text
+
+
+def test_a_model_the_user_loaded_at_closedesks_own_estimate_is_told_the_next_size(store, settings, mail, monkeypatch):
+    """The user loaded the model with 8,192 tokens, the most CloseDesk's estimate says fits, and the answer ran out of
+    memory. The chat said to reload it in LM Studio "with a smaller Context Length", naming none, and Settings said
+    nothing was wrong: that "CloseDesk asks LM Studio for 8,192 tokens", for a model CloseDesk never loaded."""
+    import test_context_memory as memory
+
+    monkeypatch.setattr(memory, "GRAPHICS_MEMORY", 20 * GB)  # 8,192 runs out; 4,096 answers
+    settings.llm = True
+    server = MacLMStudio({BIG: 8192})
+    _serve(monkeypatch, server, memory_gb=28)  # CloseDesk's estimate: 8,192 fits
+    local_llm._status_cache.clear()
+    assert local_llm.context_target(settings, local_llm.check_model(settings)) == 8192
+    events = _events(store, settings, QUESTION, mail["Q4 budget draft"].id)
+    assert not any(e["type"] == "step_back" for e in events) and server.calls == []
+    note = next(e for e in events if e["type"] == "mode")["note"]
+    assert f"reload {BIG} in LM Studio with Context Length 4,096" in note, note
+
+    local_llm._status_cache.clear()
+    line = model_fit.context_line(settings, local_llm.check_model(settings))
+    advice = line["advice"]
+    assert line["tone"] == "short" and line["step_back"] is None
+    assert "asks LM Studio for" not in advice, advice
+    assert advice == (
+        f"{BIG} ran out of memory answering with 8,192 tokens. To fix it, reload it in LM Studio with Context Length "
+        "4,096 (My Models → the model's settings → Context Length)."
+    ), advice
+
+    # Reloaded in LM Studio with 4,096 as Settings says: it answers, and CloseDesk doesn't raise it to 8,192 again.
+    server.loaded[BIG] = 4096
+    events = _events(store, settings, QUESTION, mail["Q4 budget draft"].id)
+    assert not any(e["type"] == "mode" for e in events), [e for e in events if e["type"] in ("mode", "step")]
+    assert server.calls == [], "left as the user loaded it"
+    local_llm._status_cache.clear()
+    advice = model_fit.context_line(settings, local_llm.check_model(settings))["advice"]
+    assert "couldn't load" not in advice and "reloads" not in advice, advice
+    assert f"{BIG} ran out of memory answering with 8,192 tokens, so CloseDesk leaves it at 4,096." in advice, advice
+
+
+def test_a_model_the_user_loaded_at_the_smallest_size_that_runs_out_is_told_to_choose_a_smaller_model(store, settings, mail, monkeypatch):
+    import test_context_memory as memory
+
+    monkeypatch.setattr(memory, "GRAPHICS_MEMORY", 18 * GB)
+    settings.llm = True
+    server = MacLMStudio({BIG: 4096})
+    _serve(monkeypatch, server, memory_gb=24)
+    events = _events(store, settings, QUESTION, mail["Q4 budget draft"].id)
+    note = next(e for e in events if e["type"] == "mode")["note"]
+    assert "smaller Context Length" not in note and "Context Length 4,096" not in note, note
+    local_llm._status_cache.clear()
+    line = model_fit.context_line(settings, local_llm.check_model(settings))
+    assert line["tone"] == "short"
+    assert f"{BIG} ran out of memory even with 4,096 tokens" in line["advice"] and "Choose a smaller model" in line["advice"], line
