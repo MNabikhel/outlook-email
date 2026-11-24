@@ -21,7 +21,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from controller_inbox import local_llm, model_roles
+from controller_inbox import local_llm, model_choice, model_roles
 from controller_inbox.local_llm import ModelStatus, check_model
 
 if TYPE_CHECKING:
@@ -479,6 +479,12 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
             advice += (
                 f" LM Studio couldn't load {model.key} with {target:,} tokens. "
                 "Close other apps or pick a smaller minimum below, then Save to try again."
+            )
+        elif model.key and capped and model_choice.small(model, model.key):
+            # A 3B to 8B model: the size the guide recommends, so no smaller one is pointed to.
+            advice += (
+                f" A longer context for {model.key} needs more memory than this computer can give a model, so "
+                f"CloseDesk asks LM Studio for {target:,} tokens."
             )
         elif model.key and capped:
             advice += (

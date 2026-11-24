@@ -516,3 +516,47 @@ def test_a_server_that_doesnt_say_its_context_isnt_answered_with_a_settings_vari
     status = ModelStatus(mode="auto", reachable=True, model="llama3", base_url="http://127.0.0.1:11434/v1")
     advice = model_fit.context_line(settings, status)["advice"]
     assert "CONTROLLER_INBOX" not in advice and "doesn't say" in advice, advice
+
+
+def test_a_3b_on_an_8_gb_laptop_isnt_called_too_big_by_the_context_line(settings, lm, monkeypatch):
+    """An 8 GB laptop with no graphics card and a 3B loaded at 4,096 tokens: the context line said the 3B "is too big
+    for this computer's memory with a longer context" and that "A smaller model reads whole workbooks and PDFs",
+    though a 3B is the smallest size the guide recommends and the model list beside it doesn't mark it."""
+    from controller_inbox import local_llm, model_fit
+
+    _computer(monkeypatch, 8)
+    three = "llama-3.2-3b-instruct"
+    lm.extra = [three]
+    lm.sizes = {three: int(2.05 * GB)}
+    _answering(lm, settings, three)
+    lm.contexts = {three: 4096}
+    local_llm._status_cache.clear()
+    status = check_model(settings)
+    assert local_llm.context_target(settings, status) == 4096 and three not in model_roles.too_big(settings, status)
+    advice = model_fit.context_line(settings, status)["advice"]
+    assert "too big" not in advice and "smaller model" not in advice, advice
+    assert "so CloseDesk asks LM Studio for 4,096 tokens" in advice
+
+    # A big model is still pointed to a smaller one.
+    lm.extra = [three, BIG]
+    lm.sizes = {three: int(2.05 * GB), BIG: 19 * GB}
+    _computer(monkeypatch, 32, mac=True)
+    _answering(lm, settings, BIG)
+    lm.contexts = {BIG: 4096}
+    local_llm._status_cache.clear()
+    advice = model_fit.context_line(settings, check_model(settings))["advice"]
+    assert "too big for this computer's memory with a longer context" in advice and "A smaller model" in advice
+
+
+def test_the_minimum_context_help_doesnt_promise_a_reload_a_big_model_wont_get(settings, store):
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import web
+
+    page = TestClient(web.create_app(settings, store)).get("/settings").text
+    script = (Path(web.__file__).parent / "static" / "ui" / "settings.js").read_text()
+    for text in (page, script):
+        assert "LM Studio models loaded with less are reloaded with this on the next question" not in text
+        assert "the most that fits this computer" in text
