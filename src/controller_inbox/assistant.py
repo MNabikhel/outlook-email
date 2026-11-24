@@ -1983,6 +1983,11 @@ def _more_time(state: dict, settings: Settings, exc: Exception, question: str, e
     wait = state.get("wait")
     if wait is None or not isinstance(exc, httpx.TimeoutException) or ran_out_of_memory(exc):
         return None
+    # The call that ran out was the one having LM Studio load the model, before any of it came: the load took the
+    # time, not the question. Asked again a minute later it answers at the usual speed, so ``failure_note`` says
+    # that, and no longer wait is offered to be kept for every question after.
+    if not state.get("loaded", True) and not getattr(exc, "reply_started", None):
+        return None
     call = state.get("call") or {}
     waited = _waited(wait, settings, exc)
     elapsed = time.monotonic() - call["started"] if call.get("started") else waited

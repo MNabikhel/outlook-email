@@ -129,6 +129,20 @@ def test_a_timeout_offers_more_time_under_the_lookup_answer(settings, loaded, lm
     )
 
 
+def test_a_timeout_while_lm_studio_loads_the_model_says_so_and_offers_no_longer_wait(settings, loaded, lm):
+    """LM Studio unloaded the model while idle and loading it took longer than the chat waits. The chat said the
+    model needed more time for a question like this and offered to keep a longer wait for every question after,
+    though the model was loaded by then and asking again a minute later answers at the usual speed."""
+    server = lm(timeout="start")
+    server.loaded = False
+    model_fit.record_speed(loaded, KEY, prompt_tokens=2000, read_seconds=20.0)  # 100 tokens a second, measured here
+    events = _ask(loaded, settings)
+    assert not [event for event in events if event["type"] == "more_time"]
+    mode = next(event for event in events if event["type"] == "mode")
+    assert mode["mode"] == "lookup" and "may still be loading it" in mode["note"]
+    assert "needed more time" not in mode["note"]
+
+
 def test_the_offer_keeps_the_email_that_was_open_when_the_conversation_has_files(settings, loaded, lm):
     """With files added to the conversation, a question not about the email on screen is answered from the files
     first, under their stand-in id. The offer kept that id, so asked again, the email that was open wasn't read."""
