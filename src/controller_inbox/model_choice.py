@@ -50,12 +50,10 @@ def billions(status: ModelStatus, key: str) -> float:
 
 
 def small(status: ModelStatus, key: str) -> bool:
-    """``key`` is a small model, the kind CloseDesk prefers: under ``SMALL_BILLIONS`` parameters, or, when that
-    isn't told, a download of up to ``AUTO_LARGEST``."""
+    """``key`` is a small model, the kind CloseDesk prefers: a download of up to ``AUTO_LARGEST``, and under
+    ``SMALL_BILLIONS`` parameters when that is told (a 14B at Q4 is under 10 GB too)."""
     count = billions(status, key)
-    if count:
-        return count < SMALL_BILLIONS
-    return 0 < status.chat_sizes.get(key, 0) <= AUTO_LARGEST
+    return 0 < status.chat_sizes.get(key, 0) <= AUTO_LARGEST and (not count or count < SMALL_BILLIONS)
 
 
 def pinned(settings: Settings) -> bool:

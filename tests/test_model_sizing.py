@@ -424,3 +424,31 @@ def httpx_response(url, listing):
     if url.endswith("/api/v1/models"):
         return httpx.Response(200, json=listing, request=request)
     return httpx.Response(200, json={"data": [{"id": "acme/house-chat"}]}, request=request)
+
+
+def test_an_8b_closedesk_loads_on_a_6_gb_card_isnt_called_too_big(settings, lm, monkeypatch):
+    """A 16 GB PC with a 6 GB graphics card and an 8B downloaded: CloseDesk loaded the 8B itself, then Settings
+    marked it "likely too big for this computer", said most of it would run from the computer's memory (about 6 of
+    its 8 GB are on the card) and told the user a 3B to 8B model is plenty."""
+    _computer(monkeypatch, 16, card_gb=6)
+    eight = "meta-llama-3.1-8b-instruct"
+    lm.extra = [eight]
+    lm.sizes = {eight: int(4.9 * GB)}
+    status = check_model(settings, use_cache=False)
+    assert model_choice.auto_choice(settings, status) == eight
+    assert model_roles.too_big(settings, status) == {}
+
+
+def test_a_model_mostly_on_the_card_is_said_to_run_partly_from_the_computer_s_memory(settings, lm, monkeypatch):
+    _computer(monkeypatch, 32, card_gb=8)
+    twelve = "google/gemma-3-12b"
+    lm.extra = [twelve]
+    lm.sizes = {twelve: int(7.5 * GB)}
+    warning = model_roles.too_big(settings, check_model(settings, use_cache=False))[twelve]
+    assert "part of it would run from the computer's memory" in warning and "most of it" not in warning, warning
+
+
+def test_a_small_model_that_doesnt_fit_at_all_isnt_told_a_3b_to_8b_is_plenty(settings, lm, monkeypatch):
+    _computer(monkeypatch, 8, mac=True)
+    warning = model_roles.too_big(settings, check_model(settings, use_cache=False))[CHAT]
+    assert "run out of memory" in warning and "3B to 8B" not in warning and "A smaller one" in warning, warning

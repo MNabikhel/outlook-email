@@ -378,8 +378,8 @@ def fits(
 def too_big(settings: Settings, status: ModelStatus) -> dict[str, str]:
     """The downloaded chat models too big to run well on this computer with the context Setup asks for, each with
     why: CloseDesk loads it with a shorter context, it runs slowly from the computer's memory, or it doesn't fit at
-    all. A small model (``model_choice.small``) that runs well with the shorter context isn't listed:
-    a smaller one wouldn't help. Nothing when LM Studio doesn't give the sizes, the memory can't be read, or LM Studio
+    all. A small model (``model_choice.small``) that runs well with the shorter context, or that loads partly beside
+    a graphics card, isn't listed: a smaller one wouldn't help. Nothing when LM Studio doesn't give the sizes, the memory can't be read, or LM Studio
     is on another computer."""
     from controller_inbox import model_choice, model_fit  # they import this module
 
@@ -398,22 +398,31 @@ def too_big(settings: Settings, status: ModelStatus) -> dict[str, str]:
         needed_asked = memory_needed(size, asked) if shorter else needed
         context = f" with a {tokens:,}-token context" if tokens else ""
         instead = f"CloseDesk loads it with a {asked:,}-token context instead, so long attachments are read a section at a time"
+        is_small = model_choice.small(status, key)
+        # Beside a graphics card: how much of it the card can't hold.
+        share = "most" if needed_asked - budget.runs_well > needed_asked / 2 else "part"
+        slowly = f"{share} of it would run from the computer's memory and answer slowly"
         if shorter and needed_asked <= budget.runs_well:
-            if model_choice.small(status, key):
+            if is_small:
                 continue
             what = instead
         elif needed_asked > budget.loads:
             what = "LM Studio will likely run out of memory with it"
+        elif is_small:
+            # A small model that loads, part of it beside the graphics card: CloseDesk loads one like it itself, and
+            # a smaller one would answer worse.
+            continue
         elif shorter:
-            what = f"{instead}, and most of it would run from the computer's memory and answer slowly"
+            what = f"{instead}, and {slowly}"
         else:
-            what = "most of it would run from the computer's memory and answer slowly"
+            what = slowly
         # What it was compared against: for running out of memory, the card's and the computer's together.
         compared = budget.said_at_all() if needed_asked > budget.loads else budget.said()
-        found[key] = (
-            f"{key} needs about {math.ceil(needed / GB)} GB of memory{context}, and {compared}, so {what}. "
-            "CloseDesk only needs a small model: a 3B to 8B one is plenty and answers faster."
+        smaller = (
+            "A smaller one, such as a 3B, fits better." if is_small
+            else "CloseDesk only needs a small model: a 3B to 8B one is plenty and answers faster."
         )
+        found[key] = f"{key} needs about {math.ceil(needed / GB)} GB of memory{context}, and {compared}, so {what}. {smaller}"
     return found
 
 
