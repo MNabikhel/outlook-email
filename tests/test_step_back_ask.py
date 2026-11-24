@@ -220,3 +220,47 @@ def test_the_mail_reading_stops_using_the_model_and_says_where_to_reload_it(stor
     ), result["note"]
     local_llm._status_cache.clear()
     assert model_fit.context_line(settings, local_llm.check_model(settings))["step_back"]["size"] == 8192
+
+
+def _user_sized_then_raised(settings, monkeypatch, own: int) -> MacLMStudio:
+    """BIG loaded by the user with ``own`` tokens (not one of Setup's steps), raised by CloseDesk to 16,384 on the
+    first question, which runs out of memory."""
+    settings.llm = True
+    server = MacLMStudio({BIG: own})
+    _serve(monkeypatch, server)
+    return server
+
+
+def test_a_users_own_size_that_isnt_a_step_can_be_accepted(store, settings, mail, monkeypatch):
+    server = _user_sized_then_raised(settings, monkeypatch, 12000)
+    budget = mail["Q4 budget draft"].id
+    offer = next(e for e in _events(store, settings, QUESTION, budget) if e["type"] == "step_back")
+    assert server.loaded[BIG] == 16384
+    assert (offer["loaded"], offer["size"]) == (16384, 12000)
+    client = TestClient(web.create_app(settings, store))
+    local_llm._status_cache.clear()
+    assert client.get("/api/settings", headers=PAGE).json()["context"]["window"]["step_back"]["size"] == 12000
+    assert client.post("/chat/step-back", json={"model": BIG, "size": 12001}, headers=PAGE).status_code == 400
+    done = client.post("/chat/step-back", json={"model": offer["model"], "size": offer["size"]}, headers=PAGE)
+    assert done.status_code == 200, done.json()
+    assert server.loaded[BIG] == 12000
+    _steps, modes, text = _ask(store, settings, QUESTION, budget)
+    assert not modes and "$12,480" in text
+
+
+def test_a_users_own_size_that_isnt_a_step_can_be_accepted_in_settings(store, settings, mail, monkeypatch):
+    server = _user_sized_then_raised(settings, monkeypatch, 12000)
+    _events(store, settings, QUESTION, mail["Q4 budget draft"].id)
+    client = TestClient(web.create_app(settings, store))
+    sent = client.post("/settings/step-back", data={"model": BIG, "size": "12000"}, follow_redirects=False)
+    assert sent.status_code == 303 and "notice=step-back" in sent.headers["location"] and "refused" not in sent.headers["location"]
+    assert server.loaded[BIG] == 12000
+
+
+def test_the_offer_is_never_under_4096_tokens(store, settings, mail, monkeypatch):
+    server = _user_sized_then_raised(settings, monkeypatch, 2048)
+    offer = next(e for e in _events(store, settings, QUESTION, mail["Q4 budget draft"].id) if e["type"] == "step_back")
+    assert offer["size"] >= model_fit.SMALLEST_CONTEXT, offer
+    done = TestClient(web.create_app(settings, store)).post("/chat/step-back", json={"model": BIG, "size": offer["size"]}, headers=PAGE)
+    assert done.status_code == 200, done.json()
+    assert server.loaded[BIG] == offer["size"]

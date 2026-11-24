@@ -1991,9 +1991,16 @@ def _step_back_size(key: str, loaded: int) -> tuple[int, bool]:
     that is the size it last answered with: one CloseDesk raised goes back to the size it last answered with (rather
     than a step down that may not fit either); one CloseDesk loaded itself (at the start, or with Load and use), or one
     already loaded back, to the next smaller of Setup's steps, down to 4,096 tokens and never below the size the user
-    had it at. 0 when there is none."""
+    had it at. Never under 4,096 tokens: a size the user had under that goes back to 4,096. 0 when there is none."""
+    from controller_inbox import model_fit  # it imports this module
+
+    floor = model_fit.SMALLEST_CONTEXT
     before = _context_before.get(key, 0)
     back = _context_back.get(key, 0)
+    if 0 < before < floor:
+        before = floor
+    if 0 < back < floor:
+        back = floor
     answered = 0 < back < loaded
     if not answered:
         back = max(_smaller_context(loaded), before)
@@ -2093,9 +2100,22 @@ def step_back_asked(settings: Settings, data: dict) -> str:
     size = data.get("size")
     if not key or len(key) > 200 or any(ch in key for ch in "\r\n\x00"):
         raise ValueError("Choose a model.")
-    if not isinstance(size, int) or isinstance(size, bool) or size < model_fit.SMALLEST_CONTEXT or size not in model_fit._steps():
+    if not isinstance(size, int) or isinstance(size, bool) or size < model_fit.SMALLEST_CONTEXT:
+        raise ValueError("Unknown context size.")
+    if size not in model_fit._steps() and not _offered_now(settings, key, size):
+        # Not one of Setup's steps: only the size the user had the model at, when that is what is offered.
         raise ValueError("Unknown context size.")
     return step_back_context(settings, key, size)
+
+
+def _offered_now(settings: Settings, key: str, size: int) -> bool:
+    """Whether ``size`` is the context offered for ``key`` as it is loaded now."""
+    try:
+        status = check_model(settings)
+    except Exception:  # noqa: BLE001 - can't tell: not offered
+        return False
+    loaded = status.context_length
+    return status.key == key and loaded > 0 and _step_back_size(key, loaded)[0] == size
 
 
 def ensure_context(settings: Settings) -> str:
