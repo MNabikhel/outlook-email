@@ -411,3 +411,18 @@ def test_the_classic_today_page_offers_the_suggestion_too(settings, loaded, lm):
     # Another site's address isn't followed.
     reply = client.post("/settings/chat-model/keep", data={"model": QWEN8, "next": "//evil.example"}, headers=origin, follow_redirects=False)
     assert reply.headers["location"] == "/settings?notice=chat-model-kept#chat-model"
+
+
+def test_mail_isn_t_read_with_a_model_the_load_said_it_couldn_t_get_ready(settings, loaded, lm, monkeypatch):
+    """LM Studio was still loading the model when the wait for it ran out, and Sync now said the mail is filed without
+    a model for now; the same run then sent every email to that model all the same."""
+    from controller_inbox.overnight import read_queue, waiting_for_reading
+
+    remember_model(settings, CHAT)
+    assert waiting_for_reading(loaded, 5)
+    monkeypatch.setitem(local_llm._pending_loads, CHAT, 0.0)
+    monkeypatch.setattr(local_llm, "wait_for_load", lambda *_a, **_kw: False)
+    assert llm_active(settings), "LM Studio lists the model it is loading"
+    result = read_queue(loaded, settings, limit=5)
+    assert result["load"]["failed"] and "filed without a model for now" in result["load"]["message"]
+    assert result["model"] == "" and result["stats"] is None and result["read_ids"] == [], "no email was sent to it"

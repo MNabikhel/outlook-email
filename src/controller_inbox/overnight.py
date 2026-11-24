@@ -127,6 +127,11 @@ def read_queue(
         load = model_choice.ready_to_read(settings, reader.model if reader else "", on_progress)
         if load.get("message"):
             result["load"] = load
+        if load.get("failed"):
+            # It said the mail is filed without a model for now: none of it is sent to that model meanwhile (LM Studio
+            # would load it with its own context, or each email would wait on a load that is still going).
+            result["note"] = load["message"]
+            return result
     if reader is None:
         if not llm_active(settings):
             result["note"] = check_model(settings).describe()
