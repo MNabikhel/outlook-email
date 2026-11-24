@@ -1676,6 +1676,9 @@ _context_back: dict[str, int] = {}
 # The context each model CloseDesk loaded back ran out of memory answering with, by key, for Settings to say so (not
 # that LM Studio couldn't load it). Forgotten when the minimum is changed or the model is loaded afresh.
 _context_stepped: dict[str, int] = {}
+# The context a model CloseDesk loaded ran out of memory answering with when there was no smaller size to load it with
+# (4,096 tokens), by key: it doesn't fit this computer, and Settings says so. Forgotten as ``_context_stepped`` is.
+_context_no_smaller: dict[str, int] = {}
 _context_lock = threading.Lock()
 
 # Models answering a request right now (a chat answer, the overnight reading, a page read), by the name the request
@@ -1880,6 +1883,7 @@ def set_min_context(settings: Settings, tokens: int) -> str:
     _context_raised.clear()
     _context_tried.clear()
     _context_stepped.clear()
+    _context_no_smaller.clear()
     if not _context_given:  # nothing CloseDesk sized (at the start, always): LM Studio isn't asked
         return ""
     # Another load holds the lock for as long as LM Studio takes: say so rather than wait for it.
@@ -1991,6 +1995,8 @@ def step_back_context(settings: Settings) -> str:
         if not answered:  # no size it answered with: a step down, never below the size the user had it at
             back = max(_smaller_context(loaded), before)
         if not 0 < back < loaded:
+            if not answered and not _smaller_context(loaded):  # already the smallest: it doesn't fit at all
+                _context_no_smaller[key] = loaded
             return ""
         if model_busy(status.model, key):  # unloading it would cut off another answer or the overnight reading
             return ""
@@ -2301,6 +2307,7 @@ def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) 
         _context_raised.discard(key)  # loaded afresh: a longer context may be tried again
         _context_tried.pop(key, None)
         _context_stepped.pop(key, None)
+        _context_no_smaller.pop(key, None)
         _chat_load_failed.pop(key, None)
         remember_model(settings, key)
         return ""

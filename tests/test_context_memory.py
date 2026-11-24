@@ -426,3 +426,26 @@ def test_a_model_lm_studio_loaded_again_with_its_own_context_is_raised_again(sto
     steps, _modes, _text = _ask(store, settings, "And the total again?", budget)
     assert any(step.startswith(f"Reloaded {BIG} in LM Studio with a 16,384-token context") for step in steps), steps
     assert server.loaded[BIG] == 16384 and server.chats[-1][1] == 16384
+
+
+def test_settings_says_a_model_that_runs_out_of_memory_at_the_smallest_context_doesnt_fit(store, settings, mail, monkeypatch):
+    """A model CloseDesk loaded at 4,096 tokens ran out of memory answering with them, and there is no smaller size to
+    load it with. Settings said CloseDesk asks LM Studio for 4,096 tokens, as if that worked."""
+    from controller_inbox import model_fit
+
+    settings.llm = True
+    monkeypatch.setitem(globals(), "GRAPHICS_MEMORY", 18 * GB)
+    server = MacLMStudio({BIG: 4096})
+    local_llm._context_given[BIG] = 4096  # loaded by CloseDesk
+    _serve(monkeypatch, server, memory_gb=24)
+    _ask(store, settings, "What is the total in this budget?", mail["Q4 budget draft"].id)
+    local_llm._status_cache.clear()
+    line = model_fit.context_line(settings, local_llm.check_model(settings))
+    advice = line["advice"]
+    assert line["tone"] == "short"
+    assert f"{BIG} ran out of memory even with 4,096 tokens" in advice and "Choose a smaller model" in advice, advice
+    assert "asks LM Studio for 4,096" not in advice and "smaller minimum" not in advice, advice
+    # Choosing it again in Settings forgets it: it may fit once other apps are closed.
+    assert local_llm.use_chat_model(settings, BIG) == ""
+    local_llm._status_cache.clear()
+    assert "even with" not in model_fit.context_line(settings, local_llm.check_model(settings))["advice"]

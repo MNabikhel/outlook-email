@@ -517,6 +517,13 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
             f"The next time you ask something, CloseDesk reloads {model.key} in LM Studio with {target:,} tokens "
             f"({why}). If your computer runs short of memory, it goes back to the current size."
         )
+    elif model.key and local_llm._context_no_smaller.get(model.key) == window:
+        # CloseDesk loaded it with the least it gives a model, and it still ran out of memory answering.
+        advice = (
+            f"{model.key} ran out of memory even with {window:,} tokens, the least CloseDesk loads a model with: it "
+            "doesn't fit in this computer's memory. Choose a smaller model."
+        )
+        short = True
     elif window >= recommended:
         advice = "Enough to read whole attachments when you ask about them."
     else:
