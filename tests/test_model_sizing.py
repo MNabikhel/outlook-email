@@ -452,3 +452,31 @@ def test_a_small_model_that_doesnt_fit_at_all_isnt_told_a_3b_to_8b_is_plenty(set
     _computer(monkeypatch, 8, mac=True)
     warning = model_roles.too_big(settings, check_model(settings, use_cache=False))[CHAT]
     assert "run out of memory" in warning and "3B to 8B" not in warning and "A smaller one" in warning, warning
+
+
+def test_a_6_gb_card_keeps_an_8b_rather_than_go_down_to_a_1_5b(settings, store, lm, monkeypatch):
+    """A 16 GB PC with a 6 GB card, a 1.5B and an 8B downloaded: the 1.5B was loaded at the start, and once the user
+    loaded the 8B, Settings and Today suggested going back to the 1.5B, against the "3B to 8B is plenty" on the same
+    page. The 8B needs a little over the card at 4,096 tokens (by the 1 GB set aside to work in), so a little of it
+    sits in the computer's memory."""
+    _computer(monkeypatch, 16, card_gb=6)
+    tiny, eight = "qwen2.5-1.5b-instruct", "meta-llama-3.1-8b-instruct"
+    lm.extra = [tiny, eight]
+    lm.sizes = {tiny: int(1.1e9), eight: 4_920_734_016}
+    status = check_model(settings, use_cache=False)
+    assert model_choice.auto_choice(settings, status) == eight
+    assert model_roles.too_big(settings, status) == {}
+    _answering(lm, settings, eight)
+    lm.contexts = {eight: 4096}
+    from controller_inbox import local_llm
+
+    local_llm._status_cache.clear()
+    assert model_choice.recommendation(settings, store, check_model(settings)) is None
+
+
+def test_a_7b_that_runs_on_the_card_with_a_shorter_context_is_chosen_over_a_1_5b(settings, lm, monkeypatch):
+    _computer(monkeypatch, 16, card_gb=6)
+    tiny, seven = "qwen2.5-1.5b-instruct", "qwen2.5-7b-instruct"
+    lm.extra = [tiny, seven]
+    lm.sizes = {tiny: int(1.1e9), seven: int(4.36 * GB)}
+    assert model_choice.auto_choice(settings, check_model(settings, use_cache=False)) == seven

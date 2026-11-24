@@ -56,6 +56,11 @@ def small(status: ModelStatus, key: str) -> bool:
     return 0 < status.chat_sizes.get(key, 0) <= AUTO_LARGEST and (not count or count < SMALL_BILLIONS)
 
 
+def _tiny(status: ModelStatus, key: str) -> bool:
+    """``key`` has fewer than 3B parameters, by its count or name: smaller than the 3B to 8B CloseDesk prefers."""
+    return 0 < billions(status, key) < 3
+
+
 def pinned(settings: Settings) -> bool:
     """The settings file names the model that answers: loading another wouldn't change which one answers."""
     return settings.llm_model not in {"", "local-model"}
@@ -80,7 +85,7 @@ def _best_fit(settings: Settings, status: ModelStatus, keys: list[str], *, runs_
     small (``small``: a 3B to 8B model is plenty, and answers faster), else the smallest that runs well; with none
     that runs well on a PC's graphics card, the same among those that load at all. With none that fits with the
     context Setup asks for, the same among the small ones with the shortest context CloseDesk would ask for. A general chat model before a
-    coding one. "" when none fits or this can't be told (no sizes, memory unknown, LM Studio on another computer).
+    coding one. A 3B to 8B model that fits in any of these ways comes before one under 3B. "" when none fits or this can't be told (no sizes, memory unknown, LM Studio on another computer).
     With ``runs_well``, only one that runs well: on a PC's graphics card, never one that loads only partly from the
     computer's memory."""
     budget = model_roles.model_budget()
@@ -90,6 +95,13 @@ def _best_fit(settings: Settings, status: ModelStatus, keys: list[str], *, runs_
     tries = [{}, {"shorter": True}]
     if budget.gpu and not runs_well:
         tries += [{"at_all": True}, {"at_all": True, "shorter": True}]
+    # A 3B to 8B model first, the largest that fits, even with the shorter context or partly beside a graphics card
+    # (an 8B a little over a 6 GB card): a 1.5B that fits the card answers worse than either.
+    usual = [key for key in keys if small(status, key) and not _tiny(status, key)]
+    for how in tries:
+        fitting = [key for key in usual if model_roles.fits(settings, status, key, budget, **how)]
+        if fitting:
+            return max(fitting, key=lambda key: (not _coder(key), status.chat_sizes[key]))
     for how in tries:
         fitting = [
             key for key in keys if model_roles.fits(settings, status, key, budget, **how)
@@ -246,6 +258,10 @@ def recommendation(settings: Settings, store: Store, status: ModelStatus | None 
     needed = model_roles.memory_needed(size, tokens)
     budget = model_roles.model_budget()
     too_big = bool(size and budget and model_roles.on_this_computer(settings, status) and needed > budget.runs_well)
+    if too_big and small(status, current) and not _tiny(status, current) and needed <= budget.loads:
+        # A 3B to 8B model partly beside a graphics card: the one CloseDesk would load itself (``_best_fit``), not
+        # one to go down from.
+        too_big = False
     if not (slow or too_big) or not size:
         return None
     suggested = faster_model(settings, status, current)
