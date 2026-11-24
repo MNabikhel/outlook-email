@@ -429,9 +429,10 @@ def test_the_page_tab_shows_tables_and_key_details_where_they_are_printed(settin
         assert page.get_attribute(".pv-zoom .seg[aria-pressed='true']", "data-zoom") == "150"
 
 
-def test_next_to_check_steps_through_a_scans_amber_and_red_boxes(settings, store, page, monkeypatch):
+def scan_to_check(settings, store, monkeypatch):
+    """A scan of Harbor Steel's invoice whose page has green, amber and red boxes: OCR unsure of one description, and
+    the vision model reading the plate's amount differently. Gives the email."""
     from controller_inbox import ocr, page_view, vision
-    from liveserver import serving
     from test_page_view import LINES, OVIS, _detailed_invoice
 
     pdf = _detailed_invoice()
@@ -456,6 +457,13 @@ def test_next_to_check_steps_through_a_scans_amber_and_red_boxes(settings, store
         "<tr><td>Total due</td><td></td><td></td><td>$6,327.59</td></tr></table>"
     )
     store.save_page_reading(att.id, 1, first="", model_text=reading, model=OVIS, seconds=30, comparison="{}", sha256=att.sha256)
+    return email
+
+
+def test_next_to_check_steps_through_a_scans_amber_and_red_boxes(settings, store, page, monkeypatch):
+    from liveserver import serving
+
+    email = scan_to_check(settings, store, monkeypatch)
     with serving(web.create_app(settings, store)) as base:
         _open_page_tab(page, base, email)
         assert page.locator(".pv-box.differs").count() == 1
@@ -784,11 +792,8 @@ def test_badges_and_buttons_keep_their_contrast_in_dark_mode(browser, serve, sto
         page.wait_for_selector(selectors[-1])
         for selector in selectors:
             seen[selector] = page.evaluate(CONTRAST, selector)
-    if dark:
-        assert all(ratio >= 4.5 for ratio in seen.values()), seen
-    else:
-        # Light mode is as it was: white on the danger red and on the brand blue.
-        assert seen["#rd-fraud .btn-danger"] >= 4.5 and seen[".brand-mark"] >= 4.5, seen
+    # Light mode too: the High pill's white words on its amber were 2.83:1.
+    assert all(ratio >= 4.5 for ratio in seen.values()), seen
     page.context.close()
 
 

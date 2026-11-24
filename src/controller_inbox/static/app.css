@@ -9,11 +9,33 @@
   --gold: #c4a15a;
   --gold-ink: #86692c; /* gold for text on paper: 4.5:1 */
   --green: #2f5d3a;
-  --danger: #9b2335;
-  --warn: #8a4b12;
+  --ok-soft: #e3efe5;
+  --ok-line: #c3dcc8;
+  /* Critical and danger a true red, High and warnings an amber (tests/test_palette.py checks the hues, the distances
+     and the contrast of every use). */
+  --danger: #a8162b;
+  --danger-deep: #86101f; /* a danger button under the pointer, the alert panel's edge */
+  --danger-soft: #fbeff0;
+  --danger-line: #e2b8bf;
+  --warn: #8a6400;
+  --warn-soft: #f9f1dc;
+  --imp-critical: #b3122b;
+  --imp-high: #a87800; /* the row edge */
+  --imp-high-fill: #d6a31f; /* the High pill and the due-today tag, with dark words */
+  --on-imp-high: #1b2416;
+  --imp-medium: #bfd0ec;
   --chip: #efe8da;
   --sans: "Segoe UI", "Avenir Next", "Helvetica Neue", system-ui, sans-serif;
   --serif: "Iowan Old Style", Palatino, Georgia, serif;
+}
+
+/* Colors for color blindness (Setup → Colors, or Settings → Appearance in the workspace): Critical and fraud a deeper
+   red, High and warnings a yellow, done a blue-green, told apart by lightness as well as hue. The server writes
+   data-colors on <html>, so the page never paints in the other colors first. */
+:root[data-colors="color-blind"] {
+  --imp-critical: #921f3a; --danger: #761630; --danger-deep: #5c0f24; --danger-soft: #fbedf0; --danger-line: #ebbcc6;
+  --imp-high: #aa7a00; --warn: #806c00; --warn-soft: #fcf5e0;
+  --green: #0b738a; --ok-soft: #eaf5f7; --ok-line: #b3dbe4;
 }
 
 * { box-sizing: border-box; }
@@ -65,7 +87,7 @@ table.mail tr:hover td { background: #fbf8f1; }
 .correct label { display: block; font-size: 13px; margin: 10px 0; }
 .note { background: #f3ecda; border-left: 3px solid var(--gold); padding: 8px 10px; margin: 8px 0 0; }
 .panel h2, .panel h3 { font-family: var(--serif); margin: 0 0 10px; font-size: 18px; font-weight: 600; }
-.panel.alert { background: #9b2335; color: #fff; border-color: #7a1b29; }
+.panel.alert { background: var(--danger); color: #fff; border-color: var(--danger-deep); }
 .panel.alert a { color: #fff; }
 .panel.alert small, .panel.alert .muted { color: #f3c5cc; }
 .panel.alert .summary { color: #fff; font-size: 14px; }
@@ -90,8 +112,8 @@ button.ghost, .ghost { background: transparent; color: var(--navy); border: 1px 
 table.mail { width: 100%; border-collapse: collapse; font-size: 14px; }
 table.mail th { text-align: left; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 10px; border-bottom: 1px solid var(--line); background: #f7f3ea; }
 table.mail td { padding: 10px; border-bottom: 1px solid #eee6d8; vertical-align: top; }
-table.mail tr.critical { box-shadow: inset 3px 0 0 var(--danger); }
-table.mail tr.high { box-shadow: inset 3px 0 0 var(--warn); }
+table.mail tr.critical { box-shadow: inset 3px 0 0 var(--imp-critical); }
+table.mail tr.high { box-shadow: inset 3px 0 0 var(--imp-high); }
 .nowrap { white-space: nowrap; }
 .from { font-weight: 600; }
 .subj { font-weight: 600; color: var(--ink); }
@@ -99,14 +121,14 @@ table.mail tr.high { box-shadow: inset 3px 0 0 var(--warn); }
 .muted { color: var(--muted); }
 
 .pill { display: inline-block; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 7px; background: var(--chip); }
-.pill.critical { background: var(--danger); color: #fff; }
-.pill.high { background: #b05a1f; color: #fff; }
-.pill.medium { background: #d9c48a; }
+.pill.critical { background: var(--imp-critical); color: #fff; }
+.pill.high { background: var(--imp-high-fill); color: var(--on-imp-high); }
+.pill.medium { background: var(--imp-medium); }
 .pill.low { background: #dce3d6; }
 .flags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .flag { font-size: 11px; background: #efe7d4; padding: 2px 6px; text-transform: capitalize; }
 .flag.fraud_risk, .flag.do_not_process { background: var(--danger); color: #fff; }
-.flag.duplicate_invoice, .flag.missing_attachment { background: #8a4b12; color: #fff; }
+.flag.duplicate_invoice, .flag.missing_attachment { background: var(--warn); color: #fff; }
 .flag.month_end, .flag.audit, .flag.tax { background: var(--navy); color: #fff; }
 .flag.needs_model { background: #d9c48a; }
 .flag.bionic { background: var(--green); color: #fff; }
@@ -170,7 +192,7 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .focus-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .focus-item { display: flex; gap: 14px; align-items: flex-start; background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 12px; padding: 12px 14px; }
 .focus-item.fraud, .focus-item.overdue { border-left-color: var(--danger); }
-.focus-item.due_today { border-left-color: #c46b2d; }
+.focus-item.due_today { border-left-color: var(--imp-high); }
 .focus-item.due_soon, .focus-item.due_week { border-left-color: var(--gold); }
 .focus-item.decide, .focus-item.new_task { border-left-color: var(--navy); }
 .focus-item .rank { font-family: var(--serif); font-size: 24px; color: var(--navy); min-width: 22px; line-height: 1.1; }
@@ -182,7 +204,7 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .focus-empty { background: var(--card); border: 1px dashed var(--line); border-radius: 12px; padding: 14px; color: var(--muted); }
 .tag { display: inline-block; font-size: 11px; letter-spacing: 0.03em; padding: 2px 8px; border-radius: 10px; background: var(--chip); white-space: nowrap; }
 .tag.fraud, .tag.overdue { background: var(--danger); color: #fff; }
-.tag.due_today { background: #b05a1f; color: #fff; }
+.tag.due_today { background: var(--imp-high-fill); color: var(--on-imp-high); }
 .tag.due_soon, .tag.due_week { background: #e9d9ae; }
 .tag.decide, .tag.new_task { background: #dfe6f0; color: var(--navy); }
 .ai { color: var(--green); }
@@ -210,8 +232,8 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .models-table thead th { border-top: 0; color: var(--muted); font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
 .models-table tbody th { font-weight: 500; }
 .model-state { display: inline-block; margin-right: 4px; padding: 1px 7px; border-radius: 999px; font-size: 11.5px; font-weight: 600; }
-.model-state.on { background: #e3efe5; color: var(--green); }
-.model-state.fallback { background: #f6e9d9; color: var(--warn); }
+.model-state.on { background: var(--ok-soft); color: var(--green); }
+.model-state.fallback { background: var(--warn-soft); color: var(--warn); }
 .model-state.off { background: var(--chip); color: var(--muted); }
 .chat-model-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px 10px; margin: 0 0 12px; font-size: 13px; }
 .chat-model-form select { display: block; margin-top: 3px; max-width: 100%; }
@@ -259,7 +281,7 @@ table.mail tr.is-open td { background: #f1ead9; }
 .mail-tools { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
 .mail-tools a.ghost { border-radius: 8px; }
 .draft-box { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: #fff; margin: 0 0 12px; }
-.draft-box.safety { border-color: var(--danger); background: #fbeff1; }
+.draft-box.safety { border-color: var(--danger); background: var(--danger-soft); }
 .draft-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
 .draft-note { font-size: 12px; }
 .draft-text { width: 100%; font: 14px/1.45 var(--sans); padding: 10px; border: 1px solid var(--line); border-radius: 8px; resize: vertical; }
@@ -301,7 +323,7 @@ button.icon { display: inline-grid; place-items: center; width: 30px; height: 30
 .chat-history-open small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .chat-history-delete { color: var(--muted); opacity: 0; margin-right: 4px; }
 .chat-history-item:hover .chat-history-delete, .chat-history-delete:focus-visible { opacity: 1; }
-.chat-history-delete:hover { background: #f1dde0; color: var(--danger); }
+.chat-history-delete:hover { background: var(--danger-soft); color: var(--danger); }
 .chat-history-empty { padding: 24px 10px; text-align: center; color: var(--muted); font-size: 13px; }
 .chat-drop { position: absolute; inset: 8px; z-index: 4; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 2px dashed var(--navy); border-radius: 14px; background: rgba(255, 252, 247, 0.95); color: var(--navy); font-weight: 600; font-size: 14px; pointer-events: none; }
 .chat-drop svg { width: 28px; height: 28px; }
@@ -365,8 +387,8 @@ body.chat-window .msg { max-width: min(88%, 760px); }
 /* Attachments, fraud check */
 .small { font-size: 12px; }
 button.danger { background: var(--danger); border-color: var(--danger); }
-button.danger:hover { background: #7a1b29; }
-button.danger.ghost { background: transparent; color: var(--danger); border-color: #e2b8bf; }
+button.danger:hover { background: var(--danger-deep); }
+button.danger.ghost { background: transparent; color: var(--danger); border-color: var(--danger-line); }
 .kpis .kpi-link.hot { border-color: var(--danger); }
 .kpis .kpi-link.hot b, .kpis .kpi-link.hot span { color: var(--danger); }
 #files, #notes, .fraud-panel, .correct { margin: 12px 0; }
@@ -383,7 +405,7 @@ button.danger.ghost { background: transparent; color: var(--danger); border-colo
 .file-list a.tiny { padding: 4px 8px; font-size: 12px; border-radius: 8px; }
 .findings li small { display: block; }
 .fraud-panel { border-left: 4px solid var(--line); }
-.fraud-panel.high { border-left-color: var(--danger); background: #fbf1f2; }
+.fraud-panel.high { border-left-color: var(--danger); background: var(--danger-soft); }
 .fraud-panel.caution { border-left-color: var(--gold); }
 .fraud-panel p { margin: 0 0 8px; }
 .signals li { display: flex; gap: 10px; align-items: baseline; }
@@ -406,7 +428,7 @@ table.weights td.up { color: var(--danger); font-weight: 600; }
 table.weights td.down { color: var(--green); font-weight: 600; }
 .log-list li small { display: block; }
 .tag.log-flagged, .tag.log-marked_fraud, .tag.log-reported { background: var(--danger); color: #fff; }
-.tag.log-marked_safe, .tag.log-trusted { background: #d9ead9; color: var(--green); }
+.tag.log-marked_safe, .tag.log-trusted { background: var(--ok-soft); color: var(--green); }
 .context-line { padding: 8px 10px; border-left: 3px solid var(--line); background: #f8f5ee; }
 .context-line.ok { border-left-color: var(--green); }
 .context-line.short { border-left-color: var(--gold); }
@@ -447,8 +469,8 @@ table.weights td.down { color: var(--green); font-weight: 600; }
 .msg-reading.running b::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 7px; border-radius: 50%; background: var(--navy); animation: reading-pulse 1.2s ease-in-out infinite; }
 .msg-reading .reading-bar { display: block; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .msg-reading .reading-bar i { display: block; height: 100%; min-width: 6%; background: var(--navy); transition: width 0.4s ease; }
-.msg-reading.vision { display: inline-block; padding: 2px 9px; background: #e3efe5; color: var(--green); border: 1px solid #c3dcc8; border-radius: 999px; font-weight: 600; }
-.msg-reading.fallback { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; background: #f6e9d9; border-left: 3px solid var(--warn); }
+.msg-reading.vision { display: inline-block; padding: 2px 9px; background: var(--ok-soft); color: var(--green); border: 1px solid var(--ok-line); border-radius: 999px; font-weight: 600; }
+.msg-reading.fallback { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; background: var(--warn-soft); border-left: 3px solid var(--warn); }
 .msg-reading.fallback b { color: var(--warn); }
 @keyframes reading-pulse { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .msg-reading.running b::after { animation: none; } .msg-reading .reading-bar i { transition: none; } }
@@ -462,7 +484,7 @@ table.weights td.down { color: var(--green); font-weight: 600; }
 .files-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .files-head form { margin: 0; }
 .search-state { display: inline-block; margin-top: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; padding: 2px 8px; border-radius: 10px; background: var(--chip); color: var(--muted); white-space: nowrap; vertical-align: middle; }
-.search-state.indexed { background: #e3efe5; color: var(--green); }
+.search-state.indexed { background: var(--ok-soft); color: var(--green); }
 h2 .search-state { margin-top: 0; }
 .search-box { margin: 14px 0 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
 .search-box h4 { margin: 0 0 4px; }
@@ -487,8 +509,8 @@ details.correct summary { cursor: pointer; font-family: var(--serif); font-size:
 .coding-head h3 { margin: 0; }
 .coding-state { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 10px; background: var(--chip); color: var(--muted); white-space: nowrap; }
 .coding-state.suggested { background: #f3ecda; color: #6d5521; }
-.coding-state.unmatched { background: #f6e3d3; color: var(--warn); }
-.coding-state.confirmed { background: #e3efe5; color: var(--green); }
+.coding-state.unmatched { background: var(--warn-soft); color: var(--warn); }
+.coding-state.confirmed { background: var(--ok-soft); color: var(--green); }
 .coding-codes { margin: 10px 0 0; }
 .coding .coding-codes li { display: flex; gap: 12px; align-items: flex-start; padding: 8px 0; }
 .coding-codes li:first-child { border-top: 0; }
