@@ -194,3 +194,63 @@ def test_the_setup_page_says_it_is_reloading_and_takes_one_press(settings, store
         let_go.set()
         page.wait_for_selector("[data-step-back-said]")
         assert done == [(MODEL, 8192)]
+
+
+def _slow_reloads(monkeypatch):
+    """``step_back_context`` replaced by one that waits until let go, as LM Studio's reload takes minutes."""
+    import threading
+
+    done = _reloads(monkeypatch)
+    recorded = local_llm.step_back_context
+    let_go = threading.Event()
+    started = threading.Event()
+
+    def slow(settings_, key, size):
+        started.set()
+        let_go.wait(20)
+        return recorded(settings_, key, size)
+
+    monkeypatch.setattr(local_llm, "step_back_context", slow)
+    return done, started, let_go
+
+
+def test_the_chat_takes_no_other_question_while_it_reloads(settings, store, page, monkeypatch):
+    asked = _scripted(monkeypatch, _offer("What is due?"), [{"type": "delta", "text": "The Northwind invoice is due Friday."}])
+    done, started, let_go = _slow_reloads(monkeypatch)
+    with serving(web.create_app(settings, store)) as base:
+        try:
+            _ask(page, base, "What is due?")
+            page.locator(".msg-step-back button", has_text="Reload and ask again").click()
+            assert started.wait(10)
+            page.fill("#chat textarea", "Who sent it?")
+            page.press("#chat textarea", "Enter")
+            page.wait_for_timeout(300)
+        finally:
+            let_go.set()
+        page.wait_for_selector(".msg.bot:last-child .msg-text:has-text('due Friday')")
+        assert asked == ["What is due?", "What is due?"], "the question chosen is the one asked again"
+        assert done == [(MODEL, 8192)]
+        assert page.input_value("#chat textarea") == "Who sent it?", "the other question is kept to send once it is done"
+
+
+def test_the_classic_chat_takes_no_other_question_while_it_reloads(settings, store, page, monkeypatch):
+    asked = _scripted(monkeypatch, _offer("What is due?"), [{"type": "delta", "text": "Due Friday."}])
+    done, started, let_go = _slow_reloads(monkeypatch)
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/chat/window")
+        page.fill("#chat textarea", "What is due?")
+        page.press("#chat textarea", "Enter")
+        try:
+            page.locator(".step-back button", has_text="Reload and ask again").click()
+            assert started.wait(10)
+            assert page.locator("#chat button[type='submit']").is_disabled()
+            page.fill("#chat textarea", "Who sent it?")
+            page.press("#chat textarea", "Enter")
+            page.wait_for_timeout(300)
+        finally:
+            let_go.set()
+        page.wait_for_selector(".msg:has-text('Due Friday.')")
+        assert asked == ["What is due?", "What is due?"], "the question chosen is the one asked again"
+        assert done == [(MODEL, 8192)]
+        assert page.input_value("#chat textarea") == "Who sent it?"

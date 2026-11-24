@@ -272,14 +272,23 @@ export function createChat({ root, onToggle, visionRead }) {
       offer.failed = false;
       offer.message = `Reloading ${offer.model} in LM Studio with ${Number(offer.size).toLocaleString("en-US")} tokens…`;
       repaint(turn);
+      // No other question while it reloads: it would go to the model mid-reload, and this one wouldn't be asked again.
+      busy = true;
+      send.disabled = true;
+      const free = () => {
+        busy = false;
+        send.disabled = false;
+      };
       try {
         const reply = await postJSON("/chat/step-back", { model: offer.model, size: offer.size });
         offer.done = true;
         offer.message = reply.message || "Reloaded.";
         repaint(turn);
+        free();
         // The same question about the same email, or about all mail (null) if it was: not whatever is open now.
         ask(offer.question, offer.email_id || null);
       } catch (error) {
+        free();
         offer.failed = true;
         offer.message = error.message;
         repaint(turn);

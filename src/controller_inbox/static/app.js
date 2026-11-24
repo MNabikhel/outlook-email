@@ -637,6 +637,14 @@
     const buttons = Array.from(box.querySelectorAll("button"));
     buttons.forEach((each) => (each.disabled = true));
     status.textContent = `Reloading ${box.dataset.model} in LM Studio with ${Number(box.dataset.size).toLocaleString("en-US")} tokens…`;
+    // No other question while it reloads: it would go to the model mid-reload, and this one wouldn't be asked again.
+    busy = true;
+    const sendButton = $("button[type='submit']", chatForm);
+    if (sendButton) sendButton.disabled = true;
+    const free = () => {
+      busy = false;
+      if (sendButton) sendButton.disabled = false;
+    };
     try {
       const response = await fetch("/chat/step-back", {
         method: "POST",
@@ -647,9 +655,11 @@
       if (!response.ok) throw new Error(reply.detail || `the server said ${response.status}`);
       status.textContent = reply.message || "Reloaded.";
       buttons.forEach((each) => each.remove());
+      free();
       // The same question about the same email, or about all mail (null) if it was: not whatever is open now.
       ask(box.dataset.question, box.dataset.email || null);
     } catch (error) {
+      free();
       status.textContent = error.message;
       buttons.forEach((each) => (each.disabled = false));
     }
