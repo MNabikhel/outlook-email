@@ -392,7 +392,7 @@ def _run_overnight(
     if reading["model"] and not (stats and stats.stopped_reason) and settings.overnight_ai_links:
         if on_progress:
             on_progress("linking", 1, 1, "Looking for related mail")
-        ai_linked = link_judge.judge_recent(store, settings, limit=settings.overnight_ai_links, now=now)
+        ai_linked = link_judge.judge_recent(store, settings, limit=settings.overnight_ai_links, now=now, notes=stopped_notes)
 
     if on_progress:
         on_progress("digest", 1, 1, "Writing the digest")

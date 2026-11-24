@@ -9,11 +9,12 @@ after a timeout went on to the next long file, which timed out the same way: the
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 import httpx
 import pytest
 
-from controller_inbox import agent, file_summaries, model_fit
+from controller_inbox import agent, file_summaries, link_judge, model_fit
 from controller_inbox.local_llm import CHAT_TIMEOUT, ModelStatus
 from test_file_summaries import REPORT
 
@@ -24,6 +25,7 @@ MODEL = "gemma-4-12b"
 def status(monkeypatch):
     found = ModelStatus(mode="on", reachable=True, model=MODEL)
     monkeypatch.setattr(file_summaries, "check_model", lambda *_a, **_k: found, raising=False)
+    monkeypatch.setattr(link_judge, "check_model", lambda *_a, **_k: found, raising=False)
     return found
 
 
@@ -141,3 +143,57 @@ def test_the_overnight_run_says_the_summaries_stopped(store, settings, audit_rep
     assert len(calls) == 1
     assert result["model"] and "Stopped summarizing files" in result["model_note"]
     assert "Stopped summarizing files" in open(result["log_path"], encoding="utf-8").read()
+
+
+# --- AI linking ---------------------------------------------------------------------------------------------------
+
+
+def _mail(store, id_, subject, *, sender="sales@harbor.com", body="", received="2026-10-05T09:00:00+00:00"):
+    from test_links import _record
+
+    record = _record(id_, sender=sender, received=received)
+    record.subject, record.body_text = subject, body
+    store.upsert_email(record)
+    return store.get_email(id_)
+
+
+@pytest.fixture
+def harbor(store):
+    for n in range(4):
+        _mail(store, f"q{n}", f"Harbor quote number {n}", body="Harbor quote.", received=f"2026-10-0{n + 1}T09:00:00+00:00")
+        _mail(store, f"a{n}", f"Question on the Harbor quote {n}", sender="ap@taz.com", body="About the Harbor quote.",
+              received=f"2026-10-0{n + 1}T10:00:00+00:00")
+
+
+def _judge(monkeypatch, *, fail=None):
+    calls: list[dict] = []
+
+    def complete(_settings, _messages, **kwargs):
+        calls.append({"limit": kwargs.get("limit")})
+        if fail is not None:
+            raise fail
+        return json.dumps({"same_matter": True, "why": "Both are about the Harbor quote."})
+
+    monkeypatch.setattr(link_judge, "complete_text", complete)
+    monkeypatch.setattr(link_judge, "llm_active", lambda _settings: True)
+    return calls
+
+
+def test_linking_waits_as_long_as_the_wait_set_in_settings(store, settings, harbor, status, monkeypatch):
+    settings.llm_model = MODEL
+    model_fit.set_wait(store, MODEL, 12)
+    calls = _judge(monkeypatch)
+    link_judge.judge_recent(store, settings, limit=4, now=datetime(2026, 10, 10, tzinfo=timezone.utc))
+    assert calls and all(call["limit"] == 720.0 for call in calls)
+
+
+def test_linking_that_runs_out_of_time_stops_for_the_run_and_says_so(store, settings, harbor, status, monkeypatch):
+    settings.llm_model = MODEL
+    calls = _judge(monkeypatch, fail=_timeout(300.0))
+    notes: list[str] = []
+    link_judge.judge_recent(store, settings, limit=10, now=datetime(2026, 10, 10, tzinfo=timezone.utc), notes=notes)
+    assert len(calls) == 1
+    assert notes == [
+        f"Stopped looking for related mail: {MODEL} took longer than 5 minutes on one question. CloseDesk gives it "
+        "longer next time, or Settings → Local model → Wait up to … minutes can give it longer now."
+    ]

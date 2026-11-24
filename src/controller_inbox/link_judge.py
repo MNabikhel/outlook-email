@@ -26,10 +26,20 @@ import re
 import time
 from datetime import datetime, timedelta
 
-from controller_inbox import links, semantic
+import httpx
+
+from controller_inbox import links, model_fit, semantic
 from controller_inbox.config import Settings
 from controller_inbox.fraud import as_model_reads, attachments_locked
-from controller_inbox.local_llm import EmptyReply, complete_text, llm_active, parse_json_object
+from controller_inbox.local_llm import (
+    EmptyReply,
+    ModelStatus,
+    check_model,
+    complete_text,
+    llm_active,
+    parse_json_object,
+    reply_budget,
+)
 from controller_inbox.models import EmailRecord
 from controller_inbox.store import Store
 
@@ -94,13 +104,17 @@ def candidates(store: Store, settings: Settings | None, email: EmailRecord, *, l
     return out
 
 
-def judge(store: Store, settings: Settings, email: EmailRecord, *, limit: int = CANDIDATES, spent: list | None = None) -> list[dict]:
+def judge(
+    store: Store, settings: Settings, email: EmailRecord, *, limit: int = CANDIDATES, spent: list | None = None,
+    status: ModelStatus | None = None,
+) -> list[dict]:
     """Ask about ``email`` and its candidates; keep and return each verdict ({"other", "same", "why"}). Each
-    question put to the model is added to ``spent``."""
+    question put to the model is added to ``spent``. Each waits as long as the model needs (``_wait``)."""
     if not llm_active(settings) or _suspect(email):
         return []
     out = []
     model = settings.llm_model or ""
+    wait = None
     # Each as the model may read it: a reply quoting held mail without the quote (fraud.as_model_reads).
     email = as_model_reads(store, email)
     for other in candidates(store, settings, email, limit=limit):
@@ -117,7 +131,9 @@ def judge(store: Store, settings: Settings, email: EmailRecord, *, limit: int = 
             return out  # not weighed: weighed when it is cleared
         if theirs is None or _suspect(theirs):
             continue
-        verdict = _ask(settings, email, other)
+        if wait is None:
+            wait = _wait(store, settings, status)
+        verdict = _ask(settings, email, other, wait=wait)
         if spent is not None:
             spent.append(other.id)
         if verdict is None:
@@ -128,12 +144,25 @@ def judge(store: Store, settings: Settings, email: EmailRecord, *, limit: int = 
     return out
 
 
-def judge_recent(store: Store, settings: Settings, *, limit: int = 30, now: datetime | None = None, max_seconds: float = MAX_SECONDS) -> int:
+def _wait(store: Store, settings: Settings, status: ModelStatus | None) -> model_fit.Wait:
+    """How long a question waits for the model answering: as long as it needs (``model_fit.background_wait``), for
+    two short emails and a short reply."""
+    status = status or check_model(settings)
+    model = status.model or settings.llm_model or ""
+    return model_fit.background_wait(store, settings, model, status, tokens=600, written=reply_budget(settings, REPLY_TOKENS))
+
+
+def judge_recent(
+    store: Store, settings: Settings, *, limit: int = 30, now: datetime | None = None, max_seconds: float = MAX_SECONDS,
+    notes: list[str] | None = None,
+) -> int:
     """A run's share: the newest mail of the last ``RECENT_DAYS`` not weighed yet, ``limit`` questions at most.
-    Returns how many emails were weighed."""
+    Returns how many emails were weighed. A question that runs out of time ends the run's share: that is added to
+    ``notes``, and the next run waits longer for the model (unless the user set its wait)."""
     if not llm_active(settings) or limit <= 0:
         return 0
     started = time.monotonic()
+    status = None
     asked = weighed = 0
     for email in store.recent_emails(days=RECENT_DAYS, now=now):
         if asked >= limit or time.monotonic() - started > max_seconds:
@@ -142,7 +171,16 @@ def judge_recent(store: Store, settings: Settings, *, limit: int = 30, now: date
             continue  # held or cautioned mail is never weighed, and costs this run nothing
         spent: list[str] = []
         try:
-            judge(store, settings, email, limit=min(CANDIDATES, limit - asked), spent=spent)
+            status = status or check_model(settings)
+            judge(store, settings, email, limit=min(CANDIDATES, limit - asked), spent=spent, status=status)
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as exc:
+            wait = _wait(store, settings, status)
+            waited = float(getattr(exc, "waited", 0) or 0) or wait.seconds
+            if not wait.yours:
+                model_fit.background_ran_out(store, wait.model, seconds=waited)
+            if notes is not None:
+                notes.append(model_fit.stopped_note("looking for related mail", wait, waited, "one question"))
+            break
         except Exception:  # the model stopped answering: the next run carries on
             log.warning("Weighing related mail with the model failed", exc_info=True)
             break
@@ -196,7 +234,10 @@ def shared(a: EmailRecord, b: EmailRecord) -> list[str]:
     return [mine[key] for key in mine if key in theirs][:12]
 
 
-def _ask(settings: Settings, a: EmailRecord, b: EmailRecord) -> dict | None:
+REPLY_TOKENS = 160
+
+
+def _ask(settings: Settings, a: EmailRecord, b: EmailRecord, *, wait: model_fit.Wait | None = None) -> dict | None:
     both = shared(a, b)
     question = (
         "Does one of these emails ask about, reply to, follow up on or belong with the same quote, invoice, payment, "
@@ -212,7 +253,9 @@ def _ask(settings: Settings, a: EmailRecord, b: EmailRecord) -> dict | None:
         },
     ]
     try:
-        reply = complete_text(settings, messages, max_tokens=160, temperature=0)
+        reply = complete_text(
+            settings, messages, max_tokens=REPLY_TOKENS, temperature=0, limit=wait.seconds if wait is not None else None
+        )
     except EmptyReply:
         return None
     parsed = parse_json_object(reply) or {}
