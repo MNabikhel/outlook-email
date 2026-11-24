@@ -64,3 +64,28 @@ def test_a_reply_with_only_blank_reasoning_has_none():
     reply = Reply("")
     list(_stream_pieces(httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body), reply, thoughts=True))
     assert reply.reasoning == ""
+
+
+def test_a_retry_s_thinking_is_set_apart_from_the_first_try_s(settings, loaded, monkeypatch):
+    """A model that can't stop thinking ran out of room and was asked again with more: the second try's reasoning was
+    run straight on from the first's, cut off mid-word, with nothing to say the model was asked again."""
+    from test_reasoning_models import THOUGHT, FakeLMStudio
+    from test_reasoning_models import _serve as serve_reasoning
+
+    from controller_inbox import local_llm
+    from controller_inbox.assistant import answer_stream
+
+    settings.llm = None
+    server = FakeLMStudio(options=["on"], think_tokens=2500)  # 2,048 tokens run out; 4,096 are enough
+    serve_reasoning(monkeypatch, server)
+    local_llm._status_cache.clear()
+    events = list(answer_stream(loaded, settings, QUESTION))
+    assert [call["max_tokens"] for call in server.calls if call.get("stream")][-2:] == [2048, 4096]
+    kinds = [(event["type"], event.get("state")) for event in events]
+    first, second = [i for i, kind in enumerate(kinds) if kind == ("progress", "thinking")][-2:]
+    between = events[first + 1 : second]
+    assert {"type": "step", "text": "The model ran out of room while it thought; asking it again with more room"} in between
+    assert any(event["type"] == "progress" and event["state"] == "reading" for event in between), "the thinking ended"
+    thought = "".join(event["text"] for event in events if event["type"] == "thinking")
+    assert thought == THOUGHT + THOUGHT
+    assert "".join(event["text"] for event in events if event["type"] == "delta") == "Start with [1]; it needs you today."

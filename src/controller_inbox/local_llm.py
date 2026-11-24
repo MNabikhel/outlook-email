@@ -557,6 +557,13 @@ class Thought:
         self.text = text
 
 
+class AskedAgain:
+    """Yielded by ``stream_text(thoughts=True)`` when the model ran out of room thinking and is asked again with more:
+    the chat says so, and the second try's reasoning starts apart from the first's."""
+
+    __slots__ = ()
+
+
 def _reasoning_text(part: dict, *, spaces: bool = False) -> str:
     """LM Studio calls it ``reasoning_content``; OpenRouter and newer builds ``reasoning``. ``spaces``: a piece that is
     only a line break or a space is kept too (once the reasoning has begun, streamed a token at a time)."""
@@ -1181,7 +1188,8 @@ def stream_text(
     given a list, filled with (piece of text, log probability) for each token of the answer, when the server sends
     them (llama.cpp does; a server that doesn't leaves it empty). ``limit``: how long the model may go quiet, worked
     out for it (``model_fit.chat_wait``), in place of the usual ``CHAT_TIMEOUT``. ``thoughts``: the model's reasoning
-    is yielded too as it comes, as ``Thought`` pieces (never added to the answer). ``finished`` is also given the
+    is yielded too as it comes, as ``Thought`` pieces (never added to the answer), and ``AskedAgain`` before a second
+    try with more room. ``finished`` is also given the
     reply's timing: ``read_seconds`` (until its first piece), ``write_seconds``, ``written`` (tokens, thinking
     included) and ``prompt_tokens`` when the server counted them.
     """
@@ -1227,6 +1235,8 @@ def stream_text(
         if plan is None:
             break
         effort, budget = plan
+        if thoughts:
+            yield AskedAgain()
     raise _empty_reply(settings, model, sent, reply)
 
 

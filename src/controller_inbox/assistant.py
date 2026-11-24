@@ -32,6 +32,7 @@ from controller_inbox import agent, answer_check, chats, documents, memo, model_
 from controller_inbox.config import Settings
 from controller_inbox.fraud import attachments_locked
 from controller_inbox.local_llm import (
+    AskedAgain,
     ContextOverflow,
     EmptyReply,
     Thought,
@@ -2170,6 +2171,15 @@ def _stream(settings: Settings, messages: list[dict], state: dict) -> Iterator[d
                 # The model's first words: it is writing, though the echo check holds them back a moment.
                 if not state["wrote"] and state.get("call") is not None:
                     yield WRITING
+                continue
+            if isinstance(piece, AskedAgain):
+                # It ran out of room thinking and is asked again: it reads the prompt again, and its thinking starts
+                # below the first try's (the pages end the thinking on reading, and start it again on thinking).
+                yield {"type": "step", "text": "The model ran out of room while it thought; asking it again with more room"}
+                _calling(state.get("call"), messages)
+                if state.get("call") is not None:
+                    yield _reading_progress(state.get("store"), state["call"])
+                thought = False
                 continue
             if isinstance(piece, Thought):
                 if not thought:
