@@ -357,10 +357,9 @@
         if (box.classList.contains("live")) text.scrollTop = text.scrollHeight;
         else if (thought.scrolled) text.scrollTop = thought.scrolled;
         text.addEventListener("scroll", () => (thought.scrolled = text.scrollTop));
-        // Drawn open, a box says so a moment later: only a box still on the page is the user's choice.
-        box.addEventListener("toggle", () => {
-          if (box.isConnected) thought.open = box.open;
-        });
+        // Only the user's own click is kept: a box drawn open says so with a "toggle" a moment later, which can come
+        // after the thinking ended and would open the box again at the next drawing.
+        $("summary", box).addEventListener("click", () => (thought.open = !box.open));
       }
     }
     if (!bubble) chatLog.append(el);

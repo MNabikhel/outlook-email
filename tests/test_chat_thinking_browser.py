@@ -233,3 +233,46 @@ def test_the_steps_box_counts_steps_on_both_chat_pages(settings, store, page, mo
         page.press("#chat textarea", "Enter")
         page.wait_for_selector(".msg:has-text('on Friday')")
         assert page.locator(".msg-steps summary").last.inner_text().strip() == "3 steps"
+
+
+# The box stays closed once the thinking ended ------------------------------------------------------------------------
+
+
+def _then_more_words():
+    return [
+        {"type": "sources", "sources": [], "mode": "model"},
+        {"type": "progress", "state": "thinking", "text": "Thinking"},
+        {"type": "thinking", "text": "The invoice says Friday."}, 0.3,
+        {"type": "delta", "text": "Word 1. "}, 1.5,
+        {"type": "delta", "text": "Word 2."},
+    ]
+
+
+def _drawn_open_late(page) -> None:
+    """A box drawn open says so with a "toggle" event a moment later, which can come after the thinking ended (the
+    answer's first word closed it): that event isn't the user opening it."""
+    page.locator(".msg-thinking").evaluate("el => { el.open = true; }")
+
+
+@pytest.mark.parametrize("where", ["workspace", "classic"])
+def test_the_thinking_box_isnt_opened_again_by_a_late_toggle(settings, store, page, monkeypatch, where):
+    """In some runs the workspace box ended "Thought for 18 s" but open, all of its reasoning above the answer: the
+    toggle of a box drawn open while it thought came after the thinking ended, and was kept as the user's choice."""
+    _scripted(monkeypatch, _then_more_words())
+    with serving(web.create_app(settings, store)) as base:
+        if where == "workspace":
+            _ask(page, base, "What is due?")
+        else:
+            page.set_viewport_size(WIDE)
+            page.goto(f"{base}/chat/window")
+            page.fill("#chat textarea", "What is due?")
+            page.press("#chat textarea", "Enter")
+        page.wait_for_selector(".msg .msg-text:has-text('Word 1.')")
+        _drawn_open_late(page)
+        page.wait_for_selector(".msg .msg-text:has-text('Word 2.')")
+        page.wait_for_timeout(200)
+        assert not page.locator(".msg-thinking").evaluate("el => el.open"), "the box opened again on its own"
+        page.locator(".msg-thinking summary").click()  # the user's own click still opens it
+        page.wait_for_timeout(100)
+        assert page.locator(".msg-thinking").evaluate("el => el.open")
+

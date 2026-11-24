@@ -152,9 +152,12 @@ export function createChat({ root, onToggle, visionRead }) {
     const live = turn.pending && !thought.ended;
     const seconds = Math.max(1, Math.round(((thought.spent || 0) + (thought.ended || Date.now()) - thought.started) / 1000));
     const body = h("div", { class: "think-text" }, thought.text);
-    const box = h("details", { class: `msg-thinking${live ? " live" : ""}` }, h("summary", null, live ? "Thinking…" : `Thought for ${seconds} s`), body);
+    const summary = h("summary", null, live ? "Thinking…" : `Thought for ${seconds} s`);
+    const box = h("details", { class: `msg-thinking${live ? " live" : ""}` }, summary, body);
     box.open = thought.open === undefined ? live : thought.open;
-    box.addEventListener("toggle", () => (thought.open = box.open));
+    // Only the user's own click is kept: a box drawn open says so with a "toggle" a moment later, which can come
+    // after the thinking ended and would open the box again at the next repaint.
+    summary.addEventListener("click", () => (thought.open = !box.open));
     if (live) requestAnimationFrame(() => (body.scrollTop = body.scrollHeight));
     return box;
   }
