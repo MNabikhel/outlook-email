@@ -515,7 +515,8 @@
           answer.progress = { ...event, at: Date.now() };
           renderTurn(answer, bubble);
           clearTimeout(answer.lateTimer);
-          if (Number(event.seconds) > 0) answer.lateTimer = setTimeout(() => answer.pending && renderTurn(answer, bubble), Number(event.seconds) * 1000 + 50);
+          // Only while this conversation is still the one shown: another opened meanwhile isn't redrawn or scrolled.
+          if (Number(event.seconds) > 0) answer.lateTimer = setTimeout(() => answer.pending && round === chatRound && bubble.isConnected && renderTurn(answer, bubble), Number(event.seconds) * 1000 + 50);
         } else if (event.type === "more_time") {
           answer.more_time = event;
           renderTurn(answer, bubble);
@@ -542,12 +543,12 @@
     }
     // Ended while it still thought (out of time, an error): the box keeps how long it thought, not a growing count.
     endThinking(answer);
+    clearTimeout(answer.lateTimer);
     busy = false;
     $("button[type='submit']", chatForm).disabled = false;
     if (round !== chatRound) return;
     answer.pending = false;
     if (!answer.text) answer.text = "I didn't get an answer. Try asking another way.";
-    clearTimeout(answer.lateTimer);
     turns.push(answer);
     renderTurn(answer, bubble);
     chatInput.focus({ preventScroll: true });

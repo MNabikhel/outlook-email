@@ -252,3 +252,24 @@ def test_the_classic_chat_says_to_wait_too(settings, store, page, monkeypatch):
         form.locator("button").click()
         page.wait_for_selector(".msg:has-text('Two need a reply.')")
     assert asked == ["What needs a reply?", "What is due?", "What needs a reply?"]
+
+
+def test_in_the_classic_chat_a_conversation_opened_meanwhile_doesn_t_jump_when_the_estimate_runs_out(settings, store, page, monkeypatch):
+    """The estimate's "taking longer" redraw outlived a switch to another conversation, and when it came it scrolled
+    the conversation the user had opened to the bottom."""
+    reading = {"type": "progress", "state": "reading", "text": "Reading 2 emails", "tokens": 3000, "seconds": 1, "about": "about 1 second"}
+    _scripted(monkeypatch, [reading, 4.0, {"type": "delta", "text": "Done."}])
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size(WIDE)
+        page.goto(f"{base}/chat/window")
+        page.fill("#chat textarea", "What is due?")
+        page.press("#chat textarea", "Enter")
+        page.wait_for_selector(".msg .typing:has-text('Reading 2 emails')")
+        page.click("[data-action='new-chat']")
+        # A long conversation, read from its top.
+        page.evaluate(
+            "() => { const log = document.querySelector('#chat .chat-log');"
+            " const tall = document.createElement('div'); tall.style.height = '5000px'; tall.style.flex = 'none'; log.append(tall); log.scrollTop = 0; }"
+        )
+        page.wait_for_timeout(1800)
+        assert page.evaluate("() => document.querySelector('#chat .chat-log').scrollTop") == 0
