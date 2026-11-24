@@ -185,3 +185,99 @@ def test_the_colors_are_on_the_page_before_any_script_runs(browser, settings, lo
             want = pm.workspace("light", "color-blind") if ui == "workspace" else pm.classic("color-blind")
             assert page.evaluate(TOKEN, "--imp-critical") == want["--imp-critical"], path
     context.close()
+
+
+# The importance in words on each row ---------------------------------------------------------------------------------
+
+LEVELS = """() => [...document.querySelectorAll('.items .item.kind-mail, .items .item.kind-focus')].map((li) => {
+  const level = ['critical', 'high', 'medium', 'low'].find((k) => li.classList.contains('imp-' + k)) || '';
+  const tag = li.querySelector('.item-level');
+  const shown = tag && getComputedStyle(tag).display !== 'none' && tag.getBoundingClientRect().width > 0;
+  return { key: li.dataset.key, level, text: tag ? tag.textContent : null, shown, classes: tag ? tag.className : '',
+           background: tag ? getComputedStyle(tag).backgroundColor : '', locked: li.classList.contains('is-locked'),
+           held: Boolean(li.querySelector('.chip-danger')) };
+})"""
+WORDS = {"critical": "Critical", "high": "High", "medium": "Medium", "low": "Low"}
+
+
+def test_the_importance_shows_in_words_on_each_email_when_asked(browser, settings, loaded):
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/app/settings")
+        page.evaluate("() => { window.notReloaded = true; }")
+        page.check("#set-importance-words")
+        page.wait_for_selector("html[data-importance-words='on']")
+        grey = page.evaluate("() => { const t = document.createElement('span'); t.className = 'tag'; document.body.append(t); const c = getComputedStyle(t).backgroundColor; t.remove(); return c; }")
+        seen_levels = set()
+        for nav, path in (("today", "/app"), ("folder:important", "/app/folder/important"), ("all", "/app/all")):
+            page.click(f".rail-item[data-id='{nav}']")
+            page.wait_for_url(f"**{path}")
+            page.wait_for_selector(".items .item")
+            rows = page.evaluate(LEVELS)
+            assert rows, path
+            for row in rows:
+                assert row["level"], row
+                assert row["shown"] and row["text"] == WORDS[row["level"]], (path, row)
+                if row["level"] in ("medium", "low"):
+                    assert row["background"] == grey, ("Medium and Low are the quiet grey tag", row)
+                else:
+                    assert f"tag-prio-{row['level']}" in row["classes"]
+                if row["locked"]:
+                    assert row["held"], ("a held email still says it is held", row)
+                seen_levels.add(row["level"])
+        assert {"critical", "high", "medium"} <= seen_levels, seen_levels
+        assert page.evaluate("() => window.notReloaded === true")
+        # Unticked: the words go, the colored edge stays.
+        page.click(".rail-item[data-id='settings']")
+        page.uncheck("#set-importance-words")
+        page.wait_for_selector("html:not([data-importance-words])")
+        page.click(".rail-item[data-id='all']")
+        page.wait_for_selector(".items .item")
+        assert not [row for row in page.evaluate(LEVELS) if row["shown"]]
+        assert page.evaluate("() => window.notReloaded === true")
+    context.close()
+
+
+# The longest words Today can show on one row, with a 7-figure amount; then whether anything in a row's first line
+# runs past its text box (on its right, the done button's room).
+FIT = """() => {
+  for (const li of document.querySelectorAll('.items .item.kind-focus')) {
+    const kind = li.querySelector('.item-row1 .tag:not(.item-level)');
+    if (kind) kind.textContent = 'New · needs a look';
+    const level = li.querySelector('.item-level');
+    if (level) level.textContent = 'Critical';
+    const amount = li.querySelector('.item-amount');
+    if (amount) amount.textContent = '$1,234,567.89';
+    else { const a = document.createElement('span'); a.className = 'item-amount'; a.textContent = '$1,234,567.89'; li.querySelector('.item-row1').append(a); }
+  }
+  const out = [];
+  for (const li of document.querySelectorAll('.items .item')) {
+    const main = li.querySelector('.item-main');
+    const right = main.getBoundingClientRect().right - parseFloat(getComputedStyle(main).paddingRight);
+    for (const el of li.querySelectorAll('.item-row1 > *')) {
+      const r = el.getBoundingClientRect();
+      if (r.right > right + 0.5) out.push({ row: li.dataset.key, el: el.className, over: Math.round(r.right - right) });
+    }
+    const from = li.querySelector('.item-from');
+    if (from && from.getBoundingClientRect().width <= 0) out.push({ row: li.dataset.key, el: 'item-from squeezed out' });
+  }
+  return out;
+}"""
+
+
+@pytest.mark.parametrize("width", [1280, 1100, 390, 320])
+def test_the_words_fit_each_row_at_every_width(browser, settings, loaded, width):
+    from controller_inbox import appearance
+
+    appearance.save(loaded, importance_words=True)
+    context = browser.new_context(viewport={"width": width, "height": 900})
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        problems = {}
+        for path in ("/app", "/app/folder/important", "/app/all"):
+            page.goto(f"{base}{path}")
+            page.wait_for_selector(".items .item .item-level")
+            problems[path] = page.evaluate(FIT)
+    context.close()
+    assert problems == {path: [] for path in problems}

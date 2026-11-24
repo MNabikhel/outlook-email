@@ -37,6 +37,7 @@ const S = {
   poll: 0,
   polling: false, // a status check is on its way
   jobSeq: 0, // bumped when this page starts a job, so a status fetched before that doesn't undo it
+  lookSeq: 0, // bumped when this page changes the colors, so a status fetched before that doesn't undo them
   topJob: "", // what the job bar shows
   focus: null, // { emailId, at: "heading" | "matter" }: where keys go once that email is drawn
 };
@@ -292,19 +293,23 @@ function themeButton() {
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", themeButton);
 
 /** The colors and importance words chosen in Settings (saved on the server, which writes them on <html> as it sends
-    the page): put on <html> again when they change here, or in another window or the classic pages. */
-function applyAppearance(look) {
+    the page): put on <html> again when they change here (``mine``), or in another window or the classic pages. */
+function applyAppearance(look, { mine = false } = {}) {
   if (!look) return;
+  if (mine) S.lookSeq += 1;
+  const before = `${root.dataset.colors}|${root.dataset.importanceWords}`;
   if (look.colors === "color-blind") root.dataset.colors = "color-blind";
   else delete root.dataset.colors;
   if (look.importance_words) root.dataset.importanceWords = "on";
   else delete root.dataset.importanceWords;
+  // Changed elsewhere while Settings is open here: its boxes say so.
+  if (!mine && before !== `${root.dataset.colors}|${root.dataset.importanceWords}` && S.route && S.route.view === "settings") settings.redraw();
 }
 
 async function toggleColors() {
   try {
     const reply = await postJSON("/api/settings/colors", { colors: root.dataset.colors === "color-blind" ? "standard" : "color-blind" });
-    applyAppearance(reply.appearance);
+    applyAppearance(reply.appearance, { mine: true });
     toast(reply.message, { tone: "ok" });
     if (S.route && S.route.view === "settings") settings.open();
   } catch (error) {
@@ -863,7 +868,12 @@ function showDigest(date) {
 }
 
 const settings = createSettings({
-  appearance: () => ({ theme: theme(), railCollapsed: root.dataset.rail === "collapsed" }),
+  appearance: () => ({
+    theme: theme(),
+    railCollapsed: root.dataset.rail === "collapsed",
+    colors: root.dataset.colors === "color-blind" ? "color-blind" : "standard",
+    importanceWords: root.dataset.importanceWords === "on",
+  }),
   setTheme,
   toggleRail,
   processMail: () => processMail(),
@@ -878,7 +888,7 @@ const settings = createSettings({
   },
   changed(reply) {
     // New colors or importance words: on <html> at once. Nothing else follows from them.
-    if (reply.appearance) return applyAppearance(reply.appearance);
+    if (reply.appearance) return applyAppearance(reply.appearance, { mine: true });
     // A new time zone shows in every date the workspace writes; a new profile in the top bar and Today.
     if (reply.tz) document.body.dataset.tz = reply.tz;
     if (reply.job && S.meta) {
@@ -1168,12 +1178,13 @@ async function poll() {
   if (S.polling) return;
   S.polling = true;
   const seq = S.jobSeq;
+  const lookSeq = S.lookSeq;
   try {
     const meta = await getJSON("/api/state");
     if (seq !== S.jobSeq) throw new Error("a job started while this was on its way: ask again");
     const before = S.meta;
     S.meta = meta;
-    applyAppearance(meta.appearance);
+    if (lookSeq === S.lookSeq) applyAppearance(meta.appearance);
     renderTop();
     updateRail(navId());
     chat.setModel(meta.model);

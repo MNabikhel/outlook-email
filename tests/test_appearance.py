@@ -97,3 +97,16 @@ def test_html_attrs_is_empty_without_a_look():
     assert appearance.html_attrs({"colors": "standard", "importance_words": False}) == ""
     both = appearance.html_attrs({"colors": "color-blind", "importance_words": True})
     assert both == ' data-colors="color-blind" data-importance-words="on"'
+
+
+def test_todays_rows_carry_the_importance_in_words(client, demo):
+    """The workspace writes the importance on each row of Today as well as the mail lists, so /api/focus says it."""
+    from controller_inbox.models import IMPORTANCE_LABELS
+
+    rows = client.get("/api/focus", headers=PAGE).json()["focus"]
+    assert rows
+    for row in rows:
+        email = demo.get_email(row["email_id"])
+        assert row["importance"] == email.importance.value
+        assert row["importance_label"] == IMPORTANCE_LABELS[email.importance], row
+    assert {row["importance_label"] for row in rows} >= {"Critical", "High"}

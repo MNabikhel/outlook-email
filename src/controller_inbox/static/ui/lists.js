@@ -170,10 +170,14 @@ export async function loadList(spec, signal, want = MAIL_PAGE) {
 const chip = (text, cls = "", iconName = "") => h("span", { class: `chip ${cls}` }, iconName ? icon(iconName, 12) : null, text);
 // Held as possible payment fraud: "Files locked" when it has files; without any, that it is held (no files to look for).
 const heldChip = (d) => (d.files ? chip("Files locked", "chip-danger", "lock") : chip("Held: possible fraud", "chip-danger", "alert"));
+// The importance in words beside the colored edge, shown when Settings → Appearance asks for it (data-importance-words
+// on <html>), so ticking the box needs no list drawn again. Critical and High as the task list's tags; Medium and Low
+// the quiet grey tag.
+const levelTag = (d) => (d.importance && d.importance_label ? h("span", { class: `tag tag-prio-${d.importance} item-level` }, d.importance_label) : null);
 
 function mailRow(d) {
   return [
-    h("div", { class: "item-row1" }, h("span", { class: "item-from" }, d.sender || "(unknown sender)"), h("time", { class: "item-when", title: d.when_full }, d.when)),
+    h("div", { class: "item-row1" }, levelTag(d), h("span", { class: "item-from" }, d.sender || "(unknown sender)"), h("time", { class: "item-when", title: d.when_full }, d.when)),
     h("div", { class: "item-subj" }, d.subject),
     d.summary || d.why ? h("div", { class: "item-snip" }, d.summary || d.why) : null,
     h(
@@ -195,6 +199,7 @@ function focusRow(d) {
       "div",
       { class: "item-row1" },
       h("span", { class: `tag tag-${d.kind}` }, d.label),
+      levelTag(d),
       d.amount_label ? h("span", { class: "item-amount" }, d.amount_label) : null
     ),
     h("div", { class: "item-subj" }, d.title),

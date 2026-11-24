@@ -326,6 +326,7 @@ def register_workspace(
                     **row,
                     "amount_label": _money(row.get("amount")),
                     "importance": email.importance.value if email else "",
+                    "importance_label": IMPORTANCE_LABELS.get(email.importance, email.importance.value) if email else "",
                     "files": len(email.attachments) if email else 0,
                     "locked": fraud.attachments_locked(email) if email else False,
                     "when": short_when(email.received_at, settings.tz, today) if email else "",

@@ -47,7 +47,7 @@ function zoneNow(zone) {
 }
 
 /**
- * ctx: appearance() → { theme, railCollapsed }, setTheme(value), toggleRail(), processMail(), job() → the job now,
+ * ctx: appearance() → { theme, railCollapsed, colors, importanceWords } as the page shows them now, setTheme(value), toggleRail(), processMail(), job() → the job now,
  * show(node, { keepScroll }) puts the page in the reading pane, isShown() says it is still there, and
  * changed(reply) is told about a change the rest of the workspace should pick up (a new time zone or profile).
  */
@@ -234,20 +234,20 @@ export function createSettings(ctx) {
   /* ---------- Sections ---------- */
 
   function appearance() {
-    const { theme, railCollapsed } = ctx.appearance();
+    const { theme, railCollapsed, colors, importanceWords } = ctx.appearance();
     const segment = (value, label) => h("button", { type: "button", class: `seg${theme === value ? " on" : ""}`, "aria-pressed": String(theme === value), onclick: () => ctx.setTheme(value) }, label);
-    // Saved on the server the moment a box is ticked, like the calendar's box; the page changes colour at once.
-    const look = data.appearance || { colors: "standard", importance_words: false };
+    // Saved on the server the moment a box is ticked, like the calendar's box; the page changes colour at once. Each
+    // box shows what the page shows now, which a settings answer still on its way when the page was left can't undo.
     const colorBlind = h("input", {
       type: "checkbox",
       id: "set-colors",
-      checked: look.colors === "color-blind",
+      checked: colors === "color-blind",
       onchange: (event) => save("colors", "/api/settings/colors", { colors: event.currentTarget.checked ? "color-blind" : "standard" }, event.currentTarget),
     });
     const words = h("input", {
       type: "checkbox",
       id: "set-importance-words",
-      checked: Boolean(look.importance_words),
+      checked: importanceWords,
       onchange: (event) => save("colors", "/api/settings/colors", { importance_words: event.currentTarget.checked }, event.currentTarget),
     });
     return section(

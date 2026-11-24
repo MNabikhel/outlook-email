@@ -782,13 +782,14 @@ def test_badges_and_buttons_keep_their_contrast_in_dark_mode(browser, serve, sto
     from controller_inbox import appearance
 
     ingest_demo(store, settings, now=as_of_now)
-    appearance.save(store, colors=colors)
+    appearance.save(store, colors=colors, importance_words=True)
     base = serve()
     page = _page(browser, width=1280, dark=dark)
     checks = {
         "/app/mail/demo-bec-wire?in=fraud": [".brand-mark", ".rd-head .pill.imp-critical", "#rd-fraud .btn-danger", "#rd-fraud .tag-fraud"],
-        "/app/mail/demo-approval?in=all": [".rd-head .pill.imp-high"],
+        "/app/mail/demo-approval?in=all": [".rd-head .pill.imp-high", ".items .imp-critical .item-level", ".items .imp-high .item-level"],
         "/app/fraud": [".items .tag-fraud"],
+        "/app/tasks": [".items .tag-prio-critical", ".items .tag-prio-high"],
     }
     seen = {}
     for path, selectors in checks.items():
