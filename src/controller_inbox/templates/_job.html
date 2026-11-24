@@ -36,7 +36,8 @@
 <section class="job done"><strong>Indexed for search.</strong> <span>{{ job.result.indexed }} email{{ '' if job.result.indexed == 1 else 's' }} and file sections added. <a href="/settings#search">See Setup</a></span></section>
 {% elif job.state == 'done' and job.result and job.result.kind == 'outlook' %}
 {# Sync now or the automatic sync: what it copied, and whether the model could be loaded to read the new mail. #}
-<section class="job {{ 'error' if (job.result.outlook and job.result.outlook.note) or (job.result.model_load and job.result.model_load.failed) else 'done' }}"><strong>{{ job.result.message or 'Outlook synced.' }}</strong>{% if job.result.model_load %} <span>{{ job.result.model_load.message }}</span>{% endif %}</section>
+{% set stopped = job.result.model and job.result.model_note %}
+<section class="job {{ 'error' if (job.result.outlook and job.result.outlook.note) or (job.result.model_load and job.result.model_load.failed) or stopped else 'done' }}"><strong>{{ job.result.message or 'Outlook synced.' }}</strong>{% if job.result.model_load or stopped %} <span>{% if job.result.model_load %}{{ job.result.model_load.message }}{% endif %}{% if stopped %} {{ job.result.model_note }}{% endif %}</span>{% endif %}</section>
 {% elif job.state == 'done' and job.result %}
 {# A model LM Studio couldn't load, or one that stopped reading partway, is never shown as all done. #}
 {% set load_failed = job.result.model_load and job.result.model_load.failed %}

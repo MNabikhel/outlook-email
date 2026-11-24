@@ -1309,6 +1309,33 @@ def test_sync_now_says_when_the_model_couldn_t_be_loaded(loaded, settings, page,
         assert said in page.inner_text(".toast.error:has-text('Outlook synced: 2 new.')")
 
 
+def test_sync_now_says_when_the_model_stopped_reading_the_new_mail(loaded, settings, page, monkeypatch):
+    """A model that ran out of memory on every new email: Sync now's toast said only that Outlook synced and the
+    model loaded, in green."""
+    from liveserver import serving
+
+    from controller_inbox import outlook_desktop, outlook_sync, overnight
+
+    note = "Stopped reading: the local model ran out of memory on three messages in a row. Choose one in Settings."
+
+    def synced(*_args, **_kw):
+        time.sleep(1)  # the page sees the sync running, then finish
+        return {
+            "kind": "outlook", "outlook": {"new": 2}, "message": "Outlook synced: 2 new.", "model": "google/gemma-4-31b",
+            "model_note": note, "model_load": {"message": "Loaded google/gemma-4-31b in LM Studio.", "failed": False},
+        }
+
+    monkeypatch.setattr(outlook_desktop, "available", lambda: "")
+    monkeypatch.setattr(overnight, "outlook_run", synced)
+    outlook_sync.connect(loaded, calendar=False)
+    with serving(web.create_app(settings, loaded)) as base:
+        page.set_viewport_size({"width": 1280, "height": 900})
+        page.goto(f"{base}/app/settings#set-outlook")
+        page.click("#set-outlook button:has-text('Sync now')")
+        page.wait_for_selector(".toast.error:has-text('Outlook synced: 2 new.')", timeout=20000)
+        assert note in page.inner_text(".toast.error:has-text('Outlook synced: 2 new.')")
+
+
 def test_the_classic_page_shows_process_new_mail_with_a_failed_load_as_an_error(client):
     """Process new mail with a model LM Studio couldn't load showed as done, in green, and said "No local model was
     running" beside CloseDesk's own words that it had tried to load one."""

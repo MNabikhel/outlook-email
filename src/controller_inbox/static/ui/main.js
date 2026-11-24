@@ -1210,11 +1210,13 @@ function finished(job) {
     // The new mail had the model loaded in LM Studio first (or couldn't, and the mail was filed without it): said
     // with what was synced, and a failed load is never kept quiet.
     const load = result.model_load || null;
-    const failed = Boolean((result.outlook && result.outlook.note) || (load && load.failed));
+    // The model stopped reading the new mail partway (it ran out of memory, say): why, as Process new mail says.
+    const stopped = result.model && result.model_note ? ` ${result.model_note}` : "";
+    const failed = Boolean((result.outlook && result.outlook.note) || (load && load.failed) || stopped);
     // An automatic sync that found nothing new says nothing.
     if (!result.quiet || !(job.about && job.about.auto) || failed) {
-      const said = `${result.message || "Outlook synced."}${load ? ` ${load.message}` : ""}`;
-      toast(said, { tone: failed ? "error" : "ok", ms: load ? 12000 : 7000 });
+      const said = `${result.message || "Outlook synced."}${load ? ` ${load.message}` : ""}${stopped}`;
+      toast(said, { tone: failed ? "error" : "ok", ms: load || stopped ? 12000 : 7000 });
     }
     return;
   }

@@ -491,3 +491,20 @@ def test_a_model_that_loaded_but_read_none_of_the_mail_isn_t_said_to_read_it(set
         threading.Event().wait(0.02)
     page = client.get("/").text.replace("&#39;", "'")
     assert '<section class="job error">' in page and "reads the mail" not in page and result["model_note"] in page
+
+
+def test_sync_now_says_when_the_model_stopped_reading_the_new_mail(settings, store, monkeypatch):
+    """Sync now with a model that ran out of memory on every new email said only that Outlook synced and the model
+    loaded: why the mail wasn't read was said by Process new mail alone."""
+    result = _out_of_memory_run(settings, store, monkeypatch, kind="outlook")
+    assert result["model"] == GEMMA27 and result["model_note"].startswith("Stopped reading"), result
+    assert result["model_load"] == {"message": f"Loaded {GEMMA27} in LM Studio.", "failed": False}
+    client = TestClient(web.create_app(settings, store))
+    job = client.app.state.job
+    assert job.start(lambda progress: result, about={"kind": "outlook"})
+    for _ in range(250):
+        if job.snapshot()["state"] != "running":
+            break
+        threading.Event().wait(0.02)
+    page = client.get("/").text.replace("&#39;", "'")
+    assert '<section class="job error">' in page and result["model_note"] in page, page

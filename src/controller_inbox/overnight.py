@@ -254,8 +254,11 @@ def outlook_run(
         )
         write_digest_files(payload, settings.digest_dir, as_of.isoformat())
         result["read_by_bionic"] = len(reading["read_ids"])
+        # The model that read the new mail, and why it stopped partway (out of memory, say), as Process new mail says.
+        result["model"], result["model_note"] = reading["model"], reading["note"]
+        stopped = bool(reading["model"] and reading["note"])
         if reading.get("load"):
-            result["model_load"] = {"message": reading["load"]["message"], "failed": bool(reading["load"].get("failed"))}
+            result["model_load"] = model_choice.load_said(reading["load"], stopped=stopped)
         return result
 
 
