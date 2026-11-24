@@ -2340,6 +2340,9 @@ def _read_and_answer(ws: agent.Workspace, question: str, state: dict, *, history
         # from what was read below, rather than drop it all for the lookup answer.
         if not (ws.evidence or ws.read_files):
             raise
+    # The model answered the calls above, so it is loaded now: when LM Studio had unloaded it, the first of them had it
+    # load the model, and the check pass after them is a reading to time, not the load.
+    state["loaded"] = True
     if len(ws.sources) > known:
         yield {"type": "sources", "sources": source_cards(ws.sources, settings), "mode": "model"}
     draft = _TODAY_LINE.sub("", _ECHO_RE.split(draft, maxsplit=1)[0].rstrip()).rstrip()
