@@ -32,7 +32,7 @@ def github(sha: str = NEWER, date: str = "2026-11-16T09:12:00Z"):
     """GitHub's answer for main, and the URLs it was asked."""
     asked: list[str] = []
 
-    def ask(url: str) -> dict:
+    def ask(url: str, **_waits) -> dict:
         asked.append(url)
         return {"sha": sha, "commit": {"committer": {"date": date}, "message": "anything"}}
 
@@ -55,7 +55,7 @@ def download(tmp_path, monkeypatch):
 def no_github(monkeypatch):
     """Nothing here asks the real GitHub."""
 
-    def refuse(url):
+    def refuse(url, **_waits):
         raise AssertionError(f"a test asked the real GitHub: {url}")
 
     monkeypatch.setattr(updates, "_ask_github", refuse)
@@ -227,7 +227,7 @@ def test_the_open_closedesk_asks_by_itself(download, settings, store, monkeypatc
 
 def test_the_settings_say_what_the_check_does_in_plain_words(download, settings, store):
     note = updates.status(store, settings)["note"]
-    assert "Once a day" in note and "nothing about your mail is sent" in note and "CONTROLLER_INBOX_UPDATE_CHECK=false" in note
+    assert "When CloseDesk opens, and once a day" in note and "nothing about your mail is sent" in note and "CONTROLLER_INBOX_UPDATE_CHECK=false" in note
 
 
 # What the pages show -----------------------------------------------------------------------------------------
@@ -251,7 +251,7 @@ def test_the_classic_setup_page_shows_the_notice_and_the_button(download, settin
     client = TestClient(web.create_app(settings, store))
     page = client.get("/settings").text
     assert "CloseDesk 2026.11.13 (aaaaaaa)" in page and "A newer CloseDesk" not in page
-    assert "Once a day" in page
+    assert "When CloseDesk opens, and once a day" in page
     updates.check(store, settings, now=NOW, ask=github())
     page = client.get("/settings").text
     assert "A newer CloseDesk is ready (2026.11.16; you have 2026.11.13)." in page

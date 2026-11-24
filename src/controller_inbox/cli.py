@@ -695,14 +695,17 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None,
             "Use CONTROLLER_INBOX_HOST=127.0.0.1 to keep it on this computer only.\n",
             flush=True,
         )
-    # Once a day at most, while it is open: whether a newer CloseDesk is out (updates.py).
+    # As it opens, and once a day at most while it is open: whether a newer CloseDesk is out (updates.py). The answer
+    # as it opens is the question the first page asks, with whether an update asked for before didn't finish.
     from controller_inbox import updates
 
+    app.state.update_question.begin(store, settings, failed=updates.update_unfinished(store))
     updates.start_checking(store, settings)
     _run_server(app, host=host or settings.host, port=port or settings.port)
-    # Settings' Update button stopped it: the launcher updates CloseDesk and starts it again.
+    # Settings' Update button (or the question's) stopped it: the launcher updates CloseDesk and starts it again.
     if getattr(app.state, "update_asked", False):
         _remember_port(store, port or settings.port)
+        updates.remember_update_asked(store)
         print("\nCloseDesk stops now to update, and opens again by itself when the update is done.", flush=True)
         return updates.UPDATE_AND_RESTART
     return 0

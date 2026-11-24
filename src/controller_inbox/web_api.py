@@ -1179,6 +1179,21 @@ def register_workspace(
             raise HTTPException(status_code=409, detail=why)
         return {"ok": True, "message": updates.UPDATING, "commit": version.installed()[0]}
 
+    @api.get("/update/question")
+    def update_question():
+        """The question the first page shown asks each time CloseDesk opens (updates.Question): whether a newer
+        version is out and can be updated to now, and while GitHub is still being asked, to ask again shortly."""
+        return app.state.update_question.view(store, settings, job.snapshot()["state"])
+
+    @api.post("/update/question")
+    async def update_question_answer(request: Request):
+        """Not now: not asked again until CloseDesk opens again. (Update now is POST /api/update.)"""
+        data = await json_body(request)
+        if data.get("answer") != "not-now":
+            raise HTTPException(status_code=400, detail="Answer not-now, or update with /api/update.")
+        app.state.update_question.answer()
+        return {"ok": True}
+
     @api.get("/settings/check")
     def settings_check():
         """The self-check the launchers run (``doctor``), for Settings: what is in order and what isn't."""

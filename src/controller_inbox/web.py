@@ -377,6 +377,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     job = ProcessJob()
     app.state.job = job
+    # Whether to update, asked on the first page shown each time CloseDesk opens (begun by cli._serve).
+    app.state.update_question = updates.Question()
 
     def board_date(sample: bool | None = None):
         """Today, or the sample's date when only the sample mailbox is loaded (``sample``: whether it is, when
