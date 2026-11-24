@@ -2066,7 +2066,8 @@ def step_back_context(settings: Settings, key: str, size: int) -> str:
             raise StepBackRefused(f"{key} isn't loaded in LM Studio as it was, so nothing was reloaded. Ask again to see how it answers now.")
         back, answered = _step_back_size(key, loaded)
         if not back or back != size:
-            raise StepBackRefused(f"{key} is loaded with a {loaded:,}-token context now, so nothing was reloaded. Ask again to see how it answers now.")
+            article = "an" if str(loaded).startswith("8") else "a"
+            raise StepBackRefused(f"{key} is loaded with {article} {loaded:,}-token context now, so nothing was reloaded. Ask again to see how it answers now.")
         if model_busy(status.model, key):  # unloading it would cut off another answer or the overnight reading
             raise StepBackRefused(f"{key} is answering another request. Once it is done, try again.")
         _context_raised.add(status.model)

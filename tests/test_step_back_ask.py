@@ -264,3 +264,12 @@ def test_the_offer_is_never_under_4096_tokens(store, settings, mail, monkeypatch
     done = TestClient(web.create_app(settings, store)).post("/chat/step-back", json={"model": BIG, "size": offer["size"]}, headers=PAGE)
     assert done.status_code == 200, done.json()
     assert server.loaded[BIG] == offer["size"]
+
+
+def test_an_old_offer_pressed_after_the_reload_says_an_8192_token_context(store, settings, mail, monkeypatch):
+    _closedesk_loaded(settings, monkeypatch)
+    _events(store, settings, QUESTION, mail["Q4 budget draft"].id)
+    local_llm.step_back_context(settings, BIG, 8192)
+    refused = TestClient(web.create_app(settings, store)).post("/chat/step-back", json={"model": BIG, "size": 8192}, headers=PAGE)
+    assert refused.status_code == 409
+    assert f"{BIG} is loaded with an 8,192-token context now" in refused.json()["detail"], refused.json()
