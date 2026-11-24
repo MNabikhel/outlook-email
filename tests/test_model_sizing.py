@@ -508,6 +508,19 @@ def test_settings_for_a_remembered_model_not_loaded_says_what_closedesk_will_ask
     assert "CONTROLLER_INBOX" not in page and f"{BIG} isn't loaded in LM Studio right now" in page
 
 
+def test_a_remembered_model_not_loaded_isnt_said_to_be_ready(settings, lm):
+    """With nothing loaded in LM Studio, Settings said "Local model ready: <model>": nothing said it wasn't loaded,
+    or that the first question would wait for LM Studio to load it."""
+    from controller_inbox import local_llm
+
+    settings.llm = True
+    local_llm.remember_model(settings, BIG)
+    said = check_model(settings, use_cache=False).describe()
+    assert "ready" not in said and f"{BIG}" in said and "isn't loaded now: LM Studio loads it when you ask something" in said, said
+    lm.loaded.append(BIG)
+    assert check_model(settings, use_cache=False).describe().startswith(f"Local model ready: {BIG} at ")
+
+
 def test_a_server_that_doesnt_say_its_context_isnt_answered_with_a_settings_variable(settings):
     from controller_inbox import model_fit
     from controller_inbox.local_llm import ModelStatus

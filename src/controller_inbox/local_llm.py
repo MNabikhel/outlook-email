@@ -156,6 +156,9 @@ class ModelStatus:
     def describe(self) -> str:
         if self.mode == "off":
             return "The local model is turned off in CloseDesk's settings file (.env)."
+        if self.active and self.lm_studio and not loaded_now(self, self.model):
+            # The model used last, downloaded but unloaded (LM Studio's idle unload, a restart): not "ready".
+            return f"Local model: {self.model} at {self.base_url}. It isn't loaded now: LM Studio loads it when you ask something."
         if self.active:
             return f"Local model ready: {self.model} at {self.base_url}"
         if self.reachable:
