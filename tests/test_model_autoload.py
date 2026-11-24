@@ -128,8 +128,10 @@ def test_a_load_that_fails_says_why_and_the_mail_is_read_without_a_model(setting
     lm.fails_to_load = {CHAT}
     loaded = model_choice.load_at_start(settings)
     assert loaded["model"] == "" and loaded["failed"]
-    assert loaded["message"].startswith(f"CloseDesk couldn't load {CHAT} in LM Studio. LM Studio couldn't load {CHAT} (not enough memory")
-    assert "filed without a model for now" in loaded["message"]
+    # Said once, not "CloseDesk couldn't load X in LM Studio. LM Studio couldn't load X (...)".
+    assert loaded["message"].startswith(f"LM Studio couldn't load {CHAT} (not enough memory"), loaded["message"]
+    assert loaded["message"].count("couldn't load") == 1 and "filed without a model for now" in loaded["message"]
+    assert loaded["message"].count("Settings") == 1, "told once where to choose another"
     # LM Studio isn't asked to load it again on its own for each email: the reading goes on without a model.
     assert check_model(settings, use_cache=False).model == "" and not llm_active(settings)
     assert read_queue(store, settings)["model"] == "" and lm.asked == []

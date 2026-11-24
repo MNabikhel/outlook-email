@@ -179,12 +179,12 @@ def _load(settings: Settings, key: str, on_progress: Callable[[str, int, int, st
         # The user loaded one meanwhile: it answers, and nothing was loaded beside it.
         return {"model": "", "message": ""}
     if problem:
-        return {
-            "model": "",
-            "message": f"CloseDesk couldn't load {key} in LM Studio. {problem} The mail is filed without a model "
-            "for now; choose another in Settings → Local model.",
-            "failed": True,
-        }
+        # LM Studio's refusal already names the model (and, out of memory, what to choose in Settings): said once.
+        said = problem if problem.startswith(f"LM Studio couldn't load {key}") else f"CloseDesk couldn't load {key} in LM Studio. {problem}"
+        then = "The mail is filed without a model for now." if "Settings" in problem else (
+            "The mail is filed without a model for now; choose another in Settings → Local model."
+        )
+        return {"model": "", "message": f"{said} {then}", "failed": True}
     return {"model": key, "message": f"Loaded {key} in LM Studio: it answers your questions and reads the mail."}
 
 

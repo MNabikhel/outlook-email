@@ -1309,6 +1309,21 @@ def test_sync_now_says_when_the_model_couldn_t_be_loaded(loaded, settings, page,
         assert said in page.inner_text(".toast.error:has-text('Outlook synced: 2 new.')")
 
 
+def test_the_classic_page_shows_process_new_mail_with_a_failed_load_as_an_error(client):
+    """Process new mail with a model LM Studio couldn't load showed as done, in green, and said "No local model was
+    running" beside CloseDesk's own words that it had tried to load one."""
+    said = "LM Studio couldn't load google/gemma-3-27b (Not enough memory). The mail is filed without a model for now."
+    result = {"ingested": 0, "model": "", "model_note": said, "model_load": {"message": said, "failed": True}}
+    job = client.app.state.job
+    assert job.start(lambda progress: result)
+    deadline = time.monotonic() + 5
+    while job.snapshot()["state"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.02)
+    page = client.get("/").text.replace("&#39;", "'")
+    assert '<section class="job error">' in page and said in page and page.count("couldn't load") == 1
+    assert "No local model was running" not in page
+
+
 def test_the_classic_page_says_what_a_sync_did_and_that_the_model_couldn_t_be_loaded(client):
     """The classic page showed a finished sync as "Processed. Read  new files", with none of what it said."""
     said = "CloseDesk couldn't load google/gemma-4-31b in LM Studio. The mail is filed without a model for now."
