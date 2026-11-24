@@ -42,6 +42,10 @@ LATEST_URL = "https://api.github.com/repos/MNabikhel/outlook-email/commits/main"
 UPDATE_AND_RESTART = 75
 # Set by scripts/launch.py when it starts CloseDesk for a launcher, which acts on UPDATE_AND_RESTART.
 LAUNCHER_ENV = "CLOSEDESK_LAUNCHER"
+# Set by scripts/launch.py for the CloseDesk app (``--app``, the shortcut): no console window, so what CloseDesk says
+# goes to the log named in APP_LOG_ENV (app_window.py).
+APP_ENV = "CLOSEDESK_APP"
+APP_LOG_ENV = "CLOSEDESK_APP_LOG"
 STATE_KEY = "update_latest"
 CHECK_EVERY = timedelta(days=1)
 # How often the open CloseDesk looks whether a day has passed, and how long it waits after starting.
@@ -301,6 +305,8 @@ ASK_TITLE = "A new version of CloseDesk is ready"
 ASK_HOW = "Updating takes a minute or two: CloseDesk closes, fetches the new version and opens again by itself. Your mail and settings are kept."
 UNFINISHED_TITLE = "CloseDesk wasn't updated"
 UNFINISHED = "The update didn't finish, so CloseDesk opened as it was. Your mail and settings are kept; CloseDesk's window says what went wrong."
+# The app has no console window: what went wrong is in its log.
+UNFINISHED_IN_APP = "The update didn't finish, so CloseDesk opened as it was. Your mail and settings are kept; what went wrong is written in {log}."
 DONE = "The mail is done: CloseDesk can update now."
 # The commit CloseDesk was when it stopped to update: opened again as the same one, the update didn't finish.
 ASKED_FROM_KEY = "update_asked_from"
@@ -362,7 +368,7 @@ class Question:
             "newer": newer,
             "failed": failed,
             "title": UNFINISHED_TITLE if failed else ASK_TITLE,
-            "failed_message": UNFINISHED if failed else "",
+            "failed_message": unfinished_message() if failed else "",
             "message": f"CloseDesk {shown['latest']} is out; you have {shown['mine']}." if newer else "",
             "whats_new": shown["whats_new"] if newer else "",
             "how": ASK_HOW,
@@ -374,6 +380,12 @@ class Question:
             # The page waits for CloseDesk to answer as another version once it stopped to update.
             "commit": shown["commit"],
         }
+
+
+def unfinished_message() -> str:
+    """Why CloseDesk opened again as it was, and where to read what went wrong: the launcher's window, or the app's log."""
+    log = os.environ.get(APP_LOG_ENV, "") if os.environ.get(APP_ENV) == "1" else ""
+    return UNFINISHED_IN_APP.format(log=log) if log else UNFINISHED
 
 
 def remember_update_asked(store) -> None:

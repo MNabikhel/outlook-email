@@ -84,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
     digest.add_argument("--history", action="store_true", help="List saved digests instead of building one.")
     digest.add_argument("--json", action="store_true", help="Print JSON instead of markdown.")
 
+    window = sub.add_parser("app", help="Open CloseDesk in a window of its own (what the CloseDesk shortcut runs).")
+    window.add_argument("--host", default=None)
+    window.add_argument("--port", type=int, default=None)
+
     serve = sub.add_parser("serve", help="Open the local CloseDesk dashboard.")
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
@@ -138,6 +142,11 @@ def main(argv: list[str] | None = None) -> int:
         from controller_inbox import doctor
 
         return doctor.main()
+    if args.cmd == "app":
+        # Before the settings are read: the window has no console, so it says itself when they stop CloseDesk.
+        from controller_inbox import app_window
+
+        return app_window.main(args)
     try:
         settings = load_settings()
         store = Store(settings.db_path)
@@ -409,6 +418,12 @@ def load_sample(store: Store, settings: Settings):
 def _run(settings: Settings, store: Store, args) -> int:
     from controller_inbox.overnight import RunBusy, run_overnight
 
+    from controller_inbox.app_window import WHY_ENV
+
+    # Opened from the CloseDesk shortcut when its window couldn't open here: why, in this window too.
+    why = os.environ.pop(WHY_ENV, "")
+    if why:
+        print(why + "\n")
     print(f"CloseDesk — reading {settings.inbox_incoming}")
 
     def progress(stage: str, done: int, total: int, note: str) -> None:
@@ -738,10 +753,27 @@ def _run_server(app, *, host: str, port: int) -> None:
         server.should_exit = True
 
     app.state.stop_server = stop
+    from controller_inbox.app_window import STOP_WITH_PARENT
+
+    if os.environ.pop(STOP_WITH_PARENT, "") == "1" and sys.stdin is not None:
+        # Started by the CloseDesk window, which holds this one's input open: once the window's process ends, however
+        # it ends (closed, Cmd+Q, ended in Task Manager), the input ends and CloseDesk stops as Ctrl+C stops it.
+        stream = getattr(sys.stdin, "buffer", sys.stdin)
+        threading.Thread(target=_stop_when_input_ends, args=(stream, stop), name="stop-with-window", daemon=True).start()
     server.run()
     if not server.started and not server.should_exit:
         # The port couldn't be opened (uvicorn has said why): as uvicorn.run does, end with an error.
         raise SystemExit(3)
+
+
+def _stop_when_input_ends(stream, stop) -> None:
+    """Read ``stream`` (nothing is sent on it) until it ends, then ``stop``."""
+    try:
+        while stream.read(65536):
+            pass
+    except (OSError, ValueError):
+        pass
+    stop()
 
 
 def _link_stored_mail(settings: Settings, store: Store) -> None:
