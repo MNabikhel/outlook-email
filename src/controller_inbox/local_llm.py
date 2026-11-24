@@ -1117,9 +1117,11 @@ def _empty_reply(settings: Settings, model: str, budget: int, reply: Reply) -> E
     if not options or "off" in options:
         return EmptyReply(reply.why_unusable())
     _thinks_too_long.add(model)
+    # Not the family of the model that failed (a Qwen3 Thinking build, or a DeepSeek-R1 distilled from Qwen3).
+    example = "Gemma 3" if "qwen" in model.lower() else "Qwen3"
     return ThinksTooLong(
         f"{model} thinks before every answer and can't be told not to, and it ran out of room even with {budget:,} "
-        "tokens. Choose one that can, like Qwen3, or a smaller one in Settings"
+        f"tokens. Choose one that doesn't have to think first, like {example}, or a smaller one in Settings"
     )
 
 

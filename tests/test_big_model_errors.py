@@ -196,7 +196,7 @@ def test_a_reader_whose_model_thinks_past_twice_the_room_says_so_plainly(setting
     assert [c["max_tokens"] for c in server.calls] == [2048, 4096], "4,096 once, then the run stops"
     reason = reader.stats.stopped_reason
     assert reason.startswith(f"{reader.model} thinks before every answer and can't be told not to"), reason
-    assert "like Qwen3, or a smaller one in Settings" in reason and "three messages" not in reason
+    assert "like Gemma 3, or a smaller one in Settings" in reason and "three messages" not in reason
 
 
 @pytest.mark.parametrize("call", ["complete", "stream"])
@@ -211,7 +211,7 @@ def test_a_chat_whose_model_thinks_past_twice_the_room_says_so_plainly(settings,
         else:
             list(stream_text(settings, messages, max_tokens=500))
     note = failure_note(caught.value)
-    assert "thinks before every answer and can't be told not to" in note and "like Qwen3" in note, note
+    assert "thinks before every answer and can't be told not to" in note and "like Gemma 3" in note, note
     assert note.endswith("in Settings.")
 
 
@@ -232,7 +232,7 @@ def test_the_overnight_reading_says_once_why_it_stopped(loaded, settings, monkey
     result = read_queue(loaded, settings, limit=6, reader=reader)
     assert result["note"] == (
         f"Stopped reading: {reader.model} thinks before every answer and can't be told not to, and it ran out of room "
-        "even with 4,096 tokens. Choose one that can, like Qwen3, or a smaller one in Settings."
+        "even with 4,096 tokens. Choose one that doesn't have to think first, like Gemma 3, or a smaller one in Settings."
     )
     assert len(server.calls) == 2, "one email, at 2,048 tokens and then 4,096, before the run stopped"
 
@@ -289,3 +289,14 @@ def test_a_chat_model_that_thought_past_twice_the_room_is_asked_once_next_time(s
             list(stream_text(settings, messages, max_tokens=500))
     assert [call["max_tokens"] for call in server.calls] == [2048, 4096, 4096]
     assert not [call for call in server.calls if call.get("reasoning_effort") == "none"], "it allows only on"
+
+
+@pytest.mark.parametrize("model", ["qwen/qwen3-30b-a3b-thinking-2507", "deepseek/deepseek-r1-0528-qwen3-8b", "deepseek-r1-distill-llama-8b"])
+def test_the_model_suggested_in_its_place_isnt_its_own_family(settings, monkeypatch, model):
+    """A Qwen3 Thinking build that thought too long was told to choose "one that can, like Qwen3"."""
+    status = local_llm.ModelStatus(mode="auto", reachable=True, model=model, reasoning=["on"])
+    monkeypatch.setattr(local_llm, "check_model", lambda *_a, **_k: status)
+    reply = local_llm.Reply(content="", reasoning="Let me think.", finish="length")
+    note = failure_note(local_llm._empty_reply(settings, model, 2 * local_llm.THINKING_ROOM, reply))
+    assert "doesn't have to think first, like" in note, note
+    assert ("like Qwen3" in note) == ("qwen" not in model.lower()), note
