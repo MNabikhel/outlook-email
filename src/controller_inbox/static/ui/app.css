@@ -907,6 +907,10 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 .more-time-minutes { width: 5em; height: 30px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); }
 .more-time-status:empty { display: none; }
 .more-time-status.error { color: var(--danger); }
+.msg-step-back { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); font-size: 12.5px; }
+.msg-step-back p { margin: 0; }
+.step-back-status:empty { display: none; }
+.step-back-status.error { color: var(--danger); }
 @media (max-width: 900px) { .vision-columns { grid-template-columns: 1fr; } }
 
 /* ---------- Pages (overview, digest, settings) ---------- */

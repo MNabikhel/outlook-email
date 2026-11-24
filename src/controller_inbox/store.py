@@ -2035,6 +2035,18 @@ class Store:
             rows = conn.execute("SELECT role, text, data, at FROM chat_turns WHERE chat_id = ? ORDER BY id", (chat_id,)).fetchall()
         return [{**_loads(row["data"], {}), "role": row["role"], "text": row["text"], "at": row["at"]} for row in rows]
 
+    def close_step_backs(self, chat_id: str) -> None:
+        """The offers to reload the model smaller in this conversation are answered (reloaded, or kept as is): marked
+        closed, so they aren't offered again when it is opened again."""
+        with self.connect() as conn:
+            rows = conn.execute("SELECT id, data FROM chat_turns WHERE chat_id = ? AND role = 'assistant'", (chat_id,)).fetchall()
+            for row in rows:
+                data = _loads(row["data"], {})
+                offer = data.get("step_back")
+                if isinstance(offer, dict) and not offer.get("closed"):
+                    data["step_back"] = {**offer, "closed": True}
+                    conn.execute("UPDATE chat_turns SET data = ? WHERE id = ?", (_dumps(data), row["id"]))
+
     def past_exchanges(self, *, exclude: str = "", limit: int = 2_000) -> list[dict[str, Any]]:
         """Question-and-answer pairs from other conversations, newest first. Only finished answers from the
         model count: failed, stopped and plain-lookup replies are not worth learning from."""

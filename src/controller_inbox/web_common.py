@@ -46,6 +46,8 @@ NOTICES = {
     "model-wait": "Saved. CloseDesk waits at least this long for this model from now on.",
     "model-wait-auto": "Saved. CloseDesk works out how long to wait for this model again.",
     "model-wait-refused": "The wait wasn't changed.",
+    "step-back": "Reloaded.",
+    "step-back-refused": "The model wasn't reloaded.",
     "index-failed": "The embedding model didn't answer, so nothing was indexed. Load one in LM Studio and try again.",
     "index-off": "No embedding model found. Load one in LM Studio (for example nomic-embed-text) and try again.",
     "coding-confirmed": "Cost code confirmed. The next invoice from this sender is suggested the same code.",

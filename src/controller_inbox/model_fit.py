@@ -4,7 +4,7 @@ The context. Setup's minimum (``min_context_tokens``) is what a small model gets
 memory with that much is asked for the largest of Setup's steps (``agent.CONTEXT_STEPS``) that still fits, never less
 than 4,096 tokens (or the most the model supports): the minimum is "at most" for a big model. Loading at the start,
 Load and use in Settings, and the chat raising the context all ask for this. A load that still runs out of memory
-steps back (``local_llm.step_back_context``).
+is offered smaller (``local_llm.step_back_offer``) and loaded so once the user says yes (``step_back_context``).
 
 The wait. How long the chat waits for the model's first word (it reads the whole prompt before it writes one), and
 how long the reading of mail waits between words. Worked out per model: from how fast it read prompts and wrote
@@ -646,6 +646,8 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
     fits = context_fits(settings, model)
     capped = context_capped(settings, model)
     short = False  # the window can't be used as it is, however long it is
+    # It ran out of memory with the context CloseDesk gave it: Settings offers it smaller, as the chat did.
+    step_back = local_llm.settings_step_back(settings, model) if model.key else None
     # The model used last, not loaded now: LM Studio loads it when it is asked, and CloseDesk then sizes it.
     waiting = bool(model.lm_studio and model.model and not model.key and model.model in model.chat_models)
     if waiting:
@@ -667,6 +669,9 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
             "The model server doesn't say how long its context is. For whole workbooks and PDFs, load the model "
             f"there with a context length of {recommended:,} or more."
         )
+    elif step_back:
+        advice = f"{step_back['text']} Press Reload with {step_back['size']:,} to have it answer again."
+        short = True
     elif (
         model.key and model.context_length > target > 0
         and local_llm._context_given.get(model.key) != model.context_length
@@ -678,6 +683,23 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
             f"out of memory. To fix it, reload it in LM Studio with Context Length {target:,} (My Models → the "
             "model's settings → Context Length), the most that fits here."
         )
+        short = True
+    elif (
+        model.key and local_llm._theirs_ran_out.get(model.key) == window
+        and local_llm._context_given.get(model.key) != window
+    ):
+        # Loaded in LM Studio by the user, and an answer ran out of memory with it: CloseDesk leaves it as it is, and
+        # says what to reload it with there.
+        if smaller := local_llm._smaller_context(window):
+            advice = (
+                f"{model.key} ran out of memory answering with {window:,} tokens. To fix it, reload it in LM Studio "
+                f"with Context Length {smaller:,} (My Models → the model's settings → Context Length)."
+            )
+        else:
+            advice = (
+                f"{model.key} ran out of memory even with {window:,} tokens: it doesn't fit in this computer's "
+                "memory. Choose a smaller model."
+            )
         short = True
     elif needs_more_context(settings) and fits:
         why = "the most that fits this computer" if capped else "the minimum set below"
@@ -697,9 +719,18 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
     else:
         advice = "Ask CloseDesk reads long attachments a section at a time with this."
         ran_out = local_llm._context_stepped.get(model.key, 0) if model.key else 0
-        if ran_out > window:
+        theirs = local_llm._theirs_ran_out.get(model.key, 0) if model.key else 0
+        if theirs > window and theirs <= target:
+            # Reloaded smaller in LM Studio after it ran out of memory there: not raised back to that size.
             advice += (
-                f" {model.key} ran out of memory answering with {ran_out:,} tokens, so CloseDesk loaded it back with "
+                f" {model.key} ran out of memory answering with {theirs:,} tokens, so CloseDesk leaves it at "
+                f"{window:,}. A smaller model has room for more."
+            )
+        elif ran_out > window:
+            # "back" to a size it had before; "again" with the next size down, one it never had.
+            how = "back" if model.key in local_llm._context_stepped_back else "again"
+            advice += (
+                f" {model.key} ran out of memory answering with {ran_out:,} tokens, so CloseDesk loaded it {how} with "
                 f"{window:,}. A smaller model has room for more."
             )
         elif model.key and model.context_length and window < target and not fits:
@@ -738,5 +769,6 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
         "label": "not loaded yet" if waiting else f"{window:,} tokens" if window else "not reported",
         "tone": "ok" if window >= recommended and not short else "short",
         "advice": advice,
+        "step_back": step_back,
     }
 

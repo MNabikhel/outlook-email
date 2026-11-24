@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, model_choice, model_fit, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
+    agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, local_llm, model_choice, model_fit, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
     semantic, services, table_lookup, updates, version, vision,
 )
 from controller_inbox.extract import extraction_failed
@@ -1264,6 +1264,20 @@ def register_workspace(
         if notice == "context-reloaded":  # what the smaller minimum did to the model loaded in LM Studio
             return {**saved(notice), "message": f"{NOTICES[notice]} {setup['context_change']()}"}
         return saved(notice)
+
+    @api.post("/settings/step-back")
+    async def settings_step_back(request: Request):
+        """Settings' "Reload with ..." after the model ran out of memory with the context CloseDesk gave it: LM Studio
+        loads it again with the smaller context offered."""
+        data = await json_body(request)
+        try:
+            # Loading a model in LM Studio can take minutes: off the event loop.
+            said = await run_in_threadpool(local_llm.step_back_asked, settings, data)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except local_llm.StepBackRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        return {"ok": True, "message": said}
 
     @api.post("/settings/index")
     def settings_index():
