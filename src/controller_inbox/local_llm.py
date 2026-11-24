@@ -1410,6 +1410,9 @@ _context_before: dict[str, int] = {}
 # The context a model CloseDesk raised last answered with, by key: when the longer one runs out of memory it is loaded
 # back with this (after a second raise, the size that worked rather than the user's first one).
 _context_back: dict[str, int] = {}
+# The context each model CloseDesk loaded back ran out of memory answering with, by key, for Settings to say so (not
+# that LM Studio couldn't load it). Forgotten when the minimum is changed or the model is loaded afresh.
+_context_stepped: dict[str, int] = {}
 _context_lock = threading.Lock()
 
 # Models answering a request right now (a chat answer, the overnight reading, a page read), by the name the request
@@ -1603,6 +1606,7 @@ def set_min_context(settings: Settings, tokens: int) -> str:
     it is. Returns what happened ("" when nothing did)."""
     settings.min_context_tokens = tokens
     _context_raised.clear()
+    _context_stepped.clear()
     if not _context_given:  # nothing CloseDesk sized (at the start, always): LM Studio isn't asked
         return ""
     # Another load holds the lock for as long as LM Studio takes: say so rather than wait for it.
@@ -1722,6 +1726,7 @@ def step_back_context(settings: Settings) -> str:
         if problem:
             return problem
         _context_back.pop(key, None)
+        _context_stepped[key] = loaded
         if back == before:  # as the user had it: theirs again
             _context_given.pop(key, None)
             _context_before.pop(key, None)
@@ -1989,6 +1994,7 @@ def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) 
         finally:
             _status_cache.clear()
         _context_raised.discard(key)  # loaded afresh: a longer context may be tried again
+        _context_stepped.pop(key, None)
         _chat_load_failed.pop(key, None)
         remember_model(settings, key)
         return ""

@@ -39,6 +39,7 @@ def _fresh_model_memory():
         local_llm._context_given,
         local_llm._context_before,
         local_llm._context_back,
+        local_llm._context_stepped,
         local_llm._reader_failed,
         local_llm._pending_loads,
         local_llm._chat_load_failed,

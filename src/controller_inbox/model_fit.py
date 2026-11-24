@@ -464,7 +464,13 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
         advice = "Enough to read whole attachments when you ask about them."
     else:
         advice = "Ask CloseDesk reads long attachments a section at a time with this."
-        if model.key and model.context_length and window < target and not fits:
+        ran_out = local_llm._context_stepped.get(model.key, 0) if model.key else 0
+        if ran_out > window:
+            advice += (
+                f" {model.key} ran out of memory answering with {ran_out:,} tokens, so CloseDesk loaded it back with "
+                f"{window:,}. A smaller model has room for more."
+            )
+        elif model.key and model.context_length and window < target and not fits:
             advice += (
                 f" {model.key} with {target:,} tokens wouldn't fit in this computer's memory, so CloseDesk keeps it "
                 "as LM Studio loaded it. Pick a smaller model, or a smaller minimum below."

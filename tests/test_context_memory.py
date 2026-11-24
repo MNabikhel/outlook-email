@@ -358,3 +358,24 @@ def test_settings_says_a_context_the_user_loaded_doesnt_fit(store, settings, mai
         SIZES.update(SIZES_BEFORE)
     assert "instead" not in warning and warning.count(", so ") == 1, warning
     assert "when CloseDesk loads it, it asks for a" in warning, warning
+
+
+def test_settings_after_a_step_back_says_the_answer_ran_out_of_memory_not_that_the_load_failed(store, settings, mail, monkeypatch):
+    """After CloseDesk raised a model, the answer ran out of memory and the model was loaded back, Settings said "LM
+    Studio couldn't load" it with the longer context and to pick a smaller minimum, though the load had gone through,
+    the chat had just said why it was loaded back, and no smaller minimum changes what CloseDesk asks for."""
+    from controller_inbox import model_fit
+
+    settings.llm = True
+    server = MacLMStudio({BIG: 4096})
+    _serve(monkeypatch, server)
+    steps, _modes, _text = _ask(store, settings, "What is the total in this budget?", mail["Q4 budget draft"].id)
+    assert f"Loaded {BIG} back with a 4,096-token context: 16,384 didn't fit in this computer's memory." in steps
+    local_llm._status_cache.clear()
+    advice = model_fit.context_line(settings, local_llm.check_model(settings))["advice"]
+    assert "couldn't load" not in advice and "smaller minimum" not in advice, advice
+    assert f"{BIG} ran out of memory answering with 16,384 tokens, so CloseDesk loaded it back with 4,096." in advice
+
+    # Choosing it again in Settings, or changing the minimum, forgets it.
+    assert local_llm.use_chat_model(settings, BIG) == ""
+    assert BIG not in local_llm._context_stepped
