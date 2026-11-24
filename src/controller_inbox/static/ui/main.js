@@ -1278,10 +1278,13 @@ function finished(job) {
     return;
   }
   // Only the drop folder's files are counted: with new mail from Outlook (said next), "No new files." would say nothing
-  // new came in, so a count of none is left out then, as in the launcher window (cli.files_read_said).
+  // new came in, so a count of none is left out then, or said as the drop folder's when dropped files were already
+  // filed, as in the launcher window (cli.files_read_said). Files already filed are said, so someone who just dropped
+  // them knows why nothing was read.
   const brought = Boolean((result.outlook && result.outlook.new) || result.graph_synced);
-  const files =
-    typeof result.ingested !== "number" ? "" : result.ingested ? `Read ${plural(result.ingested, "new file")}.` : brought ? "" : "No new files.";
+  const already = result.already_read || 0;
+  const count = result.ingested ? `Read ${plural(result.ingested, "new file")}` : !brought ? "No new files" : already ? "No new files in the drop folder" : "";
+  const files = typeof result.ingested !== "number" || !count ? "" : `${count}${already ? `, ${already} already filed` : ""}.`;
   const read = [files, result.files_summarized ? `Summarized ${plural(result.files_summarized, "file")}.` : ""].filter(Boolean).join(" ");
   const processed = read ? `Processed. ${read}` : "Processed.";
   const synced = result.outlook_message ? ` ${result.outlook_message}` : "";

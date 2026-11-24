@@ -5,7 +5,11 @@ rest of each message is as it was. The toast is checked in a real Chromium (skip
 The count is of the drop folder's files only: mail Outlook sync brings in is filed apart from it, so a run that
 copied 3 new emails from Outlook counts 0. "No new files." there said nothing new came in, next to "Outlook synced:
 3 new.". Such a run leaves the count unsaid (or, when dropped files were already filed, says it is the drop folder's).
-The `ingest` command words its count the same way."""
+The `ingest` command words its count the same way.
+
+The workspace's toast never said files that were already filed, as the classic page and the launcher window do: someone
+who dropped 2 files again read only "No new files.". It now says "No new files, 2 already filed.", worded as
+cli.files_read_said words it."""
 
 from __future__ import annotations
 
@@ -165,7 +169,24 @@ TOASTS = [
         {"ingested": 0, "outlook": {"new": 0, "updated": 0, "moved": 0, "removed": 0}, "outlook_message": "Outlook synced: nothing new."},
         "Processed. No new files. Outlook synced: nothing new.",
     ),
+    # Dropped files that were already filed are said, as on the classic page and in the launcher window: someone who
+    # just dropped 2 files and read "No new files." alone had no hint why nothing was read.
+    ({"ingested": 0, "already_read": 2}, "Processed. No new files, 2 already filed."),
+    ({"ingested": 4, "already_read": 1}, "Processed. Read 4 new files, 1 already filed."),
+    (
+        {"ingested": 0, "already_read": 2, **FROM_OUTLOOK},
+        "Processed. No new files in the drop folder, 2 already filed. Outlook synced: 3 new.",
+    ),
 ]
+
+
+@pytest.mark.parametrize(("run", "said"), TOASTS)
+def test_the_toast_counts_files_as_the_launcher_window_does(run, said):
+    """The toast's count of the drop folder's files is worded as cli.files_read_said words it."""
+    files = cli.files_read_said(run)
+    synced = f" {run['outlook_message']}" if run.get("outlook_message") else ""
+    summarized = " Summarized 1 file." if run.get("files_summarized") else ""
+    assert said == f"Processed{'. ' + files if files else '.'}{summarized}{synced}"
 
 
 @pytest.mark.parametrize(("run", "said"), TOASTS)
