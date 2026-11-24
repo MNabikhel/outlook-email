@@ -279,3 +279,16 @@ def test_writing_the_answer_shows_when_the_first_words_come_not_once_the_echo_ch
             break
     assert seen[-1]["state"] == "writing", "no writing step"
     assert len(sent) == 1, f"the model had sent {''.join(sent)!r} before the chat said it was writing"
+
+
+def test_a_fast_answer_is_timed_on_a_clock_that_ticks_coarsely(settings, loaded, lm, monkeypatch):  # noqa: F811
+    """Windows' time.monotonic() moves only every 15 ms or so: a model that answers within one tick would look as if
+    it read the prompt in no time, and no speed would be kept. The answer is timed on the fine clock."""
+    import time
+
+    fine = time.monotonic
+    monkeypatch.setattr(time, "monotonic", lambda: fine() // 1.0)  # a clock that ticks once a second
+    lm(first_delay=0.05, gap=0.001)
+    _ask(loaded, settings)
+    rates = model_fit.speeds(loaded, KEY)
+    assert rates.get("read", 0) > 0 and rates.get("write", 0) > 0, rates

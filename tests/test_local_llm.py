@@ -324,13 +324,13 @@ def test_a_retry_keeps_the_first_attempt_s_reading_time(settings, monkeypatch):
     time and starts the second at once, so that time was recorded as the model's reading of the whole prompt, and a
     model that reads 30 tokens a second was taken to read thousands."""
     clock = iter([0.0, 270.0, 280.0, 300.0, 301.0, 310.0])
-    monkeypatch.setattr(local_llm.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(local_llm.time, "perf_counter", lambda: next(clock))
     monkeypatch.setattr(local_llm, "_chat_plan", lambda *a, **k: ("thinker", None, 4000))
     attempts = []
 
     def stream_once(settings, messages, budget, effort, reply, **kwargs):
         attempts.append(budget)
-        reply.first_at, reply.last_at = local_llm.time.monotonic(), local_llm.time.monotonic()
+        reply.first_at, reply.last_at = local_llm.time.perf_counter(), local_llm.time.perf_counter()
         reply.pieces = 40
         if len(attempts) == 1:
             reply.reasoning, reply.finish = "thinking...", "length"

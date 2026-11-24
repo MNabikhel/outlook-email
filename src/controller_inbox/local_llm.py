@@ -608,7 +608,7 @@ class Reply:
     content: str
     reasoning: str = ""
     finish: str = ""
-    # A streamed reply's timing (time.monotonic()): when its first piece came (the model had read the prompt) and its
+    # A streamed reply's timing (time.perf_counter(), which on Windows moves finer than time.monotonic()'s 15 ms): when its first piece came (the model had read the prompt) and its
     # last, how many pieces (about a token each, thinking included) and the token counts the server gave, if any.
     first_at: float = 0.0
     last_at: float = 0.0
@@ -1345,7 +1345,7 @@ def stream_text(
         reply, sent = Reply(content=""), budget
         if token_probs is not None:
             token_probs.clear()
-        started = time.monotonic()
+        started = time.perf_counter()
         try:
             for piece in _stream_once(
                 settings, messages, budget, effort, reply, wait=wait, temperature=temperature, sampling=sampling, model=model,
@@ -1585,7 +1585,7 @@ def _stream_pieces(
         content = part.get("content") if isinstance(part.get("content"), str) else ""
         if content or reasoned:
             # Timed for the estimates: the first piece comes once the model has read the prompt.
-            reply.last_at = time.monotonic()
+            reply.last_at = time.perf_counter()
             reply.first_at = reply.first_at or reply.last_at
             reply.pieces += 1
         if raw is not None and content:

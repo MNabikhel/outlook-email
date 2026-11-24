@@ -569,7 +569,7 @@ def test_the_minimum_context_help_doesnt_promise_a_reload_a_big_model_wont_get(s
     from controller_inbox import web
 
     page = TestClient(web.create_app(settings, store)).get("/settings").text
-    script = (Path(web.__file__).parent / "static" / "ui" / "settings.js").read_text()
+    script = (Path(web.__file__).parent / "static" / "ui" / "settings.js").read_text(encoding="utf-8")
     for text in (page, script):
         assert "LM Studio models loaded with less are reloaded with this on the next question" not in text
         # Said plainly, the same on both pages.
