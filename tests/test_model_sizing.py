@@ -311,6 +311,7 @@ def _windows_cards(monkeypatch, cards: dict[str, tuple[str, int]]) -> None:
 
 @pytest.mark.parametrize("name", [
     "AMD Radeon(TM) Graphics", "AMD Radeon 780M Graphics", "AMD Radeon(TM) Vega 8 Graphics",
+    "AMD Radeon(TM) RX Vega 10 Graphics", "AMD Radeon RX Vega 11 Graphics",
     "Intel(R) UHD Graphics", "Intel(R) Iris(R) Xe Graphics", "Intel(R) Arc(TM) Graphics",
 ])
 def test_windows_doesn_t_count_graphics_built_into_the_processor(monkeypatch, name):
@@ -322,7 +323,7 @@ def test_windows_doesn_t_count_graphics_built_into_the_processor(monkeypatch, na
 
 @pytest.mark.parametrize("name", [
     "AMD Radeon RX 7800 XT", "AMD Radeon PRO W7600", "Intel(R) Arc(TM) A770 Graphics", "Intel(R) Arc(TM) B580 Graphics",
-    "NVIDIA GeForce RTX 4060",
+    "NVIDIA GeForce RTX 4060", "Radeon RX Vega", "AMD Radeon RX Vega 64",
 ])
 def test_windows_counts_a_card_with_memory_of_its_own(monkeypatch, name):
     _windows_cards(monkeypatch, {"0000": ("AMD Radeon(TM) Graphics", 4 * GB), "0001": (name, 16 * GB)})

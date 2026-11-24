@@ -134,8 +134,11 @@ SMALLEST_CARD = 4 * GB
 # Graphics built into the processor, by the name its driver gives it on Windows: "AMD Radeon(TM) Graphics", "AMD
 # Radeon 780M Graphics", "Intel(R) UHD Graphics", "Intel(R) Arc(TM) Graphics". Its memory is a share of the
 # computer's set aside for it, so a model there runs no faster than from the computer's memory. A card of its own
-# is named by its model: "AMD Radeon RX 7800 XT", "AMD Radeon PRO W7600", "Intel(R) Arc(TM) A770 Graphics".
+# is named by its model: "AMD Radeon RX 7800 XT", "AMD Radeon PRO W7600", "Intel(R) Arc(TM) A770 Graphics". The
+# graphics built into Ryzen 2000 and 3000 processors carry RX too ("AMD Radeon(TM) RX Vega 10 Graphics"), so a Vega
+# with a number and then "Graphics" is built in, where a Vega card is named "Radeon RX Vega 64".
 _BUILT_IN = re.compile(r"graphics", re.IGNORECASE)
+_BUILT_IN_VEGA = re.compile(r"\bVega\s*\d+\s+Graphics", re.IGNORECASE)
 _A_CARD = re.compile(r"\bRX\b|\bPRO\b|\bArc(\(TM\))?\s+[AB]\d|NVIDIA|GeForce|Quadro", re.IGNORECASE)
 DRM_CARDS = Path("/sys/class/drm")
 PROBE_SECONDS = 2
@@ -236,6 +239,8 @@ def _windows_card_memory() -> int:
 
 def _built_in(name: str) -> bool:
     """The graphics named ``name`` is built into the processor (see _BUILT_IN)."""
+    if _BUILT_IN_VEGA.search(name):
+        return True
     return bool(_BUILT_IN.search(name)) and not _A_CARD.search(name)
 
 
