@@ -255,26 +255,26 @@ def test_a_reading_that_runs_out_of_memory_says_so_with_the_advice(loaded, setti
     assert reader.stats.failed == 3, "three emails, then the run stopped"
 
 
-def test_a_reading_that_runs_out_of_memory_with_a_context_closedesk_gave_is_loaded_back_and_goes_on(loaded, settings, monkeypatch):
-    """With a context CloseDesk raised the model to, the chat loads it back smaller and asks again; the reading only
-    failed email after email."""
+def test_a_reading_that_runs_out_of_memory_with_a_context_closedesk_gave_stops_and_says_where_to_reload_it(loaded, settings, monkeypatch):
+    """With a context CloseDesk gave the model, the reading loaded it back smaller by itself. It no longer reloads
+    without the user's yes: the run stops using the model (the mail is filed without it) and says that Settings can
+    reload it smaller."""
     from controller_inbox.overnight import read_queue
 
     settings.llm = None
     server = LMStudio(loaded=[CHAT])
+    server.contexts[CHAT] = 16384
     local_llm._context_given[CHAT] = 16384  # CloseDesk loaded it with 16,384 tokens
-
-    def answering(request):
-        # Out of memory at 16,384 tokens; at 8,192 it answers.
-        server.answer_error = "status" if server.contexts.get(CHAT, 0) > 8192 else ""
-        return server(request)
-
-    serve_lm_studio(monkeypatch, answering)
-    reader = LocalReader(settings, client=httpx.Client(transport=httpx.MockTransport(answering)))
+    server.answer_error = "status"
+    serve_lm_studio(monkeypatch, server)
+    reader = LocalReader(settings, client=httpx.Client(transport=httpx.MockTransport(server)))
     result = read_queue(loaded, settings, limit=3, reader=reader)
-    assert ("load", CHAT, 8192) in server.calls, server.calls
-    # The first email asked again after the reload, and the others after it: none of them ran out of memory again.
-    assert "memory" not in reader.stats.last_error + result["note"], reader.stats
+    assert not [call for call in server.calls if call[0] in ("load", "unload")], server.calls
+    assert reader.stats.failed == 1, "the run stopped using the model after the first email"
+    assert result["note"] == (
+        "Stopped reading: the local model ran out of memory with a 16,384-token context. Settings → Local model can "
+        f"reload {CHAT} with 8,192."
+    ), result["note"]
 
 
 def test_a_chat_model_that_thought_past_twice_the_room_is_asked_once_next_time(settings, monkeypatch):

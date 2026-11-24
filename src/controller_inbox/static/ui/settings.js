@@ -29,7 +29,7 @@ const SECTIONS = [
 
 const STATE_LABELS = { on: "Ready", fallback: "Older method", off: "Off" };
 // The section a change's message shows in, when it isn't the change's own name.
-const SECTION_OF = { chat: "model", wait: "model", "outlook-more": "outlook" };
+const SECTION_OF = { chat: "model", wait: "model", "step-back": "context", "outlook-more": "outlook" };
 const b = (text) => h("b", null, text);
 const code = (text) => h("code", null, text);
 
@@ -494,6 +494,24 @@ export function createSettings(ctx) {
     );
   }
 
+  /* The model ran out of memory with the context CloseDesk gave it: loaded again with the smaller one offered only
+     when this is pressed, as the chat's "Reload and ask again" does. */
+  function stepBack(offer) {
+    return actions(
+      "step-back",
+      h(
+        "button",
+        {
+          type: "button",
+          class: "btn btn-primary btn-sm",
+          id: "set-step-back",
+          onclick: (event) => save("step-back", "/api/settings/step-back", { model: offer.model, size: offer.size }, event.currentTarget, { busyText: "Reloading…" }),
+        },
+        `Reload with ${Number(offer.size).toLocaleString("en-US")}`
+      )
+    );
+  }
+
   function context() {
     const c = data.context;
     const steps = c.steps;
@@ -543,6 +561,8 @@ export function createSettings(ctx) {
       "text",
       "How much of an attachment the model can read at once when you ask about it. More reads whole files but needs more memory.",
       w.shown ? h("p", { class: `set-window ${w.tone}` }, "Context window now: ", b(w.label), ". ", w.advice) : null,
+      // Once reloaded, what the reload did stays where the button was.
+      w.shown && w.step_back ? stepBack(w.step_back) : flash && flash.id === "step-back" ? status("step-back") : null,
       form
     );
   }

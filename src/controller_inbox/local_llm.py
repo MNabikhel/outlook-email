@@ -869,7 +869,6 @@ class LocalReader:
             self._max_tokens = max(self._max_tokens, THINKING_ROOM)
         self._consecutive_failures = 0
         self._memory_failures = 0  # of those, the ones that ran out of memory
-        self._stepped_back = False  # a context that ran out of memory was loaded back smaller in this run
         # The reply is streamed, so the time limit is how long the model may go without a word, not how long the whole
         # reply may take: a big model writing slowly is never cut off. A server that refuses streaming is asked for
         # the whole reply in one piece instead.
@@ -915,13 +914,17 @@ class LocalReader:
         except httpx.HTTPError as exc:
             if not ran_out_of_memory(exc):
                 return self._failed(_short_error(exc))
-            if not self._stepped_back:
-                # A context CloseDesk gave the model that ran out of memory: loaded back smaller, and this email asked
-                # once more (once a run: a model too big at any size isn't reloaded again and again).
-                self._stepped_back = True
-                if step_back_context(self.settings):
-                    return self.read(packet)
-            return self._failed("the local model ran out of memory", memory=True)
+            offer = step_back_offer(self.settings)
+            self._failed("the local model ran out of memory", memory=True)
+            if offer and not self.stats.stopped_reason:
+                # A context CloseDesk gave the model: it isn't reloaded smaller without the user's yes. The rest of the
+                # run's mail is filed without the model, and Settings offers the smaller context.
+                article = "an" if str(offer["loaded"]).startswith("8") else "a"
+                self.stats.stopped_reason = (
+                    f"the local model ran out of memory with {article} {offer['loaded']:,}-token context. Settings → Local "
+                    f"model can reload {offer['model']} with {offer['size']:,}."
+                )
+            return None
         except ContextOverflow as exc:
             return self._failed(str(exc))
         if parsed is None:
@@ -1676,9 +1679,19 @@ _context_back: dict[str, int] = {}
 # The context each model CloseDesk loaded back ran out of memory answering with, by key, for Settings to say so (not
 # that LM Studio couldn't load it). Forgotten when the minimum is changed or the model is loaded afresh.
 _context_stepped: dict[str, int] = {}
+# The models of ``_context_stepped`` loaded back with a size they had before (that they answered with, or the user's
+# own), rather than the next size down: Settings says "back" for these and "again" for the rest.
+_context_stepped_back: set[str] = set()
 # The context a model CloseDesk loaded ran out of memory answering with when there was no smaller size to load it with
 # (4,096 tokens), by key: it doesn't fit this computer, and Settings says so. Forgotten as ``_context_stepped`` is.
 _context_no_smaller: dict[str, int] = {}
+# The context each model CloseDesk sized ran out of memory with, by key, for Settings to offer loading it again smaller
+# (the user is asked first). Only while it is still loaded with that context.
+_context_ran_out: dict[str, int] = {}
+# The context a model the user loaded in LM Studio (not CloseDesk) ran out of memory answering with, by key: Settings
+# says so and names the Context Length to reload it with there, and once it is, CloseDesk doesn't raise it back to
+# that size or more. Forgotten when the model is chosen again in Settings.
+_theirs_ran_out: dict[str, int] = {}
 _context_lock = threading.Lock()
 
 # Models answering a request right now (a chat answer, the overnight reading, a page read), by the name the request
@@ -1863,13 +1876,16 @@ def raise_tried(status: ModelStatus) -> bool:
 
 
 def needs_more_context(settings: Settings) -> bool:
-    """LM Studio loaded the model with less than the minimum and CloseDesk hasn't tried to raise it yet."""
+    """LM Studio loaded the model with less than the minimum and CloseDesk hasn't tried to raise it yet (nor has the
+    model run out of memory answering with that much, as the user loaded it)."""
     status = check_model(settings)
+    target = context_target(settings, status) if status.key else 0
     return bool(
         status.active
         and status.key
-        and 0 < status.context_length < context_target(settings, status)
+        and 0 < status.context_length < target
         and not raise_tried(status)
+        and not 0 < _theirs_ran_out.get(status.key, 0) <= target
     )
 
 
@@ -1883,7 +1899,9 @@ def set_min_context(settings: Settings, tokens: int) -> str:
     _context_raised.clear()
     _context_tried.clear()
     _context_stepped.clear()
+    _context_stepped_back.clear()
     _context_no_smaller.clear()
+    _context_ran_out.clear()
     if not _context_given:  # nothing CloseDesk sized (at the start, always): LM Studio isn't asked
         return ""
     # Another load holds the lock for as long as LM Studio takes: say so rather than wait for it.
@@ -1975,38 +1993,109 @@ def _smaller_context(size: int) -> int:
     return max(smaller, default=0)
 
 
-def step_back_context(settings: Settings) -> str:
-    """An answer ran out of memory: a model whose context CloseDesk raised is loaded back with the context it last
-    answered with (rather than a step down that may not fit either); one CloseDesk loaded itself (at the start, or
-    with Load and use), or one already loaded back, is loaded again with the next smaller of Setup's steps, down to
-    4,096 tokens. Either way it isn't raised again until the minimum is changed in Settings. Returns what happened, or
-    "" when the model's context isn't CloseDesk's doing (the user loaded it as it is), there is no smaller size to
-    go to, or it can't be reloaded now."""
-    if not _context_lock.acquire(timeout=CONTEXT_WAIT_SECONDS):
-        return ""
+class StepBackRefused(Exception):
+    """The model can't be loaded back smaller now: what to say instead (it changed, it is busy, LM Studio refused)."""
+
+
+def _step_back_size(key: str, loaded: int) -> tuple[int, bool]:
+    """The context a model CloseDesk sized at ``loaded`` tokens goes back to after running out of memory, and whether
+    that is the size it last answered with: one CloseDesk raised goes back to the size it last answered with (rather
+    than a step down that may not fit either); one CloseDesk loaded itself (at the start, or with Load and use), or one
+    already loaded back, to the next smaller of Setup's steps, down to 4,096 tokens and never below the size the user
+    had it at. Never under 4,096 tokens: a size the user had under that goes back to 4,096. 0 when there is none."""
+    from controller_inbox import model_fit  # it imports this module
+
+    floor = model_fit.SMALLEST_CONTEXT
+    before = _context_before.get(key, 0)
+    back = _context_back.get(key, 0)
+    if 0 < before < floor:
+        before = floor
+    if 0 < back < floor:
+        back = floor
+    answered = 0 < back < loaded
+    if not answered:
+        back = max(_smaller_context(loaded), before)
+    return (back if 0 < back < loaded else 0), answered
+
+
+def step_back_offer(settings: Settings) -> dict | None:
+    """An answer or a reading ran out of memory: the offer to load the model again with a smaller context, for the user
+    to accept or not (``step_back_context`` does it). ``model``, ``loaded`` (the context that ran out), ``size`` (the
+    one offered) and ``text``. None when the model's context isn't CloseDesk's doing (the user loaded it as it is:
+    ``memory_advice`` says what to reload it with in LM Studio) or there is no smaller size to offer (at 4,096 tokens
+    Settings then says it doesn't fit at all). Kept for Settings to offer the same until the model is loaded again."""
     try:
         status = check_model(settings, use_cache=False)
-        key, loaded = status.key, status.context_length
-        if not (key and loaded > 0 and _context_given.get(key) == loaded):
-            return ""
-        before = _context_before.get(key, 0)
-        back = _context_back.get(key, 0)
-        answered = 0 < back < loaded
-        if not answered:  # no size it answered with: a step down, never below the size the user had it at
-            back = max(_smaller_context(loaded), before)
-        if not 0 < back < loaded:
-            if not answered and not _smaller_context(loaded):  # already the smallest: it doesn't fit at all
-                _context_no_smaller[key] = loaded
-            return ""
+    except Exception:  # noqa: BLE001 - no offer, the memory advice still stands
+        return None
+    key, loaded = status.key, status.context_length
+    if not (key and loaded > 0 and _context_given.get(key) == loaded):
+        if key and loaded > 0:  # the user's own size: Settings says what to reload it with in LM Studio
+            _theirs_ran_out[key] = loaded
+        return None
+    size, answered = _step_back_size(key, loaded)
+    if not size:
+        if not answered and not _smaller_context(loaded):  # already the smallest: it doesn't fit at all
+            _context_no_smaller[key] = loaded
+        return None
+    _context_ran_out[key] = loaded
+    return {"model": key, "loaded": loaded, "size": size, "text": step_back_text(key, loaded, size)}
+
+
+def step_back_text(key: str, loaded: int, size: int) -> str:
+    """The offer in words: what ran out of memory, and what reloading it smaller means."""
+    from controller_inbox.agent import RECOMMENDED_CONTEXT  # it imports this module
+
+    article = "an" if str(loaded).startswith("8") else "a"
+    text = f"{key} ran out of memory with {article} {loaded:,}-token context. Reload it with {size:,}?"
+    if size < RECOMMENDED_CONTEXT:
+        text += " Long attachments are then read a section at a time."
+    return text
+
+
+def settings_step_back(settings: Settings, status: ModelStatus) -> dict | None:
+    """The offer Settings shows after the model loaded now ran out of memory with the context CloseDesk gave it, and
+    it hasn't been loaded again since; None otherwise."""
+    key, loaded = status.key, status.context_length
+    if not (key and loaded > 0 and _context_ran_out.get(key) == loaded and _context_given.get(key) == loaded):
+        return None
+    size, _answered = _step_back_size(key, loaded)
+    if not size:
+        return None
+    return {"model": key, "loaded": loaded, "size": size, "text": step_back_text(key, loaded, size)}
+
+
+def step_back_context(settings: Settings, key: str, size: int) -> str:
+    """The user accepted the offer (``step_back_offer``): ``key``, which ran out of memory with the context CloseDesk
+    gave it, is loaded again with ``size`` tokens. It isn't raised again until the minimum is changed in Settings.
+    Returns what happened; raises ``StepBackRefused`` with what to say when the model loaded now isn't the one offered
+    at the context that ran out, it is answering another request, or LM Studio couldn't load it."""
+    if not _context_lock.acquire(timeout=CONTEXT_WAIT_SECONDS):
+        raise StepBackRefused("LM Studio is loading a model right now. Try again once it is done.")
+    try:
+        status = check_model(settings, use_cache=False)
+        loaded = status.context_length
+        if status.key != key or not (loaded > 0 and _context_given.get(key) == loaded):
+            raise StepBackRefused(f"{key} isn't loaded in LM Studio as it was, so nothing was reloaded. Ask again to see how it answers now.")
+        back, answered = _step_back_size(key, loaded)
+        if not back or back != size:
+            article = "an" if str(loaded).startswith("8") else "a"
+            raise StepBackRefused(f"{key} is loaded with {article} {loaded:,}-token context now, so nothing was reloaded. Ask again to see how it answers now.")
         if model_busy(status.model, key):  # unloading it would cut off another answer or the overnight reading
-            return ""
+            raise StepBackRefused(f"{key} is answering another request. Once it is done, try again.")
         _context_raised.add(status.model)
         _context_tried.pop(status.model, None)  # ran out of memory: not raised again, however it is loaded next
         problem = _reload_at(settings, status, status.model, key, back)
         if problem:
-            return problem
+            raise StepBackRefused(problem)
         _context_back.pop(key, None)
+        _context_ran_out.pop(key, None)
         _context_stepped[key] = loaded
+        before = _context_before.get(key, 0)
+        if answered or back == before:
+            _context_stepped_back.add(key)
+        else:
+            _context_stepped_back.discard(key)
         if back == before:  # as the user had it: theirs again
             _context_given.pop(key, None)
             _context_before.pop(key, None)
@@ -2017,6 +2106,34 @@ def step_back_context(settings: Settings) -> str:
         return f"Loaded {key} {how} with {article} {back:,}-token context: {loaded:,} didn't fit in this computer's memory."
     finally:
         _context_lock.release()
+
+
+def step_back_asked(settings: Settings, data: dict) -> str:
+    """The pages' "Reload and ask again" (the chat) and "Reload with ..." (Settings): ``data`` names the model and the
+    context offered. Raises ValueError for a model or size the pages never send, and ``StepBackRefused`` as
+    ``step_back_context`` does."""
+    from controller_inbox import model_fit  # it imports this module
+
+    key = str(data.get("model") or "").strip()
+    size = data.get("size")
+    if not key or len(key) > 200 or any(ch in key for ch in "\r\n\x00"):
+        raise ValueError("Choose a model.")
+    if not isinstance(size, int) or isinstance(size, bool) or size < model_fit.SMALLEST_CONTEXT:
+        raise ValueError("Unknown context size.")
+    if size not in model_fit._steps() and not _offered_now(settings, key, size):
+        # Not one of Setup's steps: only the size the user had the model at, when that is what is offered.
+        raise ValueError("Unknown context size.")
+    return step_back_context(settings, key, size)
+
+
+def _offered_now(settings: Settings, key: str, size: int) -> bool:
+    """Whether ``size`` is the context offered for ``key`` as it is loaded now."""
+    try:
+        status = check_model(settings)
+    except Exception:  # noqa: BLE001 - can't tell: not offered
+        return False
+    loaded = status.context_length
+    return status.key == key and loaded > 0 and _step_back_size(key, loaded)[0] == size
 
 
 def ensure_context(settings: Settings) -> str:
@@ -2307,7 +2424,10 @@ def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) 
         _context_raised.discard(key)  # loaded afresh: a longer context may be tried again
         _context_tried.pop(key, None)
         _context_stepped.pop(key, None)
+        _context_stepped_back.discard(key)
         _context_no_smaller.pop(key, None)
+        _context_ran_out.pop(key, None)
+        _theirs_ran_out.pop(key, None)
         _chat_load_failed.pop(key, None)
         remember_model(settings, key)
         return ""
@@ -2569,10 +2689,17 @@ MEMORY_ADVICE = (
 )
 
 
-def memory_advice(settings: Settings) -> str:
+def memory_advice(settings: Settings, offer: dict | None = None) -> str:
     """``MEMORY_ADVICE`` fitted to the model loaded in LM Studio: a shorter minimum context is offered only when it
     would reload the model with less (one CloseDesk sized), and one the user loaded is told the Context Length to
-    reload it with in LM Studio (the most that fits here, when CloseDesk can tell)."""
+    reload it with in LM Studio (the most that fits here, when CloseDesk can tell). With ``offer`` (the chat's offer
+    to load it again smaller, ``step_back_offer``, shown below the note) it points to that, and to nothing else that
+    makes the same fix: the model may well fit with the smaller context."""
+    if offer:
+        return (
+            f"CloseDesk can load {offer['model']} again with a smaller context: see below. Or choose a smaller model in "
+            "Settings: a 3B to 8B model is plenty and answers faster."
+        )
     try:
         status = check_model(settings)
     except Exception:  # noqa: BLE001 - the advice is said all the same
@@ -2596,7 +2723,10 @@ def memory_advice(settings: Settings) -> str:
     target = context_target(settings, status)
     if 0 < target < loaded:
         return f"{first} Choose one in Settings, or reload {key} in LM Studio with Context Length {target:,}, the most that fits here."
-    return f"{first} Choose one in Settings, or reload {key} in LM Studio with a smaller Context Length."
+    # Loaded with no more than CloseDesk's estimate says fits, and it ran out all the same: the next size down.
+    if smaller := _smaller_context(loaded):
+        return f"{first} Choose one in Settings, or reload {key} in LM Studio with Context Length {smaller:,}."
+    return f"{first} Choose one in Settings."
 
 
 def out_of_memory(text: str) -> bool:
@@ -2611,11 +2741,11 @@ def ran_out_of_memory(exc: Exception) -> bool:
     return out_of_memory(said) or out_of_memory(getattr(exc, "said", "")) or out_of_memory(str(exc))
 
 
-def failure_note(exc: Exception, settings: Settings | None = None) -> str:
+def failure_note(exc: Exception, settings: Settings | None = None, offer: dict | None = None) -> str:
     """Why the chat's model didn't answer (it wrote nothing), in words a person can act on. With ``settings``, the
-    memory advice is fitted to the model loaded (``memory_advice``)."""
+    memory advice is fitted to the model loaded and to ``offer`` (``memory_advice``)."""
     if ran_out_of_memory(exc):
-        advice = memory_advice(settings) if settings is not None else MEMORY_ADVICE
+        advice = memory_advice(settings, offer) if settings is not None else MEMORY_ADVICE
         return "The local model ran out of memory before it could answer. " + advice
     if isinstance(exc, ThinksTooLong):
         return f"The local model didn't answer. {exc}."

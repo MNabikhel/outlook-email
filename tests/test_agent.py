@@ -190,10 +190,10 @@ def test_a_file_whose_name_starts_another_is_not_read_for_it(store, settings, ma
     assert ws.file(budget, "invoice").filename == "Invoice.pdf"
 
 
-def test_running_out_of_memory_while_checking_steps_the_model_back(store, settings, mail, monkeypatch):
+def test_running_out_of_memory_while_checking_offers_to_step_the_model_back(store, settings, mail, monkeypatch):
     """The check pass sends the fullest prompt. When the model ran out of memory there, the draft was shown with
     "stopped while checking" and the context was never stepped back, so every later question about files ran out of
-    memory in the same place."""
+    memory in the same place. Now the chat offers the smaller context (the user says whether to reload)."""
     budget = mail["Q4 budget draft"]
     turns = []
 
@@ -209,24 +209,26 @@ def test_running_out_of_memory_while_checking_steps_the_model_back(store, settin
         raise error
         yield ""
 
-    stepped = []
+    offered = []
 
     def step_back(_settings):
-        stepped.append(True)
-        return "Loaded qwen/qwen3-32b back in LM Studio with an 8,192-token context."
+        offered.append(True)
+        return {"model": "qwen/qwen3-32b", "loaded": 16384, "size": 8192, "text": "qwen/qwen3-32b ran out of memory with a 16,384-token context. Reload it with 8,192?"}
 
     monkeypatch.setattr(assistant, "llm_active", lambda _s: True)
     monkeypatch.setattr(assistant, "context_length", lambda _s: 8192)
     monkeypatch.setattr(assistant, "chat_with_tools", fake_tools)
     monkeypatch.setattr(assistant, "stream_text", out_of_memory)
-    monkeypatch.setattr(assistant, "step_back_context", step_back)
+    monkeypatch.setattr(assistant, "step_back_offer", step_back)
     monkeypatch.setattr(assistant, "complete_text", lambda *_a, **_k: "Plan: none.\nSQL: NONE")
     events = _events(answer_stream(store, settings, "How is the total change worked out?", email_id=budget.id))
     text = _text(events)
     assert local_llm.ran_out_of_memory(httpx.HTTPError("Compute error."))
-    assert stepped == [True], "the context was stepped back"
+    assert offered == [True], "the smaller context was offered"
     assert "The total change is D2+D3 [1]." in text, "the draft is still the answer"
-    assert "ran out of memory while checking this answer" in text and "with an 8,192-token context" in text, text
+    assert "ran out of memory while checking this answer" in text and "Loaded" not in text, text
+    offer = next(e for e in events if e["type"] == "step_back")
+    assert offer["size"] == 8192 and offer["question"] == "How is the total change worked out?" and offer["email_id"] == budget.id
 
 
 def test_the_agent_reads_notes_and_checks_its_answer(store, settings, mail, monkeypatch):
@@ -1100,27 +1102,4 @@ def test_an_ordinary_question_naming_an_original_is_no_history_question():
     assert not _HISTORY.search("Which version of the template is this?")
     assert _HISTORY.search("What happened on this so far?") and _HISTORY.search("How did this start? Show the earlier emails")
 
-
-def test_a_step_back_doesnt_list_the_files_read_twice(store, settings, mail, monkeypatch):
-    """After an answer ran out of memory and the model was loaded back, the answer is asked again and read the same
-    file again: the steps listed "Read invite.ics as the meeting it holds" twice."""
-    budget = mail["Q4 budget draft"]
-    calls = []
-
-    def answer(*_a, **_k):
-        calls.append(1)
-        yield {"type": "step", "text": "Read invite.ics as the meeting it holds"}
-        if len(calls) == 1:
-            raise RuntimeError("Compute error.")
-        yield {"type": "delta", "text": "ok"}
-
-    monkeypatch.setattr(assistant, "llm_active", lambda _settings: True)
-    monkeypatch.setattr(assistant, "needs_more_context", lambda _settings: False)
-    monkeypatch.setattr(assistant, "step_back_context", lambda _settings: "Loaded m back with a 2,048-token context: 4,096 didn't fit in this computer's memory.")
-    monkeypatch.setattr(assistant, "_wait_again", lambda *a, **k: None)
-    monkeypatch.setattr(assistant, "_model_answer", answer)
-    steps = [e["text"] for e in answer_stream(store, settings, "summarize this", email_id=budget.id) if e["type"] == "step"]
-    assert len(calls) == 2
-    assert steps.count("Read invite.ics as the meeting it holds") == 1, steps
-    assert any(step.startswith("Loaded m back") for step in steps)
 

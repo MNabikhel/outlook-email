@@ -246,6 +246,8 @@ class _AnswerLog:
             self.data["note"] = event.get("note", "")
         elif kind == "vision":
             self.data["vision"] = {key: event.get(key) for key in ("email_id", "n", "file", "pages", "estimate", "text", "question")}
+        elif kind == "step_back":  # the offer to reload the model smaller, shown again with the conversation
+            self.data["step_back"] = {key: event.get(key) for key in ("model", "loaded", "size", "text", "question", "email_id")}
         elif kind == "more_time":  # the offer of more time, shown again with the conversation
             self.data["more_time"] = {key: event.get(key) for key in ("model", "minutes", "suggest", "text", "question", "email_id")}
         elif kind == "reading" and event.get("label"):  # which reading of the scans the answer used
@@ -881,6 +883,24 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         said = model_fit.minutes_said(minutes * 60)
         return JSONResponse({"ok": True, "seconds": minutes * 60, "message": f"Saved: CloseDesk waits up to {said} for {model}."})
 
+    @app.post("/chat/step-back")
+    async def chat_step_back(request: Request):
+        """The chat's "Reload and ask again" after the model ran out of memory: LM Studio loads it again with the
+        smaller context offered. The page then asks the question again."""
+        require_page(request)
+        data = await json_body(request)
+        try:
+            # Loading a model in LM Studio can take minutes: off the event loop.
+            said = await run_in_threadpool(local_llm.step_back_asked, settings, data)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except local_llm.StepBackRefused as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        chat_id = str(data.get("chat_id") or "")
+        if chats.valid_id(chat_id) and store.chat(chat_id) is not None:
+            store.close_step_backs(chat_id)  # done: not offered again with the conversation
+        return JSONResponse({"ok": True, "message": said})
+
     @app.get("/chats")
     def chat_list(q: str = ""):
         return JSONResponse({"chats": store.list_chats(q[:100])})
@@ -902,6 +922,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     def chat_show(chat_id: str):
         found = known_chat(chat_id)
         return JSONResponse({**found, "turns": store.chat_turns(chat_id), "files": chats.file_cards(store, chat_id)})
+
+    @app.post("/chats/{chat_id}/step-back-closed")
+    def chat_step_back_closed(request: Request, chat_id: str):
+        """The chat's "Keep as is": the offer to reload the model smaller is put away for good in this conversation."""
+        require_page(request)
+        known_chat(chat_id)
+        store.close_step_backs(chat_id)
+        return JSONResponse({"ok": True})
 
     @app.post("/chats/{chat_id}/delete")
     def chat_delete(request: Request, chat_id: str):
@@ -1091,6 +1119,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     context_change = {"said": ""}
     # Why the wait typed in Settings wasn't saved, shown with its notice.
     wait_problem = {"said": ""}
+    # What Setup's "Reload with ..." did, or why it didn't, for the page it goes back to.
+    step_back_said = {"said": ""}
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, recheck: int = 0):
@@ -1113,6 +1143,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             chat_problem=chat_switch["problem"] if request.query_params.get("notice") == "chat-model-failed" else "",
             model_fit=model_fit.describe(store, settings, model),
             wait_problem=wait_problem["said"] if request.query_params.get("notice") == "model-wait-refused" else "",
+            step_back_said=step_back_said["said"] if request.query_params.get("notice") in ("step-back", "step-back-refused") else "",
             vision_setup=vision_setup(model),
             search=semantic.coverage(store, settings),
             timezone_choice=settings.timezone,
@@ -1262,6 +1293,18 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         return RedirectResponse(f"/settings?notice={notice}#context", status_code=303)
+
+    @app.post("/settings/step-back")
+    def save_step_back(model: str = Form(""), size: int = Form(0)):
+        """Setup's "Reload with ..." after the model ran out of memory with the context CloseDesk gave it."""
+        try:
+            step_back_said["said"] = local_llm.step_back_asked(settings, {"model": model, "size": size})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        except local_llm.StepBackRefused as exc:
+            step_back_said["said"] = str(exc)
+            return RedirectResponse("/settings?notice=step-back-refused#context-line", status_code=303)
+        return RedirectResponse("/settings?notice=step-back#context-line", status_code=303)
 
     @app.post("/settings/update")
     def update_now(request: Request):

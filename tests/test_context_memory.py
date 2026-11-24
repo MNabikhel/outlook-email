@@ -97,22 +97,37 @@ def _ask(store, settings, question: str, email_id: int):
     return steps, modes, text
 
 
-def test_a_model_raised_past_the_memory_is_loaded_back_and_the_answer_asked_again(store, settings, mail, monkeypatch):
+def _offered(store, settings, question: str, email_id: int) -> tuple[list[str], dict | None]:
+    """Asks; returns the steps and the chat's offer to load the model again smaller (None when it made none)."""
+    local_llm._status_cache.clear()
+    events = list(answer_stream(store, settings, question, email_id=email_id))
+    offers = [e for e in events if e["type"] == "step_back"]
+    return [e["text"] for e in events if e["type"] == "step"], (offers[0] if offers else None)
+
+
+def _accept(settings, offer: dict) -> str:
+    """What the chat's Reload and ask again does before it asks again."""
+    return local_llm.step_back_context(settings, offer["model"], offer["size"])
+
+
+def test_a_model_raised_past_the_memory_is_offered_back_and_loaded_back_once_the_user_says_so(store, settings, mail, monkeypatch):
     settings.llm = True
     server = MacLMStudio({BIG: 4096})
     _serve(monkeypatch, server)
     budget = mail["Q4 budget draft"].id
     assert settings.min_context_tokens == 16384
 
-    steps, modes, text = _ask(store, settings, "What is the total in this budget?", budget)
+    steps, offer = _offered(store, settings, "What is the total in this budget?", budget)
     assert f"Reloaded {BIG} in LM Studio with a 16,384-token context so whole attachments fit." in steps
-    assert f"Loaded {BIG} back with a 4,096-token context: 16,384 didn't fit in this computer's memory." in steps
-    assert server.calls == [("unload", BIG), ("load", BIG, 16384), ("unload", BIG), ("load", BIG, 4096)]
-    assert not modes, "answered by the model, not the lookup"
-    assert "$12,480" in text
-    assert server.chats[0][1:] == (16384, "Compute error") and server.chats[-1][1:] == (4096, "ok")
+    assert server.calls == [("unload", BIG), ("load", BIG, 16384)], "not loaded back without the user's yes"
+    assert offer and (offer["loaded"], offer["size"]) == (16384, 4096), offer
+    assert _accept(settings, offer) == f"Loaded {BIG} back with a 4,096-token context: 16,384 didn't fit in this computer's memory."
+    assert server.calls[2:] == [("unload", BIG), ("load", BIG, 4096)]
 
-    # The next question doesn't raise it again.
+    # Asked again: answered with the size that fits, and not raised again.
+    steps, modes, text = _ask(store, settings, "What is the total in this budget?", budget)
+    assert not modes and "$12,480" in text and len(server.calls) == 4
+    assert server.chats[0][1:] == (16384, "Compute error") and server.chats[-1][1:] == (4096, "ok")
     steps, modes, text = _ask(store, settings, "And the total again?", budget)
     assert not modes and "$12,480" in text and len(server.calls) == 4
     assert not any("Reload" in step or "Loaded" in step for step in steps)
@@ -123,18 +138,21 @@ def test_a_model_raised_past_the_memory_is_loaded_back_and_the_answer_asked_agai
     assert local_llm.needs_more_context(settings)
 
 
-def test_an_answer_cut_off_by_memory_isnt_asked_again_but_the_next_question_has_the_room(store, settings, mail, monkeypatch):
+def test_an_answer_cut_off_by_memory_offers_the_room_for_the_next_question(store, settings, mail, monkeypatch):
     settings.llm = True
     server = MacLMStudio({BIG: 4096})
     server.partway = True
-    # The answer itself runs out of memory partway: no table query before it (that one would run out first, and the
-    # model be loaded back before the answer is asked).
+    # The answer itself runs out of memory partway: no table query before it (that one would run out first).
     settings.table_queries = False
     _serve(monkeypatch, server)
     budget = mail["Q4 budget draft"].id
-    _steps, _modes, text = _ask(store, settings, "Who sent this?", budget)
-    assert text.startswith("The total") and "stopped answering partway" in text
-    assert f"Loaded {BIG} back with a 4,096-token context: 16,384 didn't fit in this computer's memory. Ask again." in text
+    local_llm._status_cache.clear()
+    events = list(answer_stream(store, settings, "Who sent this?", email_id=budget))
+    text = "".join(e["text"] for e in events if e["type"] == "delta")
+    assert text.startswith("The total") and "stopped answering partway" in text and "Loaded" not in text, text
+    offer = next(e for e in events if e["type"] == "step_back")
+    assert server.calls[-1] == ("load", BIG, 16384)
+    _accept(settings, offer)
     assert server.calls[-2:] == [("unload", BIG), ("load", BIG, 4096)]
     calls = len(server.calls)
     _steps, modes, text = _ask(store, settings, "Who sent this?", budget)
@@ -253,8 +271,8 @@ def test_lowering_the_minimum_leaves_a_model_the_user_loaded_alone(store, settin
     assert local_llm.set_min_context(settings, 8192) == "" and len(server.calls) == calls
 
 
-def test_a_second_raise_that_runs_out_of_memory_goes_back_to_the_size_that_answered(store, settings, mail, monkeypatch):
-    """Raised to 8,192 (it answers), then to 16,384 (it runs out): loaded back with 8,192, not the user's 4,096."""
+def test_a_second_raise_that_runs_out_of_memory_offers_the_size_that_answered(store, settings, mail, monkeypatch):
+    """Raised to 8,192 (it answers), then to 16,384 (it runs out): offered 8,192 back, not the user's 4,096."""
     settings.llm = True
     server = MacLMStudio({BIG: 4096})
     _serve(monkeypatch, server)
@@ -264,9 +282,11 @@ def test_a_second_raise_that_runs_out_of_memory_goes_back_to_the_size_that_answe
     assert not modes and "$12,480" in text and server.loaded[BIG] == 8192
 
     local_llm.set_min_context(settings, 16384)
-    steps, modes, text = _ask(store, settings, "And the total again?", budget)
-    assert f"Loaded {BIG} back with an 8,192-token context: 16,384 didn't fit in this computer's memory." in steps
+    _steps, offer = _offered(store, settings, "And the total again?", budget)
+    assert offer["size"] == 8192 and server.loaded[BIG] == 16384
+    assert _accept(settings, offer) == f"Loaded {BIG} back with an 8,192-token context: 16,384 didn't fit in this computer's memory."
     assert server.calls[-2:] == [("unload", BIG), ("load", BIG, 8192)] and server.loaded[BIG] == 8192
+    _steps, modes, text = _ask(store, settings, "And the total again?", budget)
     assert not modes and "$12,480" in text
     assert not local_llm.needs_more_context(settings)
 
@@ -275,18 +295,20 @@ def test_a_second_raise_that_runs_out_of_memory_goes_back_to_the_size_that_answe
     assert server.loaded[BIG] == 4096 and BIG not in local_llm._context_given
 
 
-def test_a_model_closedesk_loaded_that_runs_out_of_memory_steps_down(store, settings, mail, monkeypatch):
+def test_a_model_closedesk_loaded_that_runs_out_of_memory_is_offered_a_step_down(store, settings, mail, monkeypatch):
     """Load and use (or the start) loads a big model with what the estimate says fits; when its answers still run out
-    of memory it is loaded again one step smaller, rather than every question failing."""
+    of memory the chat offers it one step smaller, rather than every question failing, and loads it so on a yes."""
     settings.llm = True
     server = MacLMStudio({})
     _serve(monkeypatch, server)
     assert local_llm.use_chat_model(settings, BIG) == ""
     assert server.calls == [("load", BIG, 16384)]
     budget = mail["Q4 budget draft"].id
-    steps, modes, text = _ask(store, settings, "What is the total in this budget?", budget)
-    assert f"Loaded {BIG} again with an 8,192-token context: 16,384 didn't fit in this computer's memory." in steps
+    _steps, offer = _offered(store, settings, "What is the total in this budget?", budget)
+    assert server.calls == [("load", BIG, 16384)]
+    assert _accept(settings, offer) == f"Loaded {BIG} again with an 8,192-token context: 16,384 didn't fit in this computer's memory."
     assert server.calls[1:] == [("unload", BIG), ("load", BIG, 8192)]
+    _steps, modes, text = _ask(store, settings, "What is the total in this budget?", budget)
     assert not modes and "$12,480" in text
     # The next question neither raises it nor reloads it.
     _steps, modes, text = _ask(store, settings, "And the total again?", budget)
@@ -295,12 +317,12 @@ def test_a_model_closedesk_loaded_that_runs_out_of_memory_steps_down(store, sett
     assert local_llm.set_min_context(settings, 4096) == f"Reloaded {BIG} in LM Studio with a 4,096-token context."
 
 
-def test_a_model_closedesk_loaded_at_the_smallest_context_isnt_stepped_below_it(settings, monkeypatch):
+def test_a_model_closedesk_loaded_at_the_smallest_context_isnt_offered_less(settings, monkeypatch):
     settings.llm = True
     server = MacLMStudio({BIG: 4096})
     _serve(monkeypatch, server)
     local_llm._context_given[BIG] = 4096
-    assert local_llm.step_back_context(settings) == "" and server.calls == []
+    assert local_llm.step_back_offer(settings) is None and server.calls == []
 
 
 def test_a_model_closedesk_loaded_and_then_raised_is_still_closedesks_when_the_minimum_is_lowered(store, settings, mail, monkeypatch):
@@ -320,15 +342,19 @@ def test_a_model_closedesk_loaded_and_then_raised_is_still_closedesks_when_the_m
     assert server.loaded[SMALL] == 4096
 
 
-def test_a_table_query_that_runs_out_of_memory_has_the_model_loaded_back_before_the_answer(store, settings, mail, monkeypatch):
-    """The table query ran out of memory, was let go without a word, and the answer's own call ran out the same way."""
+def test_a_table_query_and_the_answer_out_of_memory_make_one_offer(store, settings, mail, monkeypatch):
+    """The table query runs out of memory, is let go without a word, and the answer's own call runs out the same way:
+    one offer, and the answer once the user accepts."""
     settings.llm = True
     server = MacLMStudio({BIG: 4096})
     _serve(monkeypatch, server)
-    steps, modes, text = _ask(store, settings, "What is the total in this budget?", mail["Q4 budget draft"].id)
-    assert f"Loaded {BIG} back with a 4,096-token context: 16,384 didn't fit in this computer's memory." in steps
-    assert [chat[2] for chat in server.chats].count("Compute error") == 1, "asked again at the size that fits"
+    budget = mail["Q4 budget draft"].id
+    _steps, offer = _offered(store, settings, "What is the total in this budget?", budget)
+    assert offer["size"] == 4096
+    _accept(settings, offer)
+    _steps, modes, text = _ask(store, settings, "What is the total in this budget?", budget)
     assert not modes and "$12,480" in text
+    assert server.chats[-1][1:] == (4096, "ok")
 
 
 def test_settings_says_a_context_the_user_loaded_doesnt_fit(store, settings, mail, monkeypatch):
@@ -369,8 +395,8 @@ def test_settings_after_a_step_back_says_the_answer_ran_out_of_memory_not_that_t
     settings.llm = True
     server = MacLMStudio({BIG: 4096})
     _serve(monkeypatch, server)
-    steps, _modes, _text = _ask(store, settings, "What is the total in this budget?", mail["Q4 budget draft"].id)
-    assert f"Loaded {BIG} back with a 4,096-token context: 16,384 didn't fit in this computer's memory." in steps
+    _steps, offer = _offered(store, settings, "What is the total in this budget?", mail["Q4 budget draft"].id)
+    assert _accept(settings, offer) == f"Loaded {BIG} back with a 4,096-token context: 16,384 didn't fit in this computer's memory."
     local_llm._status_cache.clear()
     advice = model_fit.context_line(settings, local_llm.check_model(settings))["advice"]
     assert "couldn't load" not in advice and "smaller minimum" not in advice, advice
