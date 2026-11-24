@@ -247,7 +247,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(RunBusy())
                 return 0
             records = ingest_folder(store, settings, report=report)
-        print(f"Read {len(records)} file(s) from {settings.inbox_incoming}")
+        if records:  # none is said below ("Nothing new.")
+            print(f"{new_files_said(len(records))} from {settings.inbox_incoming}")
         if report.get("already_read"):
             print(f"{report['already_read']} were already filed earlier and were left as they were.")
         for row in report.get("failed", []):
@@ -532,14 +533,30 @@ def new_files_said(count: int) -> str:
     return f"Read {count} new file{'' if count == 1 else 's'}"
 
 
+def files_read_said(result: dict) -> str:
+    """What a run read from the drop folder, as its message starts: "No new files.", "Read 3 new files, 1 already
+    filed.". Only the drop folder's files are counted: mail copied in from Outlook is filed apart from them. So when
+    the run brought new mail from Outlook, a count of none is left out ("No new files." would say nothing new came in,
+    next to the Outlook line that says what did), or, when dropped files were already filed, said as the drop folder's."""
+    count, already = result.get("ingested") or 0, result.get("already_read") or 0
+    brought = ((result.get("outlook") or {}).get("new") or 0) + (result.get("graph_synced") or 0)
+    if count or not brought:
+        said = new_files_said(count)
+    elif already:
+        said = "No new files in the drop folder"
+    else:
+        return ""
+    return said + (f", {already} already filed" if already else "") + "."
+
+
 def _print_overnight(result: dict) -> None:
     print(result["headline"])
     if result.get("outlook_message"):
         print(result["outlook_message"])
+    files = files_read_said(result)
     print(
-        new_files_said(result["ingested"])
-        + (f", {result['already_read']} already filed" if result.get("already_read") else "")
-        + ". The local model"
+        (f"{files} " if files else "")
+        + "The local model"
         + (f" ({result['model']})" if result.get("model") else "")
         + f" read {result['read_by_bionic']}"
         + (f" (about {result['avg_seconds']}s each)" if result.get("avg_seconds") else "")
