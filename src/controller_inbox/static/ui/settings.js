@@ -535,7 +535,7 @@ export function createSettings(ctx) {
       h("div", { class: "set-ticks", "aria-hidden": "true" }, steps.map((step) => h("span", null, step.tokens ? `${step.tokens / 1024}k` : "Off"))),
       capacity,
       actions("context", h("button", { type: "submit", class: "btn btn-primary btn-sm" }, "Save")),
-      h("p", { class: "set-help" }, "A model loaded in LM Studio with less is reloaded with this on the next question, or, for one too big for this much here, with the most that fits this computer; one CloseDesk loaded with more is reloaded with it now. Other servers: set the context length there.")
+      h("p", { class: "set-help" }, "A model loaded in LM Studio with less is reloaded with this on the next question, and one CloseDesk loaded with more is reloaded with it now. A model too big for that is loaded with the most this computer fits. Other servers: set the context length there.")
     );
     return section(
       "context",

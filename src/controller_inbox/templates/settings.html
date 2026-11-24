@@ -216,7 +216,7 @@
       </div>
       <p id="context-capacity" class="context-capacity {{ chosen.tier }}" data-context-text aria-live="polite">{{ chosen.text }}</p>
       <button type="submit">Save</button>
-      <span class="muted"><small>A model loaded in LM Studio with less is reloaded with this on the next question, or, for one too big for this much here, with the most that fits this computer; one CloseDesk loaded with more is reloaded with it now. Other servers: set the context length there.</small></span>
+      <span class="muted"><small>A model loaded in LM Studio with less is reloaded with this on the next question, and one CloseDesk loaded with more is reloaded with it now. A model too big for that is loaded with the most this computer fits. Other servers: set the context length there.</small></span>
       {% if context_change %}<p class="small">{{ context_change }}</p>{% endif %}
     </form>
     <p><a href="/settings?recheck=1">Check again</a></p>

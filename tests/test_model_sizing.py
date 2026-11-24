@@ -572,4 +572,6 @@ def test_the_minimum_context_help_doesnt_promise_a_reload_a_big_model_wont_get(s
     script = (Path(web.__file__).parent / "static" / "ui" / "settings.js").read_text()
     for text in (page, script):
         assert "LM Studio models loaded with less are reloaded with this on the next question" not in text
-        assert "the most that fits this computer" in text
+        # Said plainly, the same on both pages.
+        assert "for one too big for this much here" not in text
+        assert "A model too big for that is loaded with the most this computer fits." in text
