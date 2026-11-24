@@ -2026,15 +2026,22 @@ def _more_time(state: dict, settings: Settings, exc: Exception, question: str, e
     waited = _waited(wait, settings, exc)
     elapsed = time.monotonic() - call["started"] if call.get("started") else waited
     tokens = int(call.get("tokens") or 0)
+    written = int(getattr(exc, "written", 0) or 0)
+    status = check_model(settings)
+    # Slower than its measured speed: it took longer to read the prompt than that speed allows. One that had started
+    # its reply spent some of the time writing, which the reading speed doesn't cover.
+    slower = not getattr(exc, "reply_started", None) and model_fit.slower_than_measured(
+        state.get("store"), status, prompt_tokens=tokens, elapsed=elapsed, written=written
+    )
     suggest = model_fit.suggested_minutes(
-        state.get("store"), settings, check_model(settings), prompt_tokens=tokens, waited=waited, elapsed=elapsed,
-        written=int(getattr(exc, "written", 0) or 0),
+        state.get("store"), settings, status, prompt_tokens=tokens, waited=waited, elapsed=elapsed, written=written,
+        slower=slower,
     )
     if suggest * 60 <= waited:  # it had the longest wait already: the same again would run out the same way
         return None
     return {
         "type": "more_time", "model": wait.model, "minutes": model_fit.Wait(wait.model, waited, wait.yours).minutes,
-        "suggest": suggest, "tokens": tokens, "text": model_fit.more_time_text(wait.model, waited, suggest),
+        "suggest": suggest, "tokens": tokens, "text": model_fit.more_time_text(wait.model, waited, suggest, slower=slower),
         "question": question, "email_id": email_id or "",
     }
 

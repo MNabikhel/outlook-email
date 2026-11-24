@@ -315,3 +315,23 @@ def test_a_table_query_that_runs_out_of_time_is_the_wait_the_offer_speaks_of(set
     assert len(server.waits) == 1, "the model was asked again after the table query ran out of time"
     offer = next(event for event in events if event["type"] == "more_time")
     assert offer["minutes"] == model_fit.chat_wait(store, settings).minutes
+
+
+def test_a_model_slower_than_its_measured_speed_is_offered_much_more_time(settings, store, lm):
+    """A model measured reading 533 tokens a second slowed to 10 (more of it on the processor, a laptop on battery).
+    The offer went on from the old speed: "usually needs about 2 minutes" after it had sent nothing for a minute, then
+    3, 4, 5 minutes, one more each time, so a question needing 20 minutes ran out about 18 times."""
+    lm()
+    status = local_llm.check_model(settings)
+    model_fit.record_speed(store, KEY, prompt_tokens=12000, read_seconds=12000 / 533)
+    waited, tries = 60.0, 0
+    while waited < 1200:
+        suggest = model_fit.suggested_minutes(store, settings, status, prompt_tokens=12000, waited=waited, elapsed=waited)
+        assert suggest * 60 >= 2 * waited, "it took longer than its speed allows: twice as long at least"
+        assert model_fit.slower_than_measured(store, status, prompt_tokens=12000, elapsed=waited)
+        waited, tries = suggest * 60.0, tries + 1
+    assert tries <= 3
+    text = model_fit.more_time_text(KEY, 60, 3, slower=True)
+    assert "usually needs" not in text and "slower than it was earlier on this computer" in text
+    # Cut off well within its measured time, the speed still stands.
+    assert not model_fit.slower_than_measured(store, status, prompt_tokens=12000, elapsed=20)

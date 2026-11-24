@@ -351,20 +351,27 @@ def describe(store: Store | None, settings: Settings, status: ModelStatus | None
 
 def suggested_minutes(
     store: Store | None, settings: Settings, status: ModelStatus, *, prompt_tokens: int, waited: float, elapsed: float,
-    written: int = 0,
+    written: int = 0, slower: bool | None = None,
 ) -> int:
     """How many minutes to suggest for the model answering after it ran out of time on a question: from its measured
     prompt-reading speed and this question's prompt (``prompt_tokens``) when both are known, else from its size, else
     a bit over the ``elapsed`` seconds it had taken when it was cut off. ``written``: the tokens the call that ran out
     might write (thinking included) when it isn't streamed, so nothing came back until it was all written: the time
     to write them is added (from the measured writing speed, else half as long again). More than the ``waited`` it
-    had, in whole minutes from 2 to 120: so not more when it had 120 already (the chat then offers no more time)."""
+    had, in whole minutes from 2 to 120: so not more when it had 120 already (the chat then offers no more time).
+    ``slower``: whether it had taken longer than its measured speed allows (``slower_than_measured``, worked out
+    here when not given)."""
     key = model_key(status)
     rates = speeds(store, key, status.model)
     if rates.get("read") and prompt_tokens:
         seconds = prompt_tokens / rates["read"] * MARGIN + SPARE_SECONDS
         if written > 0:
             seconds = seconds + written / rates["write"] if rates.get("write") else seconds * THINKING_SHARE
+        if slower or (slower is None and _slower(rates, prompt_tokens, written, elapsed)):
+            # It had already taken longer than its measured speed allows: that speed is out of date (more of the
+            # model on the processor, a laptop on battery). How long it needs now is only known to be more than it
+            # took, so it gets twice that with the usual margin, rather than a minute more at a time.
+            seconds = max(seconds, elapsed * MARGIN * 2)
     elif size := status.chat_sizes.get(key, 0):
         thinks = _thinks(settings, status, status.model) or _thinks(settings, status, key)
         seconds = size / GB * SECONDS_PER_GB * (THINKING_SHARE if thinks else 1.0)
@@ -374,9 +381,33 @@ def suggested_minutes(
     return min(MAX_MINUTES, max(MIN_MINUTES, minutes))
 
 
-def more_time_text(model: str, waited: float, suggest: int) -> str:
-    """What the chat says above its minutes box when the model ran out of time."""
+def _slower(rates: dict[str, float], prompt_tokens: int, written: int, elapsed: float) -> bool:
+    """The model had taken longer (``elapsed`` seconds) than its measured speeds (``rates``) allow for reading a
+    prompt of ``prompt_tokens`` (and writing ``written`` tokens, for a call that isn't streamed), even with the
+    usual margin."""
+    if not rates.get("read") or not prompt_tokens:
+        return False
+    expected = prompt_tokens / rates["read"]
+    if written > 0 and rates.get("write"):
+        expected += written / rates["write"]
+    return elapsed > expected * MARGIN
+
+
+def slower_than_measured(store: Store | None, status: ModelStatus, *, prompt_tokens: int, elapsed: float, written: int = 0) -> bool:
+    """The model that ran out of time had already taken longer than its speed measured here allows: it is slower
+    now than it was, so its usual time is no guide (``more_time_text`` says so)."""
+    return _slower(speeds(store, model_key(status), status.model), prompt_tokens, written, elapsed)
+
+
+def more_time_text(model: str, waited: float, suggest: int, *, slower: bool = False) -> str:
+    """What the chat says above its minutes box when the model ran out of time. ``slower``: it had already taken
+    longer than its measured speed allows (``slower_than_measured``), so its usual time isn't what it needs now."""
     name = model.split("/")[-1] or "The model"
+    if slower:
+        return (
+            f"The local model needed more time than CloseDesk gives it ({minutes_said(waited)}). {name} is slower "
+            f"than it was earlier on this computer: give it about {minutes_said(suggest * 60)} for a question like this."
+        )
     return (
         f"The local model needed more time than CloseDesk gives it ({minutes_said(waited)}). {name} usually needs "
         f"about {minutes_said(suggest * 60)} for a question like this on this computer."
