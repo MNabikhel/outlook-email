@@ -275,3 +275,17 @@ def test_a_reading_that_runs_out_of_memory_with_a_context_closedesk_gave_is_load
     assert ("load", CHAT, 8192) in server.calls, server.calls
     # The first email asked again after the reload, and the others after it: none of them ran out of memory again.
     assert "memory" not in reader.stats.last_error + result["note"], reader.stats
+
+
+def test_a_chat_model_that_thought_past_twice_the_room_is_asked_once_next_time(settings, monkeypatch):
+    """A model that can't stop thinking was asked with 2,048 tokens and then 4,096 on every question, minutes each on
+    a laptop, before the lookup answer; the second try also sent reasoning_effort "none", which it doesn't allow."""
+    settings.llm = None
+    server = FakeLMStudio(think_tokens=6000, **R1)
+    serve_reasoning(monkeypatch, server)
+    messages = [{"role": "system", "content": "chat"}, {"role": "user", "content": "hi"}]
+    for _question in range(2):
+        with pytest.raises(local_llm.ThinksTooLong):
+            list(stream_text(settings, messages, max_tokens=500))
+    assert [call["max_tokens"] for call in server.calls] == [2048, 4096, 4096]
+    assert not [call for call in server.calls if call.get("reasoning_effort") == "none"], "it allows only on"

@@ -509,6 +509,9 @@ _reasoning_seen: set[str] = set()
 # theirs once closed a think tag it never opened. Their replies are read as reasoning until that "</think>", so
 # reasoning cut off before it is never taken for the answer.
 _opens_think: set[str] = set()
+# Models that can't be told not to think and ran out of twice the usual room thinking in the chat (``ThinksTooLong``):
+# each later question gives them that room at once, and only once, rather than the usual room first and then twice it.
+_thinks_too_long: set[str] = set()
 _effort_rejected: set[str] = set()
 # Models whose server refused ``logprobs`` (how sure the model was of each word it wrote): asked without it from then on.
 _logprobs_rejected: set[str] = set()
@@ -605,15 +608,20 @@ def reasoning_effort(settings: Settings, model: str) -> str | None:
     """
     if model in _effort_rejected:
         return None
-    status = check_model(settings)
-    options = status.reasoning if status.model == model else status.reasoning_options.get(model, [])
+    options = _reasoning_options(settings, model)
     if "off" in options:
         return "none"
     if "low" in options:
         return "low"
-    if model in _reasoning_seen:
+    if model in _reasoning_seen and not options:  # listed options without "off" or "low": it can't be turned down
         return "none"
     return None
+
+
+def _reasoning_options(settings: Settings, model: str) -> list[str]:
+    """The ``reasoning_effort`` values LM Studio lists for ``model`` (empty when it lists none)."""
+    status = check_model(settings)
+    return list(status.reasoning if status.model == model else status.reasoning_options.get(model, []))
 
 
 def thinking_effort(settings: Settings, model: str) -> str | None:
@@ -1068,6 +1076,8 @@ def _chat_plan(
     (the one that reads pages)."""
     model = model or check_model(settings).model or settings.llm_model
     effort = thinking_effort(settings, model) if think else reasoning_effort(settings, model)
+    if model in _thinks_too_long:
+        return model, effort, max(max_tokens, 2 * THINKING_ROOM)
     return model, effort, max(max_tokens, THINKING_ROOM) if _thinks(settings, model, effort) else max_tokens
 
 
@@ -1076,14 +1086,21 @@ def reply_budget(settings: Settings, max_tokens: int) -> int:
     return _chat_plan(settings, max_tokens)[2]
 
 
-def _retry_plan(model: str, effort: str | None, budget: int, reply: Reply) -> tuple[str | None, int] | None:
+def _retry_plan(
+    settings: Settings, model: str, effort: str | None, budget: int, reply: Reply
+) -> tuple[str | None, int] | None:
     """A reasoning model wrote no answer: turn thinking down and give it room, once. One that ran out of room
     thinking gets twice the room: a model that can't turn thinking off (DeepSeek-R1 allows only ``on``) thinks as long
-    with the effort turned down, so the same budget would only run out again."""
+    with the effort turned down, so the same budget would only run out again; it isn't sent an effort it doesn't
+    allow. One that ran out of twice the room before (``_thinks_too_long``) was given that at once: not asked again."""
     if reply.content or not reply.reasoning:
         return None
+    if model in _thinks_too_long and budget >= 2 * THINKING_ROOM:
+        return None
     _reasoning_seen.add(model)
-    new_effort = effort or (None if model in _effort_rejected else "none")
+    options = _reasoning_options(settings, model)
+    fixed = bool(options) and not {"off", "low"} & set(options)  # LM Studio lists no way to turn it down
+    new_effort = effort or (None if model in _effort_rejected or fixed else "none")
     new_budget = max(budget * 2 if reply.finish == "length" else budget, THINKING_ROOM)
     if (new_effort, new_budget) == (effort, budget):
         return None
@@ -1096,10 +1113,10 @@ def _empty_reply(settings: Settings, model: str, budget: int, reply: Reply) -> E
     said plainly, with what to do, rather than only that it ran out of room."""
     if reply.content or not reply.reasoning or reply.finish != "length" or budget < 2 * THINKING_ROOM:
         return EmptyReply(reply.why_unusable())
-    status = check_model(settings)
-    options = status.reasoning if status.model == model else status.reasoning_options.get(model, [])
+    options = _reasoning_options(settings, model)
     if not options or "off" in options:
         return EmptyReply(reply.why_unusable())
+    _thinks_too_long.add(model)
     return ThinksTooLong(
         f"{model} thinks before every answer and can't be told not to, and it ran out of room even with {budget:,} "
         "tokens. Choose one that can, like Qwen3, or a smaller one in Settings"
@@ -1131,7 +1148,7 @@ def complete_text(
         _learn_think_tags(model, reply)
         if reply.content:
             return reply.content
-        plan = _retry_plan(model, payload.get("reasoning_effort"), budget, reply)
+        plan = _retry_plan(settings, model, payload.get("reasoning_effort"), budget, reply)
         if plan is None:
             break
         effort, budget = plan
@@ -1204,7 +1221,7 @@ def stream_text(
                     finished["prompt_counted"] = _cache_said(reply.usage)
         if reply.content:
             return
-        plan = _retry_plan(model, effort if model not in _effort_rejected else None, budget, reply)
+        plan = _retry_plan(settings, model, effort if model not in _effort_rejected else None, budget, reply)
         if plan is None:
             break
         effort, budget = plan
@@ -2157,7 +2174,7 @@ def chat_with_tools(
         reply = _tool_reply(data)
         if reply.content or reply.calls:
             return reply
-        plan = _retry_plan(model, payload.get("reasoning_effort"), budget, Reply(reply.content, reply.reasoning, reply.finish))
+        plan = _retry_plan(settings, model, payload.get("reasoning_effort"), budget, Reply(reply.content, reply.reasoning, reply.finish))
         if plan is None:
             break
         effort, budget = plan

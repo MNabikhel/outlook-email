@@ -33,6 +33,7 @@ def _fresh_model_memory():
         local_llm._status_cache,
         local_llm._reasoning_seen,
         local_llm._opens_think,
+        local_llm._thinks_too_long,
         local_llm._effort_rejected,
         local_llm._tools_rejected,
         local_llm._usage_rejected,
