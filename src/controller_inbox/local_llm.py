@@ -1679,6 +1679,9 @@ _context_back: dict[str, int] = {}
 # The context each model CloseDesk loaded back ran out of memory answering with, by key, for Settings to say so (not
 # that LM Studio couldn't load it). Forgotten when the minimum is changed or the model is loaded afresh.
 _context_stepped: dict[str, int] = {}
+# The models of ``_context_stepped`` loaded back with a size they had before (that they answered with, or the user's
+# own), rather than the next size down: Settings says "back" for these and "again" for the rest.
+_context_stepped_back: set[str] = set()
 # The context a model CloseDesk loaded ran out of memory answering with when there was no smaller size to load it with
 # (4,096 tokens), by key: it doesn't fit this computer, and Settings says so. Forgotten as ``_context_stepped`` is.
 _context_no_smaller: dict[str, int] = {}
@@ -1896,6 +1899,7 @@ def set_min_context(settings: Settings, tokens: int) -> str:
     _context_raised.clear()
     _context_tried.clear()
     _context_stepped.clear()
+    _context_stepped_back.clear()
     _context_no_smaller.clear()
     _context_ran_out.clear()
     if not _context_given:  # nothing CloseDesk sized (at the start, always): LM Studio isn't asked
@@ -2088,6 +2092,10 @@ def step_back_context(settings: Settings, key: str, size: int) -> str:
         _context_ran_out.pop(key, None)
         _context_stepped[key] = loaded
         before = _context_before.get(key, 0)
+        if answered or back == before:
+            _context_stepped_back.add(key)
+        else:
+            _context_stepped_back.discard(key)
         if back == before:  # as the user had it: theirs again
             _context_given.pop(key, None)
             _context_before.pop(key, None)
@@ -2416,6 +2424,7 @@ def use_chat_model(settings: Settings, key: str, *, only_if_none: bool = False) 
         _context_raised.discard(key)  # loaded afresh: a longer context may be tried again
         _context_tried.pop(key, None)
         _context_stepped.pop(key, None)
+        _context_stepped_back.discard(key)
         _context_no_smaller.pop(key, None)
         _context_ran_out.pop(key, None)
         _theirs_ran_out.pop(key, None)

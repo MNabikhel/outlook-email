@@ -43,6 +43,7 @@ def _fresh_model_memory():
         local_llm._context_before,
         local_llm._context_back,
         local_llm._context_stepped,
+        local_llm._context_stepped_back,
         local_llm._context_no_smaller,
         local_llm._context_ran_out,
         local_llm._theirs_ran_out,

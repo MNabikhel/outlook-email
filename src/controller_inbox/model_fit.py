@@ -559,8 +559,10 @@ def context_line(settings: Settings, model: ModelStatus) -> dict:
                 f"{window:,}. A smaller model has room for more."
             )
         elif ran_out > window:
+            # "back" to a size it had before; "again" with the next size down, one it never had.
+            how = "back" if model.key in local_llm._context_stepped_back else "again"
             advice += (
-                f" {model.key} ran out of memory answering with {ran_out:,} tokens, so CloseDesk loaded it back with "
+                f" {model.key} ran out of memory answering with {ran_out:,} tokens, so CloseDesk loaded it {how} with "
                 f"{window:,}. A smaller model has room for more."
             )
         elif model.key and model.context_length and window < target and not fits:

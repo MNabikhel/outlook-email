@@ -376,3 +376,15 @@ def test_a_model_the_user_loaded_at_the_smallest_size_that_runs_out_is_told_to_c
     line = model_fit.context_line(settings, local_llm.check_model(settings))
     assert line["tone"] == "short"
     assert f"{BIG} ran out of memory even with 4,096 tokens" in line["advice"] and "Choose a smaller model" in line["advice"], line
+
+
+def test_settings_after_the_reload_says_again_for_a_model_never_at_that_size(store, settings, mail, monkeypatch):
+    """CloseDesk loaded the model with 16,384 tokens and reloaded it with 8,192 after the user said yes. Settings said
+    it "loaded it back with 8,192", though the model had never been at 8,192."""
+    _closedesk_loaded(settings, monkeypatch)
+    _events(store, settings, QUESTION, mail["Q4 budget draft"].id)
+    local_llm.step_back_context(settings, BIG, 8192)
+    local_llm._status_cache.clear()
+    advice = model_fit.context_line(settings, local_llm.check_model(settings))["advice"]
+    assert "loaded it back" not in advice, advice
+    assert f"{BIG} ran out of memory answering with 16,384 tokens, so CloseDesk loaded it again with 8,192." in advice, advice
