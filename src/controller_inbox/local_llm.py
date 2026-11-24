@@ -1381,6 +1381,8 @@ def stream_text(
                     finished["prompt_counted"] = _cache_said(reply.usage)
         if reply.content:
             return
+        if _attempt:  # it was asked again already: no third try, so nothing says it is asked again
+            break
         plan = _retry_plan(settings, model, effort if model not in _effort_rejected else None, budget, reply)
         if plan is None:
             break

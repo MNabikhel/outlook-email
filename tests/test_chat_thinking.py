@@ -180,3 +180,21 @@ def test_what_closedesk_learned_about_a_models_thinking_is_kept_for_the_next_sta
         kept.clear()
     web.create_app(settings, loaded)
     assert [set(kept) for kept in learned] == before
+
+
+def test_no_second_asked_again_when_the_second_try_also_runs_out_of_room(settings, monkeypatch):
+    """The second try ran out of room too, and the chat said it was asking again (and showed it reading again) just
+    before it said the model thinks too long: no third try was coming."""
+    from test_reasoning_models import FakeLMStudio
+    from test_reasoning_models import _serve as serve_reasoning
+
+    from controller_inbox import local_llm
+
+    settings.llm = None
+    serve_reasoning(monkeypatch, FakeLMStudio(options=["on"], think_tokens=9000))
+    pieces = []
+    with pytest.raises(local_llm.ThinksTooLong):
+        for piece in local_llm.stream_text(settings, [{"role": "user", "content": "hi"}], max_tokens=500, thoughts=True):
+            pieces.append(piece)
+    asked = [i for i, piece in enumerate(pieces) if isinstance(piece, local_llm.AskedAgain)]
+    assert len(asked) == 1 and asked[0] < len(pieces) - 1, "asked again once, before the second try's thinking"
