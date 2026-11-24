@@ -175,6 +175,7 @@ def test_curl_is_given_the_same_short_wait_and_no_window(monkeypatch):
         (MERGED, "Wait as long as the model needs for file summaries, and stop instead of looking stuck"),
         ("Merge pull request #9 from x/y\n\nAsk before loading a model smaller\n\nCo-Authored-By: A <a@b.c>", "Ask before loading a model smaller"),
         ("Merge pull request #9 from x/y\n\nCo-Authored-By: A <a@b.c>", ""),
+        ("Merge pull request #9 from x/y\n\nFix: the totals on scanned invoices", "Fix: the totals on scanned invoices"),
         ("Say how long a summary may take (#74)\n\n* one\n* two", "Say how long a summary may take"),
         ("Merge branch 'main' into summary-wait", ""),
         ("", ""),

@@ -155,6 +155,7 @@ def check(
             raise ValueError(f"not a commit: {sha!r} {date!r}")
         saved.update(sha=sha, date=version.utc_day(date), title=whats_new(str(reply["commit"].get("message") or "")))
     except Exception as exc:  # no internet, a proxy, GitHub busy: said quietly in Settings, asked again tomorrow
+        # (or at the next tick, after the brief asking as CloseDesk opened)
         log.info("Couldn't ask GitHub for the newest CloseDesk: %s", exc)
         saved["failed"] = "1"
         if at_start:
@@ -163,8 +164,9 @@ def check(
     return saved
 
 
-# A line of a commit message that only says who wrote it ("Co-Authored-By: ...", "Signed-off-by: ...").
-TRAILER = re.compile(r"[A-Za-z][A-Za-z-]*: ")
+# A line of a commit message that only says who wrote it ("Co-Authored-By: ...", "Signed-off-by: ..."). A title such
+# as "Fix: the totals" isn't one.
+TRAILER = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)+: ")
 MERGED_PR = re.compile(r"Merge pull request #\d+ ")
 WHATS_NEW_CHARS = 160
 
