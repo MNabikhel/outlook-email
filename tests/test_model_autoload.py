@@ -446,3 +446,48 @@ def test_processing_again_after_a_failed_load_still_says_the_mail_is_filed_witho
     assert "filed without a model for now" in load["message"] and "Settings" in load["message"]
     assert not load.get("failed"), "not said as a new failure (an automatic sync keeps quiet about it)"
     assert len([call for call in lm.calls if call[0] == "load"]) == 1, "LM Studio isn't asked to load it again so soon"
+
+
+# A model that loaded but stopped reading -------------------------------------------------------------------------
+
+
+def _out_of_memory_run(settings, store, monkeypatch, *, kind: str):
+    """Process new mail (``kind`` "process") or Sync now ("outlook") with a model CloseDesk loaded first that then runs
+    out of memory on every email, as a 31B did at 4,096 tokens."""
+    from controller_inbox import outlook_sync, overnight
+    from controller_inbox.local_llm import LocalReader
+    from controller_inbox.pipeline import ingest_demo
+
+    ingest_demo(store, settings)
+    settings.llm = True
+    loaded = {"model": GEMMA27, "message": f"Loaded {GEMMA27} in LM Studio: it answers your questions and reads the mail."}
+    monkeypatch.setattr(model_choice, "ready_to_read", lambda *_a, **_k: dict(loaded))
+
+    def server(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "Compute error."})
+
+    reader = LocalReader(settings, model=GEMMA27, client=httpx.Client(transport=httpx.MockTransport(server)))
+    monkeypatch.setattr(overnight, "LocalReader", lambda *_a, **_k: reader)
+    monkeypatch.setattr(overnight, "llm_active", lambda _s: True)
+    if kind == "process":
+        return overnight.run_overnight(store, settings, sync_graph=False, limit=3, vision_minutes=0, reader=reader)
+    monkeypatch.setattr(overnight, "_sync_outlook", lambda *_a, **_k: {"new": 2})
+    monkeypatch.setattr(outlook_sync, "changed", lambda _report: True)
+    return overnight.outlook_run(store, settings)
+
+
+def test_a_model_that_loaded_but_read_none_of_the_mail_isn_t_said_to_read_it(settings, store, monkeypatch):
+    """0 of 18 emails read, out of memory, and the toast and the classic page still said "Loaded gemma-4-31b in LM
+    Studio: it answers your questions and reads the mail."."""
+    result = _out_of_memory_run(settings, store, monkeypatch, kind="process")
+    assert result["read_by_bionic"] == 0 and result["model_note"].startswith("Stopped reading")
+    assert result["model_load"] == {"message": f"Loaded {GEMMA27} in LM Studio.", "failed": False}
+    client = TestClient(web.create_app(settings, store))
+    job = client.app.state.job
+    assert job.start(lambda progress: result)
+    for _ in range(250):
+        if job.snapshot()["state"] != "running":
+            break
+        threading.Event().wait(0.02)
+    page = client.get("/").text.replace("&#39;", "'")
+    assert '<section class="job error">' in page and "reads the mail" not in page and result["model_note"] in page

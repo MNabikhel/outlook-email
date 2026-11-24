@@ -434,7 +434,7 @@ def _run_overnight(
         "llm_enabled": bool(reading["model"]),
     }
     if reading.get("load"):  # the model was loaded first (or couldn't be): the page says so, as at the start
-        summary["model_load"] = {"message": reading["load"]["message"], "failed": bool(reading["load"].get("failed"))}
+        summary["model_load"] = model_choice.load_said(reading["load"], stopped=bool(reading["model"] and reading["note"]))
     log_path = settings.overnight_dir / f"{as_of.isoformat()}.md"
     log_path.write_text(_log(summary, store=store), encoding="utf-8")
     summary["log_path"] = str(log_path)

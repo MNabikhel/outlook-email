@@ -197,6 +197,16 @@ def _load(settings: Settings, key: str, on_progress: Callable[[str, int, int, st
     return {"model": key, "message": f"Loaded {key} in LM Studio: it answers your questions and reads the mail."}
 
 
+def load_said(load: dict, *, stopped: bool) -> dict:
+    """What loading the model said (``load_at_start`` or ``ready_to_read``), for the page: ``message`` and ``failed``.
+    A model that loaded but then stopped reading (``stopped``: it ran out of memory on the mail, say) is only said to
+    have loaded, not to read the mail."""
+    message, failed = str(load.get("message") or ""), bool(load.get("failed"))
+    if stopped and not failed and load.get("model"):
+        message = f"Loaded {load['model']} in LM Studio."
+    return {"message": message, "failed": failed}
+
+
 def _read_json(store: Store, key: str, default):
     try:
         value = json.loads(store.get_state(key) or "null")
