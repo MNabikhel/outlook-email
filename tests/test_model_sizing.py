@@ -381,3 +381,46 @@ def test_the_suggestion_never_says_a_model_needs_what_the_mac_can_give(settings,
     assert tip and tip["reason"] == "too_big"
     assert "needs about 22 GB of memory with a 6,144-token context" in tip["message"]
     assert "this Mac can give a model about 21 GB" in tip["message"]
+
+
+def test_the_automatic_choice_takes_an_8b_over_a_14b_under_10_gb(settings, lm, monkeypatch):
+    """A 16 GB PC with no graphics card and a 1.5B, an 8B, a 14B and a 31B downloaded: CloseDesk loaded the 14B
+    (9.0 GB at Q4, under the 10 GB it took for "an 8B"), though Setup's guide says it loads one of up to about 8B and
+    a 14B answers about half as fast from the processor alone. How many parameters a model has goes by LM Studio's
+    own figure, or by its name, and by its size only when neither says."""
+    _computer(monkeypatch, 16)
+    tiny, eight, fourteen = "qwen2.5-1.5b-instruct", "meta-llama-3.1-8b-instruct", "qwen2.5-14b-instruct"
+    lm.extra = [tiny, eight, fourteen, BIG]
+    lm.sizes = {tiny: int(1.1e9), eight: int(4.9e9), fourteen: int(9.0e9), BIG: int(19e9)}
+    status = check_model(settings, use_cache=False)
+    assert model_choice.auto_choice(settings, status) == eight
+    assert model_choice.billions(status, fourteen) == 14 and model_choice.billions(status, tiny) == 1.5
+    assert not model_choice.small(status, fourteen) and model_choice.small(status, eight)
+
+    # A name that doesn't say: LM Studio's own figure, else the size.
+    plain = "acme/house-chat"
+    lm.extra = [plain, eight]
+    lm.sizes = {plain: int(8.5e9), eight: int(4.9e9)}
+    status = check_model(settings, use_cache=False)
+    assert model_choice.small(status, plain), "no figure: under 10 GB counts as small"
+    assert model_choice.auto_choice(settings, status) == plain
+    status.chat_params[plain] = "14B"
+    assert not model_choice.small(status, plain) and model_choice.auto_choice(settings, status) == eight
+
+
+def test_lm_studio_s_parameter_count_is_read(settings, lm, monkeypatch):
+    from controller_inbox import local_llm
+
+    listing = {"models": [{"type": "llm", "key": "acme/house-chat", "params_string": "14B", "size_bytes": 9 * GB, "loaded_instances": []}]}
+    monkeypatch.setattr(local_llm.httpx, "get", lambda url, **kw: httpx_response(url, listing))
+    local_llm._status_cache.clear()
+    assert check_model(settings, use_cache=False).chat_params == {"acme/house-chat": "14B"}
+
+
+def httpx_response(url, listing):
+    import httpx
+
+    request = httpx.Request("GET", url)
+    if url.endswith("/api/v1/models"):
+        return httpx.Response(200, json=listing, request=request)
+    return httpx.Response(200, json={"data": [{"id": "acme/house-chat"}]}, request=request)

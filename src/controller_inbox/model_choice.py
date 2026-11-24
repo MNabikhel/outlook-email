@@ -2,7 +2,7 @@
 
 At the start, when LM Studio answers with no chat model loaded and none is named in the settings file (.env),
 CloseDesk has it load one: the one used last if it is still downloaded, else the largest downloaded chat model of
-up to about 10 GB (an 8B) that fits this computer's memory, or the smallest that fits when none is that small. Any
+up to about 9B (by LM Studio's count or the model's name, else of up to about 10 GB) that fits this computer's memory, or the smallest that fits when none is that small. Any
 size can still be chosen in Settings; the automatic choice only prefers one that fits. A model the user loaded is
 never unloaded or replaced without their click.
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import TYPE_CHECKING, Callable
 
 from controller_inbox import local_llm, model_roles
@@ -30,9 +31,31 @@ SLOW_SECONDS = 45.0
 SPEED_MIN_EMAILS = 3
 SPEED_KEY = "model_speed"  # {model: {"seconds": average an email, "emails": how many}}, the last reading of each
 KEPT_KEY = "model_kept"  # models the user chose to keep when another was suggested: not suggested against again
-# The largest download the automatic choice prefers: an 8B at Q8 is about 9 GB. A bigger one is chosen only when
-# none this small fits; any size can still be chosen in Settings.
+# The largest model the automatic choice prefers: under 10B parameters (a 3B to 8B model is plenty, and answers
+# faster), by LM Studio's count or the model's name. When neither says, by its download: an 8B at Q8 is about 9 GB
+# (a 14B at Q4 is about the same, which is why the count goes first). A bigger one is chosen only when none this
+# small fits; any size can still be chosen in Settings.
+SMALL_BILLIONS = 10.0
 AUTO_LARGEST = 10 * 1024**3
+# "8B", "llama-3.1-8b-instruct", "qwen2.5-1.5b": a number of billions, not part of a version ("3.1") or a word.
+_BILLIONS = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)\s*b(?![a-z])", re.I)
+
+
+def billions(status: ModelStatus, key: str) -> float:
+    """How many billion parameters ``key`` has, by LM Studio's figure ("8B") or else its name; 0 when neither says."""
+    for text in (status.chat_params.get(key, ""), key.rsplit("/", 1)[-1]):
+        if found := _BILLIONS.search(text):
+            return float(found.group(1))
+    return 0.0
+
+
+def small(status: ModelStatus, key: str) -> bool:
+    """``key`` is a small model, the kind CloseDesk prefers: under ``SMALL_BILLIONS`` parameters, or, when that
+    isn't told, a download of up to ``AUTO_LARGEST``."""
+    count = billions(status, key)
+    if count:
+        return count < SMALL_BILLIONS
+    return 0 < status.chat_sizes.get(key, 0) <= AUTO_LARGEST
 
 
 def pinned(settings: Settings) -> bool:
@@ -56,7 +79,7 @@ def loaded_chat(status: ModelStatus) -> list[str]:
 
 def _best_fit(settings: Settings, status: ModelStatus, keys: list[str], *, runs_well: bool = False) -> str:
     """The one of ``keys`` to choose for this computer: the largest that runs well on it and is at most
-    ``AUTO_LARGEST`` (a 3B to 8B model is plenty, and answers faster), else the smallest that runs well; with none
+    small (``small``: a 3B to 8B model is plenty, and answers faster), else the smallest that runs well; with none
     that runs well on a PC's graphics card, the same among those that load at all. With none that fits with the
     context Setup asks for, the same among the small ones with the shortest context CloseDesk would ask for. A general chat model before a
     coding one. "" when none fits or this can't be told (no sizes, memory unknown, LM Studio on another computer).
@@ -73,15 +96,15 @@ def _best_fit(settings: Settings, status: ModelStatus, keys: list[str], *, runs_
         fitting = [
             key for key in keys if model_roles.fits(settings, status, key, budget, **how)
             # A big model is never chosen by itself to run with less than Setup's context: only a small one is.
-            and (not how.get("shorter") or status.chat_sizes[key] <= AUTO_LARGEST)
+            and (not how.get("shorter") or small(status, key))
         ]
         if fitting:
             break
     else:
         return ""
-    small = [key for key in fitting if status.chat_sizes[key] <= AUTO_LARGEST]
-    if small:
-        return max(small, key=lambda key: (not _coder(key), status.chat_sizes[key]))
+    smaller = [key for key in fitting if small(status, key)]
+    if smaller:
+        return max(smaller, key=lambda key: (not _coder(key), status.chat_sizes[key]))
     return min(fitting, key=lambda key: (_coder(key), status.chat_sizes[key]))
 
 

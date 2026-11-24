@@ -378,7 +378,7 @@ def fits(
 def too_big(settings: Settings, status: ModelStatus) -> dict[str, str]:
     """The downloaded chat models too big to run well on this computer with the context Setup asks for, each with
     why: CloseDesk loads it with a shorter context, it runs slowly from the computer's memory, or it doesn't fit at
-    all. A small model (``model_choice.AUTO_LARGEST`` or less) that runs well with the shorter context isn't listed:
+    all. A small model (``model_choice.small``) that runs well with the shorter context isn't listed:
     a smaller one wouldn't help. Nothing when LM Studio doesn't give the sizes, the memory can't be read, or LM Studio
     is on another computer."""
     from controller_inbox import model_choice, model_fit  # they import this module
@@ -399,7 +399,7 @@ def too_big(settings: Settings, status: ModelStatus) -> dict[str, str]:
         context = f" with a {tokens:,}-token context" if tokens else ""
         instead = f"CloseDesk loads it with a {asked:,}-token context instead, so long attachments are read a section at a time"
         if shorter and needed_asked <= budget.runs_well:
-            if size <= model_choice.AUTO_LARGEST:
+            if model_choice.small(status, key):
                 continue
             what = instead
         elif needed_asked > budget.loads:

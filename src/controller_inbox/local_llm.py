@@ -142,6 +142,8 @@ class ModelStatus:
     chat_models: dict[str, int] = field(default_factory=dict)
     # How big each of those is on disk, in bytes, when LM Studio says (it is about what loading it takes).
     chat_sizes: dict[str, int] = field(default_factory=dict)
+    # How many parameters each has, as LM Studio puts it ("8B"), when it says.
+    chat_params: dict[str, str] = field(default_factory=dict)
     # LM Studio's loaded embedding models, by instance id and by key (kept apart from ``instances``: none answers).
     embeddings: set[str] = field(default_factory=set)
 
@@ -222,6 +224,7 @@ def check_model(settings: Settings, *, timeout: float = 2.0, use_cache: bool = T
         status.instances = {instance: (reloadable.get(instance, (instance, 0))[0], contexts.get(instance, 0)) for instance in loaded}
         status.chat_models = listing.chat if status.lm_studio else {}
         status.chat_sizes = listing.sizes if status.lm_studio else {}
+        status.chat_params = listing.params if status.lm_studio else {}
         status.embeddings = listing.embeddings
         status.vision = status.model in seeing
         # By model key, so a model is listed once whether or not it is loaded. A downloaded one when LM Studio loads it
@@ -280,6 +283,7 @@ class _Listing:
     chat: dict[str, int] = field(default_factory=dict)  # see ModelStatus.chat_models
     embeddings: set[str] = field(default_factory=set)  # see ModelStatus.embeddings
     sizes: dict[str, int] = field(default_factory=dict)  # see ModelStatus.chat_sizes
+    params: dict[str, str] = field(default_factory=dict)  # see ModelStatus.chat_params
 
 
 def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing:
@@ -312,6 +316,7 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
         downloaded: list[str] = []
         chat: dict[str, int] = {}
         sizes: dict[str, int] = {}
+        params: dict[str, str] = {}
         embeddings: set[str] = set()
         if isinstance(data.get("models"), list):
             for item in data["models"]:
@@ -335,6 +340,8 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
                         chat[str(item["key"])] = _int(item.get("max_context_length"))
                         if _int(item.get("size_bytes")) > 0:
                             sizes[str(item["key"])] = _int(item.get("size_bytes"))
+                        if isinstance(item.get("params_string"), str) and item["params_string"].strip():
+                            params[str(item["key"])] = item["params_string"].strip()
                 for instance in item.get("loaded_instances") or []:
                     if isinstance(instance, dict) and instance.get("id"):
                         loaded.append(str(instance["id"]))
@@ -344,7 +351,7 @@ def _lm_studio_models(settings: Settings, base: str, timeout: float) -> _Listing
                         reloadable[str(instance["id"])] = (str(item.get("key") or instance["id"]), _int(item.get("max_context_length")))
                         if sees:
                             seeing.add(str(instance["id"]))
-            return _Listing("v1", loaded, reasoning, contexts, reloadable, seeing, downloaded, chat=chat, embeddings=embeddings, sizes=sizes)
+            return _Listing("v1", loaded, reasoning, contexts, reloadable, seeing, downloaded, chat=chat, embeddings=embeddings, sizes=sizes, params=params)
         # LM Studio's older route says of each model whether it is loaded; a server that answers it with a plain list
         # of the models it serves isn't LM Studio.
         if isinstance(data.get("data"), list) and any(isinstance(item, dict) and "state" in item for item in data["data"]):
