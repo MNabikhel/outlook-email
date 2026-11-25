@@ -688,6 +688,27 @@ def test_the_classic_chat_marks_a_figure_to_check_as_a_warning(settings, store, 
     assert box["warn"] and box["background"] == rgb(tokens["--warn-soft"])
 
 
+def test_the_classic_chats_fraud_warning_has_a_warning_sign(settings, store, page):
+    """The red "Verify by phone before doing anything" bar was the one warning in a classic answer with no sign: the
+    figures to check beneath it each have ⚠, and the workspace shows the same bar with its alert sign."""
+    from controller_inbox import chats
+    from controller_inbox.assistant import FRAUD_WARNING
+
+    chat_id = chats.new_id()
+    store.create_chat(chat_id, "Lakeside")
+    store.add_chat_turn(chat_id, "user", "Are the Lakeside Tooling new bank details safe to use?")
+    store.add_chat_turn(chat_id, "assistant", "Don't use them until you have called Lakeside.", {"mode": "lookup", "sources": [], "warning": FRAUD_WARNING})
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/chat/window")
+        page.evaluate("id => localStorage.setItem('closedesk-chat-id', id)", chat_id)
+        page.reload()
+        bar = page.wait_for_selector("#chat .msg-warn")
+        shown = bar.evaluate("""(e) => { const sign = getComputedStyle(e, '::before');
+          return { text: e.innerText, sign: sign.content, color: sign.color, words: getComputedStyle(e).color }; }""")
+    assert "⚠" in shown["sign"] and shown["color"] == shown["words"], shown
+    assert FRAUD_WARNING in shown["text"], shown
+
+
 def test_ctrl_k_turns_the_colors_for_color_blindness_on_and_off(settings, store, page):
     from controller_inbox import appearance
 

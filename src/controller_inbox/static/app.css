@@ -378,7 +378,11 @@ body.chat-window .msg { max-width: min(88%, 760px); }
 .md-table table { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 .md-table th, .md-table td { border: 1px solid var(--line); padding: 3px 8px; text-align: left; }
 .msg-note { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
-.msg-warn { margin: 0 0 6px; padding: 6px 8px; background: var(--danger); color: #fff; border-radius: 8px; font-size: 13px; }
+/* With a warning sign, as the figures to check beneath it have (and the workspace's bar its alert sign): the most
+   serious warning in an answer isn't told only by its colour and place. Beside the first line, a long one wrapping
+   under its words. */
+.msg-warn { display: flex; gap: 6px; align-items: flex-start; margin: 0 0 6px; padding: 6px 8px; background: var(--danger); color: #fff; border-radius: 8px; font-size: 13px; }
+.msg-warn::before { content: "⚠\FE0E"; flex: none; }
 .msg-sources { list-style: none; padding: 6px 0 0; margin: 8px 0 0; border-top: 1px solid var(--line); font-size: 12px; }
 .msg-sources li { padding: 2px 0; }
 .msg-sources small { color: var(--muted); }
