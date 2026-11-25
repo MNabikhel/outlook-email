@@ -181,18 +181,21 @@ def update_from_settings(folder: Path, archive: Path, *, before: str, after: str
     assert (folder / "docs" / "ONLY-IN-THE-UPDATE.txt").read_text(encoding="utf-8") == archive.stem
 
 
-def update_while_another_runs(folder: Path) -> None:
+def update_while_another_runs(folder: Path, archive: Path, *, before: str, after: str, did: bool) -> None:
     """Update pressed in CloseDesk, started with its launcher, while another update runs in the folder (CloseDesk-Update,
     double-clicked meanwhile and downloading on a slow link; here a program that says so in the folder's mark): the
     launcher's update waits for that one, and once it is done the launcher opens CloseDesk again by itself. (It gave up
-    before, and nothing opened CloseDesk again.)"""
+    before, and nothing opened CloseDesk again.) ``did``: that one updated CloseDesk (to ``after``), so nothing more is
+    done; else it left CloseDesk as it was (its download failed), and the update asked for runs then (to ``after``, the
+    commit in ``archive``). (It said "That update is done" before, and the update asked for wasn't tried.)"""
     port = free_port()
     output: list[str] = []
     process = subprocess.Popen(
         launcher(folder, "--no-browser", "--port", str(port)), cwd=folder, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=not WINDOWS,
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0,
-        env={**os.environ, "CONTROLLER_INBOX_UPDATE_CHECK": "false"},
+        # No asking GitHub from here: an update the launcher runs comes from the ZIP given.
+        env={**os.environ, "CONTROLLER_INBOX_UPDATE_CHECK": "false", "CLOSEDESK_UPDATE_URL": archive.as_uri()},
     )
     reader = threading.Thread(target=lambda: output.extend(line.decode(errors="replace") for line in process.stdout), daemon=True)
     reader.start()
@@ -205,7 +208,7 @@ def update_while_another_runs(folder: Path) -> None:
             if answer or process.poll() is not None:
                 break
             time.sleep(1)
-        assert answer, f"CloseDesk didn't start\n{''.join(output)}"
+        assert answer and answer.get("commit") == before, f"CloseDesk didn't start: {answer!r}\n{''.join(output)}"
         other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], stdin=subprocess.DEVNULL)
         mark.write_text(json.dumps({"pid": other.pid, "started": time.time()}), encoding="utf-8")
         print(f"--- Update pressed while another update runs: {press_update(port)}", flush=True)
@@ -218,17 +221,26 @@ def update_while_another_runs(folder: Path) -> None:
         time.sleep(3)
         assert process.poll() is None, f"the launcher gave up (exit {process.returncode})\n{''.join(output)}"
         assert health(port) is None, "CloseDesk opened while the other update still ran"
+        if did:  # it updated CloseDesk (its version, as an update writes it)
+            (folder / ".git_archival.txt").write_text(f"commit: {after}\ndate: 2026-11-16T09:00:00Z\n", encoding="utf-8")
         other.kill()  # the other update is done
         other.wait()
         back = None
-        for _ in range(300):
+        for _ in range(600):
             back = health(port)
-            if back or process.poll() is not None:
+            if (back and back.get("commit") == after) or process.poll() is not None:
                 break
             time.sleep(1)
-        assert back and back.get("app") == "closedesk", (
-            f"the launcher didn't open CloseDesk again once the other update was done (exit {process.poll()})\n{''.join(output)}")
-        print(f"--- once the other update was done, CloseDesk opened again by itself: {back}", flush=True)
+        assert back and back.get("commit") == after, (
+            f"the launcher didn't open CloseDesk again as {after[:7]} once the other update was done (exit "
+            f"{process.poll()}): {back!r}\n{''.join(output)}")
+        said = "".join(output)
+        if did:
+            assert "That update is done" in said and "didn't finish" not in said, said
+        else:
+            assert "That update didn't finish, so the update you asked for runs now." in said and "CloseDesk was updated" in said, said
+        print(f"--- once the other update was done ({'it updated CloseDesk' if did else 'it left CloseDesk as it was: the update asked for ran'}), "
+              f"CloseDesk opened again by itself: {back}", flush=True)
     finally:
         if other is not None and other.poll() is None:
             other.kill()
@@ -1187,8 +1199,10 @@ def main() -> int:
     # The Update button in Settings: CloseDesk stops, the launcher updates it and starts the new one.
     update_from_settings(folder, newer_zip(work, "c" * 40, "newest"), before="b" * 40, after="c" * 40)
     assert (folder / "data" / "keep.txt").read_text() == "my mail"
-    # ...and pressed while CloseDesk-Update runs: the launcher waits for that one, then opens CloseDesk again.
-    update_while_another_runs(folder)
+    # ...and pressed while CloseDesk-Update runs: the launcher waits for that one, then opens CloseDesk again; when that
+    # one left CloseDesk as it was, the update asked for runs then.
+    update_while_another_runs(folder, newer_zip(work, "e" * 40, "not wanted"), before="c" * 40, after="d" * 40, did=True)
+    update_while_another_runs(folder, newer_zip(work, "e" * 40, "asked for"), before="d" * 40, after="e" * 40, did=False)
 
     # The deleted shortcut stayed deleted through those starts; asked for, it is made again.
     if places:
