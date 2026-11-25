@@ -1035,8 +1035,20 @@ export function createSettings(ctx) {
       updateNotice(),
       h("p", { class: "set-help" }, "Every start checks the set-up and puts right what isn't; the same check runs here."),
       actions("about", h("button", { type: "button", class: "btn btn-sm", onclick: check }, "Check the set-up")),
-      list
+      list,
+      shortcutOffer(a.shortcut)
     );
+  }
+
+  /** The CloseDesk shortcut (Windows: Desktop and Start menu; macOS: Applications), made again when asked: deleted,
+      or CloseDesk's folder moved. Not on Linux. */
+  function shortcutOffer(offer) {
+    if (!offer || !offer.offered) return null;
+    const add = (event) => save("shortcut", "/api/settings/shortcut", {}, event.currentTarget, { busyText: "Adding…" });
+    return [
+      h("p", { class: "set-help" }, offer.help),
+      actions("shortcut", h("button", { type: "button", class: "btn btn-sm", onclick: add }, offer.label)),
+    ];
   }
 
   /** Whether a newer CloseDesk is ready, with its Update button when a launcher started this one (it starts the

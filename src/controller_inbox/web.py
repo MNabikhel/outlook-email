@@ -35,7 +35,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, chats, cost_codes, documents, fraud, local_llm, model_choice, model_fit, model_roles, ocr, semantic, services, updates, version, vision,
+    agent, chats, cost_codes, documents, fraud, local_llm, model_choice, model_fit, model_roles, ocr, semantic, services, shortcut, updates,
+    version, vision,
 )
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
@@ -1146,6 +1147,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     wait_problem = {"said": ""}
     # What Setup's "Reload with ..." did, or why it didn't, for the page it goes back to.
     step_back_said = {"said": ""}
+    # What "Add the CloseDesk shortcut again" did, or why it couldn't, shown beside it.
+    shortcut_said = {"said": "", "ok": True}
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, recheck: int = 0):
@@ -1169,6 +1172,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             model_fit=model_fit.describe(store, settings, model),
             wait_problem=wait_problem["said"] if request.query_params.get("notice") == "model-wait-refused" else "",
             step_back_said=step_back_said["said"] if request.query_params.get("notice") in ("step-back", "step-back-refused") else "",
+            shortcut=shortcut.offer(),
+            shortcut_said=shortcut_said if request.query_params.get("notice") == "shortcut" else None,
             vision_setup=vision_setup(model),
             search=semantic.coverage(store, settings),
             timezone_choice=settings.timezone,
@@ -1339,6 +1344,13 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if why:
             return render(request, "settings_update.html", page="settings", refused=why, status_code=409)
         return render(request, "settings_update.html", page="settings", refused="", commit=version.installed()[0], message=updates.UPDATING)
+
+    @app.post("/settings/shortcut")
+    def make_shortcut():
+        """Setup's "Add the CloseDesk shortcut again" (shortcut.py): what it did is said beside the button."""
+        said = shortcut.make()
+        shortcut_said.update(said=said.message, ok=said.ok)
+        return RedirectResponse("/settings?notice=shortcut#update", status_code=303)
 
     @app.post("/settings/profile")
     def save_profile(profile: str = Form(...)):

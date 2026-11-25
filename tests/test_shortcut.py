@@ -11,6 +11,7 @@ at the end)."""
 from __future__ import annotations
 
 import hashlib
+import html
 import importlib.util
 import json
 import os
@@ -694,3 +695,88 @@ def test_an_app_in_the_tests_folder_isnt_registered_with_launch_services(monkeyp
     monkeypatch.delenv(shortcut.DIR_ENV)
     shortcut._lsregister(tmp_path / "CloseDesk.app")
     assert ran == [[shortcut.LSREGISTER, "-f", str(tmp_path / "CloseDesk.app")]]
+
+
+# Settings: "Add the CloseDesk shortcut again", in both UIs ------------------------------------------------------------
+
+WINDOWS_OFFER = shortcut.offer(platform="win32")
+ADDED = "Added the CloseDesk shortcut on your Desktop and in your Start menu: it opens CloseDesk in a window of its own."
+REFUSED = "CloseDesk couldn't put its shortcut on your Desktop (Access is denied). CloseDesk.bat in CloseDesk's folder still opens it."
+
+
+@pytest.fixture
+def on_windows(monkeypatch):
+    """Settings as on Windows, with the shortcut's making standing in: what was asked, and what it says."""
+    monkeypatch.setattr(shortcut, "offer", lambda **k: WINDOWS_OFFER)
+    asked: list = []
+    said = {"now": shortcut.Said(True, ADDED)}
+    monkeypatch.setattr(shortcut, "make", lambda *a, **k: asked.append(1) or said["now"])
+    return SimpleNamespace(asked=asked, said=said)
+
+
+def test_settings_offers_to_add_the_shortcut_again(settings, store, on_windows):
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import web
+    from helpers import PAGE
+
+    client = TestClient(web.create_app(settings, store))
+    assert client.get("/api/settings", headers=PAGE).json()["about"]["shortcut"] == WINDOWS_OFFER
+    reply = client.post("/api/settings/shortcut", headers=PAGE, json={})
+    assert reply.status_code == 200 and reply.json() == {"ok": True, "message": ADDED} and on_windows.asked == [1]
+    on_windows.said["now"] = shortcut.Said(False, REFUSED)
+    reply = client.post("/api/settings/shortcut", headers=PAGE, json={})
+    assert reply.status_code == 409 and reply.json()["detail"] == REFUSED
+    assert client.post("/api/settings/shortcut", json={}).status_code == 403, "only CloseDesk's own page may ask"
+
+
+def test_on_linux_settings_has_no_shortcut_button(settings, store, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import web
+    from helpers import PAGE
+
+    monkeypatch.setattr(shortcut, "offer", lambda **k: {"offered": False, "label": "", "help": ""})
+    client = TestClient(web.create_app(settings, store))
+    assert client.get("/api/settings", headers=PAGE).json()["about"]["shortcut"]["offered"] is False
+    assert WINDOWS_OFFER["label"] not in client.get("/settings").text
+
+
+def test_classic_setup_adds_the_shortcut_again_and_says_what_it_did(settings, store, on_windows):
+    from fastapi.testclient import TestClient
+
+    from controller_inbox import web
+
+    client = TestClient(web.create_app(settings, store))
+    page = html.unescape(client.get("/settings").text)
+    assert 'action="/settings/shortcut"' in page and WINDOWS_OFFER["label"] in page and WINDOWS_OFFER["help"] in page
+    same = {"origin": "http://testserver"}
+    reply = client.post("/settings/shortcut", headers=same, follow_redirects=False)
+    assert reply.status_code == 303 and reply.headers["location"] == "/settings?notice=shortcut#update"
+    assert ADDED in html.unescape(client.get(reply.headers["location"]).text) and on_windows.asked == [1]
+    on_windows.said["now"] = shortcut.Said(False, REFUSED)
+    reply = client.post("/settings/shortcut", headers=same)
+    assert "Access is denied" in reply.text
+    assert client.post("/settings/shortcut", headers={"origin": "http://elsewhere.example"}).status_code == 403
+
+
+def test_settings_add_the_shortcut_again_in_the_workspace(site, page, on_windows):
+    page.goto(f"{site}/app/settings#set-about")
+    button = page.locator("#set-about button:has-text('Add the CloseDesk shortcut again')")
+    button.wait_for()
+    assert WINDOWS_OFFER["help"] in page.locator("#set-about").inner_text()
+    button.click()
+    page.wait_for_selector("#set-about [data-status='shortcut'].ok")
+    assert ADDED in page.locator("#set-about [data-status='shortcut']").inner_text()
+    assert on_windows.asked == [1]
+    on_windows.said["now"] = shortcut.Said(False, REFUSED)
+    page.locator("#set-about button:has-text('Add the CloseDesk shortcut again')").click()
+    page.wait_for_selector("#set-about [data-status='shortcut'].error")
+    assert "Access is denied" in page.locator("#set-about [data-status='shortcut']").inner_text()
+
+
+def test_settings_add_the_shortcut_again_on_the_classic_page(site, page, on_windows):
+    page.goto(f"{site}/settings")
+    page.click("#update button:has-text('Add the CloseDesk shortcut again')")
+    page.wait_for_url("**/settings?notice=shortcut#update")
+    assert ADDED in page.locator("#update").inner_text() and on_windows.asked == [1]

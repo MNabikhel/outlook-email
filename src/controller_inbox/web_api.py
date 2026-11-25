@@ -30,7 +30,7 @@ from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
     agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, local_llm, model_choice, model_fit, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
-    semantic, services, table_lookup, updates, version, vision,
+    semantic, services, shortcut, table_lookup, updates, version, vision,
 )
 from controller_inbox.extract import extraction_failed
 from controller_inbox.local_llm import check_model
@@ -1156,7 +1156,11 @@ def register_workspace(
                 "can_load": not (counts["emails"] and store.real_mail_count()),
             },
             "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
-            "about": {"version": version.label(), "python": platform.python_version(), "folder": str(version.ROOT)},
+            "about": {
+                "version": version.label(), "python": platform.python_version(), "folder": str(version.ROOT),
+                # "Add the CloseDesk shortcut again" (Windows and macOS).
+                "shortcut": shortcut.offer(),
+            },
             "update": updates.status(store, settings),
         }
 
@@ -1193,6 +1197,15 @@ def register_workspace(
             raise HTTPException(status_code=400, detail="Answer not-now, or update with /api/update.")
         app.state.update_question.answer()
         return {"ok": True}
+
+    @api.post("/settings/shortcut")
+    def settings_shortcut():
+        """Settings' "Add the CloseDesk shortcut again": made again, opening this folder's CloseDesk (shortcut.py),
+        whether it was deleted, moved or never made."""
+        said = shortcut.make()
+        if not said.ok:
+            raise HTTPException(status_code=409, detail=said.message)
+        return {"ok": True, "message": said.message}
 
     @api.get("/settings/check")
     def settings_check():

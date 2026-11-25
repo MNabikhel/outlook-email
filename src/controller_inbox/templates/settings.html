@@ -265,6 +265,13 @@
   <p class="muted">{{ closedesk.by_hand }}</p>
   {% endif %}
   <p class="muted">{{ closedesk.note }}</p>
+  {% if shortcut.offered %}
+  <form method="post" action="/settings/shortcut">
+    <button type="submit">{{ shortcut.label }}</button>
+  </form>
+  <p class="muted">{{ shortcut.help }}</p>
+  {% if shortcut_said and shortcut_said.said %}<p class="{{ 'notice' if shortcut_said.ok else 'warn-box' }}" role="status">{{ shortcut_said.said }}</p>{% endif %}
+  {% endif %}
 </section>
 <section class="split">
   <article class="panel">
