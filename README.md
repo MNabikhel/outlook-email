@@ -529,11 +529,12 @@ Mac's parts are fakes there).
 Microsoft Edge WebView2 Runtime, and on macOS, with Python 3.11, 3.12 and 3.14): as the shortcut starts it, onto a
 CloseDesk already open, through the shortcut itself as a double-click opens it, and with Update now pressed in it. Each
 time CloseDesk's first page and the workspace have to load in the window, the window closes itself
-(`CLOSEDESK_APP_SMOKE`), and CloseDesk stops with it. On a Mac the Dock has to call it CloseDesk (`lsappinfo`). On Linux
+(`CLOSEDESK_APP_SMOKE`), and CloseDesk stops with it. On Windows the window has to say its right-click menu and the
+browser's keys are on (read back from WebView2); on a Mac the Dock has to call it CloseDesk (`lsappinfo`). On Linux
 it checks the same with a stand-in for the window (`tests/stand_in_window`). Screenshots and the app's log are kept with
 CI's run. It closes only what it opened, and on a Mac it won't run while a CloseDesk is open.
 
-Some 47 tests drive the pages in a real Chromium through Playwright. They are marked `browser`, and need the
+Some 180 tests drive the pages in a real Chromium through Playwright. They are marked `browser`, and need the
 `browser` extra and Playwright's Chromium:
 
 ```bash
