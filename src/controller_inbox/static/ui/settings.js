@@ -156,8 +156,11 @@ export function createSettings(ctx) {
     }
   }
 
-  /** ``line`` (a status line on the page) saying what ``fresh`` (one just built) says. */
+  /** ``line`` (a status line on the page) saying what ``fresh`` (one just built) says. Words it says already are left
+      alone, or a screen reader would read the last "Saved" out again each time the page is drawn (a theme click, a
+      run starting or ending); a save empties its line first, so saving the same again is read out. */
   function sayIn(line, fresh) {
+    if (line.className === fresh.className && line.textContent === fresh.textContent) return line;
     line.className = fresh.className;
     line.replaceChildren(...fresh.childNodes);
     return line;

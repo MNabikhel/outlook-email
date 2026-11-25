@@ -660,3 +660,43 @@ def test_a_save_whose_page_cant_be_read_again_says_both_under_the_box(settings, 
         assert said.startswith(web.NOTICES["colors"]) and "Couldn't read the settings again (CloseDesk isn't answering." in said, said
         assert page.is_checked("#set-colors") and appearance.current(store)["colors"] == "color-blind"
         assert page.inner_text("#set-model [data-status='model']") == ""
+
+
+WATCH_LINE = """sel => { const line = document.querySelector(sel); window.watched = line; window.saidAgain = [];
+  new MutationObserver((records) => { if (records.some((r) => r.addedNodes.length || r.type === 'characterData')) window.saidAgain.push(line.textContent); })
+    .observe(line, { childList: true, subtree: true, characterData: true }); }"""
+
+
+def test_saved_is_said_once_not_each_time_the_page_is_drawn_again(settings, store, page):
+    """The line under a change stays the same element, so a screen reader reads out its new words. But each time the
+    page was drawn again (a theme click, a run starting or ending in the background, a change made elsewhere) the
+    same words were put in it again, and read out again: after a theme click, which is kept in this browser only, a
+    screen reader said the colors were saved for both UIs."""
+    import threading
+
+    from controller_inbox import appearance
+
+    app = web.create_app(settings, store)
+    with serving(app) as base:
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector("#set-colors")
+        page.check("#set-colors")
+        line = "#set-appearance [data-status='colors']"
+        page.wait_for_selector(f"{line}.ok")
+        page.wait_for_function("() => !document.querySelector('#set-appearance [aria-busy]')")
+        page.evaluate(WATCH_LINE, line)
+        page.click("#set-appearance .seg:has-text('Dark')")
+        page.wait_for_selector("#set-appearance .seg.on:has-text('Dark')")
+        release = threading.Event()
+        assert app.state.job.start(lambda progress: {"ingested": 0} if release.wait(20) else {})
+        page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")  # asks for the job now
+        page.wait_for_selector("#top[data-busy]")
+        release.set()
+        page.wait_for_selector("#top:not([data-busy])")
+        appearance.save(store, importance_words=True)  # in another window
+        page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")
+        page.wait_for_function("() => document.querySelector('#set-importance-words').checked")
+        page.wait_for_timeout(300)
+        assert page.evaluate("() => window.saidAgain") == []
+        assert page.evaluate(f"() => document.querySelector(\"{line}\") === window.watched")
+        assert web.NOTICES["colors"] in page.inner_text(line), "still there to read"
