@@ -259,6 +259,81 @@ def test_after_a_move_a_shortcut_deleted_from_windows_problem_with_shortcut_is_p
     assert shortcut.upkeep(system, record=windows.record).message == "" and windows.desktop not in windows.links.files
 
 
+def _moved(windows, tmp_path, name: str = "Somewhere else"):
+    moved = tmp_path / name / "CloseDesk"
+    moved.parent.mkdir()
+    windows.root.rename(moved)
+    return moved, shortcut.Windows(moved, links=windows.links, folders=lambda: dict(windows.places), icon_dir=windows.system.icon_dir)
+
+
+def test_after_a_move_the_shortcut_pinned_to_the_taskbar_follows_the_folder_too(windows, tmp_path):
+    # Pin to taskbar (as the guide says) copies the Start menu shortcut into the taskbar's own folder: after a move the
+    # Desktop and Start menu ones followed, and the pinned button still ran the old folder's pythonw.exe ("Can't open
+    # this item").
+    taskbar = tmp_path / "Roaming" / "Microsoft" / "Internet Explorer" / "Quick Launch" / "User Pinned" / "TaskBar"
+    windows.places["Taskbar"] = taskbar
+    pinned = taskbar / "CloseDesk.lnk"
+    said = _upkeep(windows)
+    assert pinned not in windows.links.files and "taskbar" not in said.message, "only Windows pins it"
+    windows.links.files[pinned] = dict(windows.links.files[windows.start])  # the person pins the open window
+    moved, system = _moved(windows, tmp_path)
+    said = shortcut.upkeep(system, record=windows.record)
+    link = windows.links.files[pinned]
+    assert link["folder"] == str(moved) and link["target"] == str(moved / ".venv" / "Scripts" / "pythonw.exe")
+    assert link["app_id"] == app_window.APP_ID
+    assert "taskbar" in said.message and "moved" in said.message, said.message
+
+
+def test_a_taskbar_shortcut_is_never_made_or_taken(windows, tmp_path):
+    taskbar = tmp_path / "TaskBar"
+    windows.places["Taskbar"] = taskbar
+    pinned = taskbar / "CloseDesk.lnk"
+    _make(windows)
+    assert pinned not in windows.links.files, "asked for, the shortcut is made again on the Desktop and in the Start menu only"
+    # Unpinned (deleted) before a move: not put back with what the move cost.
+    moved, system = _moved(windows, tmp_path)
+    del windows.links.files[windows.desktop]
+    shortcut.upkeep(system, record=windows.record)
+    assert pinned not in windows.links.files and windows.desktop in windows.links.files
+    # Someone else's pinned CloseDesk, and one for another CloseDesk folder still there, are left as they are.
+    theirs = {"target": r"C:\Tools\CloseDesk.exe", "arguments": "", "folder": r"C:\Tools", "icon": "", "icon_index": 0,
+              "description": "", "app_id": ""}
+    windows.links.files[pinned] = dict(theirs)
+    said = shortcut.make(system, record=windows.record)
+    assert windows.links.files[pinned] == theirs and "taskbar" not in said.message
+    copy = _closedesk(tmp_path / "CloseDesk copy")
+    windows.links.files[pinned] = {**windows.links.files[windows.start], "folder": str(copy)}
+    shortcut.make(system, record=windows.record)
+    assert windows.links.files[pinned]["folder"] == str(copy)
+
+
+def test_after_a_move_a_shared_desktop_shortcut_this_computer_never_had_isnt_put_back(windows, tmp_path):
+    # Two PCs share a Desktop through OneDrive. This one found the other's shortcut there and left it, making its own in
+    # the Start menu. The other PC's person deleted theirs; then this one's folder moved: the next start put a shortcut
+    # back on the shared Desktop (said as this computer's, which it never was), and the other PC got back one it deleted.
+    elsewhere = {**{key: "" for key in ("target", "arguments", "icon", "description")}, "icon_index": 0,
+                 "folder": r"D:\Work\CloseDesk", "app_id": app_window.APP_ID}
+    windows.links.files[windows.desktop] = dict(elsewhere)
+    _upkeep(windows)
+    assert windows.links.files[windows.desktop] == elsewhere and windows.start in windows.links.files
+    del windows.links.files[windows.desktop]  # deleted on the other PC, and so here too
+    moved, system = _moved(windows, tmp_path)
+    said = shortcut.upkeep(system, record=windows.record)
+    assert windows.desktop not in windows.links.files, "put back on a Desktop this computer never had it on"
+    assert windows.links.files[windows.start]["folder"] == str(moved)
+    assert "Desktop" not in said.message and "Start menu" in said.message, said.message
+
+
+def test_a_shortcut_deleted_where_the_folder_stayed_isnt_put_back_after_a_later_move(windows, tmp_path):
+    _upkeep(windows)
+    del windows.links.files[windows.desktop]
+    _upkeep(windows)  # deleted on purpose: this computer has the Start menu one only now
+    moved, system = _moved(windows, tmp_path)
+    said = shortcut.upkeep(system, record=windows.record)
+    assert windows.desktop not in windows.links.files and windows.links.files[windows.start]["folder"] == str(moved)
+    assert "Desktop" not in said.message
+
+
 def test_a_shortcut_deleted_when_another_copy_starts_stays_deleted(windows, tmp_path):
     # A second copy of CloseDesk, the first still where it was: that isn't a move.
     _upkeep(windows)
@@ -398,9 +473,10 @@ def pywin32(monkeypatch):
     pythoncom.VT_LPWSTR, pythoncom.CLSCTX_INPROC_SERVER, pythoncom.IID_IPersistFile = 31, 1, "IPersistFile"
     shell = SimpleNamespace(
         CLSID_ShellLink="ShellLink", IID_IShellLink="IShellLink", IID_IShellLinkDataList="IShellLinkDataList",
-        FOLDERID_Desktop="Desktop", FOLDERID_Programs="Programs",
+        FOLDERID_Desktop="Desktop", FOLDERID_Programs="Programs", FOLDERID_RoamingAppData="RoamingAppData",
         SHGetKnownFolderPath=lambda fid, flags=0, token=None: {"Desktop": r"C:\Users\ana\OneDrive - Firm\Desktop",
-                                                               "Programs": r"C:\Users\ana\AppData\Roaming\Microsoft\Windows\Start Menu\Programs"}[fid],
+                                                               "Programs": r"C:\Users\ana\AppData\Roaming\Microsoft\Windows\Start Menu\Programs",
+                                                               "RoamingAppData": r"C:\Users\ana\AppData\Roaming"}[fid],
         SHChangeNotify=lambda *args: com.calls.append(("SHChangeNotify", *args)),
     )
     shellcon = SimpleNamespace(SHCNE_UPDATEITEM=0x2000, SHCNF_PATHW=5)
@@ -464,13 +540,16 @@ def test_the_desktop_and_start_menu_are_windows_known_folders(pywin32, monkeypat
     places = shortcut.known_folders()
     assert places["Desktop"] == Path(r"C:\Users\ana\OneDrive - Firm\Desktop")
     assert places["Start menu"] == Path(r"C:\Users\ana\AppData\Roaming\Microsoft\Windows\Start Menu\Programs")
+    # Where Windows keeps what is pinned to the taskbar: a copy of the Start menu shortcut, followed after a move.
+    assert places["Taskbar"] == Path(r"C:\Users\ana\AppData\Roaming") / "Microsoft" / "Internet Explorer" / "Quick Launch" / "User Pinned" / "TaskBar"
 
 
 def test_a_shortcut_folder_named_for_the_check_keeps_it_off_the_desktop(monkeypatch, tmp_path):
     # The tests and the launcher check (CI) never put a shortcut on the computer's Desktop.
     monkeypatch.setenv(shortcut.DIR_ENV, str(tmp_path / "shortcuts"))
     places = shortcut.known_folders()
-    assert places == {"Desktop": tmp_path / "shortcuts" / "Desktop", "Start menu": tmp_path / "shortcuts" / "Start menu"}
+    assert places == {"Desktop": tmp_path / "shortcuts" / "Desktop", "Start menu": tmp_path / "shortcuts" / "Start menu",
+                      "Taskbar": tmp_path / "shortcuts" / "Taskbar"}
     assert shortcut.user_dir() == tmp_path / "shortcuts"
 
 
@@ -688,6 +767,81 @@ def test_a_moved_folder_is_found_again_by_the_mac_app(mac, tmp_path):
     assert said.ok and "moved" in said.message
     assert _plist(mac.app)["CloseDeskFolder"] == str(moved)
     assert str(moved) in (mac.app / "Contents" / "MacOS" / "CloseDesk").read_text(encoding="utf-8")
+
+
+def _bundle_elsewhere(mac, where: Path) -> Path:
+    """CloseDesk.app as the person moved it out of ~/Applications (to /Applications, say), and opened from there:
+    launch.py --app records where it was opened from."""
+    import shutil
+
+    shortcut.upkeep(mac.system, record=mac.record)
+    where.mkdir(parents=True, exist_ok=True)
+    app = where / "CloseDesk.app"
+    shutil.move(str(mac.app), str(app))
+    record = json.loads(mac.record.read_text(encoding="utf-8"))
+    mac.record.write_text(json.dumps({**record, "apps": [str(app)]}), encoding="utf-8")
+    return app
+
+
+def test_closedesk_app_moved_out_of_applications_is_kept_up_to_date(mac, tmp_path):
+    app = _bundle_elsewhere(mac, tmp_path / "Applications")
+    newer = tmp_path / "python3.13"
+    newer.write_text("", encoding="utf-8")
+    system = shortcut.Mac(mac.root, apps=mac.apps, home=tmp_path / "home", macos=(26, 1), interpreter=newer, register=mac.registered.append)
+    mac.registered.clear()
+    said = shortcut.upkeep(system, record=mac.record)
+    assert os.readlink(app / "Contents" / "MacOS" / "CloseDesk-python") == str(newer)
+    assert (app / "Contents" / "Resources" / "CloseDesk.icns").read_bytes() == (STATIC / "closedesk-full.icns").read_bytes()
+    assert mac.registered == [app] and not mac.app.exists(), "not made again in ~/Applications"
+    assert "up to date" in said.message and str(tmp_path / "Applications") in said.message, said.message
+
+
+def test_closedesk_app_moved_out_of_applications_follows_a_moved_folder(mac, tmp_path):
+    # Kept in the Dock from /Applications: after a folder move its alert says one CloseDesk.command start puts it right;
+    # that start made a second CloseDesk.app in ~/Applications instead, and the one in the Dock stayed broken.
+    app = _bundle_elsewhere(mac, tmp_path / "Applications")
+    shortcut.upkeep(mac.system, record=mac.record)  # opened from there: this Mac's CloseDesk.app is that one
+    moved = tmp_path / "home" / "CloseDesk"
+    mac.root.rename(moved)
+    system = shortcut.Mac(moved, apps=mac.apps, home=tmp_path / "home", macos=(15, 6), interpreter=mac.python, register=mac.registered.append)
+    said = shortcut.upkeep(system, record=mac.record)
+    assert _plist(app)["CloseDeskFolder"] == str(moved)
+    assert str(moved) in (app / "Contents" / "MacOS" / "CloseDesk").read_text(encoding="utf-8")
+    assert not mac.app.exists(), "a second CloseDesk.app, made in ~/Applications"
+    assert "moved" in said.message and str(tmp_path / "Applications") in said.message, said.message
+
+
+def test_a_recorded_app_that_isnt_closedesks_or_is_gone_is_left_alone(mac, tmp_path):
+    app = _bundle_elsewhere(mac, tmp_path / "Applications")
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.example.other"}))
+    shortcut.upkeep(mac.system, record=mac.record)
+    assert _plist(app) == {"CFBundleIdentifier": "com.example.other"}
+    import shutil
+
+    shutil.rmtree(app)
+    said = shortcut.make(mac.system, record=mac.record)
+    assert not app.exists() and mac.app.exists() and said.ok
+
+
+@MAC_FILES
+def test_the_apps_script_says_where_the_app_was_opened_from(mac, tmp_path):
+    # Wherever the person keeps it (/Applications, the Dock's copy): launch.py --app starts Python through that app's
+    # link, so the Dock says CloseDesk, and records it, so it is kept up to date and follows a moved folder.
+    shortcut.upkeep(mac.system, record=mac.record)
+    told = tmp_path / "told.txt"
+    python = mac.root / ".venv" / "bin" / "python"
+    python.parent.mkdir(parents=True)
+    python.write_text(f'#!/bin/bash\nprintf "%s\\n" "$CLOSEDESK_APP_BUNDLE" > {told}\n', encoding="utf-8")
+    python.chmod(0o755)
+    import shutil
+
+    elsewhere = tmp_path / "Applications with a space" / "CloseDesk.app"
+    elsewhere.parent.mkdir()
+    shutil.copytree(mac.app, elsewhere, symlinks=True)
+    done = subprocess.run(["/bin/bash", str(elsewhere / "Contents" / "MacOS" / "CloseDesk")],
+                          env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"}, capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done
+    assert told.read_text(encoding="utf-8").strip() == os.path.realpath(elsewhere)
 
 
 def test_a_new_python_is_linked_in_its_place(mac, tmp_path):

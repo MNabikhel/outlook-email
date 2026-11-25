@@ -50,7 +50,9 @@ window of its own, with its own icon, instead of a browser tab:
 - **Windows:** **CloseDesk** on your Desktop and in your Start menu. To keep it on the taskbar, right-click CloseDesk's
   button there while it is open and choose **Pin to taskbar**.
 - **Mac:** **CloseDesk** in Applications in your user folder. Spotlight finds it (⌘ Space, type *CloseDesk*); to keep
-  it in the Dock, right-click its Dock icon while it is open and choose **Options → Keep in Dock**.
+  it in the Dock, right-click its Dock icon while it is open and choose **Options → Keep in Dock**. You can move it
+  (to the Applications folder everyone shares, say): once it has been opened from there, CloseDesk keeps that one up
+  to date instead.
 
 No admin rights are needed, and since the shortcut is made on your computer (it is never downloaded), neither Windows
 nor macOS asks about it. On Linux there is no shortcut: `CloseDesk.command` opens CloseDesk in the browser.

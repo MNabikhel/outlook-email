@@ -257,9 +257,10 @@ def opens(folder: Path, place: Path) -> str:
     return info["CloseDeskFolder"]
 
 
-def wait_for_shortcuts(folder: Path, shortcuts: Path, *, wait: float = 120) -> None:
-    """The shortcut, made (or put right) beside CloseDesk's start, opening ``folder``."""
-    places = shortcuts_made(shortcuts)
+def wait_for_shortcuts(folder: Path, shortcuts: Path, *, wait: float = 120, more: tuple[Path, ...] = ()) -> None:
+    """The shortcut, made (or put right) beside CloseDesk's start, opening ``folder``. ``more``: other places it is to
+    be found too (Windows' copy of it pinned to the taskbar)."""
+    places = [*shortcuts_made(shortcuts), *more]
     if not places:
         assert not shortcuts.exists() or not any(shortcuts.iterdir()), "no CloseDesk shortcut on Linux"
         print("--- no CloseDesk shortcut here (Linux), as it should be", flush=True)
@@ -983,13 +984,21 @@ def main() -> int:
         assert "no CloseDesk shortcut on Linux" in out, out
     wait_for_shortcuts(folder, shortcuts, wait=5)
 
-    # The folder moved: its next start points the shortcut at it.
+    # The person pins the open window to the taskbar: Windows copies the Start menu shortcut into the taskbar's folder
+    # (here the check's own), which CloseDesk never makes but keeps pointing at the folder.
+    pinned: tuple[Path, ...] = ()
+    if WINDOWS:
+        pinned = (shortcuts / "Taskbar" / "CloseDesk.lnk",)
+        pinned[0].parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(shortcuts / "Start menu" / "CloseDesk.lnk", pinned[0])
+
+    # The folder moved: its next start points the shortcut at it, the one pinned to the taskbar too.
     moved = work / "Close Desk moved"
     folder.rename(moved)
     folder = moved
     process = start_dashboard(folder)
     try:
-        wait_for_shortcuts(folder, shortcuts)
+        wait_for_shortcuts(folder, shortcuts, more=pinned)
     finally:
         stop(process)
 

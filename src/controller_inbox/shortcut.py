@@ -14,10 +14,15 @@ itself, on the person's computer, with nothing to install and no admin rights.
   open CloseDesk.command in Terminal instead, as a double-click on it does.
 - Linux: none. CloseDesk.command opens CloseDesk in the browser.
 
+Two more are kept right but never made: on Windows, the copy Windows makes when the person pins the open window to the
+taskbar; on macOS, a CloseDesk.app the person moved out of ~/Applications (to /Applications, say), recorded by
+launch.py --app once it is opened from there.
+
 It is made once, the first time a launcher starts CloseDesk (``upkeep``, from cli._serve), and that is remembered, so
 a shortcut the person deleted isn't put back. At each start after that, one still there is kept right: pointed at this
 folder when the folder it opened is gone (CloseDesk was moved or renamed), and given what changed after an update (a
-new icon). After a move, a shortcut that is missing is put back too: Windows offers to delete one whose folder is gone.
+new icon). After a move, a shortcut that is missing is put back too, where this computer had one at the start before:
+Windows offers to delete one whose folder is gone.
 One that opens another CloseDesk folder, still there, is left alone, as is a shortcut named CloseDesk that isn't
 CloseDesk's own, and one naming a folder this computer never had (another computer's, on a Desktop OneDrive keeps the
 same on both). Nothing that is right is written again (OneDrive would copy a Desktop's changes between two computers,
@@ -50,6 +55,8 @@ from controller_inbox.app_window import user_dir as _closedesk_dir
 
 NAME = "CloseDesk"
 DIR_ENV = "CLOSEDESK_SHORTCUT_DIR"
+# macOS: in the record, the CloseDesk.app bundles the person opened CloseDesk from (launch.py --app writes them).
+APPS_KEY = "apps"
 # The link in CloseDesk.app to the Python that runs CloseDesk (launch.py has the same name).
 LINKED_PYTHON = "CloseDesk-python"
 STATIC = Path(__file__).resolve().parent / "static"
@@ -121,16 +128,23 @@ def _join(words: list[str]) -> str:
 # Windows ------------------------------------------------------------------------------------------------------------
 
 
+# Where Windows keeps what is pinned to the taskbar (in the person's roaming AppData): a copy of the shortcut the open
+# window was pinned from, with its folder.
+PINNED = ("Microsoft", "Internet Explorer", "Quick Launch", "User Pinned", "TaskBar")
+
+
 def known_folders() -> dict[str, Path]:
-    """This person's Desktop and Start menu, where Windows says they are (a Desktop moved into OneDrive is followed)."""
+    """This person's Desktop and Start menu, where Windows says they are (a Desktop moved into OneDrive is followed),
+    and the taskbar's folder of what is pinned to it."""
     named = os.environ.get(DIR_ENV, "")
     if named:
-        return {"Desktop": Path(named) / "Desktop", "Start menu": Path(named) / "Start menu"}
+        return {"Desktop": Path(named) / "Desktop", "Start menu": Path(named) / "Start menu", "Taskbar": Path(named) / "Taskbar"}
     from win32com.shell import shell
 
     return {
         "Desktop": Path(shell.SHGetKnownFolderPath(shell.FOLDERID_Desktop)),
         "Start menu": Path(shell.SHGetKnownFolderPath(shell.FOLDERID_Programs)),
+        "Taskbar": Path(shell.SHGetKnownFolderPath(shell.FOLDERID_RoamingAppData)).joinpath(*PINNED),
     }
 
 
@@ -226,10 +240,13 @@ def read_link(path) -> dict | None:
 
 
 class Windows:
-    """CloseDesk.lnk on the Desktop and in the Start menu."""
+    """CloseDesk.lnk on the Desktop and in the Start menu; and on the taskbar, once the person pins the open window
+    (Windows copies the Start menu shortcut there): that one is only ever kept right, never made."""
 
     script = "CloseDesk.bat"
-    places_said = {"Desktop": "on your Desktop", "Start menu": "in your Start menu"}
+    places_said = {"Desktop": "on your Desktop", "Start menu": "in your Start menu", "Taskbar": "on your taskbar"}
+    # Made by Windows when the person pins CloseDesk, never by CloseDesk.
+    pinned = "Taskbar"
 
     def __init__(self, root, *, links=None, folders=None, icon_dir=None, icon_source=None) -> None:
         self.root = Path(root)
@@ -238,8 +255,9 @@ class Windows:
         self.icon_dir = Path(icon_dir) if icon_dir else user_dir()
         self.icon_source = Path(icon_source) if icon_source else STATIC / "closedesk.ico"
 
-    def places(self) -> list[tuple[str, Path]]:
-        return [(name, Path(folder) / f"{NAME}.lnk") for name, folder in self.folders().items()]
+    def places(self, saved: dict | None = None) -> list[tuple[str, Path, bool]]:
+        """(name, the shortcut there, whether it is only kept right: never made)."""
+        return [(name, Path(folder) / f"{NAME}.lnk", name == self.pinned) for name, folder in self.folders().items()]
 
     def fallback(self):
         return None
@@ -403,6 +421,8 @@ def mac_script(root: Path, *, guarded: str = "") -> str:
         'export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH" PYTHONUTF8=1',
         "# With the kind of processor it runs as (arm64, or x86_64: an Intel Mac, or Rosetta on Apple's).",
         'echo "$(date "+%Y-%m-%d %H:%M:%S") CloseDesk.app opened ($(/usr/bin/uname -m))"',
+        "# This app's own folder, before anything changes the working folder.",
+        'APP_DIR="$(cd "${0%/*}" 2>/dev/null && pwd -P)"',
         'if [ ! -f "$ROOT/CloseDesk.command" ]; then',
         '  /usr/bin/osascript -e "on run argv" -e "display alert (item 1 of argv) message (item 2 of argv)" -e "end run" \\',
         "    \"CloseDesk can't find its folder\" \"It was $ROOT. Double-click CloseDesk.command in CloseDesk's folder, where it is now: after that, this opens CloseDesk again.\"",
@@ -418,6 +438,9 @@ def mac_script(root: Path, *, guarded: str = "") -> str:
             'if [ ! -x "$ROOT/.venv/bin/python" ]; then',
             '  exec /usr/bin/open -a Terminal "$ROOT/CloseDesk.command"',
             "fi",
+            "# Where this app is: it can be moved (to /Applications, say). launch.py starts Python through its link, and",
+            "# records it, so that it is kept up to date and follows a moved folder.",
+            'export CLOSEDESK_APP_BUNDLE="$(cd "$APP_DIR/../.." 2>/dev/null && pwd -P)"',
             'exec "$ROOT/.venv/bin/python" "$ROOT/scripts/launch.py" --app',
         ]
     return "\n".join(lines) + "\n"
@@ -496,11 +519,18 @@ class Mac:
         what, folder, _ = self.guarded_folder
         return f"{what[0].upper()}{what[1:]} ({folder}) is in {self.guarded}"
 
-    def places(self) -> list[tuple[str, Path]]:
-        places = [("Applications", self.apps / f"{NAME}.app")]
+    def places(self, saved: dict | None = None) -> list[tuple[str, Path, bool]]:
+        """(name, the app there, whether it is only kept right: never made). Besides the two places CloseDesk makes it,
+        each place the person opened it from (moved to /Applications, say: launch.py --app records it, ``APPS_KEY``)."""
+        places = [("Applications", self.apps / f"{NAME}.app", False)]
         in_folder = self.root / f"{NAME}.app"
         if in_folder.exists():  # made there when Applications couldn't be written
-            places.append(("CloseDesk's folder", in_folder))
+            places.append(("CloseDesk's folder", in_folder, False))
+        for named in opened_from(saved or {}):
+            app = Path(named)
+            if any(_same(app, path) for _, path, _ in places) or not app.exists():
+                continue
+            places.append((f"in {app.parent}", app, True))
         return places
 
     def fallback(self):
@@ -664,21 +694,43 @@ def _read_record(record: Path) -> dict:
         return {}
 
 
+def opened_from(saved: dict) -> list[str]:
+    """macOS: the CloseDesk.app bundles the person opened CloseDesk from, as recorded (``APPS_KEY``)."""
+    apps = saved.get(APPS_KEY)
+    return [str(app) for app in apps if isinstance(app, str) and app] if isinstance(apps, list) else []
+
+
 def _tend(system, *, explicit: bool, record: Path) -> Said:
-    first = explicit or not record.exists()
+    saved = _read_record(record)
+    first = explicit or not saved.get("made")
     # The folder this computer's shortcut last opened. Only a shortcut naming that folder, gone, is this computer's
     # after a move: one naming any other folder this computer hasn't got is another computer's (a Desktop OneDrive
     # keeps in step between two), and pointing it here would take it from that computer, for good.
-    known = str(_read_record(record).get("folder") or "")
+    known = str(saved.get("folder") or "")
+    # Where this computer's shortcuts were at the start before (None: a record that didn't say, so every place).
+    had = saved.get("places")
+    had = {str(name) for name in had} if isinstance(had, list) else None
     # CloseDesk's folder moved since this computer made its shortcut: what the move cost (a shortcut Windows' "Problem
-    # with Shortcut" offered to delete) is put back, as at the first start. Deleted where the folder stayed, it isn't.
+    # with Shortcut" offered to delete) is put back, as at the first start; only where this computer had one, never on
+    # a Desktop OneDrive shares with a computer whose shortcut it was. Deleted where the folder stayed, it isn't.
     moved_here = bool(known) and not _same(known, system.root) and not _closedesk_at(known)
     done: dict[str, list[str]] = {key: [] for key in ("made", "moved", "fresh", "kept", "theirs", "fallback", "elsewhere")}
     failed: list[tuple[str, str]] = []
-    for name, path in system.places():
+    for name, path, kept_only in system.places(saved):
         found = system.look(path)
-        if found is None:
-            if moved_here and not explicit:
+        if kept_only:
+            # Only kept right, never made or taken over: the one pinned to the taskbar (Windows makes it), a CloseDesk.app
+            # the person moved elsewhere. Put right when it opens this folder, or the folder this one moved from.
+            if found is None or found is THEIRS:
+                continue
+            if _same(found, system.root):
+                kind = "fresh"
+            elif known and _same(known, found) and not _closedesk_at(found):
+                kind = "moved"
+            else:
+                continue
+        elif found is None:
+            if moved_here and not explicit and (had is None or name in had):
                 kind = "moved"
             elif not first:
                 continue  # the person deleted it: it stays deleted
@@ -716,11 +768,21 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
             done["fallback"].append(name)
         except Exception as exc:
             failed.append((name, _why(exc)))
-    # Recorded once one is made, or another computer's was found (said once: from then on it is left as it is quietly).
-    if (first and (made or done["fallback"] or done["elsewhere"])) or done["moved"]:
+    # Where this computer's shortcuts are now (one that couldn't be written this time still counts).
+    mine = sorted({name for key in ("made", "moved", "fresh", "kept", "fallback") for name in done[key]} | {name for name, _ in failed})
+    # Recorded once one is made, or another computer's was found (said once: from then on it is left as it is quietly);
+    # again when the folder moved, or when where this computer has its shortcuts changed (one deleted, say).
+    if (
+        (first and (made or done["fallback"] or done["elsewhere"])) or done["moved"]
+        or (saved.get("made") and (had is None or had != set(mine) or moved_here))
+    ):
+        apps = [app for app in opened_from(saved) if Path(app).exists()]
         try:
             record.parent.mkdir(parents=True, exist_ok=True)
-            record.write_text(json.dumps({"made": time.strftime("%Y-%m-%d %H:%M:%S"), "folder": str(system.root)}), encoding="utf-8")
+            record.write_text(json.dumps({
+                "made": saved.get("made") if saved.get("made") and not first else time.strftime("%Y-%m-%d %H:%M:%S"),
+                "folder": str(system.root), "places": mine, **({APPS_KEY: apps} if apps else {}),
+            }), encoding="utf-8")
         except OSError:
             pass
     return system.said(done, failed, explicit=explicit)

@@ -485,7 +485,8 @@ src/controller_inbox/
                     window can't even start (standard library only, so it works when a part CloseDesk needs won't load)
   shortcut.py       The CloseDesk shortcut that opens the window: CloseDesk.lnk on the Desktop and in the Start menu
                     (Windows), CloseDesk.app in Applications (macOS); made the first time a launcher starts CloseDesk,
-                    kept pointing at the folder when it moves, and made again from Settings
+                    kept pointing at the folder when it moves (the taskbar's pinned copy too, and a CloseDesk.app moved
+                    elsewhere), and made again from Settings
   templates/        The classic pages
   static/app.js     Open-in-place preview, chat box, search shortcut (answers formatted by static/ui/format.js)
   static/ui/        The workspace's scripts and styles (no build step, no CDN); update_ask.js, the update question

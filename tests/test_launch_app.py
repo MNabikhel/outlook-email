@@ -317,6 +317,71 @@ def test_closedesk_apps_python_is_used_only_when_it_is_this_environments(launch,
     assert launch.linked_python(platform="win32") is None and launch.linked_python(platform="linux") is None
 
 
+def _app_bundle(folder: Path, python: Path, *, bundle_id: str = app_window.BUNDLE_ID) -> Path:
+    import plistlib
+
+    app = folder / "CloseDesk.app"
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": bundle_id}))
+    (app / "Contents" / "MacOS" / "CloseDesk-python").symlink_to(python)
+    return app
+
+
+@pytest.mark.skipif(os.name == "nt", reason="CloseDesk.app's link to Python is a Mac's")
+def test_closedesk_app_opened_from_outside_applications_runs_python_as_itself(launch, monkeypatch, tmp_path):
+    # Dragged to /Applications (and kept in the Dock from there): launch.py looked only in ~/Applications and CloseDesk's
+    # folder, so the window ran as Python, the Dock showing a Python tile.
+    python = tmp_path / "Python.app" / "Contents" / "MacOS" / "Python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    monkeypatch.setenv("CLOSEDESK_SHORTCUT_DIR", str(tmp_path / "shortcuts"))
+    monkeypatch.setattr(launch, "mac_interpreter", lambda *a: python)
+    app = _app_bundle(tmp_path / "Applications", python)
+    assert launch.linked_python(platform="darwin") is None
+    monkeypatch.setenv(launch.APP_BUNDLE_ENV, str(app))
+    assert launch.linked_python(platform="darwin") == app / "Contents" / "MacOS" / "CloseDesk-python"
+    other = _app_bundle(tmp_path / "Elsewhere", python, bundle_id="com.example.other")
+    monkeypatch.setenv(launch.APP_BUNDLE_ENV, str(other))
+    assert launch.linked_python(platform="darwin") is None, "only CloseDesk's own app"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="CloseDesk.app's link to Python is a Mac's")
+def test_where_closedesk_app_was_opened_from_is_recorded_and_not_passed_on(launch, monkeypatch, tmp_path):
+    python = tmp_path / "Python.app" / "Contents" / "MacOS" / "Python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    shortcuts = tmp_path / "shortcuts"
+    shortcuts.mkdir()
+    (shortcuts / "shortcut.json").write_text(json.dumps({"made": "2026-11-20 09:00:00", "folder": str(launch.ROOT)}), encoding="utf-8")
+    monkeypatch.setenv("CLOSEDESK_SHORTCUT_DIR", str(shortcuts))
+    monkeypatch.setattr(launch.sys, "platform", "darwin")
+    monkeypatch.setattr(launch, "mac_interpreter", lambda *a: python)
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    monkeypatch.setattr(launch, "_runs_as_app", lambda link: True)
+    app = _app_bundle(tmp_path / "Applications", python)
+    monkeypatch.setenv(launch.APP_BUNDLE_ENV, str(app))
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", "")
+    handed: list = []
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
+    assert launch.main(["--app"]) == 0
+    (cmd, env), = handed
+    assert cmd[0] == str(app / "Contents" / "MacOS" / "CloseDesk-python") and launch.APP_BUNDLE_ENV not in env
+    record = json.loads((shortcuts / "shortcut.json").read_text(encoding="utf-8"))
+    assert record["apps"] == [str(app)] and record["folder"] == str(launch.ROOT), "the rest of the record is kept"
+    launch.main(["--app"])
+    assert json.loads((shortcuts / "shortcut.json").read_text(encoding="utf-8"))["apps"] == [str(app)], "recorded once"
+
+
+def test_the_launchers_name_for_closedesk_apps_id_is_closedesks(launch, monkeypatch):
+    from controller_inbox import shortcut
+
+    assert launch.BUNDLE_ID == app_window.BUNDLE_ID and launch.APPS_KEY == shortcut.APPS_KEY
+    # The record it adds to is the shortcut's own.
+    monkeypatch.delenv(shortcut.DIR_ENV)
+    assert launch.tools_dir() / "shortcut.json" == shortcut.record_path()
+
+
 def test_a_python_that_doesnt_run_as_closedesk_app_isnt_used(launch, monkeypatch, tmp_path):
     # Tried first: started through the link, Python must find this environment, or the window wouldn't open at all.
     monkeypatch.setattr(launch, "in_venv", lambda: True)

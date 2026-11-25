@@ -95,6 +95,12 @@ SETUP_FAILED = (
 DIR_ENV = "CLOSEDESK_SHORTCUT_DIR"
 LINKED_PYTHON = "CloseDesk-python"
 MAC_APP_PATH = "CFProcessPath"
+# CloseDesk.app's id (app_window.BUNDLE_ID), and where its script says it was opened from: the person can move it (to
+# /Applications, say). That one's link is tried first, and it is recorded (shortcut.json, shortcut.APPS_KEY), so that
+# CloseDesk keeps it up to date and points it at a moved folder.
+BUNDLE_ID = "io.github.mnabikhel.closedesk"
+APP_BUNDLE_ENV = "CLOSEDESK_APP_BUNDLE"
+APPS_KEY = "apps"
 # CI's check of the real window (app_window's SMOKE_ENV): no message box waits there for a click no one makes.
 SMOKE_ENV = "CLOSEDESK_APP_SMOKE"
 
@@ -160,18 +166,58 @@ def mac_interpreter(sys_module=None, config_var=None) -> Path | None:
     return path if path.is_file() else None
 
 
+def opened_from() -> Path | None:
+    """macOS: the CloseDesk.app the app was opened from, as its script says (``APP_BUNDLE_ENV``), when it is
+    CloseDesk's own."""
+    named = os.environ.get(APP_BUNDLE_ENV, "")
+    if not named:
+        return None
+    app = Path(named)
+    try:
+        import plistlib
+
+        with (app / "Contents" / "Info.plist").open("rb") as handle:
+            info = plistlib.load(handle)
+    except Exception:  # not there, or not an app's
+        return None
+    return app if isinstance(info, dict) and info.get("CFBundleIdentifier") == BUNDLE_ID else None
+
+
+def remember_opened_from(app: Path) -> None:
+    """Record the CloseDesk.app the app was opened from (once), with what the shortcut keeps (shortcut.py)."""
+    record = Path(os.environ.get(DIR_ENV) or tools_dir()) / "shortcut.json"
+    try:
+        saved = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        saved = {}
+    saved = saved if isinstance(saved, dict) else {}
+    apps = [str(item) for item in saved.get(APPS_KEY) or [] if isinstance(item, str)] if isinstance(saved.get(APPS_KEY), list) else []
+    if str(app) in apps:
+        return
+    saved[APPS_KEY] = [*apps, str(app)][-5:]
+    try:
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps(saved), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def linked_python(*, platform: str = "") -> Path | None:
     """macOS: CloseDesk.app's link to the Python that runs CloseDesk, when it leads to this environment's. Python started
-    through it is CloseDesk.app to macOS: the Dock and the menu bar say CloseDesk, with CloseDesk's icon."""
+    through it is CloseDesk.app to macOS: the Dock and the menu bar say CloseDesk, with CloseDesk's icon. The app it was
+    opened from first, wherever the person keeps it."""
     if (platform or sys.platform) != "darwin":
         return None
     wanted = mac_interpreter()
     if wanted is None:
         return None
     named = os.environ.get(DIR_ENV, "")
-    apps = [Path(named)] if named else [Path.home() / "Applications", ROOT]
-    for folder in apps:
-        link = folder / "CloseDesk.app" / "Contents" / "MacOS" / LINKED_PYTHON
+    apps = [Path(named) / "CloseDesk.app"] if named else [Path.home() / "Applications" / "CloseDesk.app", ROOT / "CloseDesk.app"]
+    opened = opened_from()
+    if opened is not None:
+        apps.insert(0, opened)
+    for app in apps:
+        link = app / "Contents" / "MacOS" / LINKED_PYTHON
         try:
             if link.is_symlink() and os.path.realpath(link) == os.path.realpath(wanted):
                 return link
@@ -310,7 +356,7 @@ def open_launcher() -> None:
     """Open the double-click launcher in its window (CloseDesk.bat; CloseDesk.command in Terminal), as if it were
     double-clicked: what the app can't do (make the environment again) is done there, as it goes, then CloseDesk
     opens."""
-    for name in (APP_ENV, APP_LOG_ENV, "CLOSEDESK_LAUNCHER"):
+    for name in (APP_ENV, APP_LOG_ENV, "CLOSEDESK_LAUNCHER", APP_BUNDLE_ENV):
         os.environ.pop(name, None)
     try:
         if WINDOWS:
@@ -802,7 +848,11 @@ def _after_window(code: int) -> int:
 
 def _open_window(args: list[str]) -> int:
     window = ["-m", "controller_inbox", "app", *args]
+    opened = opened_from() if sys.platform == "darwin" else None
+    if opened is not None:
+        remember_opened_from(opened)
     linked = linked_python()
+    os.environ.pop(APP_BUNDLE_ENV, None)  # for this start only
     if linked is not None and not _runs_as_app(linked):
         say(f"Python started as CloseDesk.app ({linked}) didn't find CloseDesk: the Dock shows the window as Python's.")
         linked = None
