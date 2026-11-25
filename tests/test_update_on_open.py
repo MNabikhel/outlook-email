@@ -300,6 +300,15 @@ def test_curl_is_given_the_same_short_wait_and_no_window(monkeypatch):
         ("Merge pull request #9 from x/y\n\nAsk before loading a model smaller\n\nCo-Authored-By: A <a@b.c>", "Ask before loading a model smaller"),
         ("Merge pull request #9 from x/y\n\nCo-Authored-By: A <a@b.c>", ""),
         ("Merge pull request #9 from x/y\n\nFix: the totals on scanned invoices", "Fix: the totals on scanned invoices"),
+        # A title whose first word has a hyphen, then a colon, is a title: only the message's last lines are who wrote
+        # it, by the names git and GitHub give them.
+        ("Merge pull request #9 from x/y\n\nFollow-up: keep the totals right", "Follow-up: keep the totals right"),
+        ("Merge pull request #9 from x/y\n\nE-mail: open attachments again\n\nCo-Authored-By: A <a@b.c>\nSigned-off-by: B <b@c.d>",
+         "E-mail: open attachments again"),
+        ("Merge pull request #9 from x/y\n\nSet-up: one step\nco-authored-by: A <a@b.c>\nClaude-Session: https://claude.ai/code/x",
+         "Set-up: one step"),
+        ("Merge pull request #9 from x/y\n\nSigned-off-by: B <b@c.d>\nClaude-Session: https://claude.ai/code/x\n\n", ""),
+        ("  \n\nMerge pull request #9 from x/y\n\nRe-read scans: faster\n\nCo-Authored-By: A <a@b.c>\n\n", "Re-read scans: faster"),
         ("Say how long a summary may take (#74)\n\n* one\n* two", "Say how long a summary may take"),
         ("Merge branch 'main' into summary-wait", ""),
         ("", ""),

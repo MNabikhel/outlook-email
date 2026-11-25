@@ -268,9 +268,14 @@ def check(
     return saved
 
 
-# A line of a commit message that only says who wrote it ("Co-Authored-By: ...", "Signed-off-by: ..."). A title such
-# as "Fix: the totals" isn't one.
-TRAILER = re.compile(r"[A-Za-z]+(?:-[A-Za-z]+)+: ")
+# A line of a commit message's last lines that only says who wrote it or where ("Co-Authored-By: ...", "Signed-off-by:
+# ..."), by the names git and GitHub give them. A title such as "Fix: the totals" or "Follow-up: keep the totals
+# right" isn't one, nor such a line above the last lines.
+TRAILER = re.compile(
+    r"(?:Co-authored-by|Signed-off-by|Reviewed-by|Acked-by|Tested-by|Reported-by|Suggested-by|Helped-by|Cc"
+    r"|Change-Id|Claude-Session):\s",
+    re.IGNORECASE,
+)
 MERGED_PR = re.compile(r"Merge pull request #\d+ ")
 WHATS_NEW_CHARS = 160
 
@@ -279,12 +284,15 @@ def whats_new(message: str) -> str:
     """The latest change's title, from its commit message: for GitHub's merge of a pull request ("Merge pull request
     #73 from ...", then the pull request's title) the title, else the first line, without a squashed one's "(#73)".
     "" when it says nothing a user would read (a merge of branches). Kept to a line, in plain characters."""
-    lines = [line.strip() for line in str(message or "").splitlines() if line.strip()]
-    if not lines:
+    lines = "\n".join(line.strip() for line in str(message or "").splitlines()).strip("\n").split("\n")
+    if not lines[0]:
         return ""
     first = lines[0]
     if MERGED_PR.match(first):
-        titles = [line for line in lines[1:] if not TRAILER.match(line)]
+        rest = lines[1:]
+        # The last lines, after the last blank one: who wrote it is said only there.
+        last = max((at for at, line in enumerate(rest) if not line), default=-1) + 1
+        titles = [line for at, line in enumerate(rest) if line and not (at >= last and TRAILER.match(line))]
         first = titles[0] if titles else ""
     elif first.startswith("Merge "):
         return ""
