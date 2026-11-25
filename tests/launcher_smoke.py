@@ -68,6 +68,28 @@ def run(folder: Path, *args: str, env: dict | None = None) -> str:
     return done.stdout
 
 
+def while_updating(folder: Path) -> None:
+    """An update running in the folder (the window's, which carries on after its window is closed): a double-click
+    start, and CloseDesk-Update, say so, start nothing, and say nothing more under it."""
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], stdin=subprocess.DEVNULL)
+    mark = folder / ".closedesk-updating"
+    try:
+        mark.write_text(json.dumps({"pid": sleeper.pid, "started": time.time()}), encoding="utf-8")
+        for args in (("--check",), ("--update",)):
+            done = subprocess.run(
+                launcher(folder, *args), cwd=folder, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, errors="replace", timeout=300,
+            )
+            said = f"{' '.join(args)} while an update runs: exit {done.returncode}\n{done.stdout}"
+            assert done.returncode == 77, said
+            assert "being updated just now" in done.stdout and "CloseDesk stopped" not in done.stdout, said
+            print(f"--- {said}", flush=True)
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+        mark.unlink(missing_ok=True)
+
+
 def export(dest: Path, *, commit: str) -> None:
     """This checkout as GitHub's ZIP would hold it: tracked files (and those not yet committed), no .git."""
     files = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=REPO, capture_output=True, text=True, check=True).stdout.split("\n")
@@ -387,6 +409,11 @@ LSREGISTER = "/System/Library/Frameworks/CoreServices.framework/Frameworks/Launc
 # for a click. No asking GitHub: whether an update is out isn't what is checked here.
 WINDOW_CHECK = {"CLOSEDESK_APP_SMOKE": "120", "CLOSEDESK_APP_SMOKE_HOLD": "10", "CONTROLLER_INBOX_UPDATE_CHECK": "false"}
 SHOWED = "The CloseDesk window showed "
+# The window's last line (app_window.CLOSED), and what it says along the way when something went wrong; and what
+# launch.py says on Windows for a window's program that ended with an error.
+CLOSED = re.compile(r"The CloseDesk window closed \(exit code (-?\d+)\)\.")
+WENT_WRONG = ("CloseDesk stopped by itself", "didn't show CloseDesk's page")
+ENDED_BADLY = "The CloseDesk window's program ended with exit code"
 DOCK_NAME = f"macOS shows the window as CloseDesk ({BUNDLE_ID})."
 
 
@@ -551,8 +578,22 @@ def showed_only(log: str, port: int, what: str) -> None:
     """The window showed the CloseDesk on ``port`` and started none of its own (a second one, on the next port, would
     pass every other look: exit 0, both pages, the first one still open)."""
     assert ports_shown(log) == {str(port)}, f"the CloseDesk window ({what}) showed pages from {sorted(ports_shown(log))}, not {port}\n{log[-3000:]}"
-    for started in ("Another program is using port", "Opening http"):
+    for started in (" is using port ", "Opening http"):
         assert started not in log, f"the CloseDesk window ({what}) started a CloseDesk of its own\n{log[-3000:]}"
+
+
+def window_closed(log: str) -> int | None:
+    """The exit code the window said it closed with (its last line), None when it hasn't said."""
+    found = CLOSED.findall(log)
+    return int(found[-1]) if found else None
+
+
+def closed_well(log: str, what: str, *, windows: bool = WINDOWS) -> None:
+    """The window closed with exit code 0, nothing having gone wrong on the way: where nothing else sees how its
+    program ended (a double-click), its log says."""
+    assert window_closed(log) == 0, f"the CloseDesk window ({what}) closed with exit code {window_closed(log)}\n{log[-3000:]}"
+    for line in WENT_WRONG + ((ENDED_BADLY,) if windows else ()):
+        assert line not in log, f"the CloseDesk window ({what}) said {line!r}\n{log[-3000:]}"
 
 
 def both_uis(log: str, what: str) -> None:
@@ -627,11 +668,16 @@ def end_windows(folder: Path, shortcuts: Path) -> None:
     if WINDOWS:
         # The programs whose command line names the check's folder (the window's Python runs from its .venv), each with
         # what it started. The folder is passed in the environment, never written into the script.
+        # As given (GitHub's runners give TEMP a short name, C:\Users\RUNNER~1\...) and resolved, the long name, which
+        # what the shortcut started carries (CloseDesk's own folder, resolved); Windows' paths ignore case.
         listing = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:CLOSEDESK_CHECK_FOLDER) }"
+             "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and ("
+             "$_.CommandLine.IndexOf($env:CLOSEDESK_CHECK_FOLDER, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or "
+             "$_.CommandLine.IndexOf($env:CLOSEDESK_CHECK_FOLDER_GIVEN, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) }"
              " | ForEach-Object { $_.ProcessId }"],
-            capture_output=True, text=True, errors="replace", timeout=120, env={**os.environ, "CLOSEDESK_CHECK_FOLDER": str(folder)},
+            capture_output=True, text=True, errors="replace", timeout=120,
+            env={**os.environ, "CLOSEDESK_CHECK_FOLDER": str(folder.resolve()), "CLOSEDESK_CHECK_FOLDER_GIVEN": str(folder)},
         )
         for pid in listing.stdout.split():
             if pid.isdigit() and int(pid) != os.getpid():
@@ -702,6 +748,14 @@ def double_click(folder: Path, shortcuts: Path) -> list[str]:
     log = log_since(start)
     assert finished, (f"the window of {what} didn't show CloseDesk's page and close by itself (CloseDesk answered on "
                       f"port {port}: {up})\n--- the log\n{log[-6000:]}")
+    # How the window's program ended, which nothing else sees here (Windows' shell and macOS's open started it): its
+    # last line says, once it has closed.
+    for _ in range(120):
+        if window_closed(log) is not None:
+            break
+        time.sleep(0.5)
+        log = log_since(start)
+    closed_well(log, what)
     if MAC:
         # Started by macOS from the Dock or Spotlight, CloseDesk.app runs on the Mac's own kind of processor, not under
         # Rosetta (an environment set up for Apple's processor wouldn't load there).
@@ -897,6 +951,7 @@ def main() -> int:
 
     out = run(folder, "--check")
     assert "Installing" not in out and "etting" not in out.split("ok ")[0], "the second start set something up again"
+    while_updating(folder)
 
     moved = work / "Close Desk renamed"
     folder.rename(moved)

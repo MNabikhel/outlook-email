@@ -170,6 +170,7 @@ while [ "$tries" -lt 3 ]; do
       export CLOSEDESK_REOPEN=1
       exec bash "$PWD/CloseDesk.command" ${args[@]+"${args[@]}"}
       ;;
+    77) finish "$code" ;;                                   # launch.py: an update runs in this folder now (said above)
     *)
       echo
       echo "CloseDesk stopped. The message above says why."

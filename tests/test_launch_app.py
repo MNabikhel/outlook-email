@@ -178,6 +178,23 @@ def test_installing_in_the_app_says_so_without_a_console(launch, monkeypatch):
     assert launch.noticed == [launch.INSTALLING], "nothing on screen for a minute would look like nothing happened"
 
 
+def test_the_check_after_the_windows_update_installs_without_a_second_message(launch, monkeypatch):
+    # Update now in the window: launch.py --update, then the newest launch.py's --check, both with CLOSEDESK_APP. An
+    # update that adds a package had the check pop up "CloseDesk is installing what it needs..." over the window's own
+    # "Updating CloseDesk" page (on Windows a box that vanished by itself when the check ended).
+    monkeypatch.setenv("CLOSEDESK_APP", "1")
+    monkeypatch.setenv(launch.AFTER_UPDATE_ENV, "1")
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    (launch.ROOT / "pyproject.toml").write_text(
+        '[project]\nname = "controller-inbox"\ndependencies = ["surely-not-installed-new-part>=1"]\n', encoding="utf-8")
+    installs: list = []
+    monkeypatch.setattr(launch, "install", lambda *what: installs.append(what) or True)
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: 0)
+    launch.write_state({"extras": {}, "python": "3.12.0"})
+    assert launch.main(["--check"]) == 0
+    assert installs and launch.noticed == [], "the window says CloseDesk is updating already"
+
+
 def test_the_window_is_tried_again_at_each_app_start_until_it_installs(launch, monkeypatch):
     # The window's add-on (pywebview) that didn't install (offline, say) would mean the browser for good if it were
     # tried only once, as the other add-ons are.
@@ -555,7 +572,9 @@ def test_a_double_click_start_while_an_update_runs_says_so_and_doesnt_start(laun
     # be put in place"), and its first page said "CloseDesk wasn't updated" while the update was still running.
     handed = _opens(launch, monkeypatch)
     (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps({"pid": os.getpid(), "started": time.time()}), encoding="utf-8")
-    assert launch.main(args) == 1, "the launcher's window stays open on the words (a code of 0 closes it)"
+    # Its own code: the launcher's window stays open on the words (a code of 0 closes it), without its "CloseDesk
+    # stopped. The message above says why." under them, since nothing was started.
+    assert launch.main(args) == launch.UPDATE_UNDER_WAY
     assert launch.UPDATING_NOW in capsys.readouterr().out and handed == []
 
 
@@ -566,7 +585,7 @@ def test_a_second_update_while_one_runs_waits_for_it(launch, monkeypatch, capsys
     try:
         (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps({"pid": other.pid, "started": time.time()}), encoding="utf-8")
         monkeypatch.setattr(launch, "update", lambda: pytest.fail("a second update ran"))
-        assert launch.main(["--update"]) == 1
+        assert launch.main(["--update"]) == launch.UPDATE_UNDER_WAY
         assert launch.UPDATING_NOW in capsys.readouterr().out
         assert json.loads((launch.ROOT / launch.UPDATING_MARK).read_text(encoding="utf-8"))["pid"] == other.pid, "the first's mark stays"
     finally:
@@ -694,6 +713,48 @@ def test_a_download_curl_couldnt_make_isnt_waited_on_for_good_either(launch, mon
     started = time.monotonic()
     assert launch._fetch("https://example.com/closedesk.zip", tmp_path / "x.zip") is False
     assert time.monotonic() - started < 5
+
+
+def test_the_launchers_say_nothing_more_when_an_update_runs(launch):
+    # "CloseDesk is being updated just now..." was followed by "CloseDesk stopped. The message above says why.",
+    # though nothing had been started.
+    assert launch.UPDATE_UNDER_WAY not in (0, 1, launch.UPDATE, launch.REBUILD, 130)
+    mac = (ROOT / "CloseDesk.command").read_text(encoding="utf-8")
+    case = mac[mac.index(f"    {launch.UPDATE_UNDER_WAY})") : mac.index(";;", mac.index(f"    {launch.UPDATE_UNDER_WAY})"))]
+    assert "finish" in case and "stopped" not in case
+    windows = (ROOT / "CloseDesk.bat").read_bytes().decode("ascii")
+    assert f'if "%CODE%"=="{launch.UPDATE_UNDER_WAY}" goto :updating' in windows
+    block = windows[windows.index("\r\n:updating\r\n") + 2 :].split("\r\n\r\n")[0]
+    assert "pause" in block and "popd" in block and f"exit /b {launch.UPDATE_UNDER_WAY}" in block and "stopped" not in block
+
+
+@pytest.mark.parametrize("said, code", [("curl: (22) The requested URL returned error: 404", "404"),
+                                        ("curl: (22) The requested URL returned error: 503 Service Unavailable", "503")])
+def test_a_download_github_refuses_isnt_said_to_be_the_internet(launch, monkeypatch, tmp_path, capsys, said, code):
+    # The update download answering 404 (or a server error) while the internet works was told as "try again when the
+    # internet is back".
+    import urllib.error
+
+    def refused(url, *a, **k):
+        raise urllib.error.HTTPError(url, int(code), "Not Found", {}, None)
+
+    monkeypatch.setattr(launch.shutil, "which", lambda name: "/usr/bin/curl")
+    monkeypatch.setattr(launch.subprocess, "run", lambda cmd, **options: SimpleNamespace(returncode=22, stdout="", stderr=said))
+    monkeypatch.setattr("urllib.request.urlopen", refused)
+    monkeypatch.setenv("CLOSEDESK_UPDATE_URL", "https://example.com/closedesk.zip")
+    assert launch.update() == 1
+    out = capsys.readouterr().out
+    assert "internet is back" not in out and code in out and "Nothing was changed" in out, out
+
+
+def test_a_download_that_cant_reach_github_says_the_internet(launch, monkeypatch, capsys):
+    monkeypatch.setattr(launch.shutil, "which", lambda name: "/usr/bin/curl")
+    monkeypatch.setattr(launch.subprocess, "run", lambda cmd, **options: SimpleNamespace(
+        returncode=6, stdout="", stderr="curl: (6) Could not resolve host: github.com"))
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: (_ for _ in ()).throw(OSError("nodename nor servname provided")))
+    monkeypatch.setenv("CLOSEDESK_UPDATE_URL", "https://example.com/closedesk.zip")
+    assert launch.update() == 1
+    assert "internet is back" in capsys.readouterr().out
 
 
 def test_the_update_the_window_starts_adds_to_the_end_of_the_log_on_windows(launch, monkeypatch):

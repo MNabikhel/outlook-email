@@ -1166,6 +1166,22 @@ def test_every_download_link_says_download_so_the_window_saves_it():
     assert navigated == [], "a download by going to it: the window would show it instead (use a download link)"
 
 
+@pytest.mark.parametrize("code", [0, 1])
+def test_the_window_says_how_it_closed_as_its_last_line(monkeypatch, capsys, code):
+    # Opened by a double-click, nothing else sees how the window's program ended: CI's check read only that both pages
+    # had shown and the port was free, and passed a window that ended with an error.
+    left: list = []
+    monkeypatch.setattr(app_window, "why_no_window", lambda: None)
+    monkeypatch.setitem(sys.modules, "webview", SimpleNamespace())
+    monkeypatch.setattr(app_window, "prepare", lambda args, webview: SimpleNamespace(run=lambda: code, fallback=None))
+    monkeypatch.setattr(app_window, "_leave", left.append)
+    monkeypatch.setattr(app_window, "set_app_id", lambda: None)
+    app_window._open(SimpleNamespace(no_browser=False, host=None, port=None))
+    assert left == [code]
+    assert capsys.readouterr().out.rstrip().splitlines()[-1] == app_window.CLOSED.format(code=code) == (
+        f"The CloseDesk window closed (exit code {code}).")
+
+
 def test_the_app_without_a_browser_only_serves(monkeypatch):
     # launch.py --app --no-browser: the launcher check in CI runs the app's whole start (pythonw, the log, no console
     # windows) with no window and no browser, as --no-browser means for the double-click launchers.

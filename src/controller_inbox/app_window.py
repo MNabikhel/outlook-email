@@ -77,6 +77,9 @@ DIDNT_OPEN = 2
 # How the window's process ends when it has said itself, in a message box, why CloseDesk can't open: launch.py, which
 # otherwise says so for a window that ends with an error, then says nothing more.
 SAID = app_log.SAID
+# The window's last line in its log, with how its program ends (CI's check of the double-clicked window reads it: there,
+# nothing else sees the exit code).
+CLOSED = "The CloseDesk window closed (exit code {code})."
 # macOS: where the window's Python says it was started from (launch.py sets it to the link in CloseDesk.app), read for
 # the app it belongs to: the Dock and the menu bar say CloseDesk. Not for what the window starts.
 MAC_APP_PATH = "CFProcessPath"
@@ -1190,5 +1193,6 @@ def _open(args) -> int:
     code = app.run()
     if app.fallback:
         code = browser_instead(app.fallback, args)
+    print(CLOSED.format(code=code), flush=True)
     _leave(code)
     return code  # pragma: no cover (not reached)

@@ -10,7 +10,8 @@ On a start it checks, in order:
 Then it starts CloseDesk. Two exit codes ask the launcher to do what a running Python can't do to itself:
 ``REBUILD`` (remove ``.venv`` and run this again), and CloseDesk's own ``UPDATE`` (Settings' Update button: run this
 with ``--update``, then start CloseDesk again). CloseDesk is told a launcher started it (``CLOSEDESK_LAUNCHER``), so
-it offers that button only then.
+it offers that button only then. A third, ``UPDATE_UNDER_WAY``, says an update runs in the folder now, which was
+said, and nothing was started: the launcher's window stays open on it, with nothing more.
 
 The Python is whichever the launcher found on the computer; none is ever downloaded unasked. (The launcher's
 ``--get-python`` downloads one for CloseDesk alone, when the person asks for it.)
@@ -42,6 +43,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -62,6 +64,7 @@ LOG = VENV / "closedesk-setup.log"
 # The exit codes the launchers act on (see the module docstring). UPDATE is controller_inbox.updates.UPDATE_AND_RESTART.
 REBUILD = 76
 UPDATE = 75
+UPDATE_UNDER_WAY = 77
 
 WINDOWS = os.name == "nt"
 # The app (``--app``): set for what it runs, so none of it opens a console window. The names are
@@ -475,8 +478,10 @@ def ensure_packages() -> int:
     installed = False
     if wrong or not here:
         installed = True
-        if app_mode():
-            notice(INSTALLING)  # nothing else is on screen until the window opens
+        if app_mode() and not _after_update:
+            # Nothing else is on screen until the window opens. (The check after the window's update: the window says
+            # CloseDesk is updating already.)
+            notice(INSTALLING)
         if first:
             say("Installing what CloseDesk needs. This takes a minute or two.")
         elif not here:
@@ -553,9 +558,17 @@ def _hand_over(cmd: list[str]) -> int:
 # Updating -------------------------------------------------------------------------------------------------
 
 
+# What the server answered when it refused the last download (GitHub's "404"), "" when it wasn't reached: then it is
+# the internet (or a proxy) that stopped it.
+_refused = ""
+
+
 def _fetch(url: str, dest: Path) -> bool:
     """Download with curl (it trusts what the computer trusts, a company proxy's certificate included), else
-    with Python. Both together within ``DOWNLOAD_LONGEST``: one that stalls is given up on."""
+    with Python. Both together within ``DOWNLOAD_LONGEST``: one that stalls is given up on. When the server answered
+    with an error, ``_refused`` says which."""
+    global _refused
+    _refused = ""
     until = time.monotonic() + DOWNLOAD_LONGEST
     longest = f"{DOWNLOAD_LONGEST / 60:g} minutes"
     curl = shutil.which("curl")
@@ -571,8 +584,12 @@ def _fetch(url: str, dest: Path) -> bool:
             return False
         if done.returncode == 0:
             return True
+        if done.returncode == 22:  # -f: the server answered with an error ("returned error: 404")
+            found = re.search(r"error: (\d{3})", str(done.stderr or ""))
+            _refused = found.group(1) if found else "an error"
     try:
         import ssl
+        import urllib.error
         import urllib.request
 
         try:
@@ -591,6 +608,8 @@ def _fetch(url: str, dest: Path) -> bool:
                 out.write(chunk)
         return True
     except Exception as exc:
+        if isinstance(exc, urllib.error.HTTPError):
+            _refused = str(exc.code)
         say(f"Couldn't download {url}: {exc}")
         return False
 
@@ -623,7 +642,11 @@ def update() -> int:
         _mark_update(folder=Path(tmp).name)  # removed with what the update leaves, if it is stopped
         archive = Path(tmp) / "closedesk.zip"
         if not _fetch(url, archive):
-            say("The update couldn't be downloaded. Nothing was changed; try again when the internet is back.")
+            if _refused:
+                say(f"The update couldn't be downloaded: GitHub answered with an error ({_refused}), so the internet works "
+                    "but the download isn't there just now. Nothing was changed; try again later.")
+            else:
+                say("The update couldn't be downloaded. Nothing was changed; try again when the internet is back.")
             return 1
         try:
             with zipfile.ZipFile(archive) as bundle:
@@ -698,6 +721,8 @@ def update() -> int:
 
 
 _marked: dict = {}
+# This run is the check after an update (``AFTER_UPDATE_ENV``, read once as it starts).
+_after_update = False
 
 
 def _mark_update(**more) -> None:
@@ -886,7 +911,7 @@ def main(argv: list[str]) -> int:
         args.remove("--update")
         if update_under_way():  # another update (the window's, carrying on after it closed): not two at once
             say(UPDATING_NOW)
-            return 1
+            return UPDATE_UNDER_WAY
         _mark_update()
         try:
             code = update()
@@ -899,11 +924,13 @@ def main(argv: list[str]) -> int:
         finally:
             os.environ.pop(AFTER_UPDATE_ENV, None)
             _end_update()
-    if os.environ.pop(AFTER_UPDATE_ENV, "") != "1" and update_under_way():
+    global _after_update
+    _after_update = os.environ.pop(AFTER_UPDATE_ENV, "") == "1"
+    if not _after_update and update_under_way():
         # An update runs (the window's, which carries on after the window is closed): started now, CloseDesk would
         # run from a folder being replaced. Said in the launcher's window, which stays open on it.
         say(UPDATING_NOW)
-        return 1
+        return UPDATE_UNDER_WAY
     if not in_venv():
         return create_environment(args)
     code = ensure_packages()

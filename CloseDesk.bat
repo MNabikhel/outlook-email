@@ -97,6 +97,8 @@ if "%CODE%"=="75" goto :update_and_reopen
 rem 76: launch.py says the environment is beyond repair; it is made again, once.
 if "%CODE%"=="76" set "CLOSEDESK_REBUILT=1"
 if "%CODE%"=="76" goto :remake
+rem 77: an update runs in this folder now; launch.py said so, and nothing was started.
+if "%CODE%"=="77" goto :updating
 goto :fail
 
 :remake
@@ -221,3 +223,9 @@ echo CloseDesk stopped. The message above says why.
 pause
 popd
 exit /b 1
+
+:updating
+echo.
+pause
+popd
+exit /b 77

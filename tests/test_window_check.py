@@ -124,11 +124,18 @@ def test_the_check_closes_only_what_runs_from_its_own_folder_on_windows(monkeypa
         return module.subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(module.subprocess, "run", run)
-    folder = tmp_path / "Close Desk"
+    # The folder as the check was given it: on GitHub's runners TEMP is a short name (C:\Users\RUNNER~1\...), while
+    # what the double-click started carries the long one (CloseDesk's own folder, resolved). Here a link stands in.
+    (tmp_path / "the long name").mkdir()
+    (tmp_path / "SHORT~1").symlink_to(tmp_path / "the long name", target_is_directory=True)
+    folder = tmp_path / "SHORT~1" / "Close Desk"
+    folder.mkdir()
     module.end_windows(folder, tmp_path / "shortcuts")
     (listing, options), *killed = ran
-    assert options["env"]["CLOSEDESK_CHECK_FOLDER"] == str(folder), "the folder is passed in, not written into the script"
-    assert str(folder) not in " ".join(listing)
+    assert options["env"]["CLOSEDESK_CHECK_FOLDER"] == str(folder.resolve()), "the folder is passed in, not written into the script"
+    assert options["env"]["CLOSEDESK_CHECK_FOLDER_GIVEN"] == str(folder)
+    assert str(folder) not in " ".join(listing) and str(folder.resolve()) not in " ".join(listing)
+    assert "OrdinalIgnoreCase" in " ".join(listing) and ".Contains(" not in " ".join(listing), "Windows' paths ignore case"
     assert [cmd for cmd, _ in killed] == [["taskkill", "/F", "/T", "/PID", "4242"], ["taskkill", "/F", "/T", "/PID", "4343"]]
     assert not any("/IM" in cmd for cmd, _ in killed)
 
@@ -169,3 +176,28 @@ def test_a_window_onto_a_closedesk_already_open_has_to_show_that_one():
         except AssertionError:
             continue
         raise AssertionError(f"passed: {wrong!r}")
+
+
+def test_the_double_clicked_window_has_to_close_without_an_error():
+    # The CloseDesk it started stopped by itself while the window was held open: the window logged it, ended with 1,
+    # and the check passed, since the port was free and both pages had been shown.
+    from controller_inbox import app_window
+
+    module = smoke()
+    closed = app_window.CLOSED.format(code=0)
+    good = f"The CloseDesk window showed / (port 9)\nThe CloseDesk window showed /app (port 9)\n{closed}\n"
+    assert module.window_closed(good) == 0
+    module.closed_well(good, "the window", windows=True)
+    wrong = (
+        good.replace("(exit code 0)", "(exit code 1)"),
+        good.replace(closed, "CloseDesk stopped by itself (exit code 1).\n" + closed),
+        good.replace(closed, "The CloseDesk window didn't show CloseDesk's page within 120 seconds.\n" + closed),
+        good + "The CloseDesk window's program ended with exit code 1.\n",
+    )
+    for log in wrong:
+        try:
+            module.closed_well(log, "the window", windows=True)
+        except AssertionError:
+            continue
+        raise AssertionError(f"passed: {log!r}")
+    assert module.window_closed(good.replace(closed, "")) is None
