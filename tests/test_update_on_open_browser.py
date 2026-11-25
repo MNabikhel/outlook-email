@@ -501,6 +501,30 @@ def test_the_classic_rails_update_ready_can_be_read(download, settings, loaded, 
         assert page.evaluate(CONTRAST, link) >= 4.5
 
 
+@pytest.mark.parametrize("width", [320, 390, 560, 720])
+def test_the_workspaces_update_ready_leaves_the_top_bar_on_screen(download, settings, loaded, page, monkeypatch, width):
+    # At a phone's width (390px) "Update ready" pushed the help button and Ask CloseDesk past the right edge, and the
+    # page scrolled sideways.
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.set_viewport_size({"width": width, "height": 800})
+        page.goto(base + "/app")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Not now')")
+        page.wait_for_selector("#update-ask", state="detached")
+        page.wait_for_selector("#top-update")
+        found = page.evaluate("""() => {
+          const right = (sel) => document.querySelector(sel).getBoundingClientRect().right;
+          return {
+            page: document.documentElement.scrollWidth, help: right("[data-cmd='help']"), chat: right("#chat-btn"),
+            update: document.querySelector("#top-update").getBoundingClientRect().width,
+          };
+        }""")
+        assert found["page"] <= width, f"the page scrolls sideways: {found}"
+        assert found["help"] <= width and found["chat"] <= width, f"the top bar's buttons are past the edge: {found}"
+        assert found["update"] > 20, "Update ready is still there to click"
+
+
 # A long what's new ------------------------------------------------------------------------------------------------------
 
 
