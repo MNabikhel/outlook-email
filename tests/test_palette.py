@@ -202,8 +202,35 @@ def test_default_levels_stay_apart(ui, theme):
         assert min(pairs[pair].values()) >= floor, (pair, {v: round(d, 1) for v, d in pairs[pair].items()})
     if ui == "classic":
         # Medium and Low pills: a gold Medium sat too near the amber High; the blue one must not sit on top of Low.
-        low = pm.rule_colour(pm.CLASSIC_CSS, ".pill.low", "background", tokens)
-        assert pm.delta_e(tokens["--imp-medium"], low) >= 15
+        # The colours the pills are painted in, not only the token (test_the_medium_pill_is_painted_apart_…).
+        medium, high, low = (pm.rule_colour(pm.CLASSIC_CSS, selector, "background", tokens) for selector in MEDIUM_PILLS["classic"])
+        assert pm.delta_e(medium, low) >= 15 and pm.delta_e(medium, high) >= 34, (medium, high, low)
+
+
+# The Medium pill and the High and Low pills beside it: the classic Inbox's Importance column, and an email's
+# importance in the workspace. (Medium, High, Low.)
+MEDIUM_PILLS = {
+    "classic": (".pill.medium", ".pill.high", ".pill.low"),
+    "workspace": (".pill", ".pill.imp-high", ".pill.imp-low"),
+}
+
+
+@pytest.mark.parametrize(("ui", "colors", "theme"), pm.LOOKS)
+def test_the_medium_pill_is_painted_apart_from_high_and_low(ui, colors, theme):
+    """The checks that kept Medium apart from High and Low read the --imp-medium token, not the rule that paints the
+    pill: a Medium pill painted in the old gold (14.1 from High, 11.8 under tritanopia), in High's amber or in Low's
+    grey passed them all, and the Importance column showed Medium and High as two amber pills again. Medium isn't a
+    red or an amber, so it has its own check: on its token, and at least 20 from High and 10 from Low for every
+    vision (15 from Low with normal vision)."""
+    sheet, tokens = pm.SHEETS[ui], pm.tokens_of(ui, colors, theme)
+    selectors = MEDIUM_PILLS[ui]
+    said = pm.rule_value(sheet, selectors[0], "background") or ""
+    assert "var(--imp-medium)" in said, f"{selectors[0]} {{ background: {said} }} in {sheet.name}"
+    medium, high, low = (pm.rule_colour(sheet, selector, "background", tokens) for selector in selectors)
+    to_high = {vision: round(pm.delta_e(medium, high, vision), 1) for vision in pm.VISIONS}
+    to_low = {vision: round(pm.delta_e(medium, low, vision), 1) for vision in pm.VISIONS}
+    assert min(to_high.values()) >= 20, ("Medium against High", medium, high, to_high)
+    assert to_low["normal"] >= 15 and min(to_low.values()) >= 10, ("Medium against Low", medium, low, to_low)
 
 
 @pytest.mark.parametrize(("ui", "colors", "theme"), pm.LOOKS)
