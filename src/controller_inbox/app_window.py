@@ -813,8 +813,8 @@ class App:
         # Written by the CloseDesk this window started the moment it is to stop to update (updates.WINDOW_ASKED_ENV).
         self.asked_mark = user_dir() / f"update-asked-{os.getpid()}"
         self.delegate = None  # what Invoke takes on Windows (.NET's Func[Type]; the tests give their own)
-        # macOS: WebKit's right-click menu, the menu bar's keys and zoom, and downloads saved over a file, put back
-        # (mac_window.py; the tests give their own).
+        # macOS: WebKit's right-click menu, the menu bar's keys, a find bar and zoom, and downloads saved over a file,
+        # put back (mac_window.py; the tests give their own).
         self.mac_prepare = mac_window.prepare
         self.mac_menus = mac_window.menus_on
         self.mac_read_back = mac_window.read_back
@@ -1064,7 +1064,7 @@ class App:
         if self.platform == "darwin":
             why = self.mac_menus(self.window)
             if why:
-                print(f"Couldn't add the menu bar's keys and zoom: {why}", flush=True)
+                print(f"Couldn't add all of the menu bar's keys, the find bar and zoom: {why}", flush=True)
             named = mac_app_name()
             if named:
                 # "Python" here means the Dock shows the window as Python's (CloseDesk.app's link wasn't used).
@@ -1348,17 +1348,17 @@ class App:
             print(f"The window's right-click menu is {menu}, and its browser keys {keys}.", flush=True)
 
     def _say_mac_keys(self) -> None:
-        """In the window's check on a Mac: whether WebKit's right-click menu, the menu bar's keys and zooming are on,
-        now that CloseDesk's page shows, read back from the window itself."""
+        """In the window's check on a Mac: whether WebKit's right-click menu, the menu bar's keys, the find bar and
+        zooming are on, now that CloseDesk's page shows, read back from the window itself."""
         try:
             found = self.mac_read_back(self.window)
         except Exception as exc:
-            print(f"Couldn't read the window's right-click menu, keys and zoom: {_said(exc)}", flush=True)
+            print(f"Couldn't read the window's right-click menu, keys, find bar and zoom: {_said(exc)}", flush=True)
             return
         if mac_window.all_on(found):
             print(mac_window.KEYS_ON, flush=True)
         else:
-            print(f"The window's right-click menu, keys and zoom aren't all on: {found}", flush=True)
+            print(f"The window's right-click menu, keys, find bar and zoom aren't all on: {found}", flush=True)
 
     def _update(self) -> bool:
         """Update now: CloseDesk stopped to be updated. The window says so throughout; True when CloseDesk is to be

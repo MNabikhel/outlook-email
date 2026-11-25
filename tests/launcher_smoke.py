@@ -489,9 +489,9 @@ DOCK_NAME = f"macOS shows the window as CloseDesk ({BUNDLE_ID})."
 # both off; the window turns them on again.
 BROWSER_KEYS = "The window's right-click menu and browser keys are on."
 # A Mac: what the window says once it has read back that WebKit's right-click menu, the menu bar's keys (Cmd+F, Cmd+P,
-# Cmd+Plus/Minus/0, Cmd+[, Cmd+Shift+Z) and zooming are on (mac_window.KEYS_ON). pywebview empties the menu and has
-# few keys.
-MAC_KEYS_ON = "The window's right-click menu, its menu bar's keys and zooming are on."
+# Cmd+Plus/Minus/0, Cmd+[, Cmd+Shift+Z), each answered, the find bar Find shows, and zooming are on
+# (mac_window.KEYS_ON). pywebview empties the menu, has few keys and no find bar.
+MAC_KEYS_ON = "The window's right-click menu, its menu bar's keys, its find bar and zooming are on."
 
 
 def env_python(folder: Path, *, windowless: bool = False) -> Path:

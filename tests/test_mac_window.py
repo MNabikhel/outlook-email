@@ -1,6 +1,6 @@
 """The CloseDesk window on macOS (mac_window.py): what pywebview 6.2's Cocoa window takes away from WebKit, put back.
-WebKit's right-click menu; the menu bar's Undo, Redo, Find, Print, Reload, zoom, Back and Forward with their keys;
-and a download saved over a file already there. Run here with stand-ins for PyObjC and pywebview's Cocoa window (the
+WebKit's right-click menu; the menu bar's Undo, Redo, Find, Print, Reload, zoom, Back and Forward with their keys; a
+find bar; and a download saved over a file already there. Run here with stand-ins for PyObjC and pywebview's Cocoa window (the
 real one is read back in CI's window check on macOS, tests/launcher_smoke.py)."""
 
 from __future__ import annotations
@@ -28,12 +28,21 @@ class FakeObjc:
 
 class Item:
     def __init__(self, title: str = "", action=None, key: str = "", *, separator: bool = False) -> None:
-        self._title, self.action, self.key, self.separator = title, action, key, separator
-        self.mask, self.tag, self.target, self.sub, self.hidden, self.when_hidden = 0, 0, None, None, False, False
+        self._title, self._action, self.key, self.separator = title, action, key, separator
+        self.mask, self._tag, self._target, self.sub, self.hidden, self.when_hidden = 0, 0, None, None, False, False
 
     # NSMenuItem's
     def title(self):
         return self._title
+
+    def action(self):
+        return self._action
+
+    def tag(self):
+        return self._tag
+
+    def target(self):
+        return self._target
 
     def setTitle_(self, title):  # noqa: N802
         self._title = title
@@ -48,10 +57,10 @@ class Item:
         self.mask = mask
 
     def setTag_(self, tag):  # noqa: N802
-        self.tag = tag
+        self._tag = tag
 
     def setTarget_(self, target):  # noqa: N802
-        self.target = target
+        self._target = target
 
     def setSubmenu_(self, menu):  # noqa: N802
         self.sub = menu
@@ -114,17 +123,103 @@ class _Alloc:
         return self.make(title, action, key)
 
 
-class Page:
+def rect(x, y, width, height):
+    return SimpleNamespace(origin=SimpleNamespace(x=x, y=y), size=SimpleNamespace(width=width, height=height))
+
+
+class View:
+    """An NSView: where it is in what holds it (non-flipped, as AppKit's: y from the bottom), and in which window."""
+
+    def __init__(self, frame=None) -> None:
+        self._frame = frame or rect(0, 0, 0, 0)
+        self.holder, self.subviews, self.mask, self.in_window = None, [], 0, None
+
+    def frame(self):
+        return self._frame
+
+    def setFrame_(self, frame):  # noqa: N802
+        self._frame = frame
+
+    def bounds(self):
+        return rect(0, 0, self._frame.size.width, self._frame.size.height)
+
+    def setAutoresizingMask_(self, mask):  # noqa: N802
+        self.mask = mask
+
+    def setAutoresizesSubviews_(self, on):  # noqa: N802
+        pass
+
+    def superview(self):
+        return self.holder
+
+    def addSubview_(self, view):  # noqa: N802
+        if view.holder is not None:
+            view.removeFromSuperview()
+        view.holder = self
+        self.subviews.append(view)
+
+    def removeFromSuperview(self):  # noqa: N802
+        if self.holder is not None and self in getattr(self.holder, "subviews", []):
+            self.holder.subviews.remove(self)
+        self.holder = None
+
+    def window(self):
+        view = self
+        while view is not None:
+            if view.in_window is not None:
+                return view.in_window
+            view = view.holder
+        return None
+
+    def nextResponder(self):  # noqa: N802 (a window's content answers to the window, as AppKit has it)
+        return self.in_window if self.in_window is not None else self.holder
+
+
+class Window:
+    """The NSWindow pywebview makes: its content (the page, as pywebview puts it there), Undo and Redo."""
+
+    def __init__(self, width: float = 1280, height: float = 860) -> None:
+        self.frame_view = SimpleNamespace(subviews=[])  # the window's own frame, around its content
+        self.content, self.first, self.size = None, None, (width, height)
+
+    def contentView(self):  # noqa: N802
+        return self.content
+
+    def setContentView_(self, view):  # noqa: N802
+        if self.content is not None:
+            self.content.holder, self.content.in_window = None, None
+        view.setFrame_(rect(0, 0, *self.size))
+        view.holder, view.in_window, self.content = self.frame_view, self, view
+
+    def makeFirstResponder_(self, view):  # noqa: N802
+        self.first = view
+        return True
+
+    def nextResponder(self):  # noqa: N802
+        return None
+
+    def undo_(self, sender):
+        pass
+
+    def redo_(self, sender):
+        pass
+
+
+class Page(View):
     """The window's WKWebView."""
 
     def __init__(self) -> None:
-        self.zoom, self.magnifies, self.printed = 1.0, False, []
+        super().__init__()
+        self.zoom, self.magnification, self.magnifies, self.printed, self.went = 1.0, 1.0, False, [], []
 
     def pageZoom(self):  # noqa: N802
         return self.zoom
 
     def setPageZoom_(self, zoom):  # noqa: N802
         self.zoom = zoom
+
+    def setMagnification_(self, magnification):  # noqa: N802
+        self.magnification = magnification
 
     def setAllowsMagnification_(self, on):  # noqa: N802
         self.magnifies = on
@@ -135,8 +230,17 @@ class Page:
     def bounds(self):
         return "the page's bounds"
 
-    def window(self):
-        return "the window"
+    def reload_(self, sender):
+        self.went.append("reload")
+
+    def goBack_(self, sender):  # noqa: N802
+        self.went.append("back")
+
+    def goForward_(self, sender):  # noqa: N802
+        self.went.append("forward")
+
+    def performTextFinderAction_(self, sender):  # noqa: N802
+        """NSResponder's own, which does nothing: WebKit doesn't answer Find, it only finds what a find bar asks."""
 
     def printOperationWithPrintInfo_(self, info):  # noqa: N802
         page = self
@@ -164,6 +268,38 @@ class Page:
         type(self).host.willOpenMenu_withEvent_(self, menu, event)
 
 
+class TextFinder:
+    """AppKit's NSTextFinder, as far as CloseDesk uses it: Find makes its find bar and has what holds it show it."""
+
+    BAR_HEIGHT = 28
+
+    def __init__(self) -> None:
+        self.client = self.container = None
+        self.incremental, self.actions = False, []
+
+    def setClient_(self, client):  # noqa: N802
+        self.client = client
+
+    def setFindBarContainer_(self, container):  # noqa: N802
+        self.container = container
+
+    def findBarContainer(self):  # noqa: N802
+        return self.container
+
+    def setIncrementalSearchingEnabled_(self, on):  # noqa: N802
+        self.incremental = on
+
+    def performAction_(self, action):  # noqa: N802
+        self.actions.append(action)
+        if action == mac_window.SHOW_FIND:
+            if self.container.findBarView() is None:
+                self.container.setFindBarView_(View(rect(0, 0, 400, self.BAR_HEIGHT)))
+            if not self.container.isFindBarVisible():  # else only its box is given the typing
+                self.container.setFindBarVisible_(True)
+        elif action == mac_window.HIDE_FIND:
+            self.container.setFindBarVisible_(False)
+
+
 class AppKit:
     NSFileHandlingPanelOKButton = 1
 
@@ -171,6 +307,7 @@ class AppKit:
         self.choose: str | None = None  # the save panel's answer: a path, or None for Cancel
         self.alerts: list[tuple[str, str]] = []
         self.main = Menu()
+        self.finders: list[TextFinder] = []
         kit = self
 
         class NSObject:
@@ -200,7 +337,21 @@ class AppKit:
         self.NSMenu = SimpleNamespace(alloc=lambda: _Alloc(Menu))
         self.NSMenuItem = SimpleNamespace(alloc=lambda: _Alloc(Item), separatorItem=lambda: Item(separator=True))
         self.NSPrintInfo = SimpleNamespace(sharedPrintInfo=lambda: "print info")
-        self.NSApplication = SimpleNamespace(sharedApplication=lambda: SimpleNamespace(mainMenu=lambda: kit.main))
+
+        def send(action, target, sender):  # NSApplication's sendAction:to:from:
+            getattr(target, action.replace(":", "_"))(sender)
+            return True
+
+        self.NSApplication = SimpleNamespace(sharedApplication=lambda: SimpleNamespace(mainMenu=lambda: kit.main, sendAction_to_from_=send))
+        self.NSView = SimpleNamespace(alloc=lambda: SimpleNamespace(initWithFrame_=View))
+        self.NSMakeRect = rect
+
+        def finder():
+            made = TextFinder()
+            kit.finders.append(made)
+            return made
+
+        self.NSTextFinder = SimpleNamespace(alloc=lambda: _Alloc(finder))
 
 
 class Foundation:
@@ -258,6 +409,8 @@ def mac(tmp_path, monkeypatch):
     page = Page()
     Page.host = cocoa.BrowserView.WebKitHost
     cocoa.BrowserView.instances["main"] = SimpleNamespace(webview=page)
+    window = Window()
+    window.setContentView_(page)  # as pywebview does once the first page has loaded
     # pywebview's menu bar: its app menu, Edit and View.
     app_menu, edit, view = Item("CloseDesk"), Item("Edit"), Item("View")
     app_menu.setSubmenu_(Menu("CloseDesk"))
@@ -267,7 +420,7 @@ def mac(tmp_path, monkeypatch):
         edit.sub.addItemWithTitle_action_keyEquivalent_(name, name.lower(), key)
     view.sub.addItemWithTitle_action_keyEquivalent_("Enter Full Screen", "toggleFullScreen:", "f")
     kit.main.items = [app_menu, edit, view]
-    return SimpleNamespace(kit=kit, foundation=foundation, cocoa=cocoa, page=page, missed=missed,
+    return SimpleNamespace(kit=kit, foundation=foundation, cocoa=cocoa, page=page, missed=missed, ns_window=window,
                            window=SimpleNamespace(uid="main"), tmp=tmp_path)
 
 
@@ -376,7 +529,9 @@ def test_the_menu_bar_has_the_browsers_keys(mac):
     edit = mac.kit.main.items[2].submenu()
     assert [item.title() for item in edit.items][:2] == ["Undo", "Redo"] and edit.find("Cut") is not None
     find = edit.find("Find…")
-    assert find.action == "performTextFinderAction:" and find.tag == 1 and find.target is mac.page
+    assert find.action() == "performTextFinderAction:" and find.tag() == mac_window.SHOW_FIND
+    assert find.target() is not mac.page, "WebKit doesn't answer Find: CloseDesk hands it to the window's find bar"
+    assert found["find"] is True and found["unanswered"] == []
     # Cmd+= zooms in too, as in Safari, from an item out of sight.
     view = mac.kit.main.items[3].submenu()
     hidden = [item for item in view.items if item.hidden]
@@ -387,17 +542,118 @@ def test_the_menu_bar_has_the_browsers_keys(mac):
 def test_zoom_print_and_actual_size_act_on_the_page(mac):
     mac_window.menus_on(mac.window, cocoa=mac.cocoa, appkit=mac.kit, call_after=lambda work: work())
     view = mac.kit.main.items[3].submenu()
-    press = lambda title: (lambda item: getattr(item.target, item.action.replace(":", "_"))(item))(view.find(title))  # noqa: E731
+    press = lambda title: (lambda item: getattr(item.target(), item.action().replace(":", "_"))(item))(view.find(title))  # noqa: E731
     press("Zoom In")
     press("Zoom In")
     assert mac.page.zoom == 1.25
     press("Actual Size")
     press("Zoom Out")
     assert mac.page.zoom == 0.9
+    # Pinched on the trackpad to about twice the size: Actual Size puts that back too (it is apart from the zoom).
+    mac.page.magnification = 2.0
+    press("Actual Size")
+    assert mac.page.zoom == 1.0 and mac.page.magnification == 1.0
     file_menu = mac.kit.main.items[1].submenu()
     item = file_menu.find("Print…")
-    getattr(item.target, item.action.replace(":", "_"))(item)
-    assert mac.page.printed == [("the window", True, "the page's bounds")]
+    getattr(item.target(), item.action().replace(":", "_"))(item)
+    assert mac.page.printed == [(mac.ns_window, True, "the page's bounds")]
+
+
+def _choose(mac, menu: int, title: str):
+    item = mac.kit.main.items[menu].submenu().find(title)
+    mac.kit.NSApplication.sharedApplication().sendAction_to_from_(item.action(), item.target(), item)
+    return item
+
+
+def test_find_shows_a_find_bar_above_the_page(mac):
+    # Cmd+F (Edit > Find…) did nothing: WebKit finds words for a find bar but makes none, and the items were aimed at
+    # the page, which only has NSResponder's performTextFinderAction:, doing nothing.
+    mac_window.menus_on(mac.window, cocoa=mac.cocoa, appkit=mac.kit, call_after=lambda work: work())
+    (finder,) = mac.kit.finders
+    assert finder.client is mac.page and finder.incremental is True, "the page finds the words, as they are typed"
+    find = _choose(mac, 2, "Find…")
+    assert finder.actions == [mac_window.SHOW_FIND]
+    holder = finder.container
+    assert holder.isFindBarVisible() is True and holder.contentView() is mac.page
+    bar = holder.findBarView()
+    # The page is in a view of its own now, the window's content: the bar at its top, the page below, together the
+    # window's height.
+    content = mac.ns_window.contentView()
+    assert content is not mac.page and mac.page.superview() is content and bar.superview() is content
+    assert bar.window() is mac.ns_window and mac.page.window() is mac.ns_window
+    height = content.bounds().size.height
+    assert bar.frame().origin.y == height - TextFinder.BAR_HEIGHT and bar.frame().size.height == TextFinder.BAR_HEIGHT
+    assert mac.page.frame().origin.y == 0 and mac.page.frame().size.height == height - TextFinder.BAR_HEIGHT
+    assert bar.frame().size.width == mac.page.frame().size.width == content.bounds().size.width
+    assert mac.page.mask == mac_window.WIDTH_SIZABLE | mac_window.HEIGHT_SIZABLE
+    assert bar.mask == mac_window.WIDTH_SIZABLE | mac_window.MIN_Y_MARGIN, "kept to the top as the window is resized"
+    # Find Next and Find Previous go to the same find bar.
+    _choose(mac, 2, "Find Next")
+    _choose(mac, 2, "Find Previous")
+    assert finder.actions == [mac_window.SHOW_FIND, mac_window.FIND_NEXT, mac_window.FIND_PREVIOUS]
+    # Done (or Escape): the bar goes, the page is as tall as the window again and takes the typing again.
+    finder.performAction_(mac_window.HIDE_FIND)
+    assert holder.isFindBarVisible() is False and bar.superview() is None
+    assert mac.page.frame().size.height == height and mac.ns_window.first is mac.page
+    # Shown again: the same bar, the page put in the same view.
+    _choose(mac, 2, "Find…")
+    assert holder.findBarView() is bar and bar.superview() is content and mac.ns_window.contentView() is content
+    assert find.target() in mac_window._kept and find.target().find_bar is holder, "kept while the window is open"
+
+
+def test_find_before_the_page_is_in_its_window_waits_for_it(mac):
+    # pywebview puts the page in its window once the first page has loaded: nothing to show the bar in before then.
+    mac.ns_window.content, mac.page.holder, mac.page.in_window = None, None, None
+    mac_window.menus_on(mac.window, cocoa=mac.cocoa, appkit=mac.kit, call_after=lambda work: work())
+    _choose(mac, 2, "Find…")
+    assert mac.ns_window.contentView() is None and mac.page.superview() is None
+    assert mac.kit.finders[0].container.isFindBarVisible() is False, "not said to be shown"
+    # Once it is there, the find bar shows.
+    mac.ns_window.setContentView_(mac.page)
+    _choose(mac, 2, "Find…")
+    assert mac.page.superview() is mac.ns_window.contentView() and mac.kit.finders[0].container.findBarView().window()
+
+
+def test_the_window_check_says_when_find_shows_no_find_bar(mac, monkeypatch):
+    # The check CI runs on the real window: the menu bar's items alone said "on" while Find did nothing.
+    monkeypatch.setattr(mac_window, "MENUS", [
+        (title, [entry if entry is None or entry[1] != "performTextFinderAction:" else (*entry[:5], "page") for entry in items])
+        for title, items in mac_window.MENUS
+    ])
+    mac_window.menus_on(mac.window, cocoa=mac.cocoa, appkit=mac.kit, call_after=lambda work: work())
+    found = mac_window.read_back(mac.window, cocoa=mac.cocoa, appkit=mac.kit, call_after=lambda work: work(), tries=2)
+    assert found["unanswered"] == [], "the page has NSResponder's performTextFinderAction:, which does nothing"
+    assert found["find"] is False and not mac_window.all_on(found)
+    # An item whose action nothing answers is named.
+    edit = mac.kit.main.items[2].submenu()
+    edit.find("Undo")._action = "undoTwice:"
+    found = mac_window.read_back(mac.window, cocoa=mac.cocoa, appkit=mac.kit, call_after=lambda work: work(), tries=1)
+    assert "Undo" not in found["unanswered"], "an action not in MENUS isn't asked about"
+    edit.find("Undo")._action = "undo:"
+    view = mac.kit.main.items[3].submenu()
+    view.find("Back")._target = SimpleNamespace()
+    found = mac_window.read_back(mac.window, cocoa=mac.cocoa, appkit=mac.kit, call_after=lambda work: work(), tries=1)
+    assert found["unanswered"] == ["Back"] and not mac_window.all_on(found)
+
+
+def test_the_window_check_hides_the_find_bar_it_showed(mac):
+    mac_window.menus_on(mac.window, cocoa=mac.cocoa, appkit=mac.kit, call_after=lambda work: work())
+    found = mac_window.read_back(mac.window, cocoa=mac.cocoa, appkit=mac.kit, call_after=lambda work: work())
+    assert found["find"] is True and mac_window.all_on(found)
+    (finder,) = mac.kit.finders
+    assert finder.actions == [mac_window.SHOW_FIND, mac_window.HIDE_FIND] and finder.container.isFindBarVisible() is False
+
+
+def test_a_find_bar_that_cant_be_made_leaves_the_rest_of_the_menu_bar(mac):
+    def refuse():
+        raise RuntimeError("NSTextFinder isn't here")
+
+    mac.kit.NSTextFinder = SimpleNamespace(alloc=lambda: _Alloc(refuse))
+    why = mac_window.menus_on(mac.window, cocoa=mac.cocoa, appkit=mac.kit, call_after=lambda work: work())
+    assert why == "the find bar (NSTextFinder isn't here)"
+    _choose(mac, 2, "Find…")  # nothing happens, and nothing breaks
+    found = mac_window.read_back(mac.window, cocoa=mac.cocoa, appkit=mac.kit, call_after=lambda work: work(), tries=1)
+    assert found["menu"] and found["zoom"] and found["find"] is False
 
 
 def test_zoom_goes_in_safaris_steps_and_stops_at_the_ends():
