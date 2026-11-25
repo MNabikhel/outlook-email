@@ -681,8 +681,10 @@ PLAIN_EDGES = """sel => [...document.querySelectorAll(sel)].filter((li) => li.ge
 })"""
 CODING_ROWS = """() => [...document.querySelectorAll('.items .item.kind-coding')].map((li) => {
   const tag = li.querySelector('.item-level');
+  const held = [...li.querySelectorAll('.chip-danger')].filter((chip) => chip.getBoundingClientRect().width > 0);
   return { email: li.dataset.key.split(':').pop(), edge: getComputedStyle(li, '::before').backgroundColor,
-           word: tag && getComputedStyle(tag).display !== 'none' ? tag.textContent : null };
+           word: tag && getComputedStyle(tag).display !== 'none' ? tag.textContent : null,
+           held: held.map((chip) => chip.textContent), state: li.querySelector('.item-row1 .tag').textContent };
 })"""
 
 
@@ -738,13 +740,53 @@ def test_the_digest_and_the_ap_coding_list_mark_critical_high_and_held_as_the_li
         for row in rows:
             assert row["edge"] == (_edge_of(loaded, row["email"], colors) or "rgba(0, 0, 0, 0)"), row
             assert row["word"] is None, row
+            # Its edge is nearly the red of a Critical one's, and it says "Confirmed": it says it is held, in words.
+            assert row["held"] == (["Held: possible fraud"] if row["email"] == held.id else []), row
         assert "critical" in {loaded.get_email(row["email"]).importance.value for row in rows}
+        assert [row["state"] for row in rows if row["email"] == held.id] == ["Confirmed"], rows
         appearance.save(loaded, importance_words=True)
         page.reload()
         page.wait_for_selector(".items .item.kind-coding .item-level")
         for row in page.evaluate(CODING_ROWS):
             email = loaded.get_email(row["email"])
             assert row["word"] == ("Held for fraud" if email.id == held.id else WORDS[email.importance.value]), row
+            assert row["held"] == [], ("said once: the word says it", row)
+    context.close()
+
+
+FRAUD_ROWS = """() => [...document.querySelectorAll('.items .item.kind-fraud')].map((li) => {
+  const words = [...li.querySelectorAll('.item-row1 .tag')].filter((tag) => tag.getBoundingClientRect().width > 0);
+  return { email: li.dataset.key, edge: getComputedStyle(li, '::before').backgroundColor, words: words.map((tag) => tag.textContent) };
+})"""
+
+
+@pytest.mark.parametrize("colors", ["standard", "color-blind"])
+def test_the_fraud_check_list_marks_critical_high_and_held_as_the_lists_do(browser, settings, loaded, colors):
+    """A Caution email on the Fraud check list that is Critical or High had neither the colored edge nor, with the
+    importance words ticked, its word: the list's rows had no importance. A Blocked one, held, says "Blocked", and not
+    "Held for fraud" beside it."""
+    from controller_inbox import appearance
+    from test_appearance import CAUTIONS
+
+    for email_id in CAUTIONS:
+        loaded.save_fraud_check(email_id, 40, "caution", [{"key": "bank", "label": "Bank details mentioned", "points": 40}], "2026-09-22T12:00:00+00:00")
+    appearance.save(loaded, colors=colors)
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/app/fraud")
+        page.wait_for_selector(".items .item.kind-fraud")
+        rows = {row["email"]: row for row in page.evaluate(FRAUD_ROWS)}
+        assert set(rows) == {HELD, *CAUTIONS}, rows
+        for email_id, row in rows.items():
+            assert row["edge"] == _edge_of(loaded, email_id, colors), row
+            assert row["words"] == (["Blocked"] if email_id == HELD else ["Caution"]), row
+        appearance.save(loaded, importance_words=True)
+        page.reload()
+        page.wait_for_selector(".items .item.kind-fraud .item-level")
+        rows = {row["email"]: row for row in page.evaluate(FRAUD_ROWS)}
+        assert {email_id: row["words"] for email_id, row in rows.items()} == {
+            HELD: ["Blocked"], CAUTIONS[0]: ["Caution", "Critical"], CAUTIONS[1]: ["Caution", "High"]}, rows
     context.close()
 
 
@@ -765,6 +807,14 @@ FIT = """() => {
     li.querySelector('.item-row1 .tag:not(.item-level)').textContent = 'No code found';
     li.querySelector('.item-level').textContent = 'Held for fraud';
   }
+  // A Caution email on the Fraud check list, with the longest importance word and the note that it was cleared.
+  for (const li of document.querySelectorAll('.items .item.kind-fraud')) {
+    const level = li.querySelector('.item-level');
+    if (!level) continue;
+    level.textContent = 'Critical';
+    const when = li.querySelector('.item-row1 .item-when');
+    if (when) { when.textContent = 'score 100 · Sep 22'; when.before(Object.assign(document.createElement('span'), { className: 'chip', textContent: 'you cleared it' })); }
+  }
   const out = [];
   for (const li of document.querySelectorAll('.items .item')) {
     const main = li.querySelector('.item-main');
@@ -783,13 +833,16 @@ FIT = """() => {
 @pytest.mark.parametrize("width", [1280, 1100, 390, 320])
 def test_the_words_fit_each_row_at_every_width(browser, settings, loaded, width):
     from controller_inbox import appearance
+    from test_appearance import CAUTIONS
 
     appearance.save(loaded, importance_words=True)
+    for email_id in CAUTIONS:  # the Fraud check list's Caution rows say their importance too
+        loaded.save_fraud_check(email_id, 40, "caution", [{"key": "bank", "label": "Bank details mentioned", "points": 40}], "2026-09-22T12:00:00+00:00")
     context = browser.new_context(viewport={"width": width, "height": 900})
     page = context.new_page()
     with serving(web.create_app(settings, loaded)) as base:
         problems = {}
-        for path in ("/app", "/app/folder/important", "/app/all", "/app/coding?status=all"):
+        for path in ("/app", "/app/folder/important", "/app/all", "/app/coding?status=all", "/app/fraud"):
             page.goto(f"{base}{path}")
             page.wait_for_selector(".items .item .item-level")
             problems[path] = page.evaluate(FIT)

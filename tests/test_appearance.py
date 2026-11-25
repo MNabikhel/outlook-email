@@ -137,6 +137,30 @@ def test_the_ap_coding_rows_carry_the_importance_and_whether_held(client, demo):
     assert [row["locked"] for row in rows if row["id"] == email.id] == [True], rows
 
 
+def test_the_fraud_check_rows_carry_the_importance_and_whether_held(client, demo):
+    """The Fraud check list's rows had no importance: a Caution email that is Critical or High had neither the colored
+    edge Settings says marks Critical, High and held emails, nor its word with the importance words ticked. They carry
+    it as the other lists' rows do."""
+    from controller_inbox import fraud
+    from controller_inbox.models import IMPORTANCE_LABELS
+
+    for email_id in CAUTIONS:
+        demo.save_fraud_check(email_id, 40, "caution", [{"key": "bank", "label": "Bank details mentioned", "points": 40}], "2026-09-22T12:00:00+00:00")
+    rows = {row["id"]: row for row in client.get("/api/fraud", headers=PAGE).json()["flagged"]}
+    assert set(rows) == {HELD, *CAUTIONS}, rows
+    for email_id, row in rows.items():
+        email = demo.get_email(email_id)
+        assert (row["importance"], row["importance_label"]) == (email.importance.value, IMPORTANCE_LABELS[email.importance]), row
+        assert row["locked"] is fraud.attachments_locked(email), row
+    assert [(rows[email_id]["level"], rows[email_id]["importance"], rows[email_id]["locked"]) for email_id in CAUTIONS] == [
+        ("caution", "critical", False), ("caution", "high", False)]
+    assert (rows[HELD]["level"], rows[HELD]["locked"]) == ("high", True)
+
+
+# Two of the sample's emails a fraud check might call Caution: the Critical duplicate of an invoice, and a High wire.
+CAUTIONS = ("demo-inv-10482-dup", "demo-wire-legit")
+
+
 def _ticked(page: str, name: str) -> bool:
     """Whether Setup → Colors draws its box ``name`` ticked."""
     import re

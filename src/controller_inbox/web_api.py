@@ -949,6 +949,10 @@ def register_workspace(
     @api.get("/fraud")
     def fraud_overview():
         today = board_date()
+        checked = store.flagged(limit=100)
+        # Each email's importance, and whether it is held: a Caution email that is Critical or High has the edge of
+        # its importance, and its word when Settings → Appearance asks, as in the mail lists.
+        emails = store.get_emails([row["email_id"] for row in checked])
         flagged = [
             {
                 "id": row["email_id"],
@@ -960,8 +964,9 @@ def register_workspace(
                 "score": row["score"],
                 "signals": [signal.get("label", "") for signal in row["signals"] if (signal.get("points") or 0) > 0],
                 "cleared": "fraud_cleared" in row["flags"],
+                **_importance(emails.get(row["email_id"])),
             }
-            for row in store.flagged(limit=100)
+            for row in checked
         ]
         log = [
             {

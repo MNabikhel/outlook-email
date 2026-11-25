@@ -241,12 +241,15 @@ function taskRow(d) {
   ];
 }
 
+// A Caution row says its importance when asked, as the other lists do; a Blocked one held as possible fraud doesn't
+// say "Held for fraud" beside "Blocked".
 function fraudRow(d) {
   return [
     h(
       "div",
       { class: "item-row1" },
       h("span", { class: `tag ${d.level === "high" ? "tag-fraud" : "tag-due_soon"}` }, d.level === "high" ? "Blocked" : "Caution"),
+      d.level === "high" && d.locked ? null : levelTag(d),
       d.cleared ? h("span", { class: "chip" }, "you cleared it") : null,
       h("span", { class: "item-when" }, `score ${d.score} · ${d.when}`)
     ),
@@ -272,6 +275,9 @@ function codingRow(d) {
     h(
       "div",
       { class: "item-meta" },
+      // Held as possible payment fraud, said in words as on the mail lists: its held edge is nearly the red of a
+      // Critical one's, and a confirmed code beside it read as ready to enter.
+      d.locked ? heldChip(d) : null,
       d.amount_label ? chip(d.amount_label, "chip-num") : null,
       d.codes.length ? d.codes.map((c) => h("code", { class: "cost-code", title: c.description }, c.code)) : h("span", { class: "item-cat" }, "no code")
     ),
