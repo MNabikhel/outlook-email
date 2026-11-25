@@ -328,7 +328,8 @@ class Windows:
                 f"for that one. {use}"
             )
         for name, why in failed:
-            lines.append(f"CloseDesk couldn't put its shortcut {where([name])} ({why}).")
+            did = "check" if name in done["unread"] else "put"
+            lines.append(f"CloseDesk couldn't {did} its shortcut {where([name])} ({why}).")
         ok = any(done[key] for key in ("made", "moved", "fresh", "kept"))
         if failed and not ok:
             lines.append(f"{self.script} in CloseDesk's folder still opens it.")
@@ -624,7 +625,8 @@ class Mac:
                 "as it is. To have it open this CloseDesk, use Settings → Add CloseDesk to Applications again."
             )
         for name, why in failed:
-            lines.append(f"CloseDesk couldn't put CloseDesk.app {where([name])} ({why}).")
+            did = "check" if name in done["unread"] else "put"
+            lines.append(f"CloseDesk couldn't {did} CloseDesk.app {where([name])} ({why}).")
         ok = any(done[key] for key in ("made", "moved", "fresh", "kept", "fallback"))
         if failed and not ok:
             lines.append(f"{self.script} in CloseDesk's folder still opens it.")
@@ -714,10 +716,20 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
     # with Shortcut" offered to delete) is put back, as at the first start; only where this computer had one, never on
     # a Desktop OneDrive shares with a computer whose shortcut it was. Deleted where the folder stayed, it isn't.
     moved_here = bool(known) and not _same(known, system.root) and not _closedesk_at(known)
-    done: dict[str, list[str]] = {key: [] for key in ("made", "moved", "fresh", "kept", "theirs", "fallback", "elsewhere")}
+    done: dict[str, list[str]] = {
+        key: [] for key in ("made", "moved", "fresh", "kept", "theirs", "fallback", "elsewhere", "unread")
+    }
     failed: list[tuple[str, str]] = []
     for name, path, kept_only in system.places(saved):
-        found = system.look(path)
+        try:
+            found = system.look(path)
+        except Exception as exc:
+            # One that can't be read (online only on a Desktop OneDrive keeps, with OneDrive not running; damaged) is
+            # said, and counted as this computer's, as one that couldn't be written is: the other places are kept all
+            # the same.
+            failed.append((name, _why(exc)))
+            done["unread"].append(name)
+            continue
         if kept_only:
             # Only kept right, never made or taken over: the one pinned to the taskbar (Windows makes it), a CloseDesk.app
             # the person moved elsewhere. Put right when it opens this folder, or the folder this one moved from.

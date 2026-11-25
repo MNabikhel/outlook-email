@@ -50,8 +50,11 @@ class Links:
         self.files: dict[Path, dict] = {}
         self.written: list[Path] = []
         self.refuse: dict[Path, Exception] = {}
+        self.unreadable: dict[Path, Exception] = {}
 
     def read(self, path: Path) -> dict | None:
+        if Path(path) in self.unreadable:
+            raise self.unreadable[Path(path)]
         found = self.files.get(Path(path))
         return dict(found) if found is not None else None
 
@@ -377,6 +380,49 @@ def test_a_desktop_that_cant_be_written_is_said_and_the_start_menu_still_gets_it
     assert said.ok and windows.links.written == [windows.start]
     assert "Desktop" in said.message and "Access is denied" in said.message
     assert windows.record.exists()
+
+
+class ComError(Exception):
+    """pywin32's com_error: (its number, Windows' words, more)."""
+
+
+def test_a_desktop_shortcut_that_cant_be_read_leaves_the_start_menu_its_own(windows):
+    # The Desktop is in OneDrive, and the CloseDesk.lnk on it came from another computer: online only, with OneDrive
+    # not running (or the laptop offline), Windows can't read it. Looked at outside the try for each place, that one
+    # shortcut stopped the Start menu's being made at every start, and nothing was recorded.
+    windows.links.unreadable[windows.desktop] = ComError(-2147024514, "The cloud file provider is not running.", None, None)
+    said = _upkeep(windows)
+    assert said.ok and windows.links.written == [windows.start]
+    assert "Start menu" in said.message
+    assert "Desktop" in said.message and "The cloud file provider is not running" in said.message
+    assert said.message.count("couldn't") == 1, "only the place that failed is said to have failed"
+    assert "CloseDesk.bat" not in said.message, "the Start menu shortcut opens it"
+    saved = json.loads(windows.record.read_text(encoding="utf-8"))
+    assert saved["folder"] == str(windows.root) and set(saved["places"]) == {"Desktop", "Start menu"}
+    # Readable again (OneDrive running): kept right, and nothing more is said.
+    del windows.links.unreadable[windows.desktop]
+    windows.links.written.clear()
+    assert _upkeep(windows).ok
+
+
+def test_settings_add_the_shortcut_again_still_makes_it_where_it_can_when_one_cant_be_read(windows):
+    # A damaged or empty CloseDesk.lnk on the Desktop: Settings' button made nothing at all, though the Start menu was
+    # there to be written.
+    _upkeep(windows)
+    windows.links.unreadable[windows.desktop] = OSError(22, "The file or directory is corrupted and unreadable")
+    del windows.links.files[windows.start]
+    windows.links.written.clear()
+    said = _make(windows)
+    assert said.ok and windows.links.written == [windows.start]
+    assert "corrupted" in said.message and said.message.count("couldn't") == 1
+
+
+def test_a_taskbar_shortcut_that_cant_be_read_doesnt_stop_the_others(windows, tmp_path):
+    windows.places["Taskbar"] = tmp_path / "Taskbar"
+    windows.system.pinned = "Taskbar"
+    windows.links.unreadable[windows.places["Taskbar"] / "CloseDesk.lnk"] = ComError(-2147024891, "Access is denied.", None, None)
+    said = _upkeep(windows)
+    assert said.ok and set(windows.links.written) == {windows.desktop, windows.start}
 
 
 def test_when_no_shortcut_could_be_made_it_is_tried_again_next_start(windows):
