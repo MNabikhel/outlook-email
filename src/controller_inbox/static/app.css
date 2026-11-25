@@ -587,6 +587,8 @@ dialog.update-ask p { margin: 0 0 10px; line-height: 1.5; }
 .update-ask-help { color: var(--muted); font-size: 13px; }
 .update-ask-failed { background: #f3ecda; border-left: 3px solid var(--gold); padding: 8px 10px; }
 .update-ask-status { font-size: 13px; }
+/* Setup's update page while CloseDesk updates: the rest of the page is out of reach (inert), and looks it. */
+body[data-updating] :is(.rail, .top, .chat-fab) { opacity: 0.55; }
 .update-ask-status:empty { display: none; }
 .update-ask-status.error { color: var(--danger); }
 .update-ask-status.wait { color: var(--warn); }

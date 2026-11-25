@@ -294,6 +294,35 @@ def test_setups_update_page_goes_back_to_setup_once_closedesk_started_again_as_i
         assert "Updating CloseDesk" not in page.inner_text("body")
 
 
+def test_setups_update_page_keeps_saying_it_updates_whatever_is_clicked_meanwhile(download, settings, loaded, page, monkeypatch):
+    # The rail (Today, the folders, "Update ready"), the search and the chat stayed live while the launcher downloaded:
+    # one click left the page for the browser's "can't be reached" (or a page from the CloseDesk still stopping),
+    # and nothing brought the tab back once CloseDesk was. The workspace's updating page keeps them out of reach.
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/settings#update")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Not now')")
+        page.wait_for_selector("#update-ask", state="detached")
+        page.click("#update form[action='/settings/update'] button")
+        page.wait_for_selector("[data-update-line]")
+        address = page.url
+        assert page.query_selector(".rail-foot a[href='/settings#update']") is None, "nothing offers the update that runs"
+        today = page.query_selector(".rail nav a[href='/']").bounding_box()
+        page.mouse.click(today["x"] + today["width"] / 2, today["y"] + today["height"] / 2)  # where a person clicks
+        page.keyboard.press("/")
+        page.keyboard.type("invoice")
+        page.keyboard.press("Enter")
+        fab = page.query_selector("#chat-toggle").bounding_box()
+        page.mouse.click(fab["x"] + fab["width"] / 2, fab["y"] + fab["height"] / 2)
+        page.wait_for_timeout(500)
+        assert page.url == address and page.query_selector("[data-update-line]") is not None, "the page left 'Updating CloseDesk'"
+        assert page.is_hidden("#chat"), "the chat would only fail: CloseDesk is down"
+        app.state.run = "started-again"
+        page.wait_for_url(base + "/settings#update", timeout=20000)
+        page.wait_for_selector("#update form[action='/settings/update']")
+
+
 def test_updating_closedesk_is_said_once(download, settings, loaded, page, monkeypatch):
     app = opened(settings, loaded, monkeypatch)
     with serving(app) as base:
