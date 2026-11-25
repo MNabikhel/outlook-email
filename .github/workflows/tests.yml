@@ -116,9 +116,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # Where Microsoft says to look: for everyone, or for this user.
+          $keys = @(
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+            'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+          )
           $found = ''
-          foreach ($key in 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
-                           'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}') {
+          foreach ($key in $keys) {
             $pv = (Get-ItemProperty -Path $key -Name pv -ErrorAction SilentlyContinue).pv
             if ($pv -and $pv -ne '0.0.0.0') { $found = $pv }
           }
