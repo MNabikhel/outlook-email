@@ -253,6 +253,26 @@ LEVELS = """() => [...document.querySelectorAll('.items .item.kind-mail, .items 
 })"""
 WORDS = {"critical": "Critical", "high": "High", "medium": "Medium", "low": "Low"}
 
+# Each email's importance as a list shows it, on the classic pages and in the workspace's digest: its word, the email
+# it is on, and how it is drawn (its fill, its edge, its colour, and the colour of what is under it), with the reason
+# tag beside it on a focus row.
+ROW_WORDS = """sel => [...document.querySelectorAll(sel)].map((li) => {
+  const tag = li.querySelector('.item-level');
+  const link = li.querySelector('a[href^="/inbox/"], a[href^="/app/mail/"]');
+  const style = tag ? getComputedStyle(tag) : null;
+  let under = '', el = tag;
+  while (el && !under) { const bg = getComputedStyle(el).backgroundColor; if (!/^rgba\\(.*,\\s*0\\)$/.test(bg) && bg !== 'transparent') under = bg; el = el.parentElement; }
+  const reason = li.querySelector('.focus-top .tag, .tag:not(.item-level)');
+  return { email: link ? decodeURIComponent(link.getAttribute('href').split('?')[0].split('/').pop()) : '',
+           text: tag ? tag.textContent : null, classes: tag ? tag.className : '',
+           shown: Boolean(tag) && style.display !== 'none' && tag.getBoundingClientRect().width > 0,
+           inside: !tag || tag.getBoundingClientRect().right <= li.getBoundingClientRect().right,
+           color: style ? style.color : '', background: style ? style.backgroundColor : '', outline: style ? style.boxShadow : '',
+           size: style ? `${style.fontSize} ${style.letterSpacing}` : '',
+           under, reason: reason && reason !== tag ? getComputedStyle(reason).backgroundColor : null };
+})"""
+HELD = "demo-bec-wire"  # the sample's wire change, held as possible payment fraud
+
 
 def test_the_importance_shows_in_words_on_each_email_when_asked(browser, settings, loaded):
     context = _context(browser, "light")
@@ -270,6 +290,12 @@ def test_the_importance_shows_in_words_on_each_email_when_asked(browser, setting
             page.wait_for_selector(".items .item")
             rows = page.evaluate(LEVELS)
             assert rows, path
+            if nav == "today":
+                # Today's box of emails to verify by phone, as the digest's (drawn twice: a phone shows it above the
+                # list).
+                page.wait_for_selector(".card-danger .plain-list li:visible")
+                shown = [(row["email"], row["text"]) for row in page.evaluate(ROW_WORDS, ".card-danger .plain-list li") if row["shown"]]
+                assert shown == [(HELD, "Held for fraud")], shown
             for row in rows:
                 assert row["level"], row
                 if row["locked"]:
@@ -320,31 +346,61 @@ def test_a_held_email_with_a_file_says_it_is_held_for_fraud_in_words(browser, se
     context.close()
 
 
-CLASSIC_LEVELS = """() => [...document.querySelectorAll('.focus-item, .folder-card li:not(.muted)')].map((li) => {
-  const pill = li.querySelector('.item-level');
-  const shown = Boolean(pill) && getComputedStyle(pill).display !== 'none' && pill.getBoundingClientRect().width > 0;
-  return { text: pill ? pill.textContent : null, shown, inside: !pill || pill.getBoundingClientRect().right <= li.getBoundingClientRect().right };
-})"""
 
 
-@pytest.mark.parametrize("width", [1280, 390])
-def test_classic_today_writes_the_importance_on_each_email_when_asked(browser, settings, loaded, width):
+def _words_say_the_right_thing(rows: list[dict], where) -> None:
+    """Each email's word is its importance; the held one's says it is held, wherever it is listed."""
+    assert rows, where
+    for row in rows:
+        assert row["shown"] and row["inside"], (where, row)
+        if row["email"] == HELD:
+            assert row["text"] == "Held for fraud", ("one email, one word, on every page", where, row)
+        else:
+            assert row["text"] in WORDS.values(), (where, row)
+    assert HELD in {row["email"] for row in rows}, where
+
+
+def _drawn_apart_from_the_reason(rows: list[dict], where) -> None:
+    """Outlined, with no fill, in a colour that reads on what is under it: beside it, the reason the email is listed
+    ("Due today", "Verify by phone") is a filled tag, and "how important" doesn't look like a second "why"."""
+    for row in rows:
+        assert row["background"] == "rgba(0, 0, 0, 0)" and "inset" in row["outline"], ("outlined", where, row)
+        text, under, edge = hex_of(row["color"]), hex_of(row["under"]), hex_of(row["outline"])
+        assert pm.contrast(text, under) >= 4.5, ("its word", where, row, round(pm.contrast(text, under), 2))
+        assert pm.contrast(edge, under) >= 3.0, ("its edge shows", where, row, round(pm.contrast(edge, under), 2))
+        if row["reason"] is not None:
+            assert row["reason"] != "rgba(0, 0, 0, 0)" and row["reason"] != row["background"], ("the reason stays filled", where, row)
+    # The same word at the same size wherever it is: not the folder card's heading's ("NEEDS YOU").
+    assert len({row["size"] for row in rows}) == 1, (where, {row["size"] for row in rows})
+
+
+CLASSIC_TODAY = ".panel.alert li, .focus-item, .folder-card li:not(.muted)"
+
+
+@pytest.mark.parametrize(("width", "colors"), [(1280, "standard"), (390, "standard"), (1280, "color-blind")])
+def test_classic_today_writes_the_importance_on_each_email_when_asked(browser, settings, loaded, width, colors):
     """Today, the classic home page, had no importance on its emails with the box ticked: only the Inbox and folder
-    lists had it, in their Importance column."""
+    lists had it, in their Importance column. Then it had it, but the held email said "Critical", the Medium and Low
+    words in the folder cards were grey on their fill (3.65:1), and each word was filled in the colour of the reason
+    tag beside it ("Due today" and "HIGH" both amber)."""
     from controller_inbox import appearance
 
+    appearance.save(loaded, colors=colors)
     context = _context(browser, "light")
     page = context.new_page()
     page.set_viewport_size({"width": width, "height": 900})
     with serving(web.create_app(settings, loaded)) as base:
         page.goto(f"{base}/")
-        rows = page.evaluate(CLASSIC_LEVELS)
+        rows = page.evaluate(ROW_WORDS, CLASSIC_TODAY)
         assert rows and not [row for row in rows if row["shown"]], rows
         appearance.save(loaded, importance_words=True)
         page.reload()
-        rows = page.evaluate(CLASSIC_LEVELS)
-        assert all(row["shown"] and row["text"] in WORDS.values() and row["inside"] for row in rows), rows
-        assert {"Critical", "High"} <= {row["text"] for row in rows}
+        rows = page.evaluate(ROW_WORDS, CLASSIC_TODAY)
+        _words_say_the_right_thing(rows, "/")
+        assert {"Critical", "High", "Medium", "Low"} <= {row["text"] for row in rows}
+        _drawn_apart_from_the_reason(rows, "/")
+        # In the red box of emails to verify by phone, as in the digest's.
+        assert [row["text"] for row in page.evaluate(ROW_WORDS, ".panel.alert li")] == ["Held for fraud"]
     context.close()
 
 
@@ -354,18 +410,17 @@ DIGEST_EMAILS = {
     "workspace": ".page .card-danger .plain-list li, .page ol.ranked li, .page .cards3 .plain-list li",
     "classic": ".panel.alert ul.stack li, .focus-item, .split.three ul.stack li",
 }
-DIGEST_LEVELS = """sel => [...document.querySelectorAll(sel)].map((li) => {
-  const tag = li.querySelector('.item-level');
-  return { text: tag ? tag.textContent : null, shown: Boolean(tag) && getComputedStyle(tag).display !== 'none' && tag.getBoundingClientRect().width > 0 };
-})"""
 
 
-@pytest.mark.parametrize("where", ["workspace", "classic"])
-def test_the_digest_writes_the_importance_on_each_email_when_asked(browser, settings, loaded, where):
+@pytest.mark.parametrize(("where", "colors"), [("workspace", "standard"), ("classic", "standard"), ("classic", "color-blind")])
+def test_the_digest_writes_the_importance_on_each_email_when_asked(browser, settings, loaded, where, colors):
     """The digest lists the day's emails, as Today does: with the box ticked, each says its importance there too, in
-    the workspace as on the classic page."""
+    the workspace as on the classic page. The held email said "Critical" there, where the lists say "Held for fraud";
+    and on the classic page each word was filled like the reason tag beside it, and in the red "Do not process" box,
+    in nearly the red of the box (1.08:1), so it read as the first word of the subject."""
     from controller_inbox import appearance
 
+    appearance.save(loaded, colors=colors)
     context = _context(browser, "light")
     page = context.new_page()
     with serving(web.create_app(settings, loaded)) as base:
@@ -373,8 +428,13 @@ def test_the_digest_writes_the_importance_on_each_email_when_asked(browser, sett
         appearance.save(loaded, importance_words=True)
         page.goto(f"{base}/app/digest" if where == "workspace" else f"{base}/digest")
         page.wait_for_selector(DIGEST_EMAILS[where])
-        rows = page.evaluate(DIGEST_LEVELS, DIGEST_EMAILS[where])
-        assert len(rows) >= 10 and all(row["shown"] and row["text"] in WORDS.values() for row in rows), rows
+        rows = page.evaluate(ROW_WORDS, DIGEST_EMAILS[where])
+        assert len(rows) >= 10, rows
+        _words_say_the_right_thing(rows, where)
+        # Its box to verify by phone, its row in the focus list, and in Needs you.
+        assert [row["text"] for row in rows if row["email"] == HELD] == ["Held for fraud"] * 3, rows
+        if where == "classic":
+            _drawn_apart_from_the_reason(rows, where)
     context.close()
 
 

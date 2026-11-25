@@ -439,6 +439,14 @@ ROLES = {
         ("text", Rule(".pill.high", "color", "--ink"), [Rule(".pill.high", "background")], "High pill .pill.high"),
         ("text", Rule(".pill.medium", "color", "--ink"), [Rule(".pill.medium", "background")], "Medium pill .pill.medium"),
         ("text", Rule(".pill.low", "color", "--ink"), [Rule(".pill.low", "background")], "Low pill .pill.low"),
+        # The importance on each email of Today and the digest (Setup → Colors): outlined in its own colour, with no
+        # fill, on the card of a focus row, a folder card or a panel; and on the red of the box to verify by phone.
+        ("text", Rule(".pill.item-level.critical", "color"), ["--card"], "Critical on an email of Today .pill.item-level.critical"),
+        ("text", Rule(".pill.item-level.held", "color"), ["--card"], "Held for fraud on an email of Today .pill.item-level.held"),
+        ("text", Rule(".pill.item-level.high", "color"), ["--card"], "High on an email of Today .pill.item-level.high"),
+        ("text", Rule(".pill.item-level.medium", "color"), ["--card"], "Medium on an email of Today .pill.item-level.medium"),
+        ("text", Rule(".pill.item-level.low", "color"), ["--card"], "Low on an email of Today .pill.item-level.low"),
+        ("text", Rule(".panel.alert .pill.item-level", "color"), [Rule(".panel.alert", "background")], "in the box to verify by phone .panel.alert .pill.item-level"),
         ("text", Rule(".tag.due_today", "color", "--ink"), [Rule(".tag.due_today", "background")], "due today .tag.due_today"),
         ("text", Rule(".tag.overdue", "color", "--ink"), [Rule(".tag.overdue", "background")], "overdue and fraud .tag.overdue, .tag.fraud"),
         ("text", Rule(".flag.fraud_risk", "color", "--ink"), [Rule(".flag.fraud_risk", "background")], "fraud flags .flag.fraud_risk"),

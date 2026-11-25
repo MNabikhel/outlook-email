@@ -133,10 +133,20 @@ table.mail tr.high { box-shadow: inset 3px 0 0 var(--imp-high); }
 .pill.high { background: var(--imp-high-fill); color: var(--on-imp-high); }
 .pill.medium { background: var(--imp-medium); }
 .pill.low { background: #dce3d6; }
-/* The importance on each email of Today and the digest, as the Importance column has it: shown when Setup → Colors
-   asks for it (data-importance-words on <html>). */
-.pill.item-level { display: none; }
+/* The importance on each email of Today and the digest (_level.html): shown when Setup → Colors asks for it
+   (data-importance-words on <html>). Outlined in its own colour, with no fill, as in the workspace: the reason an
+   email is on Today ("Due today", "Verify by phone") is a filled tag beside it, and side by side "how important"
+   doesn't look like a second "why". Critical, and an email held as possible payment fraud (which says so), in the
+   red of danger words and High in the amber of warning words, as the workspace's are: kept apart for every vision
+   with the colors for color blindness. On the red of the box of emails to verify by phone, white, as its words are.
+   The Importance column keeps its filled pills. */
+.pill.item-level { display: none; background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
 :root[data-importance-words="on"] .pill.item-level { display: inline-block; }
+.pill.item-level.critical, .pill.item-level.held { color: var(--danger); }
+.pill.item-level.high { color: var(--warn); }
+.pill.item-level.medium { color: var(--navy); }
+.pill.item-level.low { color: var(--muted); }
+.panel.alert .pill.item-level { color: #fff; }
 .flags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .flag { font-size: 11px; background: #efe7d4; padding: 2px 6px; text-transform: capitalize; }
 .flag.fraud_risk, .flag.do_not_process { background: var(--danger); color: #fff; }
@@ -153,7 +163,8 @@ table.mail tr.high { box-shadow: inset 3px 0 0 var(--imp-high); }
 .folder-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .folder-card { display: block; color: inherit; text-decoration: none; }
 .folder-card:hover { text-decoration: none; border-color: var(--gold); }
-.folder-card span { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+/* The card's own heading ("Needs you"), not the importance on an email in it. */
+.folder-card > span { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .folder-card b { display: block; font-family: var(--serif); font-size: 32px; margin: 4px 0 8px; }
 .folder-card ul { list-style: none; padding: 0; margin: 0; }
 .folder-card li { font-size: 14px; padding: 4px 0; border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
