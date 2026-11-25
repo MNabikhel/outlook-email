@@ -710,7 +710,7 @@ class App:
                     return
                 if server.poll() is None:  # started, and never answered
                     self._end(server)
-                    self._show(not_open_page(self.log))
+                    self._failed(not_open_page(self.log))
                 elif server.poll() in TAKEN and self._another_answers():
                     # Another CloseDesk opened on the port meanwhile (a second double-click raced the first, and this
                     # one found it there): shown, as one already open is, and left open when the window closes.
@@ -719,7 +719,7 @@ class App:
                     self._show_closedesk()
                 else:
                     print(f"CloseDesk stopped as it started (exit code {server.poll()}).", flush=True)
-                    self._show(stopped_page(self.log))
+                    self._failed(stopped_page(self.log))
                 return
             self._show_closedesk()
             code = server.wait()
@@ -727,7 +727,7 @@ class App:
                 return
             if code != UPDATE:
                 print(f"CloseDesk stopped by itself (exit code {code}).", flush=True)
-                self._show(stopped_page(self.log))
+                self._failed(stopped_page(self.log))
                 return
             if not self._update():
                 return
@@ -780,16 +780,27 @@ class App:
         except Exception as exc:
             print(f"Couldn't show it in the window: {_said(exc)}", flush=True)
 
+    def _failed(self, html: str) -> None:
+        """Say in the window what went wrong. In the window's check, that fails the check, and the window closes."""
+        self._show(html)
+        if self.smoke:
+            self.code = 1
+            self.close_on_purpose()
+
     def _show_closedesk(self) -> None:
+        self.ready.clear()
         self.window.load_url(self.url)
         if not self.smoke:
             return
         if self.ready.wait(self.smoke):
             print(f"The CloseDesk window showed {self.ready_path}", flush=True)
             self.code = 0
-            # Kept open a while for the check to look at it; closed meanwhile, it isn't closed again.
-            until = time.monotonic() + self.smoke_hold
+            # Kept open a while (the first time) for the check to look at it, or press Update now; closed meanwhile, it
+            # isn't closed again, and CloseDesk stopping meanwhile (to update) is followed through.
+            until, self.smoke_hold = time.monotonic() + self.smoke_hold, 0
             while not self.closing and time.monotonic() < until:
+                if self.owned and self.server is not None and self.server.poll() is not None:
+                    return
                 time.sleep(min(self.poll, 0.25))
             if self.closing:
                 return

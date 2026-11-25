@@ -742,6 +742,56 @@ def test_in_the_smoke_check_a_window_closed_while_it_is_held_open_is_not_closed_
     assert not thread.is_alive() and window.closed_by == "person"
 
 
+def test_in_the_smoke_check_update_now_is_followed_through_to_the_new_version(computer, tmp_path, monkeypatch, capsys):
+    # CI presses Update now while the window is held open: the window updates, shows the new version, and closes
+    # itself once that page loaded (held open the first time only).
+    monkeypatch.setenv(app_window.SMOKE_ENV, "5")
+    monkeypatch.setenv(app_window.SMOKE_HOLD_ENV, "30")
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.js_api.page_ready("/app")
+    time.sleep(0.1)
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)  # Update now
+    until(lambda: len(window.urls()) == 2, what="the new version in the window")
+    assert len(computer.updates()) == 1 and not window.gone.is_set(), "not closed before the new version's page loaded"
+    started = time.monotonic()
+    window.js_api.page_ready("/app")
+    thread.join(10)
+    assert time.monotonic() - started < 5, "the new version's page isn't held open"
+    assert result["code"] == 0 and window.closed_by == "CloseDesk"
+    assert capsys.readouterr().out.count("The CloseDesk window showed /app") == 2
+
+
+def test_in_the_smoke_check_closedesk_stopping_by_itself_fails_and_closes_the_window(computer, tmp_path, monkeypatch):
+    # The check must end: a window left saying "CloseDesk stopped" would keep it waiting until its time ran out.
+    monkeypatch.setenv(app_window.SMOKE_ENV, "5")
+    monkeypatch.setenv(app_window.SMOKE_HOLD_ENV, "30")
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.js_api.page_ready("/app")
+    time.sleep(0.1)
+    computer.servers()[0].end(1)
+    thread.join(10)
+    assert result["code"] == 1 and window.closed_by == "CloseDesk" and "CloseDesk stopped" in window.htmls()[-1]
+
+
+def test_in_the_smoke_check_closedesk_that_never_opens_fails_and_closes_the_window(computer, tmp_path, monkeypatch):
+    monkeypatch.setenv(app_window.SMOKE_ENV, "5")
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.answers = lambda url: False
+    app.up_wait = 0.2
+    thread, result = running(app)
+    thread.join(10)
+    assert result["code"] == 1 and window_of(webview).closed_by == "CloseDesk"
+
+
 def test_in_the_smoke_check_a_window_that_cant_open_fails_and_says_why(monkeypatch, tmp_path, capsys):
     # CI checks the window itself: the browser instead (and a message box no one is there to close) would hide that it
     # didn't open, and keep the check waiting.
