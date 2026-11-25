@@ -23,6 +23,10 @@ without a word on screen: what it says goes to its log (``app_log_path``), nothi
 launcher, opened in its window, since a Python running from ``.venv`` can't remove it. On a Mac, Python is started
 through the link in CloseDesk.app (shortcut.py), so the Dock and the menu bar say CloseDesk, not Python.
 
+On a Mac with Apple's processor, an environment set up as the other kind (x86_64, from a Terminal opened under
+Rosetta) is run as it was set up, whatever starts it (CloseDesk.app from the Dock runs as the Mac's own kind): its
+compiled parts load only as that kind (``run_as_set_up``).
+
     launch.py                 set up if needed, then run CloseDesk
     launch.py --app           the same, silently, then open the CloseDesk window
     launch.py --shortcut      set up if needed, then add the CloseDesk shortcut again (Desktop and Start menu; Applications)
@@ -43,6 +47,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -106,6 +111,14 @@ APP_BUNDLE_ENV = "CLOSEDESK_APP_BUNDLE"
 APPS_KEY = "apps"
 # CI's check of the real window (app_window's SMOKE_ENV): no message box waits there for a click no one makes.
 SMOKE_ENV = "CLOSEDESK_APP_SMOKE"
+# macOS: the kind of processor the environment was set up for, recorded in STATE ("arm64", or "x86_64": an Intel Mac, or
+# a Terminal opened under Rosetta on Apple's). CloseDesk.app, opened from the Dock, runs as the Mac's own kind; an
+# environment set up as the other is run as it was set up (``ARCH`` -x86_64, say), which ARCH_ENV says from then on.
+MACHINE_KEY = "machine"
+ARCH = "/usr/bin/arch"
+ARCH_ENV = "CLOSEDESK_ARCH"
+# A Mach-O file's processor (mach/machine.h: CPU_TYPE_X86_64, CPU_TYPE_ARM64).
+MACH_O = {0x01000007: "x86_64", 0x0100000C: "arm64"}
 
 REPO = "MNabikhel/outlook-email"
 BRANCH = "main"
@@ -233,13 +246,96 @@ def _runs_as_app(link: Path) -> bool:
     """Whether Python started through CloseDesk.app's link finds this environment: tried before the window depends on
     it (a quick start, with nothing on screen)."""
     try:
+        # A part that is compiled (pydantic's), as the window loads first: one built for another kind of processor than
+        # this Python runs as is found here, not after the window's start.
         done = subprocess.run(
-            [str(link), "-c", "import controller_inbox"], cwd=ROOT, env={**os.environ, "__PYVENV_LAUNCHER__": str(venv_python())},
-            stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+            _as_set_up([str(link), "-c", "import controller_inbox.config"]), cwd=ROOT,
+            env={**os.environ, "__PYVENV_LAUNCHER__": str(venv_python())}, stdin=subprocess.DEVNULL, capture_output=True,
+            timeout=120,
         )
     except (OSError, subprocess.SubprocessError):
         return False
     return done.returncode == 0
+
+
+def _machine_here() -> str:
+    """The kind of processor this Python runs as ("x86_64" under Rosetta)."""
+    return os.uname().machine
+
+
+def _compiled_for() -> str:
+    """macOS: the kind of processor the environment's compiled packages are for, as pydantic's compiled part says (it
+    has no build for both kinds); "" when it can't be told, or it is built for both."""
+    if sys.platform != "darwin":
+        return ""
+    try:
+        spec = importlib.util.find_spec("pydantic_core")
+    except (ImportError, ValueError):
+        return ""
+    for place in list(getattr(spec, "submodule_search_locations", None) or []):
+        for path in sorted(Path(place).glob("_pydantic_core*.so")):
+            try:
+                with path.open("rb") as handle:
+                    head = handle.read(8)
+            except OSError:
+                continue
+            if head[:4] == b"\xcf\xfa\xed\xfe":  # one kind (64-bit Mach-O); a universal file starts otherwise
+                return MACH_O.get(int.from_bytes(head[4:8], "little"), "")
+            return ""
+    return ""
+
+
+def set_up_for() -> str:
+    """macOS: the kind of processor the environment was set up for, as recorded when it was set up, or else as its
+    compiled parts say (an environment set up before that was recorded). "" when it can't be told."""
+    return str(read_state().get(MACHINE_KEY) or "") or _compiled_for()
+
+
+def _loads_as(machine: str) -> bool:
+    """Whether the environment's CloseDesk loads, compiled parts and all, run as ``machine`` (Rosetta, for x86_64)."""
+    try:
+        done = subprocess.run(
+            [ARCH, f"-{machine}", sys.executable, "-c", "import controller_inbox.config"], cwd=ROOT,
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
+def _as_set_up(cmd: list[str]) -> list[str]:
+    """``cmd``, run as the kind of processor the environment was set up for, once this was started that way
+    (``ARCH_ENV``). arch keeps the program's number and the path it was started by (the Dock's CloseDesk.app)."""
+    machine = os.environ.get(ARCH_ENV, "")
+    if sys.platform == "darwin" and machine in MACH_O.values() and cmd[:1] != [ARCH]:
+        return [ARCH, f"-{machine}", *cmd]
+    return cmd
+
+
+def run_as_set_up(argv: list[str]) -> int | None:
+    """macOS: an environment set up for the other kind of processor than this runs as (from a Terminal opened under
+    Rosetta, then CloseDesk.app opened from the Dock; or the other way round) won't load its compiled parts here, and
+    CloseDesk couldn't open, every time. This launcher starts again as the environment was set up, and so does what it
+    runs. None: carry on here (the same kind, not a Mac, or this Mac can't run it as set up: as before, which says what
+    goes wrong)."""
+    if sys.platform != "darwin":
+        return None
+    wanted, here = set_up_for(), _machine_here()
+    if not wanted or wanted == here:
+        return None
+    if os.environ.get(ARCH_ENV) == wanted:  # started that way already, and still not: arch couldn't
+        say(f"CloseDesk's environment was set up for {wanted}, and couldn't be run that way here (as {here}).")
+        return None
+    if not _loads_as(wanted):
+        say(f"CloseDesk's environment was set up for {wanted} (in a Terminal opened under Rosetta, say), and this runs "
+            f"as {here}; it doesn't load as {wanted} either, so it is started as it is.")
+        return None
+    say(f"CloseDesk's environment was set up for {wanted} (in a Terminal opened under Rosetta, say), and this runs as "
+        f"{here}: CloseDesk runs as {wanted}, as it was set up.")
+    os.environ[ARCH_ENV] = wanted
+    if _after_update:
+        os.environ[AFTER_UPDATE_ENV] = "1"  # still the check after the update, which the update's mark doesn't stop
+    return _hand_over([sys.executable, str(Path(__file__).resolve()), *argv])
 
 
 def in_venv() -> bool:
@@ -514,7 +610,12 @@ def ensure_packages() -> int:
             # window's is tried at each start of the app until it installs: without it the app is the browser.
             install(*wanted)
         tried[extra] = key
-    write_state({"extras": tried, "python": ".".join(map(str, sys.version_info[:3]))})
+    write_state({
+        "extras": tried,
+        "python": ".".join(map(str, sys.version_info[:3])),
+        # As it was set up, kept: a start as the other kind (CloseDesk.app from the Dock) runs as this (run_as_set_up).
+        MACHINE_KEY: set_up_for() or platform.machine(),
+    })
     if first and installed:
         say("Setup finished.")
     return 0
@@ -539,7 +640,8 @@ def create_environment(args: list[str]) -> int:
 
 
 def _hand_over(cmd: list[str]) -> int:
-    """Run ``cmd`` in this one's place (its exit code is this one's)."""
+    """Run ``cmd`` in this one's place (its exit code is this one's), as the environment was set up (``_as_set_up``)."""
+    cmd = _as_set_up(cmd)
     _flush()
     if WINDOWS:  # no exec that waits on Windows
         try:
@@ -847,6 +949,9 @@ def app(args: list[str]) -> int:
         return 0
     if not in_venv():
         return create_environment(["--app", *args])
+    started = run_as_set_up(["--app", *args])
+    if started is not None:
+        return started
     code = ensure_packages()
     if code == REBUILD:
         say("CloseDesk's environment has to be made again: the double-click launcher does that, in its window.")
@@ -933,6 +1038,9 @@ def main(argv: list[str]) -> int:
         return UPDATE_UNDER_WAY
     if not in_venv():
         return create_environment(args)
+    started = run_as_set_up(args)
+    if started is not None:
+        return started
     code = ensure_packages()
     if code:
         return code

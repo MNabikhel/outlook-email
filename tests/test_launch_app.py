@@ -458,7 +458,8 @@ def test_the_try_runs_python_through_the_link_as_the_window_would(launch, monkey
     monkeypatch.setattr(launch.subprocess, "run", lambda cmd, **options: ran.append((cmd, options)) or SimpleNamespace(returncode=0))
     assert launch._runs_as_app(tmp_path / "CloseDesk-python") is True
     (cmd, options), = ran
-    assert cmd == [str(tmp_path / "CloseDesk-python"), "-c", "import controller_inbox"]
+    # A part that is compiled, for the kind of processor the environment was set up for: what the window loads first.
+    assert cmd == [str(tmp_path / "CloseDesk-python"), "-c", "import controller_inbox.config"]
     assert options["env"]["__PYVENV_LAUNCHER__"] == str(launch.venv_python()) and options["stdin"] == subprocess.DEVNULL
     monkeypatch.setattr(launch.subprocess, "run", lambda cmd, **options: SimpleNamespace(returncode=1))
     assert launch._runs_as_app(tmp_path / "CloseDesk-python") is False
@@ -468,6 +469,165 @@ def test_the_try_runs_python_through_the_link_as_the_window_would(launch, monkey
 
     monkeypatch.setattr(launch.subprocess, "run", cant)
     assert launch._runs_as_app(tmp_path / "CloseDesk-python") is False
+
+
+# A Mac's environment set up under Rosetta, opened natively (or the other way round) -----------------------------------
+
+X86_64 = b"\xcf\xfa\xed\xfe" + (0x01000007).to_bytes(4, "little") + bytes(24)
+ARM64 = b"\xcf\xfa\xed\xfe" + (0x0100000C).to_bytes(4, "little") + bytes(24)
+UNIVERSAL = b"\xca\xfe\xba\xbe" + bytes(28)
+
+
+def _compiled_pydantic(launch, monkeypatch, tmp_path, head: bytes) -> None:
+    """The environment's pydantic_core, its compiled part built for one kind of processor (``head``: its first bytes)."""
+    package = tmp_path / "site-packages" / "pydantic_core"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "_pydantic_core.cpython-312-darwin.so").write_bytes(head + bytes(64))
+    found = SimpleNamespace(submodule_search_locations=[str(package)])
+    monkeypatch.setattr(launch.importlib.util, "find_spec", lambda name: found if name == "pydantic_core" else None)
+
+
+def _on_a_mac(launch, monkeypatch, here: str) -> None:
+    monkeypatch.setattr(launch.sys, "platform", "darwin")
+    monkeypatch.setattr(launch, "_machine_here", lambda: here)
+    monkeypatch.setenv(launch.ARCH_ENV, "")
+    monkeypatch.delenv(launch.ARCH_ENV)
+
+
+def test_the_environment_says_which_kind_of_processor_it_was_set_up_for(launch, monkeypatch, tmp_path):
+    # An environment set up before this was recorded: its compiled parts say (pydantic has no build for both kinds).
+    monkeypatch.setattr(launch.sys, "platform", "darwin")
+    _compiled_pydantic(launch, monkeypatch, tmp_path, X86_64)
+    assert launch.set_up_for() == "x86_64"
+    (tmp_path / "site-packages" / "pydantic_core" / "_pydantic_core.cpython-312-darwin.so").write_bytes(ARM64)
+    assert launch.set_up_for() == "arm64"
+    (tmp_path / "site-packages" / "pydantic_core" / "_pydantic_core.cpython-312-darwin.so").write_bytes(UNIVERSAL)
+    assert launch.set_up_for() == "", "built for both: either runs it"
+    # Recorded as it is set up, the record says.
+    launch.write_state({"extras": {}, "python": "3.12.0", "machine": "x86_64"})
+    assert launch.set_up_for() == "x86_64"
+
+
+def test_the_set_up_records_the_kind_of_processor(launch, monkeypatch, tmp_path):
+    monkeypatch.setattr(launch, "install", lambda *what: True)
+    monkeypatch.setattr(launch.check_deps, "problem", lambda req: "")
+    monkeypatch.setattr(launch.check_deps, "extra_installed", lambda reqs: True)
+    monkeypatch.setattr(launch.platform, "machine", lambda: "x86_64")
+    assert launch.ensure_packages() == 0
+    assert json.loads(launch.STATE.read_text(encoding="utf-8"))["machine"] == "x86_64"
+    # Kept as it was set up: a start as the other kind (CloseDesk.app from the Dock) doesn't change it.
+    monkeypatch.setattr(launch.platform, "machine", lambda: "arm64")
+    assert launch.ensure_packages() == 0
+    assert json.loads(launch.STATE.read_text(encoding="utf-8"))["machine"] == "x86_64"
+
+
+def test_closedesk_app_opens_an_environment_set_up_under_rosetta_as_it_was_set_up(launch, monkeypatch, tmp_path):
+    # Set up from a Terminal opened under Rosetta (x86_64), then opened from the Dock, which runs CloseDesk.app on Apple's
+    # processor (arm64): pydantic's x86_64 part won't load there, and CloseDesk couldn't open, every time. It runs as it
+    # was set up instead (arch keeps the program's number: the Dock's CloseDesk).
+    _on_a_mac(launch, monkeypatch, "arm64")
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "set_up_for", lambda: "x86_64")
+    tried: list = []
+    monkeypatch.setattr(launch, "_loads_as", lambda machine: tried.append(machine) or True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: pytest.fail("set up as arm64, in an x86_64 environment"))
+    handed: list = []
+    monkeypatch.setattr(launch.os, "execv", lambda path, cmd: handed.append((path, cmd, dict(os.environ))))
+    monkeypatch.setattr(launch.os, "chdir", lambda path: None)
+    monkeypatch.setattr(launch.os, "dup2", lambda *fds: None)  # the app's log stays this test's
+    launch.main(["--app", "--port", "8812"])
+    (path, cmd, env), = handed
+    assert tried == ["x86_64"]
+    assert path == "/usr/bin/arch" and cmd == ["/usr/bin/arch", "-x86_64", sys.executable, str(ROOT / "scripts" / "launch.py"), "--app", "--port", "8812"]
+    assert env[launch.ARCH_ENV] == "x86_64"
+
+
+def test_started_as_it_was_set_up_the_app_opens_the_window_that_way(launch, monkeypatch, tmp_path):
+    # The second start (under arch -x86_64): set up and the window, each as x86_64.
+    _on_a_mac(launch, monkeypatch, "x86_64")
+    monkeypatch.setenv(launch.ARCH_ENV, "x86_64")
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "set_up_for", lambda: "x86_64")
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    linked = tmp_path / "CloseDesk.app" / "Contents" / "MacOS" / "CloseDesk-python"
+    monkeypatch.setattr(launch, "linked_python", lambda: linked)
+    ran: list = []
+    monkeypatch.setattr(launch.subprocess, "run", lambda cmd, **options: ran.append(cmd) or SimpleNamespace(returncode=0))
+    handed: list = []
+    monkeypatch.setattr(launch.os, "execv", lambda path, cmd: handed.append(cmd))
+    monkeypatch.setattr(launch.os, "chdir", lambda path: None)
+    monkeypatch.setattr(launch.os, "dup2", lambda *fds: None)  # the app's log stays this test's
+    launch.main(["--app"])
+    assert ran == [["/usr/bin/arch", "-x86_64", str(linked), "-c", "import controller_inbox.config"]]
+    assert handed == [["/usr/bin/arch", "-x86_64", str(linked), "-m", "controller_inbox", "app"]]
+
+
+def test_the_double_click_launcher_runs_an_environment_as_it_was_set_up_too(launch, monkeypatch):
+    # The same environment, from CloseDesk.command in a Terminal no longer opened under Rosetta.
+    _on_a_mac(launch, monkeypatch, "arm64")
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "set_up_for", lambda: "x86_64")
+    monkeypatch.setattr(launch, "_loads_as", lambda machine: True)
+    handed: list = []
+    monkeypatch.setattr(launch.os, "execv", lambda path, cmd: handed.append(cmd))
+    monkeypatch.setattr(launch.os, "chdir", lambda path: None)
+    monkeypatch.setattr(launch.os, "dup2", lambda *fds: None)  # the app's log stays this test's
+    launch.main(["--port", "8811"])
+    assert handed == [["/usr/bin/arch", "-x86_64", sys.executable, str(ROOT / "scripts" / "launch.py"), "--port", "8811"]]
+
+
+def test_the_check_after_an_update_started_as_it_was_set_up_is_still_the_check_after_it(launch, monkeypatch):
+    # The update hands over to the check after it (the same program, on a Mac), which its own mark doesn't stop: started
+    # again as the environment was set up, it is still that check, not a start during an update.
+    _on_a_mac(launch, monkeypatch, "arm64")
+    monkeypatch.setenv(launch.AFTER_UPDATE_ENV, "1")
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "set_up_for", lambda: "x86_64")
+    monkeypatch.setattr(launch, "_loads_as", lambda machine: True)
+    handed: list = []
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
+    launch.main(["--check"])
+    (cmd, env), = handed
+    assert cmd[2:] == ["--check"] and env.get(launch.AFTER_UPDATE_ENV) == "1"
+
+
+def test_an_environment_this_mac_cant_run_as_it_was_set_up_is_left_as_before(launch, monkeypatch):
+    # Rosetta not there (arch can't start it), or it won't load either way: started as before, which says what goes
+    # wrong; never started again and again.
+    _on_a_mac(launch, monkeypatch, "arm64")
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "set_up_for", lambda: "x86_64")
+    monkeypatch.setattr(launch, "_loads_as", lambda machine: False)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    handed: list = []
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append(cmd) or 0)
+    launch.main(["--port", "8811"])
+    assert handed == [[sys.executable, "-m", "controller_inbox", "run", "--port", "8811"]]
+    # Started that way already and still not matched: not again.
+    monkeypatch.setenv(launch.ARCH_ENV, "x86_64")
+    monkeypatch.setattr(launch, "_loads_as", lambda machine: pytest.fail("tried again"))
+    handed.clear()
+    launch.main(["--port", "8811"])
+    assert handed == [[sys.executable, "-m", "controller_inbox", "run", "--port", "8811"]]
+
+
+def test_an_environment_set_up_as_this_runs_or_elsewhere_nothing_changes(launch, monkeypatch):
+    for platform, here, set_up in (("darwin", "arm64", "arm64"), ("darwin", "arm64", ""), ("linux", "x86_64", "arm64")):
+        monkeypatch.setattr(launch.sys, "platform", platform)
+        monkeypatch.setattr(launch, "_machine_here", lambda here=here: here)
+        monkeypatch.setattr(launch, "set_up_for", lambda set_up=set_up: set_up)
+        monkeypatch.setattr(launch, "_loads_as", lambda machine: pytest.fail("asked"))
+        assert launch.run_as_set_up(["--app"]) is None
+
+
+def test_whether_the_environment_loads_as_it_was_set_up_is_tried_with_arch(launch, monkeypatch):
+    ran: list = []
+    monkeypatch.setattr(launch.subprocess, "run", lambda cmd, **options: ran.append(cmd) or SimpleNamespace(returncode=0))
+    assert launch._loads_as("x86_64") is True
+    assert ran == [["/usr/bin/arch", "-x86_64", sys.executable, "-c", "import controller_inbox.config"]]
+    monkeypatch.setattr(launch.subprocess, "run", lambda cmd, **options: SimpleNamespace(returncode=1))
+    assert launch._loads_as("x86_64") is False, "Bad CPU type in executable: no Rosetta"
 
 
 # What goes wrong as the window opens is said, once --------------------------------------------------------------------
