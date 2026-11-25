@@ -74,6 +74,8 @@ def digest_view(store: Store, as_of: date, wanted: str = "", *, history: int = 3
     payload = None
     if row and row.get("payload"):
         payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
+        if isinstance(payload, dict):
+            _say_which_are_held(store, payload)
     saved = store.list_digests(limit=history)
     dates = [item["period_date"] for item in saved]
     current = row["period_date"] if row else ""
@@ -87,6 +89,20 @@ def digest_view(store: Store, as_of: date, wanted: str = "", *, history: int = 3
         "newer": dates[index - 1] if index > 0 else "",
         "older": dates[index + 1] if 0 <= index < len(dates) - 1 else "",
     }
+
+
+def _say_which_are_held(store: Store, payload: dict) -> None:
+    """A digest saved before its emails said whether each is held as possible payment fraud: worked out from the email
+    as it is now, so where it says an email's importance, a held one says "Held for fraud" instead, as the other pages
+    do. Only its lists of emails (its tasks have no importance word, nor its focus rows before they had one)."""
+    new_mail = payload.get("new_mail")
+    rows = [*(payload.get("focus") or []), *(payload.get("critical_alerts") or [])]
+    if isinstance(new_mail, dict):
+        rows += [item for items in new_mail.values() if isinstance(items, list) for item in items]
+    for item in rows:
+        if isinstance(item, dict) and "locked" not in item and item.get("importance_label"):
+            email = store.get_email(str(item.get("email_id") or item.get("id") or ""))
+            item["locked"] = email is not None and fraud.attachments_locked(email)
 
 
 def coding_rows(store: Store, settings: Settings, status: str, q: str = "") -> tuple[str, list[dict]]:

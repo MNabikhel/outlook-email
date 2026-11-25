@@ -379,6 +379,35 @@ def test_a_held_email_says_held_for_fraud_wherever_its_importance_is_written(cli
         assert html.count(">Held for fraud<") == 3, path
 
 
+def test_a_digest_saved_before_it_said_which_emails_are_held_says_so_too(client, demo):
+    """A digest saved by an earlier version has each email's importance in its "Do not process" box and what came in,
+    but not whether it is held: shown now, the held email said "Critical" there. It is worked out from the email as
+    it is now; the task lists, and the focus rows, which had no importance word then, get none."""
+    import json
+
+    assert client.post("/digest/rebuild", headers=SAME, follow_redirects=False).status_code == 303
+    row = demo.latest_digest()
+    payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
+    for name in ("critical_alerts", "focus", "overdue_actions", "due_today", "due_this_week"):
+        for item in payload.get(name) or []:
+            item.pop("locked", None)
+            if name == "focus":  # a focus row had no importance either then
+                item.pop("importance", None), item.pop("importance_label", None)
+    for rows in payload["new_mail"].values():
+        for item in rows:
+            item.pop("locked", None)
+    demo.save_digest(row["period_date"], row["generated_at"], row["markdown"], row["html"], payload)
+
+    shown = client.get("/api/digest", headers=PAGE).json()["payload"]
+    assert [item["locked"] for item in shown["critical_alerts"]] == [True]
+    assert [item["id"] for rows in shown["new_mail"].values() for item in rows if item["locked"]] == [HELD]
+    for name in ("focus", "overdue_actions", "due_today", "due_this_week"):
+        assert not [item for item in shown.get(name) or [] if "locked" in item], name
+    html = client.get("/digest").text
+    assert _words_on(html, HELD) == [("pill held item-level", "Held for fraud")] * 2, "its box and Needs you"
+    assert "Critical" not in [word for _cls, word in _words_on(html, HELD)]
+
+
 @pytest.mark.parametrize(("notice", "section"), [("colors", "colors"), ("importance-words", "colors"), ("timezone", "timezone")])
 def test_setup_says_saved_in_the_section_it_goes_back_to(client, notice, section):
     """Saving Colors (or the time zone) goes back to that section of Setup, at the top of the window, but "Saved." was
