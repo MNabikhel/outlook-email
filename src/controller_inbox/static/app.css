@@ -24,6 +24,9 @@
   --imp-high-fill: #d6a31f; /* the High pill and the due-today tag, with dark words */
   --on-imp-high: #1b2416;
   --imp-medium: #bfd0ec;
+  /* The dot on Ask CloseDesk, on its navy button: filled while a local model runs, a ring when none does. */
+  --dot-on: #6fcf8a;
+  --dot-off: #d9b77c;
   --chip: #efe8da;
   --sans: "Segoe UI", "Avenir Next", "Helvetica Neue", system-ui, sans-serif;
   --serif: "Iowan Old Style", Palatino, Georgia, serif;
@@ -36,6 +39,7 @@
   --imp-critical: #921f3a; --danger: #761630; --danger-deep: #5c0f24; --danger-soft: #fbedf0; --danger-line: #ebbcc6;
   --imp-high: #aa7a00; --warn: #806c00; --warn-soft: #fcf5e0;
   --green: #0b738a; --ok-soft: #eaf5f7; --ok-line: #b3dbe4;
+  --dot-on: #48e0cf;
 }
 
 * { box-sizing: border-box; }
@@ -292,8 +296,8 @@ table.mail tr.is-open td { background: #f1ead9; }
 .chat-fab { position: fixed; right: 22px; bottom: 22px; z-index: 60; border-radius: 999px; padding: 12px 18px; box-shadow: 0 8px 24px rgba(18, 36, 63, 0.28); display: flex; gap: 8px; align-items: center; font-weight: 600; }
 .chat-fab.hidden-fab { display: none; }
 /* No local model: a hollow ring; one running: a filled dot, so they differ by more than their colour. */
-.chat-fab .dot { width: 9px; height: 9px; border-radius: 50%; background: transparent; box-shadow: inset 0 0 0 1.5px #d9b77c; }
-.chat-fab .dot.on { background: #6fcf8a; box-shadow: none; }
+.chat-fab .dot { width: 9px; height: 9px; border-radius: 50%; background: transparent; box-shadow: inset 0 0 0 1.5px var(--dot-off); }
+.chat-fab .dot.on { background: var(--dot-on); box-shadow: none; }
 .chat { position: fixed; right: 22px; bottom: 22px; z-index: 60; width: min(420px, calc(100vw - 24px)); height: min(600px, calc(100vh - 44px)); max-width: calc(100vw - 24px); max-height: calc(100vh - 24px); background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 16px 48px rgba(18, 36, 63, 0.28); display: flex; flex-direction: column; overflow: hidden; transition: width 0.18s ease, height 0.18s ease; }
 .chat.large { width: min(880px, calc(100vw - 44px)); height: calc(100vh - 44px); }
 .chat.resizing { transition: none; user-select: none; }

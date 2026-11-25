@@ -123,3 +123,14 @@ def test_meaning_colours_live_in_tokens():
     for path in (pm.WORKSPACE_CSS, pm.CLASSIC_CSS):
         text = path.read_text(encoding="utf-8").lower()
         assert not [value for value in retired if re.search(re.escape(value) + r"\b", text)], path.name
+
+
+def test_the_model_dot_on_ask_closedesk_follows_the_colors():
+    """The classic Ask CloseDesk button's dot was a green written into its rule, so it stayed green with the colors
+    for color blindness while the workspace's turned blue-green. It sits on the navy button, so it follows the
+    workspace's dark theme colour for done."""
+    for colors in ("standard", "color-blind"):
+        dot = pm.rule_colour(pm.CLASSIC_CSS, ".chat-fab .dot.on", "background", pm.classic(colors))
+        workspace = pm.workspace("dark", colors)["--ok"]
+        apart = abs(pm.oklch(dot)[2] - pm.oklch(workspace)[2])
+        assert min(apart, 360 - apart) <= 12, (colors, dot, workspace)

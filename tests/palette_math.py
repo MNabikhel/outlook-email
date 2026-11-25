@@ -438,6 +438,8 @@ ROLES = {
         ("text", Rule(".model-state.fallback", "color"), [Rule(".model-state.fallback", "background")], "an older method .model-state.fallback"),
         ("text", Rule(".coding-state.unmatched", "color"), [Rule(".coding-state.unmatched", "background")], "no cost code matched .coding-state.unmatched"),
         ("text", Rule(".coding-state.confirmed", "color"), [Rule(".coding-state.confirmed", "background")], "a cost code confirmed .coding-state.confirmed"),
+        ("ui", Rule(".chat-fab .dot.on", "background"), [Rule("button", "background")], "the model's dot on Ask CloseDesk .chat-fab .dot.on"),
+        ("ui", Rule(".chat-fab .dot", "box-shadow"), [Rule("button", "background")], "no model: its ring .chat-fab .dot"),
         ("text", "--danger", ["--card", "--paper", "--danger-soft"], "danger words .kpis .hot, b.bad, .points.plus, .job-flag"),
         ("text", "--warn", ["--card", "--warn-soft"], "warning words .model-tip p, .model-state.fallback, .coding-state.unmatched"),
         ("text", "--green", ["--card", "--ok-soft"], "done words .model-state.on, .ai, .points.minus"),
