@@ -262,15 +262,26 @@ def _log_tail(lines: int = 15) -> str:
         return ""
 
 
+def _console_python(executable: str | None = None) -> str:
+    """The Python to install with: this one, or under the app (pythonw, no console) the python.exe beside it. uv and pip
+    run the Python they are given and read what it prints; started from the app, it opens no console window."""
+    executable = executable or sys.executable
+    path = Path(executable)
+    if path.name.lower() == "pythonw.exe" and path.with_name("python.exe").exists():
+        return str(path.with_name("python.exe"))
+    return executable
+
+
 def install(*what: str) -> bool:
     """Install into this environment: with ``uv`` when the launcher has it (much faster, and it keeps what it
     downloaded for the next set-up), else with pip."""
+    python = _console_python()
     uv = find_uv()
-    if uv and _run([uv, "pip", "install", "--python", sys.executable, *what]):
+    if uv and _run([uv, "pip", "install", "--python", python, *what]):
         return True
-    if importlib.util.find_spec("pip") is None and not _run([sys.executable, "-m", "ensurepip", "--upgrade"]):
+    if importlib.util.find_spec("pip") is None and not _run([python, "-m", "ensurepip", "--upgrade"]):
         return False
-    return _run([sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", *what])
+    return _run([python, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", *what])
 
 
 def runs_this_folder() -> bool:

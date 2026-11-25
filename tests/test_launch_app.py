@@ -242,3 +242,24 @@ def test_the_app_doesnt_start_while_an_update_is_putting_files_in_place(launch, 
     os.utime(under_way, (old, old))
     assert launch.main(["--app"]) == 0
     assert len(handed) == 1
+
+
+def test_installs_from_the_app_name_the_console_python_not_pythonw(launch, monkeypatch, tmp_path):
+    # The shortcut runs pythonw, which uv and pip are asked to install into: they run the Python they are given and
+    # read what it prints, so they are given the python.exe beside it (started with no console window all the same).
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    (scripts / "pythonw.exe").write_text("")
+    (scripts / "python.exe").write_text("")
+    assert launch._console_python(str(scripts / "pythonw.exe")) == str(scripts / "python.exe")
+    assert launch._console_python(str(scripts / "python.exe")) == str(scripts / "python.exe")
+    (scripts / "python.exe").unlink()
+    assert launch._console_python(str(scripts / "pythonw.exe")) == str(scripts / "pythonw.exe"), "none beside it: as it is"
+    ran: list = []
+    monkeypatch.setattr(launch, "_console_python", lambda executable=None: "the-console-python")
+    monkeypatch.setattr(launch, "find_uv", lambda: "uv")
+    monkeypatch.setattr(launch, "_run", lambda cmd, **_: ran.append(cmd) or False)
+    monkeypatch.setattr(launch.importlib.util, "find_spec", lambda name: object())
+    launch.install("x")
+    assert ran == [["uv", "pip", "install", "--python", "the-console-python", "x"],
+                   ["the-console-python", "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "x"]]
