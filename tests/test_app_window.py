@@ -238,6 +238,7 @@ def make_app(webview, computer, tmp_path, *, owned=True) -> app_window.App:
     app.open_url = computer.opened.append
     app.open_launcher = lambda why="": computer.launcher.append(why)
     app.poll = 0.01
+    app.other_wait = 0.2
     app.storage = tmp_path / "window"
     return app
 
@@ -353,7 +354,7 @@ def test_update_now_shows_updating_in_the_window_throughout_then_the_new_version
     assert update.options["creationflags"] == NO_WINDOW and update.options["stdin"] == subprocess.DEVNULL
     assert update.options["env"][updates.APP_ENV] == "1", "its set-up runs as the app's too: no console windows"
     shown = window.htmls()[-1]
-    assert window.shown[-1][0] == "html" and "Updating CloseDesk" in shown and updates.UPDATING in shown
+    assert window.shown[-1][0] == "html" and "Updating CloseDesk" in shown and "opens again by itself" in shown
 
     update.end(0)
     until(lambda: len(window.urls()) == 2, what="the new version in the window")
@@ -446,6 +447,31 @@ def test_closedesk_that_never_answers_says_so_in_the_window(computer, tmp_path):
 
 
 # A CloseDesk already open is shown, not a second started -------------------------------------------------------------
+
+
+def test_a_second_double_click_that_races_the_first_shows_the_first(computer, tmp_path):
+    # Both windows found the port free; the second's CloseDesk then found the first's there and ended. The second window
+    # shows the first's CloseDesk, as if it had been open already, and closing it leaves that one open.
+    others_up = {"now": False}
+
+    def popen(cmd, **options):
+        process = computer.popen(cmd, **options)
+        others_up["now"] = True  # the first double-click's CloseDesk answers on the port
+        process.end(0)  # "CloseDesk is already open in another window"
+        return process
+
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.popen = popen
+    app.answers = lambda url: others_up["now"]
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls(), what="the first CloseDesk in the second window")
+    assert app.owned is False and len(computer.servers()) == 1
+    computer.busy = True
+    assert window.person_closes() is True and window.asked == []
+    thread.join(10)
+    assert result["code"] == 0
 
 
 def test_a_closedesk_already_open_is_shown_and_closing_the_window_leaves_it_open(computer, tmp_path):

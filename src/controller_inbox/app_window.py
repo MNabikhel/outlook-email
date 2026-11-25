@@ -87,6 +87,7 @@ UPDATING_CLOSE = (
     "CloseDesk is updating. Close the window anyway? The update finishes by itself; open CloseDesk again in a minute "
     "or two."
 )
+UPDATING = "CloseDesk opens again by itself in a minute or two, as the new version. Your mail and settings are kept."
 STOPPED = "CloseDesk stopped unexpectedly. What went wrong is written in {log}. Close this window and open CloseDesk again."
 NOT_OPEN = "CloseDesk didn't open in time. What went wrong is written in {log}. Close this window and open CloseDesk again."
 NO_PORT = "CloseDesk can't open: port {port} and the twenty after it are all in use. Set CONTROLLER_INBOX_PORT in the .env file in CloseDesk's folder to a free port."
@@ -94,10 +95,14 @@ CANT_START = "CloseDesk can't start yet:\n\n{problems}\n\nThis is also written i
 NO_LAUNCHER = "CloseDesk couldn't open {launcher}. Double-click it in the CloseDesk folder ({folder})."
 
 # How long the window waits: for its first page to show (WebView2 that fails to start leaves it empty), for CloseDesk
-# to answer, and for CloseDesk to stop once asked.
+# to answer, for another CloseDesk that took the port to answer, and for CloseDesk to stop once asked.
 LOAD_WAIT = 60
 UP_WAIT = 180
+OTHER_WAIT = 30
 STOP_WAIT = 20
+# How CloseDesk ends when another took its port first: "already open in another window" (0), or the port couldn't be
+# opened (3).
+TAKEN = (0, 3)
 
 # 127.0.0.1 is asked directly, never through a proxy the computer may be set to use.
 _LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -397,7 +402,7 @@ def opening_page() -> str:
 
 
 def updating_page() -> str:
-    return _page("Updating CloseDesk", updates.UPDATING, busy=True)
+    return _page("Updating CloseDesk", UPDATING, busy=True)
 
 
 def stopped_page(log: Path) -> str:
@@ -489,7 +494,7 @@ class App:
         self.open_url = webbrowser.open
         self.open_launcher = open_launcher
         self.storage = user_dir() / "window"
-        self.load_wait, self.up_wait, self.poll = LOAD_WAIT, UP_WAIT, 0.25
+        self.load_wait, self.up_wait, self.other_wait, self.poll = LOAD_WAIT, UP_WAIT, OTHER_WAIT, 0.25
 
     # On the main thread -----------------------------------------------------------------------------------------
 
@@ -628,6 +633,12 @@ class App:
                 if server.poll() is None:  # started, and never answered
                     self._end(server)
                     self._show(not_open_page(self.log))
+                elif server.poll() in TAKEN and self._another_answers():
+                    # Another CloseDesk opened on the port meanwhile (a second double-click raced the first, and this
+                    # one found it there): shown, as one already open is, and left open when the window closes.
+                    print("Another CloseDesk opened on the same port meanwhile: the window shows that one.", flush=True)
+                    self.owned = False
+                    self._show_closedesk()
                 else:
                     print(f"CloseDesk stopped as it started (exit code {server.poll()}).", flush=True)
                     self._show(stopped_page(self.log))
@@ -673,6 +684,16 @@ class App:
                 return False
             if self.answers(self.url):
                 return True
+            time.sleep(self.poll)
+        return False
+
+    def _another_answers(self) -> bool:
+        deadline = time.monotonic() + self.other_wait
+        while not self.closing:
+            if self.answers(self.url):
+                return True
+            if time.monotonic() >= deadline:
+                return False
             time.sleep(self.poll)
         return False
 
