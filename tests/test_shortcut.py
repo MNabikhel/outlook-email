@@ -361,6 +361,97 @@ def test_a_shortcut_to_another_closedesk_folder_that_is_still_there_is_left_alon
     assert windows.links.files[windows.desktop]["folder"] == str(other)
 
 
+def _copy(windows, tmp_path, name: str = "CloseDesk copy"):
+    other = _closedesk(tmp_path / name)
+    return other, shortcut.Windows(other, links=windows.links, folders=lambda: dict(windows.places), icon_dir=windows.system.icon_dir)
+
+
+def test_a_second_copy_started_once_doesnt_stop_the_shortcut_following_the_first_once_it_is_deleted(windows, tmp_path):
+    # A new download unzipped beside the old folder, started once: both shortcuts still open the old folder. That start
+    # recorded the new copy as this computer's shortcut folder, with no shortcuts; once the old folder was deleted (the
+    # update done by hand), both shortcuts opened a folder that was gone, taken for another computer's, for good.
+    _upkeep(windows)
+    other, system = _copy(windows, tmp_path)
+    assert shortcut.upkeep(system, record=windows.record).message == ""
+    assert windows.links.files[windows.desktop]["folder"] == str(windows.root)
+    import shutil
+
+    shutil.rmtree(windows.root)
+    said = shortcut.upkeep(system, record=windows.record)
+    for path in (windows.desktop, windows.start):
+        assert windows.links.files[path]["folder"] == str(other), path
+    assert said.ok and "moved" in said.message, said.message
+
+
+def test_a_second_copy_started_once_doesnt_stop_the_shortcut_following_the_first_when_it_moves(windows, tmp_path):
+    _upkeep(windows)
+    _, system = _copy(windows, tmp_path)
+    shortcut.upkeep(system, record=windows.record)
+    moved, system = _moved(windows, tmp_path)
+    said = shortcut.upkeep(system, record=windows.record)
+    for path in (windows.desktop, windows.start):
+        assert windows.links.files[path]["folder"] == str(moved), path
+    assert "moved" in said.message, said.message
+
+
+@pytest.mark.parametrize("how", ["unread", "unwritten"])
+def test_a_shortcut_that_couldnt_be_read_or_written_as_the_folder_moved_follows_it_the_next_start(windows, tmp_path, how):
+    # Moved, and at the first start in the new place the Desktop's CloseDesk.lnk couldn't be read (OneDrive not running)
+    # or written: the Start menu's followed, and the record took the new folder. At the next start the Desktop's opened
+    # the old one, gone, which was then taken for another computer's: left broken for good, with nothing said.
+    _upkeep(windows)
+    moved, system = _moved(windows, tmp_path)
+    if how == "unread":
+        windows.links.unreadable[windows.desktop] = ComError(-2147024514, "The cloud file provider is not running.", None, None)
+    else:
+        windows.links.refuse[windows.desktop] = PermissionError(13, "Access is denied")
+    said = shortcut.upkeep(system, record=windows.record)
+    assert windows.links.files[windows.start]["folder"] == str(moved)
+    assert windows.links.files[windows.desktop]["folder"] == str(windows.root) and "couldn't" in said.message
+    windows.links.unreadable.clear()
+    windows.links.refuse.clear()
+    said = shortcut.upkeep(system, record=windows.record)
+    assert windows.links.files[windows.desktop]["folder"] == str(moved)
+    assert "Desktop" in said.message and "moved" in said.message, said.message
+    # Followed: from then on nothing more is said, and the old folder is forgotten.
+    windows.links.written.clear()
+    assert shortcut.upkeep(system, record=windows.record).message == "" and windows.links.written == []
+    assert "before" not in json.loads(windows.record.read_text(encoding="utf-8"))
+
+
+def test_a_new_environment_puts_back_the_shortcut_windows_offered_to_delete_meanwhile(windows):
+    # An update by hand (the folders swapped) leaves the folder without its environment: the Desktop shortcut's
+    # pythonw.exe is gone, Windows offers to delete it, and the person says Yes. CloseDesk.bat then sets the folder up
+    # again, in the same place: that start puts it back, as after a move.
+    _upkeep(windows)
+    del windows.links.files[windows.desktop]
+    said = shortcut.upkeep(windows.system, record=windows.record, new_environment=True)
+    assert windows.links.files[windows.desktop]["folder"] == str(windows.root)
+    assert said.ok and "Desktop" in said.message and "put back" in said.message, said.message
+    assert set(json.loads(windows.record.read_text(encoding="utf-8"))["places"]) == {"Desktop", "Start menu"}
+    # An environment that was there all along: one deleted stays deleted.
+    del windows.links.files[windows.desktop]
+    assert _upkeep(windows).message == "" and windows.desktop not in windows.links.files
+
+
+def test_a_new_environment_puts_back_only_what_this_computer_had(windows):
+    _upkeep(windows)
+    del windows.links.files[windows.desktop]
+    _upkeep(windows)  # deleted on purpose
+    said = shortcut.upkeep(windows.system, record=windows.record, new_environment=True)
+    assert windows.desktop not in windows.links.files and said.message == ""
+
+
+def test_on_a_mac_a_new_environment_doesnt_put_back_a_deleted_app(mac):
+    # CloseDesk.app opens CloseDesk.command while the environment is being made: macOS offers nothing to delete.
+    shortcut.upkeep(mac.system, record=mac.record)
+    import shutil
+
+    shutil.rmtree(mac.app)
+    assert shortcut.upkeep(mac.system, record=mac.record, new_environment=True).message == ""
+    assert not mac.app.exists()
+
+
 def test_a_closedesk_shortcut_the_person_made_is_left_alone_unless_they_ask(windows):
     # Their own shortcut named CloseDesk (to CloseDesk.bat, say) has no CloseDesk taskbar id.
     theirs = {"target": str(windows.root / "CloseDesk.bat"), "arguments": "", "folder": str(windows.root), "icon": "",
@@ -613,6 +704,8 @@ def test_the_guide_says_what_to_do_when_the_python_the_shortcut_runs_is_gone():
     assert row.startswith("| Windows:") and "CloseDesk.bat" in row, row
     every_start = next(line for line in guide.splitlines() if line.startswith("After CloseDesk-Update or an update by hand"))
     assert "CloseDesk.bat" in every_start and "removed" in every_start, "the guide says the shortcut repairs a Python that went"
+    # Swapped by hand, the new folder has no environment yet: the shortcut can't start it either.
+    assert "folders swapped" in every_start and "puts it back" in every_start, every_start
 
 
 # macOS --------------------------------------------------------------------------------------------------------------
@@ -1002,7 +1095,7 @@ def _start_closedesk(settings, store, monkeypatch) -> list:
     monkeypatch.setattr(cli, "_link_stored_mail", lambda *a: None)
     monkeypatch.setattr(cli, "_run_server", lambda app, *, host, port: None)
     kept: list = []
-    monkeypatch.setattr(shortcut, "upkeep_soon", lambda: kept.append("kept"))
+    monkeypatch.setattr(shortcut, "upkeep_soon", lambda new_environment=False: kept.append("new" if new_environment else "kept"))
     assert cli._serve(settings, store, host="127.0.0.1", port=8765) == 0
     return kept
 
@@ -1010,6 +1103,15 @@ def _start_closedesk(settings, store, monkeypatch) -> list:
 def test_closedesk_started_by_a_launcher_keeps_the_shortcut(settings, store, monkeypatch):
     # Every launcher start: the double-click launchers and the window (which starts CloseDesk as they do).
     monkeypatch.setenv("CLOSEDESK_LAUNCHER", "1")
+    assert _start_closedesk(settings, store, monkeypatch) == ["kept"]
+
+
+def test_a_start_whose_environment_launch_py_just_made_says_so_to_the_shortcut_once(settings, store, monkeypatch):
+    monkeypatch.setenv("CLOSEDESK_LAUNCHER", "1")
+    monkeypatch.setenv(shortcut.NEW_ENVIRONMENT_ENV, "1")
+    assert _start_closedesk(settings, store, monkeypatch) == ["new"]
+    # What this CloseDesk starts (an update, the start after it) isn't told it again.
+    assert shortcut.NEW_ENVIRONMENT_ENV not in os.environ
     assert _start_closedesk(settings, store, monkeypatch) == ["kept"]
 
 

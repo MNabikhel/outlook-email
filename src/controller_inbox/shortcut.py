@@ -22,7 +22,8 @@ It is made once, the first time a launcher starts CloseDesk (``upkeep``, from cl
 a shortcut the person deleted isn't put back. At each start after that, one still there is kept right: pointed at this
 folder when the folder it opened is gone (CloseDesk was moved or renamed), and given what changed after an update (a
 new icon). After a move, a shortcut that is missing is put back too, where this computer had one at the start before:
-Windows offers to delete one whose folder is gone.
+Windows offers to delete one whose folder is gone. So it does while the folder has no environment (an update by hand,
+the folders swapped; the environment made again): the start that makes it puts back what that cost.
 One that opens another CloseDesk folder, still there, is left alone, as is a shortcut named CloseDesk that isn't
 CloseDesk's own, and one naming a folder this computer never had (another computer's, on a Desktop OneDrive keeps the
 same on both). Nothing that is right is written again (OneDrive would copy a Desktop's changes between two computers,
@@ -50,6 +51,8 @@ from pathlib import Path
 
 from controller_inbox import version
 from controller_inbox.app_window import APP_ID, BUNDLE_ID, mac_icon_name
+# launch.py's word that this start's environment was just made (``upkeep``'s new_environment; cli._serve reads it).
+from controller_inbox.app_window import NEW_ENVIRONMENT_ENV as NEW_ENVIRONMENT_ENV
 from controller_inbox.app_window import macos_version as _macos
 from controller_inbox.app_window import user_dir as _closedesk_dir
 
@@ -57,6 +60,11 @@ NAME = "CloseDesk"
 DIR_ENV = "CLOSEDESK_SHORTCUT_DIR"
 # macOS: in the record, the CloseDesk.app bundles the person opened CloseDesk from (launch.py --app writes them).
 APPS_KEY = "apps"
+# In the record: folders this computer's shortcut opened before a move that a shortcut hasn't followed yet (it couldn't
+# be read or written then). A shortcut still opening one, gone, is this computer's, and follows at a later start.
+BEFORE_KEY = "before"
+# The most kept of them.
+BEFORE_MOST = 5
 # The link in CloseDesk.app to the Python that runs CloseDesk (launch.py has the same name).
 LINKED_PYTHON = "CloseDesk-python"
 STATIC = Path(__file__).resolve().parent / "static"
@@ -245,6 +253,9 @@ class Windows:
 
     script = "CloseDesk.bat"
     places_said = {"Desktop": "on your Desktop", "Start menu": "in your Start menu", "Taskbar": "on your taskbar"}
+    # A shortcut whose program is gone (the folder without its environment: swapped by hand, being set up again)
+    # gets Windows' "Problem with Shortcut", which offers to delete it.
+    lost_without_environment = True
     # Made by Windows when the person pins CloseDesk, never by CloseDesk.
     pinned = "Taskbar"
 
@@ -310,6 +321,11 @@ class Windows:
             lines.append(f"Added the CloseDesk shortcut {where(done['made'])}: it opens CloseDesk in a window of its own.")
         if done["moved"]:
             lines.append(f"The CloseDesk shortcut {where(done['moved'])} now opens CloseDesk from this folder (CloseDesk's folder was moved).")
+        if done["back"]:
+            lines.append(
+                f"The CloseDesk shortcut {where(done['back'])} was put back: Windows offers to delete it while "
+                "CloseDesk's folder is being set up."
+            )
         if done["fresh"]:
             lines.append(f"The CloseDesk shortcut {where(done['fresh'])} was brought up to date.")
         if done["kept"] and explicit:
@@ -330,7 +346,7 @@ class Windows:
         for name, why in failed:
             did = "check" if name in done["unread"] else "put"
             lines.append(f"CloseDesk couldn't {did} its shortcut {where([name])} ({why}).")
-        ok = any(done[key] for key in ("made", "moved", "fresh", "kept"))
+        ok = any(done[key] for key in ("made", "moved", "back", "fresh", "kept"))
         if failed and not ok:
             lines.append(f"{self.script} in CloseDesk's folder still opens it.")
         return Said(ok, " ".join(lines))
@@ -491,6 +507,8 @@ class Mac:
 
     script = "CloseDesk.command"
     places_said = {"Applications": "in Applications in your user folder", "CloseDesk's folder": "in CloseDesk's folder"}
+    # Without its environment, CloseDesk.app opens CloseDesk.command, which sets it up: nothing offers to delete it.
+    lost_without_environment = False
     _FIND = object()
 
     def __init__(self, root, *, apps=None, home=None, macos=None, interpreter=_FIND, register=None, folders=_FIND) -> None:
@@ -627,7 +645,7 @@ class Mac:
         for name, why in failed:
             did = "check" if name in done["unread"] else "put"
             lines.append(f"CloseDesk couldn't {did} CloseDesk.app {where([name])} ({why}).")
-        ok = any(done[key] for key in ("made", "moved", "fresh", "kept", "fallback"))
+        ok = any(done[key] for key in ("made", "moved", "back", "fresh", "kept", "fallback"))
         if failed and not ok:
             lines.append(f"{self.script} in CloseDesk's folder still opens it.")
         return Said(ok, " ".join(lines))
@@ -702,13 +720,27 @@ def opened_from(saved: dict) -> list[str]:
     return [str(app) for app in apps if isinstance(app, str) and app] if isinstance(apps, list) else []
 
 
-def _tend(system, *, explicit: bool, record: Path) -> Said:
+def _folders_before(saved: dict) -> list[str]:
+    """The folders this computer's shortcut opened before a move that a shortcut hasn't followed yet (``BEFORE_KEY``)."""
+    found = saved.get(BEFORE_KEY)
+    return [str(folder) for folder in found if isinstance(folder, str) and folder] if isinstance(found, list) else []
+
+
+def _tend(system, *, explicit: bool, record: Path, new_environment: bool = False) -> Said:
     saved = _read_record(record)
     first = explicit or not saved.get("made")
     # The folder this computer's shortcut last opened. Only a shortcut naming that folder, gone, is this computer's
     # after a move: one naming any other folder this computer hasn't got is another computer's (a Desktop OneDrive
-    # keeps in step between two), and pointing it here would take it from that computer, for good.
+    # keeps in step between two), and pointing it here would take it from that computer, for good. (With the folders
+    # it opened before a move that a shortcut couldn't follow then: one opening those is this computer's too.)
     known = str(saved.get("folder") or "")
+    before = _folders_before(saved)
+    ours_before = [folder for folder in [known, *before] if folder and not _same(folder, system.root)]
+
+    def opened_ours(found: str) -> bool:
+        """A shortcut opening a folder this computer's opened, now gone: CloseDesk's folder was moved from it."""
+        return any(_same(folder, found) for folder in ours_before) and not _closedesk_at(found)
+
     # Where this computer's shortcuts were at the start before (None: a record that didn't say, so every place).
     had = saved.get("places")
     had = {str(name) for name in had} if isinstance(had, list) else None
@@ -716,8 +748,12 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
     # with Shortcut" offered to delete) is put back, as at the first start; only where this computer had one, never on
     # a Desktop OneDrive shares with a computer whose shortcut it was. Deleted where the folder stayed, it isn't.
     moved_here = bool(known) and not _same(known, system.root) and not _closedesk_at(known)
+    # The folder's environment was just made (the first start, or made again: an update by hand, the folders swapped;
+    # its Python removed): meanwhile, Windows offered to delete a shortcut whose pythonw.exe was gone. Put back the
+    # same way, in the same folder.
+    set_up_here = new_environment and getattr(system, "lost_without_environment", False) and not moved_here
     done: dict[str, list[str]] = {
-        key: [] for key in ("made", "moved", "fresh", "kept", "theirs", "fallback", "elsewhere", "unread")
+        key: [] for key in ("made", "moved", "back", "fresh", "kept", "theirs", "fallback", "elsewhere", "unread")
     }
     failed: list[tuple[str, str]] = []
     for name, path, kept_only in system.places(saved):
@@ -737,13 +773,15 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
                 continue
             if _same(found, system.root):
                 kind = "fresh"
-            elif known and _same(known, found) and not _closedesk_at(found):
+            elif opened_ours(found):
                 kind = "moved"
             else:
                 continue
         elif found is None:
             if moved_here and not explicit and (had is None or name in had):
                 kind = "moved"
+            elif set_up_here and not explicit and saved.get("made") and (had is None or name in had):
+                kind = "back"
             elif not first:
                 continue  # the person deleted it: it stays deleted
             else:
@@ -759,7 +797,7 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
             kind = "made"
         elif _closedesk_at(found):
             continue  # another CloseDesk folder's, still there
-        elif known and _same(known, found):
+        elif opened_ours(found):
             kind = "moved"
         else:
             if first:  # said once: the first time this computer finds it
@@ -771,7 +809,7 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
             failed.append((name, _why(exc)))
             continue
         done[kind if changed else "kept"].append(name)
-    made = any(done[key] for key in ("made", "moved", "fresh", "kept"))
+    made = any(done[key] for key in ("made", "moved", "back", "fresh", "kept"))
     fallback = system.fallback()
     if first and failed and not made and fallback is not None:
         name, path = fallback
@@ -781,12 +819,27 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
         except Exception as exc:
             failed.append((name, _why(exc)))
     # Where this computer's shortcuts are now (one that couldn't be written this time still counts).
-    mine = sorted({name for key in ("made", "moved", "fresh", "kept", "fallback") for name in done[key]} | {name for name, _ in failed})
+    mine = sorted(
+        {name for key in ("made", "moved", "back", "fresh", "kept", "fallback") for name in done[key]} | {name for name, _ in failed}
+    )
+    # A place that couldn't be read or written as the folder moved still opens the folder it moved from: kept, so that
+    # it follows at a later start. Once every place could be, they are forgotten.
+    still_before = []
+    if failed:
+        for folder in ours_before:
+            if not _closedesk_at(folder) and not any(_same(folder, kept) for kept in still_before):
+                still_before.append(folder)
+    still_before = still_before[:BEFORE_MOST]
+    # This start's folder has no shortcut of its own while the folder this computer's shortcuts open is another
+    # CloseDesk, still there (a second copy, a new download beside the old one): they are still that folder's, and
+    # follow it when it moves or is deleted. Recorded as this folder's, they would be taken for another computer's.
+    another_copy = not mine and not explicit and bool(known) and not _same(known, system.root) and _closedesk_at(known)
     # Recorded once one is made, or another computer's was found (said once: from then on it is left as it is quietly);
     # again when the folder moved, or when where this computer has its shortcuts changed (one deleted, say).
-    if (
-        (first and (made or done["fallback"] or done["elsewhere"])) or done["moved"]
+    if not another_copy and (
+        (first and (made or done["fallback"] or done["elsewhere"])) or done["moved"] or done["back"]
         or (saved.get("made") and (had is None or had != set(mine) or moved_here))
+        or still_before != before
     ):
         apps = [app for app in opened_from(saved) if Path(app).exists()]
         try:
@@ -794,13 +847,14 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
             record.write_text(json.dumps({
                 "made": saved.get("made") if saved.get("made") and not first else time.strftime("%Y-%m-%d %H:%M:%S"),
                 "folder": str(system.root), "places": mine, **({APPS_KEY: apps} if apps else {}),
+                **({BEFORE_KEY: still_before} if still_before else {}),
             }), encoding="utf-8")
         except OSError:
             pass
     return system.said(done, failed, explicit=explicit)
 
 
-def _keep(system, *, explicit: bool, record) -> Said:
+def _keep(system, *, explicit: bool, record, new_environment: bool = False) -> Said:
     if system is _HERE:
         system = system_here()
     if system is None:
@@ -810,15 +864,16 @@ def _keep(system, *, explicit: bool, record) -> Said:
     record = Path(record) if record else record_path()
     with _lock:
         try:
-            return _tend(system, explicit=explicit, record=record)
+            return _tend(system, explicit=explicit, record=record, new_environment=new_environment)
         except Exception as exc:  # pywin32 missing or broken, a folder Windows wouldn't name
             return Said(False, f"CloseDesk couldn't check its shortcut ({_why(exc)}). {system.script} in CloseDesk's folder still opens it.")
 
 
-def upkeep(system=_HERE, *, record=None) -> Said:
+def upkeep(system=_HERE, *, record=None, new_environment: bool = False) -> Said:
     """As a launcher starts CloseDesk: the shortcut made the first time, and kept right after that (see the module's
-    note). Its message is "" when nothing needed doing."""
-    return _keep(system, explicit=False, record=record)
+    note). Its message is "" when nothing needed doing. ``new_environment``: launch.py has just made the folder's
+    environment for this start (``NEW_ENVIRONMENT_ENV``)."""
+    return _keep(system, explicit=False, record=record, new_environment=new_environment)
 
 
 def make(system=_HERE, *, record=None) -> Said:
@@ -826,12 +881,12 @@ def make(system=_HERE, *, record=None) -> Said:
     return _keep(system, explicit=True, record=record)
 
 
-def upkeep_soon() -> threading.Thread:
+def upkeep_soon(*, new_environment: bool = False) -> threading.Thread:
     """``upkeep`` beside CloseDesk as it opens (nothing waits for it), saying what it did."""
 
     def work() -> None:
         try:
-            said = upkeep()
+            said = upkeep(new_environment=new_environment)
         except Exception as exc:  # never in CloseDesk's way
             print(f"CloseDesk couldn't check its shortcut ({_why(exc)}).", flush=True)
             return

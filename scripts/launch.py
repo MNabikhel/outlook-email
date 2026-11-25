@@ -141,6 +141,10 @@ UPDATE_LONGEST = 30 * 60
 # Set by the update for the check after it, which the update's own mark doesn't stop. (The name stays: the update a
 # copy runs hands over to the newest launch.py's check with it.)
 AFTER_UPDATE_ENV = "CLOSEDESK_AFTER_UPDATE"
+# Set for the start whose environment this launch.py has just set up (the first start, or the environment made again:
+# an update by hand, the folders swapped; its Python removed). Meanwhile Windows offered to delete the CloseDesk shortcut,
+# whose pythonw.exe was gone: CloseDesk puts it back (controller_inbox.shortcut.NEW_ENVIRONMENT_ENV).
+NEW_ENVIRONMENT_ENV = "CLOSEDESK_NEW_ENVIRONMENT"
 # An update that found this copy the newest already says so here (in .venv), for the next start: nothing went wrong.
 # (controller_inbox.updates.NEWEST_NOTE)
 NEWEST_NOTE = "closedesk-newest.txt"
@@ -573,11 +577,17 @@ def _tried_key(requirements: list[str]) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+# Whether this start's environment had nothing set up in it (``ensure_packages``): it was just made.
+_new_environment = False
+
+
 def ensure_packages() -> int:
     """Install what is missing or too old. Returns 0, or the exit code to leave with."""
+    global _new_environment
     project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     state = read_state()
     first = not state
+    _new_environment = first
     wrong = [found for found in map(check_deps.problem, project["project"]["dependencies"]) if found]
     here = runs_this_folder()
     installed = False
@@ -983,7 +993,14 @@ def app(args: list[str]) -> int:
         return code
     # The window acts on CloseDesk's UPDATE exit code itself, so CloseDesk offers its Update button.
     os.environ["CLOSEDESK_LAUNCHER"] = "1"
+    _say_new_environment()
     return _after_window(_open_window(args))
+
+
+def _say_new_environment() -> None:
+    """Tell the CloseDesk this starts whether its environment was just set up (``NEW_ENVIRONMENT_ENV``)."""
+    if _new_environment:
+        os.environ[NEW_ENVIRONMENT_ENV] = "1"
 
 
 def _after_window(code: int) -> int:
@@ -1025,6 +1042,10 @@ def _open_window(args: list[str]) -> int:
 
 def main(argv: list[str]) -> int:
     args = list(argv)
+    # Only this launch.py's own set-up says the environment is new, never what started it.
+    os.environ.pop(NEW_ENVIRONMENT_ENV, None)
+    global _new_environment
+    _new_environment = False
     if "--app" in args:
         args.remove("--app")
         return app(args)
@@ -1077,6 +1098,7 @@ def main(argv: list[str]) -> int:
         return _hand_over([*module, *args[at + 1 :]])
     # The launcher acts on CloseDesk's UPDATE exit code: CloseDesk offers its Update button only when one started it.
     os.environ["CLOSEDESK_LAUNCHER"] = "1"
+    _say_new_environment()
     return _hand_over([*module, "run", *args])
 
 

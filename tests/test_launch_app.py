@@ -50,7 +50,7 @@ def launch(tmp_path, monkeypatch):
     # after it looked for its environment there, and couldn't import anything.)
     for name in ("CLOSEDESK_APP", "CLOSEDESK_APP_LOG", "CLOSEDESK_LAUNCHER", "CLOSEDESK_REBUILT", "CLOSEDESK_UPDATE_URL",
                  "CFProcessPath", "CLOSEDESK_APP_SMOKE", "CLOSEDESK_AFTER_UPDATE", "__PYVENV_LAUNCHER__", "CLOSEDESK_ARCH",
-                 "CLOSEDESK_APP_BUNDLE", "CLOSEDESK_REOPEN"):
+                 "CLOSEDESK_APP_BUNDLE", "CLOSEDESK_REOPEN", "CLOSEDESK_NEW_ENVIRONMENT"):
         # Set, then removed: what launch.py itself sets in os.environ (--app sets the first three) is undone after the
         # test too, which removing a name that isn't set wouldn't do.
         monkeypatch.setenv(name, "")
@@ -86,6 +86,29 @@ def test_the_app_sets_up_then_opens_the_window(launch, monkeypatch):
     assert env["CLOSEDESK_APP_LOG"] == str(launch.app_log_path())
     sys.stdout.flush()
     assert "CloseDesk opening" in launch.app_log_path().read_text(encoding="utf-8"), "what the app says goes to its log"
+
+
+@pytest.mark.parametrize("args", [["--no-browser"], ["--app"]])
+def test_the_start_whose_environment_was_just_made_says_so_to_closedesk_and_no_later_one(launch, monkeypatch, args):
+    # An update by hand (the folders swapped), or an environment made again: meanwhile, Windows offered to delete the
+    # Desktop shortcut, whose pythonw.exe was gone. CloseDesk is told, so that it puts it back (shortcut.upkeep).
+    from controller_inbox import shortcut
+
+    assert launch.NEW_ENVIRONMENT_ENV == shortcut.NEW_ENVIRONMENT_ENV
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "install", lambda *what: True)
+    monkeypatch.setattr(launch.check_deps, "problem", lambda req: "")
+    monkeypatch.setattr(launch.check_deps, "extra_installed", lambda reqs: True)
+    handed: list = []
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append(dict(os.environ)) or 0)
+    assert not launch.STATE.exists()  # the environment was just made: nothing set up in it yet
+    launch.main(list(args))
+    launch.main(list(args))
+    assert [env.get(launch.NEW_ENVIRONMENT_ENV) for env in handed] == ["1", None]
+    # Nor one passed on from what started this launch.py.
+    monkeypatch.setenv(launch.NEW_ENVIRONMENT_ENV, "1")
+    launch.main(list(args))
+    assert handed[-1].get(launch.NEW_ENVIRONMENT_ENV) is None
 
 
 def test_on_windows_the_window_is_opened_with_pythonw(launch, monkeypatch):

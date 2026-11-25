@@ -738,12 +738,14 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None,
     after = updates.after_update(store)
     app.state.update_question.begin(store, settings, failed=after == "failed", newest=after == "newest")
     updates.start_checking(store, settings)
+    from controller_inbox import shortcut
+
+    # Said by launch.py for this start only: what this CloseDesk starts isn't told it again.
+    new_environment = os.environ.pop(shortcut.NEW_ENVIRONMENT_ENV, "") == "1"
     if updates.launcher_here():
         # Started by a launcher (or the window): the CloseDesk shortcut is made the first time, and kept right after
         # that (shortcut.py), beside the start.
-        from controller_inbox import shortcut
-
-        shortcut.upkeep_soon()
+        shortcut.upkeep_soon(new_environment=new_environment)
     _run_server(app, host=host or settings.host, port=port or settings.port)
     # Settings' Update button (or the question's) stopped it: the launcher updates CloseDesk and starts it again.
     if getattr(app.state, "update_asked", False):

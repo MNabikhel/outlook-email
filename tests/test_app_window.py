@@ -461,6 +461,27 @@ def test_update_now_shows_updating_in_the_window_throughout_then_the_new_version
     assert second.input_closed
 
 
+def test_only_the_first_closedesk_the_window_starts_is_told_its_environment_was_just_made(computer, tmp_path, monkeypatch):
+    # launch.py says so for this start (the shortcut puts back what Windows offered to delete meanwhile); the CloseDesk
+    # the window starts again after an update isn't a new environment's.
+    from controller_inbox import shortcut
+
+    monkeypatch.setenv(shortcut.NEW_ENVIRONMENT_ENV, "1")
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)
+    until(lambda: len(window.urls()) == 2, what="the new version in the window")
+    first, second = computer.servers()
+    assert first.options["env"].get(shortcut.NEW_ENVIRONMENT_ENV) == "1"
+    assert shortcut.NEW_ENVIRONMENT_ENV not in second.options["env"]
+    assert shortcut.NEW_ENVIRONMENT_ENV not in computer.updates()[0].options["env"]
+    window.person_closes()
+    thread.join(10)
+
+
 def test_an_update_that_fails_opens_the_version_there_is(computer, tmp_path):
     # The update said why in the log; CloseDesk opens as it was and its first page says it wasn't updated.
     computer.update_code = 1

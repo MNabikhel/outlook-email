@@ -60,6 +60,9 @@ UPDATE_UNDER_WAY = 77  # launch.py --update: another update runs in the folder (
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # CloseDesk started by the window stops when its input ends (cli._run_server).
 STOP_WITH_PARENT = "CLOSEDESK_STOP_WITH_PARENT"
+# Set by launch.py for the start whose environment it has just made: the CloseDesk shortcut puts back what Windows
+# offered to delete meanwhile (shortcut.py). For the first CloseDesk the window starts only.
+NEW_ENVIRONMENT_ENV = "CLOSEDESK_NEW_ENVIRONMENT"
 # Why the window couldn't open, for the launcher's window to say too (cli._run).
 WHY_ENV = "CLOSEDESK_WINDOW_WHY"
 # CloseDesk started by the window opens on the port the window chose, or not at all (``PORT_TAKEN``): on another, the
@@ -1131,6 +1134,9 @@ class App:
             if self.closing:
                 return None
             self.server = self.popen(cmd, cwd=str(ROOT), env=env, stdin=subprocess.PIPE, creationflags=NO_WINDOW, **_output())
+            # launch.py's word that the environment was just made is for the first CloseDesk only (shortcut.py):
+            # not the one after an update, nor the update.
+            os.environ.pop(NEW_ENVIRONMENT_ENV, None)
             return self.server
 
     def _wait_up(self, server) -> bool:
