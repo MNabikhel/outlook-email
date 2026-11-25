@@ -24,6 +24,9 @@
   --imp-high-fill: #d6a31f; /* the High pill and the due-today tag, with dark words */
   --on-imp-high: #1b2416;
   --imp-medium: #bfd0ec;
+  /* Due later this week, on Today: a slate, apart from the amber of due today, the navy of a new email and the gold
+     of an email opened (the same for the colors for color blindness: it stays apart for every vision). */
+  --due-later: #7a8594;
   /* The model on the navy: the dot on Ask CloseDesk, filled while a local model runs and a ring when none does, and
      the side bar's Local model box (its dot, or its words when none runs). */
   --dot-on: #6fcf8a;
@@ -135,7 +138,8 @@ table.mail tr.high { box-shadow: inset 3px 0 0 var(--imp-high); }
 .flag.fraud_risk, .flag.do_not_process { background: var(--danger); color: #fff; }
 .flag.duplicate_invoice, .flag.missing_attachment { background: var(--warn); color: #fff; }
 .flag.month_end, .flag.audit, .flag.tax { background: var(--navy); color: #fff; }
-.flag.needs_model { background: #d9c48a; }
+/* Waiting for the local model: a dashed outline, apart from the High pill's amber on the same row. */
+.flag.needs_model { background: var(--card); border: 1px dashed var(--muted); padding: 1px 5px; }
 .flag.bionic { background: var(--green); color: #fff; }
 .flag.user_trained { background: var(--navy); color: #fff; }
 .summary { display: block; color: var(--muted); margin-top: 4px; }
@@ -198,7 +202,7 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .focus-item { display: flex; gap: 14px; align-items: flex-start; background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 12px; padding: 12px 14px; }
 .focus-item.fraud, .focus-item.overdue { border-left-color: var(--danger); }
 .focus-item.due_today { border-left-color: var(--imp-high); }
-.focus-item.due_soon, .focus-item.due_week { border-left-color: var(--gold); }
+.focus-item.due_soon, .focus-item.due_week { border-left-color: var(--due-later); }
 .focus-item.decide, .focus-item.new_task { border-left-color: var(--navy); }
 .focus-item .rank { font-family: var(--serif); font-size: 24px; color: var(--navy); min-width: 22px; line-height: 1.1; }
 .focus-body { flex: 1; min-width: 0; }
@@ -210,7 +214,8 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .tag { display: inline-block; font-size: 11px; letter-spacing: 0.03em; padding: 2px 8px; border-radius: 10px; background: var(--chip); white-space: nowrap; }
 .tag.fraud, .tag.overdue { background: var(--danger); color: #fff; }
 .tag.due_today { background: var(--imp-high-fill); color: var(--on-imp-high); }
-.tag.due_soon, .tag.due_week { background: #e9d9ae; }
+.tag.due_soon, .tag.due_week { background: var(--card); box-shadow: inset 0 0 0 1px var(--due-later); }
+.tag.caution { background: var(--warn-soft); color: var(--warn); }
 .tag.decide, .tag.new_task { background: #dfe6f0; color: var(--navy); }
 .ai { color: var(--green); }
 .folder-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }

@@ -151,3 +151,32 @@ def test_the_model_dot_on_ask_closedesk_follows_the_colors():
         assert pm.rule_colour(pm.CLASSIC_CSS, ".model-chip.on b::before", "background", tokens) == dot, colors
         ring = pm.rule_colour(pm.CLASSIC_CSS, ".chat-fab .dot", "box-shadow", tokens)
         assert pm.rule_colour(pm.CLASSIC_CSS, ".model-chip.off b", "color", tokens) == ring, colors
+
+
+def test_the_classic_amber_stands_apart_from_the_colours_beside_it():
+    """On the classic pages the new amber sat close to the old gold beside it: Today's "Due today" edge and tag
+    against "Due Fri" in gold, and the inbox's High pill against the khaki "Script draft" and "Needs model" flags on
+    the same row. Before, Due today and High were an orange. Each pair is at least 20 apart for every vision."""
+    for colors in ("standard", "color-blind"):
+        tokens = pm.classic(colors)
+
+        def rule(selector: str, prop: str) -> str:
+            return pm.rule_colour(pm.CLASSIC_CSS, selector, prop, tokens, "--card")
+
+        edge = "border-left-color"
+        assert rule(".focus-item.due_soon", edge) == rule(".focus-item.due_week", edge)
+        assert rule(".tag.due_soon", "background") == rule(".tag.due_week", "background")
+        pairs = {
+            "Today's due-today edge / due later this week": (rule(".focus-item.due_today", edge), rule(".focus-item.due_week", edge)),
+            "due later this week / new, needs a look": (rule(".focus-item.due_week", edge), rule(".focus-item.decide", edge)),
+            "due later this week / overdue": (rule(".focus-item.due_week", edge), rule(".focus-item.overdue", edge)),
+            "due later this week / an email opened": (rule(".focus-item.due_week", edge), rule(".focus-item.is-open", "border")),
+            "the due-today tag / due later this week": (rule(".tag.due_today", "background"), rule(".tag.due_week", "background")),
+            "the High pill / the model's flags": (rule(".pill.high", "background"), rule(".flag.needs_model", "background")),
+        }
+        close = {
+            name: {vision: round(pm.delta_e(a, b, vision), 1) for vision in pm.VISIONS}
+            for name, (a, b) in pairs.items()
+            if min(pm.delta_e(a, b, vision) for vision in pm.VISIONS) < 20
+        }
+        assert not close, (colors, close)

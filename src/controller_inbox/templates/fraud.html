@@ -82,7 +82,7 @@
       <tbody>
         {% for row in flagged %}
         <tr class="{{ 'critical' if row.level == 'high' else 'high' }}" data-email="{{ row.email_id }}">
-          <td class="nowrap"><span class="tag {{ 'fraud' if row.level == 'high' else 'due_soon' }}">{{ 'Blocked' if row.level == 'high' else 'Caution' }}</span>
+          <td class="nowrap"><span class="tag {{ 'fraud' if row.level == 'high' else 'caution' }}">{{ 'Blocked' if row.level == 'high' else 'Caution' }}</span>
             {% if 'fraud_cleared' in row.flags %}<small class="muted">you cleared it</small>{% endif %}</td>
           <td><a class="subj" href="/inbox/{{ row.email_id }}">{{ row.subject or '(no subject)' }}</a><small class="why">{{ row.sender_name or row.sender_email }} · {{ row.received_at | shortdt }}</small></td>
           <td><small>{% for signal in row.signals if signal.points > 0 %}{{ signal.label }}{{ '' if loop.last else ' · ' }}{% endfor %}</small></td>
