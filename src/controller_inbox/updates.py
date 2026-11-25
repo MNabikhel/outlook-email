@@ -681,9 +681,9 @@ def remember_update_asked(store) -> None:
         pass
 
 
-def stopped_as(*, fresh: float = 0.0) -> str:
+def stopped_as() -> str:
     """The version CloseDesk was when it last stopped to update (``STOPPED_NOTE``), when it stopped within
-    ``STOPPED_FRESH`` seconds (``fresh``: or so many); "" when it didn't say. An update that ends with the folder
+    ``STOPPED_FRESH`` seconds; "" when it didn't say. An update that ends with the folder
     still that version didn't update it; another one in the folder, even one CloseDesk-Update put there while
     CloseDesk was open, did."""
     try:
@@ -691,7 +691,7 @@ def stopped_as(*, fresh: float = 0.0) -> str:
         commit, at = str(said.get("commit") or ""), float(said.get("at") or 0)
     except (OSError, ValueError, TypeError, AttributeError):
         return ""
-    return commit if commit and 0 <= time.time() - at < (fresh or STOPPED_FRESH) else ""
+    return commit if commit and 0 <= time.time() - at < STOPPED_FRESH else ""
 
 
 def update_unfinished(store) -> bool:

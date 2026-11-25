@@ -75,13 +75,6 @@ def running_at() -> str:
     return found.get("date", "") if found.get("commit") else ""
 
 
-def updated_under() -> str:
-    """The commit CloseDesk-Update put in this copy's folder while this CloseDesk was open, "" when the files are the
-    version running (or either isn't a download): this CloseDesk is to be closed and opened again to run it."""
-    mine, there = running()[0], installed()[0]
-    return there if mine and there and there.lower() != mine.lower() else ""
-
-
 def moment(date: str) -> datetime | None:
     """The moment a date with its time and offset says ("2026-11-12T22:12:03-06:00", "2026-11-13T04:12:03Z"); None
     for a day alone, or what isn't a date."""
