@@ -865,10 +865,12 @@ CLASSIC_LIST_EDGES = """sel => [...document.querySelectorAll(sel)].filter((li) =
   const panel = li.closest('.panel'), word = li.querySelector('.pill.item-level');
   return { email: link ? link.getAttribute('href').split('/').pop() : '', edge: edge.content !== 'none' ? edge.backgroundColor : null,
            width: edge.width, edgeLeft: r.left + parseFloat(edge.left), edgeRight: r.left + parseFloat(edge.left) + parseFloat(edge.width),
-           text: (li.querySelector('a, .pill') || li).getBoundingClientRect().left, inside: r.left + parseFloat(getComputedStyle(li).paddingLeft),
+           inside: r.left + parseFloat(getComputedStyle(li).paddingLeft),
            panel: panel.getBoundingClientRect().left + parseFloat(getComputedStyle(panel).borderLeftWidth),
            word: word && getComputedStyle(word).display !== 'none' ? word.textContent : null };
 })"""
+
+
 def _classic_edge_of(store, email_id: str, colors: str) -> str | None:
     """The edge an email has on the classic pages: a held one the red of danger, a Critical or High one its
     importance's, the others none."""
