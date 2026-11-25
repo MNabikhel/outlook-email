@@ -327,7 +327,9 @@ def test_reading_mail_measures_the_models_speeds_for_the_summaries_after_it(sett
     result = read_queue(loaded, settings, limit=2)
     assert len(result["read_ids"]) == 2, result["note"]
     rates = model_fit.speeds(loaded, BIG)
-    assert 20 < rates.get("write", 0) < 200, rates  # about 100 words a second, a word every 10 ms
+    # A word every 10 ms is 100 a second at most: a sleep never ends early, but on a busy test machine (CI's Macs) it
+    # ends late, and the fake then writes slower (17 a second there once). Measured, then, and never faster.
+    assert 5 < rates.get("write", 0) < 200, rates
     assert rates.get("read", 0) > 0, rates
     after = model_fit.background_wait(loaded, settings, BIG, status, tokens=4000, written=2048)
     assert after.seconds >= 2048 / rates["write"] > before.seconds
