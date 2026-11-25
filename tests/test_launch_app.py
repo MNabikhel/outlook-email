@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from controller_inbox import app_window, updates
+from controller_inbox import app_window, updates, version
 
 ROOT = Path(__file__).resolve().parent.parent
 NO_WINDOW = 0x08000000  # subprocess.CREATE_NO_WINDOW on Windows
@@ -980,6 +980,64 @@ def test_whether_an_updates_program_still_runs_on_windows(launch):
         alive.kill()
         alive.wait()
     assert launch._alive(alive.pid, time.time()) is False
+
+
+def _windows_refuses_to_say(monkeypatch):
+    """Windows, standing in, where OpenProcess on the program asked about is refused (ERROR_ACCESS_DENIED): a SYSTEM
+    program (svchost, MpCmdRun, TiWorker) or another person's, given the number of an update that is gone."""
+    import ctypes
+
+    class OpenProcess:
+        argtypes = restype = None
+
+        def __call__(self, access, inherit, pid):
+            return 0
+
+    kernel32 = SimpleNamespace(OpenProcess=OpenProcess())
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, use_last_error=False: kernel32, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+
+
+@pytest.mark.parametrize("whose", ["mine", "an older CloseDesk's", "another person's"])
+def test_a_left_update_mark_whose_number_windows_gave_to_a_system_program(launch, monkeypatch, whose):
+    # CloseDesk-Update's window closed during the download (Windows ends python.exe at once: its mark stays), and
+    # Windows gave its number to a SYSTEM program. Refused to open that program, CloseDesk took the update to be
+    # running, and neither the shortcut nor CloseDesk.bat opened CloseDesk for half an hour ("being updated just
+    # now"). This person's own update could be opened by them: refused, it is someone else's program, and the mark is
+    # left over. Only a mark another person wrote (two people using one CloseDesk folder) is still taken as running.
+    _windows_refuses_to_say(monkeypatch)
+    monkeypatch.setattr(launch, "WINDOWS", True)
+    mark = {"pid": 4242, "started": time.time() - 120}
+    if whose == "mine":
+        mark["user"] = launch._me()
+    elif whose == "another person's":
+        mark["user"] = "0123456789abcdef"
+    (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps(mark), encoding="utf-8")
+    assert launch.update_under_way() is (whose == "another person's")
+    assert (launch.ROOT / launch.UPDATING_MARK).exists() is (whose == "another person's"), "a left mark is cleared"
+
+
+def test_an_updates_mark_says_whose_update_it_is(launch):
+    launch._marked.clear()
+    try:
+        launch._mark_update()
+        said = json.loads((launch.ROOT / launch.UPDATING_MARK).read_text(encoding="utf-8"))
+    finally:
+        launch._end_update()
+    assert said["pid"] == os.getpid() and said["user"] == launch._me() == version.whose()["user"]
+
+
+@pytest.mark.parametrize("whose", ["mine", "another person's"])
+def test_the_window_takes_a_left_mark_of_its_own_person_as_left_over_on_windows(tmp_path, monkeypatch, whose):
+    # app_window's copy, which the window and updates.after_update ask: the same.
+    _windows_refuses_to_say(monkeypatch)
+    assert app_window._windows_process_runs(4242, time.time() - 120, mine=whose == "mine") is (whose != "mine")
+    asked: list = []
+    monkeypatch.setattr(app_window, "process_runs", lambda pid, started=0.0, *, mine=False: asked.append(mine) or True)
+    user = version.whose()["user"] if whose == "mine" else "0123456789abcdef"
+    (tmp_path / app_window.UPDATING_MARK).write_text(json.dumps({"pid": 4242, "started": time.time(), "user": user}), encoding="utf-8")
+    app_window.update_running(tmp_path)
+    assert asked == [whose == "mine"]
 
 
 def test_an_update_that_finds_this_the_newest_says_so_for_the_next_start(launch, monkeypatch, tmp_path):

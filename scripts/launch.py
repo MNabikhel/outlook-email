@@ -874,10 +874,26 @@ _marked: dict = {}
 _after_update = False
 
 
+def _me() -> str:
+    """Who runs this, as a fingerprint: controller_inbox.version.whose()'s "user". An update's mark says whose it is."""
+    if os.name != "nt":
+        text = f"uid {os.getuid()}"
+    else:
+        import getpass
+
+        try:
+            name = getpass.getuser()
+        except Exception:  # no name to be found
+            name = os.environ.get("USERPROFILE", "")
+        text = f"{os.environ.get('USERDOMAIN', '')}\\{name}".lower()
+    return hashlib.sha256(f"closedesk\n{text}".encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def _mark_update(**more) -> None:
-    """Say in CloseDesk's folder that an update runs (this program, since when, and ``more``)."""
+    """Say in CloseDesk's folder that an update runs (this program, since when, whose, and ``more``)."""
     _marked.setdefault("pid", os.getpid())
     _marked.setdefault("started", time.time())
+    _marked.setdefault("user", _me())
     _marked.update(more)
     try:
         (ROOT / UPDATING_MARK).write_text(json.dumps(_marked), encoding="utf-8")
@@ -895,20 +911,22 @@ def _end_update() -> None:
     _marked.clear()
 
 
-def _alive(pid: int, started: float = 0.0) -> bool:
+def _alive(pid: int, started: float = 0.0, *, mine: bool = False) -> bool:
     """Whether the program ``pid`` that said at ``started`` it was updating still runs. One started after that isn't
     it: the computer gave the number to another program since (on a Mac or Linux the update becomes the check after
-    it, which leaves the mark behind when it ends)."""
+    it, which leaves the mark behind when it ends). ``mine``: this person's update, whose program they can always ask
+    about: one they may not ask about is another program, given the number since."""
     if pid == os.getpid():
         return True
     if WINDOWS:
-        return _windows_alive(pid, started)
+        return _windows_alive(pid, started, mine=mine)
     try:
         os.kill(pid, 0)  # asks, sends nothing
     except ProcessLookupError:
         return False
-    except PermissionError:
-        pass  # there, another user's: when it started says whether it is the update
+    except PermissionError:  # there, another user's: when it started says whether it is the update
+        if mine:
+            return False  # this person's update is theirs to ask about: another program has its number
     except OSError:
         return False
     began = _started_at(pid) if started else None
@@ -928,9 +946,10 @@ def _started_at(pid: int) -> float | None:
         return None
 
 
-def _windows_alive(pid: int, started: float) -> bool:
+def _windows_alive(pid: int, started: float, *, mine: bool = False) -> bool:
     """Windows: asked of Windows (os.kill would end the program). A program started after the update said it was
-    running isn't it: Windows gave the number to another one since."""
+    running isn't it: Windows gave the number to another one since. Refused (a SYSTEM program, another person's), it
+    isn't this person's update (``mine``), which they can always ask about: only another person's may be it."""
     import ctypes
     from ctypes import wintypes
 
@@ -939,7 +958,7 @@ def _windows_alive(pid: int, started: float) -> bool:
     kernel32.OpenProcess.restype = wintypes.HANDLE
     handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not handle:
-        return ctypes.get_last_error() == 5  # access denied: there, another user's
+        return ctypes.get_last_error() == 5 and not mine  # access denied: there, a SYSTEM program or another user's
     try:
         code = wintypes.DWORD()
         if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value != 259:  # STILL_ACTIVE
@@ -970,7 +989,9 @@ def update_under_way() -> bool:
         pid, started = int(said.get("pid") or 0), float(said.get("started") or 0)
     except (TypeError, ValueError):
         pid, started = 0, 0.0
-    if pid and 0 <= time.time() - started < UPDATE_LONGEST and _alive(pid, started):
+    # Whose update it was: this person's unless another person's mark says so (an older CloseDesk's doesn't say).
+    mine = str(said.get("user") or _me()) == _me()
+    if pid and 0 <= time.time() - started < UPDATE_LONGEST and _alive(pid, started, mine=mine):
         return True
     left = Path(str(said.get("folder") or "")).name
     if left.startswith(".update-"):

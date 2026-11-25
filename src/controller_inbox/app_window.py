@@ -681,19 +681,21 @@ def _taken(url: str) -> bool:
         return False
 
 
-def process_runs(pid: int, started: float = 0.0) -> bool:
-    """Whether the program ``pid``, which said at ``started`` that it was updating, still runs. (launch.py has a copy,
-    for before CloseDesk is installed.)"""
+def process_runs(pid: int, started: float = 0.0, *, mine: bool = False) -> bool:
+    """Whether the program ``pid``, which said at ``started`` that it was updating, still runs. ``mine``: this
+    person's update, whose program they can always ask about: one they may not is another program, given the number
+    since. (launch.py has a copy, for before CloseDesk is installed.)"""
     if pid == os.getpid():
         return True
     if os.name == "nt":
-        return _windows_process_runs(pid, started)
+        return _windows_process_runs(pid, started, mine=mine)
     try:
         os.kill(pid, 0)  # asks, sends nothing
     except ProcessLookupError:
         return False
-    except PermissionError:
-        pass  # there, another user's: when it started says whether it is the update
+    except PermissionError:  # there, another user's: when it started says whether it is the update
+        if mine:
+            return False  # this person's update is theirs to ask about: another program has its number
     except OSError:
         return False
     began = _started_at(pid) if started else None
@@ -715,9 +717,10 @@ def _started_at(pid: int) -> float | None:
         return None
 
 
-def _windows_process_runs(pid: int, started: float) -> bool:
+def _windows_process_runs(pid: int, started: float, *, mine: bool = False) -> bool:
     """Asked of Windows (os.kill would end the program). One started after the update said it was running isn't it:
-    Windows gave the number to another program since."""
+    Windows gave the number to another program since. Refused (a SYSTEM program, another person's), it isn't this
+    person's update (``mine``): only another person's may be it."""
     import ctypes
     from ctypes import wintypes
 
@@ -726,7 +729,7 @@ def _windows_process_runs(pid: int, started: float) -> bool:
     kernel32.OpenProcess.restype = wintypes.HANDLE
     handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not handle:
-        return ctypes.get_last_error() == 5  # access denied: there, another user's
+        return ctypes.get_last_error() == 5 and not mine  # access denied: there, a SYSTEM program or another user's
     try:
         code = wintypes.DWORD()
         if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value != 259:  # STILL_ACTIVE
@@ -747,9 +750,12 @@ def update_running(root: Path | None = None) -> bool:
     try:
         said = json.loads(((root or ROOT) / UPDATING_MARK).read_text(encoding="utf-8"))
         pid, started = int(said["pid"]), float(said["started"])
+        me = version.whose()["user"]
+        # Whose update it is: this person's unless another person's mark says so (an older CloseDesk's doesn't say).
+        mine = str(said.get("user") or me) == me
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return False
-    return 0 <= time.time() - started < UPDATE_LONGEST and process_runs(pid, started)
+    return 0 <= time.time() - started < UPDATE_LONGEST and process_runs(pid, started, mine=mine)
 
 
 def _said(exc: BaseException) -> str:
