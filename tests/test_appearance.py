@@ -305,7 +305,7 @@ def test_the_words_help_says_which_emails_have_a_colored_edge():
     import palette_math as pm
 
     source = (Path(web.__file__).parent / "static" / "ui" / "settings.js").read_text(encoding="utf-8")
-    text = source[source.index('b("Show Critical, High, Medium or Low on each email")') :][:400]
+    text = source[source.index('b("Show Critical, High, Medium or Low on each email")') :][:600]
     assert "as well as the colored edge" not in text
     assert "the lists and the daily digest" in text and "Held for fraud" in text, text
     assert "only Critical, High and held emails" in text and "colored edge" in text, text
@@ -314,6 +314,24 @@ def test_the_words_help_says_which_emails_have_a_colored_edge():
     assert pm.rule_value(pm.WORKSPACE_CSS, ".item.is-locked::before", "background") == "var(--danger)"
     css = pm.WORKSPACE_CSS.read_text(encoding="utf-8")
     assert ".item.imp-medium" not in css and ".item.imp-low" not in css
+
+
+def test_both_setups_say_the_words_tell_the_edges_apart_in_windows_high_contrast(client):
+    """A Windows contrast theme draws the page in the computer's own colors: Critical, High and held emails keep an
+    edge (both stylesheets have rules for it, checked in tests/test_appearance_browser.py), but the same one. Neither
+    Settings said the importance words are what tells them apart there."""
+    from pathlib import Path
+
+    import palette_math as pm
+
+    source = (Path(web.__file__).parent / "static" / "ui" / "settings.js").read_text(encoding="utf-8")
+    text = source[source.index('b("Show Critical, High, Medium or Low on each email")') :][:600]
+    assert "Windows contrast theme (high contrast)" in text, text
+    form = client.get("/settings").text
+    help_text = form[form.index("<b>Show Critical, High, Medium or Low on each email</b>") :][:700]
+    assert "Windows contrast theme (high contrast)" in help_text, help_text
+    for sheet in (pm.WORKSPACE_CSS, pm.CLASSIC_CSS):
+        assert "@media (forced-colors: active)" in sheet.read_text(encoding="utf-8"), sheet.name
 
 
 def test_the_importance_words_say_which_lists_changed(client, demo):

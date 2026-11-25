@@ -1632,3 +1632,14 @@ dialog.consent p { margin: 0 0 10px; line-height: 1.5; }
   .list-brief { display: flex; flex-direction: column; gap: 10px; padding: 12px 12px 4px; }
   .list-brief .card { margin: 0; }
 }
+/* A Windows contrast theme (high contrast) puts the computer's own colors on the page and drops fills and shadows: the
+   colored edges took the background's color, so nothing marked a Critical, High or held email, and a word lost the box
+   round it ("Held for fraud" ran into the sender). The edge is drawn in the color of the words there, the same for all
+   three (Settings → Appearance says the importance words tell them apart), each tag keeps an outline, and the row
+   picked with j and k keeps one round it. */
+@media (forced-colors: active) {
+  .item:is(.imp-critical, .imp-high, .is-locked)::before,
+  .plain-list li:is(.imp-critical, .imp-high, .is-locked)::before { background: CanvasText; }
+  .tag, .chip, .pill { outline: 1px solid CanvasText; outline-offset: -1px; }
+  .item.is-sel { outline: 2px solid Highlight; outline-offset: -2px; }
+}

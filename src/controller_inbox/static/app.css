@@ -656,3 +656,15 @@ form.step-back { border: 0; padding: 0; margin-top: 6px; }
   table.mail td.nowrap { white-space: normal; }
   table.mail td:has(> .subj) { flex-basis: 100%; }
 }
+/* A Windows contrast theme (high contrast) puts the computer's own colors on the page and drops fills and shadows: the
+   Inbox's edges went, its Importance pills and the tags lost the box round their words, and every row of Today had the
+   same thick edge in the color of the words. A Critical or High email (and on Today a held one) keeps a thick edge, the
+   same for all (Setup → Colors says the importance words tell them apart); the others the thin edge of the box, their
+   words starting where the others' do. */
+@media (forced-colors: active) {
+  table.mail tr { border-left: 3px solid Canvas; }
+  table.mail tr:is(.critical, .high) { border-left-color: CanvasText; }
+  .focus-item { border-left-width: 1px; padding-left: 17px; }
+  .focus-item:is(.imp-critical, .imp-high, .fraud, .is-held) { border-left-width: 4px; padding-left: 14px; }
+  .pill, .tag, .flag { outline: 1px solid CanvasText; outline-offset: -1px; }
+}

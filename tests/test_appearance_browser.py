@@ -1004,6 +1004,94 @@ def test_classic_setup_left_open_keeps_a_change_made_in_the_workspace(browser, s
     context.close()
 
 
+# Windows high contrast (a Windows contrast theme): the page in the computer's own colors. What its Canvas (the
+# background) and CanvasText (the words) are, and how each kind of row is drawn.
+SYSTEM = """() => { const probe = document.createElement('span'); probe.style.cssText = 'background: Canvas; color: CanvasText';
+  document.body.append(probe); const s = getComputedStyle(probe); const out = { canvas: s.backgroundColor, text: s.color };
+  probe.remove(); return out; }"""
+HC_ROWS = """() => [...document.querySelectorAll('.items .item')].map((li) => {
+  const tag = li.querySelector('.item-level'), shown = tag && getComputedStyle(tag).display !== 'none';
+  return { key: li.dataset.key, marked: ['imp-critical', 'imp-high', 'is-locked'].some((c) => li.classList.contains(c)),
+           edge: getComputedStyle(li, '::before').backgroundColor, sel: li.classList.contains('is-sel'),
+           outline: `${getComputedStyle(li).outlineStyle} ${getComputedStyle(li).outlineColor}`,
+           word: shown ? tag.textContent : null, wordOutline: shown ? `${getComputedStyle(tag).outlineStyle} ${getComputedStyle(tag).outlineColor}` : null };
+})"""
+HC_CLASSIC = """() => ({
+  rows: [...document.querySelectorAll('table.mail tbody tr[data-email]')].map((tr) => {
+    const row = getComputedStyle(tr), pill = tr.querySelector('.pill:not(.item-level)');
+    return { marked: tr.classList.contains('critical') || tr.classList.contains('high'), edge: row.borderLeftColor,
+             width: row.borderLeftWidth, pill: pill ? getComputedStyle(pill).outlineStyle : null };
+  }),
+  focus: [...document.querySelectorAll('.focus-item')].map((li) => ({
+    marked: ['imp-critical', 'imp-high', 'is-held', 'fraud'].some((c) => li.classList.contains(c)),
+    width: getComputedStyle(li).borderLeftWidth, text: li.firstElementChild.getBoundingClientRect().left - li.getBoundingClientRect().left })),
+})"""
+
+
+def test_windows_high_contrast_still_marks_critical_high_and_held(browser, settings, loaded):
+    """With a Windows contrast theme on (forced colors), the colored edges took the background's color, so nothing
+    marked a Critical, High or held email; the classic Inbox lost its edges and its Importance pills their fill, and
+    on classic Today every row had the same thick edge. With the importance words on, the words lost their outline:
+    "Held for fraud" ran into the sender. They are drawn in the computer's own colors now, and Settings says the
+    words tell the three apart there."""
+    from controller_inbox import appearance
+
+    context = browser.new_context(viewport={"width": 1280, "height": 900}, color_scheme="dark", forced_colors="active")
+    context.set_default_timeout(15000)
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.request.post(f"{base}/digest/rebuild", headers={"origin": base})
+        page.goto(f"{base}/app/all")
+        page.wait_for_selector(".items .item")
+        system = page.evaluate(SYSTEM)
+        assert system["canvas"] != system["text"], system
+        page.focus(".items")
+        page.keyboard.press("j")
+        page.wait_for_selector(".items .item.is-sel")
+        rows = page.evaluate(HC_ROWS)
+        assert {row["marked"] for row in rows} == {True, False}, rows
+        for row in rows:
+            assert (row["edge"] == system["text"]) is row["marked"], ("only Critical, High and held have the edge", row)
+            if row["sel"]:
+                assert not row["outline"].startswith("none"), ("the row picked with j and k is outlined", row)
+        page.goto(f"{base}/app/digest")
+        page.wait_for_selector(".page .plain-list li.is-locked")
+        edges = page.evaluate(PLAIN_EDGES, DIGEST_EMAILS["workspace"])
+        assert [row for row in edges if row["edge"]] and all(row["edge"] in (None, system["text"]) for row in edges), edges
+
+        appearance.save(loaded, importance_words=True)
+        page.goto(f"{base}/app/all")
+        page.wait_for_selector(".items .item .item-level")
+        rows = page.evaluate(HC_ROWS)
+        assert "Held for fraud" in {row["word"] for row in rows}, rows
+        for row in rows:
+            assert row["wordOutline"] == f"solid {system['text']}", ("each word keeps its outline", row)
+        appearance.save(loaded, importance_words=False)
+
+        page.goto(f"{base}/")
+        page.wait_for_selector(".focus-item")
+        today = page.evaluate(HC_CLASSIC)["focus"]
+        page.goto(f"{base}/inbox")
+        page.wait_for_selector("table.mail tbody tr[data-email]")
+        inbox = page.evaluate(HC_CLASSIC)["rows"]
+        assert {row["marked"] for row in inbox} == {True, False}, inbox
+        for row in inbox:
+            assert (row["edge"] == system["text"] and row["width"] == "3px") is row["marked"], ("the Inbox's edges", row)
+            assert row["pill"] == "solid", ("the Importance pill keeps a box round its word", row)
+        assert {row["marked"] for row in today} == {True, False}, today
+        for row in today:
+            assert row["width"] == ("4px" if row["marked"] else "1px"), ("classic Today: a thick edge for those only", row)
+        assert len({row["text"] for row in today}) == 1, ("the words start in line", today)
+
+        # Settings points to the words there, in both.
+        page.goto(f"{base}/settings")
+        assert "contrast theme" in page.inner_text("#colors")
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector("#set-importance-words")
+        assert "contrast theme" in page.inner_text("#set-appearance")
+    context.close()
+
+
 SETUP_BOXES = """() => [...document.querySelectorAll('#colors input[name="colors"], #colors input[name="importance_words"]')]
   .map((box) => [box.name, box.checked])"""
 
