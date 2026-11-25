@@ -119,6 +119,8 @@ function show(view, updating) {
       // The keyboard's place stays in the question: Update now, just pressed, can't keep it while it waits.
       later.focus();
       if (error.status === 409 && view.meanwhile_message && error.message === view.meanwhile_message) return updatedMeanwhile(error.message);
+      // Nothing answered (no status): CloseDesk has stopped for an update another tab or window asked for.
+      if (typeof error.status !== "number" && view.elsewhere_message) return updatingElsewhere();
       const busy = error.status === 409 && error.message === view.busy_message;
       say(error.message, busy ? "wait" : "error");
       if (busy) waitForTheMail();
@@ -130,6 +132,7 @@ function show(view, updating) {
   // only be refused again, so the page is offered to be loaded again instead.
   function updatedMeanwhile(message) {
     state = "stale";
+    dialog.querySelector("#update-ask-title").textContent = view.meanwhile_title || "";
     replace(dialog.querySelector("#update-ask-body"), h("p", null, message));
     say("");
     const reload = h("button", { type: "button", class: "btn btn-sm btn-primary", onclick: () => location.reload() }, "Reload the page");
@@ -137,6 +140,19 @@ function show(view, updating) {
     later.textContent = "Close";
     later.className = "btn btn-sm ghost";
     reload.focus();
+  }
+
+  // Update now in this page found CloseDesk stopped, for the update asked for in another: said, and this page waits for
+  // CloseDesk to be back (as the new version), then loads again, as the page that asked does.
+  function updatingElsewhere() {
+    const reply = { message: view.elsewhere_message, commit: view.commit, run: "" };
+    if (updating) {
+      state = "handed";
+      dialog.close();
+      updating(reply);
+    } else {
+      updatingHere(reply);
+    }
   }
 
   // Refused while mail is being processed: offered again once that is done.

@@ -86,6 +86,12 @@ UPDATED_MEANWHILE = (
     "CloseDesk was updated meanwhile (in another tab or window), so there is nothing to update now. Reload the page to "
     "see the new version."
 )
+MEANWHILE_TITLE = "CloseDesk is already updated"
+# Update now from a second page while CloseDesk is stopped for an update asked for in another: nothing answers it.
+UPDATING_ELSEWHERE = (
+    "CloseDesk is being updated already (Update now was pressed in another tab or window). This page loads again by "
+    "itself once CloseDesk is back."
+)
 NO_LAUNCHER = (
     "CloseDesk wasn't started by double-clicking it, so it can't start itself again after an update. "
     "Close CloseDesk, then double-click CloseDesk-Update in its folder: your mail and settings are kept."
@@ -266,7 +272,8 @@ def whats_new(message: str) -> str:
     first = re.sub(r"\s*\(#\d+\)$", "", first)
     first = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", first)  # a terminal's colour codes
     first = " ".join("".join(ch for ch in first if ch.isprintable()).split())
-    return textwrap.shorten(first, WHATS_NEW_CHARS, placeholder=" …") if len(first) > WHATS_NEW_CHARS else first
+    # The "…" kept with the last word (a space that doesn't break): never left on a line of its own.
+    return textwrap.shorten(first, WHATS_NEW_CHARS, placeholder="\u00a0…") if len(first) > WHATS_NEW_CHARS else first
 
 
 def launcher_here() -> bool:
@@ -316,6 +323,8 @@ def status(store, settings) -> dict[str, Any]:
         "whats_new": latest.get("title", "") if newer else "",
         "launcher": launcher_here(),
         "by_hand": BY_HAND,
+        # Update that nothing answers: CloseDesk has stopped for an update another page asked for.
+        "elsewhere": UPDATING_ELSEWHERE,
     }
 
 
@@ -549,6 +558,9 @@ class Question:
             "done_message": DONE,
             # Update now from a page shown before CloseDesk was updated (another tab): refused so, and not offered again.
             "meanwhile_message": UPDATED_MEANWHILE,
+            "meanwhile_title": MEANWHILE_TITLE,
+            # Update now that nothing answers: CloseDesk has stopped for an update another page asked for.
+            "elsewhere_message": UPDATING_ELSEWHERE,
             "updating": UPDATING,
             # The version the page shows: Update now says it, and is refused once CloseDesk was updated since.
             "commit": version.installed()[0],

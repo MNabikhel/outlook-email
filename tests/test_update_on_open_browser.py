@@ -286,6 +286,12 @@ def test_setups_update_page_goes_back_to_setup_once_closedesk_started_again_as_i
         assert page.inner_text("#update").count("Updating CloseDesk") == 1
         app.state.run = "started-again"
         page.wait_for_url(base + "/settings#update", timeout=20000)
+        page.wait_for_selector("#update form[action='/settings/update']")
+        # The page that said "Updating CloseDesk" isn't left in the tab's history: Back doesn't say it again, with
+        # nothing updating.
+        page.go_back()
+        page.wait_for_load_state()
+        assert "Updating CloseDesk" not in page.inner_text("body")
 
 
 def test_updating_closedesk_is_said_once(download, settings, loaded, page, monkeypatch):
@@ -321,10 +327,100 @@ def test_update_now_in_a_tab_shown_before_closedesk_was_updated_says_so_and_stop
         # Update now isn't offered again (each press only repeated the refusal): the page is reloaded instead.
         assert page.query_selector("#update-ask button:has-text('Update now')") is None
         assert "is out; you have" not in page.inner_text("#update-ask")
+        # Nor does its heading still say a new version is ready, above "nothing to update now".
+        assert page.inner_text("#update-ask-title") == updates.MEANWHILE_TITLE
         assert page.evaluate("document.activeElement.textContent") == "Reload the page"
         with page.expect_navigation():
             page.click("#update-ask button:has-text('Reload the page')")
         assert page.url == base + "/inbox"
+
+
+# A second tab -----------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("first", ["/inbox", "/app"])
+def test_update_now_in_a_second_tab_while_closedesk_updates_says_so_and_comes_back(download, settings, loaded, page, monkeypatch, first):
+    # Two tabs show the question; Update now in one, and CloseDesk stops to download the update. Update now in the
+    # other found nothing answering: it said "Failed to fetch", offered both buttons again, and never loaded again.
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + first)
+        page.wait_for_selector(DIALOG)
+        # CloseDesk has stopped to update (from the first tab): nothing answers.
+        page.route("**/api/update", lambda route: route.abort("connectionrefused"))
+        page.route("**/health", lambda route: route.abort("connectionrefused"))
+        page.click("#update-ask button:has-text('Update now')")
+        shown = "#updating" if first == "/app" else "#update-ask.updating"
+        page.wait_for_selector(shown)
+        said = page.inner_text(shown)
+        assert updates.UPDATING_ELSEWHERE in said and "Failed to fetch" not in said
+        assert page.query_selector("#update-ask button:has-text('Update now')") is None
+        # Back, as the new version: the tab loads again by itself.
+        page.unroute("**/health")
+        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        page.wait_for_function("() => !document.querySelector('#updating, #update-ask.updating')", timeout=20000)
+        assert app.state.stop_server.calls == 0
+
+
+def test_settings_update_while_closedesk_updates_from_another_tab_says_so(download, settings, loaded, page, monkeypatch):
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/app/settings")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Not now')")
+        page.wait_for_selector("#set-update button:has-text('Update')")
+        page.route("**/api/update", lambda route: route.abort("connectionrefused"))
+        page.route("**/health", lambda route: route.abort("connectionrefused"))
+        page.click("#set-update button:has-text('Update')")
+        page.wait_for_selector("#updating")
+        assert updates.UPDATING_ELSEWHERE in page.inner_text("#updating")
+        assert "Failed to fetch" not in page.inner_text("body")
+
+
+# The classic rail -------------------------------------------------------------------------------------------------------
+
+
+def test_the_classic_rails_update_ready_can_be_read(download, settings, loaded, page, monkeypatch):
+    # It took the pages' navy link colour on the rail's navy: 1.28:1, an empty gap before "· CloseDesk ...".
+    from test_workspace import CONTRAST
+
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/inbox")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Not now')")
+        link = ".rail-foot a[href='/settings#update']"
+        assert page.inner_text(link) == "Update ready"
+        assert page.evaluate(CONTRAST, link) >= 4.5
+
+
+# A long what's new ------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("first", ["/inbox", "/app"])
+def test_a_long_whats_new_keeps_its_ellipsis_with_its_last_word(download, settings, loaded, page, monkeypatch, first):
+    # Shortened with "…": at the window's smallest size (720x520) the line broke just before it, leaving "…" on a line
+    # of its own. Tried at every width the line can have, from a phone's to the dialog's widest.
+    title = "Read the totals on scanned invoices from every vendor faster and say which page each figure came from " * 3
+    app = opened(settings, loaded, monkeypatch, github(message=title))
+    with serving(app) as base:
+        page.set_viewport_size({"width": 720, "height": 520})
+        page.goto(base + first)
+        page.wait_for_selector(DIALOG)
+        alone = page.evaluate("""() => {
+          const line = document.querySelector('.update-ask-new');
+          const text = line.lastChild;
+          const top = (i) => { const r = document.createRange(); r.setStart(text, i); r.setEnd(text, i + 1); return r.getBoundingClientRect().top; };
+          const end = text.length - 1;
+          const widths = [];
+          for (let width = 120; width <= 640; width += 1) {
+            line.style.width = `${width}px`;
+            if (Math.abs(top(end) - top(end - 2)) > 2) widths.push(width);
+          }
+          return widths;
+        }""")
+        assert page.evaluate("document.querySelector('.update-ask-new').lastChild.textContent.endsWith('…')")
+        assert alone == []
 
 
 # The classic Today page, while mail is processed ----------------------------------------------------------------------

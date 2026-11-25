@@ -310,7 +310,7 @@ def test_curl_is_given_the_same_short_wait_and_no_window(monkeypatch):
 def test_whats_new_is_the_latest_changes_title(message, said):
     found = updates.whats_new(message)
     if said is None:
-        assert len(found) <= 160 and found.endswith("…") and found.startswith("A very long title")
+        assert len(found) <= 160 and found.endswith("long\u00a0…") and found.startswith("A very long title")
     else:
         assert found == said
 

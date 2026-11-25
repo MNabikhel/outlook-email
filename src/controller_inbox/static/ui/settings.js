@@ -1066,6 +1066,9 @@ export function createSettings(ctx) {
         const reply = await postJSON("/api/update", { commit: u.commit });
         ctx.updating(reply);
       } catch (error) {
+        // Nothing answered: CloseDesk has stopped for an update another tab or window asked for. Said, and this page
+        // loads again once CloseDesk is back.
+        if (typeof error.status !== "number") return ctx.updating({ message: u.elsewhere, commit: u.commit, run: "" });
         button.disabled = false;
         if (line) replace(line, icon("alert", 14), h("span", null, error.message));
         if (line) line.className = "set-status error";

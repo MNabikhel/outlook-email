@@ -26,7 +26,8 @@
       }
       function again() {
         fetch('/health', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (h) {
-          if (h.app === 'closedesk' && (gone || h.commit !== before || (run && h.run && h.run !== run))) { window.location.href = '/settings#update'; return; }
+          // In this page's place: Back doesn't show "Updating CloseDesk" again, with nothing updating.
+          if (h.app === 'closedesk' && (gone || h.commit !== before || (run && h.run && h.run !== run))) { window.location.replace('/settings#update'); return; }
           slow();
           setTimeout(again, 2000);
         }).catch(function () {
