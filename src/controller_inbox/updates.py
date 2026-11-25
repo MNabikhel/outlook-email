@@ -116,7 +116,7 @@ UPDATE_DEVELOPER = "This is a developer's copy (not a download): update it with 
 
 def asks(settings) -> bool:
     """Whether this copy looks for newer versions: a download, with the check left on."""
-    return bool(getattr(settings, "update_check", True)) and bool(version.installed()[0])
+    return bool(getattr(settings, "update_check", True)) and bool(version.running()[0])
 
 
 KEPT = {"sha", "date", "at", "title", "checked_at", "from", "failed", "retry"}
@@ -230,7 +230,7 @@ def check(
     if not asks(settings):
         return {}
     now = now or datetime.now(timezone.utc)
-    mine = version.installed()[0].lower()
+    mine = version.running()[0].lower()
     saved = known(store)
     try:
         last = datetime.fromisoformat(saved.get("checked_at", ""))
@@ -309,8 +309,9 @@ def launcher_here() -> bool:
 
 
 def status(store, settings) -> dict[str, Any]:
-    """This copy, and whether a newer one is ready, as Settings and the top bar show it."""
-    commit, date = version.installed()
+    """This copy, and whether a newer one is ready, as Settings and the top bar show it: the version running, which
+    CloseDesk-Update can have replaced in the folder meanwhile (Update now then opens what it put there)."""
+    commit, date = version.running()
     on = bool(getattr(settings, "update_check", True))
     latest = known(store) if commit and on else {}
     if latest.get("from") != commit.lower():  # asked by the copy before an update: asked again soon
@@ -320,7 +321,7 @@ def status(store, settings) -> dict[str, Any]:
     # A copy newer than main (downloaded from another branch) is not offered an older one: by when each commit was made
     # (two of one day: the branch's tip in the afternoon, main's last merge that morning), else by the day.
     if newer and date and latest.get("date"):
-        if version.later(latest.get("at") or latest["date"], version.installed_at() or date) is False:
+        if version.later(latest.get("at") or latest["date"], version.running_at() or date) is False:
             newer = False
     mine, theirs = version.number(date) or commit[:7], version.number(latest.get("date", "")) or newest[:7]
     # A version number is the day: two from one day are told apart by their commits.
@@ -386,7 +387,7 @@ def _updated_to(store) -> dict[str, str]:
 def note_version(store) -> None:
     """As CloseDesk opens: when it opens as another version than the last time (updated, by Update or CloseDesk-Update),
     when, for Setup to say under it. The first opening of a copy isn't an update."""
-    mine = version.installed()[0].lower()
+    mine = version.running()[0].lower()
     if not mine:
         return
     seen = store.get_state(SEEN_KEY) or ""
@@ -426,7 +427,7 @@ def updating_message(app_state) -> str:
 
 def refusal(job_state: str) -> str:
     """Why CloseDesk can't stop to update now ("" when it can)."""
-    if not version.installed()[0]:
+    if not version.running()[0]:
         return UPDATE_DEVELOPER
     if not launcher_here():
         return NO_LAUNCHER
@@ -438,8 +439,10 @@ def refusal(job_state: str) -> str:
 def stop_to_update(app_state, job_state: str, *, shown: str = "") -> str:
     """Settings' Update button: ask the server to stop once this request is answered, so that the launcher updates
     CloseDesk and starts it again (``cli._serve`` then returns UPDATE_AND_RESTART). Why it can't ("" when asked).
-    ``shown``: the commit the page that asked showed; another one means CloseDesk was updated since that page loaded."""
-    mine = version.installed()[0]
+    ``shown``: the commit the page that asked showed; another one means CloseDesk was updated since that page loaded
+    (and opened again since: the version running, not the one in the folder, which CloseDesk-Update can have replaced
+    under this CloseDesk; then Update now opens what it put there, ``STOPPED_NOTE``)."""
+    mine = version.running()[0]
     if shown and mine and shown.strip().lower() != mine.lower():
         return UPDATED_MEANWHILE
     question = getattr(app_state, "update_question", None)
@@ -529,6 +532,12 @@ ASKED_FROM_KEY = "update_asked_from"
 ASKED_LOG_KEY = "update_asked_log"
 # Unless the update found this copy the newest already, and said so in this file in .venv (launch.py's NEWEST_NOTE).
 NEWEST_NOTE = "closedesk-newest.txt"
+# The version CloseDesk was when it stopped to update, said in this file in .venv for the update that follows
+# (launch.py's STOPPED_NOTE): CloseDesk-Update can have replaced the folder's files under the CloseDesk that stopped,
+# and then those are opened, not downloaded again. Heeded for this long after CloseDesk stopped (the update follows
+# at once), and gone when CloseDesk opens again.
+STOPPED_NOTE = "closedesk-stopped-as.txt"
+STOPPED_FRESH = 10 * 60
 # How long after CloseDesk opens an answer to the asking may come and still be put to the person: the asking's few
 # seconds, and curl's second after them. One that comes later (a computer too busy to ask in time) would pop up over
 # what the person started meanwhile: it is for Settings and the top bar. (The first page asks for the answer for half
@@ -640,8 +649,9 @@ class Question:
             "elsewhere_message": UPDATING_ELSEWHERE,
             "other_message": OTHER_HERE,
             "updating": UPDATING,
-            # The version the page shows: Update now says it, and is refused once CloseDesk was updated since.
-            "commit": version.installed()[0],
+            # The version the page shows (the one running): Update now says it, and is refused once CloseDesk was
+            # updated and opened again since.
+            "commit": version.running()[0],
             # Whose CloseDesk this is (/health's fingerprints): the page waiting for it loads only this one again,
             # never another person's that opened on the port meanwhile (a shared computer).
             "whose": version.whose(),
@@ -657,10 +667,29 @@ def unfinished_message(store) -> str:
 
 
 def remember_update_asked(store) -> None:
-    """CloseDesk stops to update (Settings' or the question's Update button): which version it was, and where the
-    update runs: the CloseDesk window runs it with what it says in the app's log; a launcher, in its own window."""
-    store.set_state(ASKED_FROM_KEY, version.installed()[0])
+    """CloseDesk stops to update (Settings' or the question's Update button): which version it was (the one running,
+    whatever is in its folder now), and where the update runs: the CloseDesk window runs it with what it says in the
+    app's log; a launcher, in its own window. The version is said in ``STOPPED_NOTE`` too, for launch.py --update."""
+    mine = version.running()[0]
+    store.set_state(ASKED_FROM_KEY, mine)
     store.set_state(ASKED_LOG_KEY, os.environ.get(APP_LOG_ENV, "") if os.environ.get(APP_ENV) == "1" else "")
+    try:
+        (version.ROOT / ".venv" / STOPPED_NOTE).write_text(json.dumps({"commit": mine, "at": time.time()}), encoding="utf-8")
+    except OSError:  # launch.py then compares with the folder's version, as before
+        pass
+
+
+def stopped_as(*, fresh: float = 0.0) -> str:
+    """The version CloseDesk was when it last stopped to update (``STOPPED_NOTE``), when it stopped within
+    ``STOPPED_FRESH`` seconds (``fresh``: or so many); "" when it didn't say. An update that ends with the folder
+    still that version didn't update it; another one in the folder, even one CloseDesk-Update put there while
+    CloseDesk was open, did."""
+    try:
+        said = json.loads((version.ROOT / ".venv" / STOPPED_NOTE).read_text(encoding="utf-8"))
+        commit, at = str(said.get("commit") or ""), float(said.get("at") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return ""
+    return commit if commit and 0 <= time.time() - at < (fresh or STOPPED_FRESH) else ""
 
 
 def update_unfinished(store) -> bool:
@@ -682,6 +711,10 @@ def after_update(store) -> str:
         return ""
     if before:
         store.set_state(ASKED_FROM_KEY, "")
+    try:
+        (version.ROOT / ".venv" / STOPPED_NOTE).unlink()
+    except OSError:
+        pass
     note = version.ROOT / ".venv" / NEWEST_NOTE
     try:
         newest = note.read_text(encoding="utf-8").strip().lower()

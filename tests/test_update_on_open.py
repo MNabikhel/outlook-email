@@ -5,6 +5,7 @@ test_update_on_open_browser.py."""
 
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
 import threading
@@ -43,6 +44,13 @@ def github(sha: str = NEWER, date: str = "2026-11-16T09:12:00Z", message: str = 
 
     ask.asked, ask.waits = asked, waits
     return ask
+
+
+def opened_again_as_newer(folder) -> None:
+    """The launcher has put the new version in CloseDesk's folder and started it: the CloseDesk answering is that one
+    (each CloseDesk says the version it started as, whatever is put in its folder later)."""
+    (folder / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+    version.remember_running()
 
 
 def offline(url: str, timeout: float = updates.TIMEOUT_SECONDS) -> dict:
@@ -807,6 +815,51 @@ def test_update_now_from_a_page_shown_before_closedesk_was_updated_is_refused(do
     assert classic.status_code == 409 and updates.UPDATED_MEANWHILE in classic.text and stopped == []
     # The page that shows this version: as before.
     assert client.post("/api/update", headers=PAGE, json={"commit": MINE}).status_code == 200 and stopped == [1]
+
+
+def test_update_now_after_closedesk_update_replaced_the_files_under_closedesk_opens_them(download, settings, store, monkeypatch):
+    # CloseDesk open as 2026.11.13, asking about 2026.11.16; the person double-clicks CloseDesk-Update, which puts the
+    # new files in the folder under the CloseDesk that is open (still the old code), then presses Update now. It was
+    # refused with "updated meanwhile ... Reload the page" (the folder's version was compared, not the one running);
+    # reloaded, the same question again; then an update that downloaded what was there already, and a first page
+    # saying "No newer version to download yet".
+    monkeypatch.setattr(updates, "_ask_github", github())
+    (download / ".venv").mkdir()
+    app = web.create_app(settings, store)
+    assert updates.after_update(store) == ""  # as cli._serve does as CloseDesk opens
+    app.state.update_question = asked_at_start(store, settings)
+    stopped: list = []
+    app.state.stop_server = lambda: stopped.append(1)
+    client = TestClient(app)
+    view = client.get("/api/update/question", headers=PAGE).json()
+    assert view["ask"] is True and view["commit"] == MINE
+    (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16T09:12:00Z\n", encoding="utf-8")
+    # What this CloseDesk says of itself is the version it runs.
+    health = client.get("/health").json()
+    assert health["commit"] == MINE and health["version"] == "CloseDesk 2026.11.13 (aaaaaaa)"
+    again = client.get("/api/update/question", headers=PAGE).json()
+    assert again["commit"] == MINE and again["message"] == "CloseDesk 2026.11.16 is out; you have 2026.11.13."
+    assert updates.status(store, settings)["label"] == "CloseDesk 2026.11.13 (aaaaaaa)"
+    # Update now stops CloseDesk, so that its launcher opens the files there.
+    reply = client.post("/api/update", headers=PAGE, json={"commit": view["commit"]})
+    assert reply.status_code == 200 and stopped == [1] and reply.json()["commit"] == MINE
+    updates.remember_update_asked(store)  # as cli._serve does once CloseDesk has stopped
+    assert store.get_state(updates.ASKED_FROM_KEY) == MINE, "the version that stopped, not the folder's"
+    assert updates.stopped_as() == MINE, "said to launch.py --update, which then downloads nothing"
+    # The launcher opens CloseDesk again, now the new files: updated, nothing said to have gone wrong.
+    version.remember_running()
+    assert updates.after_update(store) == ""
+    assert updates.stopped_as() == "", "gone once CloseDesk opens again"
+    assert updates.status(store, settings)["current"].startswith("CloseDesk was updated to this version on ")
+
+
+def test_the_version_stopped_as_is_heeded_only_just_after_it_stopped(download, monkeypatch):
+    (download / ".venv").mkdir()
+    note = download / ".venv" / updates.STOPPED_NOTE
+    note.write_text(json.dumps({"commit": MINE, "at": time.time() - updates.STOPPED_FRESH - 5}), encoding="utf-8")
+    assert updates.stopped_as() == "", "left by a CloseDesk that stopped long ago (its launcher's window closed, say)"
+    note.write_text("not what CloseDesk writes", encoding="utf-8")
+    assert updates.stopped_as() == ""
 
 
 def test_an_update_that_found_this_the_newest_isnt_said_to_have_failed(download, settings, store):

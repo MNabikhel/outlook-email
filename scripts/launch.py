@@ -151,6 +151,15 @@ NEW_ENVIRONMENT_ENV = "CLOSEDESK_NEW_ENVIRONMENT"
 # An update that found this copy the newest already says so here (in .venv), for the next start: nothing went wrong.
 # (controller_inbox.updates.NEWEST_NOTE)
 NEWEST_NOTE = "closedesk-newest.txt"
+# The version CloseDesk was when it stopped to update, said in this file in .venv (controller_inbox.updates.STOPPED_NOTE),
+# heeded for this long after: CloseDesk-Update can have replaced the folder's files under the CloseDesk that stopped,
+# which is then opened as the version there, with nothing downloaded again.
+STOPPED_NOTE = "closedesk-stopped-as.txt"
+STOPPED_FRESH = 10 * 60
+UPDATED_UNDER = (
+    "CloseDesk-Update had already updated CloseDesk's folder while CloseDesk was open, so nothing is downloaded again: "
+    "CloseDesk opens as the new version now."
+)
 # The longest a download of the update may take, and how slow it may be for how long: a connection that stays open
 # and sends nothing (a proxy holding it) ends instead of keeping the update, and the window, waiting.
 DOWNLOAD_LONGEST = 15 * 60
@@ -750,12 +759,28 @@ def installed_commit() -> str:
     return ""
 
 
-def update() -> int:
+def stopped_as() -> str:
+    """The version CloseDesk was when it stopped to update just now (``STOPPED_NOTE``), "" when it didn't say."""
+    try:
+        said = json.loads((VENV / STOPPED_NOTE).read_text(encoding="utf-8"))
+        commit, at = str(said.get("commit") or ""), float(said.get("at") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return ""
+    return commit if commit and 0 <= time.time() - at < STOPPED_FRESH else ""
+
+
+def update(stopped: str = "") -> int:
     """Replace CloseDesk's own files with the newest ones, keeping the mail, the settings and the environment.
-    The files replaced are kept in ``.previous`` until the next update."""
+    The files replaced are kept in ``.previous`` until the next update. ``stopped``: the version CloseDesk was when
+    it stopped for this update; the folder already another one (CloseDesk-Update put it there meanwhile) is opened
+    as it is."""
     if (ROOT / ".git").exists() and not os.environ.get("CLOSEDESK_UPDATE_URL"):
         say("This folder is a git checkout: update it with git (git pull), not with this.")
         return 1
+    there = installed_commit()
+    if stopped and there and there.lower() != stopped.lower():
+        say(UPDATED_UNDER)
+        return 0
     url = os.environ.get("CLOSEDESK_UPDATE_URL") or f"https://github.com/{REPO}/archive/refs/heads/{BRANCH}.zip"
     say("Looking for the newest CloseDesk...")
     try:
@@ -957,13 +982,15 @@ def update_under_way() -> bool:
     return False
 
 
-def wait_for_other_update() -> bool:
+def wait_for_other_update(stopped: str = "") -> bool:
     """Update now, from CloseDesk a launcher started, while another update runs in the folder (CloseDesk-Update,
     double-clicked meanwhile): that one is waited for, not given up on. True when it did what Update now asked (this
     copy was updated, or it found this copy the newest already): the launcher opens CloseDesk again, as the page that
     asked says it will. False when it left CloseDesk as it was (its download failed, say): the update asked for runs
-    then. ``update_under_way`` stops counting one older than ``UPDATE_LONGEST``, so this never waits for good."""
-    before = installed_commit()
+    then. ``update_under_way`` stops counting one older than ``UPDATE_LONGEST``, so this never waits for good.
+    ``stopped``: the version CloseDesk was when it stopped (the folder's may be newer already: that update was
+    nearly done), compared with the folder's once that update is done."""
+    before = stopped or installed_commit()
     say(OTHER_UPDATE)
     while update_under_way():
         time.sleep(OTHER_UPDATE_EVERY)
@@ -972,7 +999,7 @@ def wait_for_other_update() -> bool:
         newest = (VENV / NEWEST_NOTE).read_text(encoding="utf-8").strip().lower()
     except OSError:
         newest = ""
-    if not after or after != before or newest == after.lower():
+    if not after or after.lower() != before.lower() or newest == after.lower():
         say(OTHER_DONE)
         return True
     say(OTHER_FAILED)
@@ -1069,15 +1096,16 @@ def main(argv: list[str]) -> int:
         use_app_log(rotate=False)
     if "--update" in args:
         args.remove("--update")
+        stopped = stopped_as()  # the version CloseDesk was when it stopped for this update
         while update_under_way():  # another update (the window's, carrying on after it closed): not two at once
             if os.environ.get(REOPEN_ENV) != "1":
                 say(UPDATING_NOW)
                 return UPDATE_UNDER_WAY
-            if wait_for_other_update():
+            if wait_for_other_update(stopped):
                 return 0
         _mark_update()
         try:
-            code = update()
+            code = update(stopped)
             if code:
                 return code
             # The newest launch.py checks the newest set-up (this one is the old file, already in memory). (Outside

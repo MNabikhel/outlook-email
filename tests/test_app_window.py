@@ -9,6 +9,7 @@ pywebview, the processes and the Windows registry are fakes here: the real windo
 from __future__ import annotations
 
 import inspect
+import json
 import os
 import subprocess
 import sys
@@ -555,10 +556,12 @@ def test_update_now_while_another_update_runs_waits_for_that_one_before_closedes
     thread.join(10)
 
 
-@pytest.mark.parametrize("did", ["nothing", "updated", "newest"])
+@pytest.mark.parametrize("did", ["nothing", "updated", "newest", "nearly"])
 def test_after_another_update_that_didnt_finish_the_window_runs_its_own(computer, tmp_path, monkeypatch, capsys, did):
     # CloseDesk-Update's download failed while the window waited for it: CloseDesk opened as it was, and the update the
     # person asked for wasn't tried. Once that one has updated CloseDesk, or found it the newest, there is nothing to do.
+    # "nearly": it had put the new files in place under the open CloseDesk already (it was in its check after the
+    # update): compared with the folder as the waiting began, it "didn't finish", and a second update ran for nothing.
     folder = tmp_path / "CloseDesk folder"
     (folder / ".venv").mkdir(parents=True)
     (folder / ".git_archival.txt").write_text(f"commit: {'a' * 40}\ndate: 2026-11-13\n", encoding="utf-8")
@@ -570,6 +573,10 @@ def test_after_another_update_that_didnt_finish_the_window_runs_its_own(computer
     thread, _ = running(app)
     window = window_of(webview)
     until(lambda: URL in window.urls())
+    # CloseDesk, stopping to update, says which version it was (cli._serve: updates.remember_update_asked).
+    (folder / ".venv" / updates.STOPPED_NOTE).write_text(json.dumps({"commit": "a" * 40, "at": time.time()}), encoding="utf-8")
+    if did == "nearly":
+        (folder / ".git_archival.txt").write_text(f"commit: {'b' * 40}\ndate: 2026-11-16\n", encoding="utf-8")
     computer.servers()[0].end(updates.UPDATE_AND_RESTART)
     until(lambda: computer.updates(), what="the update")
     computer.update_code = 0  # the window's own, if it runs, goes through

@@ -1380,8 +1380,9 @@ class App:
             code = self._wait_for_update(self.update)
             if code == UPDATE_UNDER_WAY:
                 # Another update runs in the folder (CloseDesk-Update, double-clicked meanwhile): CloseDesk opened now
-                # would run from a folder that update is about to replace.
-                before = version.installed()[0]
+                # would run from a folder that update is about to replace. Whether it did what Update now asked is
+                # told from the version CloseDesk was when it stopped: the folder's may be the new one already.
+                before = updates.stopped_as() or version.installed()[0]
                 if self._wait_for_other_update() and not _update_did_it(before):
                     # It left CloseDesk as it was (its download failed, say): the update asked for runs now, once.
                     print("That update didn't finish, so the window's own update runs now.", flush=True)

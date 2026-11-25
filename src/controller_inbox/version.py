@@ -3,7 +3,10 @@
 
 A download's version number is its date, year first: the copy of November 16, 2026 is "2026.11.16", and is
 shown with the first seven characters of its commit, "CloseDesk 2026.11.16 (e8926db)". The date is the UTC one, as
-GitHub gives it for the newest version: a commit made at 22:12 at -06:00 on November 12 is "2026.11.13" on both sides."""
+GitHub gives it for the newest version: a commit made at 22:12 at -06:00 on November 12 is "2026.11.13" on both sides.
+
+``installed`` is the version of the files in the folder; ``running`` the one an open CloseDesk started as, which it
+still is after CloseDesk-Update replaced those files under it (``remember_running``, as CloseDesk opens)."""
 
 from __future__ import annotations
 
@@ -32,7 +35,7 @@ def _archival() -> dict[str, str]:
 
 
 def installed() -> tuple[str, str]:
-    """(commit, date) this copy was downloaded at, or ("", "") when it isn't a download."""
+    """(commit, date) the files in this copy's folder were downloaded at, or ("", "") when it isn't a download."""
     found = _archival()
     return found.get("commit", ""), utc_day(found.get("date", ""))
 
@@ -41,6 +44,42 @@ def installed_at() -> str:
     """When this copy's commit was made, whole ("2026-11-25T14:50:00+00:00", its time and offset as GitHub wrote
     them), or "" when that isn't known: two versions of one day are told apart by it (``later``)."""
     return _archival().get("date", "") if installed()[0] else ""
+
+
+# What this CloseDesk started as, for its folder (``remember_running``).
+_running: dict[str, object] = {}
+
+
+def remember_running() -> None:
+    """As CloseDesk opens: the version it starts as, which it stays while it is open, whatever is put in its folder."""
+    _running.clear()
+    _running.update(root=str(ROOT), found=_archival())
+
+
+def _started_as() -> dict[str, str]:
+    if _running.get("root") == str(ROOT):
+        return dict(_running["found"])  # type: ignore[arg-type]
+    return _archival()  # not opened here (a program of its own: the self-check, say): the folder's
+
+
+def running() -> tuple[str, str]:
+    """(commit, date) of the CloseDesk running here: the version it started as (``installed`` where it didn't
+    remember one)."""
+    found = _started_as()
+    return found.get("commit", ""), utc_day(found.get("date", ""))
+
+
+def running_at() -> str:
+    """``installed_at`` for the CloseDesk running here."""
+    found = _started_as()
+    return found.get("date", "") if found.get("commit") else ""
+
+
+def updated_under() -> str:
+    """The commit CloseDesk-Update put in this copy's folder while this CloseDesk was open, "" when the files are the
+    version running (or either isn't a download): this CloseDesk is to be closed and opened again to run it."""
+    mine, there = running()[0], installed()[0]
+    return there if mine and there and there.lower() != mine.lower() else ""
 
 
 def moment(date: str) -> datetime | None:
@@ -98,13 +137,13 @@ def short(commit: str, date: str) -> str:
 
 
 def describe() -> str:
-    """This copy's version, as "2026.11.16 (e8926db)", or that it is a developer's copy."""
-    return short(*installed())
+    """The version running, as "2026.11.16 (e8926db)", or that it is a developer's copy."""
+    return short(*running())
 
 
 def label() -> str:
-    """"CloseDesk 2026.11.16 (e8926db)", or "CloseDesk, a developer's copy (not a download)"."""
-    commit, date = installed()
+    """"CloseDesk 2026.11.16 (e8926db)" (the version running), or "CloseDesk, a developer's copy (not a download)"."""
+    commit, date = running()
     return f"CloseDesk {short(commit, date)}" if commit else f"CloseDesk, {DEVELOPER}"
 
 

@@ -387,6 +387,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     # This start of CloseDesk (/health says it): a page waiting for CloseDesk to start again after Update now knows a
     # start that came back as the same version (the update didn't finish) from this one, however quick it was.
     app.state.run = secrets.token_hex(8)
+    # The version this CloseDesk starts as, which it is until it is closed, whatever CloseDesk-Update puts in its
+    # folder meanwhile: what its pages, /health and Update now say and compare (version.running).
+    version.remember_running()
     # Whether to update, asked on the first page shown each time CloseDesk opens (begun by cli._serve).
     app.state.update_question = updates.Question()
 
@@ -1357,7 +1360,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         if why:
             return render(request, "settings_update.html", page="settings", refused=why, status_code=409)
         return render(
-            request, "settings_update.html", page="settings", refused="", commit=version.installed()[0], run=app.state.run,
+            request, "settings_update.html", page="settings", refused="", commit=version.running()[0], run=app.state.run,
             whose=version.whose(), updating=True, other=updates.OTHER_HERE,
             message=updates.updating_message(app.state),
         )
@@ -1404,7 +1407,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             # Which version answers, and which start of it: the page that asked for an update reloads when another
             # start answers (the new version, or the same one when the update didn't finish).
             "version": version.label(),
-            "commit": version.installed()[0],
+            "commit": version.running()[0],
             "run": app.state.run,
             # Whose CloseDesk this is (fingerprints of its folder and of the person running it): only this folder's,
             # run by the same person, is shown instead of a second being started.

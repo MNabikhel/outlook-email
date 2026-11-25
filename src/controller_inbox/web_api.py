@@ -1191,7 +1191,7 @@ def register_workspace(
         if why:
             raise HTTPException(status_code=409, detail=why)
         return {
-            "ok": True, "message": updates.updating_message(app.state), "commit": version.installed()[0],
+            "ok": True, "message": updates.updating_message(app.state), "commit": version.running()[0],
             "run": app.state.run, "whose": version.whose(), "other": updates.OTHER_HERE,
         }
 

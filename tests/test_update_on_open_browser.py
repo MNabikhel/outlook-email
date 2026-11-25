@@ -14,7 +14,7 @@ pytest.importorskip("playwright")
 
 from controller_inbox import updates, web  # noqa: E402
 from liveserver import serving  # noqa: E402
-from test_update_on_open import NEWER, asked_at_start, download, github, no_github, offline  # noqa: E402,F401
+from test_update_on_open import NEWER, asked_at_start, download, github, no_github, offline, opened_again_as_newer  # noqa: E402,F401
 
 DIALOG = "#update-ask[open]"
 WHATS_NEW = "Wait as long as the model needs for file summaries, and stop instead of looking stuck"
@@ -106,7 +106,7 @@ def test_update_now_in_the_workspace_updates_and_opens_the_new_version(download,
         # between found it).
         assert page.query_selector("#update-ask") is None
         # The launcher has put the new version in place and started it: the page loads again by itself.
-        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        opened_again_as_newer(download)
         page.wait_for_function("() => (document.querySelector('.rail-version') || {}).textContent === 'CloseDesk 2026.11.16 (bbbbbbb)'", timeout=20000)
 
 
@@ -131,7 +131,7 @@ def test_the_workspace_keeps_saying_it_updates_whatever_is_clicked_meanwhile(dow
         assert page.query_selector("#top-update") is None, "nothing offers the update that runs"
         assert page.is_disabled("#process-btn") and "Updating" in page.inner_text("#process-btn")
         assert page.query_selector(".toast") is None, "nothing failed: nothing was tried"
-        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        opened_again_as_newer(download)
         page.wait_for_function("() => (document.querySelector('.rail-version') || {}).textContent === 'CloseDesk 2026.11.16 (bbbbbbb)'", timeout=20000)
         assert page.query_selector("#updating") is None and page.is_enabled("#process-btn")
 
@@ -152,7 +152,7 @@ def test_update_now_on_a_classic_page_updates_and_opens_the_new_version(download
         assert page.get_attribute("#update-ask .update-ask-bar", "role") == "progressbar"
         page.keyboard.press("Escape")
         assert page.query_selector("#update-ask.updating[open]") is not None, "it stays up until CloseDesk is back"
-        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        opened_again_as_newer(download)
         page.wait_for_function("() => document.body.innerText.includes('CloseDesk 2026.11.16 (bbbbbbb)')", timeout=20000)
         assert page.url == base + "/inbox"
 
@@ -377,7 +377,7 @@ def test_update_now_in_a_tab_shown_before_closedesk_was_updated_says_so_and_stop
         page.goto(base + "/inbox")
         page.wait_for_selector(DIALOG)
         # Updated meanwhile, from another tab: this one still shows the question.
-        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        opened_again_as_newer(download)
         page.click("#update-ask button:has-text('Update now')")
         page.wait_for_function(f"() => document.querySelector('#update-ask').innerText.includes({updates.UPDATED_MEANWHILE!r})")
         assert app.state.stop_server.calls == 0
@@ -414,7 +414,7 @@ def test_update_now_in_a_second_tab_while_closedesk_updates_says_so_and_comes_ba
         assert page.query_selector("#update-ask button:has-text('Update now')") is None
         # Back, as the new version: the tab loads again by itself.
         page.unroute("**/health")
-        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        opened_again_as_newer(download)
         page.wait_for_function("() => !document.querySelector('#updating, #update-ask.updating')", timeout=20000)
         assert app.state.stop_server.calls == 0
 
@@ -472,7 +472,7 @@ def test_the_page_waiting_for_the_update_never_loads_another_persons_closedesk(d
         ), "the progress bar still goes"
         # This person's, back as the new version: loaded.
         page.unroute("**/health")
-        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        opened_again_as_newer(download)
         page.wait_for_function("() => !document.querySelector('#updating, #update-ask.updating, [data-update-line]')", timeout=20000)
 
 

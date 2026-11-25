@@ -618,5 +618,6 @@ def test_the_workspace_says_an_update_is_ready_and_waits_for_the_new_version(dow
         assert updates.UPDATING in page.inner_text("#updating") and stop.calls == 1
         # The launcher has put the new version in place and started it: the page loads again by itself.
         (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        version.remember_running()  # the CloseDesk answering is the new one
         page.wait_for_function("() => (document.querySelector('.rail-version') || {}).textContent === 'CloseDesk 2026.11.16 (bbbbbbb)'", timeout=20000)
         assert page.query_selector("#top-update") is None, "this copy is main's now"

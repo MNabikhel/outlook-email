@@ -743,7 +743,7 @@ def test_the_app_doesnt_open_while_an_update_runs_from_its_start_to_the_end_of_i
     # The update's own folder is there only while it downloads; after it come the check and new packages, which an
     # opening CloseDesk would race.
     seen: list = []
-    monkeypatch.setattr(launch, "update", lambda: seen.append(("update", launch.update_under_way())) or 0)
+    monkeypatch.setattr(launch, "update", lambda stopped="": seen.append(("update", launch.update_under_way())) or 0)
     monkeypatch.setattr(launch, "_hand_over", lambda cmd: seen.append(("check", launch.update_under_way())) or 0)
     assert launch.main(["--update"]) == 0
     assert seen == [("update", True), ("check", True)]
@@ -773,7 +773,7 @@ def test_a_second_update_while_one_runs_waits_for_it(launch, monkeypatch, capsys
     other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps({"pid": other.pid, "started": time.time()}), encoding="utf-8")
-        monkeypatch.setattr(launch, "update", lambda: pytest.fail("a second update ran"))
+        monkeypatch.setattr(launch, "update", lambda stopped="": pytest.fail("a second update ran"))
         assert launch.main(["--update"]) == launch.UPDATE_UNDER_WAY
         assert launch.UPDATING_NOW in capsys.readouterr().out
         assert json.loads((launch.ROOT / launch.UPDATING_MARK).read_text(encoding="utf-8"))["pid"] == other.pid, "the first's mark stays"
@@ -791,7 +791,7 @@ def test_update_now_while_closedesk_update_runs_waits_for_it_then_closedesk_open
         (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps({"pid": other.pid, "started": time.time()}), encoding="utf-8")
         monkeypatch.setenv("CLOSEDESK_REOPEN", "1")  # the launcher's update, after Update now: CloseDesk opens after it
         monkeypatch.setattr(launch, "OTHER_UPDATE_EVERY", 0.05)
-        monkeypatch.setattr(launch, "update", lambda: pytest.fail("a second update ran beside the first"))
+        monkeypatch.setattr(launch, "update", lambda stopped="": pytest.fail("a second update ran beside the first"))
         threading.Timer(0.5, lambda: (other.kill(), other.wait())).start()
         started = time.monotonic()
         assert launch.main(["--update"]) == 0, "the launcher opens CloseDesk again after it"
@@ -813,7 +813,7 @@ def _waits_for_closedesk_update(launch, monkeypatch, meanwhile) -> list:
     monkeypatch.setenv("CLOSEDESK_REOPEN", "1")
     monkeypatch.setattr(launch, "OTHER_UPDATE_EVERY", 0.05)
     ran: list = []
-    monkeypatch.setattr(launch, "update", lambda: ran.append(("update", launch.update_under_way())) or 0)
+    monkeypatch.setattr(launch, "update", lambda stopped="": ran.append(("update", launch.update_under_way())) or 0)
     monkeypatch.setattr(launch, "_hand_over", lambda cmd: ran.append(("check", cmd[2:])) or 0)
 
     def ends() -> None:
@@ -848,6 +848,65 @@ def test_update_now_after_a_closedesk_update_that_did_it_opens_closedesk_again(l
     assert launch.OTHER_DONE in said and launch.OTHER_FAILED not in said and ran == []
 
 
+def _stopped(launch, commit: str, *, ago: float = 1.0) -> None:
+    """CloseDesk stopped to update ``ago`` seconds ago as ``commit`` (cli._serve's updates.remember_update_asked)."""
+    launch.VENV.mkdir(exist_ok=True)
+    (launch.VENV / launch.STOPPED_NOTE).write_text(json.dumps({"commit": commit, "at": time.time() - ago}), encoding="utf-8")
+
+
+def test_update_now_waiting_for_a_closedesk_update_that_had_nearly_finished_opens_closedesk_again(launch, monkeypatch, capsys):
+    # CloseDesk-Update had put the new files in place under the open CloseDesk, and was in its check after the update,
+    # when Update now waited for it: compared with the folder's version as the waiting began (the new one already),
+    # that update "didn't finish", and the update asked for ran again for nothing.
+    (launch.ROOT / ".git_archival.txt").write_text(f"commit: {'b' * 40}\ndate: 2026-11-16\n", encoding="utf-8")
+    _stopped(launch, "a" * 40)
+    monkeypatch.setattr(launch, "installed_commit", lambda: "b" * 40)  # what the folder says throughout
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps({"pid": other.pid, "started": time.time()}), encoding="utf-8")
+    monkeypatch.setenv("CLOSEDESK_REOPEN", "1")
+    monkeypatch.setattr(launch, "OTHER_UPDATE_EVERY", 0.05)
+    monkeypatch.setattr(launch, "update", lambda stopped="": pytest.fail("the update ran again"))
+
+    def ends() -> None:
+        other.kill()
+        other.wait()
+
+    threading.Timer(0.3, ends).start()
+    assert launch.main(["--update"]) == 0
+    said = capsys.readouterr().out
+    assert launch.OTHER_DONE in said and launch.OTHER_FAILED not in said
+
+
+def test_update_now_after_closedesk_update_replaced_the_files_opens_them_without_downloading(launch, monkeypatch, capsys):
+    # CloseDesk-Update had finished while CloseDesk was open (as 2026.11.13); Update now: the download was the folder's
+    # version already, "CloseDesk is already the newest version", and the next first page said "No newer version to
+    # download yet". The files there are opened as they are, after the check that follows an update.
+    (launch.ROOT / ".git_archival.txt").write_text(f"commit: {'b' * 40}\ndate: 2026-11-16\n", encoding="utf-8")
+    _stopped(launch, "a" * 40)
+    monkeypatch.setenv("CLOSEDESK_UPDATE_URL", "file:///nowhere/closedesk.zip")
+    monkeypatch.setattr(launch, "_fetch", lambda *args, **kwargs: pytest.fail("downloaded again"))
+    handed: list = []
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append(cmd[2:]) or 0)
+    assert launch.main(["--update"]) == 0
+    said = capsys.readouterr().out
+    assert launch.UPDATED_UNDER in said and handed == [["--check"]]
+    assert not (launch.VENV / launch.NEWEST_NOTE).exists(), "nothing says the folder was found the newest"
+    assert launch.STOPPED_NOTE == updates.STOPPED_NOTE and launch.STOPPED_FRESH == updates.STOPPED_FRESH
+
+
+def test_an_update_downloads_when_closedesk_stopped_as_the_folders_version_or_long_ago(launch, monkeypatch):
+    (launch.ROOT / ".git_archival.txt").write_text(f"commit: {'a' * 40}\ndate: 2026-11-13\n", encoding="utf-8")
+    fetched: list = []
+    monkeypatch.setenv("CLOSEDESK_UPDATE_URL", "file:///nowhere/closedesk.zip")
+    monkeypatch.setattr(launch, "_fetch", lambda url, *args, **kwargs: fetched.append(url) or False)
+    _stopped(launch, "a" * 40)
+    assert launch.update(launch.stopped_as()) == 1 and len(fetched) == 1, "the folder is the version that stopped"
+    (launch.ROOT / ".git_archival.txt").write_text(f"commit: {'b' * 40}\ndate: 2026-11-16\n", encoding="utf-8")
+    _stopped(launch, "a" * 40, ago=launch.STOPPED_FRESH + 5)
+    assert launch.stopped_as() == "", "left by a CloseDesk that stopped long ago"
+    assert launch.update(launch.stopped_as()) == 1 and len(fetched) == 2
+
+
 def test_the_mac_launcher_says_closedesk_opens_again_before_its_update_runs():
     # So that its update, finding another one running, waits for it rather than giving up.
     text = (ROOT / "CloseDesk.command").read_text(encoding="utf-8")
@@ -861,7 +920,7 @@ def test_the_mac_launcher_says_closedesk_opens_again_before_its_update_runs():
 def test_the_check_after_an_update_isnt_stopped_by_that_update(launch, monkeypatch):
     # From its start to the end of the check after it, the update says it runs: that check is its own.
     handed: list = []
-    monkeypatch.setattr(launch, "update", lambda: 0)
+    monkeypatch.setattr(launch, "update", lambda stopped="": 0)
     monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
     assert launch.main(["--update"]) == 0
     (cmd, env), = handed
@@ -1031,7 +1090,7 @@ def test_the_update_the_window_starts_adds_to_the_end_of_the_log_on_windows(laun
     monkeypatch.setattr(launch, "WINDOWS", True)
     monkeypatch.setenv("CLOSEDESK_APP", "1")
     monkeypatch.setenv("CLOSEDESK_APP_LOG", str(log))
-    monkeypatch.setattr(launch, "update", lambda: launch.say("Looking for the newest CloseDesk...") or 1)
+    monkeypatch.setattr(launch, "update", lambda stopped="": launch.say("Looking for the newest CloseDesk...") or 1)
     assert launch.main(["--update"]) == 1
     sys.stdout.flush()
     assert log.read_text(encoding="utf-8") == "another window's line\nLooking for the newest CloseDesk...\n"

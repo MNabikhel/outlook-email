@@ -41,9 +41,10 @@ def _isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture(autouse=True)
 def _fresh_model_memory():
     """What a run learned about the loaded model, and the results kept to save time, must not leak between tests."""
-    from controller_inbox import cost_codes, local_llm, memo, semantic, sheet_preview
+    from controller_inbox import cost_codes, local_llm, memo, semantic, sheet_preview, version
 
     caches = (
+        version._running,  # the version an app made by a test started as
         local_llm._status_cache,
         local_llm._reasoning_seen,
         local_llm._opens_think,
