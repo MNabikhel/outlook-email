@@ -112,11 +112,12 @@ def asks(settings) -> bool:
     return bool(getattr(settings, "update_check", True)) and bool(version.installed()[0])
 
 
-KEPT = {"sha", "date", "title", "checked_at", "from", "failed", "retry"}
+KEPT = {"sha", "date", "at", "title", "checked_at", "from", "failed", "retry"}
 
 
 def known(store) -> dict[str, str]:
-    """What the last asking found: {"sha", "date", "title" (the latest change's, ``whats_new``), "checked_at",
+    """What the last asking found: {"sha", "date" (its day, the version number), "at" (when it was made, as GitHub gives
+    it), "title" (the latest change's, ``whats_new``), "checked_at",
     "from" (the commit of the copy that asked), "failed" (when GitHub couldn't be reached), "retry" (when that was the
     brief asking as CloseDesk opened)}, any of them missing when not known."""
     try:
@@ -242,14 +243,17 @@ def check(
         date = str(reply["commit"]["committer"]["date"])
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or not version.number(date):
             raise ValueError(f"not a commit: {sha!r} {date!r}")
-        saved.update(sha=sha, date=version.utc_day(date), title=whats_new(str(reply["commit"].get("message") or "")))
+        saved.update(
+            sha=sha, date=version.utc_day(date), at=date if version.moment(date) else "",
+            title=whats_new(str(reply["commit"].get("message") or "")),
+        )
     except Exception as exc:  # no internet, a proxy, GitHub busy: said quietly in Settings, asked again tomorrow
         # (or at the next tick, after the brief asking as CloseDesk opened)
         log.info("Couldn't ask GitHub for the newest CloseDesk: %s", exc)
         if before.get("from") == mine:
             # What this copy's last answer found stays known (Settings and the top bar keep offering a newer version
             # found at 9:00 after an opening on a train at 10:00), beside "couldn't reach GitHub".
-            saved.update({key: before[key] for key in ("sha", "date", "title") if before.get(key)})
+            saved.update({key: before[key] for key in ("sha", "date", "at", "title") if before.get(key)})
         saved["failed"] = "1"
         if at_start:
             saved["retry"] = "1"
@@ -298,9 +302,11 @@ def status(store, settings) -> dict[str, Any]:
         latest = {}
     newest = latest.get("sha", "")
     newer = bool(commit and newest and newest != commit.lower())
-    # A copy newer than main (downloaded from another branch) is not offered an older one.
-    if newer and date and latest.get("date") and latest["date"] < date:
-        newer = False
+    # A copy newer than main (downloaded from another branch) is not offered an older one: by when each commit was made
+    # (two of one day: the branch's tip in the afternoon, main's last merge that morning), else by the day.
+    if newer and date and latest.get("date"):
+        if version.later(latest.get("at") or latest["date"], version.installed_at() or date) is False:
+            newer = False
     mine, theirs = version.number(date) or commit[:7], version.number(latest.get("date", "")) or newest[:7]
     # A version number is the day: two from one day are told apart by their commits.
     same_day = newer and mine == theirs

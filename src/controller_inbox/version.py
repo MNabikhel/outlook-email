@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 DEVELOPER = "a developer's copy (not a download)"
 
 
-def installed() -> tuple[str, str]:
-    """(commit, date) this copy was downloaded at, or ("", "") when it isn't a download."""
+def _archival() -> dict[str, str]:
+    """What GitHub wrote into this copy's .git_archival.txt ({} for a developer's checkout)."""
     found = {}
     try:
         for line in (ROOT / ".git_archival.txt").read_text(encoding="utf-8").splitlines():
@@ -28,7 +28,44 @@ def installed() -> tuple[str, str]:
                 found[name.strip()] = value.strip()
     except OSError:
         pass
+    return found
+
+
+def installed() -> tuple[str, str]:
+    """(commit, date) this copy was downloaded at, or ("", "") when it isn't a download."""
+    found = _archival()
     return found.get("commit", ""), utc_day(found.get("date", ""))
+
+
+def installed_at() -> str:
+    """When this copy's commit was made, whole ("2026-11-25T14:50:00+00:00", its time and offset as GitHub wrote
+    them), or "" when that isn't known: two versions of one day are told apart by it (``later``)."""
+    return _archival().get("date", "") if installed()[0] else ""
+
+
+def moment(date: str) -> datetime | None:
+    """The moment a date with its time and offset says ("2026-11-12T22:12:03-06:00", "2026-11-13T04:12:03Z"); None
+    for a day alone, or what isn't a date."""
+    date = (date or "").strip()
+    if "T" not in date:
+        return None
+    try:
+        when = datetime.fromisoformat(date.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else None
+
+
+def later(theirs: str, mine: str) -> bool | None:
+    """Whether the commit dated ``theirs`` was made after the one dated ``mine``: by the moment when both say theirs,
+    else by the day (UTC). None when either isn't a date."""
+    at_theirs, at_mine = moment(theirs), moment(mine)
+    if at_theirs is not None and at_mine is not None:
+        return at_theirs > at_mine
+    day_theirs, day_mine = utc_day(theirs), utc_day(mine)
+    if not day_theirs or not day_mine:
+        return None
+    return day_theirs >= day_mine
 
 
 def utc_day(date: str) -> str:

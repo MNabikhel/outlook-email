@@ -722,6 +722,32 @@ def test_a_newer_version_from_the_same_day_is_told_apart_by_its_commit(download,
     assert updates.status(store, settings)["message"] == "A newer CloseDesk is ready (2026.11.16; you have 2026.11.13)."
 
 
+def test_a_copy_from_another_branch_newer_than_main_the_same_day_isnt_asked_to_go_back(download, settings, store, monkeypatch):
+    # The desktop-app branch's ZIP, its tip committed at 14:50 UTC, tried while main's newest merge is from 10:00 that
+    # morning: the version number is the day for both, and the day alone took main for newer. Update now would have put
+    # main's older files back, at every opening until main had a merge from a later day.
+    (download / ".git_archival.txt").write_text(f"commit: {MINE}\ndate: 2026-11-25T14:50:00Z\n", encoding="utf-8")
+    monkeypatch.setattr(updates, "_ask_github", github(date="2026-11-25T10:00:00Z"))
+    view = asked_at_start(store, settings).view(store, settings, "idle")
+    assert view["ask"] is False and view["newer"] is False
+    assert updates.status(store, settings)["newer"] is False
+    # As GitHub gives it, with an offset: the same moment is compared, not the text.
+    monkeypatch.setattr(updates, "_ask_github", github(date="2026-11-25T08:00:00-06:00"))  # 14:00 UTC
+    assert asked_at_start(store, settings).view(store, settings, "idle")["ask"] is False
+    # Merged into main later that day: newer, and asked.
+    monkeypatch.setattr(updates, "_ask_github", github(date="2026-11-25T16:20:00Z"))
+    view = asked_at_start(store, settings).view(store, settings, "idle")
+    assert view["ask"] is True and view["message"] == "CloseDesk 2026.11.25 (bbbbbbb) is out; you have 2026.11.25 (aaaaaaa)."
+
+
+def test_with_no_time_on_one_side_the_day_decides_as_before(download, settings, store, monkeypatch):
+    # A copy whose date is a day alone (2026-11-13): main's commit later that day is offered, one from before it isn't.
+    monkeypatch.setattr(updates, "_ask_github", github(date="2026-11-13T23:00:00Z"))
+    assert asked_at_start(store, settings).view(store, settings, "idle")["ask"] is True
+    monkeypatch.setattr(updates, "_ask_github", github(date="2026-11-12T23:00:00Z"))
+    assert asked_at_start(store, settings).view(store, settings, "idle")["ask"] is False
+
+
 def test_the_question_says_what_the_check_as_closedesk_opened_found(download, settings, store, monkeypatch):
     monkeypatch.setattr(updates, "_ask_github", github())
     question = asked_at_start(store, settings)
