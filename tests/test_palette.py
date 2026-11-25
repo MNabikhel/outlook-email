@@ -159,8 +159,10 @@ def test_the_model_dot_on_ask_closedesk_follows_the_colors():
 
 def test_the_classic_amber_stands_apart_from_the_colours_beside_it():
     """On the classic pages the new amber sat close to the old gold beside it: Today's "Due today" edge and tag
-    against "Due Fri" in gold, and the inbox's High pill against the khaki "Script draft" and "Needs model" flags on
-    the same row. Before, Due today and High were an orange. Each pair is at least 20 apart for every vision."""
+    against "Due Fri" in gold, the inbox's High pill against the khaki "Script draft" and "Needs model" flags on
+    the same row, and on AP coding "Suggested" (a code to confirm) against "No code found" (needs a code), which
+    became two beige pills with brown words, 1.5 apart. Before, Due today and High were an orange. Each pair is at
+    least 20 apart for every vision."""
     for colors in ("standard", "color-blind"):
         tokens = pm.classic(colors)
 
@@ -177,6 +179,8 @@ def test_the_classic_amber_stands_apart_from_the_colours_beside_it():
             "due later this week / an email opened": (rule(".focus-item.due_week", edge), rule(".focus-item.is-open", "border")),
             "the due-today tag / due later this week": (rule(".tag.due_today", "background"), rule(".tag.due_week", "background")),
             "the High pill / the model's flags": (rule(".pill.high", "background"), rule(".flag.needs_model", "background")),
+            "AP coding: Suggested / No code found": (rule(".coding-state.suggested", "background"), rule(".coding-state.unmatched", "background")),
+            "AP coding: their words": (rule(".coding-state.suggested", "color"), rule(".coding-state.unmatched", "color")),
         }
         close = {
             name: {vision: round(pm.delta_e(a, b, vision), 1) for vision in pm.VISIONS}

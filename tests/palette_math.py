@@ -447,6 +447,7 @@ ROLES = {
         ("text", Rule(".job .job-flag", "color"), [Rule(".job", "background")], "a run that needs a look .job-flag"),
         ("text", Rule(".model-state.on", "color"), [Rule(".model-state.on", "background")], "a model ready .model-state.on"),
         ("text", Rule(".model-state.fallback", "color"), [Rule(".model-state.fallback", "background")], "an older method .model-state.fallback"),
+        ("text", Rule(".coding-state.suggested", "color"), [Rule(".coding-state.suggested", "background")], "a cost code to confirm .coding-state.suggested"),
         ("text", Rule(".coding-state.unmatched", "color"), [Rule(".coding-state.unmatched", "background")], "no cost code matched .coding-state.unmatched"),
         ("text", Rule(".coding-state.confirmed", "color"), [Rule(".coding-state.confirmed", "background")], "a cost code confirmed .coding-state.confirmed"),
         ("ui", Rule(".chat-fab .dot.on", "background"), [Rule("button", "background")], "the model's dot on Ask CloseDesk .chat-fab .dot.on"),

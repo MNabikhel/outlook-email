@@ -533,7 +533,9 @@ details.correct summary { cursor: pointer; font-family: var(--serif); font-size:
 .coding-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .coding-head h3 { margin: 0; }
 .coding-state { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 10px; background: var(--chip); color: var(--muted); white-space: nowrap; }
-.coding-state.suggested { background: #f3ecda; color: #6d5521; }
+/* A code to confirm in the blue of a choice to make (as the classic Medium pill, which needs a look but isn't urgent):
+   the old gold sat on top of the amber of "No code found" beside it, and the pale green of "Confirmed". */
+.coding-state.suggested { background: #bfd0ec; color: var(--navy); }
 .coding-state.unmatched { background: var(--warn-soft); color: var(--warn); }
 .coding-state.confirmed { background: var(--ok-soft); color: var(--green); }
 .coding-codes { margin: 10px 0 0; }
