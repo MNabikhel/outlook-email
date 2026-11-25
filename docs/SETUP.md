@@ -14,8 +14,8 @@ The longer notes are in [BIONIC_GUIDE.md](BIONIC_GUIDE.md). The picture versions
      curl -fsSL https://raw.githubusercontent.com/MNabikhel/outlook-email/main/scripts/install.sh | bash
      ```
 
-     It puts CloseDesk in a `CloseDesk` folder in your home folder, sets it up, and opens the dashboard. From then on, double-click `CloseDesk.command` in that folder.
-   - **Windows:** on GitHub click **Code → Download ZIP**, unzip it somewhere permanent (for example `Documents`), and double-click `CloseDesk.bat`. If Windows shows "Windows protected your PC", click **More info → Run anyway**.
+     It puts CloseDesk in a `CloseDesk` folder in your home folder, sets it up, and opens the dashboard. It also adds **CloseDesk** to Applications in your user folder: from then on, open it from there (Spotlight finds it) or keep it in the Dock. Double-clicking `CloseDesk.command` in that folder still works too.
+   - **Windows:** on GitHub click **Code → Download ZIP**, unzip it somewhere permanent (for example `Documents`), and double-click `CloseDesk.bat`. If Windows shows "Windows protected your PC", click **More info → Run anyway**. The first start adds a **CloseDesk** shortcut to your Desktop and Start menu: from then on, open CloseDesk with it. `CloseDesk.bat` still works too.
 3. Optional: install [LM Studio](https://lmstudio.ai/), download a chat model (a 3B–8B *instruct* model is plenty; a bigger one works if your computer has the memory), and start the local server (Developer tab → **Start server**). CloseDesk finds it on its own. You don't have to load the model: when none is loaded, CloseDesk loads one as it starts (the one you used last, or the biggest one you downloaded of up to about 8B that fits this computer; a Mac counts the share macOS gives the graphics side, a PC with a graphics card counts the card's memory). To also search by meaning, load LM Studio's **nomic-embed-text** embedding model next to it. Ollama works too (see the README). If your laptop can't run a model, skip this step: sorting, summaries, tasks, fraud warnings, search, and the digest all work without one.
 4. After the first launch, open **Setup** and choose **What kind of inbox is this?** *General* suits anyone. *Finance* adds the month-end countdown and close sections.
 
@@ -42,6 +42,59 @@ The Terminal line above is the smooth way. If you downloaded the ZIP in a browse
 
 Keep the folder in your home folder (not in Downloads, Documents or Desktop), and macOS won't ask to let Terminal into those either.
 
+## The CloseDesk shortcut and window
+
+The first time `CloseDesk.bat` or `CloseDesk.command` opens the dashboard, CloseDesk adds a shortcut that opens it in a
+window of its own, with its own icon, instead of a browser tab:
+
+- **Windows:** **CloseDesk** on your Desktop and in your Start menu. To keep it on the taskbar, right-click CloseDesk's
+  button there while it is open and choose **Pin to taskbar**.
+- **Mac:** **CloseDesk** in Applications in your user folder. Spotlight finds it (⌘ Space, type *CloseDesk*); to keep
+  it in the Dock, right-click its Dock icon while it is open and choose **Options → Keep in Dock**.
+
+No admin rights are needed, and since the shortcut is made on your computer (it is never downloaded), neither Windows
+nor macOS asks about it. On Linux there is no shortcut: `CloseDesk.command` opens CloseDesk in the browser.
+
+The window is CloseDesk: it reads the new mail and opens the dashboard as the double-click files do, and **closing the
+window closes CloseDesk**. While mail is being processed, or CloseDesk is updating, it asks first (*CloseDesk is still
+processing mail. Close it anyway?*, **Close** or **Keep open**). In the window:
+
+- **Open in mail app** opens your mail app; another website, the printable digest and a file's original open in your
+  browser.
+- **Download** (a file, the `.eml` copy, a CSV) asks where to save it, starting in your Downloads folder.
+- When a newer version is out, the window asks as the browser does. **Update now** keeps the window open: it says
+  **Updating CloseDesk** while the update runs, then opens the new version by itself. If the update can't finish,
+  CloseDesk opens as it was and says so.
+- If CloseDesk is already open (from `CloseDesk.bat` / `CloseDesk.command`, or another window), the shortcut shows
+  that one, and closing the window leaves it open.
+
+The double-click files work exactly as before: CloseDesk in your browser, with the black window (Terminal on a Mac)
+that you leave open while you use it. Use whichever you like.
+
+**Where the window can't open, CloseDesk opens in your browser instead,** and says why the first time:
+
+- **Windows without Microsoft Edge WebView2 Runtime.** Windows 11 has it; some company Windows 10 laptops don't. Your
+  IT team can install it (it is free from Microsoft); after that CloseDesk opens in its window.
+- **The window's part couldn't be installed** (no internet at the first start, say). Each start from the shortcut
+  tries again.
+
+**Deleted the shortcut?** It isn't put back. To add it again: **Settings → This copy and its check → Add the CloseDesk
+shortcut again** (on a Mac, **Add CloseDesk to Applications again**; in the classic pages, **Setup → This copy**), or
+run `CloseDesk.bat --shortcut` (Mac: `bash ~/CloseDesk/CloseDesk.command --shortcut`).
+
+**Moved or renamed CloseDesk's folder?** The shortcut can't find it until you double-click `CloseDesk.bat` (or
+`CloseDesk.command`) once in its new place; that start points the shortcut at the new place. Until then, Windows says
+*Problem with Shortcut*, and the Mac says *CloseDesk can't find its folder*.
+
+**On a Mac, keep the folder in your home folder** (the install line puts it there). From Desktop, Documents, Downloads,
+iCloud Drive, another cloud drive or another disk, macOS would ask before letting CloseDesk.app in, so from there
+CloseDesk.app opens `CloseDesk.command` in Terminal and CloseDesk in your browser instead. Move the folder into your
+home folder and double-click `CloseDesk.command` once, and the window opens from then on.
+
+There is no black window with the shortcut, so what CloseDesk says as it starts is written to its log:
+`%LOCALAPPDATA%\CloseDesk\CloseDesk-app.log` on Windows, `~/Library/Logs/CloseDesk/CloseDesk-app.log` on a Mac. When
+something goes wrong as it opens, a message says so and names the log.
+
 ## Updating
 
 Each copy has a version number, its date year first, shown with the first characters of its commit: **CloseDesk
@@ -64,7 +117,7 @@ company network that blocks it), Settings says so under the version, and CloseDe
 Any of these works, and none needs admin rights:
 
 - **Click Update now when CloseDesk asks as it opens.** The same as Update in Settings, next.
-- **Click Update in Settings.** CloseDesk closes, fetches the newest version, and opens again by itself in a minute or two, in the same browser tab. Your mail and settings are kept. It waits while mail is being processed, and offers the update again once that is done. (This needs CloseDesk started by double-clicking it; started some other way, it doesn't ask as it opens, and Settings says to use CloseDesk-Update instead.)
+- **Click Update in Settings.** CloseDesk closes, fetches the newest version, and opens again by itself in a minute or two: in its window, which says **Updating CloseDesk** meanwhile, or in the same browser tab. Your mail and settings are kept. It waits while mail is being processed, and offers the update again once that is done. (This needs CloseDesk opened with its shortcut or by double-clicking `CloseDesk.bat` / `CloseDesk.command`; started some other way, it doesn't ask as it opens, and Settings says to use CloseDesk-Update instead.)
 - **Double-click `CloseDesk-Update.command`** (Mac) or **`CloseDesk-Update.bat`** (Windows). It fetches the newest CloseDesk and replaces CloseDesk's own files. Your mail (`data`, `inbox`), your settings (`.env`) and the `AP cost codes` folder are not touched, and the files it replaced are kept in `.previous`.
 - **Or by hand:** download the ZIP again and swap the folders, keeping `data`, `inbox`, `.env` and `AP cost codes` from the old one. (On a Mac the Terminal line from the setup does this for you: run again, it updates.)
 
@@ -83,9 +136,9 @@ To see the check without starting, run `CloseDesk.command --check` (Mac) or `Clo
 
    Tip: pin `inbox\incoming` to Quick Access or make a desktop shortcut. Dropping an email you already dropped is fine; it is recognized.
 
-2. **Double-click `CloseDesk.bat`** (Windows) or **`CloseDesk.command`** (Mac).
+2. **Open CloseDesk:** the **CloseDesk** shortcut on your Desktop or in the Start menu (Windows), or **CloseDesk** in the Dock or Applications (Mac).
 
-   It reads the folder, lets the local model read the most important mail first, writes today's digest, and opens the dashboard in your browser. Leave the black window open while you use the dashboard; close it when you're done.
+   It reads the folder, lets the local model read the most important mail first, writes today's digest, and opens the dashboard in CloseDesk's window. Close the window when you're done; that closes CloseDesk. (Double-clicking `CloseDesk.bat` or `CloseDesk.command` does the same in your browser: leave the black window open while you use the dashboard, and close it when you're done.)
 
 3. **Read the Today page top to bottom.**
    - A red **Do not process — verify by phone** box means someone asked to change payment details. Call a number you already have before doing anything.
@@ -132,7 +185,7 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 
 ## You are ready when
 
-1. Double-clicking CloseDesk opens the dashboard.
+1. The CloseDesk shortcut (or double-clicking `CloseDesk.bat` / `CloseDesk.command`) opens the dashboard.
 2. A message dragged into `inbox/incoming` shows up on the Today page after **Process new mail**.
 3. The rail at the bottom-left says **Local model** with a green dot and the model's name (or you are happy with script-only filing).
 
@@ -145,7 +198,12 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 | "CloseDesk needs Python 3.11 or newer" | The computer has no Python CloseDesk can use. Install it from python.org and open CloseDesk again; the message also gives the line to run if you can't install it. |
 | Something is off after an update or after moving the folder | Open CloseDesk again: every start checks the set-up and repairs it. `CloseDesk.command --check` (or `CloseDesk.bat --check`) lists what is and isn't in order. Deleting the `.venv` folder makes the next start set everything up afresh; your mail isn't in it. |
 | "Another program is using port 8765" | CloseDesk says so and uses the next free port that time. If the other program is LM Studio's server, set that back to its own port (1234). |
-| The page does not open | The CloseDesk window must still be open. Go to [http://127.0.0.1:8765](http://127.0.0.1:8765). |
+| The page does not open | The CloseDesk window (or the black window, with the double-click files) must still be open. Go to [http://127.0.0.1:8765](http://127.0.0.1:8765). |
+| The CloseDesk shortcut opens CloseDesk in the browser, not a window | The window can't open on this computer, and the first time CloseDesk said why: usually Windows without Microsoft Edge WebView2 Runtime, which IT can install (free from Microsoft), or the window's part not installed yet (each start tries again). See "The CloseDesk shortcut and window". |
+| Windows: *Problem with Shortcut*, or the Mac: *CloseDesk can't find its folder* | CloseDesk's folder was moved or renamed. Double-click `CloseDesk.bat` (or `CloseDesk.command`) once in its new place: the shortcut follows it. |
+| The CloseDesk shortcut does nothing, or says CloseDesk couldn't start | What went wrong is in its log: `%LOCALAPPDATA%\CloseDesk\CloseDesk-app.log` (Windows) or `~/Library/Logs/CloseDesk/CloseDesk-app.log` (Mac). Double-clicking `CloseDesk.bat` / `CloseDesk.command` shows the same start in its window, and `--check` says what isn't in order. |
+| The CloseDesk shortcut or the Mac's CloseDesk is gone | It isn't put back once deleted. **Settings → This copy and its check → Add the CloseDesk shortcut again** (Mac: **Add CloseDesk to Applications again**), or `CloseDesk.bat --shortcut` / `CloseDesk.command --shortcut`. |
+| Mac: CloseDesk.app opens Terminal and the browser, not a window | CloseDesk's folder is in Desktop, Documents, Downloads, iCloud Drive, another cloud drive or on another disk, where macOS would ask first. Move it into your home folder and double-click `CloseDesk.command` once. |
 | Local model: **not running** | Open LM Studio and start the server. CloseDesk loads a model the next time it starts; or choose one in Settings → **Model that answers your questions**. Then click **Process new mail** again. `python -m controller_inbox llm-check` says exactly what is wrong. |
 | "CloseDesk couldn't load … in LM Studio" when it starts | LM Studio couldn't load the model CloseDesk chose (usually not enough memory). The mail is filed without a model meanwhile. Close other apps, or choose a smaller model in Settings → **Model that answers your questions**. |
 | CloseDesk loaded a model I didn't want | It loads one only when none is loaded. Choose another in Settings → **Model that answers your questions** (it is used from then on), or load yours in LM Studio before you start CloseDesk. |
