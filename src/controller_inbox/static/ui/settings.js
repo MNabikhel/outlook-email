@@ -4,7 +4,7 @@
    server says now, with a line under the change saying what happened. */
 
 import { $, $$, h, icon, plural, replace, skeletonReader } from "./dom.js";
-import { getJSON, postJSON } from "./api.js";
+import { getJSON, inSentence, postJSON } from "./api.js";
 
 const SHORTCUTS = [
   ["j / k", "Next / previous in the list"],
@@ -74,7 +74,7 @@ export function createSettings(ctx) {
     } catch (error) {
       if (mine !== token || !ctx.isShown()) return;
       if (data) {
-        const again = `Couldn't read the settings again (${error.message}).`;
+        const again = inSentence(error, (why) => `Couldn't read the settings again (${why}).`);
         // After a change, said under it: after what saving it said, or instead of nothing when it couldn't be saved
         // (that is what matters, and it says why).
         if (!after || !flash || flash.id !== after) flash = { id: "model", tone: "error", text: again };
@@ -809,7 +809,7 @@ export function createSettings(ctx) {
         const reply = await postJSON("/coding/open");
         flash = { id: "cost-codes", tone: reply.ok ? "ok" : "error", text: reply.message };
       } catch (error) {
-        flash = { id: "cost-codes", tone: "error", text: `Couldn't open the workbook from here (${error.message}). It is at ${c.workbook}.` };
+        flash = { id: "cost-codes", tone: "error", text: `${inSentence(error, (why) => `Couldn't open the workbook from here (${why}).`)} It is at ${c.workbook}.` };
       }
       if (ctx.isShown()) draw();
     };

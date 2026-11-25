@@ -550,7 +550,8 @@
         }
       }, { signal: stop.signal });
     } catch (error) {
-      answer.text = (answer.text ? answer.text + "\n\n" : "") + `Something went wrong (${error.message}). Try again.`;
+      // CloseDesk not answering says so, and what to do, in its own words: not in brackets, nor with "Try again".
+      answer.text = (answer.text ? answer.text + "\n\n" : "") + (error.status === 0 ? error.message : `Something went wrong (${error.message}). Try again.`);
     }
     // Ended while it still thought (out of time, an error): the box keeps how long it thought, not a growing count.
     endThinking(answer);

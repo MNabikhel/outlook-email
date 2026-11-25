@@ -3,7 +3,7 @@
    reloading the page. */
 
 import { $, h, icon, replace, toast, plural, isTyping, keepTabIn, reducedMotion, skeletonList, skeletonReader } from "./dom.js";
-import { getJSON, postJSON } from "./api.js";
+import { getJSON, inSentence, postJSON } from "./api.js";
 import { MAIL_PAGE, listSpec, loadList, rowEl } from "./lists.js";
 import { emailView, fileView, errorView, closeTip } from "./reader.js";
 import { todayView, todayBrief, fraudView, codingView, digestView, emptyReader } from "./pages.js";
@@ -550,7 +550,7 @@ async function ensureList(key, { force = false, quiet = false } = {}) {
   } catch (error) {
     if (token !== S.listToken) return S.list;
     if (!S.list.items) {
-      S.list.error = `Couldn't load this list (${error.message}).`;
+      S.list.error = inSentence(error, (why) => `Couldn't load this list (${why}).`);
       renderItems();
     }
   }
@@ -792,7 +792,7 @@ async function showEmail(id, file, tab) {
     } catch (error) {
       clearTimeout(skeleton);
       if (token === S.emailToken) {
-        setReader(errorView(error.status === 404 ? "That email isn't here any more." : `Couldn't open it (${error.message}).`, () => showEmail(id, file, tab)), "error");
+        setReader(errorView(error.status === 404 ? "That email isn't here any more." : inSentence(error, (why) => `Couldn't open it (${why}).`), () => showEmail(id, file, tab)), "error");
       }
       return null;
     }
@@ -1654,7 +1654,7 @@ async function boot() {
   try {
     S.meta = await getJSON("/api/state");
   } catch (error) {
-    replace(reader, errorView(`CloseDesk didn't answer (${error.message}). Is it still running?`, () => location.reload()));
+    replace(reader, errorView(inSentence(error, (why) => `CloseDesk didn't answer (${why}). Is it still running?`), () => location.reload()));
     return;
   }
   renderTop();

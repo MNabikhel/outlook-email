@@ -12,6 +12,13 @@ class ApiError extends Error {
 // What a request says when CloseDesk doesn't answer at all, instead of the browser's own words ("Failed to fetch").
 const NOT_ANSWERING = "CloseDesk isn't answering. If it has closed, double-click CloseDesk to start it again.";
 
+/** ``error`` said in a sentence of the caller's, ``sentence(why)``: "Couldn't load this list (the server said 500).".
+    When CloseDesk isn't answering, its own words alone: they already say what to do, and in brackets they read
+    "Something went wrong (CloseDesk isn't answering. … start it again.). Try again." */
+export function inSentence(error, sentence) {
+  return error && error.status === 0 ? error.message : sentence(error ? error.message : "");
+}
+
 /** fetch, with plain words when CloseDesk can't be reached (it was stopped, say). A request cancelled on purpose
     still ends as an AbortError, which callers leave unsaid. */
 async function send(path, options) {

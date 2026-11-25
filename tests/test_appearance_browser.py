@@ -727,7 +727,7 @@ def test_a_save_whose_page_cant_be_read_again_says_both_under_the_box(settings, 
         line = "#set-appearance [data-status='colors']"
         page.wait_for_selector(f"{line}.error")
         said = page.inner_text(line)
-        assert said.startswith(web.NOTICES["colors"]) and "Couldn't read the settings again (CloseDesk isn't answering." in said, said
+        assert said.startswith(web.NOTICES["colors"]) and said.endswith(" CloseDesk isn't answering. If it has closed, double-click CloseDesk to start it again."), said
         assert page.is_checked("#set-colors") and appearance.current(store)["colors"] == "color-blind"
         assert page.inner_text("#set-model [data-status='model']") == ""
 
@@ -804,3 +804,69 @@ def test_a_long_error_message_has_its_warning_sign_at_its_first_line(settings, s
             assert abs(shown["close"] - shown["firstLine"]) <= 2, shown
             if lines > 1:
                 assert shown["width"] >= min(560, width - 24) - 1, shown
+
+
+# "CloseDesk isn't answering", said once ------------------------------------------------------------------------------
+
+NOT_ANSWERING = "CloseDesk isn't answering. If it has closed, double-click CloseDesk to start it again."
+
+
+def _said_once(text: str) -> None:
+    """The two sentences on their own, not in the brackets of another sentence ("Something went wrong (CloseDesk isn't
+    answering. … start it again.). Try again."), and not followed by "Try again" when they say to start it again."""
+    assert NOT_ANSWERING in text, text
+    assert ".)" not in text and "(CloseDesk" not in text and "Try again" not in text and text.count("CloseDesk isn't answering") == 1, text
+
+
+@pytest.mark.parametrize("where", ["workspace", "classic"])
+def test_a_question_closedesk_doesnt_answer_says_so_once(settings, store, page, where):
+    with serving(web.create_app(settings, store)) as base:
+        page.set_viewport_size({"width": 1280, "height": 900})
+        if where == "workspace":
+            page.goto(f"{base}/app/all")
+            page.click("#chat-btn")
+        else:
+            page.goto(f"{base}/chat/window")
+        page.route("**/chat", lambda route: route.abort())
+        page.fill("#chat textarea", "Are the Lakeside Tooling new bank details safe to use?")
+        page.press("#chat textarea", "Enter")
+        answer = page.wait_for_selector("#chat .msg:is(.bot, .assistant):has-text('isn\\'t answering')")
+        _said_once(answer.inner_text())
+
+
+def test_a_list_an_email_or_settings_closedesk_doesnt_answer_say_so_once(settings, loaded, page):
+    """Each was "Couldn't load this list (CloseDesk isn't answering. … start it again.).", and on opening the
+    workspace "CloseDesk didn't answer (CloseDesk isn't answering. …). Is it still running?". The "Try again" button
+    beside them is for after CloseDesk is started again: only the words are checked."""
+    said = "text=isn't answering"
+    with serving(web.create_app(settings, loaded)) as base:
+        page.set_viewport_size({"width": 1280, "height": 900})
+        # Opening the workspace.
+        page.route("**/api/state", lambda route: route.abort())
+        page.goto(f"{base}/app/all")
+        _said_once(page.wait_for_selector(f"#reader >> {said}").inner_text())
+        page.unroute("**/api/state")
+        # A list.
+        page.goto(f"{base}/app/all")
+        page.wait_for_selector("#list .item")
+        page.route("**/api/mail?**", lambda route: route.abort())
+        page.click(".rail-item[data-id='folder:important']")
+        _said_once(page.wait_for_selector(f"#list >> {said}").inner_text())
+        page.unroute("**/api/mail?**")
+        # An email.
+        page.goto(f"{base}/app/all")
+        page.wait_for_selector("#list .item")
+        page.route("**/api/mail/*", lambda route: route.abort())
+        page.click("#list .item a")
+        _said_once(page.wait_for_selector(f"#reader >> {said}").inner_text())
+        page.unroute("**/api/mail/*")
+        # Settings, read again after a change was saved.
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector("#set-colors")
+        page.route("**/api/settings", lambda route: route.abort() if route.request.method == "GET" else route.continue_())
+        page.click("#set-colors")
+        line = "#set-appearance [data-status='colors']"
+        page.wait_for_selector(f"{line}.error")
+        text = page.inner_text(line)
+        assert text.startswith(web.NOTICES["colors"]), text
+        _said_once(text)
