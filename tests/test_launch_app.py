@@ -543,6 +543,8 @@ def test_the_set_up_records_the_kind_of_processor(launch, monkeypatch, tmp_path)
     monkeypatch.setattr(launch.check_deps, "problem", lambda req: "")
     monkeypatch.setattr(launch.check_deps, "extra_installed", lambda reqs: True)
     monkeypatch.setattr(launch.platform, "machine", lambda: "x86_64")
+    # Nothing compiled to read (install is faked): on a Mac the test's own pydantic would say what it was built for.
+    monkeypatch.setattr(launch, "_compiled_for", lambda: "")
     assert launch.ensure_packages() == 0
     assert json.loads(launch.STATE.read_text(encoding="utf-8"))["machine"] == "x86_64"
     # Kept as it was set up: a start as the other kind (CloseDesk.app from the Dock) doesn't change it.
