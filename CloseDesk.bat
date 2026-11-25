@@ -11,6 +11,7 @@ rem
 rem   CloseDesk.bat               start CloseDesk
 rem   CloseDesk.bat --check       say what is and isn't in order, without starting it
 rem   CloseDesk.bat --update      fetch the newest CloseDesk (mail and settings are kept)
+rem   CloseDesk.bat --shortcut    add the CloseDesk shortcut (Desktop and Start menu) again
 rem   CloseDesk.bat --get-python  only when asked: download a Python for CloseDesk alone into your user
 rem                               folder (no admin rights; nothing is installed on the computer), and use it
 setlocal EnableExtensions

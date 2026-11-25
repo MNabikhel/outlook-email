@@ -4,8 +4,11 @@
 
 A copy of this checkout is unpacked as a download would be (into a folder with a space in its name), then:
 first start (set-up from nothing), second start (nothing to do), the folder renamed, the dashboard really
-answering, the CloseDesk shortcut's start (launch.py --app, without its window), an update that keeps the mail, and an
-update from Settings' Update button (CloseDesk stops, the launcher fetches the newer version and starts it again). CI runs this on macOS, Windows and Linux, once with the Python
+answering, the CloseDesk shortcut made (CloseDesk.lnk on Windows, CloseDesk.app on a Mac, kept in a folder of the
+check's, never on the computer's Desktop), the shortcut's start (launch.py --app, without its window), an update that
+keeps the mail, an update from Settings' Update button (CloseDesk stops, the launcher fetches the newer version and
+starts it again), a deleted shortcut left deleted until launch.py --shortcut, and the shortcut finding the folder again
+after it moved. CI runs this on macOS, Windows and Linux, once with the Python
 the machine has (nothing may be downloaded) and once asking CloseDesk to download its own, as a person without
 the rights to install Python would (CLOSEDESK_OWN_PYTHON=1 makes the first start ``--get-python``).
 Not a pytest file: it installs for real and takes minutes.
@@ -16,6 +19,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import plistlib
 import shutil
 import signal
 import socket
@@ -189,7 +193,99 @@ def app_start(folder: Path) -> None:
     assert "The CloseDesk window opens" in said[said.rindex(opening):], said[-4000:]
     if logged:
         assert "CloseDesk opening" not in "".join(output), "the app's words went to a console, not its log"
+    if sys.platform == "darwin":
+        # Python started through the link in CloseDesk.app (the Dock says CloseDesk), and it found CloseDesk.
+        assert "The window opens as CloseDesk.app" in said[said.rindex(opening):], said[-4000:]
     print(f"--- the app said what it did in {'its log, ' + str(app_log()) if logged else 'the terminal'}", flush=True)
+
+
+# The CloseDesk shortcut --------------------------------------------------------------------------------------------
+
+
+def shortcuts_made(shortcuts: Path) -> list[Path]:
+    """Where the CloseDesk shortcut goes here (in the check's own folder, CLOSEDESK_SHORTCUT_DIR)."""
+    if WINDOWS:
+        return [shortcuts / "Desktop" / "CloseDesk.lnk", shortcuts / "Start menu" / "CloseDesk.lnk"]
+    if sys.platform == "darwin":
+        return [shortcuts / "CloseDesk.app"]
+    return []
+
+
+def opens(folder: Path, place: Path) -> str:
+    """The folder the shortcut at ``place`` opens, read back as Windows or macOS would; checked to be CloseDesk's."""
+    if WINDOWS:
+        # Read with Windows' own IShellLink (pywin32, in the environment CloseDesk made).
+        done = subprocess.run(
+            [str(folder / ".venv" / "Scripts" / "python.exe"), "-c",
+             "import json, sys; from controller_inbox import shortcut; print(json.dumps(shortcut.read_link(sys.argv[1])))", str(place)],
+            capture_output=True, text=True, timeout=120,
+        )
+        assert done.returncode == 0, done.stdout + done.stderr
+        link = json.loads(done.stdout.strip().splitlines()[-1])
+        assert link["app_id"] == "CloseDesk.CloseDesk", link
+        opened = link["folder"]
+        assert Path(link["target"]) == Path(opened) / ".venv" / "Scripts" / "pythonw.exe", link
+        assert link["arguments"] == f'"{Path(opened) / "scripts" / "launch.py"}" --app', link
+        assert Path(link["icon"]).is_file() and link["flags"] & 0x40100 == 0x40100, link
+        return opened
+    with (place / "Contents" / "Info.plist").open("rb") as handle:
+        info = plistlib.load(handle)
+    assert info["CFBundleName"] == "CloseDesk" and info["CFBundleExecutable"] == "CloseDesk", info
+    lint = subprocess.run(["plutil", "-lint", str(place / "Contents" / "Info.plist")], capture_output=True, text=True)
+    assert lint.returncode == 0, lint.stdout + lint.stderr
+    script = place / "Contents" / "MacOS" / "CloseDesk"
+    assert os.access(script, os.X_OK), "the app's program can't be run"
+    python = place / "Contents" / "MacOS" / "CloseDesk-python"
+    assert python.is_symlink() and Path(os.path.realpath(python)).is_file(), "the app's link to Python leads nowhere"
+    marks = subprocess.run(["xattr", "-lr", str(place)], capture_output=True, text=True).stdout
+    assert "com.apple.quarantine" not in marks, "made on this Mac, the app must carry no downloaded-from-the-internet mark"
+    return info["CloseDeskFolder"]
+
+
+def wait_for_shortcuts(folder: Path, shortcuts: Path, *, wait: float = 120) -> None:
+    """The shortcut, made (or put right) beside CloseDesk's start, opening ``folder``."""
+    places = shortcuts_made(shortcuts)
+    if not places:
+        assert not shortcuts.exists() or not any(shortcuts.iterdir()), "no CloseDesk shortcut on Linux"
+        print("--- no CloseDesk shortcut here (Linux), as it should be", flush=True)
+        return
+    deadline = time.monotonic() + wait
+    found: dict = {}
+    while time.monotonic() < deadline:
+        found = {}
+        for place in places:
+            if place.exists():
+                try:
+                    found[place] = opens(folder, place)
+                except (OSError, ValueError, KeyError, plistlib.InvalidFileException):
+                    pass  # being written
+        if len(found) == len(places) and all(Path(opened) == folder.resolve() for opened in found.values()):
+            break
+        time.sleep(1)
+    assert len(found) == len(places), f"the CloseDesk shortcut wasn't made: {found} (of {places})"
+    for place, opened in found.items():
+        assert Path(opened) == folder.resolve(), f"{place} opens {opened}, not {folder}"
+    print(f"--- the CloseDesk shortcut opens {folder}: {', '.join(str(place) for place in places)}", flush=True)
+
+
+def start_dashboard(folder: Path) -> subprocess.Popen:
+    """CloseDesk started by its launcher, answering; stop it with stop()."""
+    port = free_port()
+    process = subprocess.Popen(
+        launcher(folder, "--no-browser", "--port", str(port)), cwd=folder, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=not WINDOWS,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0,
+        env={**os.environ, "CONTROLLER_INBOX_UPDATE_CHECK": "false"},
+    )
+    for _ in range(300):
+        answer = health(port)
+        if answer and answer.get("app") == "closedesk":
+            return process
+        if process.poll() is not None:
+            break
+        time.sleep(1)
+    stop(process)
+    raise SystemExit(f"FAILED: the dashboard didn't answer\n{process.stdout.read().decode(errors='replace')}")
 
 
 def free_port() -> int:
@@ -242,6 +338,9 @@ def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(errors="replace")
     work = Path(tempfile.mkdtemp(prefix="closedesk smoke "))
+    # The CloseDesk shortcut goes here, not on this computer's Desktop or in its Applications.
+    shortcuts = work / "shortcuts"
+    os.environ["CLOSEDESK_SHORTCUT_DIR"] = str(shortcuts)
     folder = work / "Close Desk"
     export(folder, commit="a" * 40)
     print(f"Launcher smoke test in {folder} (own Python: {os.environ.get('CLOSEDESK_OWN_PYTHON', 'no')})", flush=True)
@@ -302,11 +401,19 @@ def main() -> int:
         # A second CloseDesk started while this one is open shows it and leaves, instead of failing on the port.
         out = run(folder, "--no-browser", "--port", str(port))
         assert "already open in another window" in out, out
+        # The first start of the dashboard made the CloseDesk shortcut (the starts with --check before it didn't).
+        wait_for_shortcuts(folder, shortcuts)
     finally:
         stop(process)
 
     # The CloseDesk shortcut's start, without the window.
     app_start(folder)
+    # The person deletes the shortcut (the Desktop's, or the Mac's app): it isn't put back by the starts below.
+    places = shortcuts_made(shortcuts)
+    if places and places[0].is_dir():
+        shutil.rmtree(places[0])
+    elif places:
+        places[0].unlink()
 
     # An update: a newer download, with the mail and settings left alone.
     (folder / "data").mkdir(exist_ok=True)
@@ -327,6 +434,26 @@ def main() -> int:
     # The Update button in Settings: CloseDesk stops, the launcher updates it and starts the new one.
     update_from_settings(folder, newer_zip(work, "c" * 40, "newest"), before="b" * 40, after="c" * 40)
     assert (folder / "data" / "keep.txt").read_text() == "my mail"
+
+    # The deleted shortcut stayed deleted through those starts; asked for, it is made again.
+    if places:
+        assert not places[0].exists(), f"the shortcut the person deleted was put back: {places[0]}"
+    out = run(folder, "--shortcut")
+    if places:
+        assert "CloseDesk" in out and "couldn't" not in out, out
+    else:
+        assert "no CloseDesk shortcut on Linux" in out, out
+    wait_for_shortcuts(folder, shortcuts, wait=5)
+
+    # The folder moved: its next start points the shortcut at it.
+    moved = work / "Close Desk moved"
+    folder.rename(moved)
+    folder = moved
+    process = start_dashboard(folder)
+    try:
+        wait_for_shortcuts(folder, shortcuts)
+    finally:
+        stop(process)
 
     if WINDOWS and not own:
         install_manager_py(work, folder)

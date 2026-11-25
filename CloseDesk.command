@@ -11,6 +11,7 @@
 #   CloseDesk.command               start CloseDesk
 #   CloseDesk.command --check       say what is and isn't in order, without starting it
 #   CloseDesk.command --update      fetch the newest CloseDesk (mail and settings are kept)
+#   CloseDesk.command --shortcut    put CloseDesk in Applications again (it opens CloseDesk in a window of its own)
 #   CloseDesk.command --get-python  only when asked: download a Python for CloseDesk alone into your user
 #                                   folder (no admin rights; nothing is installed on the computer), and use it
 cd "$(dirname "$0")" || exit 1
