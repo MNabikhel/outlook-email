@@ -819,7 +819,8 @@ def update_in_window(folder: Path, archive: Path, *, before: str, after: str) ->
     commits: list[str] = []
     try:
         deadline = time.monotonic() + 300
-        while SHOWED not in log_since(start):
+        # Pressed in the workspace: the window shows it again as the new version.
+        while SHOWED + "/app" not in log_since(start):
             assert process.poll() is None and time.monotonic() < deadline, (
                 f"the window didn't show CloseDesk (exit {process.poll()})\n--- its log\n{log_since(start)[-6000:]}")
             time.sleep(0.5)
@@ -852,10 +853,74 @@ def update_in_window(folder: Path, archive: Path, *, before: str, after: str) ->
     assert log.rindex(SHOWED) > log.index("CloseDesk was updated"), f"the window didn't show the new version\n{said}"
     both_uis(log[log.index("CloseDesk was updated"):], "the new version")
     as_in_a_browser(log[log.index("CloseDesk was updated"):], "the new version")
+    again = pages_shown(log[log.index("CloseDesk was updated"):])
+    assert again[0] == "/app", f"the window didn't show the workspace again after the update, where Update now was pressed: {again}\n{said}"
     assert stopped, f"CloseDesk didn't stop with its window after the update\n{said}"
     assert (folder / "docs" / "ONLY-IN-THE-UPDATE.txt").read_text(encoding="utf-8") == archive.stem
     print(f"--- the window updated CloseDesk to {after[:7]}, showed the new version, and closed (versions that answered: "
           f"{', '.join(commit[:7] for commit in commits)})", flush=True)
+
+
+def quit_during_update(folder: Path, archive: Path) -> None:
+    """A Mac: Update now in the window, then CloseDesk quit as Cmd+Q quits it (the Dock's Quit and logging out go the
+    same way: macOS's terminate:, which ends the program without the window closing as a window does, so nothing after
+    webview.start() runs). The update the person answered runs all the same, by itself, and CloseDesk isn't opened
+    again."""
+    port = free_port()
+    start = log_size()
+    output: list[str] = []
+    process = subprocess.Popen(
+        [str(env_python(folder, windowless=True)), str(folder / "scripts" / "launch.py"), "--app", "--port", str(port)],
+        cwd=folder, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+        # The window quits itself as Cmd+Q does, nothing asked, once Update now is answered (app_window.SMOKE_QUIT_ENV).
+        env={**os.environ, **WINDOW_CHECK, "CLOSEDESK_APP_SMOKE_HOLD": "240", "CLOSEDESK_APP_SMOKE_QUIT": "1",
+             "CLOSEDESK_UPDATE_URL": archive.as_uri()},
+    )
+    reader = threading.Thread(target=lambda: output.extend(line.decode(errors="replace") for line in process.stdout), daemon=True)
+    reader.start()
+    marker = folder / "docs" / "ONLY-IN-THE-UPDATE.txt"
+
+    def updated() -> bool:
+        try:
+            return marker.read_text(encoding="utf-8") == archive.stem and "Everything CloseDesk needs is in order." in log_since(start)
+        except OSError:
+            return False
+
+    try:
+        deadline = time.monotonic() + 300
+        while SHOWED + "/app" not in log_since(start):
+            assert process.poll() is None and time.monotonic() < deadline, (
+                f"the window didn't show CloseDesk (exit {process.poll()})\n--- its log\n{log_since(start)[-6000:]}")
+            time.sleep(0.5)
+        print(f"--- Update now pressed in the window: {press_update(port)}", flush=True)
+        deadline = time.monotonic() + 120
+        while process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.5)
+        if process.poll() is None:
+            raise SystemExit(f"FAILED: the window didn't quit as Cmd+Q quits it\n--- its log\n{log_since(start)[-6000:]}")
+        # Started before macOS ended the window's program, or not at all.
+        started = ("the update runs by itself", "the update finishes by itself")
+        for _ in range(20):
+            if any(line in log_since(start) for line in started):
+                break
+            time.sleep(0.5)
+        assert any(line in log_since(start) for line in started), (
+            f"quitting CloseDesk dropped the update the person answered\n--- its log\n{log_since(start)[-6000:]}")
+        deadline = time.monotonic() + 600
+        while not updated() and time.monotonic() < deadline:
+            time.sleep(1)
+        stopped = not listening(port)
+    finally:
+        stop(process)
+        reader.join(timeout=10)
+    log = log_since(start)
+    said = f"--- its log\n{log[-8000:]}\n--- its output\n{''.join(output)[-2000:]}"
+    assert process.returncode == 0, f"the window ended with {process.returncode} when quit\n{said}"
+    assert "The check quits CloseDesk as Cmd+Q does." in log and "CloseDesk was quit" in log, f"the window wasn't quit as Cmd+Q quits it\n{said}"
+    assert window_closed(log) == 0, f"the quit window's last line isn't there\n{said}"
+    assert updated(), f"the update the person answered didn't finish after CloseDesk was quit\n{said}"
+    assert stopped, f"CloseDesk was still open after it was quit (port {port})\n{said}"
+    print("--- quit as Cmd+Q quits it after Update now: the update ran by itself, and CloseDesk stayed closed", flush=True)
 
 
 def window_check() -> int:
@@ -863,8 +928,8 @@ def window_check() -> int:
     launcher, the shortcut made with ``--shortcut`` and read back, then the window opened three ways: as the shortcut
     runs it, onto a CloseDesk already open, and through the shortcut itself as a double-click opens it. Each time
     CloseDesk's page has to load in it, the window closes itself, and CloseDesk stops with it. Then Update now in the
-    window: it updates CloseDesk and shows the new version. On a Mac the Dock has to call it CloseDesk (lsappinfo),
-    never Python. On Linux, where there is no window, its start has to say so, and the rest is checked with a stand-in
+    window: it updates CloseDesk and shows the new version (the workspace, where it was pressed). On a Mac the Dock has
+    to call it CloseDesk (lsappinfo), never Python, and Update now followed by a quit as Cmd+Q quits still updates. On Linux, where there is no window, its start has to say so, and the rest is checked with a stand-in
     for the window itself (tests/stand_in_window). Windows
     needs Microsoft Edge WebView2 Runtime (CI installs it first). CLOSEDESK_SMOKE_SHOTS: a folder for the screenshots
     and the app's log."""
@@ -925,6 +990,8 @@ def window_check() -> int:
             stop(dashboard)
         problems += double_click(folder, shortcuts)
         update_in_window(folder, newer_zip(work, "b" * 40, "newer"), before="a" * 40, after="b" * 40)
+        if MAC:
+            quit_during_update(folder, newer_zip(work, "c" * 40, "newest"))
     finally:
         keep_log()
         if MAC:

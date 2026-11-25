@@ -51,12 +51,17 @@ class Window:
         self.title, self.js_api = title, js_api
         self.localization = dict(options.get("localization") or {})
         self.confirm_close = False
+        self.url = None  # the address shown (None for the window's own pages), as get_current_url says it
         self.gone = threading.Event()
         self.events = type("Events", (), {})()
         for name in ("closing", "closed", "loaded", "shown", "initialized"):
             setattr(self.events, name, Event(self))
 
+    def get_current_url(self):
+        return self.url
+
     def load_html(self, html: str) -> None:
+        self.url = None
         heading = html[html.find("<h1>") + 4 : html.find("</h1>")]
         print(f"[stand-in window] shows: {heading}", flush=True)
         self.events.loaded.clear()
@@ -64,6 +69,7 @@ class Window:
 
     def load_url(self, url: str) -> None:
         self.events.loaded.clear()
+        self.url = url
 
         def load() -> None:
             try:

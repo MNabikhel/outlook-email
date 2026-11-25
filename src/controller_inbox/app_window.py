@@ -74,6 +74,9 @@ WINDOW_ENV = "CLOSEDESK_WINDOW"
 # click: what would be a message box is in the log only.
 SMOKE_ENV = "CLOSEDESK_APP_SMOKE"
 SMOKE_HOLD_ENV = "CLOSEDESK_APP_SMOKE_HOLD"
+# CI's check on a Mac: once Update now is answered, the window quits as Cmd+Q quits it (macOS's terminate:), nothing
+# asked; the update has to run all the same.
+SMOKE_QUIT_ENV = "CLOSEDESK_APP_SMOKE_QUIT"
 DIDNT_OPEN = 2
 # How the window's process ends when it has said itself, in a message box, why CloseDesk can't open: launch.py, which
 # otherwise says so for a window that ends with an error, then says nothing more.
@@ -138,6 +141,12 @@ GONE_FOR_GOOD = 30
 UPDATE_LONGEST = 30 * 60
 # An update says it is under way in this file in CloseDesk's folder (launch.py's UPDATING_MARK).
 UPDATING_MARK = ".closedesk-updating"
+# The pages a form sent back, which can't be loaded again as they are: shown again as the page they belong to.
+SENT_BACK = {"/settings/update": "/settings#update"}
+# What isn't a page to show again: CloseDesk's answers to the pages' scripts.
+NOT_PAGES = ("/api/", "/health")
+# Said as macOS quits CloseDesk (Cmd+Q, the Dock's Quit, logging out).
+QUIT = "CloseDesk was quit (Cmd+Q, the Dock's Quit, or logging out)."
 # How CloseDesk ends when another took its port first: "already open in another window" (0), or the port couldn't be
 # opened (3).
 TAKEN = (0, PORT_TAKEN)
@@ -330,6 +339,57 @@ def settle_mac_name(*, platform: str | None = None) -> None:
     except Exception:  # pywebview's part for macOS is missing: there is no window to name
         pass
     os.environ.pop(MAC_APP_PATH, None)
+
+
+# macOS: what runs as CloseDesk is quit, and the one that hears it (kept, so that it isn't let go).
+_QUITTING: list = []
+_HEARS_QUIT: list = []
+
+
+def when_mac_quits(action) -> None:
+    """macOS: run ``action`` as CloseDesk is quit (Cmd+Q, the Dock's Quit, logging out), once the window's closing
+    handler said yes, on the window's own thread. macOS ends the program as soon as those told have done (pywebview
+    has no applicationWillTerminate_), and webview.start() never returns: what follows the window's close is done in
+    ``action``. Said in the log when it can't be listened for."""
+    _QUITTING.append(action)
+    if _HEARS_QUIT:
+        return
+    try:
+        from AppKit import NSApplication, NSApplicationWillTerminateNotification
+        from Foundation import NSNotificationCenter, NSObject
+
+        class CloseDeskQuits(NSObject):
+            def willQuit_(self, notification):  # noqa: N802 (Objective-C's name: willQuit:)
+                _mac_quits(NSApplication.sharedApplication())
+
+        hears = CloseDeskQuits.alloc().init()
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            hears, "willQuit:", NSApplicationWillTerminateNotification, None
+        )
+        _HEARS_QUIT.append(hears)
+    except Exception as exc:  # the window still works; quitting it drops an update asked for meanwhile
+        print(f"Couldn't listen for CloseDesk being quit: {_said(exc)}", flush=True)
+
+
+def _mac_quits(application) -> None:
+    try:  # out of sight at once: CloseDesk can take a few seconds to stop
+        for window in application.windows():
+            window.orderOut_(None)
+    except Exception:
+        pass
+    for action in list(_QUITTING):
+        try:
+            action()
+        except Exception:
+            traceback.print_exc()
+
+
+def quit_mac_app() -> None:
+    """macOS: quit CloseDesk as Cmd+Q does (NSApplication's terminate:), on the window's own thread (CI's check)."""
+    from AppKit import NSApplication
+    from PyObjCTools import AppHelper
+
+    AppHelper.callAfter(NSApplication.sharedApplication().terminate_, None)
 
 
 def mac_bundle_id() -> str:
@@ -717,17 +777,21 @@ class App:
         self.url, self.port, self.owned, self.log, self.host = url, port, owned, log, host
         self.window = None
         self.server = None  # the CloseDesk this window started, while it runs
-        self.update = None  # the update under way
+        self.update = None  # the update under way, or the last one
+        self.update_for = None  # the CloseDesk that update was for (it stopped for it)
         self.updating = False
         self.closing = False  # the window is going: nothing starts again
         self.on_purpose = False  # CloseDesk closes the window itself: nothing is asked
         self.fallback: tuple[str, str] | None = None  # the window can't show CloseDesk: the browser does
         self.code = 0
+        self.stopped = False  # what follows the window's close is done (once: its close, or macOS quitting)
+        self.closed_said = False  # the window's last line is in the log
         self.ready = threading.Event()  # CloseDesk's page said it loaded
         self.ready_path = ""
         self.ready_port = ""  # the port the page says it came from (CI's check: the CloseDesk it was to show)
         self.smoke = _seconds(SMOKE_ENV)
         self.smoke_hold = _seconds(SMOKE_HOLD_ENV)
+        self.smoke_quit = bool(self.smoke and os.environ.get(SMOKE_QUIT_ENV))
         self.platform = sys.platform
         self._lock = threading.Lock()
         # What runs things on the computer (the tests give their own).
@@ -740,6 +804,8 @@ class App:
         self.working = lambda: _working(self.url)
         self.open_url = webbrowser.open
         self.open_launcher = open_launcher
+        self.when_quitting = when_mac_quits
+        self.terminate = quit_mac_app
         self.storage = user_dir() / "window"
         # Written by the CloseDesk this window started the moment it is to stop to update (updates.WINDOW_ASKED_ENV).
         self.asked_mark = user_dir() / f"update-asked-{os.getpid()}"
@@ -765,6 +831,9 @@ class App:
         self.window.events.initialized += self.check_engine
         self.window.events.closing += self.on_closing
         self.window.events.closed += self.on_closed
+        if self.platform == "darwin":
+            # Quit (Cmd+Q, the Dock's Quit, logging out), macOS ends the program before webview.start() returns.
+            self.when_quitting(self.quitting)
         try:
             # Not private: the pages keep their own settings (theme, drafts, what was said) from one start to the next.
             webview.start(self.supervise, private_mode=False, storage_path=self._storage(), icon=self._icon())
@@ -809,10 +878,14 @@ class App:
         CloseDesk to stop, but not for good.
 
         Closed after Update now but before CloseDesk had stopped for it (it takes a few seconds), the window waits for
-        CloseDesk to stop, a Mac's too, and then starts the update the person asked for, as a program of its own."""
+        CloseDesk to stop, a Mac's too, and then starts the update the person asked for, as a program of its own: unless
+        the window had started that one already (an update the window ran before, done, was for an earlier CloseDesk).
+        Done once, whether the window closed or macOS quit CloseDesk (``quitting``)."""
         with self._lock:
-            self.closing = True
-            server, update = self.server, self.update
+            if self.stopped:
+                return
+            self.stopped = self.closing = True
+            server, update, updated = self.server, self.update, self.update_for
         if update is not None and update.poll() is None:
             if self.platform == "darwin":
                 print("The window was closed during the update: the update finishes by itself.", flush=True)
@@ -824,15 +897,30 @@ class App:
                 self._let_go(server)
             else:
                 self._end(server)
-        if update is None and server is not None and server.poll() == UPDATE:
-            self._update_after_close()
+        if server is not None and server is not updated and server.poll() == UPDATE:
+            self._update_after_close(server)
         self._forget_update_asked()
 
-    def _update_after_close(self) -> None:
+    def quitting(self) -> None:
+        """macOS: CloseDesk is being quit (Cmd+Q, the Dock's Quit, logging out), and the window's closing handler said
+        yes. macOS ends the program once this returns, without webview.start() returning: what follows the window's
+        close is done here (CloseDesk it started stops, and an update asked for still runs), with its last line."""
+        print(QUIT, flush=True)
+        self.stop()
+        print(CLOSED.format(code=self.code), flush=True)
+        self.closed_said = True
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except (AttributeError, OSError, ValueError):
+                pass
+
+    def _update_after_close(self, server) -> None:
         """CloseDesk the window started stopped to update once the window had closed: the update runs all the same, as
         a program of its own (waited for as an update the window was closed during is: not on a Mac)."""
         print("CloseDesk stopped to update after its window was closed: the update runs by itself.", flush=True)
         self._update_until = time.monotonic() + self.update_longest
+        self.update_for = server
         try:
             self.update = self._start_update()
         except OSError as exc:  # the next opening says CloseDesk wasn't updated, and where to read why
@@ -969,6 +1057,7 @@ class App:
                 # "Python" here means the Dock shows the window as Python's (CloseDesk.app's link wasn't used).
                 print(f"macOS shows the window as {named}.", flush=True)
         reopen = chosen_again = False
+        again = ""  # the page shown again once CloseDesk is back after an update ("": its first page)
         while not self.closing:
             if not self.owned:
                 # A CloseDesk this window didn't start: shown, and left open when the window closes. Watched meanwhile:
@@ -1005,7 +1094,7 @@ class App:
                     print(f"CloseDesk stopped as it started (exit code {server.poll()}).", flush=True)
                     self._failed(stopped_page(self.log))
                 return
-            self._show_closedesk()
+            self._show_closedesk(again)
             code = self._until_stopped(server)
             if self.closing:
                 return
@@ -1013,6 +1102,8 @@ class App:
                 print(f"CloseDesk stopped by itself (exit code {code}).", flush=True)
                 self._failed(stopped_page(self.log))
                 return
+            # What the person was looking at, shown again as the new version (a browser tab loads it again too).
+            again = self._page_shown()
             if not self._update():
                 return
             reopen = True
@@ -1063,6 +1154,8 @@ class App:
                 if self._update_asked():
                     self._ask_on_close(UPDATING_CLOSE)
                     told = True
+                    if self.smoke_quit:
+                        self._quit_for_check()
 
     def _watch_other(self) -> bool:
         """The window shows a CloseDesk it didn't start. True when that one has gone for good: it stopped answering, its
@@ -1077,7 +1170,7 @@ class App:
                 if away is not None:
                     print("The CloseDesk the window shows is back: shown again.", flush=True)
                     away = None
-                    self._show_closedesk()
+                    self._show_closedesk(self._page_shown())
                 continue
             if self.theirs():
                 # Another folder's CloseDesk, or another person's, has the port now: never shown in this window.
@@ -1138,21 +1231,49 @@ class App:
             self.code = 1
             self.close_on_purpose()
 
-    def _show_closedesk(self) -> None:
+    def _page_shown(self) -> str:
+        """The CloseDesk page the window shows now (its path, with what follows it), as the window reads its address,
+        which follows the workspace from page to page; the page's own word when the window can't say. "" when it isn't
+        one of this CloseDesk's."""
+        try:
+            current = str(self.window.get_current_url() or "")
+        except Exception:
+            current = ""
+        if not current:
+            return self.ready_path
+        shown, here = urlsplit(current), urlsplit(self.url)
+        if shown.scheme != here.scheme or shown.netloc != here.netloc:
+            return ""
+        return shown.path + (f"?{shown.query}" if shown.query else "") + (f"#{shown.fragment}" if shown.fragment else "")
+
+    def _address(self, path: str = "") -> str:
+        """Where the window shows CloseDesk: at ``path``, one of its pages (the one shown before), or its first page."""
+        if not path:
+            return self.url
+        path = SENT_BACK.get(urlsplit(path).path, path)
+        if not path.startswith("/") or path.startswith("//") or len(path) > 2000 or path.startswith(NOT_PAGES):
+            return self.url
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in path):
+            return self.url
+        return self.url.rstrip("/") + path
+
+    def _show_closedesk(self, path: str = "") -> None:
+        """CloseDesk in the window: at ``path`` (the page it showed before an update), or its first page."""
         self.ready.clear()
         try:
-            self.window.load_url(self.url)
+            self.window.load_url(self._address(path))
         except Exception as exc:
             print(f"Couldn't show CloseDesk in the window: {_said(exc)}", flush=True)
             return
         if not self.smoke:
             return
         shown = self._check_shows()
-        if shown and self.ready_path != "/app":
-            # The check's folder has no mail, so "/" is a classic page: the workspace is loaded too, so that its own
-            # scripts run in the real window's engine.
+        if shown and (self.ready_path != "/app" or path):
+            # The other UI too, so that its own scripts run in the real window's engine: the workspace after "/" (the
+            # check's folder has no mail, so that is a classic page), and a classic page after the page shown again
+            # after an update (the workspace, where the check pressed Update now).
             self.ready.clear()
-            self.window.load_url(self.url + "app")
+            self.window.load_url(self.url if self.ready_path.startswith("/app") else self.url + "app")
             shown = self._check_shows()
         if shown:
             self.code = 0
@@ -1162,7 +1283,7 @@ class App:
             # isn't closed again, and CloseDesk stopping meanwhile (to update) is followed through.
             until, self.smoke_hold = time.monotonic() + self.smoke_hold, 0
             while not self.closing and time.monotonic() < until:
-                if self.owned and self.server is not None and self.server.poll() is not None:
+                if self.owned and self.server is not None and (self.server.poll() is not None or self._update_asked()):
                     return
                 time.sleep(min(self.poll, 0.25))
             if self.closing:
@@ -1216,7 +1337,10 @@ class App:
                 if self.closing:
                     return False
                 self._update_until = time.monotonic() + self.update_longest
+                self.update_for = self.server
                 self.update = self._start_update()
+            if self.smoke_quit:
+                self._quit_for_check()  # CloseDesk had stopped before the window saw Update now answered
             code = self._wait_for_update(self.update)
             if code == UPDATE_UNDER_WAY:
                 # Another update runs in the folder (CloseDesk-Update, double-clicked meanwhile): CloseDesk opened now
@@ -1235,6 +1359,20 @@ class App:
         if code and code != UPDATE_UNDER_WAY:
             print(f"The update ended with exit code {code}: CloseDesk opens as it is.", flush=True)
         return not self.closing
+
+    def _quit_for_check(self) -> None:
+        """CI's check on a Mac: quit as Cmd+Q does (macOS's terminate:), with nothing asked, once Update now is answered:
+        the update has to run all the same, by itself."""
+        if self.platform != "darwin" or self.on_purpose:
+            return
+        print("The check quits CloseDesk as Cmd+Q does.", flush=True)
+        self.on_purpose = True
+        try:
+            self.terminate()
+        except Exception as exc:
+            print(f"Couldn't quit CloseDesk as Cmd+Q does: {_said(exc)}", flush=True)
+            self.code = 1
+            self.close_on_purpose()
 
     def _start_update(self):
         """``launch.py --update``: a program of its own, which nothing that ends the window ends (a Mac's window leaves
@@ -1334,6 +1472,7 @@ def _open(args) -> int:
     code = app.run()
     if app.fallback:
         code = browser_instead(app.fallback, args)
-    print(CLOSED.format(code=code), flush=True)
+    if not getattr(app, "closed_said", False):
+        print(CLOSED.format(code=code), flush=True)
     _leave(code)
     return code  # pragma: no cover (not reached)
