@@ -169,11 +169,27 @@ export async function loadList(spec, signal, want = MAIL_PAGE) {
 
 const chip = (text, cls = "", iconName = "") => h("span", { class: `chip ${cls}` }, iconName ? icon(iconName, 12) : null, text);
 // Held as possible payment fraud: "Files locked" when it has files; without any, that it is held (no files to look for).
-const heldChip = (d) => (d.files ? chip("Files locked", "chip-danger", "lock") : chip("Held: possible fraud", "chip-danger", "alert"));
+// That one isn't shown while the importance is written on each email: the row's word says "Held for fraud" (app.css).
+const heldChip = (d) =>
+  d.files ? chip("Files locked", "chip-danger", "lock") : chip("Held: possible fraud", "chip-danger chip-held", "alert");
+// The importance in words beside the colored edge, shown when Settings → Appearance asks for it (data-importance-words
+// on <html>), so ticking the box needs no list drawn again. Critical and High as the task list's tags; Medium and Low
+// the quiet grey tag. An email held as possible payment fraud has the held edge, not its importance's, and says so:
+// its other chip may say only "Files locked".
+export const levelTag = (d) =>
+  d.locked
+    ? h("span", { class: "tag tag-held item-level" }, "Held for fraud")
+    : d.importance && d.importance_label
+      ? h("span", { class: `tag tag-prio-${d.importance} item-level` }, d.importance_label)
+      : null;
+
+// The edge of an email listed in a card (the daily digest, Today's emails to verify by phone), as in the lists: a
+// held one the red of danger, a Critical or High one its importance's, the others none (app.css, .plain-list).
+export const edgeClass = (d) => (d.locked ? "is-locked" : d.importance === "critical" || d.importance === "high" ? `imp-${d.importance}` : "");
 
 function mailRow(d) {
   return [
-    h("div", { class: "item-row1" }, h("span", { class: "item-from" }, d.sender || "(unknown sender)"), h("time", { class: "item-when", title: d.when_full }, d.when)),
+    h("div", { class: "item-row1" }, levelTag(d), h("span", { class: "item-from" }, d.sender || "(unknown sender)"), h("time", { class: "item-when", title: d.when_full }, d.when)),
     h("div", { class: "item-subj" }, d.subject),
     d.summary || d.why ? h("div", { class: "item-snip" }, d.summary || d.why) : null,
     h(
@@ -195,6 +211,7 @@ function focusRow(d) {
       "div",
       { class: "item-row1" },
       h("span", { class: `tag tag-${d.kind}` }, d.label),
+      levelTag(d),
       d.amount_label ? h("span", { class: "item-amount" }, d.amount_label) : null
     ),
     h("div", { class: "item-subj" }, d.title),
@@ -224,12 +241,15 @@ function taskRow(d) {
   ];
 }
 
+// A Caution row says its importance when asked, as the other lists do; a Blocked one held as possible fraud doesn't
+// say "Held for fraud" beside "Blocked".
 function fraudRow(d) {
   return [
     h(
       "div",
       { class: "item-row1" },
       h("span", { class: `tag ${d.level === "high" ? "tag-fraud" : "tag-due_soon"}` }, d.level === "high" ? "Blocked" : "Caution"),
+      d.level === "high" && d.locked ? null : levelTag(d),
       d.cleared ? h("span", { class: "chip" }, "you cleared it") : null,
       h("span", { class: "item-when" }, `score ${d.score} · ${d.when}`)
     ),
@@ -247,6 +267,7 @@ function codingRow(d) {
       "div",
       { class: "item-row1" },
       h("span", { class: `tag tag-coding-${d.status}` }, CODING_STATE[d.status] || d.status),
+      levelTag(d),
       h("span", { class: "item-when" }, d.when)
     ),
     h("div", { class: "item-subj" }, d.subject),
@@ -254,6 +275,9 @@ function codingRow(d) {
     h(
       "div",
       { class: "item-meta" },
+      // Held as possible payment fraud, said in words as on the mail lists: its held edge is nearly the red of a
+      // Critical one's, and a confirmed code beside it read as ready to enter.
+      d.locked ? heldChip(d) : null,
       d.amount_label ? chip(d.amount_label, "chip-num") : null,
       d.codes.length ? d.codes.map((c) => h("code", { class: "cost-code", title: c.description }, c.code)) : h("span", { class: "item-cat" }, "no code")
     ),

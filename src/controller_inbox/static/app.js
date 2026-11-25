@@ -330,7 +330,9 @@
       if (turn.text) html += `<div class="msg-text">${formatAnswer(turn.text, turn.sources)}</div>`;
       else if (!now) html += `<div class="msg-text">${thinking ? "" : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
       if (turn.checks && turn.checks.length) {
-        html += `<ul class="msg-check">${turn.checks.map((item) => `<li>${escapeHtml(item.text)}</li>`).join("")}</ul>`;
+        // A correction has the tick, and a figure to check (a warning) the warning sign and makes the box amber.
+        const warned = turn.checks.some((item) => item.warning);
+        html += `<ul class="msg-check${warned ? " warn" : ""}">${turn.checks.map((item) => `<li class="${item.warning ? "warn" : "ok"}">${escapeHtml(item.text)}</li>`).join("")}</ul>`;
       }
       if (turn.context) html += `<p class="msg-context">${escapeHtml(turn.context)} <a href="/settings">Setup</a></p>`;
       if (turn.vision && !turn.pending) html += visionOffer(turn.vision);
@@ -548,7 +550,8 @@
         }
       }, { signal: stop.signal });
     } catch (error) {
-      answer.text = (answer.text ? answer.text + "\n\n" : "") + `Something went wrong (${error.message}). Try again.`;
+      // CloseDesk not answering says so, and what to do, in its own words: not in brackets, nor with "Try again".
+      answer.text = (answer.text ? answer.text + "\n\n" : "") + (error.status === 0 ? error.message : `Something went wrong (${error.message}). Try again.`);
     }
     // Ended while it still thought (out of time, an error): the box keeps how long it thought, not a growing count.
     endThinking(answer);
@@ -1142,6 +1145,37 @@
       }
     }
   });
+
+  /* The colors chosen in Setup are written on <html> as a page is sent. A page the browser kept as it was (Back,
+     from its back/forward cache) or one left open (the chat in a window of its own) asks again when it is shown, so
+     it follows a change made since in Setup or the workspace. */
+  async function followColors() {
+    try {
+      const response = await fetch("/api/settings/colors", { headers: { "X-CloseDesk": "1" }, cache: "no-store" });
+      if (!response.ok) return;
+      const look = (await response.json()).appearance;
+      const html = document.documentElement;
+      if (look.colors === "color-blind") html.dataset.colors = "color-blind";
+      else delete html.dataset.colors;
+      if (look.importance_words) html.dataset.importanceWords = "on";
+      else delete html.dataset.importanceWords;
+      // Setup → Colors: its boxes show the change too, and what they show is what Save compares with (the form's
+      // _was fields). A box ticked or unticked here and not saved yet stays as it is.
+      const form = $("#colors form");
+      if (!form) return;
+      for (const [name, on, value] of [["colors", look.colors === "color-blind", (yes) => (yes ? "color-blind" : "standard")], ["importance_words", Boolean(look.importance_words), (yes) => (yes ? "1" : "0")]]) {
+        const box = form.querySelector(`input[name="${name}"]`);
+        const was = form.querySelector(`input[name="${name}_was"]`);
+        if (!box || !was || value(box.checked) !== was.value) continue;
+        box.checked = on;
+        was.value = value(on);
+      }
+    } catch (error) {
+      /* CloseDesk isn't answering: the page stays as it is */
+    }
+  }
+  window.addEventListener("pageshow", (event) => event.persisted && followColors());
+  window.addEventListener("focus", followColors);
 
   /* Setup: show the time in the zone being chosen, before it is saved. */
   const tzSelect = $("[data-tz-select]");

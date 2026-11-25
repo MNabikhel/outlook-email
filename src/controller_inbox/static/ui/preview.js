@@ -5,7 +5,7 @@
    formulas; a Word document as its headings, paragraphs and tables. Nothing here runs anything in the file. */
 
 import { h, icon, replace, plural } from "./dom.js";
-import { getJSON, getBlob, filePath } from "./api.js";
+import { getJSON, getBlob, filePath, inSentence } from "./api.js";
 
 const enc = encodeURIComponent;
 const apiFile = (emailId, n) => `/api/mail/${enc(emailId)}/files/${Number(n)}`;
@@ -54,7 +54,7 @@ function pagesPane(emailId, file) {
       }
       if (first.pages > count) holder.append(h("p", { class: "muted small" }, `${plural(first.pages - count, "more page")} not drawn here: see the Page tab.`));
     } catch (error) {
-      replace(holder, h("p", { class: "muted" }, `Couldn't draw the pages (${error.message}).`));
+      replace(holder, h("p", { class: "muted" }, inSentence(error, (why) => `Couldn't draw the pages (${why}).`)));
     }
   })();
   return h("div", { class: "pvw" }, holder);

@@ -460,10 +460,12 @@ def test_other_websites_cannot_change_settings(client, settings):
         ("/api/settings/context", {"step": 0}),
         ("/api/settings/vision", {"mode": "off"}),
         ("/api/settings/sample", {}),
+        ("/api/settings/colors", {"colors": "color-blind", "importance_words": True}),
     ):
         assert client.post(path, json=body, headers={**PAGE, "Origin": "https://evil.example"}).status_code == 403, path
         assert client.post(path, json=body).status_code == 403, path
     assert settings.timezone == "America/New_York" and settings.vision_mode == "auto" and settings.min_context_tokens == 16384
+    assert client.get("/api/settings", headers=PAGE).json()["appearance"] == {"colors": "standard", "importance_words": False}
 
 
 def test_the_whole_matter_shows_each_steps_sender_domain_in_lower_case(store, settings):

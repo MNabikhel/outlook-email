@@ -4,7 +4,7 @@
    server says now, with a line under the change saying what happened. */
 
 import { $, $$, h, icon, plural, replace, skeletonReader } from "./dom.js";
-import { getJSON, postJSON } from "./api.js";
+import { getJSON, inSentence, postJSON } from "./api.js";
 
 const SHORTCUTS = [
   ["j / k", "Next / previous in the list"],
@@ -29,7 +29,7 @@ const SECTIONS = [
 
 const STATE_LABELS = { on: "Ready", fallback: "Older method", off: "Off" };
 // The section a change's message shows in, when it isn't the change's own name.
-const SECTION_OF = { chat: "model", wait: "model", "step-back": "context", "outlook-more": "outlook" };
+const SECTION_OF = { chat: "model", wait: "model", "step-back": "context", "outlook-more": "outlook", colors: "appearance" };
 const b = (text) => h("b", null, text);
 const code = (text) => h("code", null, text);
 
@@ -47,9 +47,10 @@ function zoneNow(zone) {
 }
 
 /**
- * ctx: appearance() → { theme, railCollapsed }, setTheme(value), toggleRail(), processMail(), job() → the job now,
- * show(node, { keepScroll }) puts the page in the reading pane, isShown() says it is still there, and
- * changed(reply) is told about a change the rest of the workspace should pick up (a new time zone or profile).
+ * ctx: appearance() → { theme, railCollapsed, colors, importanceWords } as the page shows them now, setTheme(value),
+ * toggleRail(), processMail(), job() → the job now, show(node, { keepScroll }) puts the page in the reading pane,
+ * isShown() says it is still there, and changed(reply) is told about a change the rest of the workspace should pick up
+ * (a new time zone, profile or colors).
  */
 export function createSettings(ctx) {
   let data = null;
@@ -60,8 +61,13 @@ export function createSettings(ctx) {
   let observer = null;
   let root = null; // the page drawn now
   const dirty = new Set(); // sections changed here and not saved yet: drawing again leaves them as they are
+  // A box that saves as it is ticked, by its id, while its save is on its way: drawn as it was ticked. The answer to
+  // the other Colors box's save draws the page again from the colors in use, which this one hasn't changed yet.
+  const asked = new Map();
 
-  async function load({ recheck = false, keepScroll = false } = {}) {
+  /** Ask the server for the settings and draw the page from them. ``after``: the change just saved (its id), whose
+      line says so if they can't be read. */
+  async function load({ recheck = false, keepScroll = false, after = "" } = {}) {
     const mine = ++token;
     try {
       const fresh = await getJSON(`/api/settings${recheck ? "?recheck=1" : ""}`);
@@ -71,7 +77,11 @@ export function createSettings(ctx) {
     } catch (error) {
       if (mine !== token || !ctx.isShown()) return;
       if (data) {
-        flash = { id: "model", tone: "error", text: `Couldn't read the settings again (${error.message}).` };
+        const again = inSentence(error, (why) => `Couldn't read the settings again (${why}).`);
+        // After a change, said under it: after what saving it said, or instead of nothing when it couldn't be saved
+        // (that is what matters, and it says why).
+        if (!after || !flash || flash.id !== after) flash = { id: "model", tone: "error", text: again };
+        else if (flash.tone === "ok") flash = { id: after, tone: "error", text: `${flash.text} ${again}` };
         draw({ keepScroll: true });
       } else {
         ctx.show(errorPage(error.message), {});
@@ -127,6 +137,12 @@ export function createSettings(ctx) {
         const slot = kept ? $("#set-chat-model", fresh) : null;
         if (slot) slot.replaceWith(kept);
         else if (kept) dirty.delete(id); // no choice to make any more
+        // The lines saying what happened stay the same elements, with new words: a screen reader reads out a change
+        // to one it knows, and often not a new one.
+        for (const line of $$("[data-status]", fresh)) {
+          const was = $(`[data-status="${CSS.escape(line.dataset.status)}"]`, old);
+          if (was) line.replaceWith(sayIn(was, line));
+        }
         old.replaceWith(fresh);
         if (observer) {
           observer.unobserve(old);
@@ -136,17 +152,32 @@ export function createSettings(ctx) {
     }
     // A section left as it was still says what happened to its own change (an error keeps it unsaved).
     const line = flash && root ? $(`[data-status="${flash.id}"]`, root) : null;
-    if (line && dirty.has(SECTION_OF[flash.id] || flash.id)) line.replaceWith(status(flash.id));
+    if (line && dirty.has(SECTION_OF[flash.id] || flash.id)) sayIn(line, status(flash.id));
     if (focused && !(active && active.isConnected)) {
       const again = document.getElementById(focused);
       if (again) again.focus({ preventScroll: true });
     }
   }
 
+  /** ``line`` (a status line on the page) saying what ``fresh`` (one just built) says. Words it says already are left
+      alone, or a screen reader would read the last "Saved" out again each time the page is drawn (a theme click, a
+      run starting or ending); a save empties its line first, so saving the same again is read out. */
+  function sayIn(line, fresh) {
+    if (line.className === fresh.className && line.textContent === fresh.textContent) return line;
+    line.className = fresh.className;
+    line.replaceChildren(...fresh.childNodes);
+    return line;
+  }
+
   /** Send a change; draw the page again from what the server says now, with what happened under ``id``. */
-  async function save(id, path, body, button, { busyText = "Saving…", after = null } = {}) {
-    const label = button ? button.textContent : "";
-    if (button) {
+  async function save(id, path, body, button, { busyText = "Saving…", after = null, settled = null } = {}) {
+    // A box that saves as it is ticked isn't disabled while it does: that would send the keyboard's focus to the page
+    // itself (the next Tab going back to the top, a screen reader losing its place). It says it is busy instead, and
+    // ignores another tick until this one is saved (busyBox); drawn again, it gets the focus back by its id.
+    const box = button && button.type === "checkbox" ? button : null;
+    const label = button && !box ? button.textContent : "";
+    if (box) box.setAttribute("aria-busy", "true");
+    else if (button) {
       button.disabled = true;
       button.textContent = busyText;
     }
@@ -155,6 +186,7 @@ export function createSettings(ctx) {
       line.className = "set-status";
       line.textContent = "";
     }
+    let unanswered = false;
     try {
       const reply = await postJSON(path, body);
       dirty.delete(SECTION_OF[id] || id);
@@ -163,13 +195,41 @@ export function createSettings(ctx) {
       ctx.changed(reply);
     } catch (error) {
       flash = { id, tone: "error", text: error.message };
+      unanswered = error.status === 0;
     }
+    if (settled) settled();
     if (!ctx.isShown()) return;
-    if (button) {
+    if (box) {
+      box.removeAttribute("aria-busy");
+      // And the box as the page shows it now, when it was drawn again meanwhile.
+      const shown = box.id && root ? $(`#${CSS.escape(box.id)}`, root) : null;
+      if (shown) shown.removeAttribute("aria-busy");
+    } else if (button) {
       button.disabled = false;
       button.textContent = label;
     }
-    await load({ keepScroll: true });
+    // CloseDesk didn't answer: asking it for the settings again would only fail too. Drawn again from what the page
+    // has, which nothing changed, with the line under this change saying so.
+    if (unanswered) draw({ keepScroll: true });
+    else await load({ keepScroll: true, after: id });
+  }
+
+  /** A box that saves the moment it is ticked (see save): a tick while the last one is still being saved is ignored.
+      ``saveIt(box)`` saves it; until that is answered, the box is drawn as it was ticked (``asked``), and busy. */
+  function busyBox({ id, checked, saveIt }) {
+    const waiting = asked.has(id);
+    return h("input", {
+      type: "checkbox",
+      id,
+      checked: waiting ? asked.get(id) : checked,
+      "aria-busy": waiting ? "true" : null,
+      onclick: (event) => event.currentTarget.getAttribute("aria-busy") === "true" && event.preventDefault(),
+      onchange: (event) => {
+        const box = event.currentTarget;
+        asked.set(id, box.checked);
+        saveIt(box, () => asked.delete(id));
+      },
+    });
   }
 
   /* ---------- Pieces ---------- */
@@ -234,15 +294,46 @@ export function createSettings(ctx) {
   /* ---------- Sections ---------- */
 
   function appearance() {
-    const { theme, railCollapsed } = ctx.appearance();
+    const { theme, railCollapsed, colors, importanceWords } = ctx.appearance();
     const segment = (value, label) => h("button", { type: "button", class: `seg${theme === value ? " on" : ""}`, "aria-pressed": String(theme === value), onclick: () => ctx.setTheme(value) }, label);
+    // Saved on the server the moment a box is ticked, like the calendar's box; the page changes colour at once. Each
+    // box shows what the page shows now, which a settings answer still on its way when the page was left can't undo,
+    // or, while its own save is on its way, what it was ticked to (busyBox).
+    const colorBlind = busyBox({
+      id: "set-colors",
+      checked: colors === "color-blind",
+      saveIt: (box, settled) => save("colors", "/api/settings/colors", { colors: box.checked ? "color-blind" : "standard" }, box, { settled }),
+    });
+    const words = busyBox({
+      id: "set-importance-words",
+      checked: importanceWords,
+      saveIt: (box, settled) => save("colors", "/api/settings/colors", { importance_words: box.checked }, box, { settled }),
+    });
     return section(
       "appearance",
       "Appearance",
       "sun",
-      "Saved in this browser only.",
+      "The theme and side bar are saved in this browser only. The two boxes under Colors are saved for CloseDesk on this computer, and the classic pages follow them too.",
       h("div", { class: "set-row" }, h("span", { class: "set-row-label" }, "Theme"), h("div", { class: "segs", role: "group", "aria-label": "Theme" }, segment("system", "Match the computer"), segment("light", "Light"), segment("dark", "Dark"))),
-      h("div", { class: "set-row" }, h("span", { class: "set-row-label" }, "Side bar"), h("button", { type: "button", class: "btn btn-sm", onclick: ctx.toggleRail }, icon("sidebar", 14), railCollapsed ? "Show labels" : "Collapse to icons"))
+      h("div", { class: "set-row" }, h("span", { class: "set-row-label" }, "Side bar"), h("button", { type: "button", class: "btn btn-sm", onclick: ctx.toggleRail }, icon("sidebar", 14), railCollapsed ? "Show labels" : "Collapse to icons")),
+      h(
+        "div",
+        { class: "set-row set-row-stack" },
+        h("span", { class: "set-row-label" }, "Colors"),
+        h(
+          "label",
+          { class: "set-check" },
+          colorBlind,
+          h("span", { class: "set-check-text" }, b("Colors for color blindness"), h("span", null, "Uses colors that people with color blindness can tell apart: Critical and fraud turn crimson, done turns blue-green, and High and warnings stay amber."))
+        ),
+        h(
+          "label",
+          { class: "set-check" },
+          words,
+          h("span", { class: "set-check-text" }, b("Show Critical, High, Medium or Low on each email"), h("span", null, "Writes it on each email in the lists and the daily digest (not its printable page), or Held for fraud on one held as possible fraud. Without it, only Critical, High and held emails are marked, by a colored edge, and a held one still says so. With a Windows contrast theme (high contrast) on, that edge is the same for all three: tick this to tell them apart."))
+        ),
+        status("colors")
+      )
     );
   }
 
@@ -740,7 +831,7 @@ export function createSettings(ctx) {
         const reply = await postJSON("/coding/open");
         flash = { id: "cost-codes", tone: reply.ok ? "ok" : "error", text: reply.message };
       } catch (error) {
-        flash = { id: "cost-codes", tone: "error", text: `Couldn't open the workbook from here (${error.message}). It is at ${c.workbook}.` };
+        flash = { id: "cost-codes", tone: "error", text: `${inSentence(error, (why) => `Couldn't open the workbook from here (${why}).`)} It is at ${c.workbook}.` };
       }
       if (ctx.isShown()) draw();
     };
@@ -876,11 +967,10 @@ export function createSettings(ctx) {
       )
     );
     follow();
-    const calendar = h("input", {
-      type: "checkbox",
+    const calendar = busyBox({
       id: "set-outlook-calendar",
       checked: o.calendar,
-      onchange: (event) => save("outlook", "/api/settings/outlook/calendar", { on: event.currentTarget.checked }, event.currentTarget),
+      saveIt: (box, settled) => save("outlook", "/api/settings/outlook/calendar", { on: box.checked }, box, { settled }),
     });
     const disconnect = (event) => {
       if (!window.confirm("Stop reading Outlook? The mail CloseDesk copied stays here; connecting again asks again.")) return;
@@ -1017,7 +1107,8 @@ export function createSettings(ctx) {
         replace(
           list,
           reply.checks.map((item) =>
-            h("li", { class: `set-check is-${item.state}` }, icon(item.state === "ok" ? "check" : "alert", 14), h("span", null, item.text, item.todo ? h("span", { class: "set-help" }, ` ${item.todo}`) : null))
+            // A note has the info sign and a problem the warning sign, so they differ by more than their colour.
+            h("li", { class: `set-check is-${item.state}` }, icon(item.state === "ok" ? "check" : item.state === "note" ? "info" : "alert", 14), h("span", null, item.text, item.todo ? h("span", { class: "set-help" }, ` ${item.todo}`) : null))
           )
         );
       } catch (error) {

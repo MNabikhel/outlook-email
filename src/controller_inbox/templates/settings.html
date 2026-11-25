@@ -1,4 +1,6 @@
 {% extends "base.html" %}
+{# Saving these goes back to their section (/settings#colors), at the top of the window: "Saved." is said there. #}
+{% set notices_in_place = ["timezone", "colors", "importance-words"] %}
 {% block title %}Setup · CloseDesk{% endblock %}
 {% block heading %}Setup{% endblock %}
 {% block body %}
@@ -17,6 +19,7 @@
 </section>
 <section class="panel" id="timezone">
   <h3>Time zone</h3>
+  {% if notice and notice_key == 'timezone' %}<p class="notice">{{ notice }}</p>{% endif %}
   <p>Times follow this computer unless you pick another zone. The list matches Windows and Outlook: each zone shows its standard offset, and daylight saving time is applied for you. Mail stays stored in UTC, and a change here updates “today”, due dates, and every clock on screen.</p>
   <form method="post" action="/settings/timezone" class="profile-form tz-form">
     <label>
@@ -30,6 +33,24 @@
     <button type="submit">Save</button>
   </form>
   <p class="muted" data-tz-preview>Time there now: <b>{{ now_local }}</b> · {{ active_zone_name }} is {{ active_offset }} right now{% if active_daylight %} (daylight saving time){% endif %}.</p>
+</section>
+<section class="panel" id="colors">
+  <h3>Colors</h3>
+  {% if notice and notice_key in ('colors', 'importance-words') %}<p class="notice">{{ notice }}</p>{% endif %}
+  <p>Saved for CloseDesk on this computer: these pages and the workspace both use them.</p>
+  <form method="post" action="/settings/colors" class="profile-form color-form">
+    {# What the boxes showed when the page was drawn: only a box changed on it is saved, so a page left open doesn't
+       undo a change made since in the workspace. autocomplete="off": Back to this page sends it again, as it is now,
+       and the browser would put each box back as it was left (and Firefox the _was fields too), so the page would be
+       in the new colors with its box saying the old, and Save would undo the change. #}
+    <input type="hidden" name="colors_was" value="{{ appearance.colors }}" autocomplete="off"/>
+    <input type="hidden" name="importance_words_was" value="{{ '1' if appearance.importance_words else '0' }}" autocomplete="off"/>
+    <label class="choice"><input type="checkbox" name="colors" value="color-blind" autocomplete="off" {{ 'checked' if appearance.colors == 'color-blind' }}/>
+      <span><b>Colors for color blindness</b> <small class="muted">Critical and fraud turn crimson, done turns blue-green, and High and warnings stay amber.</small></span></label>
+    <label class="choice"><input type="checkbox" name="importance_words" value="1" autocomplete="off" {{ 'checked' if appearance.importance_words }}/>
+      <span><b>Show Critical, High, Medium or Low on each email</b> <small class="muted">On Today and the digest here (not its printable page), and in the workspace's lists and digest. The Inbox and folder lists here always show it, in their Importance column. With a Windows contrast theme (high contrast) on, Critical, High and held emails have the same edge: tick this to tell them apart.</small></span></label>
+    <button type="submit">Save</button>
+  </form>
 </section>
 <section class="split">
   <article class="panel">

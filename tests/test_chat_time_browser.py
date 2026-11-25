@@ -73,6 +73,7 @@ def test_out_of_time_offers_more_minutes_and_asks_again(settings, store, page, m
         form.locator("button", has_text="Save and ask again").click()
         page.wait_for_selector(".more-time-status.error")
         assert "Type a number of minutes" in page.inner_text(".more-time-status") and asked == ["What is due?"]
+        assert page.locator(".more-time-status.error svg").count() == 1, "a warning sign, not only red words"
         # A number: saved for the model, and the same question asked again in the same conversation.
         page.locator(".msg-more-time input[type=number]").fill("15")
         page.locator(".msg-more-time button", has_text="Save and ask again").click()

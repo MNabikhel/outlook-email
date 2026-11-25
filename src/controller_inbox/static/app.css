@@ -9,11 +9,41 @@
   --gold: #c4a15a;
   --gold-ink: #86692c; /* gold for text on paper: 4.5:1 */
   --green: #2f5d3a;
-  --danger: #9b2335;
-  --warn: #8a4b12;
+  --ok-soft: #e3efe5;
+  --ok-line: #c3dcc8;
+  /* Critical and danger a true red, High and warnings an amber (tests/test_palette.py checks the hues, the distances
+     and the contrast of every use). */
+  --danger: #a8162b;
+  --danger-deep: #86101f; /* a danger button under the pointer, the alert panel's edge */
+  --danger-soft: #fbeff0;
+  --danger-line: #e2b8bf;
+  --warn: #8a6400;
+  --warn-soft: #f9f1dc;
+  --imp-critical: #b3122b;
+  --imp-high: #a87800; /* the row edge */
+  --imp-high-fill: #d6a31f; /* the High pill and the due-today tag, with dark words */
+  --on-imp-high: #1b2416;
+  --imp-medium: #bfd0ec;
+  /* Due later this week, the outline of its tag on Today: a slate, apart from the amber of due today (the same for
+     the colors for color blindness: it stays apart for every vision). */
+  --due-later: #7a8594;
+  /* The model on the navy: the dot on Ask CloseDesk, filled while a local model runs and a ring when none does, and
+     the side bar's Local model box (its dot, or its words when none runs). */
+  --dot-on: #6fcf8a;
+  --dot-off: #d9b77c;
   --chip: #efe8da;
   --sans: "Segoe UI", "Avenir Next", "Helvetica Neue", system-ui, sans-serif;
   --serif: "Iowan Old Style", Palatino, Georgia, serif;
+}
+
+/* Colors for color blindness (Setup → Colors, or Settings → Appearance in the workspace): Critical and fraud a
+   crimson, High and warnings an amber, done a blue-green, told apart by lightness as well as hue. The server writes
+   data-colors on <html>, so the page never paints in the other colors first. */
+:root[data-colors="color-blind"] {
+  --imp-critical: #921f3a; --danger: #761630; --danger-deep: #5c0f24; --danger-soft: #fbedf0; --danger-line: #ebbcc6;
+  --imp-high: #aa7a00; --warn: #806c00; --warn-soft: #fcf5e0;
+  --green: #0b738a; --ok-soft: #eaf5f7; --ok-line: #b3dbe4;
+  --dot-on: #48e0cf;
 }
 
 * { box-sizing: border-box; }
@@ -65,7 +95,7 @@ table.mail tr:hover td { background: #fbf8f1; }
 .correct label { display: block; font-size: 13px; margin: 10px 0; }
 .note { background: #f3ecda; border-left: 3px solid var(--gold); padding: 8px 10px; margin: 8px 0 0; }
 .panel h2, .panel h3 { font-family: var(--serif); margin: 0 0 10px; font-size: 18px; font-weight: 600; }
-.panel.alert { background: #9b2335; color: #fff; border-color: #7a1b29; }
+.panel.alert { background: var(--danger); color: #fff; border-color: var(--danger-deep); }
 .panel.alert a { color: #fff; }
 .panel.alert small, .panel.alert .muted { color: #f3c5cc; }
 .panel.alert .summary { color: #fff; font-size: 14px; }
@@ -90,8 +120,8 @@ button.ghost, .ghost { background: transparent; color: var(--navy); border: 1px 
 table.mail { width: 100%; border-collapse: collapse; font-size: 14px; }
 table.mail th { text-align: left; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 10px; border-bottom: 1px solid var(--line); background: #f7f3ea; }
 table.mail td { padding: 10px; border-bottom: 1px solid #eee6d8; vertical-align: top; }
-table.mail tr.critical { box-shadow: inset 3px 0 0 var(--danger); }
-table.mail tr.high { box-shadow: inset 3px 0 0 var(--warn); }
+table.mail tr.critical { box-shadow: inset 3px 0 0 var(--imp-critical); }
+table.mail tr.high { box-shadow: inset 3px 0 0 var(--imp-high); }
 .nowrap { white-space: nowrap; }
 .from { font-weight: 600; }
 .subj { font-weight: 600; color: var(--ink); }
@@ -99,16 +129,39 @@ table.mail tr.high { box-shadow: inset 3px 0 0 var(--warn); }
 .muted { color: var(--muted); }
 
 .pill { display: inline-block; font-size: 11px; letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 7px; background: var(--chip); }
-.pill.critical { background: var(--danger); color: #fff; }
-.pill.high { background: #b05a1f; color: #fff; }
-.pill.medium { background: #d9c48a; }
+.pill.critical { background: var(--imp-critical); color: #fff; }
+.pill.high { background: var(--imp-high-fill); color: var(--on-imp-high); }
+.pill.medium { background: var(--imp-medium); }
 .pill.low { background: #dce3d6; }
+/* The importance on each email of Today and the digest (_level.html): shown when Setup → Colors asks for it
+   (data-importance-words on <html>). Outlined in its own colour, with no fill, as in the workspace: the reason an
+   email is on Today ("Due today", "Verify by phone") is a filled tag beside it, and side by side "how important"
+   doesn't look like a second "why". Critical, and an email held as possible payment fraud (which says so), in the
+   red of danger words and High in the amber of warning words, as the workspace's are: kept apart for every vision
+   with the colors for color blindness. On the red of the box of emails to verify by phone, white, as its words are.
+   The Importance column keeps its filled pills. */
+.pill.item-level { display: none; background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
+:root[data-importance-words="on"] .pill.item-level { display: inline-block; }
+/* A held email says so in words wherever it is listed, whether or not the importance words are asked for, as the
+   Inbox's flags and the workspace's held chip do: its red edge is nearly a Critical one's. In the red box of emails to
+   verify by phone, which says it, only when they are. */
+.pill.item-level.held { display: inline-block; }
+.panel.alert .pill.item-level.held { display: none; }
+:root[data-importance-words="on"] .panel.alert .pill.item-level.held { display: inline-block; }
+.pill.item-level.critical, .pill.item-level.held { color: var(--danger); }
+.pill.item-level.high { color: var(--warn); }
+.pill.item-level.medium { color: var(--navy); }
+.pill.item-level.low { color: var(--muted); }
+.panel.alert .pill.item-level { color: #fff; }
 .flags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .flag { font-size: 11px; background: #efe7d4; padding: 2px 6px; text-transform: capitalize; }
 .flag.fraud_risk, .flag.do_not_process { background: var(--danger); color: #fff; }
-.flag.duplicate_invoice, .flag.missing_attachment { background: #8a4b12; color: #fff; }
+/* A payment to check before it is made ("Payment Caution", "Bank Change Caution") is a warning, as the workspace's
+   amber "Check before paying" and the fraud check's Caution are; not a plain label. */
+.flag.duplicate_invoice, .flag.missing_attachment, .flag.payment_caution, .flag.bank_change_caution { background: var(--warn); color: #fff; }
 .flag.month_end, .flag.audit, .flag.tax { background: var(--navy); color: #fff; }
-.flag.needs_model { background: #d9c48a; }
+/* Waiting for the local model: a dashed outline, apart from the High pill's amber on the same row. */
+.flag.needs_model { background: var(--card); border: 1px dashed var(--muted); padding: 1px 5px; }
 .flag.bionic { background: var(--green); color: #fff; }
 .flag.user_trained { background: var(--navy); color: #fff; }
 .summary { display: block; color: var(--muted); margin-top: 4px; }
@@ -116,10 +169,11 @@ table.mail tr.high { box-shadow: inset 3px 0 0 var(--warn); }
 .folder-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
 .folder-card { display: block; color: inherit; text-decoration: none; }
 .folder-card:hover { text-decoration: none; border-color: var(--gold); }
-.folder-card span { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+/* The card's own heading ("Needs you"), not the importance on an email in it. */
+.folder-card > span { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .folder-card b { display: block; font-family: var(--serif); font-size: 32px; margin: 4px 0 8px; }
 .folder-card ul { list-style: none; padding: 0; margin: 0; }
-.folder-card li { font-size: 14px; padding: 4px 0; border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.folder-card li { font-size: 14px; padding: 4px 0; border-top: 1px solid var(--line); }
 
 .detail-head { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
 .detail-head h2 { font-family: var(--serif); margin: 8px 0 4px; font-size: 28px; }
@@ -158,8 +212,8 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .model-chip span { display: block; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #c9d0c4; }
 /* A long model id breaks anywhere; "not running" only at its space. */
 .model-chip b { display: block; font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
-.model-chip.on b::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #6fcf8a; margin-right: 6px; }
-.model-chip.off b { color: #d9b77c; }
+.model-chip.on b::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dot-on); margin-right: 6px; }
+.model-chip.off b { color: var(--dot-off); }
 .notice { background: #f3ecda; border-left: 3px solid var(--gold); padding: 10px 12px; margin: 0 0 14px; }
 .today-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; margin: 0 0 6px; }
 .headline { font-family: var(--serif); font-size: 24px; margin: 0; max-width: 60ch; }
@@ -169,10 +223,13 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .focus h2 { font-family: var(--serif); font-size: 20px; font-weight: 600; margin: 0 0 10px; }
 .focus-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .focus-item { display: flex; gap: 14px; align-items: flex-start; background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 12px; padding: 12px 14px; }
-.focus-item.fraud, .focus-item.overdue { border-left-color: var(--danger); }
-.focus-item.due_today { border-left-color: #c46b2d; }
-.focus-item.due_soon, .focus-item.due_week { border-left-color: var(--gold); }
-.focus-item.decide, .focus-item.new_task { border-left-color: var(--navy); }
+/* The edge says one thing, as on every list in both UIs: a Critical or High email has the edge of its importance, and
+   one held as possible payment fraud (or to verify by phone) the red of danger. The others have the plain edge,
+   whatever the reason they are here, which their tag says: an edge in the reason's colour read as an importance (a
+   Medium email due today had the amber of High, an overdue one nearly the red of Critical). The later rule wins. */
+.focus-item.imp-high { border-left-color: var(--imp-high); }
+.focus-item.fraud, .focus-item.is-held { border-left-color: var(--danger); }
+.focus-item.imp-critical { border-left-color: var(--imp-critical); }
 .focus-item .rank { font-family: var(--serif); font-size: 24px; color: var(--navy); min-width: 22px; line-height: 1.1; }
 .focus-body { flex: 1; min-width: 0; }
 .focus-top { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
@@ -182,19 +239,34 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .focus-empty { background: var(--card); border: 1px dashed var(--line); border-radius: 12px; padding: 14px; color: var(--muted); }
 .tag { display: inline-block; font-size: 11px; letter-spacing: 0.03em; padding: 2px 8px; border-radius: 10px; background: var(--chip); white-space: nowrap; }
 .tag.fraud, .tag.overdue { background: var(--danger); color: #fff; }
-.tag.due_today { background: #b05a1f; color: #fff; }
-.tag.due_soon, .tag.due_week { background: #e9d9ae; }
+.tag.due_today { background: var(--imp-high-fill); color: var(--on-imp-high); }
+.tag.due_soon, .tag.due_week { background: var(--card); box-shadow: inset 0 0 0 1px var(--due-later); }
+.tag.caution { background: var(--warn-soft); color: var(--warn); }
 .tag.decide, .tag.new_task { background: #dfe6f0; color: var(--navy); }
 .ai { color: var(--green); }
 .folder-grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .folder-card.important { border-top: 3px solid var(--navy); }
 .folder-card.informational { border-top: 3px solid var(--gold); }
 .folder-card.reference { border-top: 3px solid #b9c2b3; }
-.folder-card li a { color: var(--ink); }
+/* Each subject on one line, cut with "…" at the card's edge; the importance word (Setup → Colors) on a line of its
+   own above it, so the subject keeps the card's whole width. */
+.folder-card li a { display: block; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:root[data-importance-words="on"] .folder-card li .pill.item-level, .folder-card li .pill.item-level.held { display: block; width: fit-content; margin-bottom: 2px; }
 .folder-card li small { display: block; white-space: normal; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .folder-card .more { display: inline-block; margin-top: 8px; font-size: 13px; }
 .split.three { grid-template-columns: repeat(3, 1fr); }
 .stack .summary { margin: 2px 0 0; font-size: 13px; }
+/* An email in Today's folder cards and the digest's lists has the edge it has in the Inbox and on the focus list: a
+   Critical or High one its importance's, a held one the red of danger (and wider), the others none, with the
+   importance words or without. In the card's margin, so its words start where the others' do. None in the red box of
+   emails to verify by phone, which says it. */
+.folder-card li:is(.imp-critical, .imp-high, .is-held), ul.stack li:is(.imp-critical, .imp-high, .is-held) { position: relative; }
+.folder-card li:is(.imp-critical, .imp-high, .is-held)::before,
+ul.stack li:is(.imp-critical, .imp-high, .is-held)::before { content: ""; position: absolute; left: -10px; top: 0; bottom: 0; width: 3px; border-radius: 2px; }
+.folder-card li.imp-critical::before, ul.stack li.imp-critical::before { background: var(--imp-critical); }
+.folder-card li.imp-high::before, ul.stack li.imp-high::before { background: var(--imp-high); }
+.folder-card li.is-held::before, ul.stack li.is-held::before { background: var(--danger); width: 4px; }
+.panel.alert li:is(.imp-critical, .imp-high, .is-held)::before { content: none; }
 .job { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 14px; border-radius: 12px; margin: 0 0 14px; border: 1px solid var(--line); background: var(--card); }
 .job strong { margin-right: 8px; }
 .job span { color: var(--muted); }
@@ -204,16 +276,23 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .job-stop button { white-space: nowrap; }
 .job.done { border-left: 4px solid var(--green); display: block; }
 .job.error { border-left: 4px solid var(--danger); display: block; }
+.job .job-flag { color: var(--danger); }
+/* A finished run's box is a line of text: the space after its headline is the one in the markup, as between its
+   sentences (the margin is for the running box's flex row, where spaces don't show). */
+.job:is(.done, .error) strong { margin-right: 0; }
 .models-table { width: 100%; margin: 4px 0 12px; border-collapse: collapse; font-size: 13px; }
 .models-table caption { text-align: left; font-weight: 600; padding: 0 0 6px; }
 .models-table th, .models-table td { padding: 7px 8px; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }
 .models-table thead th { border-top: 0; color: var(--muted); font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
 .models-table tbody th { font-weight: 500; }
 .model-state { display: inline-block; margin-right: 4px; padding: 1px 7px; border-radius: 999px; font-size: 11.5px; font-weight: 600; }
-.model-state.on { background: #e3efe5; color: var(--green); }
-.model-state.fallback { background: #f6e9d9; color: var(--warn); }
+.model-state.on { background: var(--ok-soft); color: var(--green); }
+.model-state.fallback { background: var(--warn-soft); color: var(--warn); }
 .model-state.off { background: var(--chip); color: var(--muted); }
 .chat-model-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px 10px; margin: 0 0 12px; font-size: 13px; }
+/* A long model name ("… (loaded) (likely too big for this computer)") would make the drop-down, and with it the page,
+   wider than a phone: the label may shrink below it, and the drop-down to the label. */
+.chat-model-form label { min-width: 0; max-width: 100%; }
 .chat-model-form select { display: block; margin-top: 3px; max-width: 100%; }
 .chat-model-form p { flex-basis: 100%; margin: 0; }
 /* A model that fits this computer better, suggested once: the user loads it or keeps theirs. */
@@ -259,7 +338,7 @@ table.mail tr.is-open td { background: #f1ead9; }
 .mail-tools { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
 .mail-tools a.ghost { border-radius: 8px; }
 .draft-box { border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: #fff; margin: 0 0 12px; }
-.draft-box.safety { border-color: var(--danger); background: #fbeff1; }
+.draft-box.safety { border-color: var(--danger); background: var(--danger-soft); }
 .draft-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
 .draft-note { font-size: 12px; }
 .draft-text { width: 100%; font: 14px/1.45 var(--sans); padding: 10px; border: 1px solid var(--line); border-radius: 8px; resize: vertical; }
@@ -268,8 +347,9 @@ table.mail tr.is-open td { background: #f1ead9; }
 
 .chat-fab { position: fixed; right: 22px; bottom: 22px; z-index: 60; border-radius: 999px; padding: 12px 18px; box-shadow: 0 8px 24px rgba(18, 36, 63, 0.28); display: flex; gap: 8px; align-items: center; font-weight: 600; }
 .chat-fab.hidden-fab { display: none; }
-.chat-fab .dot { width: 9px; height: 9px; border-radius: 50%; background: #d9b77c; }
-.chat-fab .dot.on { background: #6fcf8a; }
+/* No local model: a hollow ring; one running: a filled dot, so they differ by more than their colour. */
+.chat-fab .dot { width: 9px; height: 9px; border-radius: 50%; background: transparent; box-shadow: inset 0 0 0 1.5px var(--dot-off); }
+.chat-fab .dot.on { background: var(--dot-on); box-shadow: none; }
 .chat { position: fixed; right: 22px; bottom: 22px; z-index: 60; width: min(420px, calc(100vw - 24px)); height: min(600px, calc(100vh - 44px)); max-width: calc(100vw - 24px); max-height: calc(100vh - 24px); background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: 0 16px 48px rgba(18, 36, 63, 0.28); display: flex; flex-direction: column; overflow: hidden; transition: width 0.18s ease, height 0.18s ease; }
 .chat.large { width: min(880px, calc(100vw - 44px)); height: calc(100vh - 44px); }
 .chat.resizing { transition: none; user-select: none; }
@@ -301,7 +381,7 @@ button.icon { display: inline-grid; place-items: center; width: 30px; height: 30
 .chat-history-open small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .chat-history-delete { color: var(--muted); opacity: 0; margin-right: 4px; }
 .chat-history-item:hover .chat-history-delete, .chat-history-delete:focus-visible { opacity: 1; }
-.chat-history-delete:hover { background: #f1dde0; color: var(--danger); }
+.chat-history-delete:hover { background: var(--danger-soft); color: var(--danger); }
 .chat-history-empty { padding: 24px 10px; text-align: center; color: var(--muted); font-size: 13px; }
 .chat-drop { position: absolute; inset: 8px; z-index: 4; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 2px dashed var(--navy); border-radius: 14px; background: rgba(255, 252, 247, 0.95); color: var(--navy); font-weight: 600; font-size: 14px; pointer-events: none; }
 .chat-drop svg { width: 28px; height: 28px; }
@@ -335,7 +415,11 @@ body.chat-window .msg { max-width: min(88%, 760px); }
 .md-table table { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
 .md-table th, .md-table td { border: 1px solid var(--line); padding: 3px 8px; text-align: left; }
 .msg-note { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
-.msg-warn { margin: 0 0 6px; padding: 6px 8px; background: var(--danger); color: #fff; border-radius: 8px; font-size: 13px; }
+/* With a warning sign, as the figures to check beneath it have (and the workspace's bar its alert sign): the most
+   serious warning in an answer isn't told only by its colour and place. Beside the first line, a long one wrapping
+   under its words. */
+.msg-warn { display: flex; gap: 6px; align-items: flex-start; margin: 0 0 6px; padding: 6px 8px; background: var(--danger); color: #fff; border-radius: 8px; font-size: 13px; }
+.msg-warn::before { content: "⚠\FE0E"; flex: none; }
 .msg-sources { list-style: none; padding: 6px 0 0; margin: 8px 0 0; border-top: 1px solid var(--line); font-size: 12px; }
 .msg-sources li { padding: 2px 0; }
 .msg-sources small { color: var(--muted); }
@@ -354,8 +438,14 @@ body.chat-window .msg { max-width: min(88%, 760px); }
 .profile-form { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 4px 0 8px; }
 .tz-form select { min-width: 18rem; max-width: 100%; }
 .choice { display: flex; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; background: #fff; cursor: pointer; }
-.choice.on { border-color: var(--navy); box-shadow: inset 0 0 0 1px var(--navy); }
+.choice.on, .color-form .choice:has(input:checked) { border-color: var(--navy); box-shadow: inset 0 0 0 1px var(--navy); }
 .choice input { margin: 0; }
+/* Setup → Colors: each box outlined while ticked (the inbox profile's choice is outlined once saved), one above
+   the other at the same width, with Save under them. */
+.color-form { flex-direction: column; align-items: stretch; }
+.color-form button { align-self: flex-start; }
+.color-form .choice { align-items: flex-start; }
+.color-form .choice input { margin-top: 3px; }
 @media (max-width: 980px) {
   .shell { grid-template-columns: 1fr; height: auto; overflow: visible; }
   .rail, .main { height: auto; overflow: visible; }
@@ -365,8 +455,8 @@ body.chat-window .msg { max-width: min(88%, 760px); }
 /* Attachments, fraud check */
 .small { font-size: 12px; }
 button.danger { background: var(--danger); border-color: var(--danger); }
-button.danger:hover { background: #7a1b29; }
-button.danger.ghost { background: transparent; color: var(--danger); border-color: #e2b8bf; }
+button.danger:hover { background: var(--danger-deep); }
+button.danger.ghost { background: transparent; color: var(--danger); border-color: var(--danger-line); }
 .kpis .kpi-link.hot { border-color: var(--danger); }
 .kpis .kpi-link.hot b, .kpis .kpi-link.hot span { color: var(--danger); }
 #files, #notes, .fraud-panel, .correct { margin: 12px 0; }
@@ -383,7 +473,7 @@ button.danger.ghost { background: transparent; color: var(--danger); border-colo
 .file-list a.tiny { padding: 4px 8px; font-size: 12px; border-radius: 8px; }
 .findings li small { display: block; }
 .fraud-panel { border-left: 4px solid var(--line); }
-.fraud-panel.high { border-left-color: var(--danger); background: #fbf1f2; }
+.fraud-panel.high { border-left-color: var(--danger); background: var(--danger-soft); }
 .fraud-panel.caution { border-left-color: var(--gold); }
 .fraud-panel p { margin: 0 0 8px; }
 .signals li { display: flex; gap: 10px; align-items: baseline; }
@@ -406,7 +496,7 @@ table.weights td.up { color: var(--danger); font-weight: 600; }
 table.weights td.down { color: var(--green); font-weight: 600; }
 .log-list li small { display: block; }
 .tag.log-flagged, .tag.log-marked_fraud, .tag.log-reported { background: var(--danger); color: #fff; }
-.tag.log-marked_safe, .tag.log-trusted { background: #d9ead9; color: var(--green); }
+.tag.log-marked_safe, .tag.log-trusted { background: var(--ok-soft); color: var(--green); }
 .context-line { padding: 8px 10px; border-left: 3px solid var(--line); background: #f8f5ee; }
 .context-line.ok { border-left-color: var(--green); }
 .context-line.short { border-left-color: var(--gold); }
@@ -447,13 +537,19 @@ table.weights td.down { color: var(--green); font-weight: 600; }
 .msg-reading.running b::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 7px; border-radius: 50%; background: var(--navy); animation: reading-pulse 1.2s ease-in-out infinite; }
 .msg-reading .reading-bar { display: block; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .msg-reading .reading-bar i { display: block; height: 100%; min-width: 6%; background: var(--navy); transition: width 0.4s ease; }
-.msg-reading.vision { display: inline-block; padding: 2px 9px; background: #e3efe5; color: var(--green); border: 1px solid #c3dcc8; border-radius: 999px; font-weight: 600; }
-.msg-reading.fallback { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; background: #f6e9d9; border-left: 3px solid var(--warn); }
+.msg-reading.vision { display: inline-block; padding: 2px 9px; background: var(--ok-soft); color: var(--green); border: 1px solid var(--ok-line); border-radius: 999px; font-weight: 600; }
+.msg-reading.fallback { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; background: var(--warn-soft); border-left: 3px solid var(--warn); }
 .msg-reading.fallback b { color: var(--warn); }
 @keyframes reading-pulse { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .msg-reading.running b::after { animation: none; } .msg-reading .reading-bar i { transition: none; } }
-.msg-check { margin: 8px 0 0; padding: 6px 8px 6px 24px; font-size: 12px; background: #f3ecda; border-left: 3px solid var(--gold); border-radius: 0 6px 6px 0; }
-.msg-check li { margin: 2px 0; }
+/* The answer's checks, as in the workspace: a correction made has the tick, and its box the green of done (blue-green
+   with the colors for color blindness); a figure to check before relying on it has the warning sign, and makes the
+   box amber. */
+.msg-check { margin: 8px 0 0; padding: 6px 8px 6px 24px; font-size: 12px; background: var(--ok-soft); border-left: 3px solid var(--green); border-radius: 0 6px 6px 0; }
+.msg-check li { margin: 2px 0; list-style: none; }
+.msg-check li::before { content: "✓\FE0E"; display: inline-block; width: 16px; margin-left: -16px; color: var(--green); }
+.msg-check.warn { background: var(--warn-soft); border-left-color: var(--warn); }
+.msg-check li.warn::before { content: "⚠\FE0E"; color: var(--warn); }
 @media (max-width: 980px) {
   .file-layout { grid-template-columns: 1fr; }
   .file-nav { position: static; max-height: 240px; }
@@ -462,7 +558,7 @@ table.weights td.down { color: var(--green); font-weight: 600; }
 .files-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .files-head form { margin: 0; }
 .search-state { display: inline-block; margin-top: 4px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em; padding: 2px 8px; border-radius: 10px; background: var(--chip); color: var(--muted); white-space: nowrap; vertical-align: middle; }
-.search-state.indexed { background: #e3efe5; color: var(--green); }
+.search-state.indexed { background: var(--ok-soft); color: var(--green); }
 h2 .search-state { margin-top: 0; }
 .search-box { margin: 14px 0 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
 .search-box h4 { margin: 0 0 4px; }
@@ -486,9 +582,11 @@ details.correct summary { cursor: pointer; font-family: var(--serif); font-size:
 .coding-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .coding-head h3 { margin: 0; }
 .coding-state { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 10px; background: var(--chip); color: var(--muted); white-space: nowrap; }
-.coding-state.suggested { background: #f3ecda; color: #6d5521; }
-.coding-state.unmatched { background: #f6e3d3; color: var(--warn); }
-.coding-state.confirmed { background: #e3efe5; color: var(--green); }
+/* A code to confirm in the blue of a choice to make (as the classic Medium pill, which needs a look but isn't urgent):
+   the old gold sat on top of the amber of "No code found" beside it, and the pale green of "Confirmed". */
+.coding-state.suggested { background: #bfd0ec; color: var(--navy); }
+.coding-state.unmatched { background: var(--warn-soft); color: var(--warn); }
+.coding-state.confirmed { background: var(--ok-soft); color: var(--green); }
 .coding-codes { margin: 10px 0 0; }
 .coding .coding-codes li { display: flex; gap: 12px; align-items: flex-start; padding: 8px 0; }
 .coding-codes li:first-child { border-top: 0; }
@@ -574,4 +672,17 @@ form.step-back { border: 0; padding: 0; margin-top: 6px; }
   table.mail td { display: block; padding: 0; border: 0; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
   table.mail td.nowrap { white-space: normal; }
   table.mail td:has(> .subj) { flex-basis: 100%; }
+}
+/* A Windows contrast theme (high contrast) puts the computer's own colors on the page and drops fills and shadows: the
+   Inbox's edges went, its Importance pills and the tags lost the box round their words, and every row of Today had the
+   same thick edge in the color of the words. A Critical or High email (and on Today and the digest a held one) keeps a
+   thick edge, the same for all (Setup → Colors says the importance words tell them apart); the others the thin edge of
+   the box, their words starting where the others' do. */
+@media (forced-colors: active) {
+  table.mail tr { border-left: 3px solid Canvas; }
+  table.mail tr:is(.critical, .high) { border-left-color: CanvasText; }
+  .focus-item { border-left-width: 1px; padding-left: 17px; }
+  .focus-item:is(.imp-critical, .imp-high, .fraud, .is-held) { border-left-width: 4px; padding-left: 14px; }
+  .folder-card li:is(.imp-critical, .imp-high, .is-held)::before, ul.stack li:is(.imp-critical, .imp-high, .is-held)::before { background: CanvasText; }
+  .pill, .tag, .flag { outline: 1px solid CanvasText; outline-offset: -1px; }
 }

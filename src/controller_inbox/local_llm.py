@@ -877,6 +877,24 @@ class ReaderStats:
     last_error: str = ""
     times: list[float] = field(default_factory=list)  # seconds each email read took, in order
     too_slow: bool = False  # stopped because the model sent nothing for longer than even the longer wait allows
+    memory_failed: int = 0  # of the failed, the ones that ran out of memory
+
+    def none_read(self, settings: Settings) -> str:
+        """Why the model read none of the emails it was given, when it failed on each of them but on too few in a row
+        (three) to stop the run: "" when it read one, stopped, or was given none. The run still says it, so one the
+        model read none of isn't shown as all done. One sentence with no label of its own (the job box puts "Needs a
+        look:" before it), naming the mail it means: a run with no new files still gives the model the emails earlier
+        runs left waiting. The model's own error is for the log (``last_error``), not for the page."""
+        failed = self.failed
+        if self.read or not failed or self.stopped_reason:
+            return ""
+        which = (
+            "the one email" if failed == 1 else f"either of the {failed} emails" if failed == 2 else f"any of the {failed} emails"
+        )
+        said = f"The local model couldn't read {which} waiting for it"
+        if self.memory_failed == failed:
+            return f"{said}: it ran out of memory{'' if failed == 1 else ' on each'}. {memory_advice(settings)}"
+        return f"{said}. {'It is' if failed == 1 else 'They are'} tried again on the next run."
 
     @property
     def average_seconds(self) -> float:
@@ -1002,6 +1020,7 @@ class LocalReader:
 
     def _failed(self, reason: str, *, memory: bool = False) -> None:
         self.stats.failed += 1
+        self.stats.memory_failed += 1 if memory else 0
         self.stats.last_error = reason
         self._consecutive_failures += 1
         self._memory_failures = self._memory_failures + 1 if memory else 0

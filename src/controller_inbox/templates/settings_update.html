@@ -12,14 +12,15 @@
   <p class="muted"><progress aria-label="Updating"></progress></p>
   <script>
     // CloseDesk stops, its launcher fetches the newest version, and CloseDesk starts again: Setup is shown when it
-    // answers again (with the new version, or as it was when the update couldn't be done).
+    // answers again (with the new version, or as it was when the update couldn't be done), in this page's place, so
+    // Back goes to the page before Update, not to this one.
     (function () {
       var before = {{ commit | tojson }};
       var gone = false;
       var started = Date.now();
       function again() {
         fetch('/health', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (h) {
-          if (h.app === 'closedesk' && (gone || h.commit !== before)) { window.location.href = '/settings#update'; return; }
+          if (h.app === 'closedesk' && (gone || h.commit !== before)) { window.location.replace('/settings#update'); return; }
           setTimeout(again, 2000);
         }).catch(function () {
           gone = true;

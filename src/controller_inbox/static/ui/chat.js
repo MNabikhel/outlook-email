@@ -3,7 +3,7 @@
    endpoint and events the classic chat uses. The question is about the open email unless you un-scope it. */
 
 import { h, icon, append, replace, toast, plural, reducedMotion } from "./dom.js";
-import { getJSON, postJSON, postStream } from "./api.js";
+import { getJSON, inSentence, postJSON, postStream } from "./api.js";
 import { formatAnswer, mailHref, fileHref, lookedAt } from "./format.js";
 
 const CHAT_KEY = "closedesk-chat-id";
@@ -216,7 +216,7 @@ export function createChat({ root, onToggle, visionRead }) {
     const offer = turn.more_time;
     if (!offer) return null;
     const minutes = h("input", { type: "number", class: "more-time-minutes", min: "2", max: "120", step: "1", inputmode: "numeric", value: String(offer.suggest || ""), "aria-label": "Minutes to wait" });
-    const said = h("p", { class: `more-time-status${offer.failed ? " error" : ""}`, role: "status", "aria-live": "polite" }, offer.message || "");
+    const said = h("p", { class: `more-time-status${offer.failed ? " error" : ""}`, role: "status", "aria-live": "polite" }, offer.failed && offer.message ? icon("alert", 13) : null, offer.message || "");
     const button = h("button", { type: "submit", class: "btn btn-sm btn-primary", disabled: Boolean(offer.saved) }, icon("refresh", 14), h("span", null, "Save and ask again"));
     const save = async (event) => {
       event.preventDefault();
@@ -261,7 +261,7 @@ export function createChat({ root, onToggle, visionRead }) {
     const offer = turn.step_back;
     // Closed: answered before (reloaded, or kept as is), and saved so with the conversation.
     if (!offer || offer.dismissed || offer.closed || turn.pending) return null;
-    const said = h("p", { class: `step-back-status${offer.failed ? " error" : ""}`, role: "status", "aria-live": "polite" }, offer.message || "");
+    const said = h("p", { class: `step-back-status${offer.failed ? " error" : ""}`, role: "status", "aria-live": "polite" }, offer.failed && offer.message ? icon("alert", 13) : null, offer.message || "");
     const reload = async (event) => {
       if (busy) {
         offer.failed = true;
@@ -633,7 +633,7 @@ export function createChat({ root, onToggle, visionRead }) {
       );
     } catch (error) {
       if (error.name === "AbortError") answer.stopped = true;
-      else answer.text = (answer.text ? answer.text + "\n\n" : "") + `Something went wrong (${error.message}). Try again.`;
+      else answer.text = (answer.text ? answer.text + "\n\n" : "") + inSentence(error, (why) => `Something went wrong (${why}). Try again.`);
     }
     // Stopped, out of time or failed while it still thought: the box closes and keeps how long it thought, rather
     // than count up to each later repaint.

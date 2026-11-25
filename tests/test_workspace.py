@@ -429,9 +429,10 @@ def test_the_page_tab_shows_tables_and_key_details_where_they_are_printed(settin
         assert page.get_attribute(".pv-zoom .seg[aria-pressed='true']", "data-zoom") == "150"
 
 
-def test_next_to_check_steps_through_a_scans_amber_and_red_boxes(settings, store, page, monkeypatch):
+def scan_to_check(settings, store, monkeypatch):
+    """A scan of Harbor Steel's invoice whose page has green, amber and red boxes: OCR unsure of one description, and
+    the vision model reading the plate's amount differently. Gives the email."""
     from controller_inbox import ocr, page_view, vision
-    from liveserver import serving
     from test_page_view import LINES, OVIS, _detailed_invoice
 
     pdf = _detailed_invoice()
@@ -456,6 +457,13 @@ def test_next_to_check_steps_through_a_scans_amber_and_red_boxes(settings, store
         "<tr><td>Total due</td><td></td><td></td><td>$6,327.59</td></tr></table>"
     )
     store.save_page_reading(att.id, 1, first="", model_text=reading, model=OVIS, seconds=30, comparison="{}", sha256=att.sha256)
+    return email
+
+
+def test_next_to_check_steps_through_a_scans_amber_and_red_boxes(settings, store, page, monkeypatch):
+    from liveserver import serving
+
+    email = scan_to_check(settings, store, monkeypatch)
     with serving(web.create_app(settings, store)) as base:
         _open_page_tab(page, base, email)
         assert page.locator(".pv-box.differs").count() == 1
@@ -653,6 +661,7 @@ def test_process_new_mail_says_when_the_model_stopped_reading(browser, serve, se
     page.wait_for_selector(".toast:has-text('Processed')", timeout=60000)
     toast = page.locator(".toast:has-text('Processed')")
     assert note in toast.inner_text() and "error" in (toast.get_attribute("class") or "")
+    assert toast.locator("svg").count() >= 2, "a warning sign before the words, as well as the red (and the close button)"
 
 
 # Toolbars fit the reading pane -----------------------------------------------------------------------
@@ -768,15 +777,20 @@ CONTRAST = """sel => {
 }"""
 
 
+@pytest.mark.parametrize("colors", ["standard", "color-blind"])
 @pytest.mark.parametrize("dark", [True, False])
-def test_badges_and_buttons_keep_their_contrast_in_dark_mode(browser, serve, store, settings, as_of_now, dark):
+def test_badges_and_buttons_keep_their_contrast_in_dark_mode(browser, serve, store, settings, as_of_now, dark, colors):
+    from controller_inbox import appearance
+
     ingest_demo(store, settings, now=as_of_now)
+    appearance.save(store, colors=colors, importance_words=True)
     base = serve()
     page = _page(browser, width=1280, dark=dark)
     checks = {
         "/app/mail/demo-bec-wire?in=fraud": [".brand-mark", ".rd-head .pill.imp-critical", "#rd-fraud .btn-danger", "#rd-fraud .tag-fraud"],
-        "/app/mail/demo-approval?in=all": [".rd-head .pill.imp-high"],
+        "/app/mail/demo-approval?in=all": [".rd-head .pill.imp-high", ".items .imp-critical .item-level", ".items .imp-high .item-level"],
         "/app/fraud": [".items .tag-fraud"],
+        "/app/tasks": [".items .tag-prio-critical", ".items .tag-prio-high"],
     }
     seen = {}
     for path, selectors in checks.items():
@@ -784,16 +798,18 @@ def test_badges_and_buttons_keep_their_contrast_in_dark_mode(browser, serve, sto
         page.wait_for_selector(selectors[-1])
         for selector in selectors:
             seen[selector] = page.evaluate(CONTRAST, selector)
-    if dark:
-        assert all(ratio >= 4.5 for ratio in seen.values()), seen
-    else:
-        # Light mode is as it was: white on the danger red and on the brand blue.
-        assert seen["#rd-fraud .btn-danger"] >= 4.5 and seen[".brand-mark"] >= 4.5, seen
+    # Light mode too: the High pill's white words on its amber were 2.83:1.
+    assert all(ratio >= 4.5 for ratio in seen.values()), seen
     page.context.close()
 
 
-def test_the_classic_pages_fit_a_phone(browser, serve, store, settings, as_of_now):
+@pytest.mark.parametrize("chosen", [False, True])
+def test_the_classic_pages_fit_a_phone(browser, serve, store, settings, as_of_now, chosen):
+    from controller_inbox import appearance
+
     ingest_demo(store, settings, now=as_of_now)
+    if chosen:  # the colors for color blindness and the importance words on
+        appearance.save(store, colors="color-blind", importance_words=True)
     base = serve()
     page = _page(browser, width=390, height=844)
     wide = {}
@@ -804,6 +820,31 @@ def test_the_classic_pages_fit_a_phone(browser, serve, store, settings, as_of_no
         if width > 390:
             wide[path] = page.evaluate("[...document.querySelectorAll('.main *')].filter(e => e.getBoundingClientRect().right > 391 && !e.closest('.table-wrap')).map(e => e.tagName + '.' + e.className + ' ' + e.textContent.slice(0, 50))")
     assert wide == {}
+    page.context.close()
+
+
+def test_classic_setup_fits_a_phone_with_a_long_model_name(browser, serve, store, settings, as_of_now, monkeypatch):
+    """The Local model drop-down took the width of its longest choice ("google/gemma-4-31b (loaded) (likely too big
+    for this computer)", 431px), and the whole Setup page scrolled sideways at 390px."""
+    from test_lm_studio_models import LMStudio, _serve
+
+    from controller_inbox import model_roles
+
+    big = "google/gemma-4-31b"
+    settings.llm = None
+    server = LMStudio(loaded=[big])
+    server.extra = [big]
+    server.sizes = {big: 19 * 1024**3}
+    _serve(monkeypatch, server)
+    monkeypatch.setattr(model_roles, "computer_memory", lambda: 16 * 1024**3)
+    ingest_demo(store, settings, now=as_of_now)
+    base = serve()
+    page = _page(browser, width=390, height=844)
+    page.goto(f"{base}/settings")
+    page.wait_for_selector("#chat-model select")
+    assert f"{big} (loaded) (likely too big for this computer)" in page.inner_text("#chat-model select")
+    wide = page.evaluate("[...document.querySelectorAll('.main *')].filter(e => e.getBoundingClientRect().right > 391).map(e => e.tagName + '.' + e.className)")
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390, wide
     page.context.close()
 
 

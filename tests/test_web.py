@@ -506,6 +506,7 @@ def test_sample_reload_keeps_setup_trust_and_chats(settings: Settings, store: St
     assert client.post("/settings/timezone", data={"zone": "Asia/Tokyo"}, headers=SAME).status_code == 303
     assert client.post("/settings/context", data={"step": "0"}, headers=SAME).status_code == 303
     assert client.post("/settings/profile", data={"profile": "finance"}, headers=SAME).status_code == 303
+    assert client.post("/settings/colors", data={"colors": "color-blind", "importance_words": "1"}, headers=SAME).status_code == 303
     store.set_trust("domain", "taz.com", "safe", source="you")
     store.create_chat("c1")
     store.add_chat_turn("c1", "user", "What is due?")
@@ -515,6 +516,7 @@ def test_sample_reload_keeps_setup_trust_and_chats(settings: Settings, store: St
     assert store.get_state("timezone") == "Asia/Tokyo"
     assert store.get_state("min_context_tokens") == "0"
     assert store.get_state("profile") == "finance"
+    assert store.get_state("colors") == "color-blind" and store.get_state("importance_words") == "1"
     assert [row["value"] for row in store.trust_entries()] == ["taz.com"]
     assert [chat["id"] for chat in store.list_chats()] == ["c1"]
     assert store.get_state("last_overnight_at") is None, "mail bookkeeping starts over"

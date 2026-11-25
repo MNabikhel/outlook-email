@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, local_llm, model_choice, model_fit, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
+    agent, appearance, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, local_llm, model_choice, model_fit, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
     semantic, services, table_lookup, updates, version, vision,
 )
 from controller_inbox.extract import extraction_failed
@@ -153,6 +153,17 @@ def _category(email_category) -> dict[str, str]:
     return {"category": email_category.value, "category_label": DOCUMENT_LABELS.get(email_category, email_category.value)}
 
 
+def _importance(email: EmailRecord | None) -> dict[str, Any]:
+    """An email's importance, in words too, and whether it is held as possible payment fraud (said instead)."""
+    if email is None:
+        return {"importance": "", "importance_label": "", "locked": False}
+    return {
+        "importance": email.importance.value,
+        "importance_label": IMPORTANCE_LABELS.get(email.importance, email.importance.value),
+        "locked": fraud.attachments_locked(email),
+    }
+
+
 def mail_card(email: EmailRecord, tz, today: date, *, done: bool | None = None) -> dict[str, Any]:
     """One row of a mail list: enough to read it at a glance, nothing from its files."""
     return {
@@ -163,8 +174,7 @@ def mail_card(email: EmailRecord, tz, today: date, *, done: bool | None = None) 
         "received_at": email.received_at,
         "when": short_when(email.received_at, tz, today),
         "when_full": format_when(email.received_at, tz),
-        "importance": email.importance.value,
-        "importance_label": IMPORTANCE_LABELS.get(email.importance, email.importance.value),
+        **_importance(email),
         "score": email.importance_score,
         **_category(email.category),
         "folder": email.folder,
@@ -177,7 +187,6 @@ def mail_card(email: EmailRecord, tz, today: date, *, done: bool | None = None) 
         "due": email.extracted.primary_due or "",
         "files": len(email.attachments),
         "open_tasks": sum(1 for action in email.actions if action.status == ActionStatus.OPEN),
-        "locked": fraud.attachments_locked(email),
         "caution": "payment_caution" in email.flags,
         "model_status": email.model_status,
         "done": done,
@@ -299,6 +308,8 @@ def register_workspace(
             "outlook_ready": not outlook_desktop.available() or settings.graph_configured,
             "folders": [{"key": key, "label": label} for key, label in FOLDER_LABELS.items()],
             "categories": [{"value": key.value, "label": label} for key, label in DOCUMENT_LABELS.items()],
+            # The colors and importance words chosen in Settings, so a page left open follows a change made elsewhere.
+            "appearance": appearance.current(store),
             # Changes whenever a count does, so the page knows when its lists are out of date.
             "version": hashlib.sha256(
                 json.dumps([counts, coding, last_run, snapshot["finished_at"], tip and [tip["current"], tip["suggested"]]], sort_keys=True).encode()
@@ -324,6 +335,7 @@ def register_workspace(
                     **row,
                     "amount_label": _money(row.get("amount")),
                     "importance": email.importance.value if email else "",
+                    "importance_label": IMPORTANCE_LABELS.get(email.importance, email.importance.value) if email else "",
                     "files": len(email.attachments) if email else 0,
                     "locked": fraud.attachments_locked(email) if email else False,
                     "when": short_when(email.received_at, settings.tz, today) if email else "",
@@ -937,6 +949,10 @@ def register_workspace(
     @api.get("/fraud")
     def fraud_overview():
         today = board_date()
+        checked = store.flagged(limit=100)
+        # Each email's importance, and whether it is held: a Caution email that is Critical or High has the edge of
+        # its importance, and its word when Settings → Appearance asks, as in the mail lists.
+        emails = store.get_emails([row["email_id"] for row in checked])
         flagged = [
             {
                 "id": row["email_id"],
@@ -948,8 +964,9 @@ def register_workspace(
                 "score": row["score"],
                 "signals": [signal.get("label", "") for signal in row["signals"] if (signal.get("points") or 0) > 0],
                 "cleared": "fraud_cleared" in row["flags"],
+                **_importance(emails.get(row["email_id"])),
             }
-            for row in store.flagged(limit=100)
+            for row in checked
         ]
         log = [
             {
@@ -980,6 +997,9 @@ def register_workspace(
         status, rows = services.coding_rows(store, settings, status, q[:200])
         today = board_date()
         book = cost_codes.load(settings)
+        # Each invoice's importance, and whether it is held as possible payment fraud (a coding confirmed before it was
+        # held stays listed): its edge, and its word when Settings → Appearance asks, as in the mail lists.
+        emails = store.get_emails([row["email_id"] for row in rows])
         return {
             "status": status,
             "counts": store.coding_counts(),
@@ -995,6 +1015,7 @@ def register_workspace(
                     "amount_label": _money(row["extracted"].primary_amount),
                     "codes": [{"code": item.get("code", ""), "description": item.get("description", "")} for item in row["codes"]],
                     "status": row["status"],
+                    **_importance(emails.get(row["email_id"])),
                 }
                 for row in rows
             ],
@@ -1091,6 +1112,7 @@ def register_workspace(
         counts = store.counts()
         snapshot = job.snapshot()
         return {
+            "appearance": appearance.current(store),
             "profile": {"current": active_profile(settings, store), "choices": [{"value": key, "label": label} for key, label in PROFILES.items()]},
             "timezone": {
                 "choice": settings.timezone,
@@ -1342,6 +1364,23 @@ def register_workspace(
         outlook_sync.disconnect(store)
         return {"ok": True, "message": "Disconnected. CloseDesk no longer reads Outlook; the mail it copied stays here."}
 
+    @api.get("/settings/colors")
+    def settings_colors_now():
+        """The colors and importance words in use now: a classic page shown again (Back, or its window brought to the
+        front) asks, as the workspace's status check does."""
+        return {"appearance": appearance.current(store)}
+
+    @api.post("/settings/colors")
+    async def settings_colors(request: Request):
+        """Settings → Appearance: the colors for color blindness, and the importance on each email; each saved on its
+        own, as its box is ticked."""
+        data = await json_body(request)
+        colors, words = data.get("colors"), data.get("importance_words")
+        if (colors is None and words is None) or (colors is not None and colors not in appearance.COLORS):
+            raise HTTPException(status_code=400, detail="Choose the standard colors or the colors for color blindness.")
+        look = appearance.save(store, colors=colors, importance_words=None if words is None else _yes(words))
+        return saved("colors" if colors is not None else "importance-words", appearance=look)
+
     @api.post("/settings/outlook/calendar")
     async def settings_outlook_calendar(request: Request):
         must_be_connected()
@@ -1449,7 +1488,7 @@ def register_workspace(
         return templates.TemplateResponse(
             request,
             "app.html",
-            {"ui_version": UI_VERSION, "import_map": ui_import_map(), "tz": settings.tz.key},
+            {"ui_version": UI_VERSION, "import_map": ui_import_map(), "tz": settings.tz.key, "appearance": appearance.current(store)},
             headers={"Cache-Control": "no-store"},
         )
 

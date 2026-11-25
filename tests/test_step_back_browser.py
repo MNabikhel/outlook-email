@@ -91,6 +91,7 @@ def test_the_chat_says_why_the_reload_was_refused(settings, store, page, monkeyp
         page.locator(".msg-step-back button", has_text="Reload and ask again").click()
         page.wait_for_selector(".step-back-status.error")
         assert "is answering another request" in page.inner_text(".step-back-status")
+        assert page.locator(".step-back-status.error svg").count() == 1, "a warning sign, not only red words"
         assert asked == ["What is due?"], "not asked again"
         assert page.locator(".msg-step-back button", has_text="Reload and ask again").is_enabled()
 
@@ -199,12 +200,15 @@ def test_the_setup_page_says_it_is_reloading_and_takes_one_press(settings, store
     with serving(web.create_app(settings, store)) as base:
         page.set_viewport_size(WIDE)
         page.goto(f"{base}/settings")
-        button = page.locator("form[data-step-back] button")
-        button.wait_for()
-        button.click(no_wait_after=True)
+        page.locator("form[data-step-back] button").wait_for()
         # The form is sent and its page not back yet: the button says what is happening and can't be pressed again.
-        assert page.evaluate("document.querySelector('form[data-step-back] button').disabled")
-        assert page.evaluate("document.querySelector('form[data-step-back] button').textContent.trim()") == "Reloading in LM Studio…"
+        # Read in the same step as the press: the form's own script runs inside click(), and the page leaves only
+        # once the reload answers. A second step while the form waits can itself wait until the page has gone.
+        state = page.evaluate(
+            """() => { const button = document.querySelector('form[data-step-back] button');
+              button.click(); return [button.disabled, button.textContent.trim()]; }"""
+        )
+        assert state == [True, "Reloading in LM Studio…"]
         let_go.set()
         page.wait_for_selector("[data-step-back-said]")
         assert done == [(MODEL, 8192)]

@@ -19,23 +19,34 @@
   --selected: #edf3fc;
   --brand: #1b365d;
   --gold: #86672a; /* text: 4.5:1 on every light surface */
-  --danger: #b42318;
-  --danger-soft: #fdf0ee;
-  --danger-line: #f1c4be;
+  /* Critical and danger a true red, High and warnings an amber (tests/test_palette.py checks the hues, the distances
+     and the contrast of every use). */
+  --danger: #a8162b;
+  --danger-soft: #fdeef0;
+  --danger-line: #f2c1c8;
   /* Text on a filled danger, importance or brand colour. */
   --on-danger: #ffffff;
   --on-pill: #ffffff;
+  --on-imp-high: #17202c;
   --on-brand: #f3e3bd;
-  --warn: #9a5b0b;
-  --warn-soft: #fdf5e7;
-  --warn-line: #efd6a6;
+  --warn: #8a6400;
+  --warn-soft: #fdf6e1;
+  --warn-line: #ecd8a0;
   --ok: #17734a;
   --ok-soft: #eaf6ef;
   --ok-line: #bfe2cf;
-  --imp-critical: #c2361f;
-  --imp-high: #d38a12;
-  --imp-medium: #6f8bb3;
+  --imp-critical: #b3122b;
+  --imp-high: #b88100; /* the list edge and outlines */
+  --imp-high-fill: #d6a31f; /* the High pill, with dark words */
+  --imp-medium: #5b7299;
   --imp-low: #c3cad4;
+  /* The same in both themes, never set by a dark block: the boxes drawn on a page, which is white paper in dark mode
+     too, and the error message. */
+  --paper-ok: #17734a;
+  --paper-check: #b88100;
+  --paper-differs: #a8162b;
+  --paper-accent: #2557a7;
+  --toast-error: #a8162b;
   --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.06);
   --shadow-2: 0 10px 30px rgba(15, 23, 42, 0.14), 0 2px 8px rgba(15, 23, 42, 0.06);
   --radius: 8px;
@@ -70,20 +81,22 @@
     --selected: #1a2740;
     --brand: #9db8e8;
     --gold: #d8b46c;
-    --danger: #ff8f84;
-    --danger-soft: #2a1616;
-    --danger-line: #5c2a28;
+    --danger: #ff6b6b;
+    --danger-soft: #2c1517;
+    --danger-line: #5e2629;
     --on-danger: #1a0d0d;
     --on-pill: #0d1117;
+    --on-imp-high: #0d1117;
     --on-brand: #0d1117;
-    --warn: #f1b75e;
-    --warn-soft: #2a2113;
-    --warn-line: #5a4420;
+    --warn: #f0c060;
+    --warn-soft: #2a2310;
+    --warn-line: #5a4818;
     --ok: #63d29b;
     --ok-soft: #12271d;
     --ok-line: #23523a;
-    --imp-critical: #ff7a66;
-    --imp-high: #f0ad45;
+    --imp-critical: #ff5a5f;
+    --imp-high: #f2bd3a;
+    --imp-high-fill: #f2bd3a;
     --imp-medium: #7f9cc9;
     --imp-low: #46505f;
     --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -110,24 +123,59 @@
   --selected: #1a2740;
   --brand: #9db8e8;
   --gold: #d8b46c;
-  --danger: #ff8f84;
-  --danger-soft: #2a1616;
-  --danger-line: #5c2a28;
+  --danger: #ff6b6b;
+  --danger-soft: #2c1517;
+  --danger-line: #5e2629;
   --on-danger: #1a0d0d;
   --on-pill: #0d1117;
+  --on-imp-high: #0d1117;
   --on-brand: #0d1117;
-  --warn: #f1b75e;
-  --warn-soft: #2a2113;
-  --warn-line: #5a4420;
+  --warn: #f0c060;
+  --warn-soft: #2a2310;
+  --warn-line: #5a4818;
   --ok: #63d29b;
   --ok-soft: #12271d;
   --ok-line: #23523a;
-  --imp-critical: #ff7a66;
-  --imp-high: #f0ad45;
+  --imp-critical: #ff5a5f;
+  --imp-high: #f2bd3a;
+  --imp-high-fill: #f2bd3a;
   --imp-medium: #7f9cc9;
   --imp-low: #46505f;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-2: 0 12px 36px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* Colors for color blindness (Settings → Appearance): Critical and danger a crimson, High and warnings an amber,
+   done a blue-green, told apart by lightness as well as hue. The server writes data-colors on <html>, so the page
+   never paints in the other colors first. This block comes after the dark ones with the same specificity, so it wins
+   over them: the dark blocks below set every token it does, except the --paper-* and --toast-error ones, which are
+   the same in both themes. */
+:root[data-colors="color-blind"] {
+  --imp-critical: #921f3a;
+  --danger: #761630; --danger-soft: #fcedf0; --danger-line: #ebbcc6;
+  --imp-high: #aa7a00;
+  --warn: #806c00; --warn-soft: #fdf6dc; --warn-line: #e3cf8c;
+  --ok: #0b738a; --ok-soft: #eaf5f7; --ok-line: #b3dbe4;
+  --paper-ok: #0b738a; --paper-check: #aa7a00; --paper-differs: #761630;
+  --toast-error: #761630;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-colors="color-blind"]:not([data-theme="light"]) {
+    --imp-critical: #f7577a;
+    --danger: #f9678d; --danger-soft: #2c1520; --danger-line: #5e2638;
+    --imp-high: #ffd23f; --imp-high-fill: #ffd23f; --on-imp-high: #0d1117;
+    --warn: #ffd54f; --warn-soft: #29230c; --warn-line: #5a4b14;
+    --ok: #48e0cf; --ok-soft: #0e2626; --ok-line: #1f4f4b;
+  }
+}
+
+:root[data-colors="color-blind"][data-theme="dark"] {
+  --imp-critical: #f7577a;
+  --danger: #f9678d; --danger-soft: #2c1520; --danger-line: #5e2638;
+  --imp-high: #ffd23f; --imp-high-fill: #ffd23f; --on-imp-high: #0d1117;
+  --warn: #ffd54f; --warn-soft: #29230c; --warn-line: #5a4b14;
+  --ok: #48e0cf; --ok-soft: #0e2626; --ok-line: #1f4f4b;
 }
 
 * { box-sizing: border-box; }
@@ -231,8 +279,9 @@ code { font: 12.5px var(--mono); }
 .rail-foot { padding: 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
 .rail-chip { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: var(--radius-sm); font-size: 12.5px; color: var(--muted); white-space: nowrap; text-decoration: none; }
 a.rail-chip:hover { background: var(--surface-3); text-decoration: none; }
-.rail-chip .dot, .btn-chat .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
-.rail-chip.model.on .dot, .btn-chat.live .dot { background: var(--ok); }
+/* No local model: a hollow ring; one running: a filled dot, so they differ by more than their colour. */
+.rail-chip .dot, .btn-chat .dot { width: 8px; height: 8px; border-radius: 50%; background: transparent; box-shadow: inset 0 0 0 1.5px var(--faint); flex: none; }
+.rail-chip.model.on .dot, .btn-chat.live .dot { background: var(--ok); box-shadow: none; }
 .rail-chip.close b { font-size: 15px; color: var(--gold); font-variant-numeric: tabular-nums; min-width: 18px; text-align: center; }
 .rail-classic { font-size: 12.5px; }
 .rail-version { padding: 2px 10px 0; font-size: 11px; color: var(--faint); white-space: nowrap; }
@@ -362,11 +411,25 @@ a.rail-chip:hover { background: var(--surface-3); text-decoration: none; }
 .tag-ok, .tag-coding-confirmed { background: var(--ok-soft); color: var(--ok); }
 .tag-coding-suggested { background: var(--accent-soft); color: var(--accent); }
 .tag-coding-unmatched { background: var(--warn-soft); color: var(--warn); }
-.tag-prio-critical { background: var(--danger-soft); color: var(--danger); }
+/* Held for fraud, said where an email's importance is (lists.js): in the red of the held edge beside it. */
+.tag-prio-critical, .tag-held { background: var(--danger-soft); color: var(--danger); }
 .tag-prio-high { background: var(--warn-soft); color: var(--warn); }
+/* The importance in words on each email in the lists (lists.js), shown when Settings → Appearance asks for it. After
+   .tag, so it stays hidden otherwise. Outlined on the row, in its own colour, where the reason a row is in Today
+   ("Due today", "Overdue") is a filled tag: side by side, "how important" doesn't look like a second "why". Today's
+   first line wraps rather than run into the done button, and the AP coding and Fraud check lists' rather than cut
+   their date off. */
+.item-level { display: none; flex: none; }
+.tag.item-level { background: transparent; box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 55%, transparent); }
+:root[data-importance-words="on"] .item-level { display: inline-flex; }
+/* A held email's word says "Held for fraud": its chip saying "Held: possible fraud" goes meanwhile, and the chip's
+   line with it when it was all there was on it ("Files locked" says more, and stays). */
+:root[data-importance-words="on"] .item .chip-held,
+:root[data-importance-words="on"] .item .item-meta:has(> .chip-held:only-child) { display: none; }
+:root[data-importance-words="on"] :is(.kind-focus, .kind-coding, .kind-fraud) .item-row1 { flex-wrap: wrap; row-gap: 2px; }
 .pill { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11.5px; font-weight: 650; color: var(--on-pill); background: var(--imp-medium); }
 .pill.imp-critical { background: var(--imp-critical); }
-.pill.imp-high { background: var(--imp-high); }
+.pill.imp-high { background: var(--imp-high-fill); color: var(--on-imp-high); }
 .pill.imp-low { background: var(--surface-3); color: var(--muted); }
 .badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
 .badge.ok { color: var(--ok); background: var(--ok-soft); border-color: var(--ok-line); }
@@ -374,7 +437,7 @@ a.rail-chip:hover { background: var(--surface-3); text-decoration: none; }
 .cost-code { font: 600 12px var(--mono); padding: 1px 5px; border-radius: 4px; background: var(--surface-3); color: var(--text); }
 .flag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11.5px; background: var(--surface-3); color: var(--text-2); text-transform: capitalize; }
 .flag-fraud_risk, .flag-do_not_process { background: var(--danger-soft); color: var(--danger); }
-.flag-payment_caution, .flag-possible_duplicate, .flag-missing_attachment { background: var(--warn-soft); color: var(--warn); }
+.flag-payment_caution, .flag-bank_change_caution, .flag-duplicate_invoice, .flag-missing_attachment { background: var(--warn-soft); color: var(--warn); }
 .note { padding: 8px 10px; border-radius: var(--radius-sm); background: var(--warn-soft); border: 1px solid var(--warn-line); color: var(--text); font-size: 13px; }
 .warn-text { color: var(--warn); }
 .ok-text { color: var(--ok); }
@@ -755,6 +818,16 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 :is(.pv-box, .pv-swatch, .pv-tip-tag).check { --tone: var(--imp-high); }
 :is(.pv-box, .pv-swatch, .pv-tip-tag).differs { --tone: var(--danger); }
 :is(.pv-box, .pv-swatch, .pv-tip-tag).fixed { --tone: var(--accent); }
+/* The boxes are drawn on the page, which is white paper in dark mode too, so they keep the light theme's colours
+   (the legend and the card beside the page keep the theme's). An amber box has a dotted edge and a red one a heavier
+   edge, so they differ by more than their colour. Not dashed: on this page a dashed outline is a table (its outline,
+   its chip above the page and the one drawn to mark a table), and the words above the page say so. */
+.pv-box.ok { --tone: var(--paper-ok); }
+.pv-box.check { --tone: var(--paper-check); border-style: dotted; border-width: 2px; margin: -2.5px 0 0 -2.5px; }
+.pv-box.differs { --tone: var(--paper-differs); box-shadow: 0 0 0 1px var(--tone); }
+.pv-box.fixed { --tone: var(--paper-accent); }
+.pv-swatch.check { border-style: dotted; border-width: 2px; }
+.pv-swatch.differs { box-shadow: 0 0 0 1px var(--tone); }
 .pv-tip {
   position: fixed; z-index: 60;
   max-width: min(380px, calc(100vw - 16px));
@@ -781,17 +854,23 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 .pv-sheet.drawing .pv-taught { pointer-events: none; }
 /* Over the table outlines and their tags (z-index 4, and drawn after them), so a taught box inside a table can be
    pointed at and its tag read. */
-.pv-taught { position: absolute; z-index: 4; border: 2px solid var(--ok); border-radius: 3px; background: color-mix(in srgb, var(--ok) 12%, transparent); cursor: pointer; }
+.pv-taught { position: absolute; z-index: 4; border: 2px solid var(--paper-ok); border-radius: 3px; background: color-mix(in srgb, var(--paper-ok) 12%, transparent); cursor: pointer; }
 .pv-taught:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.pv-taught-tag { position: absolute; left: -2px; bottom: 100%; display: inline-flex; align-items: center; gap: 3px; max-width: 260px; padding: 1px 6px; border-radius: 4px 4px 4px 0; background: var(--ok); color: var(--ok-soft); font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pv-taught-tag { position: absolute; left: -2px; bottom: 100%; display: inline-flex; align-items: center; gap: 3px; max-width: 260px; padding: 1px 6px; border-radius: 4px 4px 4px 0; background: var(--paper-ok); color: #fff; font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .taught-chip { margin-left: 4px; font-size: 10.5px; padding: 0 6px; vertical-align: 1px; }
 .pv-check .pv-teach-pick { width: auto; max-width: 170px; height: 27px; padding: 0 8px; font-size: 12.5px; flex: none; }
-.pv-rubber { position: absolute; z-index: 4; border: 2px dashed var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); pointer-events: none; }
+.pv-rubber { position: absolute; z-index: 4; border: 2px dashed var(--paper-accent); background: color-mix(in srgb, var(--paper-accent) 10%, transparent); pointer-events: none; }
 .pv-tip-row { display: flex; align-items: center; gap: 8px; }
 .pv-tip-row b { font-weight: 650; color: var(--text-2); }
 .pv-tip-model { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 .pv-tip-text { margin: 3px 0 0; font: 12.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pv-tip-tag { padding: 0 7px; border-radius: 999px; font-size: 11.5px; font-weight: 650; color: var(--tone); background: color-mix(in srgb, var(--tone) 14%, transparent); border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent); }
+/* How sure a reading is, in words: the text colours on their own pale fills, which read at 4.5:1 or more in every
+   theme and palette. The boxes' edge colours on a tint were too pale (the amber 2.9:1 in the light theme). */
+.pv-tip-tag.ok { color: var(--ok); background: var(--ok-soft); border-color: var(--ok-line); }
+.pv-tip-tag.check { color: var(--warn); background: var(--warn-soft); border-color: var(--warn-line); }
+.pv-tip-tag.differs { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-line); }
+.pv-tip-tag.fixed { color: var(--accent); background: var(--accent-soft); }
 
 /* Page size, what to check next, and the tables on the page. */
 .pv-zoom .seg { font-variant-numeric: tabular-nums; }
@@ -834,9 +913,10 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 .pv-field-value { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .pv-field-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pv-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--tone, var(--faint)); }
+/* Green a filled dot, amber a ring and red a square, as the boxes on the page are solid, dotted and ringed. */
 .pv-dot.ok { --tone: var(--ok); }
-.pv-dot.check { --tone: var(--imp-high); }
-.pv-dot.differs { --tone: var(--danger); }
+.pv-dot.check { --tone: var(--imp-high); background: transparent; box-shadow: inset 0 0 0 2px var(--tone); }
+.pv-dot.differs { --tone: var(--danger); border-radius: 1px; }
 
 /* A table opened from the page: kept in view at the top while the page scrolls under it. */
 .pv-panel {
@@ -906,6 +986,8 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 .more-time-row label { display: inline-flex; align-items: center; gap: 6px; }
 .more-time-minutes { width: 5em; height: 30px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); }
 .more-time-status:empty { display: none; }
+.more-time-status.error, .step-back-status.error { display: flex; gap: 5px; align-items: flex-start; }
+:is(.more-time-status, .step-back-status).error .ic { flex: none; margin-top: 2px; }
 .more-time-status.error { color: var(--danger); }
 .msg-step-back { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); font-size: 12.5px; }
 .msg-step-back p { margin: 0; }
@@ -947,6 +1029,20 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .plain-list.folders li { flex-direction: row; justify-content: space-between; }
 .plain-list.ranked li { display: block; }
 .plain-list.ranked small { display: block; }
+/* An email in the daily digest, or in Today's box of emails to verify by phone, has the edge it has in the lists: a
+   Critical or High one its importance's, a held one the red of danger (pages.js). In the card's margin, so its words
+   start where the others' do. */
+.plain-list li:is(.imp-critical, .imp-high, .is-locked) { position: relative; }
+.plain-list li:is(.imp-critical, .imp-high, .is-locked)::before { content: ""; position: absolute; left: -10px; top: 0; bottom: 0; width: 3px; border-radius: 2px; }
+.plain-list li.imp-critical::before { background: var(--imp-critical); }
+.plain-list li.imp-high::before { background: var(--imp-high); }
+.plain-list li.is-locked::before { background: var(--danger); width: 4px; }
+/* A held one says so in words too, with the importance words or without, as the lists' rows do with their held chip:
+   its red edge is nearly a Critical one's. In the box of emails to verify by phone, which says it, only when the words
+   are asked for. */
+.plain-list .item-level.tag-held { display: inline-flex; }
+.card-danger .plain-list .item-level.tag-held { display: none; }
+:root[data-importance-words="on"] .card-danger .plain-list .item-level.tag-held { display: inline-flex; }
 .doc-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .doc-date { font-weight: 650; padding: 0 6px; font-variant-numeric: tabular-nums; }
 .md-copy { white-space: pre-wrap; font: 12px/1.5 var(--mono); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; max-height: 360px; overflow: auto; }
@@ -1004,6 +1100,8 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .set-row { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 10px 0 0; border-top: 1px solid var(--border); }
 .set-sec-head + .set-row { border-top: 0; padding-top: 0; }
 .set-row-label { font-size: 13px; font-weight: 600; }
+/* A row of checkboxes: the label above them, each box on its own line. */
+.set-row.set-row-stack { flex-direction: column; align-items: stretch; gap: 10px; }
 .set-choices { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
 .set-choices.stack { grid-template-columns: 1fr; }
 .set-choice { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); cursor: pointer; transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease); }
@@ -1228,11 +1326,15 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 
 /* ---------- Toasts and overlays ---------- */
 
-.toasts { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 60; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+/* Across the window, so a message on a phone has its width (centred at half of it, it wrapped at half the screen). */
+.toasts { position: fixed; left: 12px; right: 12px; bottom: 18px; z-index: 60; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
 .toast {
   pointer-events: auto;
-  display: flex; align-items: center; gap: 10px;
+  /* The sign, Undo and the × line up with the first line of words, however many lines a message runs to: each is
+     24px tall, as the words' first line is with its padding. */
+  display: flex; align-items: flex-start; gap: 10px;
   max-width: min(560px, calc(100vw - 24px));
+  line-height: 18px;
   padding: 8px 8px 8px 14px;
   border-radius: var(--radius);
   background: #1d2533;
@@ -1243,15 +1345,18 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 }
 :root[data-theme="dark"] .toast { background: #e7ebf1; color: #121820; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .toast { background: #e7ebf1; color: #121820; } }
-.toast.error { background: #8f1d14; color: #fff; }
+/* Red in both themes (the dark theme's light toasts above would otherwise win), with a warning sign (dom.js). */
+:root .toast.error { background: var(--toast-error); color: #fff; }
+.toast.error > .ic { flex: none; margin-top: 4.5px; }
+.toast-text { padding: 3px 0; }
 .toast.leaving { animation: toast-out 170ms var(--ease) forwards; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 @keyframes toast-out { to { opacity: 0; transform: translateY(8px); } }
-.toast-action { border: 0; background: transparent; color: #9cc0ff; font-weight: 650; cursor: pointer; padding: 3px 6px; border-radius: 4px; }
+.toast-action { flex: none; border: 0; background: transparent; color: #9cc0ff; font-weight: 650; cursor: pointer; padding: 3px 6px; line-height: 18px; border-radius: 4px; }
 :root[data-theme="dark"] .toast-action { color: #1f4e9c; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .toast-action { color: #1f4e9c; } }
 .toast-action:hover { background: rgba(127, 127, 127, 0.2); }
-.toast-close { border: 0; background: transparent; color: inherit; opacity: 0.6; cursor: pointer; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 4px; }
+.toast-close { flex: none; border: 0; background: transparent; color: inherit; opacity: 0.6; cursor: pointer; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 4px; }
 .toast-close:hover { opacity: 1; }
 .overlay { position: fixed; inset: 0; z-index: 50; background: rgba(13, 17, 23, 0.36); display: flex; justify-content: center; align-items: flex-start; padding: 12vh 16px 16px; animation: fade 140ms var(--ease); }
 @keyframes fade { from { opacity: 0; } }
@@ -1467,11 +1572,11 @@ dialog.consent p { margin: 0 0 10px; line-height: 1.5; }
 .cal-chip.open .cal-time { color: inherit; }
 .cal-panel-title:focus { outline: none; }
 .cal-panel-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-.cal-chip.all-day { border-left-color: var(--ok, #2e7d4f); background: var(--ok-soft); }
+.cal-chip.all-day { border-left-color: var(--ok); background: var(--ok-soft); }
 .cal-chip.cancelled .cal-subj { text-decoration: line-through; color: var(--muted); }
 /* An invitation to doubt (calendar_events.with_cautions): marked on its chip, said in full in its panel. */
-.cal-chip.caution { border-left-color: var(--warn, #b26a00); }
-.cal-caution { flex: none; color: var(--warn, #b26a00); display: inline-flex; }
+.cal-chip.caution { border-left-color: var(--warn); }
+.cal-caution { flex: none; color: var(--warn); display: inline-flex; }
 .cal-chip.open .cal-caution { color: inherit; }
 .cal-caution-note { display: flex; gap: 4px; align-items: flex-start; white-space: normal; margin: 0; }
 /* Open, the title is struck through in the open meeting's own colour: grey on the accent couldn't be read. */
@@ -1516,8 +1621,9 @@ dialog.consent p { margin: 0 0 10px; line-height: 1.5; }
   .cal-cell { height: 58px; padding: 2px; }
   .cal-daynum { display: block; padding: 1px 4px; }
   .cal-month .cal-chip { display: inline-block; width: 9px; height: 9px; margin: 1px; padding: 0; border: 0; border-radius: 50%; background: var(--accent); vertical-align: middle; }
-  .cal-month .cal-chip.all-day { background: var(--ok); }
-  .cal-month .cal-chip.cancelled { background: var(--faint); }
+  /* All day a square, cancelled a ring: told apart by shape as well as colour. */
+  .cal-month .cal-chip.all-day { background: var(--ok); border-radius: 2px; }
+  .cal-month .cal-chip.cancelled { background: transparent; box-shadow: inset 0 0 0 1.5px var(--faint); }
   .cal-month .cal-chip.open { outline: 2px solid var(--text); outline-offset: 1px; }
   .cal-month .cal-chip > * { display: none; }
   .cal-more { display: block; padding: 0 2px; font-size: 11px; }
@@ -1532,4 +1638,20 @@ dialog.consent p { margin: 0 0 10px; line-height: 1.5; }
 @media (max-width: 900px) {
   .list-brief { display: flex; flex-direction: column; gap: 10px; padding: 12px 12px 4px; }
   .list-brief .card { margin: 0; }
+}
+/* A Windows contrast theme (high contrast) puts the computer's own colors on the page and drops fills and shadows: the
+   colored edges took the background's color, so nothing marked a Critical, High or held email, and a word lost the box
+   round it ("Held for fraud" ran into the sender). The edge is drawn in the color of the words there, the same for all
+   three (Settings → Appearance says the importance words tell them apart), each tag keeps an outline, and the row
+   picked with j and k keeps one round it.
+   The boxes drawn on a page's image keep their own colors and shapes: the theme leaves the image as it is, white
+   paper, and drew every box's edge in the color of its words (white on that paper in a dark theme) without the red
+   box's ring, so a red box looked like a green one. The legend's swatches and the key details' dots keep theirs too,
+   as they match the boxes: the amber dot (a ring) had gone, and the green and red ones took the page's color. */
+@media (forced-colors: active) {
+  .item:is(.imp-critical, .imp-high, .is-locked)::before,
+  .plain-list li:is(.imp-critical, .imp-high, .is-locked)::before { background: CanvasText; }
+  .tag, .chip, .pill { outline: 1px solid CanvasText; outline-offset: -1px; }
+  .item.is-sel { outline: 2px solid Highlight; outline-offset: -2px; }
+  .pv-sheet :is(.pv-box, .pv-tbl, .pv-taught, .pv-rubber), .pv-swatch, .pv-dot { forced-color-adjust: none; }
 }
