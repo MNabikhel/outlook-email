@@ -415,6 +415,37 @@ def test_classic_today_writes_the_importance_on_each_email_when_asked(browser, s
     context.close()
 
 
+MODEL_FLAGS = """() => [...document.querySelectorAll('table.mail tbody tr')].map((tr) => {
+  const cell = tr.querySelector('a.subj').closest('td');
+  const above = [...cell.children].filter((el) => el.matches('.summary, .why, .flags:not(.model-flags), a.subj')).pop();
+  const flag = cell.querySelector('.flag.needs_model:not(.flags:not(.model-flags) .flag), .flag.bionic, .flag.user_trained');
+  return { subject: tr.querySelector('a.subj').textContent,
+           gap: flag && above ? flag.getBoundingClientRect().top - above.getBoundingClientRect().bottom : null,
+           waiting: [...cell.querySelectorAll('.flag')].filter((f) => /^(script draft|needs model)$/i.test(f.innerText.trim())).map((f) => f.innerText.trim()) };
+})"""
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_the_classic_inbox_says_once_that_an_email_waits_for_the_model_with_room_above_it(browser, settings, loaded, width):
+    """The dashed "Script draft" box sat flush against the summary line above it (0px: its top edge touched the
+    descenders of "Confirm by phone before any payment."), and the same row had a second, identical dashed box, "Needs
+    Model", saying the email waits for the model too."""
+    context = _context(browser, "light")
+    page = context.new_page()
+    page.set_viewport_size({"width": width, "height": 900})
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/inbox")
+        rows = page.evaluate(MODEL_FLAGS)
+    context.close()
+    waiting = [row for row in rows if row["waiting"]]
+    assert waiting, rows
+    for row in rows:
+        assert len(row["waiting"]) <= 1, ("said once", row)
+        if row["gap"] is not None:
+            assert row["gap"] >= 4, ("room above it", width, row)
+    assert [row for row in waiting if row["gap"] is not None], waiting
+
+
 FOCUS_EDGES = """() => [...document.querySelectorAll('.focus-item')].map((li) => {
   const level = li.querySelector('.item-level');
   return { title: (li.querySelector('.focus-top a') || {}).textContent || '',
