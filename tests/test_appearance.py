@@ -254,17 +254,20 @@ def test_the_help_says_what_the_colors_for_color_blindness_change(client):
 
 def test_the_words_help_says_which_emails_have_a_colored_edge():
     """The words box said it writes the importance "as well as the colored edge", but only Critical and High have
-    one: a Medium or Low email has no edge at all."""
+    one: a Medium or Low email has no edge at all. Then it named only the lists, where the box also writes on the
+    daily digest, and left out the held email's edge and its "Held for fraud"."""
     from pathlib import Path
 
     import palette_math as pm
 
     source = (Path(web.__file__).parent / "static" / "ui" / "settings.js").read_text(encoding="utf-8")
-    text = source[source.index('b("Show Critical, High, Medium or Low on each email")') :][:300]
+    text = source[source.index('b("Show Critical, High, Medium or Low on each email")') :][:400]
     assert "as well as the colored edge" not in text
-    assert "only Critical and High" in text and "colored edge" in text, text
+    assert "the lists and the daily digest" in text and "Held for fraud" in text, text
+    assert "only Critical, High and held emails" in text and "colored edge" in text, text
     for level in ("critical", "high"):
         assert pm.rule_value(pm.WORKSPACE_CSS, f".item.imp-{level}::before", "background") == f"var(--imp-{level})"
+    assert pm.rule_value(pm.WORKSPACE_CSS, ".item.is-locked::before", "background") == "var(--danger)"
     css = pm.WORKSPACE_CSS.read_text(encoding="utf-8")
     assert ".item.imp-medium" not in css and ".item.imp-low" not in css
 
@@ -272,9 +275,9 @@ def test_the_words_help_says_which_emails_have_a_colored_edge():
 def test_the_importance_words_say_which_lists_changed(client, demo):
     """Ticking only "Show Critical, High, Medium or Low on each email" said "The workspace and the classic pages now
     look this way", but the classic Inbox and folder lists show the importance in a column either way: what changes
-    is the workspace's lists, and Today and the digest on the classic pages."""
+    is the workspace's lists and digest, and Today and the digest on the classic pages."""
     words = web.NOTICES["importance-words"]
-    assert "workspace's lists" in words and "Today and the digest" in words
+    assert "workspace's lists and digest" in words and "Today and the digest on the classic pages" in words
     reply = colors(client, {"importance_words": True})
     assert reply.json()["message"] == words and reply.json()["notice"] == "importance-words"
     assert colors(client, {"importance_words": False}).json()["message"] == words
@@ -302,13 +305,15 @@ def test_the_importance_words_say_which_lists_changed(client, demo):
 def test_both_setup_pages_say_where_the_importance_words_go(client):
     """Classic Setup said the box was for "the workspace's lists. These pages already show it in the Importance
     column", but the classic home page, Today, and the digest have no such column; and the workspace said the classic
-    pages use the box too, which they didn't. Now Today and the digest do, and both pages say so."""
+    pages use the box too, which they didn't. Now Today and the digest do, and both pages say so: classic Setup names
+    the workspace's digest too, and not the digest's printable page, which keeps no words."""
     from pathlib import Path
 
     page = client.get("/settings").text
     section = page[page.index('id="colors"') : page.index("</section>", page.index('id="colors"'))]
     words = section[section.index("Show Critical, High, Medium or Low on each email") :]
     assert "already" not in words and "Today and the digest" in words and "Inbox and folder lists" in words, words
+    assert "not its printable page" in words and "the workspace's lists and digest" in words, words
     source = (Path(web.__file__).parent / "static" / "ui" / "settings.js").read_text(encoding="utf-8")
     assert "The two boxes under Colors are saved for CloseDesk on this computer, and the classic pages follow them too." in source
 

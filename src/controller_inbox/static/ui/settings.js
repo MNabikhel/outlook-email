@@ -308,7 +308,7 @@ export function createSettings(ctx) {
           "label",
           { class: "set-check" },
           words,
-          h("span", { class: "set-check-text" }, b("Show Critical, High, Medium or Low on each email"), h("span", null, "Writes it on each email in the lists. Without it, only Critical and High are marked, by a colored edge."))
+          h("span", { class: "set-check-text" }, b("Show Critical, High, Medium or Low on each email"), h("span", null, "Writes it on each email in the lists and the daily digest, or Held for fraud on one held as possible fraud. Without it, only Critical, High and held emails are marked, by a colored edge."))
         ),
         status("colors")
       )
