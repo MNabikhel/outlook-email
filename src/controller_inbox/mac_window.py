@@ -462,19 +462,23 @@ def _responds(thing, action: str) -> bool:
         return callable(getattr(thing, action.replace(":", "_"), None))
 
 
-def _answered(target, action: str, page) -> bool:
-    """Whether a menu item's action is answered: by its target, or (with none) by the page or what holds it, up to the
-    window and the app (AppKit's responder chain, from the page as the window's first responder)."""
+def _answered(target, action: str, page, application=None) -> bool:
+    """Whether a menu item's action is answered: by its target, or (with none) as AppKit sends it, from the page as
+    the window's first responder: the page or what holds it, up to the window, then the window's delegate, the app
+    and the app's delegate."""
     if target is not None:
         return _responds(target, action)
     responder = page
     for _ in range(40):
         if responder is None:
-            return False
+            break
         if _responds(responder, action):
             return True
         responder = responder.nextResponder()
-    return False
+    window = page.window()
+    others = [window.delegate() if window is not None and hasattr(window, "delegate") else None, application]
+    others.append(application.delegate() if application is not None and hasattr(application, "delegate") else None)
+    return any(other is not None and _responds(other, action) for other in others)
 
 
 def _press(appkit, title: str, action: str):
@@ -538,7 +542,8 @@ def read_back(window, *, cocoa=None, appkit=None, call_after=None, wait: float =
         found["menu"] = int(menu.numberOfItems()) == 1
         keys, unanswered = [], []
         wanted = {(entry[0], entry[1]) for _, items in MENUS for entry in items if entry is not None}
-        main = appkit.NSApplication.sharedApplication().mainMenu()
+        application = appkit.NSApplication.sharedApplication()
+        main = application.mainMenu()
         for index in range(main.numberOfItems()):
             menu = main.itemAtIndex_(index).submenu()
             if menu is None:
@@ -548,7 +553,7 @@ def read_back(window, *, cocoa=None, appkit=None, call_after=None, wait: float =
                 if str(item.keyEquivalent()) and not item.isSeparatorItem():
                     keys.append((str(item.title()), str(item.keyEquivalent()), int(item.keyEquivalentModifierMask())))
                 action = "" if item.isSeparatorItem() else _action(item)
-                if (str(item.title()), action) in wanted and not _answered(item.target(), action, page):
+                if (str(item.title()), action) in wanted and not _answered(item.target(), action, page, application):
                     unanswered.append(str(item.title()))
         found["keys"], found["unanswered"] = keys, unanswered
         found["zoom"] = bool(page.allowsMagnification())
