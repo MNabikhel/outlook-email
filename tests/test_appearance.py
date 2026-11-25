@@ -413,6 +413,42 @@ def test_a_digest_saved_before_it_said_which_emails_are_held_says_so_too(client,
     assert "Critical" not in [word for _cls, word in _words_on(html, HELD)]
 
 
+def test_a_held_invoice_on_a_digest_saved_before_it_said_so_is_held_in_every_list(client, demo):
+    """An AP invoice flagged for changed bank details, on a digest saved by an earlier version: it said "Held for
+    fraud" in its "Do not process" box and in Needs you, then "High" under Invoices to enter, on the same page, as only
+    the box, the focus rows and what came in were worked out again. Every list of emails is now."""
+    import json
+
+    from controller_inbox import fraud
+
+    invoice = demo.get_email(INVOICE)
+    invoice.flags = [*invoice.flags, "fraud_risk"]
+    demo.upsert_email(invoice)
+    assert fraud.attachments_locked(demo.get_email(INVOICE))
+    assert client.post("/digest/rebuild", headers=SAME, follow_redirects=False).status_code == 303
+    row = demo.latest_digest()
+    payload = json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"]
+    lists = [value for value in payload.values() if isinstance(value, list)] + list(payload["new_mail"].values())
+    for items in lists:
+        for item in items:
+            if isinstance(item, dict):
+                item.pop("locked", None)
+    assert [item for item in payload["invoices_to_enter"] if item["id"] == INVOICE], "it is an invoice to enter"
+    demo.save_digest(row["period_date"], row["generated_at"], row["markdown"], row["html"], payload)
+
+    shown = client.get("/api/digest", headers=PAGE).json()["payload"]
+    rows = [item for value in shown.values() if isinstance(value, list) for item in value if isinstance(item, dict)]
+    rows += [item for items in shown["new_mail"].values() for item in items]
+    ours = [item for item in rows if (item.get("email_id") or item.get("id")) == INVOICE and item.get("importance_label")]
+    assert len(ours) >= 3 and all(item["locked"] is True for item in ours), ours
+    assert [item["locked"] for item in shown["invoices_to_enter"] if item["id"] == INVOICE] == [True]
+    words = _words_on(client.get("/digest").text, INVOICE)
+    assert len(words) >= 3 and set(words) == {("pill held item-level", "Held for fraud")}, words
+
+
+INVOICE = "demo-inv-10482"  # the sample's AP invoice
+
+
 @pytest.mark.parametrize(("notice", "section"), [("colors", "colors"), ("importance-words", "colors"), ("timezone", "timezone")])
 def test_setup_says_saved_in_the_section_it_goes_back_to(client, notice, section):
     """Saving Colors (or the time zone) goes back to that section of Setup, at the top of the window, but "Saved." was

@@ -94,12 +94,13 @@ def digest_view(store: Store, as_of: date, wanted: str = "", *, history: int = 3
 def _say_which_are_held(store: Store, payload: dict) -> None:
     """A digest saved before its emails said whether each is held as possible payment fraud: worked out from the email
     as it is now, so where it says an email's importance, a held one says "Held for fraud" instead, as the other pages
-    do. Only its lists of emails (its tasks have no importance word, nor its focus rows before they had one)."""
+    do. Every list of emails (the "Do not process" box, what came in, Invoices to enter, Cash to apply, Close /
+    reconcile, and any added later): its tasks have no importance word, nor its focus rows before they had one."""
     new_mail = payload.get("new_mail")
-    rows = [*(payload.get("focus") or []), *(payload.get("critical_alerts") or [])]
+    lists = [value for value in payload.values() if isinstance(value, list)]
     if isinstance(new_mail, dict):
-        rows += [item for items in new_mail.values() if isinstance(items, list) for item in items]
-    for item in rows:
+        lists += [items for items in new_mail.values() if isinstance(items, list)]
+    for item in (item for items in lists for item in items):
         if isinstance(item, dict) and "locked" not in item and item.get("importance_label"):
             email = store.get_email(str(item.get("email_id") or item.get("id") or ""))
             item["locked"] = email is not None and fraud.attachments_locked(email)
