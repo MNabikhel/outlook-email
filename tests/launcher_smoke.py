@@ -476,6 +476,10 @@ DOCK_NAME = f"macOS shows the window as CloseDesk ({BUNDLE_ID})."
 # menu and the browser's own keys (Ctrl+F, Ctrl+P, zoom, Back) are on (app_window.BROWSER_KEYS_ON). pywebview turns
 # both off; the window turns them on again.
 BROWSER_KEYS = "The window's right-click menu and browser keys are on."
+# A Mac: what the window says once it has read back that WebKit's right-click menu, the menu bar's keys (Cmd+F, Cmd+P,
+# Cmd+Plus/Minus/0, Cmd+[, Cmd+Shift+Z) and zooming are on (mac_window.KEYS_ON). pywebview empties the menu and has
+# few keys.
+MAC_KEYS_ON = "The window's right-click menu, its menu bar's keys and zooming are on."
 
 
 def env_python(folder: Path, *, windowless: bool = False) -> Path:
@@ -672,10 +676,11 @@ def both_uis(log: str, what: str) -> None:
 
 
 def as_in_a_browser(log: str, what: str) -> None:
-    """Windows: the window's right-click menu and the browser's own keys were on, read back from WebView2, as CloseDesk's
-    page showed."""
-    if WINDOWS:
-        assert BROWSER_KEYS in log, f"the CloseDesk window ({what}) didn't say {BROWSER_KEYS!r}\n{log[-3000:]}"
+    """The window's right-click menu and the browser's keys were on as CloseDesk's page showed: read back from WebView2
+    on Windows, and on a Mac from WebKit and the menu bar (with zooming)."""
+    wanted = BROWSER_KEYS if WINDOWS else MAC_KEYS_ON if MAC else ""
+    if wanted:
+        assert wanted in log, f"the CloseDesk window ({what}) didn't say {wanted!r}\n{log[-3000:]}"
 
 
 def open_window(folder: Path, port: int, *, name: str, attached: bool = False) -> list[str]:

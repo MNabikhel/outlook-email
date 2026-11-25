@@ -482,6 +482,8 @@ src/controller_inbox/
                     first page asks about it, and Settings' Update button
   app_window.py     The CloseDesk window (`launch.py --app`, pywebview): starts CloseDesk and shows it, stops it when
                     closed, stays up through an update, and opens the browser instead where it can't open
+  mac_window.py     The window on a Mac: what pywebview's Cocoa window takes from WebKit, put back (its right-click
+                    menu; the menu bar's Undo, Find, Print, zoom and Back with their keys; a download saved over a file)
   app_log.py        The app's log, which each of its programs adds to at its end, and the message box when the
                     window can't even start (standard library only, so it works when a part CloseDesk needs won't load)
   shortcut.py       The CloseDesk shortcut that opens the window: CloseDesk.lnk on the Desktop and in the Start menu
@@ -522,15 +524,16 @@ The launchers are tested as a person runs them, by `python tests/launcher_smoke.
 checkout, sets it up from nothing, starts it twice, renames the folder, checks the dashboard answers, makes the
 CloseDesk shortcut and reads it back, and runs an update. CI runs it on macOS, Windows and Linux, with the machine's
 Python and with `--get-python` (`CLOSEDESK_OWN_PYTHON=1`). The unit tests of the same code are in `tests/test_launch.py`,
-`tests/test_launch_app.py`, `tests/test_app_window.py` and `tests/test_shortcut.py` (pywebview, Windows' shell and the
-Mac's parts are fakes there).
+`tests/test_launch_app.py`, `tests/test_app_window.py`, `tests/test_mac_window.py` and `tests/test_shortcut.py`
+(pywebview, Windows' shell and the Mac's parts are fakes there).
 
 `python tests/launcher_smoke.py --window` opens the real CloseDesk window (CI's window job, on Windows, after installing
 Microsoft Edge WebView2 Runtime, and on macOS, with Python 3.11, 3.12 and 3.14): as the shortcut starts it, onto a
 CloseDesk already open, through the shortcut itself as a double-click opens it, and with Update now pressed in it. Each
 time CloseDesk's first page and the workspace have to load in the window, the window closes itself
 (`CLOSEDESK_APP_SMOKE`), and CloseDesk stops with it. On Windows the window has to say its right-click menu and the
-browser's keys are on (read back from WebView2); on a Mac the Dock has to call it CloseDesk (`lsappinfo`). On Linux
+browser's keys are on (read back from WebView2); on a Mac the Dock has to call it CloseDesk (`lsappinfo`), and its
+right-click menu, the menu bar's keys and zooming have to be on (read back from the window). On Linux
 it checks the same with a stand-in for the window (`tests/stand_in_window`). Screenshots and the app's log are kept with
 CI's run. It closes only what it opened, and on a Mac it won't run while a CloseDesk is open.
 

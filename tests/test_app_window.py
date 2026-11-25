@@ -282,6 +282,7 @@ class Computer:
         self.free_from: dict[int, int] = {}  # a port taken: the next one free, as cli._port_to_use finds it
         self.picked: list[int] = []  # the ports the window chose again
         self.popen_server = FakeProcess  # what a CloseDesk the window starts is (SlowToStop: still finishing as it stops)
+        self.mac: list = []  # macOS: what the window asked of mac_window (WebKit's menu, keys and zoom put back)
 
     def pick_port(self, port: int) -> tuple[int, bool]:
         self.picked.append(port)
@@ -330,6 +331,9 @@ def make_app(webview, computer, tmp_path, *, owned=True) -> app_window.App:
     app.other_wait = 0.2
     app.storage = tmp_path / "window"
     app.delegate = lambda fn: fn  # .NET's Func[Type], which Invoke takes on Windows
+    app.mac_prepare = lambda: computer.mac.append(("prepare", webview.started)) or []
+    app.mac_menus = lambda window: computer.mac.append(("menus", window, window.events.loaded.is_set())) or ""
+    app.mac_read_back = lambda window: computer.mac.append(("read back", window)) or {"menu": False, "keys": [], "zoom": False}
     app.asked_mark = tmp_path / "update-asked"
     app.when_quitting = webview.quitting.append  # macOS: told as the app quits
     # macOS, CI's check: quit as Cmd+Q does, on the window's own thread (the supervisor goes on meanwhile).
@@ -1129,18 +1133,54 @@ def test_a_right_click_menu_that_cant_be_turned_on_leaves_the_window_open(comput
     thread.join(10)
 
 
-def test_elsewhere_the_window_leaves_its_engines_menu_and_keys_as_they_are(computer, tmp_path):
-    # macOS's WebKit window has its right-click menu and keys already; Linux has no window.
-    for platform in ("darwin", "linux"):
+def test_on_a_mac_the_window_puts_back_webkits_menu_and_the_browsers_keys(computer, tmp_path):
+    # pywebview's Cocoa window empties WebKit's right-click menu and has few keys (no Cmd+F, Cmd+P, Cmd+Plus/Minus/0,
+    # Cmd+[ or Cmd+Shift+Z), nor zoom: put back before the window starts (the menu, the downloads) and once it shows
+    # (the menu bar's items). WebView2's settings are Windows' only, and Linux has no window.
+    webview = FakeWebview(renderer="wkwebview")
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "darwin"
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    until(lambda: len(computer.mac) == 2, what="the menu bar's keys")
+    assert computer.mac == [("prepare", None), ("menus", window, True)], "before webview.start, then once it loaded"
+    window.person_closes()
+    thread.join(10)
+    assert window.native.invoked == []
+    computer.mac.clear()
+    webview = FakeWebview(renderer="wkwebview")
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "linux"
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.person_closes()
+    thread.join(10)
+    assert computer.mac == [] and window.native.invoked == [] and window.native.settings.AreDefaultContextMenusEnabled is False
+
+
+def test_in_the_smoke_check_on_a_mac_the_window_says_its_menu_keys_and_zoom_are_on(computer, tmp_path, monkeypatch, capsys):
+    # CI's check of the real window reads them back once CloseDesk's page shows, as on Windows, and looks for this line.
+    from controller_inbox import mac_window
+
+    monkeypatch.setenv(app_window.SMOKE_ENV, "5")
+    for found, said in ((lambda found: True, True), (lambda found: False, False)):
+        monkeypatch.setattr(mac_window, "all_on", found)
         webview = FakeWebview(renderer="wkwebview")
         app = make_app(webview, computer, tmp_path)
-        app.platform = platform
-        thread, _ = running(app)
+        app.platform = "darwin"
+        thread, result = running(app)
         window = window_of(webview)
         until(lambda: URL in window.urls())
-        window.person_closes()
+        window.js_api.page_ready("/app")
         thread.join(10)
-        assert window.native.invoked == [] and window.native.settings.AreDefaultContextMenusEnabled is False
+        out = capsys.readouterr().out
+        assert result["code"] == 0 and ("read back", window) in computer.mac
+        assert (mac_window.KEYS_ON in out) is said, out
+        assert said or "aren't all on" in out
+    smoke = (ROOT / "tests" / "launcher_smoke.py").read_text(encoding="utf-8")
+    assert mac_window.KEYS_ON in smoke, "CI's check looks for it"
 
 
 def test_in_the_smoke_check_on_windows_the_window_says_its_menu_and_keys_are_on(computer, tmp_path, monkeypatch, capsys):

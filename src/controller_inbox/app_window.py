@@ -43,7 +43,7 @@ from html import escape
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from controller_inbox import app_log, updates, version
+from controller_inbox import app_log, mac_window, updates, version
 from controller_inbox.config import load_settings
 
 ROOT = version.ROOT
@@ -813,6 +813,11 @@ class App:
         # Written by the CloseDesk this window started the moment it is to stop to update (updates.WINDOW_ASKED_ENV).
         self.asked_mark = user_dir() / f"update-asked-{os.getpid()}"
         self.delegate = None  # what Invoke takes on Windows (.NET's Func[Type]; the tests give their own)
+        # macOS: WebKit's right-click menu, the menu bar's keys and zoom, and downloads saved over a file, put back
+        # (mac_window.py; the tests give their own).
+        self.mac_prepare = mac_window.prepare
+        self.mac_menus = mac_window.menus_on
+        self.mac_read_back = mac_window.read_back
         self.load_wait, self.up_wait, self.other_wait, self.poll = LOAD_WAIT, UP_WAIT, OTHER_WAIT, 0.25
         self.watch, self.gone_for_good, self.update_longest = WATCH_EVERY, GONE_FOR_GOOD, UPDATE_LONGEST
         self._update_until = 0.0
@@ -837,6 +842,8 @@ class App:
         if self.platform == "darwin":
             # Quit (Cmd+Q, the Dock's Quit, logging out), macOS ends the program before webview.start() returns.
             self.when_quitting(self.quitting)
+            for missed in self.mac_prepare():
+                print(f"The window couldn't put back {missed}: it works without it.", flush=True)
         try:
             # Not private: the pages keep their own settings (theme, drafts, what was said) from one start to the next.
             webview.start(self.supervise, private_mode=False, storage_path=self._storage(), icon=self._icon())
@@ -1055,6 +1062,9 @@ class App:
         if self.platform == "win32":
             self._browser_keys_on()
         if self.platform == "darwin":
+            why = self.mac_menus(self.window)
+            if why:
+                print(f"Couldn't add the menu bar's keys and zoom: {why}", flush=True)
             named = mac_app_name()
             if named:
                 # "Python" here means the Dock shows the window as Python's (CloseDesk.app's link wasn't used).
@@ -1290,6 +1300,8 @@ class App:
             self.code = 0
             if self.platform == "win32":
                 self._say_browser_keys()
+            elif self.platform == "darwin":
+                self._say_mac_keys()
             # Kept open a while (the first time) for the check to look at it, or press Update now; closed meanwhile, it
             # isn't closed again, and CloseDesk stopping meanwhile (to update) is followed through.
             until, self.smoke_hold = time.monotonic() + self.smoke_hold, 0
@@ -1334,6 +1346,19 @@ class App:
             menu = "on" if found.get("menu") else "off"
             keys = "on" if found.get("keys") else "off"
             print(f"The window's right-click menu is {menu}, and its browser keys {keys}.", flush=True)
+
+    def _say_mac_keys(self) -> None:
+        """In the window's check on a Mac: whether WebKit's right-click menu, the menu bar's keys and zooming are on,
+        now that CloseDesk's page shows, read back from the window itself."""
+        try:
+            found = self.mac_read_back(self.window)
+        except Exception as exc:
+            print(f"Couldn't read the window's right-click menu, keys and zoom: {_said(exc)}", flush=True)
+            return
+        if mac_window.all_on(found):
+            print(mac_window.KEYS_ON, flush=True)
+        else:
+            print(f"The window's right-click menu, keys and zoom aren't all on: {found}", flush=True)
 
     def _update(self) -> bool:
         """Update now: CloseDesk stopped to be updated. The window says so throughout; True when CloseDesk is to be
