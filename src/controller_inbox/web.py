@@ -1356,11 +1356,19 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return render(request, "settings_update.html", page="settings", refused="", commit=version.installed()[0], message=updates.UPDATING)
 
     @app.post("/settings/colors")
-    def save_colors(colors: str = Form(""), importance_words: str = Form("")):
-        """Setup → Colors: a box left unticked sends nothing, which is off. The form sends both boxes, so what it says
-        is for what changed: the importance words alone change only the workspace."""
+    def save_colors(colors: str = Form(""), importance_words: str = Form(""), colors_was: str = Form(""), importance_words_was: str = Form("")):
+        """Setup → Colors: a box left unticked sends nothing, which is off. The form also says what each box showed
+        when the page was drawn, and only a box changed on it is saved: a Setup page left open doesn't undo a change
+        made since in the workspace (a form without them, from before, saves both). It sends both boxes, so what it
+        says is for what changed: the importance words alone change only the workspace."""
         before = appearance.current(store)
-        now = appearance.save(store, colors="color-blind" if colors == "color-blind" else "standard", importance_words=importance_words in ("1", "on"))
+        wanted = "color-blind" if colors == "color-blind" else "standard"
+        words = importance_words in ("1", "on")
+        now = appearance.save(
+            store,
+            colors=None if colors_was == wanted else wanted,
+            importance_words=None if importance_words_was == ("1" if words else "0") else words,
+        )
         notice = "importance-words" if now["colors"] == before["colors"] and now != before else "colors"
         return RedirectResponse(f"/settings?notice={notice}#colors", status_code=303)
 

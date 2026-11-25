@@ -405,6 +405,52 @@ def test_a_classic_page_kept_open_follows_the_colors_when_shown_again(browser, s
     context.close()
 
 
+@pytest.mark.parametrize("changed", ["colors", "importance_words"])
+def test_classic_setup_left_open_keeps_a_change_made_in_the_workspace(browser, settings, loaded, changed):
+    """Classic Setup open in one tab, the workspace in another. A box ticked in the workspace turned the Setup tab's
+    page to the new colors when it was shown again, but its own boxes still showed the old ones; ticking the other
+    box there and pressing Save turned the workspace's choice off again, with "Saved" said."""
+    from controller_inbox import appearance
+
+    other = "importance_words" if changed == "colors" else "colors"
+    box = {"colors": "#set-colors", "importance_words": "#set-importance-words"}
+    context = _context(browser, "light")
+    classic = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        classic.goto(f"{base}/settings")
+        assert not classic.is_checked(f"#colors input[name='{changed}']")
+        workspace = context.new_page()
+        workspace.goto(f"{base}/app/settings")
+        workspace.check(box[changed])
+        workspace.wait_for_selector("#set-appearance [data-status='colors'].ok")
+        classic.bring_to_front()
+        classic.evaluate("() => window.dispatchEvent(new Event('focus'))")  # its tab shown again
+        attr = "colors" if changed == "colors" else "importanceWords"
+        classic.wait_for_function(f"() => Boolean(document.documentElement.dataset.{attr})")
+        classic.wait_for_function(f"() => document.querySelector(\"#colors input[name='{changed}']\").checked")
+        classic.check(f"#colors input[name='{other}']")
+        classic.click("#colors button[type='submit']")
+        classic.wait_for_url("**/settings?notice=*")
+        assert appearance.current(loaded) == {"colors": "color-blind", "importance_words": True}
+        assert classic.is_checked("#colors input[name='colors']") and classic.is_checked("#colors input[name='importance_words']")
+
+        # A box changed on the page and not saved yet stays as it was ticked, whatever changes elsewhere.
+        classic.uncheck(f"#colors input[name='{changed}']")
+        appearance.save(loaded, colors="standard", importance_words=False)
+        classic.evaluate("() => window.dispatchEvent(new Event('focus'))")
+        classic.wait_for_function(f"() => document.querySelector(\"#colors input[name='{other}']\").checked === false")
+        assert not classic.is_checked(f"#colors input[name='{changed}']")
+        appearance.save(loaded, colors="color-blind", importance_words=True)
+        classic.evaluate("() => window.dispatchEvent(new Event('focus'))")
+        classic.wait_for_function(f"() => document.querySelector(\"#colors input[name='{other}']\").checked === true")
+        assert not classic.is_checked(f"#colors input[name='{changed}']"), "left as the person ticked it"
+        classic.click("#colors button[type='submit']")
+        classic.wait_for_url("**/settings?notice=*")
+        want = {"colors": "color-blind", "importance_words": True} | {changed: "standard" if changed == "colors" else False}
+        assert appearance.current(loaded) == want
+    context.close()
+
+
 # Shapes and signs as well as colour ----------------------------------------------------------------------------------
 
 ALERT_PATH = "M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"

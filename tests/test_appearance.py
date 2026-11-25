@@ -133,6 +133,42 @@ def test_the_classic_setup_page_saves_both(client, demo):
     assert 'value="color-blind" checked' not in page and 'value="1" checked' not in page
 
 
+def test_a_setup_page_left_open_saves_only_the_box_changed_on_it(client, demo):
+    """Setup → Colors sends both boxes, and an unticked box sends nothing, which is off. A Setup page drawn before the
+    colors were changed in the workspace still showed the old boxes, so ticking the other box and saving quietly
+    undid the workspace's change, with "Saved" said. The form says what each box showed when it was drawn, and only
+    a box changed on it is saved."""
+    import re
+
+    page = client.get("/settings").text
+    drawn = dict(re.findall(r'<input type="hidden" name="(\w+_was)" value="([^"]*)"', page))
+    assert drawn == {"colors_was": "standard", "importance_words_was": "0"}
+
+    def save(**fields):
+        reply = client.post("/settings/colors", data={**drawn, **fields}, headers=SAME, follow_redirects=False)
+        assert reply.status_code == 303
+        return reply.headers["location"]
+
+    # The workspace turns on the colors for color blindness; the page left open ticks only the words box.
+    appearance.save(demo, colors="color-blind")
+    assert save(importance_words="1") == "/settings?notice=importance-words#colors"
+    assert appearance.current(demo) == {"colors": "color-blind", "importance_words": True}
+    # The other way round: the workspace turns the words off again; the page ticks the colors box (already on).
+    appearance.save(demo, importance_words=False)
+    assert save(colors="color-blind") == "/settings?notice=colors#colors"
+    assert appearance.current(demo) == {"colors": "color-blind", "importance_words": False}
+    # A box changed on the page is saved whatever was saved since: here unticking what it drew unticked.
+    drawn = {"colors_was": "color-blind", "importance_words_was": "1"}
+    assert save(colors="", importance_words="1") == "/settings?notice=colors#colors"
+    assert appearance.current(demo) == {"colors": "standard", "importance_words": False}
+    # A form from before this (no _was fields) saves both, as it always did.
+    drawn = {}
+    save(colors="color-blind", importance_words="1")
+    assert appearance.current(demo) == {"colors": "color-blind", "importance_words": True}
+    page = client.get("/settings").text
+    assert dict(re.findall(r'<input type="hidden" name="(\w+_was)" value="([^"]*)"', page)) == {"colors_was": "color-blind", "importance_words_was": "1"}
+
+
 def _finished(client, result, about=None) -> str:
     """The classic Today page's job box once a run that gave ``result`` has finished, as its words."""
     import re

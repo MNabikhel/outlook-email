@@ -1158,6 +1158,17 @@
       else delete html.dataset.colors;
       if (look.importance_words) html.dataset.importanceWords = "on";
       else delete html.dataset.importanceWords;
+      // Setup → Colors: its boxes show the change too, and what they show is what Save compares with (the form's
+      // _was fields). A box ticked or unticked here and not saved yet stays as it is.
+      const form = $("#colors form");
+      if (!form) return;
+      for (const [name, on, value] of [["colors", look.colors === "color-blind", (yes) => (yes ? "color-blind" : "standard")], ["importance_words", Boolean(look.importance_words), (yes) => (yes ? "1" : "0")]]) {
+        const box = form.querySelector(`input[name="${name}"]`);
+        const was = form.querySelector(`input[name="${name}_was"]`);
+        if (!box || !was || value(box.checked) !== was.value) continue;
+        box.checked = on;
+        was.value = value(on);
+      }
     } catch (error) {
       /* CloseDesk isn't answering: the page stays as it is */
     }

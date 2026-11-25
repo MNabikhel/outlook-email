@@ -39,6 +39,10 @@
   {% if notice and notice_key in ('colors', 'importance-words') %}<p class="notice">{{ notice }}</p>{% endif %}
   <p>Saved for CloseDesk on this computer: these pages and the workspace both use them.</p>
   <form method="post" action="/settings/colors" class="profile-form color-form">
+    {# What the boxes showed when the page was drawn: only a box changed on it is saved, so a page left open doesn't
+       undo a change made since in the workspace. #}
+    <input type="hidden" name="colors_was" value="{{ appearance.colors }}"/>
+    <input type="hidden" name="importance_words_was" value="{{ '1' if appearance.importance_words else '0' }}"/>
     <label class="choice"><input type="checkbox" name="colors" value="color-blind" {{ 'checked' if appearance.colors == 'color-blind' }}/>
       <span><b>Colors for color blindness</b> <small class="muted">Critical and fraud turn a deeper red, done turns blue-green, and High and warnings stay yellow.</small></span></label>
     <label class="choice"><input type="checkbox" name="importance_words" value="1" {{ 'checked' if appearance.importance_words }}/>
