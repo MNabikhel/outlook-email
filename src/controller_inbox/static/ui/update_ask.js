@@ -79,6 +79,7 @@ function show(view, updating) {
       "div",
       { id: "update-ask-body" },
       view.failed ? h("p", { class: "update-ask-failed" }, view.failed_message) : null,
+      view.note ? h("p", null, view.note) : null,
       view.newer ? h("p", null, view.message) : null,
       view.whats_new ? h("p", { class: "update-ask-new" }, h("b", null, "What's new: "), view.whats_new) : null,
       view.newer ? h("p", { class: "update-ask-help" }, view.how) : null

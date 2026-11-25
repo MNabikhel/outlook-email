@@ -107,6 +107,9 @@ KEPT = {"data", "inbox", ".env", ".venv", "AP cost codes", ".previous", ".git"}
 # its start to the end of the check after it: the CloseDesk app doesn't open meanwhile. One older than this is stale.
 UPDATING_MARK = ".closedesk-updating"
 UPDATE_LONGEST = 30 * 60
+# Set by the update for the check after it, which the update's own mark doesn't stop. (The name stays: the update a
+# copy runs hands over to the newest launch.py's check with it.)
+AFTER_UPDATE_ENV = "CLOSEDESK_AFTER_UPDATE"
 # An update that found this copy the newest already says so here (in .venv), for the next start: nothing went wrong.
 # (controller_inbox.updates.NEWEST_NOTE)
 NEWEST_NOTE = "closedesk-newest.txt"
@@ -671,7 +674,9 @@ def _end_update() -> None:
 
 
 def _alive(pid: int, started: float = 0.0) -> bool:
-    """Whether the program ``pid`` that said at ``started`` it was updating still runs."""
+    """Whether the program ``pid`` that said at ``started`` it was updating still runs. One started after that isn't
+    it: the computer gave the number to another program since (on a Mac or Linux the update becomes the check after
+    it, which leaves the mark behind when it ends)."""
     if pid == os.getpid():
         return True
     if WINDOWS:
@@ -681,10 +686,24 @@ def _alive(pid: int, started: float = 0.0) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True  # there, another user's
+        pass  # there, another user's: when it started says whether it is the update
     except OSError:
         return False
-    return True
+    began = _started_at(pid) if started else None
+    return began is None or began <= started + 5
+
+
+def _started_at(pid: int) -> float | None:
+    """When the program ``pid`` started (seconds since 1970), as ps says (Mac, Linux); None when it can't be told."""
+    try:
+        done = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+        )
+        text = " ".join(done.stdout.split())
+        return time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y")) if done.returncode == 0 and text else None
+    except (OSError, ValueError, subprocess.SubprocessError, OverflowError):
+        return None
 
 
 def _windows_alive(pid: int, started: float) -> bool:
@@ -820,9 +839,16 @@ def main(argv: list[str]) -> int:
                 return code
             # The newest launch.py checks the newest set-up (this one is the old file, already in memory). (Outside
             # Windows it takes this program's place, and what it said about the update with it: stale once it ends.)
+            os.environ[AFTER_UPDATE_ENV] = "1"
             return _hand_over([sys.executable, str(Path(__file__).resolve()), "--check", *args])
         finally:
+            os.environ.pop(AFTER_UPDATE_ENV, None)
             _end_update()
+    if os.environ.pop(AFTER_UPDATE_ENV, "") != "1" and update_under_way():
+        # An update runs (the window's, which carries on after the window is closed): started now, CloseDesk would
+        # run from a folder being replaced. Said in the launcher's window, which stays open on it.
+        say(UPDATING_NOW)
+        return 1
     if not in_venv():
         return create_environment(args)
     code = ensure_packages()

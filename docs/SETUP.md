@@ -59,7 +59,7 @@ The window is CloseDesk: it reads the new mail and opens the dashboard as the do
 window closes CloseDesk**. While mail is being processed, or CloseDesk is updating, it asks first (*CloseDesk is still
 processing mail. Close it anyway?*): **Close** closes it and **Cancel** keeps it open (on Windows the buttons are
 **OK** and **Cancel**). An update carries on by itself after the window is closed; open CloseDesk again once it is
-done (opened meanwhile, CloseDesk says it is being updated). In the window:
+done (opened meanwhile, from the shortcut or the double-click files, CloseDesk says it is being updated). In the window:
 
 - **Open in mail app** opens your mail app; another website, the printable digest and a file's original open in your
   browser.
@@ -118,7 +118,9 @@ ready**, with the new and the current version, what changed last, and two button
 on every page). Opening CloseDesk with no internet, or when GitHub is slow, nothing is asked and nothing waits on it:
 the asking gives up after a few seconds. A newer version found later while CloseDesk is open (it asks again a minute
 later, and once a day) is shown in Settings and the top bar, not asked about in the middle of your work. If an update
-didn't finish, the next start says **CloseDesk wasn't updated** and opens as it was.
+didn't finish, the next start says **CloseDesk wasn't updated** and opens as it was. For a few minutes after a change,
+GitHub can list a newer version before its download has it: then **Update now** finds nothing newer, and CloseDesk
+opens as it was and says **No newer version to download yet**; Update in Settings tries again.
 
 The top bar also shows a small **Update ready** link, and Settings says **A newer CloseDesk is ready (2026.11.16; you
 have 2026.11.13)** with an **Update** button. To stop the asking, put `CONTROLLER_INBOX_UPDATE_CHECK=false` in the

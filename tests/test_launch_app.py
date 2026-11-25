@@ -46,7 +46,7 @@ def launch(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "NO_WINDOW", NO_WINDOW)
     monkeypatch.setattr(module, "APP_LOGS", True)  # as on Windows and macOS, where the app has no console
     for name in ("CLOSEDESK_APP", "CLOSEDESK_APP_LOG", "CLOSEDESK_LAUNCHER", "CLOSEDESK_REBUILT", "CLOSEDESK_UPDATE_URL",
-                 "CFProcessPath", "CLOSEDESK_APP_SMOKE"):
+                 "CFProcessPath", "CLOSEDESK_APP_SMOKE", "CLOSEDESK_AFTER_UPDATE"):
         # Set, then removed: what launch.py itself sets in os.environ (--app sets the first three) is undone after the
         # test too, which removing a name that isn't set wouldn't do.
         monkeypatch.setenv(name, "")
@@ -483,6 +483,37 @@ def test_the_app_doesnt_open_while_an_update_runs_from_its_start_to_the_end_of_i
     assert launch.told == [launch.UPDATING_NOW] and handed == []
 
 
+@pytest.mark.parametrize("args", [[], ["--no-browser"], ["--check"], ["--shortcut"], ["--command", "overnight"]])
+def test_a_double_click_start_while_an_update_runs_says_so_and_doesnt_start(launch, monkeypatch, capsys, args):
+    # The window's update carries on after the window is closed. CloseDesk.bat or CloseDesk.command opened meanwhile
+    # started CloseDesk from a folder being replaced (old code in memory serving new pages, or "The update couldn't
+    # be put in place"), and its first page said "CloseDesk wasn't updated" while the update was still running.
+    handed = _opens(launch, monkeypatch)
+    (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps({"pid": os.getpid(), "started": time.time()}), encoding="utf-8")
+    assert launch.main(args) == 1, "the launcher's window stays open on the words (a code of 0 closes it)"
+    assert launch.UPDATING_NOW in capsys.readouterr().out and handed == []
+
+
+def test_the_check_after_an_update_isnt_stopped_by_that_update(launch, monkeypatch):
+    # From its start to the end of the check after it, the update says it runs: that check is its own.
+    handed: list = []
+    monkeypatch.setattr(launch, "update", lambda: 0)
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
+    assert launch.main(["--update"]) == 0
+    (cmd, env), = handed
+    assert cmd[-1] == "--check" and env.get(launch.AFTER_UPDATE_ENV) == "1"
+    # The check, as that program (the mark still names the update, as it does on a Mac or Linux, where the update
+    # becomes the check).
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps({"pid": os.getpid(), "started": time.time()}), encoding="utf-8")
+    monkeypatch.setenv(launch.AFTER_UPDATE_ENV, "1")
+    handed.clear()
+    assert launch.main(["--check"]) == 0
+    (cmd, env), = handed
+    assert cmd[-1] == "doctor" and launch.AFTER_UPDATE_ENV not in env, "said to the check only, not to what it starts"
+
+
 def test_an_update_said_to_run_long_ago_doesnt_count(launch):
     (launch.ROOT / launch.UPDATING_MARK).write_text(
         json.dumps({"pid": os.getpid(), "started": time.time() - launch.UPDATE_LONGEST - 60}), encoding="utf-8")
@@ -497,6 +528,21 @@ def test_whether_an_updates_program_still_runs_here(launch):
     gone.wait()
     assert launch._alive(os.getpid(), time.time()) is True
     assert launch._alive(gone.pid, time.time()) is False
+
+
+def test_a_program_given_the_updates_number_later_isnt_the_update(launch):
+    # A Mac or Linux: the update becomes the check after it (exec, the same number), whose end leaves the mark behind.
+    # A program given that number later (a browser's helper, another user's) isn't the update: CloseDesk wouldn't open
+    # for half an hour. Asked of the computer when it started (Windows: Windows itself; elsewhere ps).
+    alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert launch._alive(alive.pid, time.time() + 5) is True
+        assert launch._alive(alive.pid, time.time() - 3600) is False
+        assert app_window.process_runs(alive.pid, time.time() + 5) is True
+        assert app_window.process_runs(alive.pid, time.time() - 3600) is False
+    finally:
+        alive.kill()
+        alive.wait()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows' own answer")

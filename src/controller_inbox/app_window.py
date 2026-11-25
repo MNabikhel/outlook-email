@@ -559,10 +559,26 @@ def process_runs(pid: int, started: float = 0.0) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        return True
+        pass  # there, another user's: when it started says whether it is the update
     except OSError:
         return False
-    return True
+    began = _started_at(pid) if started else None
+    # One started after the update said so isn't it: the number was given to another program since (on a Mac or Linux
+    # the update becomes the check after it, which leaves the mark behind when it ends).
+    return began is None or began <= started + 5
+
+
+def _started_at(pid: int) -> float | None:
+    """When the program ``pid`` started (seconds since 1970), as ps says (Mac, Linux); None when it can't be told."""
+    try:
+        done = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+        )
+        text = " ".join(done.stdout.split())
+        return time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y")) if done.returncode == 0 and text else None
+    except (OSError, ValueError, subprocess.SubprocessError, OverflowError):
+        return None
 
 
 def _windows_process_runs(pid: int, started: float) -> bool:

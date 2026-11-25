@@ -72,10 +72,10 @@ def no_github(monkeypatch):
     monkeypatch.delenv("CLOSEDESK_REOPEN", raising=False)
 
 
-def asked_at_start(store, settings, *, failed: bool = False) -> updates.Question:
+def asked_at_start(store, settings, *, failed: bool = False, newest: bool = False) -> updates.Question:
     """CloseDesk opening: the question, once GitHub has answered (or not)."""
     question = updates.Question()
-    question.begin(store, settings, failed=failed)
+    question.begin(store, settings, failed=failed, newest=newest)
     deadline = time.monotonic() + 10
     while question.checking():
         assert time.monotonic() < deadline, "the check as CloseDesk opens never ended"
@@ -649,6 +649,50 @@ def test_an_update_that_found_this_the_newest_isnt_said_to_have_failed(download,
     assert not (download / ".venv" / updates.NEWEST_NOTE).exists(), "read once"
     updates.remember_update_asked(store)
     assert updates.update_unfinished(store) is True, "an update that didn't say so did fail"
+
+
+def test_after_update_now_found_nothing_newer_to_download_the_same_question_isnt_asked_again(download, settings, store, monkeypatch):
+    # GitHub's list of changes names a newer commit while its download is still this copy (it lags just after a push).
+    # Update now: "CloseDesk is already the newest version", CloseDesk opened again, and asked the same question again,
+    # with nothing said of what happened: pressed again, the same, for as long as the two disagreed.
+    monkeypatch.setattr(updates, "_ask_github", github())
+
+    def update_asked(app):
+        app.state.update_asked = True
+
+    _served(settings, store, monkeypatch, asked=update_asked)
+    (download / ".venv").mkdir()
+    (download / ".venv" / updates.NEWEST_NOTE).write_text(MINE + "\n", encoding="utf-8")  # launch.py --update's
+    monkeypatch.setenv("CLOSEDESK_REOPEN", "1")
+    app, _ = _served(settings, store, monkeypatch)
+    question = app.state.update_question
+    while question.checking():
+        time.sleep(0.01)
+    view = question.view(store, settings, "idle")
+    assert view["ask"] is True and view["newer"] is False and view["failed"] is False, view
+    assert view["title"] == updates.NEWEST_TITLE and view["note"] == updates.NEWEST_SAID
+    assert "download" in view["note"] and "few minutes" in view["note"]
+    # Settings still says GitHub has one (Update there tries again); the next opening asks as usual.
+    assert updates.status(store, settings)["newer"] is True
+    app, _ = _served(settings, store, monkeypatch)
+    while app.state.update_question.checking():
+        time.sleep(0.01)
+    view = app.state.update_question.view(store, settings, "idle")
+    assert view["ask"] is True and view["newer"] is True and view["note"] == ""
+
+
+def test_closedesk_opened_while_an_update_still_runs_leaves_that_update_to_say_how_it_went(download, settings, store):
+    # CloseDesk started meanwhile (by hand, say) is still this version: the update hasn't put the new one in place.
+    # Read then, "CloseDesk wasn't updated" was said, and the update's own word used up, while it was still running.
+    import json
+    import os
+
+    updates.remember_update_asked(store)
+    (download / ".closedesk-updating").write_text(json.dumps({"pid": os.getpid(), "started": time.time()}), encoding="utf-8")
+    assert updates.after_update(store) == ""
+    assert store.get_state(updates.ASKED_FROM_KEY) == MINE, "left for the start after the update"
+    (download / ".closedesk-updating").unlink()
+    assert updates.after_update(store) == "failed"
 
 
 # The page waiting for CloseDesk to come back ---------------------------------------------------------------------------

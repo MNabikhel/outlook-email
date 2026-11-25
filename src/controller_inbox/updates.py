@@ -374,6 +374,13 @@ UNFINISHED = "The update didn't finish, so CloseDesk opened as it was. Your mail
 # The app has no console window: what went wrong is in its log.
 UNFINISHED_IN_APP = "The update didn't finish, so CloseDesk opened as it was. Your mail and settings are kept; what went wrong is written in {log}."
 DONE = "The mail is done: CloseDesk can update now."
+# Update now found nothing newer to download: GitHub's list of changes names a newer version before its download has it.
+NEWEST_TITLE = "No newer version to download yet"
+NEWEST_SAID = (
+    "GitHub lists a newer CloseDesk, but its download is still the version you have (it can be a few minutes behind), "
+    "so CloseDesk opened as it was, with your mail and settings. Try Update in Settings again in a few minutes, or "
+    "let CloseDesk ask the next time it opens."
+)
 # The commit CloseDesk was when it stopped to update: opened again as the same one, the update didn't finish.
 ASKED_FROM_KEY = "update_asked_from"
 # Unless the update found this copy the newest already, and said so in this file in .venv (launch.py's NEWEST_NOTE).
@@ -401,13 +408,16 @@ class Question:
         self._checking = False
         self._answered = False
         self._failed = False
+        self._newest = False
         self._found: dict[str, Any] | None = None  # status() once the asking as CloseDesk opened answered, in time
         self._held = False  # Update now was refused while mail was processed: said done when it is
 
-    def begin(self, store, settings, *, failed: bool = False) -> None:
+    def begin(self, store, settings, *, failed: bool = False, newest: bool = False) -> None:
         """CloseDesk is opening: ask GitHub (``START_TIMEOUT_SECONDS`` at most) in the background, so the page opens
-        meanwhile. ``failed``: the update asked for before CloseDesk stopped didn't finish (``update_unfinished``)."""
+        meanwhile. ``failed``: the update asked for before CloseDesk stopped didn't finish; ``newest``: it found
+        nothing newer to download (``after_update``), so the same question isn't asked again this time."""
         self._failed = failed
+        self._newest = newest and not failed
         self._begun = True
         if not asks(settings):
             return
@@ -456,15 +466,18 @@ class Question:
             shown = self._found or {}
             held = self._held
             checking = open_ and self._checking
-        newer = bool(not checking and shown.get("newer"))
+        newest = open_ and self._newest
+        # Just after Update now found nothing newer to download, the same question would only lead there again.
+        newer = bool(not checking and shown.get("newer")) and not newest
         failed = open_ and self._failed
         return {
-            "ask": bool(open_ and not checking and (newer or failed)),
+            "ask": bool(open_ and not checking and (newer or failed or newest)),
             "checking": checking,
             "newer": newer,
             "failed": failed,
-            "title": UNFINISHED_TITLE if failed else ASK_TITLE,
+            "title": UNFINISHED_TITLE if failed else NEWEST_TITLE if newest else ASK_TITLE,
             "failed_message": unfinished_message() if failed else "",
+            "note": NEWEST_SAID if newest else "",
             "message": f"CloseDesk {shown['latest']} is out; you have {shown['mine']}." if newer else "",
             "whats_new": shown.get("whats_new", "") if newer else "",
             "how": ASK_HOW,
@@ -492,10 +505,21 @@ def remember_update_asked(store) -> None:
 
 
 def update_unfinished(store) -> bool:
-    """Whether CloseDesk stopped to update and opened again as the same version: the update didn't finish (no internet,
-    a file in use, the window closed meanwhile). Not when the update found this copy the newest already (it said so in
-    ``NEWEST_NOTE``): nothing went wrong. Read once."""
+    """Whether CloseDesk stopped to update and opened again as the same version (``after_update``'s "failed")."""
+    return after_update(store) == "failed"
+
+
+def after_update(store) -> str:
+    """What became of the update CloseDesk last stopped for, read once as it opens again: "failed" (it opened again as
+    the same version: no internet, a file in use, the window closed meanwhile), "newest" (the update found this copy
+    the newest download already, and said so in ``NEWEST_NOTE``: nothing went wrong, GitHub's download is behind its
+    list of changes), or "" (updated, or no update asked for). While the update still runs in CloseDesk's folder
+    (CloseDesk opened meanwhile), nothing is read: it is for the start after that update."""
+    from controller_inbox.app_window import update_running
+
     before = store.get_state(ASKED_FROM_KEY) or ""
+    if before and update_running(version.ROOT):
+        return ""
     if before:
         store.set_state(ASKED_FROM_KEY, "")
     note = version.ROOT / ".venv" / NEWEST_NOTE
@@ -510,5 +534,5 @@ def update_unfinished(store) -> bool:
             pass
     mine = version.installed()[0]
     if not (before and mine) or before != mine:
-        return False
-    return newest != mine.lower()
+        return ""
+    return "newest" if newest == mine.lower() else "failed"

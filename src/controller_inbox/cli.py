@@ -724,7 +724,8 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None,
     # as it opens is the question the first page asks, with whether an update asked for before didn't finish.
     from controller_inbox import updates
 
-    app.state.update_question.begin(store, settings, failed=updates.update_unfinished(store))
+    after = updates.after_update(store)
+    app.state.update_question.begin(store, settings, failed=after == "failed", newest=after == "newest")
     updates.start_checking(store, settings)
     if updates.launcher_here():
         # Started by a launcher (or the window): the CloseDesk shortcut is made the first time, and kept right after

@@ -28,11 +28,11 @@ class Stopper:
         self.calls += 1
 
 
-def opened(settings, store, monkeypatch, ask=None, *, failed: bool = False):
+def opened(settings, store, monkeypatch, ask=None, *, failed: bool = False, newest: bool = False):
     """CloseDesk as it opens: GitHub asked (by ``ask``), and the app with its question; Update now stops it."""
     monkeypatch.setattr(updates, "_ask_github", ask or github())
     app = web.create_app(settings, store)
-    app.state.update_question = asked_at_start(store, settings, failed=failed)
+    app.state.update_question = asked_at_start(store, settings, failed=failed, newest=newest)
     app.state.stop_server = Stopper()
     return app
 
@@ -200,6 +200,22 @@ def test_an_update_that_didnt_finish_is_said(download, settings, loaded, page, m
         text = page.inner_text("#update-ask")
         assert "CloseDesk wasn't updated" in text and updates.UNFINISHED in text
         assert page.query_selector("#update-ask button:has-text('Update now')") is None, "GitHub can't be reached now"
+        page.click("#update-ask button:has-text('OK')")
+        page.wait_for_selector("#update-ask", state="detached")
+        assert answered(page, base + first)["ask"] is False
+
+
+@pytest.mark.parametrize("first", ["/", "/app"])
+def test_after_update_now_found_nothing_newer_to_download_the_page_says_so_once(download, settings, loaded, page, monkeypatch, first):
+    # GitHub still lists the newer version: the page that loads again after Update now says why nothing changed,
+    # instead of asking the same question again.
+    with serving(opened(settings, loaded, monkeypatch, newest=True)) as base:
+        page.goto(base + first)
+        page.wait_for_selector(DIALOG)
+        text = page.inner_text("#update-ask")
+        assert updates.NEWEST_TITLE in text and updates.NEWEST_SAID in text
+        assert "is out; you have" not in text
+        assert page.query_selector("#update-ask button:has-text('Update now')") is None
         page.click("#update-ask button:has-text('OK')")
         page.wait_for_selector("#update-ask", state="detached")
         assert answered(page, base + first)["ask"] is False
