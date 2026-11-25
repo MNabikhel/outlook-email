@@ -288,8 +288,9 @@ def test_the_open_closedesk_asks_by_itself(download, settings, store, monkeypatc
     monkeypatch.setattr(updates, "_ask_github", ask)
     monkeypatch.setattr(updates, "FIRST_TICK_SECONDS", 0)
     updates.start_checking(store, settings)
+    # Waited for until the answer is kept, not only asked for: the check keeps it a moment after GitHub answers.
     deadline = time.monotonic() + 10
-    while not ask.asked and time.monotonic() < deadline:
+    while not updates.status(store, settings)["newer"] and time.monotonic() < deadline:
         time.sleep(0.02)
     assert ask.asked and updates.status(store, settings)["newer"] is True
 
