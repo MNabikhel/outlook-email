@@ -401,9 +401,13 @@ def test_an_update_that_fails_opens_the_version_there_is(computer, tmp_path):
 
 
 def test_closing_during_an_update_asks_and_lets_the_update_finish(computer, tmp_path):
+    # Windows (and Linux): the window waits for the update. (A Mac's leaves at once, and the update finishes by itself:
+    # test_on_a_mac_a_window_closed_during_an_update_leaves_at_once_and_the_update_finishes_by_itself.) Pinned, so the
+    # test is the same on CI's macOS leg.
     computer.update_code = None
     webview = FakeWebview()
     app = make_app(webview, computer, tmp_path)
+    app.platform = "win32"
     thread, result = running(app)
     window = window_of(webview)
     until(lambda: URL in window.urls())
