@@ -59,10 +59,12 @@ def _hue(value: str) -> float:
 def test_critical_is_red_and_high_is_amber(ui, colors, theme):
     """Critical looked orange: #c2361f and the dark #ff7a66 are at 30-32°, where red turns to vermilion. High and
     warnings are an amber; with the colors for color blindness they may go on to a yellow (the light warning words,
-    #806c00, are at 96°)."""
+    #806c00, are at 96°). In the workspace the red and amber boxes drawn on a page, and the error message, have
+    colours of their own (the same in both themes), and they are the same red and amber."""
     tokens = pm.tokens_of(ui, colors, theme)
-    reds = {name: round(_hue(tokens[name]), 1) for name in ("--imp-critical", "--danger")}
-    ambers = {name: round(_hue(tokens[name]), 1) for name in ("--imp-high", "--imp-high-fill", "--warn")}
+    own = ui == "workspace"
+    reds = {name: round(_hue(tokens[name]), 1) for name in ("--imp-critical", "--danger", *(("--paper-differs", "--toast-error") if own else ()))}
+    ambers = {name: round(_hue(tokens[name]), 1) for name in ("--imp-high", "--imp-high-fill", "--warn", *(("--paper-check",) if own else ()))}
     assert all(-10 <= hue <= 25 for hue in reds.values()), reds
     assert all(70 <= hue <= (100 if colors == "color-blind" else 95) for hue in ambers.values()), ambers
 
@@ -82,9 +84,11 @@ def test_colour_blind_levels_stay_apart(ui, theme):
 
 # The standard colors' smallest distance with simulated color blindness, rounded down: a change that brings two levels
 # closer has to change this table on purpose.
+# The boxes on a page are the same in both themes (it is white paper in dark mode too).
+PAPER_FLOORS = {("paper-check", "paper-differs"): 21, ("paper-check", "paper-ok"): 17, ("paper-differs", "paper-ok"): 10}
 DEFAULT_FLOORS = {
-    ("workspace", "light"): {("critical", "high"): 18, ("danger", "warn"): 7},
-    ("workspace", "dark"): {("critical", "high"): 14, ("danger", "warn"): 11},
+    ("workspace", "light"): {("critical", "high"): 18, ("danger", "warn"): 7, **PAPER_FLOORS},
+    ("workspace", "dark"): {("critical", "high"): 14, ("danger", "warn"): 11, **PAPER_FLOORS},
     ("classic", "light"): {("critical", "high"): 14, ("danger", "warn"): 7},
 }
 
@@ -95,7 +99,7 @@ def test_default_levels_stay_apart(ui, theme):
     Today's were 21-30 apart, a red-orange against an orange."""
     tokens = pm.tokens_of(ui, "standard", theme)
     pairs = pm.pair_distances(ui, tokens)
-    for pair in (("critical", "high"), ("danger", "warn")):
+    for pair in (("critical", "high"), ("danger", "warn"), *((("paper-check", "paper-differs"),) if ui == "workspace" else ())):
         assert pairs[pair]["normal"] >= 34, (pair, round(pairs[pair]["normal"], 1))
     for pair, floor in DEFAULT_FLOORS[(ui, theme)].items():
         assert min(pairs[pair].values()) >= floor, (pair, {v: round(d, 1) for v, d in pairs[pair].items()})

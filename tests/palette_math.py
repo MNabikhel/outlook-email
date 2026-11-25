@@ -344,13 +344,17 @@ def tokens_of(ui: str, colors: str, theme: str) -> dict[str, str]:
 MEANINGS = {
     "workspace": {
         "critical": "--imp-critical",  # list edge and Critical pill
-        "high": "--imp-high",  # list edge, the page's amber boxes
+        "high": "--imp-high",  # list edge, and the amber in the page's legend and Key details
         "high-fill": "--imp-high-fill",  # High pill
         "danger": "--danger",
         "warn": "--warn",
         "ok": "--ok",
         "accent": "--accent",
         "medium": "--imp-medium",
+        # The boxes drawn on a page (.pv-box), on its white paper in both themes: green, amber and red.
+        "paper-ok": "--paper-ok",
+        "paper-check": "--paper-check",
+        "paper-differs": "--paper-differs",
     },
     "classic": {
         "critical": "--imp-critical",  # Critical pill and row edge
@@ -365,12 +369,14 @@ MEANINGS = {
 }
 
 # Pairs that carry meaning, which the colors for color blindness keep at least 20 apart for every vision: the two
-# levels of one element (the list edges and pills, .tag-prio-critical against .tag-prio-high), the page's amber
-# against its red boxes (high/danger), and each status against done.
+# levels of one element (the list edges and pills, .tag-prio-critical against .tag-prio-high), the amber against the
+# red in the page's legend (high/danger) and in the boxes drawn on the page (paper-check/paper-differs), and each
+# status against done.
 KEY_PAIRS = {
     "workspace": [
         ("critical", "high"), ("critical", "high-fill"), ("high-fill", "medium"), ("danger", "warn"), ("high", "danger"),
         ("critical", "ok"), ("high", "ok"), ("danger", "ok"), ("warn", "ok"),
+        ("paper-check", "paper-differs"), ("paper-check", "paper-ok"), ("paper-differs", "paper-ok"),
     ],
     "classic": [
         ("critical", "high"), ("critical", "high-fill"), ("high-fill", "medium"), ("danger", "warn"),
