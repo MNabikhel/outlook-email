@@ -415,6 +415,10 @@ CLOSED = re.compile(r"The CloseDesk window closed \(exit code (-?\d+)\)\.")
 WENT_WRONG = ("CloseDesk stopped by itself", "didn't show CloseDesk's page")
 ENDED_BADLY = "The CloseDesk window's program ended with exit code"
 DOCK_NAME = f"macOS shows the window as CloseDesk ({BUNDLE_ID})."
+# Windows: what the window says once it has read back from WebView2, with CloseDesk's page shown, that its right-click
+# menu and the browser's own keys (Ctrl+F, Ctrl+P, zoom, Back) are on (app_window.BROWSER_KEYS_ON). pywebview turns
+# both off; the window turns them on again.
+BROWSER_KEYS = "The window's right-click menu and browser keys are on."
 
 
 def env_python(folder: Path, *, windowless: bool = False) -> Path:
@@ -603,6 +607,13 @@ def both_uis(log: str, what: str) -> None:
     assert "/app" in pages and any(page != "/app" for page in pages), f"the CloseDesk window ({what}) didn't show both UIs: {pages}"
 
 
+def as_in_a_browser(log: str, what: str) -> None:
+    """Windows: the window's right-click menu and the browser's own keys were on, read back from WebView2, as CloseDesk's
+    page showed."""
+    if WINDOWS:
+        assert BROWSER_KEYS in log, f"the CloseDesk window ({what}) didn't say {BROWSER_KEYS!r}\n{log[-3000:]}"
+
+
 def open_window(folder: Path, port: int, *, name: str, attached: bool = False) -> list[str]:
     """launch.py --app as the shortcut runs it (pythonw on Windows), with the window's check: the real window opens,
     shows CloseDesk's page and closes itself; it ends with 0, and CloseDesk stops with it (``attached`` to a CloseDesk
@@ -645,6 +656,7 @@ def open_window(folder: Path, port: int, *, name: str, attached: bool = False) -
     assert process.returncode == 0, f"the CloseDesk window ({name}) ended with {process.returncode}\n{said}"
     assert SHOWED in log, f"the CloseDesk window ({name}) didn't show CloseDesk's page\n{said}"
     both_uis(log, name)
+    as_in_a_browser(log, name)
     print(f"--- the CloseDesk window ({name}) showed {', '.join(pages_shown(log))} and closed by itself, exit 0", flush=True)
     if attached:
         showed_only(log, port, name)
@@ -762,6 +774,7 @@ def double_click(folder: Path, shortcuts: Path) -> list[str]:
         opened = f"CloseDesk.app opened ({os.uname().machine})"
         assert opened in log, f"macOS didn't run CloseDesk.app as {os.uname().machine}\n--- the log\n{log[-6000:]}"
     both_uis(log, what)
+    as_in_a_browser(log, what)
     print(f"--- the window of {what} showed {', '.join(pages_shown(log))}, closed by itself, and CloseDesk stopped with it", flush=True)
     if not MAC:
         return []
@@ -838,6 +851,7 @@ def update_in_window(folder: Path, archive: Path, *, before: str, after: str) ->
     # (The new version answers only for the moment its page takes to load: its commit is shown when it was caught.)
     assert log.rindex(SHOWED) > log.index("CloseDesk was updated"), f"the window didn't show the new version\n{said}"
     both_uis(log[log.index("CloseDesk was updated"):], "the new version")
+    as_in_a_browser(log[log.index("CloseDesk was updated"):], "the new version")
     assert stopped, f"CloseDesk didn't stop with its window after the update\n{said}"
     assert (folder / "docs" / "ONLY-IN-THE-UPDATE.txt").read_text(encoding="utf-8") == archive.stem
     print(f"--- the window updated CloseDesk to {after[:7]}, showed the new version, and closed (versions that answered: "

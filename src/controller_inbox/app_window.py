@@ -96,6 +96,9 @@ LABELS = {"global.quit": "Close", "global.quitConfirmation": (
 )}
 # The engines CloseDesk's pages run in: WebView2 (Windows) and WebKit (macOS).
 ENGINES = ("edgechromium", "wkwebview")
+# Windows, in CI's check of the real window: what it says once it has read back from WebView2 that its right-click menu
+# and the browser's own keys are on (tests/launcher_smoke.py looks for it).
+BROWSER_KEYS_ON = "The window's right-click menu and browser keys are on."
 # Where what leaves CloseDesk may be opened: another website, a mail address.
 OUTSIDE = ("http", "https", "mailto")
 
@@ -493,6 +496,34 @@ def not_open_page(log: Path) -> str:
     return _page("CloseDesk didn't open", NOT_OPEN.format(log=log))
 
 
+# The window as a browser is (Windows) -------------------------------------------------------------------------------
+
+
+def browser_keys(window, *, delegate=None, turn_on: bool = False) -> dict[str, bool]:
+    """Windows: whether the window's right-click menu (Copy, Paste, Select all, spelling suggestions) and the browser's
+    own keys (Ctrl+F find, Ctrl+P print, F5, Ctrl+Plus/Minus/0 zoom, Alt+Left back) are on, as WebView2 says;
+    ``turn_on`` turns both on first. pywebview 6.2 turns both off unless it runs for debugging, which would also open
+    the developer tools; here they are turned on by themselves, and the developer tools stay off. WebView2 takes its
+    settings on the window's own thread only: given to it there (``Invoke``, with ``delegate``, .NET's Func[Type])."""
+    if delegate is None:
+        from System import Func, Type  # pythonnet, which pywebview's Windows part has loaded
+
+        delegate = Func[Type]
+    form = window.native
+    found: dict[str, bool] = {}
+
+    def on_the_windows_thread():
+        settings = form.webview.CoreWebView2.Settings
+        if turn_on:
+            settings.AreDefaultContextMenusEnabled = True
+            settings.AreBrowserAcceleratorKeysEnabled = True
+        found["menu"] = bool(settings.AreDefaultContextMenusEnabled)
+        found["keys"] = bool(settings.AreBrowserAcceleratorKeysEnabled)
+
+    form.Invoke(delegate(on_the_windows_thread))
+    return found
+
+
 # What the pages may ask of the window ---------------------------------------------------------------------------------
 
 
@@ -700,6 +731,7 @@ class App:
         self.open_url = webbrowser.open
         self.open_launcher = open_launcher
         self.storage = user_dir() / "window"
+        self.delegate = None  # what Invoke takes on Windows (.NET's Func[Type]; the tests give their own)
         self.load_wait, self.up_wait, self.other_wait, self.poll = LOAD_WAIT, UP_WAIT, OTHER_WAIT, 0.25
         self.watch, self.gone_for_good, self.update_longest = WATCH_EVERY, GONE_FOR_GOOD, UPDATE_LONGEST
         self._update_until = 0.0
@@ -884,6 +916,8 @@ class App:
             self.fallback = ("blank", BLANK)
             self.close_on_purpose()
             return
+        if self.platform == "win32":
+            self._browser_keys_on()
         if self.platform == "darwin":
             named = mac_app_name()
             if named:
@@ -1062,6 +1096,8 @@ class App:
             shown = self._check_shows()
         if shown:
             self.code = 0
+            if self.platform == "win32":
+                self._say_browser_keys()
             # Kept open a while (the first time) for the check to look at it, or press Update now; closed meanwhile, it
             # isn't closed again, and CloseDesk stopping meanwhile (to update) is followed through.
             until, self.smoke_hold = time.monotonic() + self.smoke_hold, 0
@@ -1083,6 +1119,29 @@ class App:
             return True
         print(f"The CloseDesk window didn't show CloseDesk's page within {self.smoke:g} seconds.", flush=True)
         return False
+
+    def _browser_keys_on(self) -> None:
+        """Windows: the right-click menu and the browser's own keys, as in a browser (``browser_keys``). Turned on once
+        the window's first page (its own "Opening CloseDesk") has loaded, before CloseDesk's is shown."""
+        try:
+            browser_keys(self.window, delegate=self.delegate, turn_on=True)
+        except Exception as exc:  # the window still shows CloseDesk, as pywebview left it
+            print(f"Couldn't turn on the window's right-click menu and browser keys: {_said(exc)}", flush=True)
+
+    def _say_browser_keys(self) -> None:
+        """In the window's check on Windows: whether the right-click menu and the browser's keys are on still, now that
+        CloseDesk's page shows, read back from WebView2."""
+        try:
+            found = browser_keys(self.window, delegate=self.delegate)
+        except Exception as exc:
+            print(f"Couldn't read the window's right-click menu and browser keys: {_said(exc)}", flush=True)
+            return
+        if found.get("menu") and found.get("keys"):
+            print(BROWSER_KEYS_ON, flush=True)
+        else:
+            menu = "on" if found.get("menu") else "off"
+            keys = "on" if found.get("keys") else "off"
+            print(f"The window's right-click menu is {menu}, and its browser keys {keys}.", flush=True)
 
     def _update(self) -> bool:
         """Update now: CloseDesk stopped to be updated. The window says so throughout; True when CloseDesk is to be

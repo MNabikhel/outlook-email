@@ -66,6 +66,9 @@ done (opened meanwhile, from the shortcut or the double-click files, CloseDesk s
 - **Open in mail app** opens your mail app; another website, the printable digest and a file's original open in your
   browser.
 - **Download** (a file, the `.eml` copy, a CSV) asks where to save it, starting in your Downloads folder.
+- On Windows, right-click (**Copy**, **Paste**, spelling) and the browser's keys work as in the browser: **Ctrl+F**
+  finds a word on the page, **Ctrl+P** prints, **Ctrl+Plus** and **Ctrl+Minus** make the page bigger and smaller
+  (**Ctrl+0** puts it back), and **Alt+Left** goes back.
 - When a newer version is out, the window asks as the browser does. **Update now** keeps the window open: it says
   **Updating CloseDesk** while the update runs, then opens the new version by itself. If the update can't finish,
   CloseDesk opens as it was and says so.

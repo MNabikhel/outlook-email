@@ -72,6 +72,35 @@ class FakeEvent:
         self.flag.clear()
 
 
+class FakeForm:
+    """Windows: pywebview's form (``window.native``), with the WebView2 in it, whose settings pywebview 6.2 left as it
+    leaves them without ``debug``: no right-click menu and no browser keys. WebView2 takes its settings on the
+    window's own thread only: ``Invoke`` runs what it is given there (a thread of its own here)."""
+
+    def __init__(self) -> None:
+        self.settings = SimpleNamespace(
+            AreDefaultContextMenusEnabled=False, AreBrowserAcceleratorKeysEnabled=False, AreDevToolsEnabled=False,
+            IsStatusBarEnabled=False,
+        )
+        self.webview = SimpleNamespace(CoreWebView2=SimpleNamespace(Settings=self.settings))
+        self.invoked: list[str] = []  # the threads what was given to Invoke ran on
+        self.fails: Exception | None = None
+
+    def Invoke(self, delegate):  # noqa: N802 (.NET's name)
+        if self.fails is not None:
+            raise self.fails
+        done: dict = {}
+
+        def on_gui() -> None:
+            self.invoked.append(threading.current_thread().name)
+            done["result"] = delegate()
+
+        gui = threading.Thread(target=on_gui, name="the window's own thread")
+        gui.start()
+        gui.join(5)
+        return done.get("result")
+
+
 class FakeWindow:
     def __init__(self, title, *, url=None, html=None, js_api=None, localization=None, **options) -> None:
         self.title, self.js_api, self.options = title, js_api, options
@@ -86,6 +115,7 @@ class FakeWindow:
         self.loads = True  # whether a page shown in it loads
         # macOS (pywebview's Cocoa should_close) reads the question before the closing handlers run; Windows after.
         self.cocoa = False
+        self.native = FakeForm()  # Windows: pywebview's form, with the WebView2 in it
 
     def load_url(self, url) -> None:
         self.events.loaded.clear()
@@ -258,6 +288,7 @@ def make_app(webview, computer, tmp_path, *, owned=True) -> app_window.App:
     app.gone_for_good = 0.3
     app.other_wait = 0.2
     app.storage = tmp_path / "window"
+    app.delegate = lambda fn: fn  # .NET's Func[Type], which Invoke takes on Windows
     return app
 
 
@@ -704,6 +735,119 @@ def test_the_page_can_reach_only_what_the_bridge_offers(computer, tmp_path):
     bridge = app_window.Bridge(make_app(FakeWebview(), computer, tmp_path))
     public = {name for name in dir(bridge) if not name.startswith("_")}
     assert public == {"open_outside", "page_ready"}
+
+
+# On Windows the window works as a browser does: its right-click menu and the browser's own keys ---------------------
+
+
+def test_on_windows_the_right_click_menu_and_the_browsers_keys_are_on_once_the_window_shows(computer, tmp_path):
+    # pywebview 6.2 turns off WebView2's right-click menu (Copy an IBAN, Paste in the chat, spelling) and its browser
+    # keys (Ctrl+F find, Ctrl+P, F5, Ctrl+Plus/Minus/0 zoom, Alt+Left back) unless it runs for debugging, which would
+    # open the developer tools too. The window turns the two back on, on the window's own thread (WebView2 takes nothing
+    # from another), and leaves the developer tools off.
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "win32"
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    settings = window.native.settings
+    assert settings.AreDefaultContextMenusEnabled is True and settings.AreBrowserAcceleratorKeysEnabled is True
+    assert settings.AreDevToolsEnabled is False and settings.IsStatusBarEnabled is False
+    assert window.native.invoked and set(window.native.invoked) == {"the window's own thread"}
+    window.person_closes()
+    thread.join(10)
+
+
+def test_the_right_click_menu_is_turned_on_before_closedesk_is_shown(computer, tmp_path):
+    # Its first page is the window's own "Opening CloseDesk": on by the time CloseDesk's page loads (WebView2 reads some
+    # settings at the next page).
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "win32"
+    on_when_shown: list[bool] = []
+    window_load = FakeWindow.load_url
+
+    def load_url(self, url) -> None:
+        on_when_shown.append(self.native.settings.AreDefaultContextMenusEnabled)
+        window_load(self, url)
+
+    FakeWindow.load_url = load_url
+    try:
+        thread, _ = running(app)
+        window = window_of(webview)
+        until(lambda: URL in window.urls())
+    finally:
+        FakeWindow.load_url = window_load
+    assert on_when_shown == [True]
+    window.person_closes()
+    thread.join(10)
+
+
+def test_a_right_click_menu_that_cant_be_turned_on_leaves_the_window_open(computer, tmp_path, capsys):
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "win32"
+    webview_create = webview.create_window
+
+    def create_window(*args, **options):
+        window = webview_create(*args, **options)
+        window.native.fails = RuntimeError("InvalidOperationException")
+        return window
+
+    webview.create_window = create_window
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    assert thread.is_alive() and "right-click menu" in capsys.readouterr().out
+    window.person_closes()
+    thread.join(10)
+
+
+def test_elsewhere_the_window_leaves_its_engines_menu_and_keys_as_they_are(computer, tmp_path):
+    # macOS's WebKit window has its right-click menu and keys already; Linux has no window.
+    for platform in ("darwin", "linux"):
+        webview = FakeWebview(renderer="wkwebview")
+        app = make_app(webview, computer, tmp_path)
+        app.platform = platform
+        thread, _ = running(app)
+        window = window_of(webview)
+        until(lambda: URL in window.urls())
+        window.person_closes()
+        thread.join(10)
+        assert window.native.invoked == [] and window.native.settings.AreDefaultContextMenusEnabled is False
+
+
+def test_in_the_smoke_check_on_windows_the_window_says_its_menu_and_keys_are_on(computer, tmp_path, monkeypatch, capsys):
+    # CI's check of the real window reads both back from WebView2 once CloseDesk's page shows, and looks for this line.
+    monkeypatch.setenv(app_window.SMOKE_ENV, "5")
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "win32"
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.js_api.page_ready("/app")
+    thread.join(10)
+    out = capsys.readouterr().out
+    assert result["code"] == 0 and app_window.BROWSER_KEYS_ON in out
+    smoke = (ROOT / "tests" / "launcher_smoke.py").read_text(encoding="utf-8")
+    assert app_window.BROWSER_KEYS_ON in smoke
+
+
+def test_in_the_smoke_check_a_menu_turned_off_again_is_said(computer, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(app_window.SMOKE_ENV, "5")
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "win32"
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.native.settings.AreBrowserAcceleratorKeysEnabled = False  # as if a page load had put it back
+    window.js_api.page_ready("/app")
+    thread.join(10)
+    out = capsys.readouterr().out
+    assert app_window.BROWSER_KEYS_ON not in out and "browser keys off" in out
 
 
 # The smoke check CI runs: the real window, with CloseDesk's page loaded in it ------------------------------------------
