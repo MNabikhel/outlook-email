@@ -471,11 +471,20 @@ p { margin: 0 0 20px; color: var(--muted); overflow-wrap: anywhere; }
 """
 
 
+# The window's own pages are in its history too: Back (Alt+Left, the mouse's Back button) from CloseDesk's first page
+# would show "Opening CloseDesk" again, waiting for good. Come to by Back, such a page goes forward again.
+_FORWARD = (
+    "<script>var n=performance.getEntriesByType&&performance.getEntriesByType('navigation')[0];"
+    "if(n&&n.type==='back_forward')history.forward();"
+    "addEventListener('pageshow',function(e){if(e.persisted)history.forward();});</script>"
+)
+
+
 def _page(heading: str, text: str, *, busy: bool = False) -> str:
     bar = f'<div class="bar" role="progressbar" aria-label="{escape(heading)}"><span></span></div>' if busy else ""
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
-        f"<title>{TITLE}</title><style>{_STYLE}</style></head><body><main>"
+        f"<title>{TITLE}</title><style>{_STYLE}</style>{_FORWARD if busy else ''}</head><body><main>"
         f'<div class="mark" aria-hidden="true">CD</div><h1>{escape(heading, quote=False)}</h1>'
         f'<p role="status">{escape(text, quote=False)}</p>{bar}</main></body></html>'
     )
@@ -824,7 +833,11 @@ class App:
         a program of its own (waited for as an update the window was closed during is: not on a Mac)."""
         print("CloseDesk stopped to update after its window was closed: the update runs by itself.", flush=True)
         self._update_until = time.monotonic() + self.update_longest
-        self.update = self._start_update()
+        try:
+            self.update = self._start_update()
+        except OSError as exc:  # the next opening says CloseDesk wasn't updated, and where to read why
+            print(f"The update couldn't be started: {_said(exc)}", flush=True)
+            return
         if self.platform != "darwin":
             self._wait_for_update(self.update)
 

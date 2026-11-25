@@ -1162,7 +1162,7 @@ def register_workspace(
                 "shortcut": shortcut.offer(),
             },
             # "waits": Update now waits for the mail being processed (not for what CloseDesk reads by itself).
-            "update": {**updates.status(store, settings), "waits": updates.job_state(snapshot) == "running"},
+            "update": {**updates.status(store, settings), "waits": updates.state_for_update(snapshot) == "running"},
         }
 
     def saved(notice: str, **extra) -> dict[str, Any]:
@@ -1183,7 +1183,7 @@ def register_workspace(
         updated since (a second tab, say)."""
         data = await json_body(request)
         shown = str(data.get("commit") or "")
-        why = await run_in_threadpool(updates.stop_to_update, app.state, updates.job_state(job.snapshot()), shown=shown)
+        why = await run_in_threadpool(updates.stop_to_update, app.state, updates.state_for_update(job.snapshot()), shown=shown)
         if why:
             raise HTTPException(status_code=409, detail=why)
         return {"ok": True, "message": updates.updating_message(app.state), "commit": version.installed()[0], "run": app.state.run}
@@ -1192,7 +1192,7 @@ def register_workspace(
     def update_question():
         """The question the first page shown asks each time CloseDesk opens (updates.Question): whether a newer
         version is out and can be updated to now, and while GitHub is still being asked, to ask again shortly."""
-        return app.state.update_question.view(store, settings, updates.job_state(job.snapshot()))
+        return app.state.update_question.view(store, settings, updates.state_for_update(job.snapshot()))
 
     @api.post("/update/question")
     async def update_question_answer(request: Request):

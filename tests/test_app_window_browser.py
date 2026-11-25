@@ -200,3 +200,26 @@ def test_in_a_browser_tab_links_meant_for_a_new_tab_still_open_one(site, tab):
     assert "/digest/" in opened.value.url
     assert tab.context.opened == []
     assert tab.evaluate("() => { const w = window.open('about:blank'); const real = !!(w && w.document); w && w.close(); return real; }")
+
+
+@pytest.mark.parametrize("which", ["opening", "updating"])
+def test_back_onto_the_windows_own_page_goes_forward_again(browser, which):
+    # On Windows the window's browser keys and its mouse's Back button work (app_window.browser_keys): Back from
+    # CloseDesk's first page went to the window's own "Opening CloseDesk", which waits for good, with nothing opening.
+    from controller_inbox import app_window
+
+    shown = {"opening": app_window.opening_page(), "updating": app_window.updating_page()}[which]
+    context = browser.new_context()
+    context.set_default_timeout(15000)
+    page = context.new_page()
+    page.route("http://window.test/own", lambda route: route.fulfill(content_type="text/html", body=shown))
+    page.route("http://window.test/closedesk", lambda route: route.fulfill(content_type="text/html", body="<title>CloseDesk</title><p>Today</p>"))
+    try:
+        page.goto("http://window.test/own")
+        assert page.inner_text("h1") in ("Opening CloseDesk", "Updating CloseDesk"), "shown as the window shows it"
+        page.goto("http://window.test/closedesk")
+        page.go_back()
+        page.wait_for_url("http://window.test/closedesk")
+        assert page.inner_text("p") == "Today"
+    finally:
+        context.close()

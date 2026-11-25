@@ -338,7 +338,7 @@ def _day(stamp: str) -> str:
     return f"{when:%B} {when.day}"
 
 
-def job_state(snapshot: dict) -> str:
+def state_for_update(snapshot: dict) -> str:
     """The job's state as far as Update now goes: "running" only for work the person asked for (Process new mail, a scan
     being read, Sync now). What CloseDesk reads by itself (its reading as it opens, the automatic Outlook sync) doesn't
     hold the update back: it is stopped, and what it hadn't finished is picked up when CloseDesk opens again, as when

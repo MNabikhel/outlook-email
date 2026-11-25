@@ -434,7 +434,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "coding_counts": store.coding_counts(),
             "closedesk": updates.status(store, settings),
             # Update waits for mail the person asked to be processed, not for what CloseDesk reads by itself.
-            "update_waits": updates.job_state(base_job) == "running",
+            "update_waits": updates.state_for_update(base_job) == "running",
         }
         base["llm_enabled"] = base["model"].active
         base.update(extra)
@@ -1353,7 +1353,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         """Setup's Update button: CloseDesk stops once this page is sent, its launcher fetches the newest version and
         starts it again, and the page waits for that, then goes back to Setup. ``commit``: the version the page showed
         (refused once CloseDesk was updated since, in another tab)."""
-        why = updates.stop_to_update(app.state, updates.job_state(job.snapshot()), shown=commit)
+        why = updates.stop_to_update(app.state, updates.state_for_update(job.snapshot()), shown=commit)
         if why:
             return render(request, "settings_update.html", page="settings", refused=why, status_code=409)
         return render(
