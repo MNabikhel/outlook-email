@@ -848,6 +848,14 @@ def test_the_fraud_check_list_marks_critical_high_and_held_as_the_lists_do(brows
         rows = {row["email"]: row for row in page.evaluate(FRAUD_ROWS)}
         assert {email_id: row["words"] for email_id, row in rows.items()} == {
             HELD: ["Blocked"], CAUTIONS[0]: ["Caution", "Critical"], CAUTIONS[1]: ["Caution", "High"]}, rows
+        # Cleared by you: no longer held (and checked again, a Caution), so it has its importance's edge and word, as
+        # in the other lists.
+        cleared = page.request.post(f"{base}/inbox/{HELD}/fraud", form={"choice": "safe"}, headers={"origin": base})
+        assert cleared.ok, cleared.status
+        page.reload()
+        page.wait_for_selector(".items .item.kind-fraud .item-level")
+        rows = {row["email"]: row for row in page.evaluate(FRAUD_ROWS)}
+        assert (rows[HELD]["words"], rows[HELD]["edge"]) == (["Caution", "Critical"], rgb(pm.workspace("light", colors)["--imp-critical"])), rows[HELD]
     context.close()
 
 
