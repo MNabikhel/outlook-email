@@ -1355,7 +1355,7 @@ def register_workspace(
         if (colors is None and words is None) or (colors is not None and colors not in appearance.COLORS):
             raise HTTPException(status_code=400, detail="Choose the standard colors or the colors for color blindness.")
         look = appearance.save(store, colors=colors, importance_words=None if words is None else _yes(words))
-        return saved("colors", appearance=look)
+        return saved("colors" if colors is not None else "importance-words", appearance=look)
 
     @api.post("/settings/outlook/calendar")
     async def settings_outlook_calendar(request: Request):

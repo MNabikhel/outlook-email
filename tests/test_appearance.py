@@ -185,3 +185,32 @@ def test_the_help_says_what_the_colors_for_color_blindness_change(client):
         for name in ("--imp-critical", "--danger"):
             assert pm.oklch(blind[name])[0] < pm.oklch(standard[name])[0] - 5, name
         assert pm.oklch(standard[ok])[2] < 170 < pm.oklch(blind[ok])[2] < 230
+
+
+def test_the_importance_words_say_only_the_workspace_changed(client, demo):
+    """Ticking only "Show Critical, High, Medium or Low on each email" said "The workspace and the classic pages now
+    look this way", but only the workspace's lists change: the classic pages show the importance in a column anyway."""
+    words = web.NOTICES["importance-words"]
+    assert "workspace" in words and "classic" not in words
+    reply = colors(client, {"importance_words": True})
+    assert reply.json()["message"] == words and reply.json()["notice"] == "importance-words"
+    assert colors(client, {"importance_words": False}).json()["message"] == words
+    assert colors(client, {"colors": "color-blind"}).json()["message"] == web.NOTICES["colors"]
+    # Both at once (Ctrl K and the classic form can): the colors' message, which covers both.
+    assert colors(client, {"colors": "standard", "importance_words": True}).json()["message"] == web.NOTICES["colors"]
+
+    # The classic form sends both boxes every time: its message is for what changed.
+    def classic(**fields):
+        saved = client.post("/settings/colors", data=fields, headers=SAME, follow_redirects=False)
+        assert saved.status_code == 303
+        return saved.headers["location"]
+
+    assert classic(importance_words="1") == "/settings?notice=colors#colors"  # nothing changed: as it was
+    assert classic() == "/settings?notice=importance-words#colors"
+    assert classic(importance_words="1") == "/settings?notice=importance-words#colors"
+    assert classic(colors="color-blind", importance_words="1") == "/settings?notice=colors#colors"
+    assert classic(colors="color-blind") == "/settings?notice=importance-words#colors"
+    assert classic(importance_words="1") == "/settings?notice=colors#colors"
+    from markupsafe import escape
+
+    assert str(escape(words)) in client.get("/settings?notice=importance-words").text

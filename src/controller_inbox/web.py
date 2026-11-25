@@ -1352,9 +1352,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     @app.post("/settings/colors")
     def save_colors(colors: str = Form(""), importance_words: str = Form("")):
-        """Setup → Colors: a box left unticked sends nothing, which is off."""
-        appearance.save(store, colors="color-blind" if colors == "color-blind" else "standard", importance_words=importance_words in ("1", "on"))
-        return RedirectResponse("/settings?notice=colors#colors", status_code=303)
+        """Setup → Colors: a box left unticked sends nothing, which is off. The form sends both boxes, so what it says
+        is for what changed: the importance words alone change only the workspace."""
+        before = appearance.current(store)
+        now = appearance.save(store, colors="color-blind" if colors == "color-blind" else "standard", importance_words=importance_words in ("1", "on"))
+        notice = "importance-words" if now["colors"] == before["colors"] and now != before else "colors"
+        return RedirectResponse(f"/settings?notice={notice}#colors", status_code=303)
 
     @app.post("/settings/profile")
     def save_profile(profile: str = Form(...)):
