@@ -446,6 +446,32 @@ def test_the_classic_update_button_shows_the_waiting_page(download, settings, st
     assert TestClient(app).post("/settings/update", headers={"origin": "http://elsewhere.example"}).status_code == 403
 
 
+def test_the_page_the_update_button_sends_may_be_kept_for_back(download, settings, store):
+    """The classic pages were all sent as never to be kept, the one Update sends too: Back to it gave the browser's
+    "Confirm Form Resubmission", whose Reload asked for the update again and stopped CloseDesk a second time. The
+    pages fetched (GET) still aren't kept; the page answering the button may be, and it goes on to Setup without
+    leaving itself in the history."""
+    app = web.create_app(settings, store)
+    app.state.stop_server = Stopper()
+    client = TestClient(app)
+    release = threading.Event()
+    app.state.job.start(lambda progress: release.wait(10))
+    try:
+        refused = client.post("/settings/update", headers=SAME)
+    finally:
+        release.set()
+    assert refused.status_code == 409 and "no-store" not in refused.headers.get("cache-control", ""), refused.headers
+    for _ in range(100):
+        if app.state.job.snapshot()["state"] != "running":
+            break
+        time.sleep(0.05)
+    updating = client.post("/settings/update", headers=SAME)
+    assert updating.status_code == 200 and updates.UPDATING in updating.text
+    assert "no-store" not in updating.headers.get("cache-control", ""), updating.headers
+    assert "location.replace('/settings#update')" in updating.text and "location.href" not in updating.text
+    assert client.get("/settings").headers["cache-control"] == "no-store"
+
+
 def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))

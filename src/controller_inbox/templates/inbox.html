@@ -52,9 +52,11 @@
         </td>
         <td>
           <a class="subj" href="/inbox/{{ email.id }}">{{ email.subject }}</a>
-          {% if email.flags %}
+          {# "Script draft" below says the email waits for the model: its "Needs model" flag would say it again. #}
+          {% set flags = email.flags | reject('equalto', 'needs_model') | list if email.model_status == 'script_draft' else email.flags %}
+          {% if flags %}
           <div class="flags">
-            {% for flag in email.flags %}
+            {% for flag in flags %}
             <span class="flag {{ flag }}">{{ flag.replace('_', ' ') }}</span>
             {% endfor %}
           </div>
@@ -64,12 +66,17 @@
           {% elif email.importance_reasons %}
           <small class="why">{{ email.importance_reasons[0] }}</small>
           {% endif %}
+          {# On a line of its own with room above it, not against the summary's last line. #}
+          {% if email.model_status in ('script_draft', 'bionic', 'corrected') %}
+          <div class="flags model-flags">
           {% if email.model_status == 'script_draft' %}
           <span class="flag needs_model">Script draft</span>
           {% elif email.model_status == 'bionic' %}
           <span class="flag bionic">Read by local model</span>
-          {% elif email.model_status == 'corrected' %}
+          {% else %}
           <span class="flag user_trained">Corrected by you</span>
+          {% endif %}
+          </div>
           {% endif %}
         </td>
         <td>{{ email.category.value | label_doc }}</td>

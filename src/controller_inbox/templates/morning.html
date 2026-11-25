@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_level.html" import level, focus_edge, edge_class %}
 {% block title %}Today · CloseDesk{% endblock %}
 {% block heading %}Today{% endblock %}
 {% block body %}
@@ -33,6 +34,7 @@
   <ul>
     {% for item in payload.critical_alerts %}
     <li>
+      {{ level(item) }}
       <a href="/inbox/{{ item.id }}"><strong>{{ item.subject }}</strong></a>
       <small>{{ item.sender }} · {{ item.summary }}</small>
     </li>
@@ -45,11 +47,12 @@
   <h2>Your focus today</h2>
   <ol class="focus-list">
     {% for row in payload.focus %}
-    <li class="focus-item {{ row.kind }}" data-email="{{ row.email_id }}">
+    <li class="focus-item {{ row.kind }}{{ focus_edge(row) }}" data-email="{{ row.email_id }}">
       <span class="rank">{{ row.rank }}</span>
       <div class="focus-body">
         <div class="focus-top">
           <span class="tag {{ row.kind }}">{{ row.label }}</span>
+          {{ level(row) }}
           <a href="/inbox/{{ row.email_id }}">{{ row.title }}</a>
         </div>
         <p>{{ row.summary or row.subject }}</p>
@@ -84,8 +87,9 @@
     <b>{{ rows | length }}</b>
     <ul>
       {% for item in rows[:6] %}
-      <li>
-        <a href="/inbox/{{ item.id }}">{{ item.subject }}</a>
+      <li{{ edge_class(item) }}>
+        {{ level(item) }}
+        <a href="/inbox/{{ item.id }}" title="{{ item.subject }}">{{ item.subject }}</a>
         {% if item.summary and folder != 'reference' %}<small>{{ item.summary }}</small>{% endif %}
       </li>
       {% else %}

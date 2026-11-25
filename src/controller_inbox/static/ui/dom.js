@@ -163,7 +163,8 @@ export function icon(name, size = 16) {
 export function toast(message, { action = "", onAction = null, ms = 4000, tone = "" } = {}) {
   const box = document.getElementById("toasts");
   if (!box) return () => {};
-  const item = h("div", { class: `toast ${tone}`, role: "status" }, h("span", { class: "toast-text" }, message));
+  // An error has the warning sign as well as its red.
+  const item = h("div", { class: `toast ${tone}`, role: "status" }, tone === "error" ? icon("alert", 15) : null, h("span", { class: "toast-text" }, message));
   let timer = null;
   const close = () => {
     clearTimeout(timer);

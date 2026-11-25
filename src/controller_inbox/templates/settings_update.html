@@ -13,9 +13,10 @@
   <p class="muted"><span class="update-ask-bar" role="progressbar" aria-label="Updating" data-update-bar><span></span></span></p>
   <script>
     // CloseDesk stops, its launcher fetches the newest version, and CloseDesk starts again: Setup is shown when another
-    // start of it answers (with the new version, or as it was when the update couldn't be done, however quickly). Only
-    // this CloseDesk counts, never another person's that opened on the port meanwhile (a shared computer); an older
-    // one, which doesn't say whose it is, is taken for this one.
+    // start of it answers (with the new version, or as it was when the update couldn't be done, however quickly), in this
+    // page's place, so Back goes to the page before Update, not to this one. Only this CloseDesk counts, never another
+    // person's that opened on the port meanwhile (a shared computer); an older one, which doesn't say whose it is, is
+    // taken for this one.
     (function () {
       var before = {{ commit | tojson }};
       var run = {{ run | tojson }};

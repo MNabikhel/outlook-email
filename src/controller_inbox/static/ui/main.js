@@ -3,7 +3,7 @@
    reloading the page. */
 
 import { $, h, icon, replace, toast, plural, isTyping, keepTabIn, reducedMotion, skeletonList, skeletonReader } from "./dom.js";
-import { getJSON, postJSON } from "./api.js";
+import { getJSON, inSentence, postJSON } from "./api.js";
 import { MAIL_PAGE, listSpec, loadList, rowEl } from "./lists.js";
 import { emailView, fileView, errorView, closeTip } from "./reader.js";
 import { todayView, todayBrief, fraudView, codingView, digestView, emptyReader } from "./pages.js";
@@ -40,6 +40,7 @@ const S = {
   poll: 0,
   polling: false, // a status check is on its way
   jobSeq: 0, // bumped when this page starts a job, so a status fetched before that doesn't undo it
+  lookSeq: 0, // bumped when this page changes the colors, so a status fetched before that doesn't undo them
   topJob: "", // what the job bar shows
   focus: null, // { emailId, at: "heading" | "matter" }: where keys go once that email is drawn
 };
@@ -318,6 +319,37 @@ function themeButton() {
 
 window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", themeButton);
 
+/** The colors and importance words chosen in Settings (saved on the server, which writes them on <html> as it sends
+    the page): put on <html> again when they change here (``mine``), or in another window or the classic pages. */
+function applyAppearance(look, { mine = false } = {}) {
+  if (!look) return;
+  if (mine) S.lookSeq += 1;
+  const before = `${root.dataset.colors}|${root.dataset.importanceWords}`;
+  if (look.colors === "color-blind") root.dataset.colors = "color-blind";
+  else delete root.dataset.colors;
+  if (look.importance_words) root.dataset.importanceWords = "on";
+  else delete root.dataset.importanceWords;
+  // Changed elsewhere while Settings is open here: its boxes say so.
+  if (!mine && before !== `${root.dataset.colors}|${root.dataset.importanceWords}` && S.route && S.route.view === "settings") settings.redraw();
+}
+
+async function toggleColors() {
+  try {
+    const reply = await postJSON("/api/settings/colors", { colors: root.dataset.colors === "color-blind" ? "standard" : "color-blind" });
+    applyAppearance(reply.appearance, { mine: true });
+    // No box in sight to show which way it went: the message says.
+    toast(
+      reply.appearance && reply.appearance.colors === "color-blind"
+        ? "Colors for color blindness on: the workspace and the classic pages on this computer now use them."
+        : "Colors for color blindness off: the workspace and the classic pages on this computer are back to the standard colors.",
+      { tone: "ok" }
+    );
+    if (S.route && S.route.view === "settings") settings.redraw();
+  } catch (error) {
+    toast(error.message, { tone: "error" });
+  }
+}
+
 /* ---------- The list ---------- */
 
 function visible() {
@@ -545,7 +577,7 @@ async function ensureList(key, { force = false, quiet = false } = {}) {
   } catch (error) {
     if (token !== S.listToken) return S.list;
     if (!S.list.items) {
-      S.list.error = `Couldn't load this list (${error.message}).`;
+      S.list.error = inSentence(error, (why) => `Couldn't load this list (${why}).`);
       renderItems();
     }
   }
@@ -790,7 +822,7 @@ async function showEmail(id, file, tab) {
     } catch (error) {
       clearTimeout(skeleton);
       if (token === S.emailToken) {
-        setReader(errorView(error.status === 404 ? "That email isn't here any more." : `Couldn't open it (${error.message}).`, () => showEmail(id, file, tab)), "error");
+        setReader(errorView(error.status === 404 ? "That email isn't here any more." : inSentence(error, (why) => `Couldn't open it (${why}).`), () => showEmail(id, file, tab)), "error");
       }
       return null;
     }
@@ -872,7 +904,12 @@ function showDigest(date) {
 }
 
 const settings = createSettings({
-  appearance: () => ({ theme: theme(), railCollapsed: root.dataset.rail === "collapsed" }),
+  appearance: () => ({
+    theme: theme(),
+    railCollapsed: root.dataset.rail === "collapsed",
+    colors: root.dataset.colors === "color-blind" ? "color-blind" : "standard",
+    importanceWords: root.dataset.importanceWords === "on",
+  }),
   setTheme,
   toggleRail,
   processMail: () => processMail(),
@@ -886,6 +923,8 @@ const settings = createSettings({
     if (keepScroll) reader.scrollTop = top;
   },
   changed(reply) {
+    // New colors or importance words: on <html> at once. Nothing else follows from them.
+    if (reply.appearance) return applyAppearance(reply.appearance, { mine: true });
     // A new time zone shows in every date the workspace writes; a new profile in the top bar and Today.
     if (reply.tz) document.body.dataset.tz = reply.tz;
     if (reply.job && S.meta) {
@@ -1169,6 +1208,14 @@ function doneSelected() {
 
 /* ---------- Live status ---------- */
 
+/** The dot on Ask CloseDesk: filled while a local model runs, a ring when none does, and words on hover. They start
+    with what the button does: on a narrow window it shows only its icon. Its name stays "Ask CloseDesk" (app.html). */
+function modelDot(model) {
+  const button = $("#chat-btn");
+  button.classList.toggle("live", model.active);
+  button.title = model.active ? "Ask CloseDesk: local model running" : "Ask CloseDesk: no local model running";
+}
+
 async function poll() {
   clearTimeout(S.poll);
   if (S.updating) return; // CloseDesk is stopping to update: updating() waits for it instead
@@ -1176,6 +1223,7 @@ async function poll() {
   if (S.polling) return;
   S.polling = true;
   const seq = S.jobSeq;
+  const lookSeq = S.lookSeq;
   try {
     const meta = await getJSON("/api/state");
     if (seq !== S.jobSeq) throw new Error("a job started while this was on its way: ask again");
@@ -1185,10 +1233,11 @@ async function poll() {
       return anotherHere();
     }
     S.meta = meta;
+    if (lookSeq === S.lookSeq) applyAppearance(meta.appearance);
     renderTop();
     updateRail(navId());
     chat.setModel(meta.model);
-    $("#chat-btn").classList.toggle("live", meta.model.active);
+    modelDot(meta.model);
     if (before && meta.job.state !== "running" && meta.job.finished_at && meta.job.finished_at !== before.job.finished_at) finished(meta.job);
     if (before && before.version !== meta.version) refreshData();
     if (S.route && S.route.view === "settings") settings.job(meta.job);
@@ -1500,6 +1549,7 @@ const overlays = createOverlays({
     { label: "Ask CloseDesk", icon: "chat", keywords: "chat question", run: () => chat.open() },
     { label: "Process new mail", icon: "refresh", keywords: "import run", run: processMail },
     { label: isDark() ? "Switch to light theme" : "Switch to dark theme", icon: isDark() ? "sun" : "moon", keywords: "theme dark light", run: () => setTheme(isDark() ? "light" : "dark") },
+    { label: root.dataset.colors === "color-blind" ? "Turn off colors for color blindness" : "Turn on colors for color blindness", icon: "eye", keywords: "color colour blind red orange green", run: toggleColors },
     { label: root.dataset.rail === "collapsed" ? "Show the side bar labels" : "Collapse the side bar", icon: "sidebar", keywords: "rail sidebar", run: toggleRail },
     { label: "Keyboard shortcuts", icon: "help", keywords: "keys help", run: () => overlays.help() },
     { label: "Classic view", icon: "classic", keywords: "old dashboard", run: () => (location.href = "/") },
@@ -1675,7 +1725,7 @@ async function boot() {
   try {
     S.meta = await getJSON("/api/state");
   } catch (error) {
-    replace(reader, errorView(`CloseDesk didn't answer (${error.message}). Is it still running?`, () => location.reload()));
+    replace(reader, errorView(inSentence(error, (why) => `CloseDesk didn't answer (${why}). Is it still running?`), () => location.reload()));
     return;
   }
   renderTop();
@@ -1684,6 +1734,7 @@ async function boot() {
   toldOnOpening(S.meta.job);
   updateRail("");
   chat.setModel(S.meta.model);
+  modelDot(S.meta.model);
   await sync();
   S.poll = setTimeout(poll, S.meta.job.state === "running" ? 1500 : 15000);
   document.body.classList.add("ready");

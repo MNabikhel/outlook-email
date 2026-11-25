@@ -2,7 +2,7 @@
    fraud check), and an attachment's Page, Tables and Text views. */
 
 import { h, icon, replace, toast, plural, isTyping, keepTabIn, saveFrom, $ } from "./dom.js";
-import { getJSON, getBlob, postJSON, mailPath, filePath } from "./api.js";
+import { getJSON, getBlob, postJSON, mailPath, filePath, inSentence } from "./api.js";
 import { previewPane, thumb } from "./preview.js";
 
 const enc = encodeURIComponent;
@@ -1143,7 +1143,7 @@ function pageView(data, ctx) {
     } catch (error) {
       if (mine !== token) return;
       sheet.classList.remove("loading");
-      replace(sheet, h("p", { class: "pv-fail muted" }, `Couldn't show this page (${error.message}).`));
+      replace(sheet, h("p", { class: "pv-fail muted" }, inSentence(error, (why) => `Couldn't show this page (${why}).`)));
       keys.hidden = tools.hidden = true;
       prev.disabled = page <= 1;
       next.disabled = !pages || page >= pages;

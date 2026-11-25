@@ -36,8 +36,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, chats, cost_codes, documents, fraud, local_llm, model_choice, model_fit, model_roles, ocr, semantic, services, shortcut, updates,
-    version, vision,
+    agent, appearance, chats, cost_codes, documents, fraud, local_llm, model_choice, model_fit, model_roles, ocr, semantic, services,
+    shortcut, updates, version, vision,
 )
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
@@ -56,7 +56,7 @@ from controller_inbox.clock import (
     zone_option,
 )
 from controller_inbox.config import PROFILES, Settings
-from controller_inbox.digest import write_digest_files
+from controller_inbox.digest import page_to_show, write_digest_files
 from controller_inbox.local_llm import check_model, set_min_context, use_chat_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.profile import active_profile, set_profile
@@ -91,6 +91,17 @@ def _shortdt(context, value) -> str:
 
 
 templates.env.filters["shortdt"] = _shortdt
+
+
+@pass_context
+def _appearance_attrs(context) -> str:
+    """The colors and importance words chosen in Settings, on <html> (``ctx`` and the workspace pass ``appearance``);
+    nothing for a page rendered without them."""
+    return appearance.html_attrs(context.get("appearance"))
+
+
+templates.env.globals["appearance_attrs"] = _appearance_attrs
+
 # The classic chat formats answers with the workspace's own module (static/ui/classic.js loads it).
 templates.env.globals["ui_import_map"] = ui_import_map()
 templates.env.globals["coding_choices"] = cost_codes.choices
@@ -431,11 +442,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "filter_category": "",
             "query": "",
             "notice": NOTICES.get(request.query_params.get("notice", ""), ""),
+            # Which notice it is: a page can say it in the section the change goes back to (notices_in_place).
+            "notice_key": request.query_params.get("notice", ""),
             "profile": profile,
             "profiles": PROFILES,
             "finance": profile == "finance",
             "coding_counts": store.coding_counts(),
             "closedesk": updates.status(store, settings),
+            "appearance": appearance.current(store),
             # Update waits for mail the person asked to be processed, not for what CloseDesk reads by itself.
             "update_waits": updates.state_for_update(base_job) == "running",
         }
@@ -444,7 +458,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return base
 
     def render(request: Request, name: str, status_code: int = 200, **extra):
-        return templates.TemplateResponse(request, name, ctx(request, **extra), status_code=status_code)
+        # A page fetched is never kept by the browser: Back shows it as it is now (its counts, the job, the colors
+        # chosen in Setup since), not the copy it was first sent as. One answering a form sent (Setup's Update) may be
+        # kept: without its copy, Back has nothing to show but the browser's offer to send the form again.
+        headers = {"Cache-Control": "no-store"} if request.method == "GET" else None
+        return templates.TemplateResponse(request, name, ctx(request, **extra), status_code=status_code, headers=headers)
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):
@@ -1140,7 +1158,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         row = store.get_digest(period)
         if not row:
             raise HTTPException(status_code=404, detail=f"No digest saved for {period}")
-        return HTMLResponse(row["html"])
+        # In the colors chosen in Setup, as the other pages are, and in today's colors even when it was saved by an
+        # earlier version; the file saved for printing keeps the standard ones.
+        shown = page_to_show(row)
+        return HTMLResponse(appearance.on_saved_page(shown, appearance.current(store)), headers={"Cache-Control": "no-store"})
 
     @app.get("/digests", response_class=HTMLResponse)
     def digests_page(request: Request):
@@ -1371,6 +1392,23 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         said = shortcut.make()
         shortcut_said.update(said=said.message, ok=said.ok)
         return RedirectResponse("/settings?notice=shortcut#update", status_code=303)
+
+    @app.post("/settings/colors")
+    def save_colors(colors: str = Form(""), importance_words: str = Form(""), colors_was: str = Form(""), importance_words_was: str = Form("")):
+        """Setup → Colors: a box left unticked sends nothing, which is off. The form also says what each box showed
+        when the page was drawn, and only a box changed on it is saved: a Setup page left open doesn't undo a change
+        made since in the workspace (a form without them, from before, saves both). It sends both boxes, so what it
+        says is for what changed: the importance words alone change only some lists (not the classic Inbox's column)."""
+        before = appearance.current(store)
+        wanted = "color-blind" if colors == "color-blind" else "standard"
+        words = importance_words in ("1", "on")
+        now = appearance.save(
+            store,
+            colors=None if colors_was == wanted else wanted,
+            importance_words=None if importance_words_was == ("1" if words else "0") else words,
+        )
+        notice = "importance-words" if now["colors"] == before["colors"] and now != before else "colors"
+        return RedirectResponse(f"/settings?notice={notice}#colors", status_code=303)
 
     @app.post("/settings/profile")
     def save_profile(profile: str = Form(...)):

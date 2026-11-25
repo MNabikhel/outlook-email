@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en"{{ appearance_attrs() }}>
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -78,7 +78,8 @@
           <a class="kpi-link {{ 'hot' if counts.fraud_alerts else '' }}" href="/fraud"><span>Fraud flags</span><b>{{ counts.fraud_alerts }}</b></a>
         </div>
       </header>
-      {% if notice %}<p class="notice">{{ notice }}</p>{% endif %}
+      {# A page that goes back to the section that was changed says so there, in sight (settings.html). #}
+      {% if notice and notice_key not in (notices_in_place | default([])) %}<p class="notice">{{ notice }}</p>{% endif %}
       {% block body %}{% endblock %}
     </div>
   </div>
