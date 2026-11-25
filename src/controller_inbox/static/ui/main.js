@@ -172,13 +172,19 @@ function toggleRail() {
 
 /* ---------- The top bar ---------- */
 
-/** Whether the top bar's buttons would be pushed past its edge (a narrow window, the chat open beside it), the search
-    box having given way as far as it goes: then the date and "Update ready" are shortened ("Update…") too. */
+/* Where the top bar's buttons would be pushed past its edge (a narrow window, the chat open beside it), its parts give
+   way in turn, each only while it is still too tight (app.css): the search box, to its icon alone; the date's second
+   half and the sample chip; "Update ready", to "Update…"; and last the date and that, cut short. */
+const TIGHT = ["data-tight", "data-tight-date", "data-tight-update", "data-tight-cut"];
+
 function fitTop() {
   const top = $("#top");
   if (!top) return;
-  top.removeAttribute("data-tight");
-  if (top.scrollWidth > top.clientWidth + 1) top.setAttribute("data-tight", "");
+  for (const name of TIGHT) top.removeAttribute(name);
+  for (const name of TIGHT) {
+    if (top.scrollWidth <= top.clientWidth + 1) return;
+    top.setAttribute(name, "");
+  }
 }
 
 function renderTop() {
@@ -190,17 +196,23 @@ function renderTop() {
     h("span", { class: "muted" }, meta.finance ? ` · ${plural(meta.days_to_close, "day")} to month-end` : ` · ${plural(meta.counts.emails, "email")} sorted`),
     meta.is_sample ? h("span", { class: "chip faint sample" }, "sample mailbox") : null
   );
-  // A newer CloseDesk is ready: a small link to Settings, where its Update button is.
+  // A newer CloseDesk is ready: a small link to Settings, where its Update button is ("Update…" where the top bar is
+  // tight: heard whole all the same).
   const ready = Boolean(meta.closedesk && meta.closedesk.newer);
   let notice = $("#top-update");
   if (ready && !notice) {
-    notice = h("a", { id: "top-update", class: "top-update", href: "/app/settings#set-about", dataset: { nav: "" } }, "Update ready");
+    notice = h(
+      "a",
+      { id: "top-update", class: "top-update", href: "/app/settings#set-about", dataset: { nav: "" }, "aria-label": "Update ready" },
+      "Update",
+      h("span", { class: "top-update-more" }, " ready")
+    );
     $(".top-tools").before(notice);
-    fitTop();
   } else if (!ready && notice) {
     notice.remove();
-    fitTop();
   }
+  // The date, the link or the progress may have changed width.
+  fitTop();
   if (ready) notice.title = meta.closedesk.message;
   const job = meta.job;
   const running = job.state === "running";
@@ -253,6 +265,7 @@ function renderTop() {
         )
       : null
   );
+  fitTop();
 }
 
 async function stopJob(event) {

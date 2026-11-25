@@ -541,12 +541,12 @@ def test_the_classic_rails_update_ready_can_be_read(download, settings, loaded, 
 @pytest.mark.parametrize(
     "width, chat, whole",
     [(320, False, False), (390, False, True), (560, False, True), (720, False, True), (1280, False, True),
-     (1280, True, True), (1181, True, False)],
+     (1280, True, True), (1181, True, True)],
 )
 def test_the_workspaces_update_ready_leaves_the_top_bar_on_screen(download, settings, loaded, page, monkeypatch, width, chat, whole):
     # At a phone's width (390px) "Update ready" pushed the help button and Ask CloseDesk past the right edge, and the
     # page scrolled sideways; so it did beside the open chat just wider than the chat's own window (1181px). Shortened
-    # ("Update…") only where it would.
+    # ("Update…") only where it would, the search box having given way first (whole beside the chat at 1181px now).
     app = opened(settings, loaded, monkeypatch)
     with serving(app) as base:
         page.set_viewport_size({"width": width, "height": 800})
@@ -559,7 +559,8 @@ def test_the_workspaces_update_ready_leaves_the_top_bar_on_screen(download, sett
             page.click("#chat-btn")
             page.wait_for_selector("#chat:not([hidden])")
             page.wait_for_timeout(300)
-        cut = page.evaluate("(() => { const e = document.querySelector('#top-update'); return e.scrollWidth > e.clientWidth; })()")
+        # Shortened: "Update…" (or, with no room even for that, cut short).
+        cut = page.evaluate("(() => { const e = document.querySelector('#top-update'); return e.scrollWidth > e.clientWidth || e.innerText.trim() !== 'Update ready'; })()")
         assert cut is not whole, "said whole where it fits, shortened only where it doesn't"
         found = page.evaluate("""() => {
           const right = (sel) => document.querySelector(sel).getBoundingClientRect().right;
@@ -571,6 +572,33 @@ def test_the_workspaces_update_ready_leaves_the_top_bar_on_screen(download, sett
         assert found["page"] <= width, f"the page scrolls sideways: {found}"
         assert found["help"] <= width and found["chat"] <= width, f"the top bar's buttons are past the edge: {found}"
         assert found["update"] > 20, "Update ready is still there to click"
+
+
+@pytest.mark.parametrize("width", [1260, 1229, 1200, 1152, 1100, 1024, 960, 720, 390])
+def test_the_search_box_gives_way_before_update_ready_and_update_ready_is_never_cut_mid_word(download, settings, loaded, page, monkeypatch, width):
+    # At 1229px (the CloseDesk window on a 1366x768 laptop) the top bar read "Updat…" while the search box kept 245px
+    # and "Search mail, jump to …": once the bar was tight, each part gave way in proportion to its width.
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.set_viewport_size({"width": width, "height": 800})
+        page.goto(base + "/app")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Not now')")
+        page.wait_for_selector("#update-ask", state="detached")
+        page.wait_for_selector("#top-update")
+        found = page.evaluate("""() => {
+          const link = document.querySelector('#top-update');
+          const search = document.querySelector('.palette-btn').getBoundingClientRect().width;
+          return { text: link.innerText.trim(), cut: link.scrollWidth > link.clientWidth, search, page: document.documentElement.scrollWidth,
+                   label: link.getAttribute('aria-label') };
+        }""")
+        assert found["page"] <= width, f"the page scrolls sideways: {found}"
+        assert not found["cut"] and found["text"] in ("Update ready", "Update"), f"Update ready cut mid-word: {found}"
+        assert found["label"] == "Update ready", "a screen reader hears it whole"
+        if found["text"] != "Update ready":
+            assert found["search"] <= 40, f"Update ready gave way before the search box did: {found}"
+        if width >= 1100:
+            assert found["text"] == "Update ready", f"shortened where the search box giving way leaves room: {found}"
 
 
 # A long what's new ------------------------------------------------------------------------------------------------------
