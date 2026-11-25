@@ -579,7 +579,8 @@ def test_linux_has_no_shortcut(tmp_path):
     assert shortcut.system_here(platform="linux") is None
     assert shortcut.upkeep(None, record=tmp_path / "x.json").message == ""
     said = shortcut.make(None, record=tmp_path / "x.json")
-    assert said.ok is False and "CloseDesk.command" in said.message
+    # Said, and nothing went wrong: launch.py --shortcut ends with 0 there.
+    assert said.ok is True and "no CloseDesk shortcut on Linux" in said.message and "CloseDesk.command" in said.message
     assert shortcut.offer(platform="linux")["offered"] is False
 
 

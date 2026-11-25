@@ -81,7 +81,8 @@ _lock = threading.Lock()
 
 @dataclass
 class Said:
-    """What was done, in plain words ("" when nothing needed doing), and whether there is a shortcut to use."""
+    """What was done, in plain words ("" when nothing needed doing); ``ok`` is False when a shortcut that should be
+    there couldn't be made (Linux has none, and nothing went wrong there)."""
 
     ok: bool
     message: str = ""
@@ -439,6 +440,7 @@ class Mac:
     """CloseDesk.app in Applications in the person's own folder."""
 
     script = "CloseDesk.command"
+    places_said = {"Applications": "in Applications in your user folder", "CloseDesk's folder": "in CloseDesk's folder"}
     _FIND = object()
 
     def __init__(self, root, *, apps=None, home=None, macos=None, interpreter=_FIND, register=None) -> None:
@@ -501,18 +503,21 @@ class Mac:
         return changed
 
     def said(self, done: dict, failed: list, *, explicit: bool) -> Said:
-        lines = []
+        where = lambda names: _join([self.places_said.get(name, name) for name in names])  # noqa: E731
         guarded = (
             f" CloseDesk's folder is in {self.guarded}, which macOS lets an app like this into only after asking, so from "
             "there it opens CloseDesk in Terminal and your browser, as CloseDesk.command does. For the window, move the "
             "CloseDesk folder into your home folder and double-click CloseDesk.command once."
         ) if self.guarded else ""
+        window = "" if self.guarded else ": it opens CloseDesk in a window of its own"
+        lines = []
         if "Applications" in done["made"]:
-            window = "" if self.guarded else ": it opens CloseDesk in a window of its own"
             lines.append(
                 f"Added CloseDesk to Applications in your user folder{window}. Find it with Spotlight, and keep it in the "
                 f"Dock to open CloseDesk with a click.{guarded}"
             )
+        elif done["made"]:
+            lines.append(f"CloseDesk.app {where(done['made'])} was made again{window}. Drag it to the Dock to open CloseDesk with a click.{guarded}")
         if done["fallback"]:
             why = next((why for name, why in failed if name == "Applications"), "")
             lines.append(
@@ -521,15 +526,18 @@ class Mac:
             )
             failed = [item for item in failed if item[0] != "Applications"]
         if done["moved"]:
-            lines.append("CloseDesk in Applications now opens CloseDesk from this folder (CloseDesk's folder was moved).")
-        if done["fresh"] and not done["moved"]:
-            lines.append("CloseDesk.app was brought up to date.")
+            lines.append(f"CloseDesk.app {where(done['moved'])} now opens CloseDesk from this folder (CloseDesk's folder was moved).")
+        if done["fresh"]:
+            lines.append(f"CloseDesk.app {where(done['fresh'])} was brought up to date.")
         if done["kept"] and explicit:
-            lines.append("CloseDesk is in Applications in your user folder: find it with Spotlight, or keep it in the Dock.")
+            if "Applications" in done["kept"]:
+                lines.append("CloseDesk is in Applications in your user folder: find it with Spotlight, or keep it in the Dock.")
+            else:
+                lines.append(f"CloseDesk.app is {where(done['kept'])}: drag it to the Dock to open CloseDesk with a click.")
         if done["theirs"]:
-            lines.append("There is already an app named CloseDesk in Applications, so it was left as it is.")
-        for _name, why in failed:
-            lines.append(f"CloseDesk couldn't add itself to Applications in your user folder ({why}).")
+            lines.append(f"There is already an app named CloseDesk {where(done['theirs'])}, so it was left as it is.")
+        for name, why in failed:
+            lines.append(f"CloseDesk couldn't put CloseDesk.app {where([name])} ({why}).")
         ok = any(done[key] for key in ("made", "moved", "fresh", "kept", "fallback"))
         if failed and not ok:
             lines.append(f"{self.script} in CloseDesk's folder still opens it.")
@@ -639,7 +647,7 @@ def _keep(system, *, explicit: bool, record) -> Said:
         system = system_here()
     if system is None:
         if explicit:
-            return Said(False, "There is no CloseDesk shortcut on Linux: CloseDesk.command opens CloseDesk in your browser.")
+            return Said(True, "There is no CloseDesk shortcut on Linux: CloseDesk.command opens CloseDesk in your browser.")
         return Said(True, "")
     record = Path(record) if record else record_path()
     with _lock:
