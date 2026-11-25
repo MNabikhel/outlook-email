@@ -87,7 +87,11 @@ run `CloseDesk.bat --shortcut` (Mac: `bash ~/CloseDesk/CloseDesk.command --short
 
 **Moved or renamed CloseDesk's folder?** The shortcut can't find it until you double-click `CloseDesk.bat` (or
 `CloseDesk.command`) once in its new place; that start points the shortcut at the new place. Until then, Windows says
-*Problem with Shortcut*, and the Mac says *CloseDesk can't find its folder*.
+*Problem with Shortcut*, and the Mac says *CloseDesk can't find its folder*. If Windows offered to delete the shortcut
+and you clicked **Yes**, that start puts it back.
+
+**The same Desktop on two computers** (OneDrive keeps it in step): the shortcut on it opens CloseDesk on the computer
+that made it first. The other computer leaves it as it is and says so; there, open CloseDesk from the Start menu.
 
 **On a Mac, keep the folder in your home folder** (the install line puts it there). From Desktop, Documents, Downloads,
 iCloud Drive, another cloud drive or another disk, macOS would ask before letting CloseDesk.app in, so from there
@@ -125,7 +129,7 @@ Any of these works, and none needs admin rights:
 - **Double-click `CloseDesk-Update.command`** (Mac) or **`CloseDesk-Update.bat`** (Windows). It fetches the newest CloseDesk and replaces CloseDesk's own files. Your mail (`data`, `inbox`), your settings (`.env`) and the `AP cost codes` folder are not touched, and the files it replaced are kept in `.previous`.
 - **Or by hand:** download the ZIP again and swap the folders, keeping `data`, `inbox`, `.env` and `AP cost codes` from the old one. (On a Mac the Terminal line from the setup does this for you: run again, it updates.)
 
-After CloseDesk-Update or an update by hand, open CloseDesk as usual. Every start checks the set-up and puts right what isn't: packages an update added, a folder that was moved or renamed, a Python that was upgraded or replaced. When everything is in place it just starts (the check takes about half a second).
+After CloseDesk-Update or an update by hand, open CloseDesk as usual. Every start checks the set-up and puts right what isn't: packages an update added, a folder that was moved or renamed, a Python that was upgraded or replaced. When everything is in place it just starts (the check takes about half a second). Two of these need a double-click on `CloseDesk.bat` (or `CloseDesk.command`) once, since the shortcut can't start CloseDesk until they are put right: a folder that was moved or renamed, and on Windows a Python that was removed (the Python CloseDesk was set up with, uninstalled after a newer one came).
 
 To see the check without starting, run `CloseDesk.command --check` (Mac) or `CloseDesk.bat --check` (Windows). It lists what is in order, what is optional and missing, and what to do about anything marked FIX.
 
@@ -204,7 +208,8 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 | "Another program is using port 8765" | CloseDesk says so and uses the next free port that time. If the other program is LM Studio's server, set that back to its own port (1234). |
 | The page does not open | The CloseDesk window (or the black window, with the double-click files) must still be open. Go to [http://127.0.0.1:8765](http://127.0.0.1:8765). |
 | The CloseDesk shortcut opens CloseDesk in the browser, not a window | The window can't open on this computer, and the first time CloseDesk said why: usually Windows without Microsoft Edge WebView2 Runtime, which IT can install (free from Microsoft), or the window's part not installed yet (each start tries again). See "The CloseDesk shortcut and window". |
-| Windows: *Problem with Shortcut*, or the Mac: *CloseDesk can't find its folder* | CloseDesk's folder was moved or renamed. Double-click `CloseDesk.bat` (or `CloseDesk.command`) once in its new place: the shortcut follows it. |
+| Windows: *Problem with Shortcut*, or the Mac: *CloseDesk can't find its folder* | CloseDesk's folder was moved or renamed. Double-click `CloseDesk.bat` (or `CloseDesk.command`) once in its new place: the shortcut follows it (and is put back if you let Windows delete it). |
+| Windows: *Python venv launcher is sorry to say ... did not find executable* | The Python CloseDesk was set up with is gone (uninstalled, often after a newer one was installed). Double-click `CloseDesk.bat` once: it sets CloseDesk up again with the Python that is there, and the shortcut works again. |
 | The CloseDesk shortcut says *CloseDesk couldn't open*, or does nothing | What went wrong is in its log: `%LOCALAPPDATA%\CloseDesk\CloseDesk-app.log` (Windows) or `~/Library/Logs/CloseDesk/CloseDesk-app.log` (Mac). Double-clicking `CloseDesk.bat` / `CloseDesk.command` shows the same start in its window, and `--check` says what isn't in order. |
 | The CloseDesk shortcut or the Mac's CloseDesk is gone | It isn't put back once deleted. **Settings → This copy and its check → Add the CloseDesk shortcut again** (Mac: **Add CloseDesk to Applications again**), or `CloseDesk.bat --shortcut` / `CloseDesk.command --shortcut`. |
 | Mac: CloseDesk.app opens Terminal and the browser, not a window | CloseDesk's folder is in Desktop, Documents, Downloads, iCloud Drive, another cloud drive or on another disk, where macOS would ask first. Move it into your home folder and double-click `CloseDesk.command` once. |

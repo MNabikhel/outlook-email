@@ -185,6 +185,77 @@ def test_a_shortcut_another_computer_pointed_at_its_folder_is_left_alone(windows
     assert windows.links.files[windows.desktop]["folder"] == str(windows.root)
 
 
+def test_a_desktop_shared_by_two_computers_keeps_the_first_computers_shortcut(tmp_path):
+    # One person, OneDrive keeping the Desktop in step between two PCs, CloseDesk in a different folder on each. The
+    # second PC's first start finds the first PC's shortcut there, naming a folder this PC hasn't got: it isn't this
+    # PC's moved folder (this PC never made it), so it is left for the first PC, and the second PC's own goes in its
+    # Start menu, which isn't shared, with a line saying why.
+    links = Links()
+    desktop = tmp_path / "OneDrive - Firm" / "Desktop"
+
+    def computer(name: str):
+        root = _closedesk(tmp_path / name / "CloseDesk")
+        places = {"Desktop": desktop, "Start menu": tmp_path / name / "Start Menu"}
+        system = shortcut.Windows(root, links=links, folders=lambda: dict(places), icon_dir=tmp_path / name / "LocalAppData")
+        return SimpleNamespace(root=root, system=system, record=tmp_path / name / "LocalAppData" / "shortcut.json",
+                               start=places["Start menu"] / "CloseDesk.lnk", hidden=tmp_path / name / "elsewhere")
+
+    first, second = computer("PC1"), computer("PC2")
+
+    def on(pc):
+        # Only this computer's CloseDesk folder is there: the other computer's isn't on this one.
+        for other in (first, second):
+            if other is not pc and other.root.exists():
+                other.root.rename(other.hidden)
+            elif other is pc and not other.root.exists():
+                other.hidden.rename(other.root)
+        return shortcut.upkeep(pc.system, record=pc.record)
+
+    on(first)
+    shared = desktop / "CloseDesk.lnk"
+    assert links.files[shared]["folder"] == str(first.root)
+    said = on(second)
+    assert links.files[shared]["folder"] == str(first.root), "the second computer took the first one's Desktop shortcut"
+    assert links.files[second.start]["folder"] == str(second.root)
+    assert "moved" not in said.message
+    assert "another computer" in said.message and "Start menu" in said.message, said.message
+    # The first computer's next start: its Desktop shortcut is still its own, and nothing is said.
+    links.written.clear()
+    said = on(first)
+    assert links.files[shared]["folder"] == str(first.root) and links.written == [] and said.message == ""
+    # And the second computer's next start says nothing more about it.
+    assert on(second).message == "" and links.files[shared]["folder"] == str(first.root)
+
+
+def test_after_a_move_a_shortcut_deleted_from_windows_problem_with_shortcut_is_put_back(windows, tmp_path):
+    # Moved, the folder isn't where the shortcut opens it, and Windows offers to delete the shortcut: many click Yes.
+    # The next start from the new place (CloseDesk.bat, as the guide says) puts back what the move cost.
+    _upkeep(windows)
+    moved = tmp_path / "Somewhere else" / "CloseDesk"
+    moved.parent.mkdir()
+    windows.root.rename(moved)
+    del windows.links.files[windows.desktop]
+    system = shortcut.Windows(moved, links=windows.links, folders=lambda: dict(windows.places), icon_dir=windows.system.icon_dir)
+    said = shortcut.upkeep(system, record=windows.record)
+    for path in (windows.desktop, windows.start):
+        assert windows.links.files[path]["folder"] == str(moved), path
+    assert said.ok and "Desktop" in said.message and "moved" in said.message, said.message
+    assert json.loads(windows.record.read_text(encoding="utf-8"))["folder"] == str(moved)
+    # From then on, one deleted where the folder stays is left deleted again.
+    del windows.links.files[windows.desktop]
+    assert shortcut.upkeep(system, record=windows.record).message == "" and windows.desktop not in windows.links.files
+
+
+def test_a_shortcut_deleted_when_another_copy_starts_stays_deleted(windows, tmp_path):
+    # A second copy of CloseDesk, the first still where it was: that isn't a move.
+    _upkeep(windows)
+    del windows.links.files[windows.desktop]
+    other = _closedesk(tmp_path / "CloseDesk copy")
+    system = shortcut.Windows(other, links=windows.links, folders=lambda: dict(windows.places), icon_dir=windows.system.icon_dir)
+    assert shortcut.upkeep(system, record=windows.record).message == ""
+    assert windows.desktop not in windows.links.files
+
+
 def test_a_shortcut_to_another_closedesk_folder_that_is_still_there_is_left_alone(windows, tmp_path):
     # Two copies of CloseDesk: the shortcut opens the one it was made for.
     _upkeep(windows)
@@ -393,6 +464,17 @@ def test_a_shortcut_folder_named_for_the_check_keeps_it_off_the_desktop(monkeypa
 def test_the_tests_never_reach_the_computers_desktop():
     # conftest names a folder of its own for every test session.
     assert os.environ.get(shortcut.DIR_ENV)
+
+
+def test_the_guide_says_what_to_do_when_the_python_the_shortcut_runs_is_gone():
+    # The shortcut runs the environment's pythonw.exe, which only starts the Python CloseDesk was set up with. With that
+    # one uninstalled, Windows' own box says "Python venv launcher is sorry to say ... did not find executable", and
+    # nothing of CloseDesk runs to put it right: CloseDesk.bat does.
+    guide = (ROOT / "docs" / "SETUP.md").read_text(encoding="utf-8")
+    row = next((line for line in guide.splitlines() if "venv launcher is sorry to say" in line), "")
+    assert row.startswith("| Windows:") and "CloseDesk.bat" in row, row
+    every_start = next(line for line in guide.splitlines() if line.startswith("After CloseDesk-Update or an update by hand"))
+    assert "CloseDesk.bat" in every_start and "removed" in every_start, "the guide says the shortcut repairs a Python that went"
 
 
 # macOS --------------------------------------------------------------------------------------------------------------

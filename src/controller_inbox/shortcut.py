@@ -17,9 +17,11 @@ itself, on the person's computer, with nothing to install and no admin rights.
 It is made once, the first time a launcher starts CloseDesk (``upkeep``, from cli._serve), and that is remembered, so
 a shortcut the person deleted isn't put back. At each start after that, one still there is kept right: pointed at this
 folder when the folder it opened is gone (CloseDesk was moved or renamed), and given what changed after an update (a
-new icon). One that opens another CloseDesk folder, still there, is left alone, as is a shortcut named CloseDesk that
-isn't CloseDesk's own. Nothing that is right is written again (OneDrive would copy a Desktop's changes between two
-computers, with conflicts). ``make`` (Settings, ``launch.py --shortcut``) makes it again, whatever was there.
+new icon). After a move, a shortcut that is missing is put back too: Windows offers to delete one whose folder is gone.
+One that opens another CloseDesk folder, still there, is left alone, as is a shortcut named CloseDesk that isn't
+CloseDesk's own, and one naming a folder this computer never had (another computer's, on a Desktop OneDrive keeps the
+same on both). Nothing that is right is written again (OneDrive would copy a Desktop's changes between two computers,
+with conflicts). ``make`` (Settings, ``launch.py --shortcut``) makes it again, whatever was there.
 
 ``CLOSEDESK_SHORTCUT_DIR`` keeps all of it in that folder instead (the tests and the launcher check), never on the
 person's Desktop or in their Applications.
@@ -299,6 +301,14 @@ class Windows:
             lines.append(f"The CloseDesk shortcut is {where(done['kept'])}.")
         if done["theirs"]:
             lines.append(f"There is already a shortcut named CloseDesk {where(done['theirs'])}, so it was left as it is.")
+        if done["elsewhere"]:
+            here = [name for key in ("made", "moved", "fresh", "kept") for name in done[key]]
+            use = f"on this computer, use the one {where(here)}" if here else f"on this computer, {self.script} in CloseDesk's folder opens it"
+            lines.append(
+                f"The CloseDesk shortcut {where(done['elsewhere'])} opens CloseDesk from a folder this computer hasn't got: "
+                f"it is another computer's (OneDrive keeps your Desktop the same on both), so it was left as it is for that "
+                f"one. {use[0].upper()}{use[1:]}."
+            )
         for name, why in failed:
             lines.append(f"CloseDesk couldn't put its shortcut {where([name])} ({why}).")
         ok = any(done[key] for key in ("made", "moved", "fresh", "kept"))
@@ -537,6 +547,11 @@ class Mac:
                 lines.append(f"CloseDesk.app is {where(done['kept'])}: drag it to the Dock to open CloseDesk with a click.")
         if done["theirs"]:
             lines.append(f"There is already an app named CloseDesk {where(done['theirs'])}, so it was left as it is.")
+        if done["elsewhere"]:
+            lines.append(
+                f"CloseDesk.app {where(done['elsewhere'])} opens CloseDesk from a folder this Mac hasn't got, so it was left "
+                "as it is. To have it open this CloseDesk, use Settings → Add CloseDesk to Applications again."
+            )
         for name, why in failed:
             lines.append(f"CloseDesk couldn't put CloseDesk.app {where([name])} ({why}).")
         ok = any(done[key] for key in ("made", "moved", "fresh", "kept", "fallback"))
@@ -610,17 +625,24 @@ def _read_record(record: Path) -> dict:
 
 def _tend(system, *, explicit: bool, record: Path) -> Said:
     first = explicit or not record.exists()
-    # The folder this computer's shortcut last opened: one naming a folder it never did is another computer's (a
-    # Desktop OneDrive keeps in step between two), and pointing it here would have the two take turns rewriting it.
+    # The folder this computer's shortcut last opened. Only a shortcut naming that folder, gone, is this computer's
+    # after a move: one naming any other folder this computer hasn't got is another computer's (a Desktop OneDrive
+    # keeps in step between two), and pointing it here would take it from that computer, for good.
     known = str(_read_record(record).get("folder") or "")
-    done: dict[str, list[str]] = {key: [] for key in ("made", "moved", "fresh", "kept", "theirs", "fallback")}
+    # CloseDesk's folder moved since this computer made its shortcut: what the move cost (a shortcut Windows' "Problem
+    # with Shortcut" offered to delete) is put back, as at the first start. Deleted where the folder stayed, it isn't.
+    moved_here = bool(known) and not _same(known, system.root) and not _closedesk_at(known)
+    done: dict[str, list[str]] = {key: [] for key in ("made", "moved", "fresh", "kept", "theirs", "fallback", "elsewhere")}
     failed: list[tuple[str, str]] = []
     for name, path in system.places():
         found = system.look(path)
         if found is None:
-            if not first:
+            if moved_here and not explicit:
+                kind = "moved"
+            elif not first:
                 continue  # the person deleted it: it stays deleted
-            kind = "made"
+            else:
+                kind = "made"
         elif found is THEIRS:
             if not explicit:
                 done["theirs"].append(name)
@@ -630,10 +652,14 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
             kind = "fresh"
         elif explicit:
             kind = "made"
-        elif _closedesk_at(found) or (known and not _same(known, found)):
-            continue  # another CloseDesk folder's, still there; or another computer's
-        else:
+        elif _closedesk_at(found):
+            continue  # another CloseDesk folder's, still there
+        elif known and _same(known, found):
             kind = "moved"
+        else:
+            if first:  # said once: the first time this computer finds it
+                done["elsewhere"].append(name)
+            continue  # another computer's
         try:
             changed = system.put(path)
         except Exception as exc:
