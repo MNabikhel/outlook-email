@@ -81,7 +81,7 @@ CHECK_OFF = "Looking for newer versions is turned off (CONTROLLER_INBOX_UPDATE_C
 UNREACHED = "CloseDesk couldn't reach GitHub on {day} to look for a newer version; CloseDesk-Update in its folder still updates it."
 BY_HAND = "To update, close CloseDesk and double-click CloseDesk-Update in its folder: your mail and settings are kept."
 # Under this copy when no newer one is known: what is known first, then how to update by hand later on (read first,
-# just after an update, BY_HAND sounded as if the update hadn't happened).
+# just after an update, BY_HAND sounded as if the update hadn't happened). With nothing known of it, BY_HAND itself.
 NEWEST_HERE = "This is the newest version."
 UPDATED_HERE = "CloseDesk was updated to this version on {day}."
 UPDATE_LATER = "To update later on, close CloseDesk and double-click CloseDesk-Update in its folder: your mail and settings are kept."
@@ -348,7 +348,8 @@ def status(store, settings) -> dict[str, Any]:
         "launcher": launcher_here(),
         "by_hand": BY_HAND,
         "current": "" if newer else current,
-        "later": UPDATE_LATER,
+        # How to update by hand, under what is known of this copy: "later on" only after something is said of it.
+        "later": UPDATE_LATER if current else BY_HAND,
         # Update that nothing answers: CloseDesk has stopped for an update another page asked for.
         "elsewhere": UPDATING_ELSEWHERE,
         # Whose CloseDesk this is (/health's fingerprints): the page waiting for it loads only this one again.

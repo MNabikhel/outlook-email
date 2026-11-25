@@ -909,6 +909,27 @@ def test_setup_says_this_copy_is_the_newest_once_github_said_so(download, settin
     assert updates.status(store, settings)["current"] == ""
 
 
+@pytest.mark.parametrize("how", ["check off", "github out of reach", "never told"])
+def test_with_nothing_said_about_this_copy_setup_says_how_to_update_not_later_on(download, settings, store, monkeypatch, how):
+    # "To update later on, ..." followed nothing: no newer version known, and nothing said of this one (the asking
+    # turned off, GitHub blocked by a company network, a copy not yet told it is the newest).
+    if how == "check off":
+        settings.update_check = False
+    elif how == "github out of reach":
+        updates.check(store, settings, now=NOW, ask=offline)
+    shown = updates.status(store, settings)
+    assert shown["newer"] is False and shown["current"] == ""
+    assert shown["later"] == updates.BY_HAND and shown["later"].startswith("To update, close CloseDesk")
+    client = TestClient(web.create_app(settings, store))
+    section = _setup_section(client)
+    assert "To update, close CloseDesk" in section and "later on" not in section
+    assert client.get("/api/settings", headers=PAGE).json()["update"]["later"] == updates.BY_HAND  # the workspace's
+    # Said after what is known of this copy, "later on" follows it.
+    updates.check(store, settings, now=NOW + timedelta(days=2), ask=github(sha=MINE, date="2026-11-13T10:00:00Z"))
+    if how != "check off":
+        assert updates.status(store, settings)["later"] == updates.UPDATE_LATER
+
+
 def test_a_copy_opened_for_the_first_time_isnt_said_to_have_been_updated(download, settings, store):
     updates.after_update(store)
     assert updates.status(store, settings)["current"] == ""
