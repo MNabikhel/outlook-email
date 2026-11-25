@@ -703,3 +703,37 @@ def test_saved_is_said_once_not_each_time_the_page_is_drawn_again(settings, stor
         assert page.evaluate("() => window.saidAgain") == []
         assert page.evaluate(f"() => document.querySelector(\"{line}\") === window.watched")
         assert web.NOTICES["colors"] in page.inner_text(line), "still there to read"
+
+
+LONG_TOAST = """async (message) => {
+  const { toast } = await import('/static/ui/dom.js');
+  document.querySelectorAll('.toast').forEach((t) => t.remove());
+  toast(message, { tone: 'error', ms: 60000 });
+  const box = document.querySelector('.toast.error');
+  const text = box.querySelector('.toast-text');
+  const style = getComputedStyle(text);
+  const line = parseFloat(style.lineHeight);
+  const middle = (el) => { const r = el.getBoundingClientRect(); return (r.top + r.bottom) / 2; };
+  const top = text.getBoundingClientRect().top + parseFloat(style.paddingTop);
+  const height = text.getBoundingClientRect().height - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+  return { width: box.getBoundingClientRect().width, lines: Math.round(height / line), firstLine: top + line / 2,
+           sign: middle(box.querySelector(':scope > .ic')), close: middle(box.querySelector('.toast-close')) };
+}"""
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_a_long_error_message_has_its_warning_sign_at_its_first_line(settings, store, page, width):
+    """A long red message (Process new mail when LM Studio can't load the model: eight lines) had its warning sign,
+    and the × that closes it, halfway down its side, not beside its first line. On a phone every message wrapped at
+    half the screen's width, which made it longer still."""
+    page.set_viewport_size({"width": width, "height": 800})
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector("body.ready")
+        for message, lines in (("That conversation could not be deleted.", 1), ("Processed. Read 1 new file. " + "LM Studio couldn't load the model you chose: there isn't enough memory for it on this computer. " * 5, 4)):
+            shown = page.evaluate(LONG_TOAST, message)
+            assert shown["lines"] >= lines, shown
+            assert abs(shown["sign"] - shown["firstLine"]) <= 2, shown
+            assert abs(shown["close"] - shown["firstLine"]) <= 2, shown
+            if lines > 1:
+                assert shown["width"] >= min(560, width - 24) - 1, shown

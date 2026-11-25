@@ -1305,11 +1305,15 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 
 /* ---------- Toasts and overlays ---------- */
 
-.toasts { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 60; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+/* Across the window, so a message on a phone has its width (centred at half of it, it wrapped at half the screen). */
+.toasts { position: fixed; left: 12px; right: 12px; bottom: 18px; z-index: 60; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
 .toast {
   pointer-events: auto;
-  display: flex; align-items: center; gap: 10px;
+  /* The sign, Undo and the × line up with the first line of words, however many lines a message runs to: each is
+     24px tall, as the words' first line is with its padding. */
+  display: flex; align-items: flex-start; gap: 10px;
   max-width: min(560px, calc(100vw - 24px));
+  line-height: 18px;
   padding: 8px 8px 8px 14px;
   border-radius: var(--radius);
   background: #1d2533;
@@ -1322,15 +1326,16 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .toast { background: #e7ebf1; color: #121820; } }
 /* Red in both themes (the dark theme's light toasts above would otherwise win), with a warning sign (dom.js). */
 :root .toast.error { background: var(--toast-error); color: #fff; }
-.toast.error > .ic { flex: none; }
+.toast.error > .ic { flex: none; margin-top: 4.5px; }
+.toast-text { padding: 3px 0; }
 .toast.leaving { animation: toast-out 170ms var(--ease) forwards; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 @keyframes toast-out { to { opacity: 0; transform: translateY(8px); } }
-.toast-action { border: 0; background: transparent; color: #9cc0ff; font-weight: 650; cursor: pointer; padding: 3px 6px; border-radius: 4px; }
+.toast-action { flex: none; border: 0; background: transparent; color: #9cc0ff; font-weight: 650; cursor: pointer; padding: 3px 6px; line-height: 18px; border-radius: 4px; }
 :root[data-theme="dark"] .toast-action { color: #1f4e9c; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .toast-action { color: #1f4e9c; } }
 .toast-action:hover { background: rgba(127, 127, 127, 0.2); }
-.toast-close { border: 0; background: transparent; color: inherit; opacity: 0.6; cursor: pointer; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 4px; }
+.toast-close { flex: none; border: 0; background: transparent; color: inherit; opacity: 0.6; cursor: pointer; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 4px; }
 .toast-close:hover { opacity: 1; }
 .overlay { position: fixed; inset: 0; z-index: 50; background: rgba(13, 17, 23, 0.36); display: flex; justify-content: center; align-items: flex-start; padding: 12vh 16px 16px; animation: fade 140ms var(--ease); }
 @keyframes fade { from { opacity: 0; } }
