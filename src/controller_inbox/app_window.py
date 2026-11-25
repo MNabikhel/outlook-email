@@ -332,23 +332,27 @@ def open_launcher(why: str = "", *, platform: str | None = None, startfile=None,
         tell(NO_LAUNCHER.format(launcher=launcher.name, folder=ROOT), platform=platform)
 
 
+def run_here(args, *, browser: bool = True) -> int:
+    """CloseDesk runs in this process, as the launcher runs it. Nothing here starts it again after an update, so it
+    doesn't offer one."""
+    os.environ.pop(updates.LAUNCHER_ENV, None)
+    from controller_inbox import cli
+
+    argv = ["run"] if browser else ["run", "--no-browser"]
+    if getattr(args, "host", None):
+        argv += ["--host", args.host]
+    if getattr(args, "port", None):
+        argv += ["--port", str(args.port)]
+    return cli.main(argv)
+
+
 def browser_instead(fallback: tuple[str, str], args, *, platform: str | None = None) -> int:
     """The window can't show CloseDesk here: open it in the browser as before, and say why."""
     key, words = fallback
     platform = platform or sys.platform
     print(words, flush=True)
     if platform not in ("win32", "darwin") or _console():
-        # Linux (a developer's), or a terminal: CloseDesk runs here as the launcher runs it. Nothing here starts it
-        # again after an update, so it doesn't offer one.
-        os.environ.pop(updates.LAUNCHER_ENV, None)
-        from controller_inbox import cli
-
-        argv = ["run"]
-        if getattr(args, "host", None):
-            argv += ["--host", args.host]
-        if getattr(args, "port", None):
-            argv += ["--port", str(args.port)]
-        return cli.main(argv)
+        return run_here(args)  # Linux (a developer's), or a terminal
     if key != "off" and not _said_before(key):
         tell(words, platform=platform)
         _remember_said(key)
@@ -771,6 +775,9 @@ def main(args) -> int:
     use_log_if_no_console()
     set_app_id()
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} The CloseDesk window opens ({version.label()}).", flush=True)
+    if getattr(args, "no_browser", False):
+        # The launcher check: the app's whole start, with no window and no browser.
+        return run_here(args, browser=False)
     fallback = why_no_window()
     if fallback:
         return browser_instead(fallback, args)

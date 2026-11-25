@@ -4,8 +4,8 @@
 
 A copy of this checkout is unpacked as a download would be (into a folder with a space in its name), then:
 first start (set-up from nothing), second start (nothing to do), the folder renamed, the dashboard really
-answering, an update that keeps the mail, and an update from Settings' Update button (CloseDesk stops, the launcher
-fetches the newer version and starts it again). CI runs this on macOS, Windows and Linux, once with the Python
+answering, the CloseDesk shortcut's start (launch.py --app, without its window), an update that keeps the mail, and an
+update from Settings' Update button (CloseDesk stops, the launcher fetches the newer version and starts it again). CI runs this on macOS, Windows and Linux, once with the Python
 the machine has (nothing may be downloaded) and once asking CloseDesk to download its own, as a person without
 the rights to install Python would (CLOSEDESK_OWN_PYTHON=1 makes the first start ``--get-python``).
 Not a pytest file: it installs for real and takes minutes.
@@ -146,6 +146,52 @@ def update_from_settings(folder: Path, archive: Path, *, before: str, after: str
     assert (folder / "docs" / "ONLY-IN-THE-UPDATE.txt").read_text(encoding="utf-8") == archive.stem
 
 
+def app_log() -> Path:
+    """Where launch.py --app writes what it says on Windows and macOS (its app_log_path)."""
+    if WINDOWS:
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "CloseDesk" / "CloseDesk-app.log"
+    return Path.home() / "Library" / "Logs" / "CloseDesk" / "CloseDesk-app.log"
+
+
+def app_start(folder: Path) -> None:
+    """The CloseDesk shortcut's start, as it will run it (launch.py --app, on the environment's pythonw on Windows),
+    with no window and no browser (--no-browser): the set-up checked without a console, what it says in its log, and
+    CloseDesk answering. (The window itself is checked where it can open.)"""
+    port = free_port()
+    python = folder / ".venv" / ("Scripts/pythonw.exe" if WINDOWS else "bin/python")
+    logged = sys.platform in ("win32", "darwin")
+    output: list[str] = []
+    process = subprocess.Popen(
+        [str(python), str(folder / "scripts" / "launch.py"), "--app", "--no-browser", "--port", str(port)], cwd=folder,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=not WINDOWS,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0,
+        env={**os.environ, "CONTROLLER_INBOX_UPDATE_CHECK": "false"},
+    )
+    reader = threading.Thread(target=lambda: output.extend(line.decode(errors="replace") for line in process.stdout), daemon=True)
+    reader.start()
+    try:
+        answer = None
+        for _ in range(180):
+            answer = health(port)
+            if answer or process.poll() is not None:
+                break
+            time.sleep(1)
+        log = app_log().read_text(encoding="utf-8", errors="replace") if logged and app_log().exists() else ""
+        assert answer and answer.get("app") == "closedesk", (
+            f"the app's start didn't answer (exit {process.poll()})\n{''.join(output)}\n--- its log (end)\n{log[-4000:]}")
+        print(f"--- the app's start ({python.name} launch.py --app) answers on port {port}", flush=True)
+    finally:
+        stop(process)
+        reader.join(timeout=10)
+    said = app_log().read_text(encoding="utf-8", errors="replace") if logged else "".join(output)
+    opening = f"CloseDesk opening (the app), in {folder.resolve()}"
+    assert opening in said, said[-4000:]
+    assert "The CloseDesk window opens" in said[said.rindex(opening):], said[-4000:]
+    if logged:
+        assert "CloseDesk opening" not in "".join(output), "the app's words went to a console, not its log"
+    print(f"--- the app said what it did in {'its log, ' + str(app_log()) if logged else 'the terminal'}", flush=True)
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -258,6 +304,9 @@ def main() -> int:
         assert "already open in another window" in out, out
     finally:
         stop(process)
+
+    # The CloseDesk shortcut's start, without the window.
+    app_start(folder)
 
     # An update: a newer download, with the mail and settings left alone.
     (folder / "data").mkdir(exist_ok=True)

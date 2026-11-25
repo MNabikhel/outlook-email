@@ -823,3 +823,15 @@ def test_every_download_link_says_download_so_the_window_saves_it():
                 navigated.append(f"{path.name}:{n}")
     assert missing == [], "a download link without download"
     assert navigated == [], "a download by going to it: the window would show it instead (use a download link)"
+
+
+def test_the_app_without_a_browser_only_serves(monkeypatch):
+    # launch.py --app --no-browser: the launcher check in CI runs the app's whole start (pythonw, the log, no console
+    # windows) with no window and no browser, as --no-browser means for the double-click launchers.
+    ran: list = []
+    monkeypatch.setattr(cli, "main", lambda argv: ran.append(argv) or 0)
+    monkeypatch.setattr(app_window, "why_no_window", lambda **_: pytest.fail("no window is asked for"))
+    monkeypatch.setenv(updates.LAUNCHER_ENV, "1")
+    assert app_window.main(SimpleNamespace(no_browser=True, host=None, port=8813)) == 0
+    assert ran == [["run", "--no-browser", "--port", "8813"]]
+    assert os.environ.get(updates.LAUNCHER_ENV) is None, "nothing here starts CloseDesk again after an update"

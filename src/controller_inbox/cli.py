@@ -87,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
     window = sub.add_parser("app", help="Open CloseDesk in a window of its own (what the CloseDesk shortcut runs).")
     window.add_argument("--host", default=None)
     window.add_argument("--port", type=int, default=None)
+    window.add_argument("--no-browser", action="store_true", help="No window and no browser: only serve (for checks).")
 
     serve = sub.add_parser("serve", help="Open the local CloseDesk dashboard.")
     serve.add_argument("--host", default=None)
