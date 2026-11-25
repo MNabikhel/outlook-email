@@ -158,6 +158,33 @@ def test_a_moved_folder_is_found_again_by_its_shortcuts_at_the_next_start(window
     assert said.ok and "moved" in said.message
 
 
+def test_moved_twice_the_shortcut_follows_each_time(windows, tmp_path):
+    _upkeep(windows)
+    root = windows.root
+    for name in ("Second place", "Third place"):
+        moved = tmp_path / name / "CloseDesk"
+        moved.parent.mkdir()
+        root.rename(moved)
+        root = moved
+        system = shortcut.Windows(moved, links=windows.links, folders=lambda: dict(windows.places), icon_dir=windows.system.icon_dir)
+        assert "moved" in shortcut.upkeep(system, record=windows.record).message
+        assert windows.links.files[windows.desktop]["folder"] == str(moved)
+
+
+def test_a_shortcut_another_computer_pointed_at_its_folder_is_left_alone(windows):
+    # A Desktop OneDrive keeps in step between two computers, CloseDesk in a different folder on each: were each to
+    # point the shared shortcut at its own folder, they would rewrite it in turn at every start.
+    _upkeep(windows)
+    elsewhere = r"D:\Work\CloseDesk"
+    for path in (windows.desktop, windows.start):
+        windows.links.files[path]["folder"] = elsewhere
+    windows.links.written.clear()
+    assert _upkeep(windows).message == "" and windows.links.written == []
+    # Asked for, it opens this computer's CloseDesk.
+    _make(windows)
+    assert windows.links.files[windows.desktop]["folder"] == str(windows.root)
+
+
 def test_a_shortcut_to_another_closedesk_folder_that_is_still_there_is_left_alone(windows, tmp_path):
     # Two copies of CloseDesk: the shortcut opens the one it was made for.
     _upkeep(windows)
@@ -781,3 +808,14 @@ def test_settings_add_the_shortcut_again_on_the_classic_page(site, page, on_wind
     page.click("#update button:has-text('Add the CloseDesk shortcut again')")
     page.wait_for_url("**/settings?notice=shortcut#update")
     assert ADDED in page.locator("#update").inner_text() and on_windows.asked == [1]
+
+
+def test_a_file_that_is_right_isnt_written_again_whatever_windows_says_its_mode_is(monkeypatch, tmp_path):
+    # Windows has no 0o644: its files read as 0o666, and an icon Explorer is reading can't be replaced.
+    path = tmp_path / "closedesk-1234abcd.ico"
+    assert shortcut._write(path, b"icon", 0o644) is True
+    path.chmod(0o666)
+    monkeypatch.setattr(shortcut.os, "name", "nt")
+    assert shortcut._write(path, b"icon", 0o644) is False
+    monkeypatch.setattr(shortcut.os, "name", "posix")
+    assert shortcut._write(path, b"icon", 0o644) is True, "on a Mac the program must be runnable: its mode counts"

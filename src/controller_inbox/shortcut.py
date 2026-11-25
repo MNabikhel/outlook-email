@@ -545,9 +545,13 @@ class Mac:
 
 
 def _write(path: Path, data: bytes, mode: int) -> bool:
-    """Write ``data`` to ``path`` (whole, never half) unless it holds it already. True when it was written."""
+    """Write ``data`` to ``path`` (whole, never half) unless it holds it already. True when it was written. (Windows
+    has no such modes: there the content alone counts.)"""
     try:
-        if path.is_file() and not path.is_symlink() and stat.S_IMODE(path.stat().st_mode) == mode and path.read_bytes() == data:
+        if (
+            path.is_file() and not path.is_symlink() and path.read_bytes() == data
+            and (os.name == "nt" or stat.S_IMODE(path.stat().st_mode) == mode)
+        ):
             return False
     except OSError:
         pass
@@ -595,8 +599,19 @@ def system_here(*, platform: str | None = None, root=None):
     return None
 
 
+def _read_record(record: Path) -> dict:
+    try:
+        found = json.loads(record.read_text(encoding="utf-8"))
+        return found if isinstance(found, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def _tend(system, *, explicit: bool, record: Path) -> Said:
     first = explicit or not record.exists()
+    # The folder this computer's shortcut last opened: one naming a folder it never did is another computer's (a
+    # Desktop OneDrive keeps in step between two), and pointing it here would have the two take turns rewriting it.
+    known = str(_read_record(record).get("folder") or "")
     done: dict[str, list[str]] = {key: [] for key in ("made", "moved", "fresh", "kept", "theirs", "fallback")}
     failed: list[tuple[str, str]] = []
     for name, path in system.places():
@@ -614,8 +629,8 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
             kind = "fresh"
         elif explicit:
             kind = "made"
-        elif _closedesk_at(found):
-            continue  # another CloseDesk folder's, still there
+        elif _closedesk_at(found) or (known and not _same(known, found)):
+            continue  # another CloseDesk folder's, still there; or another computer's
         else:
             kind = "moved"
         try:
@@ -633,7 +648,7 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
             done["fallback"].append(name)
         except Exception as exc:
             failed.append((name, _why(exc)))
-    if first and (made or done["fallback"]):
+    if (first and (made or done["fallback"])) or done["moved"]:
         try:
             record.parent.mkdir(parents=True, exist_ok=True)
             record.write_text(json.dumps({"made": time.strftime("%Y-%m-%d %H:%M:%S"), "folder": str(system.root)}), encoding="utf-8")
