@@ -123,6 +123,18 @@ def test_meaning_colours_live_in_tokens():
     for path in (pm.WORKSPACE_CSS, pm.CLASSIC_CSS):
         text = path.read_text(encoding="utf-8").lower()
         assert not [value for value in retired if re.search(re.escape(value) + r"\b", text)], path.name
+    # The model's dots and words on the navy: set in the tokens only (the side bar's Local model box kept the green
+    # written into its rule, so with the colors for color blindness it differed from the Ask CloseDesk dot beside it).
+    token_blocks = {pm.ROOT, pm.COLOR_BLIND}
+    css = re.sub(r"/\*.*?\*/", "", pm.CLASSIC_CSS.read_text(encoding="utf-8"), flags=re.S).lower()
+    written = {
+        f"{selector} {{ {body.strip()} }}"
+        for media, selector, body in pm._rules(css)
+        if not (not media and selector in token_blocks)
+        for value in ("#6fcf8a", "#d9b77c", "#48e0cf")
+        if value in body
+    }
+    assert not written, written
 
 
 def test_the_model_dot_on_ask_closedesk_follows_the_colors():
@@ -134,3 +146,8 @@ def test_the_model_dot_on_ask_closedesk_follows_the_colors():
         workspace = pm.workspace("dark", colors)["--ok"]
         apart = abs(pm.oklch(dot)[2] - pm.oklch(workspace)[2])
         assert min(apart, 360 - apart) <= 12, (colors, dot, workspace)
+        # The side bar's Local model box shows the same thing on the same page, in the same colors.
+        tokens = pm.classic(colors)
+        assert pm.rule_colour(pm.CLASSIC_CSS, ".model-chip.on b::before", "background", tokens) == dot, colors
+        ring = pm.rule_colour(pm.CLASSIC_CSS, ".chat-fab .dot", "box-shadow", tokens)
+        assert pm.rule_colour(pm.CLASSIC_CSS, ".model-chip.off b", "color", tokens) == ring, colors

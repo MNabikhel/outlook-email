@@ -24,7 +24,8 @@
   --imp-high-fill: #d6a31f; /* the High pill and the due-today tag, with dark words */
   --on-imp-high: #1b2416;
   --imp-medium: #bfd0ec;
-  /* The dot on Ask CloseDesk, on its navy button: filled while a local model runs, a ring when none does. */
+  /* The model on the navy: the dot on Ask CloseDesk, filled while a local model runs and a ring when none does, and
+     the side bar's Local model box (its dot, or its words when none runs). */
   --dot-on: #6fcf8a;
   --dot-off: #d9b77c;
   --chip: #efe8da;
@@ -184,8 +185,8 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .model-chip span { display: block; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #c9d0c4; }
 /* A long model id breaks anywhere; "not running" only at its space. */
 .model-chip b { display: block; font-size: 13px; margin-top: 2px; overflow-wrap: anywhere; }
-.model-chip.on b::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #6fcf8a; margin-right: 6px; }
-.model-chip.off b { color: #d9b77c; }
+.model-chip.on b::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--dot-on); margin-right: 6px; }
+.model-chip.off b { color: var(--dot-off); }
 .notice { background: #f3ecda; border-left: 3px solid var(--gold); padding: 10px 12px; margin: 0 0 14px; }
 .today-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; margin: 0 0 6px; }
 .headline { font-family: var(--serif); font-size: 24px; margin: 0; max-width: 60ch; }
