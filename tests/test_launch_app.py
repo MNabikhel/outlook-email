@@ -44,7 +44,10 @@ def launch(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "NO_WINDOW", NO_WINDOW)
     monkeypatch.setattr(module, "APP_LOGS", True)  # as on Windows and macOS, where the app has no console
     for name in ("CLOSEDESK_APP", "CLOSEDESK_APP_LOG", "CLOSEDESK_LAUNCHER", "CLOSEDESK_REBUILT", "CLOSEDESK_UPDATE_URL"):
-        monkeypatch.delenv(name, raising=False)
+        # Set, then removed: what launch.py itself sets in os.environ (--app sets the first three) is undone after the
+        # test too, which removing a name that isn't set wouldn't do.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
     module.told, module.noticed, module.opened = [], [], []
     monkeypatch.setattr(module, "tell", module.told.append)
     monkeypatch.setattr(module, "notice", module.noticed.append)
