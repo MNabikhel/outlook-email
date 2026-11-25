@@ -65,6 +65,9 @@ WINDOW_ENV = "CLOSEDESK_WINDOW"
 SMOKE_ENV = "CLOSEDESK_APP_SMOKE"
 SMOKE_HOLD_ENV = "CLOSEDESK_APP_SMOKE_HOLD"
 DIDNT_OPEN = 2
+# macOS: where the window's Python says it was started from (launch.py sets it to the link in CloseDesk.app), read for
+# the app it belongs to: the Dock and the menu bar say CloseDesk. Not for what the window starts.
+MAC_APP_PATH = "CFProcessPath"
 
 SIZE = (1280, 860)
 MIN_SIZE = (720, 520)
@@ -271,6 +274,21 @@ def why_no_window(*, platform: str | None = None, environ=None, registry=None) -
     return None
 
 
+def settle_mac_name(*, platform: str | None = None) -> None:
+    """macOS: which app this program is, read now while ``MAC_APP_PATH`` names CloseDesk.app (macOS reads it once, the
+    first time it is asked); then it goes, so nothing the window runs (an alert, the browser, CloseDesk itself) takes
+    CloseDesk.app's name and icon."""
+    if (platform or sys.platform) != "darwin" or MAC_APP_PATH not in os.environ:
+        return
+    try:
+        from Foundation import NSBundle
+
+        NSBundle.mainBundle()
+    except Exception:  # pywebview's part for macOS is missing: there is no window to name
+        pass
+    os.environ.pop(MAC_APP_PATH, None)
+
+
 def mac_app_name() -> str:
     """macOS: the name the Dock and the menu bar give this program, with its app's id ("CloseDesk
     (io.github.mnabikhel.closedesk)" when it runs as CloseDesk.app; "Python (org.python.python)" when not). "" when
@@ -347,7 +365,7 @@ def open_launcher(why: str = "", *, platform: str | None = None, startfile=None,
     CloseDesk in the browser, with its window that closing stops, or the set-up that has to be done again shown as it
     goes. ``why``: said in its window too (Windows passes it on)."""
     platform = platform or sys.platform
-    for name in (updates.APP_ENV, updates.APP_LOG_ENV, updates.LAUNCHER_ENV, STOP_WITH_PARENT, "CLOSEDESK_REOPEN"):
+    for name in (updates.APP_ENV, updates.APP_LOG_ENV, updates.LAUNCHER_ENV, STOP_WITH_PARENT, "CLOSEDESK_REOPEN", MAC_APP_PATH):
         os.environ.pop(name, None)
     if why:
         os.environ[WHY_ENV] = why
@@ -503,6 +521,14 @@ def _seconds(name: str) -> float:
         return max(0.0, float(os.environ.get(name) or 0))
     except ValueError:
         return 0.0
+
+
+def _environment(**more: str) -> dict:
+    """The environment for a program the window starts: its own, without what makes the window's Python CloseDesk.app
+    to macOS."""
+    env = {**os.environ, **more}
+    env.pop(MAC_APP_PATH, None)
+    return env
 
 
 class App:
@@ -712,14 +738,13 @@ class App:
         if self.host:
             cmd += ["--host", self.host]
         cmd += ["--port", str(self.port)]
-        env = {
-            **os.environ,
+        env = _environment(**{
             # Update now stops CloseDesk for the window to update and start again: offered, as with a launcher.
             updates.LAUNCHER_ENV: "1",
             updates.APP_ENV: "1",
             updates.APP_LOG_ENV: str(self.log),
             STOP_WITH_PARENT: "1",
-        }
+        })
         env.pop("CLOSEDESK_REOPEN", None)
         if reopen:
             env["CLOSEDESK_REOPEN"] = "1"  # on the port it was on, where the window looks for it
@@ -779,7 +804,7 @@ class App:
         self.updating = True
         self._show(updating_page())
         print("Updating CloseDesk...", flush=True)
-        env = {**os.environ, updates.APP_ENV: "1", updates.APP_LOG_ENV: str(self.log)}
+        env = _environment(**{updates.APP_ENV: "1", updates.APP_LOG_ENV: str(self.log)})
         for name in (STOP_WITH_PARENT, "CLOSEDESK_REOPEN"):
             env.pop(name, None)
         try:
@@ -853,6 +878,7 @@ def main(args) -> int:
     """``controller_inbox app``: open the CloseDesk window, or the browser where it can't open."""
     use_log_if_no_console()
     set_app_id()
+    settle_mac_name()
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} The CloseDesk window opens ({version.label()}).", flush=True)
     if getattr(args, "no_browser", False):
         # The launcher check: the app's whole start, with no window and no browser.

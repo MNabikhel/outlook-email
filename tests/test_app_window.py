@@ -225,7 +225,7 @@ class Computer:
 @pytest.fixture
 def computer(monkeypatch):
     monkeypatch.setattr(app_window, "NO_WINDOW", NO_WINDOW)
-    for name in ("CLOSEDESK_REOPEN", app_window.SMOKE_ENV, app_window.SMOKE_HOLD_ENV):
+    for name in ("CLOSEDESK_REOPEN", app_window.SMOKE_ENV, app_window.SMOKE_HOLD_ENV, app_window.MAC_APP_PATH):
         monkeypatch.delenv(name, raising=False)
     return Computer()
 
@@ -803,6 +803,47 @@ def test_elsewhere_nothing_is_asked_of_macos(computer, tmp_path, monkeypatch, ca
     window.person_closes()
     thread.join(10)
     assert "macOS shows" not in capsys.readouterr().out
+
+
+def test_what_the_window_starts_isnt_given_the_windows_name_on_a_mac(computer, tmp_path, monkeypatch):
+    # launch.py starts the window's Python as CloseDesk.app (CFProcessPath, which macOS reads for the app's name and
+    # icon). CloseDesk itself and the update are plain Python programs, and the launcher a Terminal window.
+    monkeypatch.setenv(app_window.MAC_APP_PATH, "/Users/x/Applications/CloseDesk.app/Contents/MacOS/CloseDesk-python")
+    computer.update_code = 0
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)
+    until(lambda: len(window.urls()) == 2, what="the new version in the window")
+    window.person_closes()
+    thread.join(10)
+    for process in computer.processes:
+        assert app_window.MAC_APP_PATH not in process.options["env"], process.cmd
+    started: list = []
+    app_window.open_launcher("", platform="darwin", run=lambda cmd: started.append(dict(os.environ)))
+    assert app_window.MAC_APP_PATH not in started[0]
+
+
+def test_on_a_mac_the_window_takes_its_name_then_passes_it_on_to_nothing(monkeypatch):
+    # macOS reads where the program was started from once, the first time it is asked which app this is: asked here,
+    # then the variable goes, so nothing the window runs (an alert, the browser, CloseDesk itself) takes CloseDesk.app's
+    # name.
+    asked: list = []
+    monkeypatch.setitem(sys.modules, "Foundation", SimpleNamespace(
+        NSBundle=SimpleNamespace(mainBundle=lambda: asked.append(os.environ.get(app_window.MAC_APP_PATH)))))
+    monkeypatch.setenv(app_window.MAC_APP_PATH, "/Applications/CloseDesk.app/Contents/MacOS/CloseDesk-python")
+    app_window.settle_mac_name(platform="darwin")
+    assert asked == ["/Applications/CloseDesk.app/Contents/MacOS/CloseDesk-python"]
+    assert app_window.MAC_APP_PATH not in os.environ
+    monkeypatch.setenv(app_window.MAC_APP_PATH, "x")
+    monkeypatch.setitem(sys.modules, "Foundation", None)  # can't be asked: the variable goes all the same
+    app_window.settle_mac_name(platform="darwin")
+    assert app_window.MAC_APP_PATH not in os.environ
+    monkeypatch.setenv(app_window.MAC_APP_PATH, "x")
+    app_window.settle_mac_name(platform="win32")
+    assert os.environ[app_window.MAC_APP_PATH] == "x", "only a Mac's"
 
 
 # The window's size, the log, the taskbar ------------------------------------------------------------------------------

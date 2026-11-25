@@ -82,9 +82,11 @@ SETUP_FAILED = (
 )
 
 # CloseDesk.app on a Mac (controller_inbox/shortcut.py): where it is kept for the tests and the launcher check, and the
-# link in it to the Python that runs CloseDesk.
+# link in it to the Python that runs CloseDesk. MAC_APP_PATH (app_window's) says where that Python was started from,
+# which macOS reads first for the app a program belongs to.
 DIR_ENV = "CLOSEDESK_SHORTCUT_DIR"
 LINKED_PYTHON = "CloseDesk-python"
+MAC_APP_PATH = "CFProcessPath"
 # CI's check of the real window (app_window's SMOKE_ENV): no message box waits there for a click no one makes.
 SMOKE_ENV = "CLOSEDESK_APP_SMOKE"
 
@@ -639,11 +641,15 @@ def app(args: list[str]) -> int:
         say(f"The window opens as CloseDesk.app ({linked}).")
         # As python3.x tells the program it starts: this environment is the one to run.
         os.environ["__PYVENV_LAUNCHER__"] = str(venv_python())
+        # And where it was started from, said outright: macOS reads this before the path itself, so the Dock says
+        # CloseDesk however the link is resolved. (The window doesn't pass it on to what it starts.)
+        os.environ[MAC_APP_PATH] = str(linked)
         try:
             return _hand_over([str(linked), *window])
         except OSError as exc:
             say(f"Python couldn't be started as CloseDesk.app ({exc}): the Dock shows the window as Python's.")
             os.environ.pop("__PYVENV_LAUNCHER__", None)
+            os.environ.pop(MAC_APP_PATH, None)
     return _hand_over([str(app_python()), *window])
 
 

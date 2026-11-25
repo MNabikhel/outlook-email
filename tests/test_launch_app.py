@@ -44,7 +44,7 @@ def launch(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "NO_WINDOW", NO_WINDOW)
     monkeypatch.setattr(module, "APP_LOGS", True)  # as on Windows and macOS, where the app has no console
     for name in ("CLOSEDESK_APP", "CLOSEDESK_APP_LOG", "CLOSEDESK_LAUNCHER", "CLOSEDESK_REBUILT", "CLOSEDESK_UPDATE_URL",
-                 "CLOSEDESK_APP_SMOKE"):
+                 "CFProcessPath", "CLOSEDESK_APP_SMOKE"):
         # Set, then removed: what launch.py itself sets in os.environ (--app sets the first three) is undone after the
         # test too, which removing a name that isn't set wouldn't do.
         monkeypatch.setenv(name, "")
@@ -296,6 +296,9 @@ def test_on_a_mac_the_window_runs_python_as_closedesk_apps_own(launch, monkeypat
     (cmd, env), = handed
     assert cmd == [str(linked), "-m", "controller_inbox", "app"]
     assert env["__PYVENV_LAUNCHER__"] == str(launch.venv_python())
+    # Where macOS looks for the app a program belongs to, said outright too (it reads CFProcessPath before the path
+    # the program was started by), so the Dock says CloseDesk however macOS resolves the link.
+    assert env["CFProcessPath"] == str(linked)
 
 
 def test_without_closedesk_app_the_window_runs_the_environments_python(launch, monkeypatch):
@@ -308,7 +311,7 @@ def test_without_closedesk_app_the_window_runs_the_environments_python(launch, m
     monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
     launch.main(["--app"])
     (cmd, env), = handed
-    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env
+    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env and "CFProcessPath" not in env
 
 
 def test_closedesk_apps_python_is_used_only_when_it_is_this_environments(launch, monkeypatch, tmp_path):
@@ -342,7 +345,29 @@ def test_a_python_that_doesnt_run_as_closedesk_app_isnt_used(launch, monkeypatch
     monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
     launch.main(["--app"])
     (cmd, env), = handed
-    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env
+    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env and "CFProcessPath" not in env
+
+
+def test_a_link_that_cant_be_started_leaves_python_as_it_is(launch, monkeypatch, tmp_path):
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    linked = tmp_path / "CloseDesk-python"
+    monkeypatch.setattr(launch, "linked_python", lambda: linked)
+    monkeypatch.setattr(launch, "_runs_as_app", lambda link: True)
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", "")
+    monkeypatch.delenv("__PYVENV_LAUNCHER__")
+    handed: list = []
+
+    def hand_over(cmd):
+        if cmd[0] == str(linked):
+            raise OSError("Exec format error")
+        handed.append((cmd, dict(os.environ)))
+        return 0
+
+    monkeypatch.setattr(launch, "_hand_over", hand_over)
+    launch.main(["--app"])
+    (cmd, env), = handed
+    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env and "CFProcessPath" not in env
 
 
 def test_in_the_window_check_nothing_waits_for_a_click(monkeypatch):
