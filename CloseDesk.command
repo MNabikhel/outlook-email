@@ -161,13 +161,14 @@ while [ "$tries" -lt 3 ]; do
       # The update replaces this file too, so the new file is started in this one's place rather than read on.
       # Without --get-python: the environment is there now, and stays.
       [ -x .venv/bin/python ] && PY=.venv/bin/python
+      # The page that asked for the update is still open, and reloads itself: no second one is opened. (Said before
+      # the update too: one that finds another update running, CloseDesk-Update's, waits for it.)
+      export CLOSEDESK_REOPEN=1
       echo
       if ! "$PY" scripts/launch.py --update; then
         echo
         echo "CloseDesk starts again now. The message above says what didn't go as it should."
       fi
-      # The page that asked for the update is still open, and reloads itself: no second one is opened.
-      export CLOSEDESK_REOPEN=1
       exec bash "$PWD/CloseDesk.command" ${args[@]+"${args[@]}"}
       ;;
     77) finish "$code" ;;                                   # launch.py: an update runs in this folder now (said above)

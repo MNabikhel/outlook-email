@@ -181,6 +181,63 @@ def update_from_settings(folder: Path, archive: Path, *, before: str, after: str
     assert (folder / "docs" / "ONLY-IN-THE-UPDATE.txt").read_text(encoding="utf-8") == archive.stem
 
 
+def update_while_another_runs(folder: Path) -> None:
+    """Update pressed in CloseDesk, started with its launcher, while another update runs in the folder (CloseDesk-Update,
+    double-clicked meanwhile and downloading on a slow link; here a program that says so in the folder's mark): the
+    launcher's update waits for that one, and once it is done the launcher opens CloseDesk again by itself. (It gave up
+    before, and nothing opened CloseDesk again.)"""
+    port = free_port()
+    output: list[str] = []
+    process = subprocess.Popen(
+        launcher(folder, "--no-browser", "--port", str(port)), cwd=folder, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=not WINDOWS,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0,
+        env={**os.environ, "CONTROLLER_INBOX_UPDATE_CHECK": "false"},
+    )
+    reader = threading.Thread(target=lambda: output.extend(line.decode(errors="replace") for line in process.stdout), daemon=True)
+    reader.start()
+    mark = folder / ".closedesk-updating"
+    other = None
+    try:
+        answer = None
+        for _ in range(180):
+            answer = health(port)
+            if answer or process.poll() is not None:
+                break
+            time.sleep(1)
+        assert answer, f"CloseDesk didn't start\n{''.join(output)}"
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], stdin=subprocess.DEVNULL)
+        mark.write_text(json.dumps({"pid": other.pid, "started": time.time()}), encoding="utf-8")
+        print(f"--- Update pressed while another update runs: {press_update(port)}", flush=True)
+        waiting = "Another update is running in CloseDesk's folder"
+        for _ in range(120):
+            if waiting in "".join(output) or process.poll() is not None:
+                break
+            time.sleep(0.5)
+        assert waiting in "".join(output), f"the launcher's update didn't wait for the other one\n{''.join(output)}"
+        time.sleep(3)
+        assert process.poll() is None, f"the launcher gave up (exit {process.returncode})\n{''.join(output)}"
+        assert health(port) is None, "CloseDesk opened while the other update still ran"
+        other.kill()  # the other update is done
+        other.wait()
+        back = None
+        for _ in range(300):
+            back = health(port)
+            if back or process.poll() is not None:
+                break
+            time.sleep(1)
+        assert back and back.get("app") == "closedesk", (
+            f"the launcher didn't open CloseDesk again once the other update was done (exit {process.poll()})\n{''.join(output)}")
+        print(f"--- once the other update was done, CloseDesk opened again by itself: {back}", flush=True)
+    finally:
+        if other is not None and other.poll() is None:
+            other.kill()
+            other.wait()
+        mark.unlink(missing_ok=True)
+        stop(process)
+        reader.join(timeout=10)
+
+
 # Linux's window check (the stand-in window): where the app's words are kept, as its log is on Windows and macOS.
 _LOG: list[Path] = []
 
@@ -1109,6 +1166,8 @@ def main() -> int:
     # The Update button in Settings: CloseDesk stops, the launcher updates it and starts the new one.
     update_from_settings(folder, newer_zip(work, "c" * 40, "newest"), before="b" * 40, after="c" * 40)
     assert (folder / "data" / "keep.txt").read_text() == "my mail"
+    # ...and pressed while CloseDesk-Update runs: the launcher waits for that one, then opens CloseDesk again.
+    update_while_another_runs(folder)
 
     # The deleted shortcut stayed deleted through those starts; asked for, it is made again.
     if places:

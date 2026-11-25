@@ -11,7 +11,8 @@ Then it starts CloseDesk. Two exit codes ask the launcher to do what a running P
 ``REBUILD`` (remove ``.venv`` and run this again), and CloseDesk's own ``UPDATE`` (Settings' Update button: run this
 with ``--update``, then start CloseDesk again). CloseDesk is told a launcher started it (``CLOSEDESK_LAUNCHER``), so
 it offers that button only then. A third, ``UPDATE_UNDER_WAY``, says an update runs in the folder now, which was
-said, and nothing was started: the launcher's window stays open on it, with nothing more.
+said, and nothing was started: the launcher's window stays open on it, with nothing more. (The launcher's update after
+Update now waits for that one instead, and CloseDesk opens again once it is done.)
 
 The Python is whichever the launcher found on the computer; none is ever downloaded unasked. (The launcher's
 ``--get-python`` downloads one for CloseDesk alone, when the person asks for it.)
@@ -84,6 +85,14 @@ APP_LOGS = sys.platform in ("win32", "darwin")
 APP_LOG_LIMIT = 2_000_000  # a log grown past this starts afresh (the one before is kept as .old)
 INSTALLING = "CloseDesk is installing what it needs. This takes a minute or two; it opens by itself when it is done."
 UPDATING_NOW = "CloseDesk is being updated just now. Open it again in a minute or two, once the update is done."
+# Update now, from CloseDesk a launcher started, while another update runs in the folder (CloseDesk-Update, double-clicked
+# meanwhile): that one is waited for, looked at this often, and then the launcher opens CloseDesk again.
+OTHER_UPDATE = "Another update is running in CloseDesk's folder (CloseDesk-Update, say). CloseDesk opens again by itself once it is done."
+OTHER_DONE = "That update is done: CloseDesk opens again."
+OTHER_UPDATE_EVERY = 3
+# Set by the launchers for the update after Update now (and for the start after it): CloseDesk opens again after it,
+# in the page that asked, which reloads itself.
+REOPEN_ENV = "CLOSEDESK_REOPEN"
 # The window's process ended with an error before it could say anything itself (a part of Python that won't load, say).
 CANT_OPEN = (
     "CloseDesk couldn't open. What went wrong is written in {log}. Double-click {launcher} in CloseDesk's folder to "
@@ -935,6 +944,18 @@ def update_under_way() -> bool:
     return False
 
 
+def wait_for_other_update() -> int:
+    """Update now, from CloseDesk a launcher started, while another update runs in the folder (CloseDesk-Update,
+    double-clicked meanwhile): that one is waited for, not given up on, and then the launcher opens CloseDesk again (its
+    new version), as the page that asked says it will. ``update_under_way`` stops counting one older than
+    ``UPDATE_LONGEST``, so this never waits for good."""
+    say(OTHER_UPDATE)
+    while update_under_way():
+        time.sleep(OTHER_UPDATE_EVERY)
+    say(OTHER_DONE)
+    return 0
+
+
 def app(args: list[str]) -> int:
     """``--app``: set up as every start does, silently, then open the CloseDesk window."""
     os.environ[APP_ENV] = "1"
@@ -1015,6 +1036,8 @@ def main(argv: list[str]) -> int:
     if "--update" in args:
         args.remove("--update")
         if update_under_way():  # another update (the window's, carrying on after it closed): not two at once
+            if os.environ.get(REOPEN_ENV) == "1":
+                return wait_for_other_update()
             say(UPDATING_NOW)
             return UPDATE_UNDER_WAY
         _mark_update()

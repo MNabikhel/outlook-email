@@ -58,7 +58,7 @@ No admin rights are needed, and since the shortcut is made on your computer (it 
 nor macOS asks about it. On Linux there is no shortcut: `CloseDesk.command` opens CloseDesk in the browser.
 
 The window is CloseDesk: it reads the new mail and opens the dashboard as the double-click files do, and **closing the
-window closes CloseDesk**. While mail is being processed, or CloseDesk is updating, it asks first (*CloseDesk is still
+window closes CloseDesk** (on a Mac, so does quitting it: Cmd+Q, or Quit in the Dock). While mail is being processed, or CloseDesk is updating, it asks first (*CloseDesk is still
 processing mail. Close it anyway?*): **Close** closes it and **Cancel** keeps it open (on Windows the buttons are
 **OK** and **Cancel**). An update carries on by itself after the window is closed; open CloseDesk again once it is
 done (opened meanwhile, from the shortcut or the double-click files, CloseDesk says it is being updated). In the window:
@@ -138,7 +138,7 @@ Any of these works, and none needs admin rights:
 
 - **Click Update now when CloseDesk asks as it opens.** The same as Update in Settings, next.
 - **Click Update in Settings.** CloseDesk closes, fetches the newest version, and opens again by itself in a minute or two: in its window, which says **Updating CloseDesk** meanwhile, or in the same browser tab. Your mail and settings are kept. It waits while mail you asked for is being processed (**Process new mail**, a scan being read, **Sync now**), and offers the update again once that is done; what CloseDesk reads by itself as it opens, or in its automatic Outlook sync, doesn't hold the update back: it stops, and is picked up when CloseDesk opens again. (This needs CloseDesk opened with its shortcut or by double-clicking `CloseDesk.bat` / `CloseDesk.command`; started some other way, it doesn't ask as it opens, and Settings says to use CloseDesk-Update instead.)
-- **Double-click `CloseDesk-Update.command`** (Mac) or **`CloseDesk-Update.bat`** (Windows). It fetches the newest CloseDesk and replaces CloseDesk's own files. Your mail (`data`, `inbox`), your settings (`.env`) and the `AP cost codes` folder are not touched, and the files it replaced are kept in `.previous`.
+- **Double-click `CloseDesk-Update.command`** (Mac) or **`CloseDesk-Update.bat`** (Windows). It fetches the newest CloseDesk and replaces CloseDesk's own files. Your mail (`data`, `inbox`), your settings (`.env`) and the `AP cost codes` folder are not touched, and the files it replaced are kept in `.previous`. Update pressed in CloseDesk while it runs waits for it, and CloseDesk then opens again by itself.
 - **Or by hand:** download the ZIP again and swap the folders, keeping `data`, `inbox`, `.env` and `AP cost codes` from the old one. (On a Mac the Terminal line from the setup does this for you: run again, it updates.)
 
 After CloseDesk-Update or an update by hand, open CloseDesk as usual. Every start checks the set-up and puts right what isn't: packages an update added, a folder that was moved or renamed, a Python that was upgraded or replaced. When everything is in place it just starts (the check takes about half a second). Two of these need a double-click on `CloseDesk.bat` (or `CloseDesk.command`) once, since the shortcut can't start CloseDesk until they are put right: a folder that was moved or renamed, and on Windows a Python that was removed (the Python CloseDesk was set up with, uninstalled after a newer one came).

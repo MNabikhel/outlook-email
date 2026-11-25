@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -751,6 +752,38 @@ def test_a_second_update_while_one_runs_waits_for_it(launch, monkeypatch, capsys
     finally:
         other.kill()
         other.wait()
+
+
+def test_update_now_while_closedesk_update_runs_waits_for_it_then_closedesk_opens_again(launch, monkeypatch, capsys):
+    # CloseDesk-Update double-clicked, downloading on a slow link, and Update now pressed in the open CloseDesk meanwhile:
+    # the launcher's update found that one running and gave up (77), and so did the start after it. Nothing opened
+    # CloseDesk once CloseDesk-Update was done, while the page went on saying it opens again by itself.
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps({"pid": other.pid, "started": time.time()}), encoding="utf-8")
+        monkeypatch.setenv("CLOSEDESK_REOPEN", "1")  # the launcher's update, after Update now: CloseDesk opens after it
+        monkeypatch.setattr(launch, "OTHER_UPDATE_EVERY", 0.05)
+        monkeypatch.setattr(launch, "update", lambda: pytest.fail("a second update ran beside the first"))
+        threading.Timer(0.5, lambda: (other.kill(), other.wait())).start()
+        started = time.monotonic()
+        assert launch.main(["--update"]) == 0, "the launcher opens CloseDesk again after it"
+        assert time.monotonic() - started >= 0.4, "it didn't wait for the other update"
+        said = capsys.readouterr().out
+        assert launch.OTHER_UPDATE in said and launch.OTHER_DONE in said and launch.UPDATING_NOW not in said
+        assert not (launch.ROOT / launch.UPDATING_MARK).exists()
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_the_mac_launcher_says_closedesk_opens_again_before_its_update_runs():
+    # So that its update, finding another one running, waits for it rather than giving up.
+    text = (ROOT / "CloseDesk.command").read_text(encoding="utf-8")
+    block = text[text.index("    75)") : text.index(";;", text.index("    75)"))]
+    assert block.index("export CLOSEDESK_REOPEN=1") < block.index("scripts/launch.py --update")
+    windows = (ROOT / "CloseDesk.bat").read_bytes().decode("ascii")
+    part = windows[windows.index(":update_and_reopen\r\n") :]
+    assert part.index('set "CLOSEDESK_REOPEN=1"') < part.index(r"scripts\launch.py --update")
 
 
 def test_the_check_after_an_update_isnt_stopped_by_that_update(launch, monkeypatch):
