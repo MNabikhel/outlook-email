@@ -109,6 +109,14 @@ function show(view, updating) {
     dialog.remove();
   });
 
+  // The page takes over (the workspace's updating page): the question goes at once, not a moment later with its close
+  // event, so that nothing finds a closed question with its Update now still in the page.
+  function handOver() {
+    state = "handed";
+    dialog.close();
+    dialog.remove();
+  }
+
   async function updateNow() {
     now.disabled = true;
     later.disabled = true;
@@ -117,8 +125,7 @@ function show(view, updating) {
     try {
       const reply = await postJSON("/api/update", { commit: view.commit });
       if (updating) {
-        state = "handed";
-        dialog.close();
+        handOver();
         updating(reply);
       } else {
         updatingHere(reply);
@@ -157,8 +164,7 @@ function show(view, updating) {
   function updatingElsewhere() {
     const reply = { message: view.elsewhere_message, commit: view.commit, run: "", whose: view.whose };
     if (updating) {
-      state = "handed";
-      dialog.close();
+      handOver();
       updating(reply);
     } else {
       updatingHere(reply);

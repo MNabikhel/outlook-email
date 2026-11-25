@@ -102,6 +102,8 @@ def test_update_now_in_the_workspace_updates_and_opens_the_new_version(download,
         page.click("#update-ask button:has-text('Update now')")
         page.wait_for_selector("#updating")
         assert updates.UPDATING in page.inner_text("#updating") and app.state.stop_server.calls == 1
+        # Gone as the updating page shows (it was taken out only by its close event, a moment later: a look in
+        # between found it).
         assert page.query_selector("#update-ask") is None
         # The launcher has put the new version in place and started it: the page loads again by itself.
         (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
@@ -176,6 +178,32 @@ def test_update_now_waits_while_mail_is_processed_and_is_offered_when_done(downl
             assert page.evaluate("document.activeElement.textContent") == "Not now"
             page.click("#update-ask button:has-text('Update now')")
             page.wait_for_selector("#updating")
+            assert app.state.stop_server.calls == 1
+    finally:
+        release.set()
+
+
+def test_classic_setups_update_button_is_offered_once_the_mail_is_done(download, settings, loaded, page, monkeypatch):
+    # Classic Setup has no look at the mail being processed: its Update button stayed disabled, "It can update once the
+    # mail being processed now is done" with it, after the mail was done, until the page was loaded again.
+    app = opened(settings, loaded, monkeypatch)
+    release = threading.Event()
+    app.state.job.start(lambda progress: release.wait(30))
+    try:
+        with serving(app) as base:
+            page.goto(base + "/settings#update")
+            page.wait_for_selector(DIALOG)
+            page.click("#update-ask button:has-text('Not now')")
+            page.wait_for_selector("#update-ask", state="detached")
+            button = "#update form[action='/settings/update'] button"
+            assert page.is_disabled(button)
+            assert "It can update once the mail being processed now is done." in page.inner_text("#update")
+            release.set()
+            page.wait_for_function(f"() => !document.querySelector({button!r}).disabled", timeout=10000)
+            said = page.inner_text("#update")
+            assert updates.DONE in said and "It can update once" not in said
+            page.click(button)
+            page.wait_for_selector("[data-update-line]")
             assert app.state.stop_server.calls == 1
     finally:
         release.set()
