@@ -176,7 +176,7 @@ def test_github_is_reached_with_the_computers_own_certificates_when_python_cant(
         ran.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"sha": NEWER}), stderr="")
 
-    monkeypatch.setattr(httpx, "get", refused)
+    monkeypatch.setattr(httpx, "stream", refused)
     monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/curl" if name == "curl" else None)
     monkeypatch.setattr(updates.subprocess, "run", curl)
     assert updates._fetch_json(updates.LATEST_URL) == {"sha": NEWER}

@@ -152,7 +152,9 @@ function show(view, updating) {
 
   document.body.append(dialog);
   dialog.showModal();
-  (now || later).focus();
+  // Not now has the focus: the question can come up while a key meant for the page is being pressed (Enter in the
+  // chat or the search), and that key must not update CloseDesk.
+  later.focus();
   if (now && view.held) {
     // Update now was refused while mail was processed (here, or on the page before this one loaded again).
     if (view.busy) {

@@ -25,6 +25,7 @@ MERGED = (
     "Wait as long as the model needs for file summaries, and stop instead of looking stuck"
 )
 REAL_ASK = updates._ask_github
+START_WAIT = updates.START_TIMEOUT_SECONDS
 
 
 def github(sha: str = NEWER, date: str = "2026-11-16T09:12:00Z", message: str = MERGED, *, hold: threading.Event | None = None):
@@ -126,6 +127,94 @@ def test_a_github_that_doesnt_answer_is_given_up_on_within_the_wait(download, se
     assert view["ask"] is False and view["checking"] is False
 
 
+class Trickle:
+    """A stand-in for GitHub on a slow link or proxy: it answers, then sends its answer a byte at a time, each in good
+    time for httpx (whose timeout is for each step, not the whole), the whole of it far too late."""
+
+    def __init__(self, gap: float = 0.3) -> None:
+        import json
+
+        self.body = json.dumps({"sha": NEWER, "commit": {"committer": {"date": "2026-11-16T09:12:00Z"}, "message": MERGED}}).encode()
+        self.gap = gap
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen()
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}/commits/main"
+        self.closed = threading.Event()
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while not self.closed.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._answer, args=(conn,), daemon=True).start()
+
+    def _answer(self, conn) -> None:
+        with conn:
+            try:
+                conn.recv(65536)
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n" % len(self.body))
+                for byte in self.body:
+                    if self.closed.wait(self.gap):
+                        return
+                    conn.sendall(bytes([byte]))
+            except OSError:
+                pass
+
+    def close(self) -> None:
+        self.closed.set()
+        self.sock.close()
+
+
+@pytest.fixture
+def trickle(monkeypatch):
+    slow = Trickle()
+    monkeypatch.setattr(updates, "LATEST_URL", slow.url)
+    monkeypatch.setattr(updates, "_ask_github", REAL_ASK)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: None)  # curl's try is the next test's
+    yield slow
+    slow.close()
+
+
+def test_an_answer_that_trickles_in_is_given_up_on_at_the_wait(trickle):
+    # httpx's timeout is for each step (connect, each read), not the whole: the asking went on for as long as the
+    # answer kept coming, a minute or more, and popped the question up over the work.
+    started = time.monotonic()
+    with pytest.raises(Exception):
+        updates._fetch_json(trickle.url, timeout=1)
+    assert time.monotonic() - started < 2.5
+
+
+def test_the_asking_as_closedesk_opens_ends_in_its_few_seconds_whatever_the_link(trickle, download, settings, store, monkeypatch):
+    monkeypatch.setattr(updates, "START_TIMEOUT_SECONDS", 1)
+    started = time.monotonic()
+    question = asked_at_start(store, settings)
+    assert time.monotonic() - started < 2.5
+    view = question.view(store, settings, "idle")
+    assert view["ask"] is False and view["checking"] is False
+    # And an answer is put to the page only when it came in those seconds (and curl's after them), not 25 seconds on.
+    assert updates.ASK_WAIT_SECONDS <= START_WAIT + 5
+
+
+def test_curl_is_tried_only_with_time_left(monkeypatch):
+    import httpx
+
+    ran: list = []
+
+    def slow(*_a, **_k):
+        time.sleep(0.6)
+        raise httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(updates, "_get_within", slow)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/curl" if name == "curl" else None)
+    monkeypatch.setattr(updates.subprocess, "run", lambda cmd, **kwargs: ran.append(cmd))
+    with pytest.raises(httpx.ReadTimeout):
+        updates._fetch_json(updates.LATEST_URL, timeout=0.8)
+    assert ran == [], "curl was started after the time was up"
+
+
 def test_no_answer_in_the_few_seconds_is_tried_again_soon_with_longer_to_wait(download, settings, store):
     # A slow network: the brief asking as CloseDesk opens gets nothing. The daily asking tries again at its next tick
     # (a minute after CloseDesk opens), so Settings still learns of a newer version that day; then once a day as before.
@@ -160,7 +249,7 @@ def test_curl_is_given_the_same_short_wait_and_no_window(monkeypatch):
         ran.append((cmd, kwargs))
         return subprocess.CompletedProcess(cmd, 0, stdout='{"sha": "x"}', stderr="")
 
-    monkeypatch.setattr(httpx, "get", refused)
+    monkeypatch.setattr(httpx, "stream", refused)
     monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/curl" if name == "curl" else None)
     monkeypatch.setattr(updates.subprocess, "run", curl)
     updates._fetch_json(updates.LATEST_URL, timeout=4)

@@ -55,7 +55,7 @@ def test_the_first_page_asks_and_not_now_isnt_asked_again_this_run(download, set
         assert "A new version of CloseDesk is ready" in text
         assert "CloseDesk 2026.11.16 is out; you have 2026.11.13." in text
         assert WHATS_NEW in text
-        assert page.evaluate("document.activeElement.textContent") == "Update now"
+        assert page.evaluate("document.activeElement.textContent") == "Not now"
         page.click("#update-ask button:has-text('Not now')")
         page.wait_for_selector("#update-ask", state="detached")
         # CloseDesk carries on as normal, in this UI and the other, without asking again in this run.
@@ -67,6 +67,19 @@ def test_the_first_page_asks_and_not_now_isnt_asked_again_this_run(download, set
     with serving(opened(settings, loaded, monkeypatch)) as base:
         page.goto(base + first)
         page.wait_for_selector(DIALOG)
+
+
+def test_enter_pressed_as_the_question_comes_up_doesnt_update(download, settings, loaded, page, monkeypatch):
+    # The question can come up while the person is typing in the page: an Enter meant for the chat closes it, as Not
+    # now, and never updates CloseDesk.
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/app")
+        page.wait_for_selector(DIALOG)
+        page.keyboard.press("Enter")
+        page.wait_for_selector("#update-ask", state="detached")
+        assert app.state.stop_server.calls == 0
+        assert answered(page, base + "/app")["ask"] is False
 
 
 def test_escape_is_not_now(download, settings, loaded, page, monkeypatch):

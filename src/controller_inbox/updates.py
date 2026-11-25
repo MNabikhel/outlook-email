@@ -55,7 +55,10 @@ TICK_SECONDS = 3600
 FIRST_TICK_SECONDS = 60
 TIMEOUT_SECONDS = 10
 # How long the asking as CloseDesk opens waits for GitHub (and curl after it): the question comes in that time, or not.
+# The whole of the asking, however slowly an answer comes in (a slow link, a proxy that holds it).
 START_TIMEOUT_SECONDS = 4
+# The most an answer that size can be (GitHub's is a few kilobytes): more is not GitHub's answer.
+LONGEST_ANSWER = 2_000_000
 # A console program started without this flashes a console window up in the CloseDesk app on Windows (0 elsewhere).
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -108,23 +111,64 @@ def _ask_github(url: str, timeout: float = TIMEOUT_SECONDS) -> dict[str, Any]:
     return _fetch_json(url, timeout=timeout)
 
 
+def _read_within(url: str, deadline: float) -> bytes:
+    """GET ``url``, the whole answer by ``deadline`` (time.monotonic()), else httpx.ReadTimeout. httpx's own timeout is
+    for each step (connecting, each piece read), not for the whole: an answer that trickles in went on for minutes."""
+    import httpx
+
+    left = max(0.1, deadline - time.monotonic())
+    chunks: list[bytes] = []
+    size = 0
+    with httpx.stream("GET", url, timeout=left, follow_redirects=True, headers=HEADERS) as reply:
+        reply.raise_for_status()
+        for chunk in reply.iter_bytes():
+            chunks.append(chunk)
+            size += len(chunk)
+            if time.monotonic() > deadline:
+                raise httpx.ReadTimeout(f"no whole answer in {left:.0f} seconds")
+            if size > LONGEST_ANSWER:
+                raise httpx.ReadError("the answer is too long to be GitHub's")
+    return b"".join(chunks)
+
+
+def _get_within(url: str, deadline: float) -> bytes:
+    """``_read_within``, given up on at ``deadline`` (a read that waits is let go of, and ends by itself soon after)."""
+    import httpx
+
+    found: dict[str, Any] = {}
+
+    def read() -> None:
+        try:
+            found["body"] = _read_within(url, deadline)
+        except BaseException as exc:  # handed to the asking
+            found["error"] = exc
+
+    reader = threading.Thread(target=read, name="update-ask-read", daemon=True)
+    reader.start()
+    reader.join(max(0.0, deadline - time.monotonic()) + 0.05)
+    if "error" in found:
+        raise found["error"]
+    if "body" not in found:
+        raise httpx.ReadTimeout("no whole answer in time")
+    return found["body"]
+
+
 def _fetch_json(url: str, *, timeout: float = TIMEOUT_SECONDS) -> dict[str, Any]:
-    """GET ``url`` as JSON, in about ``timeout`` seconds. With Python's own certificates first; when that fails (a
+    """GET ``url`` as JSON, in ``timeout`` seconds in all. With Python's own certificates first; when that fails (a
     company proxy that inspects HTTPS signs with a certificate only the computer trusts), with curl, which trusts what
     the computer trusts, as CloseDesk-Update does, in the time that is left (a second at least: a certificate is
-    refused at once, so curl's try is the one that counts then)."""
+    refused at once, so curl's try is the one that counts then). With under half a second left, curl isn't tried."""
     import httpx
 
     started = time.monotonic()
     try:
-        reply = httpx.get(url, timeout=timeout, follow_redirects=True, headers=HEADERS)
-        reply.raise_for_status()
-        return reply.json()
+        return json.loads(_get_within(url, started + timeout))
     except (httpx.TransportError, httpx.HTTPStatusError) as exc:
         curl = shutil.which("curl")
-        if not curl:
+        rest = timeout - (time.monotonic() - started)
+        if not curl or rest < 0.5:
             raise
-        left = max(1, math.ceil(timeout - (time.monotonic() - started)))
+        left = max(1, math.ceil(rest))
         cmd = [curl, "-fsSL", "--max-time", str(left)]
         for name, value in HEADERS.items():
             cmd += ["-H", f"{name}: {value}"]
@@ -327,9 +371,11 @@ DONE = "The mail is done: CloseDesk can update now."
 ASKED_FROM_KEY = "update_asked_from"
 # Unless the update found this copy the newest already, and said so in this file in .venv (launch.py's NEWEST_NOTE).
 NEWEST_NOTE = "closedesk-newest.txt"
-# How long the first page waits for the asking as CloseDesk opens (static/ui/update_ask.js asks for half a minute): an
-# answer that comes later is too late for that page, and isn't asked of the next one either.
-ASK_WAIT_SECONDS = 25
+# How long after CloseDesk opens an answer to the asking may come and still be put to the person: the asking's few
+# seconds, and curl's second after them. One that comes later (a computer too busy to ask in time) would pop up over
+# what the person started meanwhile: it is for Settings and the top bar. (The first page asks for the answer for half
+# a minute, static/ui/update_ask.js, so a page that loads late still gets one that came in time.)
+ASK_WAIT_SECONDS = START_TIMEOUT_SECONDS + 4
 
 
 class Question:
