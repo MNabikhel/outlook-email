@@ -305,6 +305,33 @@ def test_classic_todays_edge_says_only_the_importance_or_that_an_email_is_held()
         assert pm.rule_colour(pm.CLASSIC_CSS, ".focus-item", "border-left", tokens) == tokens["--line"]
 
 
+def test_the_classic_chat_tells_a_correction_from_a_figure_to_check():
+    """The classic chat showed a correction in the gold box of a note (#f3ecda, a gold edge), 2.3 from the amber box of
+    a figure to check, with edges 3° apart. A correction is in the green of done, as in the workspace: its box and
+    tick stay apart from the warning's, for everyone, and for every vision with the colors for color blindness."""
+    for colors in ("standard", "color-blind"):
+        tokens = pm.classic(colors)
+
+        def rule(selector: str, prop: str) -> str:
+            return pm.rule_colour(pm.CLASSIC_CSS, selector, prop, tokens)
+
+        assert (rule(".msg-check", "background"), rule(".msg-check", "border-left")) == (tokens["--ok-soft"], tokens["--green"]), colors
+        assert rule(".msg-check li::before", "color") == tokens["--green"], colors
+        pairs = {
+            "the edges": (rule(".msg-check", "border-left"), rule(".msg-check.warn", "border-left-color")),
+            "the signs": (rule(".msg-check li::before", "color"), rule(".msg-check li.warn::before", "color")),
+        }
+        visions = pm.VISIONS if colors == "color-blind" else ("normal",)
+        close = {
+            name: {vision: round(pm.delta_e(a, b, vision), 1) for vision in visions}
+            for name, (a, b) in pairs.items()
+            if min(pm.delta_e(a, b, vision) for vision in visions) < 20
+        }
+        assert not close, (colors, close)
+        fills = (rule(".msg-check", "background"), rule(".msg-check.warn", "background"))
+        assert pm.delta_e(*fills, "normal") >= 8, (colors, fills)
+
+
 def test_a_payment_to_check_first_is_flagged_in_the_amber_of_a_warning():
     """The classic lists showed "Payment Caution" in the same plain beige as any other label, beside the red of a
     held email's flags; the workspace shows it as an amber "Check before paying", and the fraud check as an amber

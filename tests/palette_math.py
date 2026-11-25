@@ -469,6 +469,7 @@ ROLES = {
         ("text", "--warn", ["--card", "--warn-soft"], "warning words .model-tip p, .model-state.fallback, .coding-state.unmatched"),
         ("text", "--green", ["--card", "--ok-soft"], "done words .model-state.on, .ai, .points.minus"),
         ("ui", "--warn", ["--warn-soft"], "a chat check to look at .msg-check li.warn::before"),
+        ("ui", Rule(".msg-check li::before", "color"), [Rule(".msg-check", "background"), Rule(".msg-check.warn", "background")], "a chat correction's tick .msg-check li::before"),
     ],
 }
 

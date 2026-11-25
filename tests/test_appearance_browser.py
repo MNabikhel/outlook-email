@@ -1023,6 +1023,45 @@ def test_the_classic_chat_marks_a_figure_to_check_as_a_warning(settings, store, 
     assert box["warn"] and box["background"] == rgb(tokens["--warn-soft"])
 
 
+CHECK_BOXES = """() => [...document.querySelectorAll('#chat .msg-check')].map((box) => ({
+  background: getComputedStyle(box).backgroundColor, edge: getComputedStyle(box).borderLeftColor,
+  items: [...box.querySelectorAll('li')].map((li) => ({ text: li.innerText.trim(), sign: getComputedStyle(li, '::before').content,
+                                                      color: getComputedStyle(li, '::before').color, bullet: getComputedStyle(li).listStyleType })) }))"""
+
+
+@pytest.mark.parametrize("colors", ["standard", "color-blind"])
+def test_the_classic_chat_shows_a_correction_in_the_green_of_done_apart_from_a_warning(settings, store, page, colors):
+    """In the classic chat an answer's corrections were in the gold box of a note (#f3ecda, with a gold edge), 2.3
+    apart from the new amber box of a figure to check (43° and 40° edges), and each correction had a plain bullet: the
+    two were told apart by the warning sign alone, and the colors for color blindness ("done turns blue-green") left
+    them as they were. As in the workspace, a correction has the tick, in the green of done, and so has its box; a box
+    with a figure to check in it is amber."""
+    from controller_inbox import appearance, chats
+    from test_check_warnings_browser import CORRECTED, NOT_FOUND
+
+    appearance.save(store, colors=colors)
+    chat_id = chats.new_id()
+    store.create_chat(chat_id, "Marketing")
+    store.add_chat_turn(chat_id, "user", "How did Marketing change?")
+    store.add_chat_turn(chat_id, "assistant", "Marketing went up by 31,500.", {"mode": "model", "sources": [], "checks": [CORRECTED]})
+    store.add_chat_turn(chat_id, "user", "And travel?")
+    store.add_chat_turn(chat_id, "assistant", "Travel is $12,480.", {"mode": "model", "sources": [], "checks": [CORRECTED, NOT_FOUND]})
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/chat/window")
+        page.evaluate("id => localStorage.setItem('closedesk-chat-id', id)", chat_id)
+        page.reload()
+        page.wait_for_function("() => document.querySelectorAll('#chat .msg-check').length === 2")
+        corrected, warned = page.evaluate(CHECK_BOXES)
+    tokens = pm.classic(colors)
+    assert (corrected["background"], corrected["edge"]) == (rgb(tokens["--ok-soft"]), rgb(tokens["--green"])), corrected
+    assert (warned["background"], warned["edge"]) == (rgb(tokens["--warn-soft"]), rgb(tokens["--warn"])), warned
+    for item in [*corrected["items"], warned["items"][0]]:
+        assert item["text"] == CORRECTED and "✓" in item["sign"] and item["color"] == rgb(tokens["--green"]), item
+    (warning,) = warned["items"][1:]
+    assert warning["text"] == NOT_FOUND and "⚠" in warning["sign"] and warning["color"] == rgb(tokens["--warn"]), warning
+    assert {item["bullet"] for item in [*corrected["items"], *warned["items"]]} == {"none"}, "the sign in the bullet's place"
+
+
 def test_the_classic_chats_fraud_warning_has_a_warning_sign(settings, store, page):
     """The red "Verify by phone before doing anything" bar was the one warning in a classic answer with no sign: the
     figures to check beneath it each have ⚠, and the workspace shows the same bar with its alert sign."""

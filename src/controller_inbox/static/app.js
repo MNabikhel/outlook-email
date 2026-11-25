@@ -330,9 +330,9 @@
       if (turn.text) html += `<div class="msg-text">${formatAnswer(turn.text, turn.sources)}</div>`;
       else if (!now) html += `<div class="msg-text">${thinking ? "" : `<span class="typing">${escapeHtml(waiting)}</span>`}</div>`;
       if (turn.checks && turn.checks.length) {
-        // A figure to check (a warning) has the warning sign, and makes the box amber.
+        // A correction has the tick, and a figure to check (a warning) the warning sign and makes the box amber.
         const warned = turn.checks.some((item) => item.warning);
-        html += `<ul class="msg-check${warned ? " warn" : ""}">${turn.checks.map((item) => `<li${item.warning ? ' class="warn"' : ""}>${escapeHtml(item.text)}</li>`).join("")}</ul>`;
+        html += `<ul class="msg-check${warned ? " warn" : ""}">${turn.checks.map((item) => `<li class="${item.warning ? "warn" : "ok"}">${escapeHtml(item.text)}</li>`).join("")}</ul>`;
       }
       if (turn.context) html += `<p class="msg-context">${escapeHtml(turn.context)} <a href="/settings">Setup</a></p>`;
       if (turn.vision && !turn.pending) html += visionOffer(turn.vision);
