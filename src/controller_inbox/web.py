@@ -426,6 +426,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "filter_category": "",
             "query": "",
             "notice": NOTICES.get(request.query_params.get("notice", ""), ""),
+            # Which notice it is: a page can say it in the section the change goes back to (notices_in_place).
+            "notice_key": request.query_params.get("notice", ""),
             "profile": profile,
             "profiles": PROFILES,
             "finance": profile == "finance",

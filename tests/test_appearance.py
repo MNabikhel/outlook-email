@@ -214,3 +214,19 @@ def test_the_importance_words_say_only_the_workspace_changed(client, demo):
     from markupsafe import escape
 
     assert str(escape(words)) in client.get("/settings?notice=importance-words").text
+
+
+@pytest.mark.parametrize(("notice", "section"), [("colors", "colors"), ("importance-words", "colors"), ("timezone", "timezone")])
+def test_setup_says_saved_in_the_section_it_goes_back_to(client, notice, section):
+    """Saving Colors (or the time zone) goes back to that section of Setup, at the top of the window, but "Saved." was
+    written at the top of the page, out of sight above it (468px above at 1280 by 800, 892px on a phone)."""
+    from markupsafe import escape
+
+    page = client.get(f"/settings?notice={notice}").text
+    said = f'<p class="notice">{escape(web.NOTICES[notice])}</p>'
+    assert page.count(said) == 1, "said once"
+    start = page.index(f'<section class="panel" id="{section}">')
+    assert start < page.index(said) < page.index("</section>", start), "in the section"
+    # Anything else is still said at the top.
+    other = client.get("/settings?notice=profile").text
+    assert other.index(f'<p class="notice">{escape(web.NOTICES["profile"])}</p>') < other.index('<section class="panel profile-card">')

@@ -312,9 +312,15 @@ ROW_EDGE = """() => { const row = document.querySelector('table.mail tr.critical
   return row ? getComputedStyle(row).boxShadow : 'missing'; }"""
 
 
-def test_the_classic_setup_page_ticks_both_and_the_lists_follow(browser, settings, loaded):
+IN_SIGHT = """sel => { const r = document.querySelector(sel).getBoundingClientRect();
+  return r.top >= 0 && r.bottom <= window.innerHeight && r.width > 0; }"""
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_the_classic_setup_page_ticks_both_and_the_lists_follow(browser, settings, loaded, width):
     context = _context(browser, "light")
     page = context.new_page()
+    page.set_viewport_size({"width": width, "height": 800 if width > 400 else 844})
     with serving(web.create_app(settings, loaded)) as base:
         page.goto(f"{base}/inbox")
         assert rgb(pm.classic("standard")["--imp-critical"]) in page.evaluate(ROW_EDGE)
@@ -323,7 +329,17 @@ def test_the_classic_setup_page_ticks_both_and_the_lists_follow(browser, setting
         page.check("#colors input[name='importance_words']")
         page.click("#colors button[type='submit']")
         page.wait_for_url("**/settings?notice=colors#colors")
-        assert "now look this way" in page.inner_text(".notice")
+        assert "now look this way" in page.inner_text("#colors .notice")
+        # Said where the page goes back to, not at its top out of sight above it.
+        assert page.evaluate(IN_SIGHT, "#colors .notice"), "Saved, in sight"
+        # Only the importance words changed: said in sight too.
+        page.uncheck("#colors input[name='importance_words']")
+        page.click("#colors button[type='submit']")
+        page.wait_for_url("**/settings?notice=importance-words#colors")
+        assert "workspace's lists" in page.inner_text("#colors .notice") and page.evaluate(IN_SIGHT, "#colors .notice")
+        page.check("#colors input[name='importance_words']")
+        page.click("#colors button[type='submit']")
+        page.wait_for_url("**/settings?notice=importance-words#colors")
         assert page.evaluate("() => document.documentElement.dataset.colors") == "color-blind"
         assert page.is_checked("#colors input[name='colors']") and page.is_checked("#colors input[name='importance_words']")
         # A ticked box's choice is outlined, as the inbox profile's is.
