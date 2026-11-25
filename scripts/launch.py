@@ -12,7 +12,8 @@ Then it starts CloseDesk. Two exit codes ask the launcher to do what a running P
 with ``--update``, then start CloseDesk again). CloseDesk is told a launcher started it (``CLOSEDESK_LAUNCHER``), so
 it offers that button only then. A third, ``UPDATE_UNDER_WAY``, says an update runs in the folder now, which was
 said, and nothing was started: the launcher's window stays open on it, with nothing more. (The launcher's update after
-Update now waits for that one instead, and CloseDesk opens again once it is done.)
+Update now waits for that one instead, and CloseDesk opens again once it is done; when that one left CloseDesk as it
+was, the update asked for runs then.)
 
 The Python is whichever the launcher found on the computer; none is ever downloaded unasked. (The launcher's
 ``--get-python`` downloads one for CloseDesk alone, when the person asks for it.)
@@ -89,6 +90,8 @@ UPDATING_NOW = "CloseDesk is being updated just now. Open it again in a minute o
 # meanwhile): that one is waited for, looked at this often, and then the launcher opens CloseDesk again.
 OTHER_UPDATE = "Another update is running in CloseDesk's folder (CloseDesk-Update, say). CloseDesk opens again by itself once it is done."
 OTHER_DONE = "That update is done: CloseDesk opens again."
+# That one ended with CloseDesk as it was (its download failed, say): the update asked for runs now, as asked.
+OTHER_FAILED = "That update didn't finish, so the update you asked for runs now."
 OTHER_UPDATE_EVERY = 3
 # Set by the launchers for the update after Update now (and for the start after it): CloseDesk opens again after it,
 # in the page that asked, which reloads itself.
@@ -954,16 +957,26 @@ def update_under_way() -> bool:
     return False
 
 
-def wait_for_other_update() -> int:
+def wait_for_other_update() -> bool:
     """Update now, from CloseDesk a launcher started, while another update runs in the folder (CloseDesk-Update,
-    double-clicked meanwhile): that one is waited for, not given up on, and then the launcher opens CloseDesk again (its
-    new version), as the page that asked says it will. ``update_under_way`` stops counting one older than
-    ``UPDATE_LONGEST``, so this never waits for good."""
+    double-clicked meanwhile): that one is waited for, not given up on. True when it did what Update now asked (this
+    copy was updated, or it found this copy the newest already): the launcher opens CloseDesk again, as the page that
+    asked says it will. False when it left CloseDesk as it was (its download failed, say): the update asked for runs
+    then. ``update_under_way`` stops counting one older than ``UPDATE_LONGEST``, so this never waits for good."""
+    before = installed_commit()
     say(OTHER_UPDATE)
     while update_under_way():
         time.sleep(OTHER_UPDATE_EVERY)
-    say(OTHER_DONE)
-    return 0
+    after = installed_commit()
+    try:
+        newest = (VENV / NEWEST_NOTE).read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        newest = ""
+    if not after or after != before or newest == after.lower():
+        say(OTHER_DONE)
+        return True
+    say(OTHER_FAILED)
+    return False
 
 
 def app(args: list[str]) -> int:
@@ -1056,11 +1069,12 @@ def main(argv: list[str]) -> int:
         use_app_log(rotate=False)
     if "--update" in args:
         args.remove("--update")
-        if update_under_way():  # another update (the window's, carrying on after it closed): not two at once
-            if os.environ.get(REOPEN_ENV) == "1":
-                return wait_for_other_update()
-            say(UPDATING_NOW)
-            return UPDATE_UNDER_WAY
+        while update_under_way():  # another update (the window's, carrying on after it closed): not two at once
+            if os.environ.get(REOPEN_ENV) != "1":
+                say(UPDATING_NOW)
+                return UPDATE_UNDER_WAY
+            if wait_for_other_update():
+                return 0
         _mark_update()
         try:
             code = update()

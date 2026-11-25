@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from controller_inbox import app_window, cli, updates
+from controller_inbox import app_window, cli, updates, version
 
 ROOT = Path(__file__).resolve().parent.parent
 URL = "http://127.0.0.1:8765/"
@@ -547,6 +547,37 @@ def test_update_now_while_another_update_runs_waits_for_that_one_before_closedes
     until(lambda: len(window.urls()) == 2, what="the new version in the window")
     assert computer.servers()[1].options["env"].get("CLOSEDESK_REOPEN") == "1"
     assert "Another update" in capsys.readouterr().out
+    window.person_closes()
+    thread.join(10)
+
+
+@pytest.mark.parametrize("did", ["nothing", "updated", "newest"])
+def test_after_another_update_that_didnt_finish_the_window_runs_its_own(computer, tmp_path, monkeypatch, capsys, did):
+    # CloseDesk-Update's download failed while the window waited for it: CloseDesk opened as it was, and the update the
+    # person asked for wasn't tried. Once that one has updated CloseDesk, or found it the newest, there is nothing to do.
+    folder = tmp_path / "CloseDesk folder"
+    (folder / ".venv").mkdir(parents=True)
+    (folder / ".git_archival.txt").write_text(f"commit: {'a' * 40}\ndate: 2026-11-13\n", encoding="utf-8")
+    monkeypatch.setattr(version, "ROOT", folder)
+    computer.update_code = app_window.UPDATE_UNDER_WAY
+    computer.updating = True
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)
+    until(lambda: computer.updates(), what="the update")
+    computer.update_code = 0  # the window's own, if it runs, goes through
+    if did == "updated":
+        (folder / ".git_archival.txt").write_text(f"commit: {'b' * 40}\ndate: 2026-11-16\n", encoding="utf-8")
+    elif did == "newest":
+        (folder / ".venv" / updates.NEWEST_NOTE).write_text("a" * 40 + "\n", encoding="utf-8")
+    computer.updating = False  # the other update is done
+    until(lambda: len(computer.servers()) == 2, what="CloseDesk opened again")
+    assert len(computer.updates()) == (2 if did == "nothing" else 1)
+    said = capsys.readouterr().out
+    assert ("didn't finish" in said) is (did == "nothing"), said
     window.person_closes()
     thread.join(10)
 

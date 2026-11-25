@@ -804,6 +804,50 @@ def test_update_now_while_closedesk_update_runs_waits_for_it_then_closedesk_open
         other.wait()
 
 
+def _waits_for_closedesk_update(launch, monkeypatch, meanwhile) -> list:
+    """Update now (the launcher's update, CLOSEDESK_REOPEN) while CloseDesk-Update runs; ``meanwhile`` is what that one
+    does to the folder before it ends. What the launcher ran after it."""
+    (launch.ROOT / ".git_archival.txt").write_text(f"commit: {'a' * 40}\ndate: 2026-11-13\n", encoding="utf-8")
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps({"pid": other.pid, "started": time.time()}), encoding="utf-8")
+    monkeypatch.setenv("CLOSEDESK_REOPEN", "1")
+    monkeypatch.setattr(launch, "OTHER_UPDATE_EVERY", 0.05)
+    ran: list = []
+    monkeypatch.setattr(launch, "update", lambda: ran.append(("update", launch.update_under_way())) or 0)
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: ran.append(("check", cmd[2:])) or 0)
+
+    def ends() -> None:
+        meanwhile()
+        other.kill()
+        other.wait()
+
+    threading.Timer(0.3, ends).start()
+    assert launch.main(["--update"]) == 0
+    return ran
+
+
+def test_update_now_after_a_closedesk_update_that_failed_runs_its_own_update(launch, monkeypatch, capsys):
+    # CloseDesk-Update's download failed ("The download isn't a CloseDesk update") while Update now waited for it: the
+    # launcher said "That update is done: CloseDesk opens again", and the update the person asked for wasn't tried.
+    ran = _waits_for_closedesk_update(launch, monkeypatch, lambda: None)
+    said = capsys.readouterr().out
+    assert launch.OTHER_DONE not in said and launch.OTHER_FAILED in said
+    assert ran == [("update", True), ("check", ["--check"])], "its own update, marked as running, then the check after it"
+
+
+@pytest.mark.parametrize("did", ["updated", "newest"])
+def test_update_now_after_a_closedesk_update_that_did_it_opens_closedesk_again(launch, monkeypatch, capsys, did):
+    def meanwhile() -> None:
+        if did == "updated":
+            (launch.ROOT / ".git_archival.txt").write_text(f"commit: {'b' * 40}\ndate: 2026-11-16\n", encoding="utf-8")
+        else:  # it found this copy the newest already, and said so for the next start
+            (launch.VENV / launch.NEWEST_NOTE).write_text("a" * 40 + "\n", encoding="utf-8")
+
+    ran = _waits_for_closedesk_update(launch, monkeypatch, meanwhile)
+    said = capsys.readouterr().out
+    assert launch.OTHER_DONE in said and launch.OTHER_FAILED not in said and ran == []
+
+
 def test_the_mac_launcher_says_closedesk_opens_again_before_its_update_runs():
     # So that its update, finding another one running, waits for it rather than giving up.
     text = (ROOT / "CloseDesk.command").read_text(encoding="utf-8")

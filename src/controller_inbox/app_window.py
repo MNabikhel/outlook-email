@@ -1356,7 +1356,17 @@ class App:
             if code == UPDATE_UNDER_WAY:
                 # Another update runs in the folder (CloseDesk-Update, double-clicked meanwhile): CloseDesk opened now
                 # would run from a folder that update is about to replace.
-                self._wait_for_other_update()
+                before = version.installed()[0]
+                if self._wait_for_other_update() and not _update_did_it(before):
+                    # It left CloseDesk as it was (its download failed, say): the update asked for runs now, once.
+                    print("That update didn't finish, so the window's own update runs now.", flush=True)
+                    with self._lock:
+                        if self.closing:
+                            return False
+                        self.update = self._start_update()
+                    code = self._wait_for_update(self.update)
+                    if code == UPDATE_UNDER_WAY:
+                        self._wait_for_other_update()
         finally:
             self.updating = False
             self._ask_on_close(BUSY_CLOSE)
@@ -1396,19 +1406,35 @@ class App:
             stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, start_new_session=os.name != "nt", **_output(),
         )
 
-    def _wait_for_other_update(self) -> None:
+    def _wait_for_other_update(self) -> bool:
         """Another update runs in CloseDesk's folder: the window keeps saying CloseDesk is updating until that one is
         done (its mark is gone), as it waits before showing a CloseDesk that is updating; then CloseDesk opens. Not past
-        ``update_longest`` (CloseDesk opens as it is), nor once the window is closed (that update finishes by itself)."""
+        ``update_longest`` (CloseDesk opens as it is), nor once the window is closed (that update finishes by itself).
+        True when that update ended."""
         print("Another update runs in CloseDesk's folder (CloseDesk-Update, say): the window waits for it to finish.", flush=True)
         while not self.closing:
             if not self.update_running():
-                print("The other update is done: CloseDesk opens.", flush=True)
-                return
+                print("The other update is done.", flush=True)
+                return True
             if time.monotonic() >= self._update_until:
                 print(f"The other update was still running after {self.update_longest / 60:g} minutes: CloseDesk opens as it is.", flush=True)
-                return
+                return False
             time.sleep(self.watch)
+        return False
+
+
+def _update_did_it(before: str) -> bool:
+    """Whether an update that ended did what Update now asked: this copy (``before``, its commit) was updated, or it was
+    found the newest already (launch.py says so in updates.NEWEST_NOTE). A developer's copy, which isn't updated this
+    way, counts as done."""
+    after = version.installed()[0]
+    if not after or after != before:
+        return True
+    try:
+        newest = (version.ROOT / ".venv" / updates.NEWEST_NOTE).read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        return False
+    return newest == after.lower()
 
 
 def prepare(args, webview) -> App | None:
