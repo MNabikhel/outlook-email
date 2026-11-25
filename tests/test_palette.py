@@ -69,6 +69,102 @@ def test_critical_is_red_and_high_is_amber(ui, colors, theme):
     assert all(70 <= hue <= (100 if colors == "color-blind" else 95) for hue in ambers.values()), ambers
 
 
+# Every rule that paints Critical, danger, High or a warning, and the token it takes its colour from. The checks above
+# read the tokens; a rule written with a colour of its own (the old orange-red #c2361f on the classic Critical pill,
+# or an orange on "Due today") passed them all, looked orange again for everyone and stopped changing with the colors
+# for color blindness. (selector, property, token)
+MEANING_RULES = {
+    "classic": [
+        ("table.mail tr.critical", "box-shadow", "--imp-critical"),
+        ("table.mail tr.high", "box-shadow", "--imp-high"),
+        (".pill.critical", "background", "--imp-critical"),
+        (".pill.high", "background", "--imp-high-fill"),
+        (".pill.item-level.critical", "color", "--danger"),
+        (".pill.item-level.held", "color", "--danger"),
+        (".pill.item-level.high", "color", "--warn"),
+        (".tag.overdue", "background", "--danger"),
+        (".tag.fraud", "background", "--danger"),
+        (".tag.due_today", "background", "--imp-high-fill"),
+        (".tag.caution", "color", "--warn"),
+        (".flag.fraud_risk", "background", "--danger"),
+        (".flag.do_not_process", "background", "--danger"),
+        (".flag.duplicate_invoice", "background", "--warn"),
+        (".flag.missing_attachment", "background", "--warn"),
+        (".flag.payment_caution", "background", "--warn"),
+        (".flag.bank_change_caution", "background", "--warn"),
+        (".panel.alert", "background", "--danger"),
+        (".panel.alert", "border-color", "--danger-deep"),
+        (".focus-item.fraud", "border-left-color", "--danger"),
+        (".focus-item.overdue", "border-left-color", "--danger"),
+        (".focus-item.is-held", "border-left-color", "--danger"),
+        (".focus-item.imp-critical", "border-left-color", "--imp-critical"),
+        (".focus-item.due_today", "border-left-color", "--imp-high"),
+        (".focus-item.imp-high", "border-left-color", "--imp-high"),
+        (".fraud-panel.high", "border-left-color", "--danger"),
+        (".job.error", "border-left", "--danger"),
+        (".job .job-flag", "color", "--danger"),
+        (".kpis .hot", "color", "--danger"),
+        (".warn-box", "background", "--danger"),
+        (".msg-warn", "background", "--danger"),
+        (".msg-check li.warn::before", "color", "--warn"),
+        (".msg-check.warn", "border-left-color", "--warn"),
+        (".model-state.fallback", "color", "--warn"),
+        (".coding-state.unmatched", "color", "--warn"),
+        ("button.danger", "background", "--danger"),
+    ],
+    "workspace": [
+        (".item.imp-critical::before", "background", "--imp-critical"),
+        (".item.imp-high::before", "background", "--imp-high"),
+        (".item.is-locked::before", "background", "--danger"),
+        (".pill.imp-critical", "background", "--imp-critical"),
+        (".pill.imp-high", "background", "--imp-high-fill"),
+        (".tag-prio-critical", "color", "--danger"),
+        (".tag-held", "color", "--danger"),
+        (".tag-prio-high", "color", "--warn"),
+        (".tag-fraud", "background", "--danger"),
+        (".tag-overdue", "color", "--danger"),
+        (".tag-due_today", "color", "--warn"),
+        (".flag-fraud_risk", "color", "--danger"),
+        (".flag-do_not_process", "color", "--danger"),
+        (".flag-payment_caution", "color", "--warn"),
+        (".flag-duplicate_invoice", "color", "--warn"),
+        (".chip-danger", "color", "--danger"),
+        (".chip-warn", "color", "--warn"),
+        (".badge.warn", "color", "--warn"),
+        (".rail-count.danger:not(.zero)", "background", "--danger"),
+        (".btn-danger", "background", "--danger"),
+        (".msg-warn", "color", "--danger"),
+        (".msg-check li.warn .ic", "color", "--warn"),
+        (".rd-alert.danger > .ic", "color", "--danger"),
+        (".rd-alert.warn > .ic", "color", "--warn"),
+        (".kpi.danger b", "color", "--danger"),
+        (".kpi.warn b", "color", "--warn"),
+        (":root .toast.error", "background", "--toast-error"),
+    ],
+}
+REDS = {"--imp-critical", "--danger", "--danger-deep", "--toast-error"}
+
+
+@pytest.mark.parametrize(("ui", "colors", "theme"), pm.LOOKS)
+def test_the_rules_that_paint_critical_and_high_are_red_and_amber(ui, colors, theme):
+    """Each rule takes its colour from its token, so it switches with the colors for color blindness, and the colour it
+    paints is the red or the amber the tokens are checked for."""
+    sheet, tokens = pm.SHEETS[ui], pm.tokens_of(ui, colors, theme)
+    own = {
+        f"{selector} {{ {prop}: {pm.rule_value(sheet, selector, prop)} }}": token
+        for selector, prop, token in MEANING_RULES[ui]
+        if f"var({token})" not in (pm.rule_value(sheet, selector, prop) or "")
+    }
+    assert not own, f"not on its token in {sheet.name}: {own}"
+    off = {}
+    for selector, prop, token in MEANING_RULES[ui]:
+        hue = _hue(pm.rule_colour(sheet, selector, prop, tokens))
+        red = token in REDS
+        if not (-10 <= hue <= 25 if red else 70 <= hue <= (100 if colors == "color-blind" else 95)):
+            off[f"{selector} {{ {prop} }}"] = (("red" if red else "amber"), round(hue, 1))
+    assert not off, off
+
+
 @pytest.mark.parametrize(("ui", "theme"), [("workspace", "light"), ("workspace", "dark"), ("classic", "light")])
 def test_colour_blind_levels_stay_apart(ui, theme):
     """With the colors for color blindness, each pair that carries meaning is at least 20 apart (CIEDE2000) with
@@ -123,7 +219,11 @@ def test_every_colour_that_carries_meaning_passes_contrast(ui, colors, theme):
 def test_meaning_colours_live_in_tokens():
     """The colours that switch with the palette are tokens, not written into the rules, so the colors for color
     blindness reach every one of them."""
-    retired = ("#b05a1f", "#c46b2d", "#8a4b12", "#9b2335", "#7a1b29", "#fbf1f2", "#fbeff1", "#8f1d14", "#2e7d4f", "#b26a00")
+    # With the old orange-red Critical (#c2361f, and the dark coral #ff7a66) and the old High (#d38a12, #f0ad45).
+    retired = (
+        "#b05a1f", "#c46b2d", "#8a4b12", "#9b2335", "#7a1b29", "#fbf1f2", "#fbeff1", "#8f1d14", "#2e7d4f", "#b26a00",
+        "#c2361f", "#ff7a66", "#d38a12", "#f0ad45", "#b42318", "#9a5b0b", "#ff8f84", "#f1b75e",
+    )
     for path in (pm.WORKSPACE_CSS, pm.CLASSIC_CSS):
         text = path.read_text(encoding="utf-8").lower()
         assert not [value for value in retired if re.search(re.escape(value) + r"\b", text)], path.name
