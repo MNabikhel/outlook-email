@@ -145,7 +145,7 @@
   --shadow-2: 0 12px 36px rgba(0, 0, 0, 0.5), 0 2px 8px rgba(0, 0, 0, 0.35);
 }
 
-/* Colors for color blindness (Settings → Appearance): Critical and danger a deeper red, High and warnings a yellow,
+/* Colors for color blindness (Settings → Appearance): Critical and danger a crimson, High and warnings an amber,
    done a blue-green, told apart by lightness as well as hue. The server writes data-colors on <html>, so the page
    never paints in the other colors first. This block comes after the dark ones with the same specificity, so it wins
    over them: the dark blocks below set every token it does, except the --paper-* and --toast-error ones, which are

@@ -310,7 +310,13 @@ async function toggleColors() {
   try {
     const reply = await postJSON("/api/settings/colors", { colors: root.dataset.colors === "color-blind" ? "standard" : "color-blind" });
     applyAppearance(reply.appearance, { mine: true });
-    toast(reply.message, { tone: "ok" });
+    // No box in sight to show which way it went: the message says.
+    toast(
+      reply.appearance && reply.appearance.colors === "color-blind"
+        ? "Colors for color blindness on: the workspace and the classic pages on this computer now use them."
+        : "Colors for color blindness off: the workspace and the classic pages on this computer are back to the standard colors.",
+      { tone: "ok" }
+    );
     if (S.route && S.route.view === "settings") settings.redraw();
   } catch (error) {
     toast(error.message, { tone: "error" });

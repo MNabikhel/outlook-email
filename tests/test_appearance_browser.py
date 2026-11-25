@@ -606,7 +606,10 @@ def test_ctrl_k_turns_the_colors_for_color_blindness_on_and_off(settings, store,
             page.keyboard.press("Enter")
             on = want.startswith("Turn on")
             page.wait_for_function("on => (document.documentElement.dataset.colors === 'color-blind') === on", arg=on)
-            page.wait_for_selector(f".toast:has-text('{web.NOTICES['colors']}')")
+            # With no box in sight, it says which: on or off.
+            said = page.wait_for_selector(".toast:has-text('Colors for color blindness')").inner_text()
+            assert said.startswith(f"Colors for color blindness {'on' if on else 'off'}:") and "classic pages" in said, said
+            page.evaluate("() => document.querySelectorAll('.toast').forEach((t) => t.remove())")
             # Settings, open beside it, says so.
             page.wait_for_function("on => { const box = document.querySelector('#set-colors'); return Boolean(box) && box.checked === on; }", arg=on)
             assert appearance.current(store)["colors"] == ("color-blind" if on else "standard")

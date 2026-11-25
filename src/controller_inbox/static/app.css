@@ -33,8 +33,8 @@
   --serif: "Iowan Old Style", Palatino, Georgia, serif;
 }
 
-/* Colors for color blindness (Setup → Colors, or Settings → Appearance in the workspace): Critical and fraud a deeper
-   red, High and warnings a yellow, done a blue-green, told apart by lightness as well as hue. The server writes
+/* Colors for color blindness (Setup → Colors, or Settings → Appearance in the workspace): Critical and fraud a
+   crimson, High and warnings an amber, done a blue-green, told apart by lightness as well as hue. The server writes
    data-colors on <html>, so the page never paints in the other colors first. */
 :root[data-colors="color-blind"] {
   --imp-critical: #921f3a; --danger: #761630; --danger-deep: #5c0f24; --danger-soft: #fbedf0; --danger-line: #ebbcc6;

@@ -212,9 +212,10 @@ def test_a_processed_run_that_needs_a_look_says_so_in_words(client):
 
 
 def test_the_help_says_what_the_colors_for_color_blindness_change(client):
-    """The help said the box "swaps the red, orange and green" and that "High and warnings turn yellow". There is no
-    orange in either palette, and High and warnings are the same yellow amber in both, so someone ticking the box to
-    see High change saw nothing happen. What changes is a deeper red and a blue-green done."""
+    """The help said the box "swaps the red, orange and green" and that "High and warnings turn yellow": there is no
+    orange in either palette. Then it said Critical and fraud "turn a deeper red" and High and warnings "stay yellow":
+    in the dark theme the red turns pinker, not deeper, and High is an amber everywhere else. What changes in every
+    theme is a red that leans to crimson and a blue-green done; High and warnings stay amber."""
     from pathlib import Path
 
     import palette_math as pm
@@ -228,13 +229,42 @@ def test_the_help_says_what_the_colors_for_color_blindness_change(client):
     }
     for where, text in helps.items():
         text = text[text.index("Colors for color blindness") :][:400]
-        assert "deeper red" in text and "blue-green" in text, where
-        assert "orange" not in text and "turn yellow" not in text, where
-    # And so they are: in the light theme, Critical and fraud are darker and done turns from green to blue-green.
-    for standard, blind, ok in ((pm.workspace("light"), pm.workspace("light", "color-blind"), "--ok"), (pm.classic(), pm.classic("color-blind"), "--green")):
-        for name in ("--imp-critical", "--danger"):
-            assert pm.oklch(blind[name])[0] < pm.oklch(standard[name])[0] - 5, name
-        assert pm.oklch(standard[ok])[2] < 170 < pm.oklch(blind[ok])[2] < 230
+        text = text[: text.index("Critical, High, Medium or Low")]
+        assert "crimson" in text and "blue-green" in text and "amber" in text, where
+        assert not [word for word in ("orange", "yellow", "deeper") if word in text], where
+
+    def hue(value):
+        found = pm.oklch(value)[2]
+        return found - 360 if found > 180 else found
+
+    # And so they are, in each theme: a true red turns crimson (towards blue), green turns blue-green, and High and
+    # warnings keep an amber's hue.
+    for ui, theme in (("workspace", "light"), ("workspace", "dark"), ("classic", "light")):
+        standard, blind = pm.tokens_of(ui, "standard", theme), pm.tokens_of(ui, "color-blind", theme)
+        meanings = pm.MEANINGS[ui]
+        for name in ("critical", "danger"):
+            token = meanings[name]
+            assert hue(blind[token]) <= 15 and hue(standard[token]) - hue(blind[token]) >= 8, (ui, theme, name)
+        assert pm.oklch(standard[meanings["ok"]])[2] < 170 < pm.oklch(blind[meanings["ok"]])[2] < 230, (ui, theme)
+        for name in ("high", "high-fill", "warn"):
+            assert 70 <= hue(blind[meanings[name]]) <= 100, (ui, theme, name)
+
+
+def test_the_words_help_says_which_emails_have_a_colored_edge():
+    """The words box said it writes the importance "as well as the colored edge", but only Critical and High have
+    one: a Medium or Low email has no edge at all."""
+    from pathlib import Path
+
+    import palette_math as pm
+
+    source = (Path(web.__file__).parent / "static" / "ui" / "settings.js").read_text(encoding="utf-8")
+    text = source[source.index('b("Show Critical, High, Medium or Low on each email")') :][:300]
+    assert "as well as the colored edge" not in text
+    assert "only Critical and High" in text and "colored edge" in text, text
+    for level in ("critical", "high"):
+        assert pm.rule_value(pm.WORKSPACE_CSS, f".item.imp-{level}::before", "background") == f"var(--imp-{level})"
+    css = pm.WORKSPACE_CSS.read_text(encoding="utf-8")
+    assert ".item.imp-medium" not in css and ".item.imp-low" not in css
 
 
 def test_the_importance_words_say_only_the_workspace_changed(client, demo):

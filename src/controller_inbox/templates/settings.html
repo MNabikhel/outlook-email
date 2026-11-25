@@ -44,7 +44,7 @@
     <input type="hidden" name="colors_was" value="{{ appearance.colors }}"/>
     <input type="hidden" name="importance_words_was" value="{{ '1' if appearance.importance_words else '0' }}"/>
     <label class="choice"><input type="checkbox" name="colors" value="color-blind" {{ 'checked' if appearance.colors == 'color-blind' }}/>
-      <span><b>Colors for color blindness</b> <small class="muted">Critical and fraud turn a deeper red, done turns blue-green, and High and warnings stay yellow.</small></span></label>
+      <span><b>Colors for color blindness</b> <small class="muted">Critical and fraud turn crimson, done turns blue-green, and High and warnings stay amber.</small></span></label>
     <label class="choice"><input type="checkbox" name="importance_words" value="1" {{ 'checked' if appearance.importance_words }}/>
       <span><b>Show Critical, High, Medium or Low on each email</b> <small class="muted">In the workspace's lists. These pages already show it in the Importance column.</small></span></label>
     <button type="submit">Save</button>

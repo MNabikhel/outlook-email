@@ -302,13 +302,13 @@ export function createSettings(ctx) {
           "label",
           { class: "set-check" },
           colorBlind,
-          h("span", { class: "set-check-text" }, b("Colors for color blindness"), h("span", null, "Uses colors that people with color blindness can tell apart: Critical and fraud turn a deeper red, done turns blue-green, and High and warnings stay yellow."))
+          h("span", { class: "set-check-text" }, b("Colors for color blindness"), h("span", null, "Uses colors that people with color blindness can tell apart: Critical and fraud turn crimson, done turns blue-green, and High and warnings stay amber."))
         ),
         h(
           "label",
           { class: "set-check" },
           words,
-          h("span", { class: "set-check-text" }, b("Show Critical, High, Medium or Low on each email"), h("span", null, "Writes the importance beside each email in the lists, as well as the colored edge."))
+          h("span", { class: "set-check-text" }, b("Show Critical, High, Medium or Low on each email"), h("span", null, "Writes it on each email in the lists. Without it, only Critical and High are marked, by a colored edge."))
         ),
         status("colors")
       )
