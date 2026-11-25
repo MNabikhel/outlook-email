@@ -628,6 +628,11 @@ def double_click(folder: Path, shortcuts: Path) -> list[str]:
     log = log_since(start)
     assert finished, (f"the window of {what} didn't show CloseDesk's page and close by itself (CloseDesk answered on "
                       f"port {port}: {up})\n--- the log\n{log[-6000:]}")
+    if MAC:
+        # Started by macOS from the Dock or Spotlight, CloseDesk.app runs on the Mac's own kind of processor, not under
+        # Rosetta (an environment set up for Apple's processor wouldn't load there).
+        opened = f"CloseDesk.app opened ({os.uname().machine})"
+        assert opened in log, f"macOS didn't run CloseDesk.app as {os.uname().machine}\n--- the log\n{log[-6000:]}"
     print(f"--- the window of {what} showed {shown(log)}, closed by itself, and CloseDesk stopped with it", flush=True)
     if not MAC:
         return []

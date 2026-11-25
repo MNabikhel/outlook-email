@@ -469,6 +469,9 @@ def test_the_apps_script_opens_closedesk_in_its_window_from_its_folder(mac, tmp_
     assert "/opt/homebrew/bin" in path.split(":")
     log = tmp_path / "home" / "Library" / "Logs" / "CloseDesk" / "CloseDesk-app.log"
     assert log.exists(), "what it says goes to the app's log, as launch.py --app's does"
+    # And on which kind of processor it runs (arm64, or x86_64 under Rosetta, where the environment set up for arm64
+    # wouldn't load): said in the log, which CI's window check reads.
+    assert f"CloseDesk.app opened ({os.uname().machine})" in log.read_text(encoding="utf-8")
 
 
 def test_the_apps_script_says_when_the_folder_is_gone(mac, tmp_path):
