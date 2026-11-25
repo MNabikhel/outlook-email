@@ -79,6 +79,8 @@ UNREACHED = "CloseDesk couldn't reach GitHub on {day} to look for a newer versio
 BY_HAND = "To update, close CloseDesk and double-click CloseDesk-Update in its folder: your mail and settings are kept."
 UPDATING = "CloseDesk closes, fetches the new version and opens again by itself in a minute or two. Your mail and settings are kept."
 BUSY = "CloseDesk is processing mail now. It can update once that is done."
+# Update now while CloseDesk read new mail by itself (as it opened, or the automatic Outlook sync): that is stopped.
+READ_AGAIN = "What it was reading by itself is picked up when it opens again."
 # Update now from a page shown before CloseDesk was updated (another tab, another window): the page's version is gone.
 UPDATED_MEANWHILE = (
     "CloseDesk was updated meanwhile (in another tab or window), so there is nothing to update now. Reload the page to "
@@ -327,6 +329,23 @@ def _day(stamp: str) -> str:
     return f"{when:%B} {when.day}"
 
 
+def job_state(snapshot: dict) -> str:
+    """The job's state as far as Update now goes: "running" only for work the person asked for (Process new mail, a scan
+    being read, Sync now). What CloseDesk reads by itself (its reading as it opens, the automatic Outlook sync) doesn't
+    hold the update back: it is stopped, and what it hadn't finished is picked up when CloseDesk opens again, as when
+    CloseDesk is closed. With a local model that reading takes many minutes at every opening."""
+    state = str(snapshot.get("state") or "")
+    if state == "running" and (snapshot.get("about") or {}).get("auto"):
+        return "idle"
+    return state
+
+
+def updating_message(app_state) -> str:
+    """What Update now answers: CloseDesk updates, and, when it stopped what it was reading by itself, that that is
+    picked up when it opens again."""
+    return f"{UPDATING} {READ_AGAIN}" if getattr(app_state, "update_cut_reading", False) else UPDATING
+
+
 def refusal(job_state: str) -> str:
     """Why CloseDesk can't stop to update now ("" when it can)."""
     if not version.installed()[0]:
@@ -357,10 +376,12 @@ def stop_to_update(app_state, job_state: str, *, shown: str = "") -> str:
     # From here no new work starts (the automatic Outlook sync, say), so none is cut off when CloseDesk stops. Work
     # that started after the page looked holds the update back.
     job = getattr(app_state, "job", None)
-    if job is not None and not job.close():
+    if job is not None and not job.close(stopping_automatic=True):
         if question is not None:
             question.hold()
         return BUSY
+    # What CloseDesk was reading by itself was asked to stop (job.close): it is picked up when CloseDesk opens again.
+    app_state.update_cut_reading = job is not None and job.snapshot()["state"] == "running"
     app_state.update_asked = True
     # Asked for (from Settings, say): the question isn't put to the page that waits for CloseDesk to stop.
     if question is not None:

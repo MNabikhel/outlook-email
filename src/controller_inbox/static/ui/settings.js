@@ -1055,7 +1055,8 @@ export function createSettings(ctx) {
       new one), else how to update by hand; and what the daily check for one does. */
   function updateNotice() {
     const u = data.update || {};
-    const busy = data.job && data.job.state === "running";
+    // Mail the person asked to be processed holds the update back; what CloseDesk reads by itself doesn't.
+    const busy = Boolean(u.waits);
     const update = async (event) => {
       const button = event.currentTarget;
       button.disabled = true;

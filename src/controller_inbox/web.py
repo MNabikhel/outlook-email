@@ -322,13 +322,18 @@ class ProcessJob:
                 "can_stop": running and handle is not None and not handle.done,
             }
 
-    def close(self) -> bool:
-        """No job starts after this (CloseDesk stops to update). False, and nothing closed, while one is running."""
+    def close(self, *, stopping_automatic: bool = False) -> bool:
+        """No job starts after this (CloseDesk stops to update). False, and nothing closed, while one is running;
+        ``stopping_automatic``: one CloseDesk started by itself (its reading as it opens, the automatic Outlook sync) is
+        asked to stop instead (``request_stop``), and what it hasn't finished is picked up when CloseDesk opens again."""
         with self._lock:
-            if self.state == "running":
+            running = self.state == "running"
+            if running and not (stopping_automatic and (self.about or {}).get("auto")):
                 return False
             self._closed = True
-            return True
+        if running:
+            self.request_stop()
+        return True
 
     def start(self, target, *, about: dict | None = None) -> bool:
         with self._lock:
@@ -401,6 +406,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         sample = store.only_sample()
         counts = store.counts()
         profile = active_profile(settings, store)
+        base_job = job.snapshot()
         base = {
             "request": request,
             "settings": settings,
@@ -409,7 +415,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             **services.today_fields(board_date(sample), sample=sample),
             "graph_configured": settings.graph_configured,
             "model": check_model(settings),
-            "job": job.snapshot(),
+            "job": base_job,
             "inbox_incoming": str(settings.inbox_incoming),
             "inbox_attachments": str(settings.inbox_attachments),
             "inbox_failed": str(settings.inbox_failed),
@@ -427,6 +433,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "finance": profile == "finance",
             "coding_counts": store.coding_counts(),
             "closedesk": updates.status(store, settings),
+            # Update waits for mail the person asked to be processed, not for what CloseDesk reads by itself.
+            "update_waits": updates.job_state(base_job) == "running",
         }
         base["llm_enabled"] = base["model"].active
         base.update(extra)
@@ -1345,12 +1353,12 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         """Setup's Update button: CloseDesk stops once this page is sent, its launcher fetches the newest version and
         starts it again, and the page waits for that, then goes back to Setup. ``commit``: the version the page showed
         (refused once CloseDesk was updated since, in another tab)."""
-        why = updates.stop_to_update(app.state, job.snapshot()["state"], shown=commit)
+        why = updates.stop_to_update(app.state, updates.job_state(job.snapshot()), shown=commit)
         if why:
             return render(request, "settings_update.html", page="settings", refused=why, status_code=409)
         return render(
             request, "settings_update.html", page="settings", refused="", commit=version.installed()[0], run=app.state.run,
-            message=updates.UPDATING,
+            message=updates.updating_message(app.state),
         )
 
     @app.post("/settings/shortcut")

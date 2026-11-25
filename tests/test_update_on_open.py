@@ -502,6 +502,83 @@ def test_update_now_is_refused_while_mail_is_processed_and_offered_when_done(dow
     assert client.post("/api/update", headers=PAGE).status_code == 200 and stopped == [1]
 
 
+@pytest.mark.parametrize("about", [{"kind": "startup", "auto": True}, {"kind": "outlook", "auto": True}])
+def test_update_now_doesnt_wait_for_closedesks_own_reading_as_it_opens(download, settings, store, monkeypatch, about):
+    # The question comes up as CloseDesk's own reading of new mail starts (or its automatic Outlook sync), which with a
+    # local model takes many minutes at every opening. Update now doesn't wait for it: it is stopped, and what it hadn't
+    # finished is read when CloseDesk opens again (as the new version), as when CloseDesk is closed.
+    monkeypatch.setattr(updates, "_ask_github", github())
+    app = web.create_app(settings, store)
+    app.state.update_question = asked_at_start(store, settings)
+    stopped: list = []
+    app.state.stop_server = lambda: stopped.append(1)
+    client = TestClient(app)
+    release = threading.Event()
+    app.state.job.start(lambda progress: release.wait(10), about=about)
+    try:
+        view = client.get("/api/update/question", headers=PAGE).json()
+        assert view["ask"] is True and view["busy"] is False, "the question says it can update now"
+        reply = client.post("/api/update", headers=PAGE)
+        assert reply.status_code == 200 and stopped == [1]
+        assert updates.READ_AGAIN in reply.json()["message"]
+        assert app.state.job.snapshot()["stopping"] is True, "the reading was asked to stop (its model calls hung up on)"
+        ran: list = []
+        assert app.state.job.start(lambda progress: ran.append(1)) is False, "nothing new starts"
+    finally:
+        release.set()
+
+
+def test_the_classic_update_doesnt_wait_for_closedesks_own_reading_either(download, settings, store):
+    app = web.create_app(settings, store)
+    app.state.stop_server = lambda: None
+    release = threading.Event()
+    app.state.job.start(lambda progress: release.wait(10), about={"kind": "startup", "auto": True})
+    try:
+        page = TestClient(app).post("/settings/update", headers={"origin": "http://testserver"})
+        assert page.status_code == 200 and updates.READ_AGAIN in page.text
+    finally:
+        release.set()
+
+
+def test_settings_update_button_waits_only_for_mail_the_person_asked_for(download, settings, store):
+    updates.check(store, settings, now=NOW, ask=github())
+    app = web.create_app(settings, store)
+    client = TestClient(app)
+    for about, waits in (({"kind": "startup", "auto": True}, False), (None, True)):
+        release = threading.Event()
+        assert app.state.job.start(lambda progress, release=release: release.wait(10), about=about)
+        try:
+            assert client.get("/api/settings", headers=PAGE).json()["update"]["waits"] is waits
+            page = client.get("/settings").text
+            button = page.split('action="/settings/update"', 1)[1].split("</form>", 1)[0]
+            assert ("disabled" in button) is waits and ("It can update once" in page) is waits
+        finally:
+            release.set()
+        deadline = time.monotonic() + 10
+        while app.state.job.snapshot()["state"] == "running":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+
+def test_update_now_still_waits_for_mail_the_person_asked_to_be_processed(download, settings, store):
+    # Process new mail, a scan being read, Sync now: started by the person, and not cut off.
+    app = web.create_app(settings, store)
+    app.state.stop_server = lambda: None
+    for about in (None, {"kind": "vision", "email_id": "x", "n": 1, "file": "scan.pdf"}, {"kind": "outlook"}):
+        release = threading.Event()
+        assert app.state.job.start(lambda progress, release=release: release.wait(10), about=about)
+        try:
+            refused = TestClient(app).post("/api/update", headers=PAGE)
+            assert refused.status_code == 409 and refused.json()["detail"] == updates.BUSY, about
+            assert app.state.job.snapshot()["stopping"] is False
+        finally:
+            release.set()
+        deadline = time.monotonic() + 10
+        while app.state.job.snapshot()["state"] == "running":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+
 def test_once_an_update_is_asked_for_the_page_that_waits_isnt_asked(download, settings, store, monkeypatch):
     # Settings' Update button, pressed before the question came up: the classic page that waits for CloseDesk to stop
     # (settings_update.html) is a page too, and isn't asked.
