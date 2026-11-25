@@ -1138,7 +1138,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         row = store.get_digest(period)
         if not row:
             raise HTTPException(status_code=404, detail=f"No digest saved for {period}")
-        return HTMLResponse(row["html"])
+        # In the colors chosen in Setup, as the other pages are; the file saved for printing keeps the standard ones.
+        return HTMLResponse(appearance.on_saved_page(row["html"], appearance.current(store)), headers={"Cache-Control": "no-store"})
 
     @app.get("/digests", response_class=HTMLResponse)
     def digests_page(request: Request):

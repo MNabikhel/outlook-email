@@ -242,3 +242,43 @@ def test_classic_pages_are_never_kept_and_say_the_colors_in_use(client, demo):
     appearance.save(demo, colors="color-blind", importance_words=True)
     assert client.get("/api/settings/colors", headers=PAGE).json() == {"appearance": {"colors": "color-blind", "importance_words": True}}
     assert client.get("/api/settings/colors").status_code == 403, "for CloseDesk's own pages"
+
+
+def _digest_css(html: str, tmp_path):
+    """The printable digest's own stylesheet, as a file palette_math can read."""
+    css = tmp_path / "digest.css"
+    css.write_text(html[html.index("<style>") + len("<style>") : html.index("</style>")], encoding="utf-8")
+    return css
+
+
+def test_the_printable_digest_uses_the_true_red_and_follows_the_colors(client, demo, settings, as_of_now, tmp_path):
+    """The printable digest kept the old crimson and orange, with white words on the orange "Due today" at 4.27:1, and
+    ignored the colors for color blindness, so it and the Today page disagreed. It uses the classic pages' colors
+    now, and the page CloseDesk shows follows the choice; the file saved for printing and email keeps the standard
+    ones (it has words on every tag)."""
+    from datetime import date
+
+    import palette_math as pm
+    from controller_inbox.digest import build_digest, write_digest_files
+
+    period = "2026-09-22"
+    payload = build_digest(demo, as_of=date(2026, 9, 22), generated_at=as_of_now, tz=settings.tz)
+    write_digest_files(payload, settings.digest_dir, period)
+    standard, blind = pm.classic(), pm.classic("color-blind")
+    shown = client.get(f"/digest/{period}.html")
+    assert shown.headers["cache-control"] == "no-store"
+    assert '<html lang="en">' in shown.text
+    css = _digest_css(shown.text, tmp_path)
+    red = pm.rule_colour(css, ".tag.overdue", "background", {})
+    assert red == pm.rule_colour(css, ".tag.fraud", "background", {}) == pm.rule_colour(css, ".alert", "background", {}) == standard["--danger"]
+    assert pm.rule_colour(css, ".tag.due_today", "background", {}) == standard["--imp-high-fill"]
+    assert pm.rule_colour(css, ".tag.due_today", "color", {}) == standard["--on-imp-high"]
+    assert pm.contrast(standard["--on-imp-high"], standard["--imp-high-fill"]) >= 4.5
+    for selector in ('html[data-colors="color-blind"] .tag.overdue', 'html[data-colors="color-blind"] .tag.fraud', 'html[data-colors="color-blind"] .alert'):
+        assert pm.rule_colour(css, selector, "background", {}) == blind["--danger"], selector
+    assert "#9b2335" not in shown.text and "#b8651b" not in shown.text
+
+    appearance.save(demo, colors="color-blind")
+    assert '<html lang="en" data-colors="color-blind">' in client.get(f"/digest/{period}.html").text
+    saved = (settings.digest_dir / f"{period}.html").read_text(encoding="utf-8")
+    assert '<html lang="en">' in saved, "the file for printing and email is as it was"

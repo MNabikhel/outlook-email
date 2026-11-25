@@ -36,6 +36,11 @@ def save(store: Store, *, colors: str | None = None, importance_words: bool | No
     return current(store)
 
 
+def on_saved_page(html: str, look: dict | None) -> str:
+    """A page saved as it was written (the printable digest), with this look on its <html> as CloseDesk shows it."""
+    return html.replace('<html lang="en">', f'<html lang="en"{html_attrs(look)}>', 1)
+
+
 def html_attrs(look: dict | None) -> Markup:
     """What goes on <html> for this look, after lang="en": ' data-colors="color-blind"' and ' data-importance-words="on"'
     when chosen; nothing otherwise, and nothing for a page rendered without a look."""
