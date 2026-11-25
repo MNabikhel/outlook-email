@@ -494,6 +494,8 @@ def _compiled_pydantic(launch, monkeypatch, tmp_path, head: bytes) -> None:
 
 def _on_a_mac(launch, monkeypatch, here: str) -> None:
     monkeypatch.setattr(launch.sys, "platform", "darwin")
+    # A Mac's way of handing over (exec), wherever the tests run: on Windows, launch.py would run /usr/bin/arch.
+    monkeypatch.setattr(launch, "WINDOWS", False)
     monkeypatch.setattr(launch, "_machine_here", lambda: here)
     monkeypatch.setenv(launch.ARCH_ENV, "")
     monkeypatch.delenv(launch.ARCH_ENV)
