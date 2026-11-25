@@ -287,6 +287,7 @@ def test_on_a_mac_the_window_runs_python_as_closedesk_apps_own(launch, monkeypat
     monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
     linked = tmp_path / "CloseDesk.app" / "Contents" / "MacOS" / "CloseDesk-python"
     monkeypatch.setattr(launch, "linked_python", lambda: linked)
+    monkeypatch.setattr(launch, "_runs_as_app", lambda link: True)
     monkeypatch.setenv("__PYVENV_LAUNCHER__", "")
     handed: list = []
     monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
@@ -326,3 +327,35 @@ def test_closedesk_apps_python_is_used_only_when_it_is_this_environments(launch,
     link.symlink_to(python)
     assert launch.linked_python(platform="darwin") == link
     assert launch.linked_python(platform="win32") is None and launch.linked_python(platform="linux") is None
+
+
+def test_a_python_that_doesnt_run_as_closedesk_app_isnt_used(launch, monkeypatch, tmp_path):
+    # Tried first: started through the link, Python must find this environment, or the window wouldn't open at all.
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    monkeypatch.setattr(launch, "linked_python", lambda: tmp_path / "CloseDesk-python")
+    monkeypatch.setattr(launch, "_runs_as_app", lambda link: False)
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", "")
+    monkeypatch.delenv("__PYVENV_LAUNCHER__")
+    handed: list = []
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
+    launch.main(["--app"])
+    (cmd, env), = handed
+    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env
+
+
+def test_the_try_runs_python_through_the_link_as_the_window_would(launch, monkeypatch, tmp_path):
+    ran: list = []
+    monkeypatch.setattr(launch.subprocess, "run", lambda cmd, **options: ran.append((cmd, options)) or SimpleNamespace(returncode=0))
+    assert launch._runs_as_app(tmp_path / "CloseDesk-python") is True
+    (cmd, options), = ran
+    assert cmd == [str(tmp_path / "CloseDesk-python"), "-c", "import controller_inbox"]
+    assert options["env"]["__PYVENV_LAUNCHER__"] == str(launch.venv_python()) and options["stdin"] == subprocess.DEVNULL
+    monkeypatch.setattr(launch.subprocess, "run", lambda cmd, **options: SimpleNamespace(returncode=1))
+    assert launch._runs_as_app(tmp_path / "CloseDesk-python") is False
+
+    def cant(cmd, **options):
+        raise OSError("Exec format error")
+
+    monkeypatch.setattr(launch.subprocess, "run", cant)
+    assert launch._runs_as_app(tmp_path / "CloseDesk-python") is False

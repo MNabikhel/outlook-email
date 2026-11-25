@@ -154,6 +154,19 @@ def linked_python(*, platform: str = "") -> Path | None:
     return None
 
 
+def _runs_as_app(link: Path) -> bool:
+    """Whether Python started through CloseDesk.app's link finds this environment: tried before the window depends on
+    it (a quick start, with nothing on screen)."""
+    try:
+        done = subprocess.run(
+            [str(link), "-c", "import controller_inbox"], cwd=ROOT, env={**os.environ, "__PYVENV_LAUNCHER__": str(venv_python())},
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
+
+
 def in_venv() -> bool:
     try:
         return Path(sys.prefix).resolve() == VENV.resolve()
@@ -613,6 +626,9 @@ def app(args: list[str]) -> int:
     os.environ["CLOSEDESK_LAUNCHER"] = "1"
     window = ["-m", "controller_inbox", "app", *args]
     linked = linked_python()
+    if linked is not None and not _runs_as_app(linked):
+        say(f"Python started as CloseDesk.app ({linked}) didn't find CloseDesk: the Dock shows the window as Python's.")
+        linked = None
     if linked is not None:
         say(f"The window opens as CloseDesk.app ({linked}).")
         # As python3.x tells the program it starts: this environment is the one to run.
