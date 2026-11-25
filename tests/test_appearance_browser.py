@@ -249,7 +249,10 @@ LEVELS = """() => [...document.querySelectorAll('.items .item.kind-mail, .items 
   return { key: li.dataset.key, level, text: tag ? tag.textContent : null, shown, classes: tag ? tag.className : '',
            background: tag ? getComputedStyle(tag).backgroundColor : '', outline: tag ? getComputedStyle(tag).boxShadow : '',
            color: tag ? getComputedStyle(tag).color : '', reason: reason ? getComputedStyle(reason).backgroundColor : null,
-           locked: li.classList.contains('is-locked'), held: (li.querySelector('.chip-danger') || {}).textContent || '' };
+           locked: li.classList.contains('is-locked'), held: (li.querySelector('.chip-danger') || {}).textContent || '',
+           heldShown: [...li.querySelectorAll('.chip-danger')].some((c) => c.getBoundingClientRect().width > 0),
+           emptyLine: [...li.querySelectorAll('.item-meta')].some((m) => m.getBoundingClientRect().height > 0
+             && ![...m.children].some((c) => c.getBoundingClientRect().width > 0)) };
 })"""
 WORDS = {"critical": "Critical", "high": "High", "medium": "Medium", "low": "Low"}
 
@@ -298,10 +301,14 @@ def test_the_importance_shows_in_words_on_each_email_when_asked(browser, setting
                 assert shown == [(HELD, "Held for fraud")], shown
             for row in rows:
                 assert row["level"], row
+                assert not row["emptyLine"], ("no line left empty", path, row)
                 if row["locked"]:
-                    # Held as possible payment fraud: its edge is the held one, so its word says that.
+                    # Held as possible payment fraud: its edge is the held one, so its word says that. The chip below
+                    # said "Held: possible fraud" as well, on the same row: it goes while the word says it. "Files
+                    # locked" says more, and stays.
                     assert row["shown"] and row["text"] == "Held for fraud" and "tag-held" in row["classes"], (path, row)
                     assert row["held"], ("a held email still has its held chip", row)
+                    assert row["heldShown"] == (row["held"] == "Files locked"), ("held said once", path, row)
                     held.add(row["held"])
                     continue
                 assert row["shown"] and row["text"] == WORDS[row["level"]], (path, row)
@@ -322,9 +329,13 @@ def test_the_importance_shows_in_words_on_each_email_when_asked(browser, setting
         page.click(".rail-item[data-id='settings']")
         page.uncheck("#set-importance-words")
         page.wait_for_selector("html:not([data-importance-words])")
-        page.click(".rail-item[data-id='all']")
-        page.wait_for_selector(".items .item")
-        assert not [row for row in page.evaluate(LEVELS) if row["shown"]]
+        for nav in ("all", "today"):
+            page.click(f".rail-item[data-id='{nav}']")
+            page.wait_for_selector(".items .item")
+            rows = page.evaluate(LEVELS)
+            assert not [row for row in rows if row["shown"]]
+            # With no word, the chip says it is held.
+            assert [row for row in rows if row["locked"]] and all(row["heldShown"] for row in rows if row["locked"]), nav
         assert page.evaluate("() => window.notReloaded === true")
     context.close()
 

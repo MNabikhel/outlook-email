@@ -169,7 +169,9 @@ export async function loadList(spec, signal, want = MAIL_PAGE) {
 
 const chip = (text, cls = "", iconName = "") => h("span", { class: `chip ${cls}` }, iconName ? icon(iconName, 12) : null, text);
 // Held as possible payment fraud: "Files locked" when it has files; without any, that it is held (no files to look for).
-const heldChip = (d) => (d.files ? chip("Files locked", "chip-danger", "lock") : chip("Held: possible fraud", "chip-danger", "alert"));
+// That one isn't shown while the importance is written on each email: the row's word says "Held for fraud" (app.css).
+const heldChip = (d) =>
+  d.files ? chip("Files locked", "chip-danger", "lock") : chip("Held: possible fraud", "chip-danger chip-held", "alert");
 // The importance in words beside the colored edge, shown when Settings → Appearance asks for it (data-importance-words
 // on <html>), so ticking the box needs no list drawn again. Critical and High as the task list's tags; Medium and Low
 // the quiet grey tag. An email held as possible payment fraud has the held edge, not its importance's, and says so:
