@@ -867,3 +867,18 @@ def test_the_app_without_a_browser_only_serves(monkeypatch):
 def test_a_smoke_wait_that_isnt_a_number_is_no_smoke_check(computer, tmp_path, monkeypatch):
     monkeypatch.setenv(app_window.SMOKE_ENV, "soon")
     assert make_app(FakeWebview(), computer, tmp_path).smoke == 0
+
+
+def test_a_storage_folder_that_cant_be_made_leaves_the_window_its_default(computer, tmp_path):
+    # pywebview refuses to start at all with a storage folder it can't write: the pages' settings would be lost, not
+    # the window.
+    (tmp_path / "a-file").write_text("")
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.storage = tmp_path / "a-file" / "window"
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    assert webview.started["storage_path"] is None
+    window.person_closes()
+    thread.join(10)

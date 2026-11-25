@@ -517,13 +517,22 @@ class App:
         self.window.events.closing += self.on_closing
         try:
             # Not private: the pages keep their own settings (theme, drafts, what was said) from one start to the next.
-            webview.start(self.supervise, private_mode=False, storage_path=str(self.storage), icon=icon_path())
+            webview.start(self.supervise, private_mode=False, storage_path=self._storage(), icon=icon_path())
         except Exception as exc:
             traceback.print_exc()
             if self.fallback is None:
                 self.fallback = ("broken", NO_PART.format(detail=_said(exc)))
         self.stop()
         return self.code
+
+    def _storage(self) -> str | None:
+        """Where the window keeps the pages' own settings; None (pywebview's own folder) when it can't be written,
+        which pywebview would refuse to start with."""
+        try:
+            self.storage.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return None
+        return str(self.storage) if os.access(self.storage, os.W_OK) else None
 
     def _size(self) -> tuple[int, int]:
         """A good size for CloseDesk, never bigger than the screen."""
