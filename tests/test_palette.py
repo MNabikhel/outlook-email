@@ -188,3 +188,16 @@ def test_the_classic_amber_stands_apart_from_the_colours_beside_it():
             if min(pm.delta_e(a, b, vision) for vision in pm.VISIONS) < 20
         }
         assert not close, (colors, close)
+
+
+def test_a_payment_to_check_first_is_flagged_in_the_amber_of_a_warning():
+    """The classic lists showed "Payment Caution" in the same plain beige as any other label, beside the red of a
+    held email's flags; the workspace shows it as an amber "Check before paying", and the fraud check as an amber
+    Caution."""
+    for colors in ("standard", "color-blind"):
+        tokens = pm.classic(colors)
+        plain = pm.rule_colour(pm.CLASSIC_CSS, ".flag", "background", tokens)
+        for flag in ("payment_caution", "bank_change_caution"):
+            fill = pm.rule_colour(pm.CLASSIC_CSS, f".flag.{flag}", "background", tokens)
+            assert fill == tokens["--warn"], (colors, flag, fill)
+            assert min(pm.delta_e(fill, plain, vision) for vision in pm.VISIONS) >= 20, (colors, flag)

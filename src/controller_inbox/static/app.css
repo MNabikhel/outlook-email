@@ -136,7 +136,9 @@ table.mail tr.high { box-shadow: inset 3px 0 0 var(--imp-high); }
 .flags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .flag { font-size: 11px; background: #efe7d4; padding: 2px 6px; text-transform: capitalize; }
 .flag.fraud_risk, .flag.do_not_process { background: var(--danger); color: #fff; }
-.flag.duplicate_invoice, .flag.missing_attachment { background: var(--warn); color: #fff; }
+/* A payment to check before it is made ("Payment Caution", "Bank Change Caution") is a warning, as the workspace's
+   amber "Check before paying" and the fraud check's Caution are; not a plain label. */
+.flag.duplicate_invoice, .flag.missing_attachment, .flag.payment_caution, .flag.bank_change_caution { background: var(--warn); color: #fff; }
 .flag.month_end, .flag.audit, .flag.tax { background: var(--navy); color: #fff; }
 /* Waiting for the local model: a dashed outline, apart from the High pill's amber on the same row. */
 .flag.needs_model { background: var(--card); border: 1px dashed var(--muted); padding: 1px 5px; }

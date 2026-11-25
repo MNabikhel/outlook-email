@@ -442,6 +442,7 @@ ROLES = {
         ("text", Rule(".tag.overdue", "color", "--ink"), [Rule(".tag.overdue", "background")], "overdue and fraud .tag.overdue, .tag.fraud"),
         ("text", Rule(".flag.fraud_risk", "color", "--ink"), [Rule(".flag.fraud_risk", "background")], "fraud flags .flag.fraud_risk"),
         ("text", Rule(".flag.duplicate_invoice", "color", "--ink"), [Rule(".flag.duplicate_invoice", "background")], "warning flags .flag.duplicate_invoice"),
+        ("text", Rule(".flag.payment_caution", "color", "--ink"), [Rule(".flag.payment_caution", "background")], "a payment to check first .flag.payment_caution"),
         ("text", Rule(".panel.alert", "color"), [Rule(".panel.alert", "background")], "the fraud alert panel .panel.alert"),
         ("text", Rule(".panel.alert small", "color"), [Rule(".panel.alert", "background")], "its small print .panel.alert small"),
         ("text", Rule(".job .job-flag", "color"), [Rule(".job", "background")], "a run that needs a look .job-flag"),
