@@ -440,9 +440,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return base
 
     def render(request: Request, name: str, status_code: int = 200, **extra):
-        # Never kept by the browser: Back shows the page as it is now (its counts, the job, the colors chosen in
-        # Setup since), not the copy it was first sent as.
-        return templates.TemplateResponse(request, name, ctx(request, **extra), status_code=status_code, headers={"Cache-Control": "no-store"})
+        # A page fetched is never kept by the browser: Back shows it as it is now (its counts, the job, the colors
+        # chosen in Setup since), not the copy it was first sent as. One answering a form sent (Setup's Update) may be
+        # kept: without its copy, Back has nothing to show but the browser's offer to send the form again.
+        headers = {"Cache-Control": "no-store"} if request.method == "GET" else None
+        return templates.TemplateResponse(request, name, ctx(request, **extra), status_code=status_code, headers=headers)
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):

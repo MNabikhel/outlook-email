@@ -691,6 +691,59 @@ def test_back_after_changing_the_colors_shows_the_classic_pages_in_the_new_ones(
     context.close()
 
 
+# Setup's Update button, as its form sends it (the button shows only when a newer version has been found).
+PRESS_UPDATE = """() => { const form = document.createElement('form'); form.method = 'post'; form.action = '/settings/update';
+  document.body.append(form); form.submit(); }"""
+
+
+@pytest.mark.parametrize("refused", [False, True], ids=["updating", "refused"])
+def test_back_to_the_page_the_update_button_sent_doesnt_ask_for_the_update_again(browser, settings, loaded, monkeypatch, tmp_path, refused):
+    """The classic pages were sent as never to be kept, the page Setup's Update button sends too. Back to it, after it
+    had gone on to Setup (or "Back to Setup" was clicked on the one saying it can't update now), showed the browser's
+    "Confirm Form Resubmission", and its Reload sent the button again: CloseDesk stopped for a second update, or did
+    the update refused earlier once the run had finished, without Update being pressed."""
+    from controller_inbox import updates, version
+
+    copy = tmp_path / "this copy"
+    copy.mkdir()
+    archival = copy / ".git_archival.txt"
+    archival.write_text(f"commit: {'a' * 40}\ndate: 2026-11-13\n", encoding="utf-8")
+    monkeypatch.setattr(version, "ROOT", copy)
+    asked: list[str] = []  # each time the button reached CloseDesk
+
+    def refusal(job_state: str) -> str:
+        asked.append(job_state)
+        return updates.BUSY if refused else ""
+
+    monkeypatch.setattr(updates, "refusal", refusal)
+    app = web.create_app(settings, loaded)
+    stops: list[int] = []
+    app.state.stop_server = lambda: stops.append(1)
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(app) as base:
+        page.goto(f"{base}/settings")
+        page.evaluate(PRESS_UPDATE)
+        page.wait_for_url("**/settings/update")
+        if refused:
+            assert updates.BUSY in page.inner_text("#update")
+            page.click("#update a[href='/settings#update']")
+            page.wait_for_url("**/settings#update")
+            page.go_back()  # net::ERR_CACHE_MISS, and the browser's page asking to send the form again
+            assert updates.BUSY in page.inner_text("#update"), "the page as it was sent"
+        else:
+            page.wait_for_selector("[data-update-line]")
+            # CloseDesk answers again, as the newer version: the page goes on to Setup by itself.
+            archival.write_text(f"commit: {'b' * 40}\ndate: 2026-11-16\n", encoding="utf-8")
+            page.wait_for_url("**/settings#update", timeout=15000)
+            page.go_back()
+            assert page.url == f"{base}/settings", "back to Setup as it was before Update, not to the page Update sent"
+        page.wait_for_timeout(300)
+    context.close()
+    assert len(asked) == 1, asked
+    assert stops == ([] if refused else [1])
+
+
 def test_a_classic_page_kept_open_follows_the_colors_when_shown_again(browser, settings, loaded):
     """A classic page the browser keeps as it was (Back, with the back/forward cache), or the chat in a window of its
     own, kept the colors it was sent with until it was loaded again. Shown again, it asks."""
