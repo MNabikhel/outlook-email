@@ -69,6 +69,12 @@ def launch(tmp_path, monkeypatch):
             stream.close()
 
 
+def names(env: dict[str, str]) -> dict[str, str]:
+    """``env`` by its names in capitals: Windows keeps them so (CFProcessPath is CFPROCESSPATH in a copy of
+    os.environ there), where macOS and Linux keep them as set."""
+    return {name.upper(): value for name, value in env.items()}
+
+
 def test_the_launchers_names_for_the_app_are_closedesks(launch):
     assert launch.APP_ENV == updates.APP_ENV and launch.APP_LOG_ENV == updates.APP_LOG_ENV
     assert launch.UPDATE == updates.UPDATE_AND_RESTART and launch.REBUILD == app_window.REBUILD
@@ -325,7 +331,7 @@ def test_on_a_mac_the_window_runs_python_as_closedesk_apps_own(launch, monkeypat
     assert env["__PYVENV_LAUNCHER__"] == str(launch.venv_python())
     # Where macOS looks for the app a program belongs to, said outright too (it reads CFProcessPath before the path
     # the program was started by), so the Dock says CloseDesk however macOS resolves the link.
-    assert env["CFProcessPath"] == str(linked)
+    assert names(env)["CFPROCESSPATH"] == str(linked)
 
 
 def test_without_closedesk_app_the_window_runs_the_environments_python(launch, monkeypatch):
@@ -338,7 +344,7 @@ def test_without_closedesk_app_the_window_runs_the_environments_python(launch, m
     monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
     launch.main(["--app"])
     (cmd, env), = handed
-    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env and "CFProcessPath" not in env
+    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env and "CFPROCESSPATH" not in names(env)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="CloseDesk.app's link to Python is a Mac's")
@@ -438,7 +444,7 @@ def test_a_python_that_doesnt_run_as_closedesk_app_isnt_used(launch, monkeypatch
     monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
     launch.main(["--app"])
     (cmd, env), = handed
-    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env and "CFProcessPath" not in env
+    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env and "CFPROCESSPATH" not in names(env)
 
 
 def test_a_link_that_cant_be_started_leaves_python_as_it_is(launch, monkeypatch, tmp_path):
@@ -460,7 +466,7 @@ def test_a_link_that_cant_be_started_leaves_python_as_it_is(launch, monkeypatch,
     monkeypatch.setattr(launch, "_hand_over", hand_over)
     launch.main(["--app"])
     (cmd, env), = handed
-    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env and "CFProcessPath" not in env
+    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env and "CFPROCESSPATH" not in names(env)
 
 
 def test_in_the_window_check_nothing_waits_for_a_click(monkeypatch):
