@@ -84,6 +84,8 @@ class FakeWindow:
         self.gone = threading.Event()
         self.events = SimpleNamespace(**{name: FakeEvent(self) for name in ("closing", "closed", "loaded", "shown", "initialized")})
         self.loads = True  # whether a page shown in it loads
+        # macOS (pywebview's Cocoa should_close) reads the question before the closing handlers run; Windows after.
+        self.cocoa = False
 
     def load_url(self, url) -> None:
         self.events.loaded.clear()
@@ -109,10 +111,11 @@ class FakeWindow:
     def _close(self, by: str, *, answer: bool) -> bool:
         if self.gone.is_set():
             return True
+        read_first = self.localization["global.quitConfirmation"]
         if self.events.closing.set():
             return False
         if self.confirm_close:
-            self.asked.append(self.localization["global.quitConfirmation"])
+            self.asked.append(read_first if self.cocoa else self.localization["global.quitConfirmation"])
             if not answer:
                 return False
         self.closed_by = by
@@ -204,6 +207,8 @@ class Computer:
         self.update_code: int | None = 0  # None: the update runs until the test ends it
         self.opened: list[str] = []  # given to the default browser or mail app
         self.launcher: list[str] = []  # the double-click launcher opened, and why
+        self.other = False  # a CloseDesk the window didn't start answers on the port
+        self.updating = False  # an update runs in CloseDesk's folder (launch.py --update, started elsewhere)
 
     def popen(self, cmd, **options) -> FakeProcess:
         process = FakeProcess(cmd, **options)
@@ -219,7 +224,7 @@ class Computer:
         return [p for p in self.processes if "--update" in p.cmd]
 
     def answers(self, url: str) -> bool:
-        return any(p.poll() is None for p in self.servers())
+        return self.other or any(p.poll() is None for p in self.servers())
 
 
 @pytest.fixture
@@ -237,7 +242,11 @@ def make_app(webview, computer, tmp_path, *, owned=True) -> app_window.App:
     app.working = lambda: computer.busy
     app.open_url = computer.opened.append
     app.open_launcher = lambda why="": computer.launcher.append(why)
+    app.update_running = lambda: computer.updating
+    app.port_taken = lambda: computer.answers(URL)
     app.poll = 0.01
+    app.watch = 0.01
+    app.gone_for_good = 0.3
     app.other_wait = 0.2
     app.storage = tmp_path / "window"
     return app
@@ -1121,3 +1130,258 @@ def test_a_storage_folder_that_cant_be_made_leaves_the_window_its_default(comput
     assert webview.started["storage_path"] is None
     window.person_closes()
     thread.join(10)
+
+
+# What goes wrong as the window opens is said, once --------------------------------------------------------------------
+
+
+def test_what_stops_the_window_opening_is_said_once_and_the_launcher_says_nothing_more(monkeypatch, settings):
+    # Said in a message box by the window itself: its exit code tells launch.py so (SAID), which otherwise says it.
+    told: list = []
+    monkeypatch.setattr(app_window, "tell", lambda text, **_: told.append(text))
+    monkeypatch.setattr(app_window, "why_no_window", lambda **_: None)
+    monkeypatch.setitem(sys.modules, "webview", FakeWebview())
+    monkeypatch.setattr(app_window, "load_settings", lambda: settings)
+    monkeypatch.setattr(cli, "_port_to_use", lambda host, port: (0, False))
+    assert app_window.main(SimpleNamespace(no_browser=False, host=None, port=None)) == app_window.SAID
+    assert len(told) == 1 and "port" in told[0]
+
+
+def test_an_error_before_the_window_opens_is_said_in_a_message_box(monkeypatch, tmp_path):
+    told: list = []
+    monkeypatch.setattr(app_window, "tell", lambda text, **_: told.append(text))
+    monkeypatch.setattr(app_window, "why_no_window", lambda **_: None)
+    monkeypatch.setitem(sys.modules, "webview", FakeWebview())
+    monkeypatch.setenv(updates.APP_LOG_ENV, str(tmp_path / "CloseDesk-app.log"))
+
+    def broken(args, webview):
+        raise RuntimeError("create_window failed")
+
+    monkeypatch.setattr(app_window, "prepare", broken)
+    assert app_window.main(SimpleNamespace(no_browser=False, host=None, port=None)) == app_window.SAID
+    assert len(told) == 1 and "couldn't open" in told[0] and str(tmp_path / "CloseDesk-app.log") in told[0]
+
+
+def test_a_part_of_python_that_wont_load_is_said_before_any_of_closedesk_runs(tmp_path):
+    # A company's policy (Smart App Control, WDAC) blocks a compiled part CloseDesk needs: Python ends while importing
+    # it, before the window's own code. Said in a message box, with the log that has the details.
+    blocked = tmp_path / "blocked" / "pydantic"
+    blocked.mkdir(parents=True)
+    (blocked / "__init__.py").write_text(
+        'raise ImportError("DLL load failed while importing _pydantic_core: An Application Control policy has blocked this file.")\n',
+        encoding="utf-8")
+    log = tmp_path / "CloseDesk-app.log"
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path / "blocked"), str(ROOT / "src")]),
+           updates.APP_ENV: "1", updates.APP_LOG_ENV: str(log)}
+    env.pop(app_window.SMOKE_ENV, None)
+    done = subprocess.run([sys.executable, "-m", "controller_inbox", "app"], cwd=tmp_path, env=env, capture_output=True,
+                          text=True, timeout=120)
+    said = done.stdout + done.stderr
+    assert done.returncode == app_window.SAID, said
+    assert "CloseDesk couldn't open" in said and str(log) in said and "Application Control policy" in said
+    # Anything else isn't the window's to say: as before.
+    done = subprocess.run([sys.executable, "-m", "controller_inbox", "doctor"], cwd=tmp_path, env=env, capture_output=True,
+                          text=True, timeout=120)
+    assert done.returncode == 1 and "CloseDesk couldn't open" not in done.stdout + done.stderr
+
+
+# The app's log: two CloseDesk windows write at its end, never over each other's lines --------------------------------
+
+
+def test_a_program_the_window_starts_writes_at_the_end_of_the_log_not_where_it_was_passed_on(tmp_path):
+    # Windows passes on the open log, not the way it was opened: a program writing to it as passed on writes where the
+    # one that passed it last wrote, over a second CloseDesk window's lines. (A file opened for reading and writing
+    # stands in for that here.) Opened again for adding at its end, it can't.
+    log = tmp_path / "CloseDesk-app.log"
+    log.write_text("the first window's line\nthe second window's line\n", encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), updates.APP_ENV: "1", updates.APP_LOG_ENV: str(log)}
+    code = "from controller_inbox import app_log; app_log.write_at_end(platform='win32'); print('CloseDesk started')"
+    with log.open("r+", encoding="utf-8") as passed_on:  # at the start, as an inherited file can be
+        subprocess.run([sys.executable, "-c", code], stdout=passed_on, stderr=subprocess.STDOUT, env=env, timeout=60, check=True)
+    assert log.read_text(encoding="utf-8") == "the first window's line\nthe second window's line\nCloseDesk started\n"
+
+
+# A window onto a CloseDesk it didn't start ---------------------------------------------------------------------------
+
+
+def test_a_window_onto_another_closedesk_starts_its_own_when_that_one_is_closed(computer, tmp_path):
+    # The shortcut opened a second window onto the first one's CloseDesk, then the first window was closed: the second
+    # went on showing a CloseDesk that wasn't there, with nothing to say so.
+    computer.other = True
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path, owned=False)
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    assert computer.processes == []
+    computer.other = False  # the other window closed, and its CloseDesk with it
+    until(lambda: computer.servers(), what="CloseDesk started by this window")
+    until(lambda: len(window.urls()) == 2, what="CloseDesk shown again")
+    (server,) = computer.servers()
+    assert app.owned is True and server.cmd[server.cmd.index("--port") + 1] == "8765", "on the port the page was on"
+    assert window.person_closes() is True
+    thread.join(10)
+    assert result["code"] == 0 and server.input_closed, "it is this window's now: closing it stops it"
+
+
+def test_a_window_onto_another_closedesk_waits_while_that_one_updates(computer, tmp_path):
+    # Updated by its own launcher, the other CloseDesk is away a minute and comes back on the same port.
+    computer.other = True
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path, owned=False)
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.updating = True
+    computer.other = False
+    time.sleep(app.gone_for_good * 3)
+    assert computer.processes == [], "not started over a folder being updated"
+    computer.updating = False
+    computer.other = True  # back, as the new version
+    until(lambda: len(window.urls()) == 2, what="the new version shown")
+    assert computer.processes == [] and app.owned is False
+    window.person_closes()
+    thread.join(10)
+
+
+def test_a_window_onto_another_closedesk_that_was_only_slow_to_answer_doesnt_start_a_second(computer, tmp_path):
+    computer.other = True
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path, owned=False)
+    still_there = {"port": True}
+    app.port_taken = lambda: still_there["port"]
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.other = False  # it doesn't answer in time (busy), but still holds its port
+    time.sleep(app.gone_for_good * 3)
+    assert computer.processes == []
+    window.person_closes()
+    thread.join(10)
+
+
+# The close question on a Mac -------------------------------------------------------------------------------------------
+
+
+def test_on_a_mac_the_first_close_while_mail_is_processed_asks_closedesks_question(computer, tmp_path):
+    # macOS reads the question before the closing handler runs: set only there, the first close asked pywebview's
+    # "Do you really want to quit?", and every close after it the question of the close before.
+    computer.busy = True
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, _ = running(app)
+    window = window_of(webview)
+    window.cocoa = True
+    until(lambda: URL in window.urls())
+    assert window.person_closes(answer=False) is False
+    assert window.asked == [app_window.BUSY_CLOSE]
+    computer.busy = False
+    window.person_closes()
+    thread.join(10)
+
+
+def test_on_a_mac_the_first_close_during_an_update_says_it_finishes_by_itself(computer, tmp_path):
+    computer.update_code = None
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, _ = running(app)
+    window = window_of(webview)
+    window.cocoa = True
+    until(lambda: URL in window.urls())
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)
+    until(lambda: computer.updates())
+    assert window.person_closes(answer=False) is False
+    assert window.asked == [app_window.UPDATING_CLOSE]
+    computer.updates()[0].end(0)
+    until(lambda: len(window.urls()) == 2, what="the new version")
+    computer.busy = True
+    assert window.person_closes(answer=False) is False
+    assert window.asked[-1] == app_window.BUSY_CLOSE, "the update is over: its words go with it"
+    computer.busy = False
+    window.person_closes()
+    thread.join(10)
+
+
+def test_the_windows_labels_leave_the_pages_own_questions_alone():
+    # pywebview's Cocoa uses "global.cancel" for the pages' own window.confirm() too ("Delete this conversation?"):
+    # "Keep open" there would be the wrong word.
+    assert "global.cancel" not in app_window.LABELS
+    assert app_window.LABELS["global.quit"] == "Close"
+    assert app_window.LABELS["global.quitConfirmation"] == app_window.BUSY_CLOSE
+
+
+# Closed during an update on a Mac ------------------------------------------------------------------------------------
+
+
+def test_on_a_mac_a_window_closed_during_an_update_leaves_at_once_and_the_update_finishes_by_itself(computer, tmp_path):
+    # Waiting kept CloseDesk in the Dock with no window and nothing answering, and opening CloseDesk meanwhile only
+    # brought that one forward: nothing appeared. The update is a program of its own, and finishes either way.
+    computer.update_code = None
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "darwin"
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)
+    until(lambda: computer.updates())
+    (update,) = computer.updates()
+    assert update.options.get("start_new_session") is (os.name != "nt"), "nothing that ends the window ends the update"
+    assert window.person_closes() is True
+    thread.join(10)
+    assert not thread.is_alive() and result["code"] == 0
+    assert update.poll() is None and not update.terminated, "left to finish"
+
+
+def test_an_update_that_never_ends_is_given_up_on_and_closedesk_opens_as_it_is(computer, tmp_path, capsys):
+    computer.update_code = None
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.update_longest = 0.3
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)
+    until(lambda: len(window.urls()) == 2, what="CloseDesk opened as it is")
+    (update,) = computer.updates()
+    assert update.terminated and len(computer.servers()) == 2
+    assert "gave up" in capsys.readouterr().out
+    window.person_closes()
+    thread.join(10)
+
+
+def test_a_window_closed_during_an_update_that_never_ends_doesnt_wait_for_good(computer, tmp_path):
+    computer.update_code = None
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "win32"
+    app.update_longest = 0.5
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)
+    until(lambda: computer.updates())
+    window.person_closes()
+    thread.join(10)
+    assert not thread.is_alive(), "an invisible program waiting until the computer restarts"
+
+
+# CI's check opens the workspace too -----------------------------------------------------------------------------------
+
+
+def test_in_the_smoke_check_the_workspace_is_loaded_too(computer, tmp_path, monkeypatch, capsys):
+    # The check's folder has no mail, so "/" is a classic page: the workspace's own scripts would never run in the
+    # real window (WebKit, WebView2).
+    monkeypatch.setenv(app_window.SMOKE_ENV, "5")
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.js_api.page_ready("/")
+    until(lambda: URL + "app" in window.urls(), what="the workspace in the window")
+    assert not window.gone.is_set()
+    window.js_api.page_ready("/app")
+    thread.join(10)
+    said = capsys.readouterr().out
+    assert result["code"] == 0 and "The CloseDesk window showed /\n" in said and "The CloseDesk window showed /app\n" in said

@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -229,25 +231,6 @@ def test_the_launchers_message_box_and_notice(monkeypatch):
     assert "only said" in buffer.getvalue() and len(ran) == 2
 
 
-def test_the_app_doesnt_start_while_an_update_is_putting_files_in_place(launch, monkeypatch):
-    # The window closed during an update leaves the update to finish; opened again meanwhile, CloseDesk would start
-    # from a half-replaced folder. (launch.py --update keeps its download in .update-* until it is done.)
-    import time
-
-    monkeypatch.setattr(launch, "in_venv", lambda: True)
-    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
-    handed: list = []
-    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append(cmd) or 0)
-    under_way = launch.ROOT / ".update-k2j3h4"
-    under_way.mkdir()
-    assert launch.main(["--app"]) == 0
-    assert launch.told == [launch.UPDATING_NOW] and handed == []
-    old = time.time() - 3600  # left behind by an update that was stopped long ago
-    os.utime(under_way, (old, old))
-    assert launch.main(["--app"]) == 0
-    assert len(handed) == 1
-
-
 def test_installs_from_the_app_name_the_console_python_not_pythonw(launch, monkeypatch, tmp_path):
     # The shortcut runs pythonw, which uv and pip are asked to install into: they run the Python they are given and
     # read what it prints, so they are given the python.exe beside it (started with no console window all the same).
@@ -403,3 +386,201 @@ def test_the_try_runs_python_through_the_link_as_the_window_would(launch, monkey
 
     monkeypatch.setattr(launch.subprocess, "run", cant)
     assert launch._runs_as_app(tmp_path / "CloseDesk-python") is False
+
+
+# What goes wrong as the window opens is said, once --------------------------------------------------------------------
+
+
+def test_a_window_that_ends_before_it_opens_says_so_in_a_message_box(launch, monkeypatch):
+    # The window's process (pythonw, no console) failing before any window is there (a part of Python a company's
+    # policy blocks, say) was only a line in the log: the person double-clicked and nothing happened.
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    monkeypatch.setattr(launch, "linked_python", lambda: None)
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: 1)
+    assert launch.main(["--app"]) == 1
+    assert len(launch.told) == 1, launch.told
+    assert "couldn't open" in launch.told[0] and str(launch.app_log_path()) in launch.told[0]
+
+
+def test_what_the_window_said_itself_isnt_said_again(launch, monkeypatch):
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    monkeypatch.setattr(launch, "linked_python", lambda: None)
+    for code in (0, launch.SAID):
+        monkeypatch.setattr(launch, "_hand_over", lambda cmd, code=code: code)
+        launch.main(["--app"])
+    assert launch.told == [], "closed as usual, or a message box of the window's own"
+    assert launch.SAID == app_window.SAID
+    # CI's check of the window: what failed is in its log, and no one is there to close a message box.
+    monkeypatch.setenv("CLOSEDESK_APP_SMOKE", "60")
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: 1)
+    assert launch.main(["--app"]) == 1 and launch.told == []
+
+
+def test_a_log_an_open_closedesk_holds_is_added_to_not_lost(launch, monkeypatch):
+    # Windows can't rename a file that is open, and an open CloseDesk window holds its log: a second start while the
+    # log was long sent everything it said nowhere.
+    log = launch.app_log_path()
+    log.parent.mkdir(parents=True)
+    log.write_text("x" * (launch.APP_LOG_LIMIT + 1), encoding="utf-8")
+
+    def in_use(self, target):
+        raise PermissionError(32, "The process cannot access the file because it is being used by another process")
+
+    monkeypatch.setattr(launch.Path, "replace", in_use)
+    launch.use_app_log()
+    launch.say("the second start")
+    sys.stdout.flush()
+    assert log.read_text(encoding="utf-8").endswith("the second start\n")
+
+
+# An update under way, and one that was stopped ------------------------------------------------------------------------
+
+
+def _opens(launch, monkeypatch) -> list:
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    monkeypatch.setattr(launch, "linked_python", lambda: None)
+    handed: list = []
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append(cmd) or 0)
+    return handed
+
+
+def test_a_folder_left_by_an_update_that_was_stopped_doesnt_keep_closedesk_closed(launch, monkeypatch):
+    # The update's console closed, the battery ran out: its download folder stays. The shortcut said "being updated"
+    # for a quarter of an hour although nothing was.
+    handed = _opens(launch, monkeypatch)
+    (launch.ROOT / ".update-left-behind").mkdir()
+    assert launch.main(["--app"]) == 0
+    assert launch.told == [] and len(handed) == 1
+
+
+def test_an_update_whose_program_is_gone_doesnt_count_and_what_it_left_goes(launch, monkeypatch):
+    handed = _opens(launch, monkeypatch)
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    (launch.ROOT / ".update-abc123").mkdir()
+    (launch.ROOT / launch.UPDATING_MARK).write_text(
+        json.dumps({"pid": gone.pid, "started": time.time() - 5, "folder": ".update-abc123"}), encoding="utf-8")
+    assert launch.update_under_way() is False
+    assert not (launch.ROOT / launch.UPDATING_MARK).exists() and not (launch.ROOT / ".update-abc123").exists()
+    assert launch.main(["--app"]) == 0 and len(handed) == 1
+
+
+def test_the_app_doesnt_open_while_an_update_runs_from_its_start_to_the_end_of_its_check(launch, monkeypatch):
+    # The update's own folder is there only while it downloads; after it come the check and new packages, which an
+    # opening CloseDesk would race.
+    seen: list = []
+    monkeypatch.setattr(launch, "update", lambda: seen.append(("update", launch.update_under_way())) or 0)
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: seen.append(("check", launch.update_under_way())) or 0)
+    assert launch.main(["--update"]) == 0
+    assert seen == [("update", True), ("check", True)]
+    assert launch.update_under_way() is False, "said done once it is"
+    handed = _opens(launch, monkeypatch)
+    (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps({"pid": os.getpid(), "started": time.time()}), encoding="utf-8")
+    assert launch.main(["--app"]) == 0
+    assert launch.told == [launch.UPDATING_NOW] and handed == []
+
+
+def test_an_update_said_to_run_long_ago_doesnt_count(launch):
+    (launch.ROOT / launch.UPDATING_MARK).write_text(
+        json.dumps({"pid": os.getpid(), "started": time.time() - launch.UPDATE_LONGEST - 60}), encoding="utf-8")
+    assert launch.update_under_way() is False
+    (launch.ROOT / launch.UPDATING_MARK).write_text("not what an update writes", encoding="utf-8")
+    assert launch.update_under_way() is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows' is asked of Windows itself (below)")
+def test_whether_an_updates_program_still_runs_here(launch):
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    assert launch._alive(os.getpid(), time.time()) is True
+    assert launch._alive(gone.pid, time.time()) is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows' own answer")
+def test_whether_an_updates_program_still_runs_on_windows(launch):
+    # Asked of Windows itself (os.kill would end the program). A program started after the update said it was running
+    # was given the same number later: it isn't the update.
+    alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert launch._alive(alive.pid, time.time() + 5) is True
+        assert launch._alive(alive.pid, time.time() - 3600) is False
+    finally:
+        alive.kill()
+        alive.wait()
+    assert launch._alive(alive.pid, time.time()) is False
+
+
+def test_an_update_that_finds_this_the_newest_says_so_for_the_next_start(launch, monkeypatch, tmp_path):
+    # Nothing went wrong: the next start must not say "CloseDesk wasn't updated".
+    import zipfile
+
+    (launch.ROOT / ".git_archival.txt").write_text(f"commit: {'a' * 40}\ndate: 2026-10-21\n", encoding="utf-8")
+    archive = tmp_path / "download.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("outlook-email-main/pyproject.toml", '[project]\nname = "controller-inbox"\ndependencies = []\n')
+        bundle.writestr("outlook-email-main/scripts/launch.py", "# the launcher\n")
+        bundle.writestr("outlook-email-main/.git_archival.txt", f"commit: {'a' * 40}\ndate: 2026-10-21\n")
+    monkeypatch.setenv("CLOSEDESK_UPDATE_URL", archive.as_uri())
+    assert launch.update() == 0
+    assert (launch.VENV / updates.NEWEST_NOTE).read_text(encoding="utf-8").strip() == "a" * 40
+    assert launch.NEWEST_NOTE == updates.NEWEST_NOTE
+
+
+def test_a_download_that_stalls_gives_up_instead_of_waiting_for_good(launch, monkeypatch, tmp_path):
+    # A proxy that holds the connection open and sends nothing: curl would wait with no end, and the window with it.
+    ran: list = []
+    monkeypatch.setattr(launch.shutil, "which", lambda name: "/usr/bin/curl")
+    monkeypatch.setattr(launch.subprocess, "run", lambda cmd, **options: ran.append((cmd, options)) or SimpleNamespace(returncode=0))
+    assert launch._fetch("https://example.com/closedesk.zip", tmp_path / "x.zip") is True
+    (cmd, options), = ran
+    for flag in ("--connect-timeout", "--speed-limit", "--speed-time", "--max-time"):
+        assert flag in cmd, flag
+    assert int(cmd[cmd.index("--max-time") + 1]) <= launch.DOWNLOAD_LONGEST
+    assert options["timeout"] and options["timeout"] > launch.DOWNLOAD_LONGEST
+
+
+def test_a_download_curl_couldnt_make_isnt_waited_on_for_good_either(launch, monkeypatch, tmp_path):
+    # curl refused (a certificate it doesn't trust, say): Python's own download, which trickles on for ever, is given
+    # up on within the same time.
+    def refused(cmd, **options):
+        return SimpleNamespace(returncode=60, stdout="", stderr="SSL certificate problem")
+
+    class Trickle:
+        """A reply that keeps sending a little, for ever."""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, size=-1):
+            time.sleep(0.01)
+            return b"x"
+
+    monkeypatch.setattr(launch.shutil, "which", lambda name: "/usr/bin/curl")
+    monkeypatch.setattr(launch.subprocess, "run", refused)
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: Trickle())
+    monkeypatch.setattr(launch, "DOWNLOAD_LONGEST", 0.3)
+    started = time.monotonic()
+    assert launch._fetch("https://example.com/closedesk.zip", tmp_path / "x.zip") is False
+    assert time.monotonic() - started < 5
+
+
+def test_the_update_the_window_starts_adds_to_the_end_of_the_log_on_windows(launch, monkeypatch):
+    # Started by the window with the log as its output: Windows passes on the open file, not the way it was opened, so
+    # written as passed on it would write over a second CloseDesk window's lines. Opened again here, for adding.
+    log = launch.app_log_path()
+    log.parent.mkdir(parents=True)
+    log.write_text("another window's line\n", encoding="utf-8")
+    monkeypatch.setattr(launch, "WINDOWS", True)
+    monkeypatch.setenv("CLOSEDESK_APP", "1")
+    monkeypatch.setenv("CLOSEDESK_APP_LOG", str(log))
+    monkeypatch.setattr(launch, "update", lambda: launch.say("Looking for the newest CloseDesk...") or 1)
+    assert launch.main(["--update"]) == 1
+    sys.stdout.flush()
+    assert log.read_text(encoding="utf-8") == "another window's line\nLooking for the newest CloseDesk...\n"
+    assert sys.stdout.mode == "a"

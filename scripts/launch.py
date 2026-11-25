@@ -76,6 +76,14 @@ APP_LOGS = sys.platform in ("win32", "darwin")
 APP_LOG_LIMIT = 2_000_000  # a log grown past this starts afresh (the one before is kept as .old)
 INSTALLING = "CloseDesk is installing what it needs. This takes a minute or two; it opens by itself when it is done."
 UPDATING_NOW = "CloseDesk is being updated just now. Open it again in a minute or two, once the update is done."
+# The window's process ended with an error before it could say anything itself (a part of Python that won't load, say).
+CANT_OPEN = (
+    "CloseDesk couldn't open. What went wrong is written in {log}. Double-click {launcher} in CloseDesk's folder to "
+    "open it in your browser instead: its window shows what goes wrong."
+)
+# How the window's process ends when it has said why it can't open itself (a message box of its own): not said again.
+# (app_window.SAID)
+SAID = 4
 SETUP_FAILED = (
     "CloseDesk couldn't install what it needs. Most often the internet connection (or a company proxy) stopped a "
     "download: try again when it is back. What went wrong is written in {log}."
@@ -95,6 +103,17 @@ BRANCH = "main"
 # What an update never touches: the mail, the settings and the environment. (Anything else the new version
 # doesn't have, such as a folder you made, is left alone too.)
 KEPT = {"data", "inbox", ".env", ".venv", "AP cost codes", ".previous", ".git"}
+# An update says it is under way (its program, since when, its download folder) in this file in CloseDesk's folder, from
+# its start to the end of the check after it: the CloseDesk app doesn't open meanwhile. One older than this is stale.
+UPDATING_MARK = ".closedesk-updating"
+UPDATE_LONGEST = 30 * 60
+# An update that found this copy the newest already says so here (in .venv), for the next start: nothing went wrong.
+# (controller_inbox.updates.NEWEST_NOTE)
+NEWEST_NOTE = "closedesk-newest.txt"
+# The longest a download of the update may take, and how slow it may be for how long: a connection that stays open
+# and sends nothing (a proxy holding it) ends instead of keeping the update, and the window, waiting.
+DOWNLOAD_LONGEST = 15 * 60
+SLOWEST = ("1024", "60")  # bytes a second, for that many seconds
 
 
 def say(text: str = "") -> None:
@@ -201,14 +220,23 @@ def app_log_path() -> Path:
 _app_log = None
 
 
-def use_app_log() -> None:
-    """What the app says goes to its log (there is no console; under pythonw print and flush would fail)."""
+def use_app_log(*, rotate: bool = True) -> None:
+    """What the app says goes to its log (there is no console; under pythonw print and flush would fail), added at its
+    end. ``rotate``: a log grown long is started afresh, unless an open CloseDesk holds it (Windows can't rename an
+    open file): then it is added to, never left for nowhere."""
     global _app_log
-    path = app_log_path()
+    path = Path(os.environ.get(APP_LOG_ENV) or app_log_path())
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.exists() and path.stat().st_size > APP_LOG_LIMIT:
-            path.replace(path.with_name(path.name + ".old"))
+    except OSError:
+        pass
+    if rotate:
+        try:
+            if path.exists() and path.stat().st_size > APP_LOG_LIMIT:
+                path.replace(path.with_name(path.name + ".old"))
+        except OSError:
+            pass  # in use by an open CloseDesk: started afresh another time
+    try:
         _app_log = open(path, "a", encoding="utf-8", errors="replace", buffering=1)  # noqa: SIM115 (kept open)
     except OSError:
         _app_log = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115
@@ -478,10 +506,18 @@ def _hand_over(cmd: list[str]) -> int:
 
 def _fetch(url: str, dest: Path) -> bool:
     """Download with curl (it trusts what the computer trusts, a company proxy's certificate included), else
-    with Python."""
+    with Python. Both together within ``DOWNLOAD_LONGEST``: one that stalls is given up on."""
+    until = time.monotonic() + DOWNLOAD_LONGEST
+    longest = f"{DOWNLOAD_LONGEST / 60:g} minutes"
     curl = shutil.which("curl")
     if curl:
-        done = subprocess.run([curl, "-fsSL", "--retry", "2", "-o", str(dest), url], capture_output=True, text=True, **_quiet())
+        cmd = [curl, "-fsSL", "--retry", "2", "--connect-timeout", "30", "--speed-limit", SLOWEST[0], "--speed-time",
+               SLOWEST[1], "--max-time", str(max(1, int(DOWNLOAD_LONGEST))), "-o", str(dest), url]
+        try:
+            done = subprocess.run(cmd, capture_output=True, text=True, timeout=DOWNLOAD_LONGEST + 60, **_quiet())
+        except subprocess.TimeoutExpired:
+            say(f"The download of {url} took longer than {longest}: it was stopped.")
+            return False
         if done.returncode == 0:
             return True
     try:
@@ -495,7 +531,13 @@ def _fetch(url: str, dest: Path) -> bool:
         except ImportError:
             context = ssl.create_default_context()
         with urllib.request.urlopen(url, timeout=60, context=context) as reply, dest.open("wb") as out:  # noqa: S310
-            shutil.copyfileobj(reply, out)
+            while True:
+                if time.monotonic() > until:
+                    raise TimeoutError(f"it took longer than {longest}")
+                chunk = reply.read(1 << 16)
+                if not chunk:
+                    break
+                out.write(chunk)
         return True
     except Exception as exc:
         say(f"Couldn't download {url}: {exc}")
@@ -522,7 +564,12 @@ def update() -> int:
         return 1
     url = os.environ.get("CLOSEDESK_UPDATE_URL") or f"https://github.com/{REPO}/archive/refs/heads/{BRANCH}.zip"
     say("Looking for the newest CloseDesk...")
+    try:
+        (VENV / NEWEST_NOTE).unlink()
+    except OSError:
+        pass
     with tempfile.TemporaryDirectory(prefix=".update-", dir=ROOT) as tmp:
+        _mark_update(folder=Path(tmp).name)  # removed with what the update leaves, if it is stopped
         archive = Path(tmp) / "closedesk.zip"
         if not _fetch(url, archive):
             say("The update couldn't be downloaded. Nothing was changed; try again when the internet is back.")
@@ -556,6 +603,10 @@ def update() -> int:
             pass
         if before and before == after:
             say("CloseDesk is already the newest version.")
+            try:
+                (VENV / NEWEST_NOTE).write_text(before + "\n", encoding="utf-8")  # the next start: nothing went wrong
+            except OSError:
+                pass
             return 0
         previous = ROOT / ".previous"
         shutil.rmtree(previous, ignore_errors=True)
@@ -595,16 +646,98 @@ def update() -> int:
 # ----------------------------------------------------------------------------------------------------------
 
 
+_marked: dict = {}
+
+
+def _mark_update(**more) -> None:
+    """Say in CloseDesk's folder that an update runs (this program, since when, and ``more``)."""
+    _marked.setdefault("pid", os.getpid())
+    _marked.setdefault("started", time.time())
+    _marked.update(more)
+    try:
+        (ROOT / UPDATING_MARK).write_text(json.dumps(_marked), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _end_update() -> None:
+    try:
+        said = json.loads((ROOT / UPDATING_MARK).read_text(encoding="utf-8"))
+        if said.get("pid") == os.getpid():
+            (ROOT / UPDATING_MARK).unlink()
+    except (OSError, ValueError, AttributeError):
+        pass
+    _marked.clear()
+
+
+def _alive(pid: int, started: float = 0.0) -> bool:
+    """Whether the program ``pid`` that said at ``started`` it was updating still runs."""
+    if pid == os.getpid():
+        return True
+    if WINDOWS:
+        return _windows_alive(pid, started)
+    try:
+        os.kill(pid, 0)  # asks, sends nothing
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # there, another user's
+    except OSError:
+        return False
+    return True
+
+
+def _windows_alive(pid: int, started: float) -> bool:
+    """Windows: asked of Windows (os.kill would end the program). A program started after the update said it was
+    running isn't it: Windows gave the number to another one since."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.get_last_error() == 5  # access denied: there, another user's
+    try:
+        code = wintypes.DWORD()
+        if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value != 259:  # STILL_ACTIVE
+            return False
+        created, ended, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if started and kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in (created, ended, kernel, user))):
+            when = ((created.dwHighDateTime << 32) | created.dwLowDateTime) / 1e7 - 11_644_473_600
+            if when > started + 5:
+                return False
+        return True
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def update_under_way() -> bool:
-    """Whether an update is putting files in place in this folder now (``update`` keeps its download in a folder
-    named .update-... until it is done). One left behind long ago by an update that was stopped doesn't count."""
-    now = time.time()
-    for folder in ROOT.glob(".update-*"):
-        try:
-            if now - folder.stat().st_mtime < 15 * 60:
-                return True
-        except OSError:
-            pass
+    """Whether an update runs in this folder now, from its start to the end of the check after it (it says so in
+    ``UPDATING_MARK``). One whose program is gone (stopped: its window closed, the battery ran out) doesn't count, and
+    the download it left goes with what it said."""
+    mark = ROOT / UPDATING_MARK
+    try:
+        said = json.loads(mark.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        said = {}
+    said = said if isinstance(said, dict) else {}
+    try:
+        pid, started = int(said.get("pid") or 0), float(said.get("started") or 0)
+    except (TypeError, ValueError):
+        pid, started = 0, 0.0
+    if pid and 0 <= time.time() - started < UPDATE_LONGEST and _alive(pid, started):
+        return True
+    left = Path(str(said.get("folder") or "")).name
+    if left.startswith(".update-"):
+        shutil.rmtree(ROOT / left, ignore_errors=True)
+    try:
+        mark.unlink()
+    except OSError:
+        pass
     return False
 
 
@@ -632,6 +765,21 @@ def app(args: list[str]) -> int:
         return code
     # The window acts on CloseDesk's UPDATE exit code itself, so CloseDesk offers its Update button.
     os.environ["CLOSEDESK_LAUNCHER"] = "1"
+    return _after_window(_open_window(args))
+
+
+def _after_window(code: int) -> int:
+    """The window's process has ended (Windows: it ran beside this one). With an error it didn't explain itself (it
+    ended before it could: a part of Python that won't load, say), the person is told, or they would see nothing at
+    all."""
+    if code not in (0, SAID, 130):
+        say(f"The CloseDesk window's program ended with exit code {code}.")
+        if not os.environ.get(SMOKE_ENV):
+            tell(CANT_OPEN.format(log=app_log_path(), launcher="CloseDesk.bat" if WINDOWS else "CloseDesk.command"))
+    return code
+
+
+def _open_window(args: list[str]) -> int:
     window = ["-m", "controller_inbox", "app", *args]
     linked = linked_python()
     if linked is not None and not _runs_as_app(linked):
@@ -658,13 +806,23 @@ def main(argv: list[str]) -> int:
     if "--app" in args:
         args.remove("--app")
         return app(args)
+    if app_mode() and os.environ.get(APP_LOG_ENV) and (WINDOWS or sys.stdout is None):
+        # Started by the CloseDesk window (the update, its check) with the app's log as its output: opened again here,
+        # for adding at its end (Windows passes on the file, not the way it was opened: written as passed on, it
+        # would write over another CloseDesk window's lines).
+        use_app_log(rotate=False)
     if "--update" in args:
         args.remove("--update")
-        code = update()
-        if code:
-            return code
-        # The newest launch.py checks the newest set-up (this one is the old file, already in memory).
-        return _hand_over([sys.executable, str(Path(__file__).resolve()), "--check", *args])
+        _mark_update()
+        try:
+            code = update()
+            if code:
+                return code
+            # The newest launch.py checks the newest set-up (this one is the old file, already in memory). (Outside
+            # Windows it takes this program's place, and what it said about the update with it: stale once it ends.)
+            return _hand_over([sys.executable, str(Path(__file__).resolve()), "--check", *args])
+        finally:
+            _end_update()
     if not in_venv():
         return create_environment(args)
     code = ensure_packages()

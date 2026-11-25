@@ -30,6 +30,7 @@ import io
 import json
 import os
 import platform as _platform
+import socket
 import subprocess
 import sys
 import threading
@@ -41,7 +42,7 @@ from html import escape
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from controller_inbox import updates, version
+from controller_inbox import app_log, updates, version
 from controller_inbox.config import load_settings
 
 ROOT = version.ROOT
@@ -65,6 +66,9 @@ WINDOW_ENV = "CLOSEDESK_WINDOW"
 SMOKE_ENV = "CLOSEDESK_APP_SMOKE"
 SMOKE_HOLD_ENV = "CLOSEDESK_APP_SMOKE_HOLD"
 DIDNT_OPEN = 2
+# How the window's process ends when it has said itself, in a message box, why CloseDesk can't open: launch.py, which
+# otherwise says so for a window that ends with an error, then says nothing more.
+SAID = app_log.SAID
 # macOS: where the window's Python says it was started from (launch.py sets it to the link in CloseDesk.app), read for
 # the app it belongs to: the Dock and the menu bar say CloseDesk. Not for what the window starts.
 MAC_APP_PATH = "CFProcessPath"
@@ -72,7 +76,13 @@ MAC_APP_PATH = "CFProcessPath"
 SIZE = (1280, 860)
 MIN_SIZE = (720, 520)
 BACKGROUND = "#F4F5F7"
-LABELS = {"global.quit": "Close", "global.cancel": "Keep open"}
+# pywebview's "close anyway?": its question is there from the start, since macOS reads it before the closing handler
+# runs (Windows after; the handler sets it for both). "global.cancel" is pywebview's own ("Cancel"): macOS uses it for
+# the pages' own questions too (window.confirm), where "Keep open" would be the wrong word.
+LABELS = {"global.quit": "Close", "global.quitConfirmation": (
+    "CloseDesk is still processing mail. Close it anyway? What it hasn't finished is picked up the next time "
+    "CloseDesk opens."
+)}
 # The engines CloseDesk's pages run in: WebView2 (Windows) and WebKit (macOS).
 ENGINES = ("edgechromium", "wkwebview")
 # Where what leaves CloseDesk may be opened: another website, a mail address.
@@ -87,10 +97,7 @@ NO_WEBVIEW2 = (
 NO_PART = "The CloseDesk window couldn't start on this computer ({detail}), so CloseDesk opens in your browser instead."
 BLANK = "The CloseDesk window stayed empty, so CloseDesk opens in your browser instead."
 TURNED_OFF = "CloseDesk opens in your browser (CLOSEDESK_WINDOW=0 is set)."
-BUSY_CLOSE = (
-    "CloseDesk is still processing mail. Close it anyway? What it hasn't finished is picked up the next time "
-    "CloseDesk opens."
-)
+BUSY_CLOSE = LABELS["global.quitConfirmation"]
 UPDATING_CLOSE = (
     "CloseDesk is updating. Close the window anyway? The update finishes by itself; open CloseDesk again in a minute "
     "or two."
@@ -108,6 +115,14 @@ LOAD_WAIT = 60
 UP_WAIT = 180
 OTHER_WAIT = 30
 STOP_WAIT = 20
+# Showing a CloseDesk it didn't start: how often the window looks whether that one is still there, and how long it
+# may be away (its port free, no update under way) before the window starts CloseDesk itself.
+WATCH_EVERY = 3
+GONE_FOR_GOOD = 30
+# The longest an update may run before the window gives up on it (its download gives up long before).
+UPDATE_LONGEST = 30 * 60
+# An update says it is under way in this file in CloseDesk's folder (launch.py's UPDATING_MARK).
+UPDATING_MARK = ".closedesk-updating"
 # How CloseDesk ends when another took its port first: "already open in another window" (0), or the port couldn't be
 # opened (3).
 TAKEN = (0, 3)
@@ -130,12 +145,7 @@ def user_dir() -> Path:
 
 def log_path() -> Path:
     """The app's log, as launch.py named it (its app_log_path)."""
-    named = os.environ.get(updates.APP_LOG_ENV, "")
-    if named:
-        return Path(named)
-    if sys.platform == "darwin":
-        return Path.home() / "Library" / "Logs" / "CloseDesk" / "CloseDesk-app.log"
-    return user_dir() / "CloseDesk-app.log"
+    return app_log.path()
 
 
 def icon_path() -> str | None:
@@ -311,25 +321,9 @@ def _in_check() -> bool:
 
 
 def tell(text: str, *, platform: str | None = None) -> None:
-    """Say ``text`` where a person sees it with no console: a message box (Windows), an alert (macOS). Also logged."""
-    platform = platform or sys.platform
-    print(text, flush=True)
-    if _in_check():
-        return  # no one is there to close it
-    try:
-        if platform == "win32":
-            import ctypes
-
-            ctypes.windll.user32.MessageBoxW(None, text, TITLE, 0x40 | 0x10000)  # an "i", brought to the front
-        elif platform == "darwin":
-            # The words are passed as they are, never written into the script.
-            subprocess.run(
-                ["/usr/bin/osascript", "-e", "on run argv", "-e", "display alert (item 1 of argv) message (item 2 of argv)",
-                 "-e", "end run", TITLE, text],
-                stdin=subprocess.DEVNULL, capture_output=True, timeout=3600,
-            )
-    except (OSError, AttributeError, ValueError, subprocess.SubprocessError):
-        pass
+    """Say ``text`` where a person sees it with no console: a message box (Windows), an alert (macOS). Also logged. (In
+    CI's check of the window, the log only.)"""
+    app_log.tell(text, platform=platform)
 
 
 def _said_file() -> Path:
@@ -511,6 +505,71 @@ def _working(url: str) -> bool:
         return False
 
 
+def _taken(url: str) -> bool:
+    """Whether something holds CloseDesk's port at ``url`` (a CloseDesk too busy to answer in time is still there)."""
+    parts = urlsplit(url)
+    try:
+        with socket.create_connection((parts.hostname or "127.0.0.1", parts.port or 80), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def process_runs(pid: int, started: float = 0.0) -> bool:
+    """Whether the program ``pid``, which said at ``started`` that it was updating, still runs. (launch.py has a copy,
+    for before CloseDesk is installed.)"""
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        return _windows_process_runs(pid, started)
+    try:
+        os.kill(pid, 0)  # asks, sends nothing
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _windows_process_runs(pid: int, started: float) -> bool:
+    """Asked of Windows (os.kill would end the program). One started after the update said it was running isn't it:
+    Windows gave the number to another program since."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.get_last_error() == 5  # access denied: there, another user's
+    try:
+        code = wintypes.DWORD()
+        if kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value != 259:  # STILL_ACTIVE
+            return False
+        created, ended, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if started and kernel32.GetProcessTimes(handle, *(ctypes.byref(t) for t in (created, ended, kernel, user))):
+            when = ((created.dwHighDateTime << 32) | created.dwLowDateTime) / 1e7 - 11_644_473_600
+            if when > started + 5:
+                return False
+        return True
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def update_running(root: Path | None = None) -> bool:
+    """Whether an update runs in CloseDesk's folder now (launch.py --update, from its start to the end of the check after
+    it, says so in ``UPDATING_MARK``); one whose program is gone doesn't count."""
+    try:
+        said = json.loads(((root or ROOT) / UPDATING_MARK).read_text(encoding="utf-8"))
+        pid, started = int(said["pid"]), float(said["started"])
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+    return 0 <= time.time() - started < UPDATE_LONGEST and process_runs(pid, started)
+
+
 def _said(exc: BaseException) -> str:
     return " ".join(f"{type(exc).__name__}: {exc}".split())[:200]
 
@@ -554,11 +613,15 @@ class App:
         # What runs things on the computer (the tests give their own).
         self.popen = subprocess.Popen
         self.answers = _answers
+        self.port_taken = lambda: _taken(self.url)
+        self.update_running = update_running
         self.working = lambda: _working(self.url)
         self.open_url = webbrowser.open
         self.open_launcher = open_launcher
         self.storage = user_dir() / "window"
         self.load_wait, self.up_wait, self.other_wait, self.poll = LOAD_WAIT, UP_WAIT, OTHER_WAIT, 0.25
+        self.watch, self.gone_for_good, self.update_longest = WATCH_EVERY, GONE_FOR_GOOD, UPDATE_LONGEST
+        self._update_until = 0.0
 
     # On the main thread -----------------------------------------------------------------------------------------
 
@@ -576,6 +639,7 @@ class App:
         )
         self.window.events.initialized += self.check_engine
         self.window.events.closing += self.on_closing
+        self.window.events.closed += self.on_closed
         try:
             # Not private: the pages keep their own settings (theme, drafts, what was said) from one start to the next.
             webview.start(self.supervise, private_mode=False, storage_path=self._storage(), icon=icon_path())
@@ -605,16 +669,35 @@ class App:
         return min(SIZE[0], int(width * 0.9)), min(SIZE[1], int(height * 0.88))
 
     def stop(self) -> None:
-        """The window has closed: the CloseDesk it started stops; an update under way finishes first (one stopped half
-        way would leave CloseDesk half updated)."""
+        """The window has closed: the CloseDesk it started stops. An update under way is a program of its own and
+        finishes by itself (one stopped half way would leave CloseDesk half updated). On a Mac the window's program
+        leaves at once: kept with no window, it would stay in the Dock, where opening CloseDesk again only brings it
+        forward and nothing appears. Elsewhere it waits for the update, but not for good."""
         with self._lock:
             self.closing = True
             server, update = self.server, self.update
         if update is not None and update.poll() is None:
-            print("The window was closed during the update: the update finishes first.", flush=True)
-            update.wait()
+            if self.platform == "darwin":
+                print("The window was closed during the update: the update finishes by itself.", flush=True)
+            else:
+                print("The window was closed during the update: the update finishes first.", flush=True)
+                self._wait_for_update(update)
         if server is not None and server.poll() is None:
             self._end(server)
+
+    def _wait_for_update(self, update) -> int:
+        """The update's exit code once it ends; given up on (and ended) past ``update_longest``: something holds it
+        that won't let go."""
+        try:
+            return update.wait(max(0.0, self._update_until - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            print(f"The update was still running after {self.update_longest / 60:g} minutes: the window gave up on it.", flush=True)
+            try:
+                update.terminate()
+                update.wait(10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            return 1
 
     def _end(self, server) -> None:
         """Stop CloseDesk the window started, as Ctrl+C would: its input ends. Ended outright if it doesn't."""
@@ -662,6 +745,18 @@ class App:
         window.confirm_close = bool(words)
         return None
 
+    def on_closed(self) -> None:
+        """The window is gone: nothing more is shown in it, and nothing starts again."""
+        with self._lock:
+            self.closing = True
+
+    def _ask_on_close(self, words: str) -> None:
+        """What pywebview's "close anyway?" asks from now on (macOS reads it before the closing handler runs)."""
+        try:
+            self.window.localization["global.quitConfirmation"] = words
+        except (AttributeError, TypeError):
+            pass
+
     def close_on_purpose(self) -> None:
         """CloseDesk closes its window itself (for the browser, the launcher, or CI's check): nothing is asked."""
         self.on_purpose = True
@@ -697,11 +792,17 @@ class App:
             if named:
                 # "Python" here means the Dock shows the window as Python's (CloseDesk.app's link wasn't used).
                 print(f"macOS shows the window as {named}.", flush=True)
-        if not self.owned:
-            self._show_closedesk()
-            return
         reopen = False
-        while True:
+        while not self.closing:
+            if not self.owned:
+                # A CloseDesk this window didn't start: shown, and left open when the window closes. Watched meanwhile:
+                # when it stops for good (closed with its own window), this window starts CloseDesk itself.
+                self._show_closedesk()
+                if not self._watch_other():
+                    return
+                self.owned, reopen = True, False
+                self._show(opening_page())
+                continue
             server = self._start_server(reopen=reopen)
             if server is None:
                 return
@@ -716,7 +817,7 @@ class App:
                     # one found it there): shown, as one already open is, and left open when the window closes.
                     print("Another CloseDesk opened on the same port meanwhile: the window shows that one.", flush=True)
                     self.owned = False
-                    self._show_closedesk()
+                    continue
                 else:
                     print(f"CloseDesk stopped as it started (exit code {server.poll()}).", flush=True)
                     self._failed(stopped_page(self.log))
@@ -764,6 +865,33 @@ class App:
             time.sleep(self.poll)
         return False
 
+    def _watch_other(self) -> bool:
+        """The window shows a CloseDesk it didn't start. True when that one has gone for good: it stopped answering, its
+        port is free, and no update runs in its folder (an update brings it back on the same port) for
+        ``gone_for_good`` seconds. Back meanwhile (updated), it is shown again. False once the window closes."""
+        away = None
+        while not self.closing:
+            time.sleep(self.watch)
+            if self.closing:
+                return False
+            if self.answers(self.url):
+                if away is not None:
+                    print("The CloseDesk the window shows is back: shown again.", flush=True)
+                    away = None
+                    self._show_closedesk()
+                continue
+            if self.port_taken():
+                continue  # still there, busy: too slow to answer in time
+            if away is None:
+                print("The CloseDesk the window shows has stopped: the window waits a moment, since an update brings it back.", flush=True)
+            if away is None or self.update_running():
+                away = time.monotonic()
+                continue
+            if time.monotonic() - away >= self.gone_for_good:
+                print("It didn't come back (closed with its own window): the window starts CloseDesk itself.", flush=True)
+                return True
+        return False
+
     def _another_answers(self) -> bool:
         deadline = time.monotonic() + self.other_wait
         while not self.closing:
@@ -789,11 +917,21 @@ class App:
 
     def _show_closedesk(self) -> None:
         self.ready.clear()
-        self.window.load_url(self.url)
+        try:
+            self.window.load_url(self.url)
+        except Exception as exc:
+            print(f"Couldn't show CloseDesk in the window: {_said(exc)}", flush=True)
+            return
         if not self.smoke:
             return
-        if self.ready.wait(self.smoke):
-            print(f"The CloseDesk window showed {self.ready_path}", flush=True)
+        shown = self._check_shows()
+        if shown and self.ready_path != "/app":
+            # The check's folder has no mail, so "/" is a classic page: the workspace is loaded too, so that its own
+            # scripts run in the real window's engine.
+            self.ready.clear()
+            self.window.load_url(self.url + "app")
+            shown = self._check_shows()
+        if shown:
             self.code = 0
             # Kept open a while (the first time) for the check to look at it, or press Update now; closed meanwhile, it
             # isn't closed again, and CloseDesk stopping meanwhile (to update) is followed through.
@@ -805,13 +943,21 @@ class App:
             if self.closing:
                 return
         else:
-            print(f"The CloseDesk window didn't show CloseDesk's page within {self.smoke:g} seconds.", flush=True)
             self.code = 1
         self.close_on_purpose()
+
+    def _check_shows(self) -> bool:
+        """In the window's check: whether the page loaded in it says it loaded, in time."""
+        if self.ready.wait(self.smoke):
+            print(f"The CloseDesk window showed {self.ready_path}", flush=True)
+            return True
+        print(f"The CloseDesk window didn't show CloseDesk's page within {self.smoke:g} seconds.", flush=True)
+        return False
 
     def _update(self) -> bool:
         """Update now: CloseDesk stopped to be updated. The window says so throughout; True when CloseDesk is to be
         started again (updated, or as it was when the update didn't finish: its first page says so)."""
+        self._ask_on_close(UPDATING_CLOSE)
         self.updating = True
         self._show(updating_page())
         print("Updating CloseDesk...", flush=True)
@@ -822,13 +968,17 @@ class App:
             with self._lock:
                 if self.closing:
                     return False
+                self._update_until = time.monotonic() + self.update_longest
+                # A program of its own, which nothing that ends the window ends (a Mac's window leaves at once when it
+                # is closed meanwhile).
                 self.update = self.popen(
                     [sys.executable, str(ROOT / "scripts" / "launch.py"), "--update"], cwd=str(ROOT), env=env,
-                    stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, **_output(),
+                    stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, start_new_session=os.name != "nt", **_output(),
                 )
-            code = self.update.wait()
+            code = self._wait_for_update(self.update)
         finally:
             self.updating = False
+            self._ask_on_close(BUSY_CLOSE)
         if code == REBUILD:
             # The environment has to be made again, which a Python running from it can't do: the launcher does, in its
             # window, then starts CloseDesk.
@@ -886,8 +1036,19 @@ def _leave(code: int) -> None:
 
 
 def main(args) -> int:
-    """``controller_inbox app``: open the CloseDesk window, or the browser where it can't open."""
+    """``controller_inbox app``: open the CloseDesk window, or the browser where it can't open. What stops it opening
+    is said in a message box (it has no console), and it ends with ``SAID``."""
+    app_log.write_at_end()
     use_log_if_no_console()
+    try:
+        return _open(args)
+    except Exception:
+        traceback.print_exc()
+        tell(app_log.CANT_OPEN.format(log=log_path(), launcher="CloseDesk.bat" if sys.platform == "win32" else "CloseDesk.command"))
+        return SAID
+
+
+def _open(args) -> int:
     set_app_id()
     settle_mac_name()
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} The CloseDesk window opens ({version.label()}).", flush=True)
@@ -901,7 +1062,7 @@ def main(args) -> int:
 
     app = prepare(args, webview)
     if app is None:
-        return 1
+        return SAID  # said in a message box
     code = app.run()
     if app.fallback:
         code = browser_instead(app.fallback, args)
