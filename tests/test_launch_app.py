@@ -494,6 +494,21 @@ def test_a_double_click_start_while_an_update_runs_says_so_and_doesnt_start(laun
     assert launch.UPDATING_NOW in capsys.readouterr().out and handed == []
 
 
+def test_a_second_update_while_one_runs_waits_for_it(launch, monkeypatch, capsys):
+    # CloseDesk-Update double-clicked while the window's update carries on after its window closed: two updates
+    # moving the same files at once.
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        (launch.ROOT / launch.UPDATING_MARK).write_text(json.dumps({"pid": other.pid, "started": time.time()}), encoding="utf-8")
+        monkeypatch.setattr(launch, "update", lambda: pytest.fail("a second update ran"))
+        assert launch.main(["--update"]) == 1
+        assert launch.UPDATING_NOW in capsys.readouterr().out
+        assert json.loads((launch.ROOT / launch.UPDATING_MARK).read_text(encoding="utf-8"))["pid"] == other.pid, "the first's mark stays"
+    finally:
+        other.kill()
+        other.wait()
+
+
 def test_the_check_after_an_update_isnt_stopped_by_that_update(launch, monkeypatch):
     # From its start to the end of the check after it, the update says it runs: that check is its own.
     handed: list = []

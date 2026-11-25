@@ -832,6 +832,9 @@ def main(argv: list[str]) -> int:
         use_app_log(rotate=False)
     if "--update" in args:
         args.remove("--update")
+        if update_under_way():  # another update (the window's, carrying on after it closed): not two at once
+            say(UPDATING_NOW)
+            return 1
         _mark_update()
         try:
             code = update()
