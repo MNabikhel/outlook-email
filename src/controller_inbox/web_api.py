@@ -1346,6 +1346,12 @@ def register_workspace(
         outlook_sync.disconnect(store)
         return {"ok": True, "message": "Disconnected. CloseDesk no longer reads Outlook; the mail it copied stays here."}
 
+    @api.get("/settings/colors")
+    def settings_colors_now():
+        """The colors and importance words in use now: a classic page shown again (Back, or its window brought to the
+        front) asks, as the workspace's status check does."""
+        return {"appearance": appearance.current(store)}
+
     @api.post("/settings/colors")
     async def settings_colors(request: Request):
         """Settings → Appearance: the colors for color blindness, and the importance on each email; each saved on its

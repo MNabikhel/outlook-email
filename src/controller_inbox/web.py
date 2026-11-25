@@ -440,7 +440,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return base
 
     def render(request: Request, name: str, status_code: int = 200, **extra):
-        return templates.TemplateResponse(request, name, ctx(request, **extra), status_code=status_code)
+        # Never kept by the browser: Back shows the page as it is now (its counts, the job, the colors chosen in
+        # Setup since), not the copy it was first sent as.
+        return templates.TemplateResponse(request, name, ctx(request, **extra), status_code=status_code, headers={"Cache-Control": "no-store"})
 
     @app.get("/", response_class=HTMLResponse)
     def home(request: Request):

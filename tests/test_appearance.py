@@ -230,3 +230,15 @@ def test_setup_says_saved_in_the_section_it_goes_back_to(client, notice, section
     # Anything else is still said at the top.
     other = client.get("/settings?notice=profile").text
     assert other.index(f'<p class="notice">{escape(web.NOTICES["profile"])}</p>') < other.index('<section class="panel profile-card">')
+
+
+def test_classic_pages_are_never_kept_and_say_the_colors_in_use(client, demo):
+    """Back after Setup → Colors showed the page before in the old colors, from the copy the browser kept: the
+    classic pages now say not to keep them, as the workspace's does. A page kept anyway (the back/forward cache, a
+    chat window left open) asks for the colors in use when it is shown again."""
+    for path in PAGES:
+        assert client.get(path).headers.get("cache-control") == "no-store", path
+    assert client.get("/api/settings/colors", headers=PAGE).json() == {"appearance": {"colors": "standard", "importance_words": False}}
+    appearance.save(demo, colors="color-blind", importance_words=True)
+    assert client.get("/api/settings/colors", headers=PAGE).json() == {"appearance": {"colors": "color-blind", "importance_words": True}}
+    assert client.get("/api/settings/colors").status_code == 403, "for CloseDesk's own pages"

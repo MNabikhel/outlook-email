@@ -1145,6 +1145,26 @@
     }
   });
 
+  /* The colors chosen in Setup are written on <html> as a page is sent. A page the browser kept as it was (Back,
+     from its back/forward cache) or one left open (the chat in a window of its own) asks again when it is shown, so
+     it follows a change made since in Setup or the workspace. */
+  async function followColors() {
+    try {
+      const response = await fetch("/api/settings/colors", { headers: { "X-CloseDesk": "1" }, cache: "no-store" });
+      if (!response.ok) return;
+      const look = (await response.json()).appearance;
+      const html = document.documentElement;
+      if (look.colors === "color-blind") html.dataset.colors = "color-blind";
+      else delete html.dataset.colors;
+      if (look.importance_words) html.dataset.importanceWords = "on";
+      else delete html.dataset.importanceWords;
+    } catch (error) {
+      /* CloseDesk isn't answering: the page stays as it is */
+    }
+  }
+  window.addEventListener("pageshow", (event) => event.persisted && followColors());
+  window.addEventListener("focus", followColors);
+
   /* Setup: show the time in the zone being chosen, before it is saved. */
   const tzSelect = $("[data-tz-select]");
   const tzPreview = $("[data-tz-preview]");

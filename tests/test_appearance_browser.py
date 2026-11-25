@@ -350,6 +350,54 @@ def test_the_classic_setup_page_ticks_both_and_the_lists_follow(browser, setting
     context.close()
 
 
+COLORS_ON = "() => [document.documentElement.dataset.colors || null, document.documentElement.dataset.importanceWords || null]"
+
+
+def test_back_after_changing_the_colors_shows_the_classic_pages_in_the_new_ones(browser, settings, loaded):
+    """Back after Setup → Colors → Save showed the page before in the old colors: the classic pages were sent with
+    nothing saying not to keep them, so the browser showed the copy it kept until the page was loaded again."""
+    from controller_inbox import appearance
+
+    appearance.save(loaded, colors="color-blind")
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/inbox")
+        assert page.evaluate(COLORS_ON) == ["color-blind", None]
+        page.click(".rail a[href='/settings']")
+        page.wait_for_url("**/settings")
+        page.uncheck("#colors input[name='colors']")
+        page.click("#colors button[type='submit']")
+        page.wait_for_url("**/settings?notice=colors#colors")
+        page.go_back()
+        page.go_back()
+        page.wait_for_url("**/inbox")
+        page.wait_for_selector("table.mail tr.critical")
+        assert page.evaluate(COLORS_ON) == [None, None]
+        assert rgb(pm.classic("standard")["--imp-critical"]) in page.evaluate(ROW_EDGE)
+    context.close()
+
+
+def test_a_classic_page_kept_open_follows_the_colors_when_shown_again(browser, settings, loaded):
+    """A classic page the browser keeps as it was (Back, with the back/forward cache), or the chat in a window of its
+    own, kept the colors it was sent with until it was loaded again. Shown again, it asks."""
+    from controller_inbox import appearance
+
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/chat/window")
+        page.wait_for_selector("#chat")
+        assert page.evaluate(COLORS_ON) == [None, None]
+        appearance.save(loaded, colors="color-blind", importance_words=True)
+        page.evaluate("() => window.dispatchEvent(new Event('focus'))")  # the chat's window comes to the front
+        page.wait_for_function(f"() => ({COLORS_ON})().join() === 'color-blind,on'")
+        appearance.save(loaded, colors="standard", importance_words=False)
+        page.evaluate("() => window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }))")
+        page.wait_for_function(f"() => ({COLORS_ON})().join() === ','")
+    context.close()
+
+
 # Shapes and signs as well as colour ----------------------------------------------------------------------------------
 
 ALERT_PATH = "M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"
