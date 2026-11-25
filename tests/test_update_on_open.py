@@ -235,6 +235,41 @@ def test_no_answer_in_the_few_seconds_is_tried_again_soon_with_longer_to_wait(do
     assert len(later.asked) == 1 and updates.status(store, settings)["newer"] is True
 
 
+def test_an_opening_without_internet_keeps_the_newer_version_found_before(download, settings, store):
+    # 9:00, online: a newer version is found, and the person answers Not now. 10:00, on a train: CloseDesk opens again
+    # and can't reach GitHub. Settings and the top bar still offer the version found at 9:00 (beside "couldn't reach
+    # GitHub"), the rest of the day too, even though GitHub isn't asked again until tomorrow.
+    updates.check(store, settings, now=NOW, ask=github(), at_start=True)
+    assert updates.status(store, settings)["newer"] is True
+    updates.check(store, settings, now=NOW + timedelta(hours=1), ask=offline, at_start=True)
+    after = updates.status(store, settings)
+    assert after["newer"] is True and "couldn't reach GitHub" in after["note"]
+    updates.check(store, settings, now=NOW + timedelta(hours=1, minutes=1), ask=offline)  # the retry a minute on
+    assert updates.status(store, settings)["newer"] is True
+    later = github()
+    for hours in range(2, 12):
+        updates.check(store, settings, now=NOW + timedelta(hours=hours), ask=later)
+    assert later.asked == [] and updates.status(store, settings)["newer"] is True
+
+
+def test_what_a_copy_before_an_update_found_isnt_kept_by_an_asking_that_fails(download, settings, store, monkeypatch):
+    # Found by the copy before an update (another commit): not this copy's to offer.
+    updates.check(store, settings, now=NOW, ask=github(), at_start=True)
+    (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+    updates.check(store, settings, now=NOW + timedelta(hours=1), ask=offline, at_start=True)
+    assert "sha" not in updates.known(store) and updates.status(store, settings)["newer"] is False
+
+
+def test_an_opening_without_internet_asks_no_question_about_a_version_found_before(download, settings, store, monkeypatch):
+    # Offline means no question as CloseDesk opens (Update now couldn't download it anyway): Settings offers it.
+    updates.check(store, settings, now=datetime.now(timezone.utc) - timedelta(hours=1), ask=github(), at_start=True)
+    monkeypatch.setattr(updates, "_ask_github", offline)
+    monkeypatch.setenv(updates.LAUNCHER_ENV, "1")
+    view = asked_at_start(store, settings).view(store, settings, "idle")
+    assert view["ask"] is False and view["newer"] is False
+    assert updates.status(store, settings)["newer"] is True
+
+
 def test_curl_is_given_the_same_short_wait_and_no_window(monkeypatch):
     # The fallback for a company proxy. In the CloseDesk app on Windows there is no console: a console program started
     # without CREATE_NO_WINDOW would flash one up on every open.

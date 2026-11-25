@@ -214,6 +214,7 @@ def check(
     recent = last is not None and last.tzinfo is not None and timedelta(0) <= now - last < CHECK_EVERY
     if recent and saved.get("from") == mine and not at_start and not saved.get("retry"):
         return saved
+    before = saved
     saved = {"checked_at": now.isoformat(), "from": mine}
     try:
         asking = ask or functools.partial(_ask_github, timeout=START_TIMEOUT_SECONDS if at_start else TIMEOUT_SECONDS)
@@ -228,6 +229,10 @@ def check(
     except Exception as exc:  # no internet, a proxy, GitHub busy: said quietly in Settings, asked again tomorrow
         # (or at the next tick, after the brief asking as CloseDesk opened)
         log.info("Couldn't ask GitHub for the newest CloseDesk: %s", exc)
+        if before.get("from") == mine:
+            # What this copy's last answer found stays known (Settings and the top bar keep offering a newer version
+            # found at 9:00 after an opening on a train at 10:00), beside "couldn't reach GitHub".
+            saved.update({key: before[key] for key in ("sha", "date", "title") if before.get(key)})
         saved["failed"] = "1"
         if at_start:
             saved["retry"] = "1"
@@ -458,8 +463,10 @@ class Question:
         def ask() -> None:
             found = None
             try:
-                check(store, settings, at_start=True)
-                found = status(store, settings)
+                # Unanswered (offline, GitHub slow): no question, even about a version found before, which Settings
+                # and the top bar still offer.
+                if not check(store, settings, at_start=True).get("failed"):
+                    found = status(store, settings)
             except Exception:  # nothing in the way: no question this time
                 log.warning("Looking for a newer CloseDesk as it opened failed", exc_info=True)
             finally:
