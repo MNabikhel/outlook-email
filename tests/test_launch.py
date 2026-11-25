@@ -621,3 +621,15 @@ def test_the_check_says_the_store_python_keeps_what_it_writes_to_itself(monkeypa
     assert "python.org" in check.todo and "Start menu" in check.todo and ".venv" in check.todo
     monkeypatch.setattr(app_log, "store_python", lambda sys_module=None: False)
     assert "Microsoft Store" not in doctor._python().text
+
+
+def test_closedesk_bat_gives_back_the_update_s_exit_code():
+    """CloseDesk.bat --update gives back what launch.py --update ended with (77: another update runs). A bare
+    ``exit /b`` at the end of its block gave ``cmd /c`` the last command's own code, 0, so a second update at the same
+    time looked as if it had worked (CI's Windows launcher check)."""
+    text = (ROOT / "CloseDesk.bat").read_text(encoding="utf-8")
+    blocks = [part.split("\n)", 1)[0] for part in text.split('"--update" (')[1:]]
+    assert len(blocks) == 2, "the start and the start after --get-python"
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip() and not line.strip().startswith("rem")]
+        assert lines[-2:] == ["setlocal EnableDelayedExpansion", "exit /b !CODE!"], lines

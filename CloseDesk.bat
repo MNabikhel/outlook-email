@@ -62,15 +62,16 @@ if defined UV set "CLOSEDESK_UV=%UV%"
 if defined GETPY goto :start_plain
 rem An update replaces this file while it runs, so that one is run from a block read whole beforehand. With
 rem call, a Python that is a .bat file comes back here too. (In a block, the exit code is kept with call set and
-rem given back with cmd /c exit, after popd.)
+rem given back after popd as a number: a bare exit /b gives cmd /c the last command's own code, not this one. The
+rem block was read before CODE was set, so it is read with delayed expansion.)
 if /i "%~1"=="--update" (
   call %PY% scripts\launch.py %*
   call set "CODE=%%ERRORLEVEL%%"
   echo.
   pause
   popd
-  call cmd /d /c exit %%CODE%%
-  exit /b
+  setlocal EnableDelayedExpansion
+  exit /b !CODE!
 )
 call %PY% scripts\launch.py %*
 goto :ran
@@ -83,8 +84,8 @@ if /i "%~2"=="--update" (
   echo.
   pause
   popd
-  call cmd /d /c exit %%CODE%%
-  exit /b
+  setlocal EnableDelayedExpansion
+  exit /b !CODE!
 )
 call %PY% scripts\launch.py %2 %3 %4 %5 %6 %7 %8 %9
 
