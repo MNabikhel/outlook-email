@@ -615,6 +615,7 @@ def test_the_browser_instead_runs_here_on_linux_or_from_a_terminal(monkeypatch):
 
 def test_the_double_click_launcher_is_opened_for_the_browser(monkeypatch, tmp_path):
     started, ran = [], []
+    monkeypatch.delenv(app_window.WHY_ENV, raising=False)  # put back as it was: unset
     monkeypatch.setenv(updates.APP_ENV, "1")
     monkeypatch.setenv(updates.LAUNCHER_ENV, "1")
     app_window.open_launcher("why", platform="win32", startfile=lambda path: started.append((path, dict(os.environ))))

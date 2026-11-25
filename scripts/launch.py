@@ -169,15 +169,16 @@ def _output() -> dict:
     return {}
 
 
-def tell(text: str) -> None:
+def tell(text: str, *, platform: str = "") -> None:
     """Say ``text`` where a person sees it with no console: a message box (Windows), an alert (macOS). Also logged."""
     say(text)
+    platform = platform or sys.platform
     try:
-        if sys.platform == "win32":
+        if platform == "win32":
             import ctypes
 
             ctypes.windll.user32.MessageBoxW(None, text, "CloseDesk", 0x30 | 0x10000)  # a warning, brought to the front
-        elif sys.platform == "darwin":
+        elif platform == "darwin":
             # The words are passed as they are, never written into the script.
             subprocess.run(
                 ["/usr/bin/osascript", "-e", "on run argv", "-e", "display alert (item 1 of argv) message (item 2 of argv)",
@@ -188,18 +189,19 @@ def tell(text: str) -> None:
         pass
 
 
-def notice(text: str) -> None:
+def notice(text: str, *, platform: str = "") -> None:
     """Say ``text`` without waiting for an answer, while the app carries on (installing): a notification on macOS, a
     message box on Windows that stays until it is closed."""
     say(text)
+    platform = platform or sys.platform
     try:
-        if sys.platform == "win32":
+        if platform == "win32":
             import ctypes
 
             threading.Thread(
                 target=ctypes.windll.user32.MessageBoxW, args=(None, text, "CloseDesk", 0x40 | 0x10000), daemon=True
             ).start()
-        elif sys.platform == "darwin":
+        elif platform == "darwin":
             subprocess.Popen(
                 ["/usr/bin/osascript", "-e", "on run argv", "-e", 'display notification (item 1 of argv) with title "CloseDesk"',
                  "-e", "end run", text],

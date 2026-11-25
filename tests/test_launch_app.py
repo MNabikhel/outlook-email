@@ -215,13 +215,11 @@ def test_the_launchers_message_box_and_notice(monkeypatch):
     ran: list = []
     monkeypatch.setattr(module.subprocess, "run", lambda cmd, **options: ran.append(cmd))
     monkeypatch.setattr(module.subprocess, "Popen", lambda cmd, **options: ran.append(cmd))
-    monkeypatch.setattr(module.sys, "platform", "darwin")
-    module.tell('CloseDesk couldn\'t install "it"')
-    module.notice("Installing")
+    module.tell('CloseDesk couldn\'t install "it"', platform="darwin")
+    module.notice("Installing", platform="darwin")
     assert ran[0][0] == "/usr/bin/osascript" and 'CloseDesk couldn\'t install "it"' in ran[0], "passed as it is, never quoted into a script"
     assert ran[1][0] == "/usr/bin/osascript" and "Installing" in ran[1]
     buffer = io.StringIO()
-    monkeypatch.setattr(module.sys, "platform", "linux")
-    monkeypatch.setattr(module.sys, "stdout", buffer)
-    module.tell("only said")
+    monkeypatch.setattr(sys, "stdout", buffer)
+    module.tell("only said", platform="linux")
     assert "only said" in buffer.getvalue() and len(ran) == 2
