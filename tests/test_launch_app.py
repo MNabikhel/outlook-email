@@ -266,3 +266,63 @@ def test_installs_from_the_app_name_the_console_python_not_pythonw(launch, monke
     launch.install("x")
     assert ran == [["uv", "pip", "install", "--python", "the-console-python", "x"],
                    ["the-console-python", "-m", "pip", "install", "--quiet", "--disable-pip-version-check", "x"]]
+
+
+# The CloseDesk shortcut ---------------------------------------------------------------------------------------------
+
+
+def test_launch_py_shortcut_sets_up_then_makes_the_shortcut_again(launch, monkeypatch):
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    handed: list = []
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append(cmd) or 0)
+    assert launch.main(["--shortcut"]) == 0
+    assert handed == [[sys.executable, "-m", "controller_inbox", "shortcut"]]
+
+
+def test_on_a_mac_the_window_runs_python_as_closedesk_apps_own(launch, monkeypatch, tmp_path):
+    # Started through the link in CloseDesk.app, Python is that app to macOS: the Dock and the menu bar say CloseDesk.
+    # The environment is named, as python3.x does for the program it starts.
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    linked = tmp_path / "CloseDesk.app" / "Contents" / "MacOS" / "CloseDesk-python"
+    monkeypatch.setattr(launch, "linked_python", lambda: linked)
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", "")
+    handed: list = []
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
+    assert launch.main(["--app"]) == 0
+    (cmd, env), = handed
+    assert cmd == [str(linked), "-m", "controller_inbox", "app"]
+    assert env["__PYVENV_LAUNCHER__"] == str(launch.venv_python())
+
+
+def test_without_closedesk_app_the_window_runs_the_environments_python(launch, monkeypatch):
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    monkeypatch.setattr(launch, "linked_python", lambda: None)
+    monkeypatch.setenv("__PYVENV_LAUNCHER__", "")
+    monkeypatch.delenv("__PYVENV_LAUNCHER__")
+    handed: list = []
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append((cmd, dict(os.environ))) or 0)
+    launch.main(["--app"])
+    (cmd, env), = handed
+    assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env
+
+
+def test_closedesk_apps_python_is_used_only_when_it_is_this_environments(launch, monkeypatch, tmp_path):
+    python = tmp_path / "Python.app" / "Contents" / "MacOS" / "Python"
+    python.parent.mkdir(parents=True)
+    python.write_text("", encoding="utf-8")
+    monkeypatch.setenv("CLOSEDESK_SHORTCUT_DIR", str(tmp_path / "shortcuts"))
+    monkeypatch.setattr(launch, "mac_interpreter", lambda *a: python)
+    link = tmp_path / "shortcuts" / "CloseDesk.app" / "Contents" / "MacOS" / "CloseDesk-python"
+    assert launch.linked_python(platform="darwin") is None, "no CloseDesk.app yet"
+    link.parent.mkdir(parents=True)
+    other = tmp_path / "python3.13"
+    other.write_text("", encoding="utf-8")
+    link.symlink_to(other)
+    assert launch.linked_python(platform="darwin") is None, "another Python than the environment's can't run it"
+    link.unlink()
+    link.symlink_to(python)
+    assert launch.linked_python(platform="darwin") == link
+    assert launch.linked_python(platform="win32") is None and launch.linked_python(platform="linux") is None

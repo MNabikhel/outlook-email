@@ -19,10 +19,12 @@ The CloseDesk app (``--app``, what the CloseDesk shortcut runs with pythonw, no 
 without a word on screen: what it says goes to its log (``app_log_path``), nothing it runs opens a console window
 (CREATE_NO_WINDOW), and what goes wrong is said in a message box. Then it opens the CloseDesk window
 (``controller_inbox app``, app_window.py), which handles ``UPDATE`` itself; ``REBUILD`` is left to the double-click
-launcher, opened in its window, since a Python running from ``.venv`` can't remove it.
+launcher, opened in its window, since a Python running from ``.venv`` can't remove it. On a Mac, Python is started
+through the link in CloseDesk.app (shortcut.py), so the Dock and the menu bar say CloseDesk, not Python.
 
     launch.py                 set up if needed, then run CloseDesk
     launch.py --app           the same, silently, then open the CloseDesk window
+    launch.py --shortcut      set up if needed, then add the CloseDesk shortcut again (Desktop and Start menu; Applications)
     launch.py --check         set up if needed, then say what is and isn't in order (no dashboard)
     launch.py --update        fetch the newest CloseDesk, keeping mail and settings, then check it
     launch.py --command NAME  set up if needed, then run that command (``overnight`` for the scheduler)
@@ -79,6 +81,11 @@ SETUP_FAILED = (
     "download: try again when it is back. What went wrong is written in {log}."
 )
 
+# CloseDesk.app on a Mac (controller_inbox/shortcut.py): where it is kept for the tests and the launcher check, and the
+# link in it to the Python that runs CloseDesk.
+DIR_ENV = "CLOSEDESK_SHORTCUT_DIR"
+LINKED_PYTHON = "CloseDesk-python"
+
 REPO = "MNabikhel/outlook-email"
 BRANCH = "main"
 # What an update never touches: the mail, the settings and the environment. (Anything else the new version
@@ -110,6 +117,41 @@ def app_python() -> Path:
         if windowless.exists():
             return windowless
     return venv_python()
+
+
+def mac_interpreter(sys_module=None, config_var=None) -> Path | None:
+    """The program that really runs this Python (shortcut.mac_interpreter's copy: CloseDesk isn't importable here yet).
+    A framework's (python.org's, Homebrew's) is Python.app's program; any other is the file behind the links."""
+    import sysconfig
+
+    sys_module = sys_module or sys
+    config_var = config_var or sysconfig.get_config_var
+    framework = config_var("PYTHONFRAMEWORK") or ""
+    if framework:
+        path = Path(sys_module.base_prefix) / "Resources" / "Python.app" / "Contents" / "MacOS" / framework
+    else:
+        path = Path(os.path.realpath(getattr(sys_module, "_base_executable", "") or sys_module.executable))
+    return path if path.is_file() else None
+
+
+def linked_python(*, platform: str = "") -> Path | None:
+    """macOS: CloseDesk.app's link to the Python that runs CloseDesk, when it leads to this environment's. Python started
+    through it is CloseDesk.app to macOS: the Dock and the menu bar say CloseDesk, with CloseDesk's icon."""
+    if (platform or sys.platform) != "darwin":
+        return None
+    wanted = mac_interpreter()
+    if wanted is None:
+        return None
+    named = os.environ.get(DIR_ENV, "")
+    apps = [Path(named)] if named else [Path.home() / "Applications", ROOT]
+    for folder in apps:
+        link = folder / "CloseDesk.app" / "Contents" / "MacOS" / LINKED_PYTHON
+        try:
+            if link.is_symlink() and os.path.realpath(link) == os.path.realpath(wanted):
+                return link
+        except OSError:
+            continue
+    return None
 
 
 def in_venv() -> bool:
@@ -569,7 +611,18 @@ def app(args: list[str]) -> int:
         return code
     # The window acts on CloseDesk's UPDATE exit code itself, so CloseDesk offers its Update button.
     os.environ["CLOSEDESK_LAUNCHER"] = "1"
-    return _hand_over([str(app_python()), "-m", "controller_inbox", "app", *args])
+    window = ["-m", "controller_inbox", "app", *args]
+    linked = linked_python()
+    if linked is not None:
+        say(f"The window opens as CloseDesk.app ({linked}).")
+        # As python3.x tells the program it starts: this environment is the one to run.
+        os.environ["__PYVENV_LAUNCHER__"] = str(venv_python())
+        try:
+            return _hand_over([str(linked), *window])
+        except OSError as exc:
+            say(f"Python couldn't be started as CloseDesk.app ({exc}): the Dock shows the window as Python's.")
+            os.environ.pop("__PYVENV_LAUNCHER__", None)
+    return _hand_over([str(app_python()), *window])
 
 
 def main(argv: list[str]) -> int:
@@ -592,6 +645,8 @@ def main(argv: list[str]) -> int:
     module = [sys.executable, "-m", "controller_inbox"]
     if "--check" in args:
         return _hand_over([*module, "doctor"])
+    if "--shortcut" in args:
+        return _hand_over([*module, "shortcut"])
     if "--command" in args:
         at = args.index("--command")
         return _hand_over([*module, *args[at + 1 :]])
