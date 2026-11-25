@@ -479,13 +479,16 @@ src/controller_inbox/
   version.py        Which version this copy is: its date-based number (2026.11.16) and commit
   updates.py        Whether a newer CloseDesk is out (asked of GitHub as it opens and once a day), the question the
                     first page asks about it, and Settings' Update button
+  app_window.py     The CloseDesk window (`launch.py --app`, pywebview): starts CloseDesk and shows it, stops it when
+                    closed, stays up through an update, and opens the browser instead where it can't open
   templates/        The classic pages
   static/app.js     Open-in-place preview, chat box, search shortcut (answers formatted by static/ui/format.js)
   static/ui/        The workspace's scripts and styles (no build step, no CDN); update_ask.js, the update question
-                    as CloseDesk opens, is the classic pages' too
+                    as CloseDesk opens, and in_window.js, what leaves CloseDesk from its window, are the classic pages' too
 CloseDesk.bat / CloseDesk.command   Double-click launchers: find the computer's Python, then run launch.py (--get-python downloads one, only when asked); after Settings' Update button, update and start again
 CloseDesk-Update.bat / .command     Double-click to fetch the newest version (mail and settings are kept)
-scripts/launch.py                   Every start: check the set-up, install what is missing, start; also --check and --update
+scripts/launch.py                   Every start: check the set-up, install what is missing, start; also --check, --update and
+                                    --app (the same set-up with no console, then the CloseDesk window)
 scripts/check_deps.py               The package checks launch.py uses
 scripts/install.sh                  The one-line install for a Mac's Terminal
 scripts/overnight.bat / .sh         For Task Scheduler / cron
