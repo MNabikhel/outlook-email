@@ -485,11 +485,26 @@ def test_the_classic_inbox_says_once_that_an_email_waits_for_the_model_with_room
 
 FOCUS_EDGES = """() => [...document.querySelectorAll('.focus-item')].map((li) => {
   const level = li.querySelector('.item-level');
-  return { title: (li.querySelector('.focus-top a') || {}).textContent || '',
+  return { title: (li.querySelector('.focus-top a') || {}).textContent || '', email: (li.querySelector('.focus-top a') || { href: '' }).href.split('/').pop(),
            kind: [...li.classList].filter((name) => name !== 'focus-item' && !name.startsWith('imp-')).join(' '),
            level: level ? ['critical', 'high', 'medium', 'low', 'held'].find((name) => level.classList.contains(name)) || '' : '',
            edge: getComputedStyle(li).borderLeftColor };
 })"""
+
+
+def _a_medium_task_overdue(store) -> str:
+    """The sample has no task overdue on its day: a Medium email's task due today is made two days late."""
+    from controller_inbox.models import ActionStatus, Importance
+
+    for stub in store.list_emails(importance="medium"):
+        email = store.get_email(stub.id)
+        due = [action for action in email.actions if action.status == ActionStatus.OPEN and action.due_date == "2026-09-22"]
+        if email.importance == Importance.MEDIUM and due:
+            for action in due:
+                action.due_date = "2026-09-20"
+            store.upsert_email(email)
+            return email.id
+    raise AssertionError("no Medium email with a task due today")
 
 
 @pytest.mark.parametrize("colors", ["standard", "color-blind"])
@@ -497,11 +512,15 @@ FOCUS_EDGES = """() => [...document.querySelectorAll('.focus-item')].map((li) =>
 def test_a_critical_email_on_classic_today_has_the_red_edge_whatever_its_reason(browser, settings, loaded, colors, path):
     """Classic Today gave "Review possible duplicate invoice INV-10482", a Critical email due today, the amber edge of
     a High one (the edge said the reason, and due today is amber), where the workspace's Today and every list give it
-    the red of Critical. Its edge now says its importance when it is Critical or High, as theirs do; an overdue or held
-    email keeps the red of danger, and the rest the colour of their reason."""
+    the red of Critical. Its edge now says its importance when it is Critical or High, as theirs do, and a held email
+    (or one to verify by phone) has the red of danger. The others had the edge of their reason, in the same colors: a
+    Medium email due today had the amber of High, and an overdue one the red of danger, 2.2 from Critical's. Their edge
+    is now the plain one, as in the workspace, where only Critical, High and held emails have a colored edge: the
+    reason is said in its tag."""
     from controller_inbox import appearance
 
     appearance.save(loaded, colors=colors)
+    overdue = _a_medium_task_overdue(loaded)
     tokens = pm.classic(colors)
     context = _context(browser, "light")
     page = context.new_page()
@@ -513,16 +532,18 @@ def test_a_critical_email_on_classic_today_has_the_red_edge_whatever_its_reason(
         rows = page.evaluate(FOCUS_EDGES)
     context.close()
     assert [row for row in rows if row["level"] == "critical" and row["kind"] == "due_today"], ("the case seen", rows)
+    assert [row for row in rows if row["level"] == "medium" and row["kind"] == "due_today"], ("a Medium email due today", rows)
+    assert [row for row in rows if row["level"] == "medium" and row["kind"] == "overdue" and row["email"] == overdue], rows
     for row in rows:
         edge = hex_of(row["edge"])
         if row["level"] == "critical":
             assert edge == tokens["--imp-critical"], (path, colors, row)
-        elif row["level"] == "held" or row["kind"] in ("overdue", "fraud"):
+        elif row["level"] == "held" or "fraud" in row["kind"].split():
             assert edge == tokens["--danger"], (path, colors, row)
         elif row["level"] == "high":
             assert edge == tokens["--imp-high"], (path, colors, row)
-        elif row["kind"] == "due_today":
-            assert edge == tokens["--imp-high"], (path, colors, row)
+        else:
+            assert edge == tokens["--line"], ("the plain edge, whatever the reason", path, colors, row)
 
 
 # The digest's lists of emails (not its tasks, which have their own priority): what needs a phone call, the focus

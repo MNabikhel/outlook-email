@@ -24,8 +24,8 @@
   --imp-high-fill: #d6a31f; /* the High pill and the due-today tag, with dark words */
   --on-imp-high: #1b2416;
   --imp-medium: #bfd0ec;
-  /* Due later this week, on Today: a slate, apart from the amber of due today, the navy of a new email and the gold
-     of an email opened (the same for the colors for color blindness: it stays apart for every vision). */
+  /* Due later this week, the outline of its tag on Today: a slate, apart from the amber of due today (the same for
+     the colors for color blindness: it stays apart for every vision). */
   --due-later: #7a8594;
   /* The model on the navy: the dot on Ask CloseDesk, filled while a local model runs and a ring when none does, and
      the side bar's Local model box (its dot, or its words when none runs). */
@@ -217,14 +217,12 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .focus h2 { font-family: var(--serif); font-size: 20px; font-weight: 600; margin: 0 0 10px; }
 .focus-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .focus-item { display: flex; gap: 14px; align-items: flex-start; background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 12px; padding: 12px 14px; }
-/* The edge says why the email is here (due today, due later, to decide), except that a Critical or High email has
-   the edge of its importance, as on every list in both UIs (a Critical email due today had the amber of High), and an
-   overdue or held one the red of danger. The later rule wins. */
-.focus-item.due_today { border-left-color: var(--imp-high); }
-.focus-item.due_soon, .focus-item.due_week { border-left-color: var(--due-later); }
-.focus-item.decide, .focus-item.new_task { border-left-color: var(--navy); }
+/* The edge says one thing, as on every list in both UIs: a Critical or High email has the edge of its importance, and
+   one held as possible payment fraud (or to verify by phone) the red of danger. The others have the plain edge,
+   whatever the reason they are here, which their tag says: an edge in the reason's colour read as an importance (a
+   Medium email due today had the amber of High, an overdue one nearly the red of Critical). The later rule wins. */
 .focus-item.imp-high { border-left-color: var(--imp-high); }
-.focus-item.fraud, .focus-item.overdue, .focus-item.is-held { border-left-color: var(--danger); }
+.focus-item.fraud, .focus-item.is-held { border-left-color: var(--danger); }
 .focus-item.imp-critical { border-left-color: var(--imp-critical); }
 .focus-item .rank { font-family: var(--serif); font-size: 24px; color: var(--navy); min-width: 22px; line-height: 1.1; }
 .focus-body { flex: 1; min-width: 0; }

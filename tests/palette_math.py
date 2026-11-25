@@ -429,9 +429,7 @@ ROLES = {
         # Read from the rules, so one that drops its token (white words on the amber High pill) fails here.
         ("ui", Rule("table.mail tr.critical", "box-shadow"), ["--card", "--row-hover", "--row-open"], "row edge table.mail tr.critical"),
         ("ui", Rule("table.mail tr.high", "box-shadow"), ["--card", "--row-hover", "--row-open"], "row edge table.mail tr.high"),
-        ("ui", Rule(".focus-item.due_today", "border-left-color"), ["--card", "--paper"], "Today's due-today edge .focus-item.due_today"),
-        ("ui", Rule(".focus-item.overdue", "border-left-color"), ["--card", "--paper"], "Today's overdue and fraud edge .focus-item.overdue"),
-        ("ui", Rule(".focus-item.due_week", "border-left-color"), ["--card", "--paper"], "Today's due later this week edge .focus-item.due_week"),
+        ("ui", Rule(".focus-item.fraud", "border-left-color"), ["--card", "--paper"], "Today's edge to verify by phone .focus-item.fraud"),
         ("ui", Rule(".focus-item.imp-critical", "border-left-color"), ["--card", "--paper"], "Today's Critical edge .focus-item.imp-critical"),
         ("ui", Rule(".focus-item.imp-high", "border-left-color"), ["--card", "--paper"], "Today's High edge .focus-item.imp-high"),
         ("ui", Rule(".focus-item.is-held", "border-left-color"), ["--card", "--paper"], "Today's held email edge .focus-item.is-held"),

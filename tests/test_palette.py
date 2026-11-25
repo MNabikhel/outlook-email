@@ -95,10 +95,8 @@ MEANING_RULES = {
         (".panel.alert", "background", "--danger"),
         (".panel.alert", "border-color", "--danger-deep"),
         (".focus-item.fraud", "border-left-color", "--danger"),
-        (".focus-item.overdue", "border-left-color", "--danger"),
         (".focus-item.is-held", "border-left-color", "--danger"),
         (".focus-item.imp-critical", "border-left-color", "--imp-critical"),
-        (".focus-item.due_today", "border-left-color", "--imp-high"),
         (".focus-item.imp-high", "border-left-color", "--imp-high"),
         (".fraud-panel.high", "border-left-color", "--danger"),
         (".job.error", "border-left", "--danger"),
@@ -269,15 +267,10 @@ def test_the_classic_amber_stands_apart_from_the_colours_beside_it():
         def rule(selector: str, prop: str) -> str:
             return pm.rule_colour(pm.CLASSIC_CSS, selector, prop, tokens, "--card")
 
-        edge = "border-left-color"
-        assert rule(".focus-item.due_soon", edge) == rule(".focus-item.due_week", edge)
         assert rule(".tag.due_soon", "background") == rule(".tag.due_week", "background")
+        assert rule(".tag.due_soon", "box-shadow") == rule(".tag.due_week", "box-shadow")
         pairs = {
-            "Today's due-today edge / due later this week": (rule(".focus-item.due_today", edge), rule(".focus-item.due_week", edge)),
-            "due later this week / new, needs a look": (rule(".focus-item.due_week", edge), rule(".focus-item.decide", edge)),
-            "due later this week / overdue": (rule(".focus-item.due_week", edge), rule(".focus-item.overdue", edge)),
-            "due later this week / an email opened": (rule(".focus-item.due_week", edge), rule(".focus-item.is-open", "border")),
-            "the due-today tag / due later this week": (rule(".tag.due_today", "background"), rule(".tag.due_week", "background")),
+            "the due-today tag / due later this week": (rule(".tag.due_today", "background"), rule(".tag.due_week", "box-shadow")),
             "the High pill / the model's flags": (rule(".pill.high", "background"), rule(".flag.needs_model", "background")),
             "AP coding: Suggested / No code found": (rule(".coding-state.suggested", "background"), rule(".coding-state.unmatched", "background")),
             "AP coding: their words": (rule(".coding-state.suggested", "color"), rule(".coding-state.unmatched", "color")),
@@ -288,6 +281,28 @@ def test_the_classic_amber_stands_apart_from_the_colours_beside_it():
             if min(pm.delta_e(a, b, vision) for vision in pm.VISIONS) < 20
         }
         assert not close, (colors, close)
+
+
+# Why an email is on Today (focus_row's kinds in digest.py): said by its tag, never by its edge.
+REASONS = ("overdue", "due_today", "due_soon", "due_week", "new_task", "decide")
+
+
+def test_classic_todays_edge_says_only_the_importance_or_that_an_email_is_held():
+    """The edge of a row on classic Today (and the digest) said its importance when it was Critical or High, and
+    otherwise its reason, in the same colours: a Medium email due today had the amber of High, and an overdue one the
+    red of danger, 2.2 from Critical's. Only Critical, High and a held email (or one to verify by phone) have a colored
+    edge, as in the workspace; the reason is the tag's to say."""
+    css = re.sub(r"/\*.*?\*/", "", pm.CLASSIC_CSS.read_text(encoding="utf-8"), flags=re.S)
+    painted = {
+        prelude: body.strip()
+        for _media, prelude, body in pm._rules(css)
+        if any(f".focus-item.{reason}" in selector for selector in pm._selectors(prelude) for reason in REASONS)
+        and re.search(r"(?:^|;)\s*border(?:-left)?(?:-color)?\s*:", body)
+    }
+    assert not painted, painted
+    for colors in ("standard", "color-blind"):
+        tokens = pm.classic(colors)
+        assert pm.rule_colour(pm.CLASSIC_CSS, ".focus-item", "border-left", tokens) == tokens["--line"]
 
 
 def test_a_payment_to_check_first_is_flagged_in_the_amber_of_a_warning():
