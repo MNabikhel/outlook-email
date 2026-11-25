@@ -1480,19 +1480,26 @@ def test_the_app_command_starts_the_window_before_reading_the_settings(monkeypat
     assert seen == [(None, 8811)]
 
 
-def test_an_update_that_didnt_finish_says_where_the_app_wrote_why(monkeypatch, tmp_path):
-    question = updates.Question()
-    # Started by CloseDesk.bat or CloseDesk.command: the launcher's window that showed the download may be closed (it
-    # was closed during the update, say), and the one open now says nothing of it: no window to point to, but how to
-    # try again, where what stops it is shown.
-    said = updates.unfinished_message()
-    assert "window says what went wrong" not in said
-    assert "CloseDesk-Update" in said and "Update in Settings" in said
+def test_an_update_that_didnt_finish_says_where_the_app_wrote_why(monkeypatch, tmp_path, store):
+    # Where the update ran, recorded as it is asked for, says where its reason is: not how this start was opened.
+    log = tmp_path / "CloseDesk-app.log"
+    for name in (updates.APP_ENV, updates.APP_LOG_ENV):
+        monkeypatch.delenv(name, raising=False)
+    # Asked for from CloseDesk.bat or CloseDesk.command: the update ran in that launcher's window, which may be closed by
+    # now (closed during the download, say). Opened next from the shortcut, the app's log has nothing of it: how to
+    # try again instead, where what stops it is shown.
+    updates.remember_update_asked(store)
     monkeypatch.setenv(updates.APP_ENV, "1")
-    monkeypatch.setenv(updates.APP_LOG_ENV, str(tmp_path / "CloseDesk-app.log"))
-    said = updates.unfinished_message()
-    assert str(tmp_path / "CloseDesk-app.log") in said and "window says" not in said
-    assert question is not None
+    monkeypatch.setenv(updates.APP_LOG_ENV, str(log))
+    said = updates.unfinished_message(store)
+    assert str(log) not in said and "window says what went wrong" not in said
+    assert "CloseDesk-Update" in said and "Update in Settings" in said
+    # Asked for in the window: the update wrote to the app's log, whichever way CloseDesk is opened next.
+    updates.remember_update_asked(store)
+    monkeypatch.delenv(updates.APP_ENV)
+    monkeypatch.delenv(updates.APP_LOG_ENV)
+    said = updates.unfinished_message(store)
+    assert str(log) in said and "window says" not in said
 
 
 # CloseDesk started by the window stops when the window's process ends --------------------------------------------------

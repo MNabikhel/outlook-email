@@ -506,6 +506,9 @@ NEWEST_SAID = (
 )
 # The commit CloseDesk was when it stopped to update: opened again as the same one, the update didn't finish.
 ASKED_FROM_KEY = "update_asked_from"
+# Where that update said what it did: the app's log when the CloseDesk window ran it, "" when a launcher's own window
+# did (CloseDesk.bat, CloseDesk.command). Said when it didn't finish, however CloseDesk is opened next.
+ASKED_LOG_KEY = "update_asked_log"
 # Unless the update found this copy the newest already, and said so in this file in .venv (launch.py's NEWEST_NOTE).
 NEWEST_NOTE = "closedesk-newest.txt"
 # How long after CloseDesk opens an answer to the asking may come and still be put to the person: the asking's few
@@ -601,7 +604,7 @@ class Question:
             "newer": newer,
             "failed": failed,
             "title": UNFINISHED_TITLE if failed else NEWEST_TITLE if newest else ASK_TITLE,
-            "failed_message": unfinished_message() if failed else "",
+            "failed_message": unfinished_message(store) if failed else "",
             "note": NEWEST_SAID if newest else "",
             "message": f"CloseDesk {shown['latest']} is out; you have {shown['mine']}." if newer else "",
             "whats_new": shown.get("whats_new", "") if newer else "",
@@ -626,15 +629,19 @@ class Question:
         }
 
 
-def unfinished_message() -> str:
-    """Why CloseDesk opened again as it was, and where to read what went wrong: the launcher's window, or the app's log."""
-    log = os.environ.get(APP_LOG_ENV, "") if os.environ.get(APP_ENV) == "1" else ""
+def unfinished_message(store) -> str:
+    """Why CloseDesk opened again as it was, and where to read what went wrong: where the update ran when it was asked
+    for (``ASKED_LOG_KEY``), not how this start was opened. The app's log when the window ran it; else how to try
+    again, where what stops it is shown (the launcher's window that ran it may be closed by now)."""
+    log = store.get_state(ASKED_LOG_KEY) or ""
     return UNFINISHED_IN_APP.format(log=log) if log else UNFINISHED
 
 
 def remember_update_asked(store) -> None:
-    """CloseDesk stops to update (Settings' or the question's Update button): which version it was."""
+    """CloseDesk stops to update (Settings' or the question's Update button): which version it was, and where the
+    update runs: the CloseDesk window runs it with what it says in the app's log; a launcher, in its own window."""
     store.set_state(ASKED_FROM_KEY, version.installed()[0])
+    store.set_state(ASKED_LOG_KEY, os.environ.get(APP_LOG_ENV, "") if os.environ.get(APP_ENV) == "1" else "")
 
 
 def update_unfinished(store) -> bool:
