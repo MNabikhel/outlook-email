@@ -227,6 +227,19 @@ def test_a_desktop_shared_by_two_computers_keeps_the_first_computers_shortcut(tm
     assert on(second).message == "" and links.files[shared]["folder"] == str(first.root)
 
 
+def test_with_every_shortcut_another_computers_the_first_start_says_what_opens_closedesk_here(windows):
+    # A roaming profile shares the Start menu too: nothing is taken from the other computer, and the line says how
+    # CloseDesk opens here.
+    elsewhere = {**{key: "" for key in ("target", "arguments", "icon", "description")}, "icon_index": 0,
+                 "folder": r"D:\Work\CloseDesk", "app_id": app_window.APP_ID}
+    for path in (windows.desktop, windows.start):
+        windows.links.files[path] = dict(elsewhere)
+    said = _upkeep(windows)
+    assert windows.links.written == [] and "another computer's" in said.message and "CloseDesk.bat" in said.message
+    # Said once.
+    assert _upkeep(windows).message == "" and windows.links.written == []
+
+
 def test_after_a_move_a_shortcut_deleted_from_windows_problem_with_shortcut_is_put_back(windows, tmp_path):
     # Moved, the folder isn't where the shortcut opens it, and Windows offers to delete the shortcut: many click Yes.
     # The next start from the new place (CloseDesk.bat, as the guide says) puts back what the move cost.

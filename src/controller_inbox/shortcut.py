@@ -300,11 +300,14 @@ class Windows:
             lines.append(f"There is already a shortcut named CloseDesk {where(done['theirs'])}, so it was left as it is.")
         if done["elsewhere"]:
             here = [name for key in ("made", "moved", "fresh", "kept") for name in done[key]]
-            use = f"on this computer, use the one {where(here)}" if here else f"on this computer, {self.script} in CloseDesk's folder opens it"
+            use = (
+                f"On this computer, use the one {where(here)}." if here
+                else f"On this computer, {self.script} in CloseDesk's folder opens it (or add this computer's own in Settings)."
+            )
             lines.append(
                 f"The CloseDesk shortcut {where(done['elsewhere'])} opens CloseDesk from a folder this computer hasn't got: "
-                f"it is another computer's (OneDrive keeps your Desktop the same on both), so it was left as it is for that "
-                f"one. {use[0].upper()}{use[1:]}."
+                f"it is another computer's, shared with this one (as OneDrive shares a Desktop), so it was left as it is "
+                f"for that one. {use}"
             )
         for name, why in failed:
             lines.append(f"CloseDesk couldn't put its shortcut {where([name])} ({why}).")
@@ -713,7 +716,8 @@ def _tend(system, *, explicit: bool, record: Path) -> Said:
             done["fallback"].append(name)
         except Exception as exc:
             failed.append((name, _why(exc)))
-    if (first and (made or done["fallback"])) or done["moved"]:
+    # Recorded once one is made, or another computer's was found (said once: from then on it is left as it is quietly).
+    if (first and (made or done["fallback"] or done["elsewhere"])) or done["moved"]:
         try:
             record.parent.mkdir(parents=True, exist_ok=True)
             record.write_text(json.dumps({"made": time.strftime("%Y-%m-%d %H:%M:%S"), "folder": str(system.root)}), encoding="utf-8")
