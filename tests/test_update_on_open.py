@@ -844,6 +844,50 @@ def test_the_page_waiting_is_told_whose_closedesk_to_wait_for(download, settings
     assert mine["folder"] in page and mine["user"] in page
 
 
+# What Setup says of this copy -------------------------------------------------------------------------------------------
+
+
+def _setup_section(client) -> str:
+    page = client.get("/settings").text
+    start = page.index('<section class="panel" id="update">')
+    return page[start : page.index("</section>", start)]
+
+
+def test_right_after_an_update_setup_says_so_before_how_to_update_by_hand(download, settings, store):
+    # Updated, and opened again on Setup (where Update was pressed): its first line under the new version was "To
+    # update, close CloseDesk and double-click CloseDesk-Update in its folder", which read as if nothing had happened.
+    updates.after_update(store)  # CloseDesk opened, before the update
+    (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+    updates.after_update(store)  # opened again, as the new version (whichever way it was updated)
+    shown = updates.status(store, settings)
+    assert shown["current"].startswith("CloseDesk was updated to this version on "), shown["current"]
+    client = TestClient(web.create_app(settings, store))
+    section = _setup_section(client)
+    assert "CloseDesk was updated to this version on " in section
+    assert section.index("CloseDesk was updated to this version") < section.index("CloseDesk-Update")
+    assert "To update, close CloseDesk" not in section, "an instruction to update, just after updating"
+    assert client.get("/api/settings", headers=PAGE).json()["update"]["current"] == shown["current"]
+    # Opened again later as the same version: still said (the version is the one it was updated to).
+    updates.after_update(store)
+    assert updates.status(store, settings)["current"] == shown["current"]
+
+
+def test_setup_says_this_copy_is_the_newest_once_github_said_so(download, settings, store):
+    updates.check(store, settings, now=NOW, ask=github(sha=MINE, date="2026-11-13T10:00:00Z"))
+    shown = updates.status(store, settings)
+    assert shown["newer"] is False and shown["current"] == updates.NEWEST_HERE
+    section = _setup_section(TestClient(web.create_app(settings, store)))
+    assert updates.NEWEST_HERE in section and "To update, close CloseDesk" not in section
+    # GitHub out of reach since: what it said before isn't said as now.
+    updates.check(store, settings, now=NOW + timedelta(days=2), ask=offline)
+    assert updates.status(store, settings)["current"] == ""
+
+
+def test_a_copy_opened_for_the_first_time_isnt_said_to_have_been_updated(download, settings, store):
+    updates.after_update(store)
+    assert updates.status(store, settings)["current"] == ""
+
+
 # What the question says --------------------------------------------------------------------------------------------
 
 

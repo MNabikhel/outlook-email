@@ -130,7 +130,8 @@ GitHub can list a newer version before its download has it: then **Update now** 
 opens as it was and says **No newer version to download yet**; Update in Settings tries again.
 
 The top bar also shows a small **Update ready** link, and Settings says **A newer CloseDesk is ready (2026.11.16; you
-have 2026.11.13)** with an **Update** button. To stop the asking, put `CONTROLLER_INBOX_UPDATE_CHECK=false` in the
+have 2026.11.13)** with an **Update** button. After an update, Settings says **CloseDesk was updated to this version on
+November 16**, and **It is the newest version** once GitHub has said so. To stop the asking, put `CONTROLLER_INBOX_UPDATE_CHECK=false` in the
 `.env` file in CloseDesk's folder: then no question comes up either. When GitHub can't be reached (no internet, or a
 company network that blocks it), Settings says so under the version, and CloseDesk-Update still works.
 

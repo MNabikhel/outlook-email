@@ -283,7 +283,8 @@
   <p>{{ closedesk.by_hand }}</p>
   {% endif %}
   {% elif not closedesk.developer %}
-  <p class="muted">{{ closedesk.by_hand }}</p>
+  {% if closedesk.current %}<p>{{ closedesk.current }}</p>{% endif %}
+  <p class="muted">{{ closedesk.later }}</p>
   {% endif %}
   <p class="muted">{{ closedesk.note }}</p>
   {% if shortcut.offered %}

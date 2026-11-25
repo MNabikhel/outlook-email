@@ -55,6 +55,9 @@ APP_LOG_ENV = "CLOSEDESK_APP_LOG"
 # meanwhile asks first and the update still runs (app_window.py).
 WINDOW_ASKED_ENV = "CLOSEDESK_UPDATE_ASKED_MARK"
 STATE_KEY = "update_latest"
+# The version CloseDesk last opened as, and when it last opened as another one (updated, whichever way).
+SEEN_KEY = "version_seen"
+UPDATED_KEY = "version_updated"
 CHECK_EVERY = timedelta(days=1)
 # How often the open CloseDesk looks whether a day has passed, and how long it waits after starting.
 TICK_SECONDS = 3600
@@ -77,6 +80,11 @@ DEVELOPER = "This is a developer's copy (not a download): update it with git. It
 CHECK_OFF = "Looking for newer versions is turned off (CONTROLLER_INBOX_UPDATE_CHECK=false in .env)."
 UNREACHED = "CloseDesk couldn't reach GitHub on {day} to look for a newer version; CloseDesk-Update in its folder still updates it."
 BY_HAND = "To update, close CloseDesk and double-click CloseDesk-Update in its folder: your mail and settings are kept."
+# Under this copy when no newer one is known: what is known first, then how to update by hand later on (read first,
+# just after an update, BY_HAND sounded as if the update hadn't happened).
+NEWEST_HERE = "This is the newest version."
+UPDATED_HERE = "CloseDesk was updated to this version on {day}."
+UPDATE_LATER = "To update later on, close CloseDesk and double-click CloseDesk-Update in its folder: your mail and settings are kept."
 UPDATING = "CloseDesk closes, fetches the new version and opens again by itself in a minute or two. Your mail and settings are kept."
 BUSY = "CloseDesk is processing mail now. It can update once that is done."
 # Update now while CloseDesk read new mail by itself (as it opened, or the automatic Outlook sync): that is stopped.
@@ -298,6 +306,16 @@ def status(store, settings) -> dict[str, Any]:
     same_day = newer and mine == theirs
     if same_day:
         mine, theirs = version.short(commit, date), version.short(newest, latest.get("date", ""))
+    # What is known of this copy, said first under it when no newer one is: updated to it, and the newest.
+    is_newest = bool(commit and newest == commit.lower() and not latest.get("failed"))
+    current = ""
+    updated = _updated_to(store)
+    if commit and updated.get("commit") == commit.lower():
+        current = UPDATED_HERE.format(day=_day(updated.get("at", "")))
+        if is_newest:
+            current += " " + NEWEST_HERE.replace("This", "It")
+    elif is_newest:
+        current = NEWEST_HERE
     if not commit:
         note = DEVELOPER
     elif not on:
@@ -323,11 +341,36 @@ def status(store, settings) -> dict[str, Any]:
         "whats_new": latest.get("title", "") if newer else "",
         "launcher": launcher_here(),
         "by_hand": BY_HAND,
+        "current": "" if newer else current,
+        "later": UPDATE_LATER,
         # Update that nothing answers: CloseDesk has stopped for an update another page asked for.
         "elsewhere": UPDATING_ELSEWHERE,
         # Whose CloseDesk this is (/health's fingerprints): the page waiting for it loads only this one again.
         "whose": version.whose(),
     }
+
+
+def _updated_to(store) -> dict[str, str]:
+    """When CloseDesk last opened as another version than before: {"commit", "at"}, or {}."""
+    try:
+        said = json.loads(store.get_state(UPDATED_KEY) or "{}")
+    except ValueError:
+        return {}
+    return {key: str(value) for key, value in said.items()} if isinstance(said, dict) else {}
+
+
+def note_version(store) -> None:
+    """As CloseDesk opens: when it opens as another version than the last time (updated, by Update or CloseDesk-Update),
+    when, for Setup to say under it. The first opening of a copy isn't an update."""
+    mine = version.installed()[0].lower()
+    if not mine:
+        return
+    seen = store.get_state(SEEN_KEY) or ""
+    if seen == mine:
+        return
+    if seen:
+        store.set_state(UPDATED_KEY, json.dumps({"commit": mine, "at": datetime.now(timezone.utc).isoformat()}))
+    store.set_state(SEEN_KEY, mine)
 
 
 def _day(stamp: str) -> str:
@@ -439,7 +482,12 @@ def start_checking(store, settings) -> None:
 ASK_TITLE = "A new version of CloseDesk is ready"
 ASK_HOW = "Updating takes a minute or two: CloseDesk closes, fetches the new version and opens again by itself. Your mail and settings are kept."
 UNFINISHED_TITLE = "CloseDesk wasn't updated"
-UNFINISHED = "The update didn't finish, so CloseDesk opened as it was. Your mail and settings are kept; CloseDesk's window says what went wrong."
+# Started by CloseDesk.bat or CloseDesk.command, the window that showed the update may be closed by now (closed during
+# it, say): how to try again instead, where what stops it is shown.
+UNFINISHED = (
+    "The update didn't finish, so CloseDesk opened as it was. Your mail and settings are kept. To try again, use Update "
+    "in Settings, or double-click CloseDesk-Update in CloseDesk's folder: its window shows what stops the update."
+)
 # The app has no console window: what went wrong is in its log.
 UNFINISHED_IN_APP = "The update didn't finish, so CloseDesk opened as it was. Your mail and settings are kept; what went wrong is written in {log}."
 DONE = "The mail is done: CloseDesk can update now."
@@ -596,6 +644,7 @@ def after_update(store) -> str:
     (CloseDesk opened meanwhile), nothing is read: it is for the start after that update."""
     from controller_inbox.app_window import update_running
 
+    note_version(store)
     before = store.get_state(ASKED_FROM_KEY) or ""
     if before and update_running(version.ROOT):
         return ""

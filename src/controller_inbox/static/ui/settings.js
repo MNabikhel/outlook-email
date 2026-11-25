@@ -1089,7 +1089,7 @@ export function createSettings(ctx) {
           ]
         : u.developer
           ? null
-          : h("p", { class: "set-help" }, u.by_hand),
+          : [u.current ? h("p", null, u.current) : null, h("p", { class: "set-help" }, u.later)],
       h("p", { class: "set-help" }, u.note)
     );
   }

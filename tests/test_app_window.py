@@ -1461,7 +1461,12 @@ def test_the_app_command_starts_the_window_before_reading_the_settings(monkeypat
 
 def test_an_update_that_didnt_finish_says_where_the_app_wrote_why(monkeypatch, tmp_path):
     question = updates.Question()
-    assert "CloseDesk's window says what went wrong" in updates.unfinished_message()
+    # Started by CloseDesk.bat or CloseDesk.command: the launcher's window that showed the download may be closed (it
+    # was closed during the update, say), and the one open now says nothing of it: no window to point to, but how to
+    # try again, where what stops it is shown.
+    said = updates.unfinished_message()
+    assert "window says what went wrong" not in said
+    assert "CloseDesk-Update" in said and "Update in Settings" in said
     monkeypatch.setenv(updates.APP_ENV, "1")
     monkeypatch.setenv(updates.APP_LOG_ENV, str(tmp_path / "CloseDesk-app.log"))
     said = updates.unfinished_message()
