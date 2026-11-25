@@ -255,6 +255,54 @@ def test_a_reading_that_runs_out_of_memory_says_so_with_the_advice(loaded, setti
     assert reader.stats.failed == 3, "three emails, then the run stopped"
 
 
+@pytest.mark.parametrize(("given", "said"), [(2, "both messages"), (1, "the one message")])
+def test_a_reading_too_short_to_stop_that_read_none_still_says_why(loaded, settings, monkeypatch, given, said):
+    """Two new messages (or one) and a model that runs out of memory on each: fewer than the three in a row that stop
+    a run, so the run said nothing of it, and the job box was the green of all done: "Processed. The local model read
+    0." with no reason."""
+    from controller_inbox.overnight import read_queue
+
+    settings.llm = None
+    server = LMStudio(loaded=[CHAT])
+    server.answer_error = "status"  # {"error": {"message": "Compute error."}}
+    serve_lm_studio(monkeypatch, server)
+    reader = LocalReader(settings, client=httpx.Client(transport=httpx.MockTransport(server)))
+    result = read_queue(loaded, settings, limit=given, reader=reader)
+    assert reader.stats.failed == given and not reader.stats.read and not reader.stopped
+    note = result["note"]
+    assert note.startswith(f"Read none: the local model ran out of memory on {said} it was given. "), note
+    assert "3B to 8B" in note and "Server error" not in note and "http" not in note and ".." not in note, note
+
+
+def test_a_reading_that_read_none_for_another_reason_says_it(loaded, settings, monkeypatch):
+    from controller_inbox.overnight import read_queue
+
+    settings.llm = None
+    server = LMStudio(loaded=[CHAT])
+    serve_lm_studio(monkeypatch, server)
+
+    def unusable(_request):
+        return httpx.Response(200, json={"choices": [{"message": {"content": "I think this is an invoice."}, "finish_reason": "stop"}]})
+
+    reader = LocalReader(settings, client=httpx.Client(transport=httpx.MockTransport(unusable)))
+    result = read_queue(loaded, settings, limit=2, reader=reader)
+    assert reader.stats.failed == 2 and not reader.stats.read and not reader.stopped
+    assert result["note"].startswith("Read none: both messages it was given failed (reply was not the JSON shape"), result["note"]
+    # One read of the two: the run went on, and the note is for a model that read none.
+    calls = []
+
+    def first_fails(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return unusable(request)
+        reading = {"category": "ap_invoice", "folder": "important", "importance": "high", "summary": "Invoice to enter.", "actions": [], "why": "Vendor bill."}
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(reading)}, "finish_reason": "stop"}]})
+
+    reader = LocalReader(settings, client=httpx.Client(transport=httpx.MockTransport(first_fails)))
+    result = read_queue(loaded, settings, limit=2, reader=reader)
+    assert reader.stats.read >= 1 and result["note"] == "", result["note"]
+
+
 def test_a_reading_that_runs_out_of_memory_with_a_context_closedesk_gave_stops_and_says_where_to_reload_it(loaded, settings, monkeypatch):
     """With a context CloseDesk gave the model, the reading loaded it back smaller by itself. It no longer reloads
     without the user's yes: the run stops using the model (the mail is filed without it) and says that Settings can

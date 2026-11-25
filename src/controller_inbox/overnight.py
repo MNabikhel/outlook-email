@@ -183,6 +183,9 @@ def _read_waiting(
                 if faster
                 else " A smaller model answers faster: a 3B to 8B model is plenty. Choose one in Settings → Local model."
             )
+    elif none := reader.stats.none_read(settings):
+        # One or two new messages, each failed: too few in a row to stop the run, but the model read none of them.
+        result["note"] = f"Read none: {none.rstrip('.')}."
     return result
 
 

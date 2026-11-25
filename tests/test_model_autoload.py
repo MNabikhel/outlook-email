@@ -451,7 +451,7 @@ def test_processing_again_after_a_failed_load_still_says_the_mail_is_filed_witho
 # A model that loaded but stopped reading -------------------------------------------------------------------------
 
 
-def _out_of_memory_run(settings, store, monkeypatch, *, kind: str):
+def _out_of_memory_run(settings, store, monkeypatch, *, kind: str, limit: int = 3):
     """Process new mail (``kind`` "process") or Sync now ("outlook") with a model CloseDesk loaded first that then runs
     out of memory on every email, as a 31B did at 4,096 tokens."""
     from controller_inbox import outlook_sync, overnight
@@ -470,7 +470,7 @@ def _out_of_memory_run(settings, store, monkeypatch, *, kind: str):
     monkeypatch.setattr(overnight, "LocalReader", lambda *_a, **_k: reader)
     monkeypatch.setattr(overnight, "llm_active", lambda _s: True)
     if kind == "process":
-        return overnight.run_overnight(store, settings, sync_graph=False, limit=3, vision_minutes=0, reader=reader)
+        return overnight.run_overnight(store, settings, sync_graph=False, limit=limit, vision_minutes=0, reader=reader)
     monkeypatch.setattr(overnight, "_sync_outlook", lambda *_a, **_k: {"new": 2})
     monkeypatch.setattr(outlook_sync, "changed", lambda _report: True)
     return overnight.outlook_run(store, settings)
@@ -491,6 +491,23 @@ def test_a_model_that_loaded_but_read_none_of_the_mail_isn_t_said_to_read_it(set
         threading.Event().wait(0.02)
     page = client.get("/").text.replace("&#39;", "'")
     assert '<section class="job error">' in page and "reads the mail" not in page and result["model_note"] in page
+
+
+def test_a_run_of_two_messages_the_model_read_neither_of_needs_a_look(settings, store, monkeypatch):
+    """Two messages for the model, out of memory on each: too few in a row to stop the run, so it said nothing of it,
+    and the job box was the green of all done ("Processed. The local model read 0."), with no reason."""
+    result = _out_of_memory_run(settings, store, monkeypatch, kind="process", limit=2)
+    assert result["read_by_bionic"] == 0 and result["model_note"].startswith("Read none: the local model ran out of memory on both messages"), result["model_note"]
+    assert result["model_load"] == {"message": f"Loaded {GEMMA27} in LM Studio.", "failed": False}
+    client = TestClient(web.create_app(settings, store))
+    job = client.app.state.job
+    assert job.start(lambda progress: result)
+    for _ in range(250):
+        if job.snapshot()["state"] != "running":
+            break
+        threading.Event().wait(0.02)
+    page = client.get("/").text.replace("&#39;", "'")
+    assert '<section class="job error">' in page and '<b class="job-flag">Needs a look:</b>' in page and result["model_note"] in page
 
 
 def test_sync_now_says_when_the_model_stopped_reading_the_new_mail(settings, store, monkeypatch):

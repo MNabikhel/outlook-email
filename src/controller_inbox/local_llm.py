@@ -877,6 +877,19 @@ class ReaderStats:
     last_error: str = ""
     times: list[float] = field(default_factory=list)  # seconds each email read took, in order
     too_slow: bool = False  # stopped because the model sent nothing for longer than even the longer wait allows
+    memory_failed: int = 0  # of the failed, the ones that ran out of memory
+
+    def none_read(self, settings: Settings) -> str:
+        """Why the model read none of the messages it was given, when it failed on each of them but on too few in a
+        row (three) to stop the run: "" when it read one, stopped, or was given none. The run still says it, so one
+        the model read none of isn't shown as all done."""
+        failed = self.failed
+        if self.read or not failed or self.stopped_reason:
+            return ""
+        given = "the one message" if failed == 1 else "both messages" if failed == 2 else f"all {failed} messages"
+        if self.memory_failed == failed:
+            return f"the local model ran out of memory on {given} it was given. {memory_advice(settings)}"
+        return f"{given} it was given failed ({self.last_error})"
 
     @property
     def average_seconds(self) -> float:
@@ -1002,6 +1015,7 @@ class LocalReader:
 
     def _failed(self, reason: str, *, memory: bool = False) -> None:
         self.stats.failed += 1
+        self.stats.memory_failed += 1 if memory else 0
         self.stats.last_error = reason
         self._consecutive_failures += 1
         self._memory_failures = self._memory_failures + 1 if memory else 0
