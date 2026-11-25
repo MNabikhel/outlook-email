@@ -96,6 +96,57 @@ def test_the_boxes_on_a_page_show_on_its_white_paper_in_dark_mode(settings, stor
     assert rgb(paper["--paper-differs"]) in shown["differsRing"]
 
 
+# In a contrast theme: whether the computer's colors are forced, each box's edge, ring and fill, and each legend
+# swatch's and key-detail dot's.
+FORCED_BOXES = """() => {
+  const box = (el) => { const s = getComputedStyle(el); return { edge: s.borderTopColor, style: s.borderTopStyle, ring: s.boxShadow, fill: s.backgroundColor, radius: s.borderRadius }; };
+  const dots = document.createElement('div');
+  dots.innerHTML = '<span class="pv-dot ok"></span><span class="pv-dot check"></span><span class="pv-dot differs"></span>';
+  document.querySelector('.pv-keys').append(dots);
+  const out = { forced: matchMedia('(forced-colors: active)').matches,
+                boxes: Object.fromEntries(['ok', 'check', 'differs'].map((n) => [n, box(document.querySelector(`.pv-sheet .pv-box.${n}`))])),
+                swatches: Object.fromEntries([...document.querySelectorAll('.pv-swatch')].map((el) => [[...el.classList].pop(), box(el)])),
+                dots: Object.fromEntries(['ok', 'check', 'differs'].map((n) => [n, box(dots.querySelector(`.pv-dot.${n}`))])) };
+  dots.remove();
+  return out;
+}"""
+CLEAR = "rgba(0, 0, 0, 0)"
+
+
+@pytest.mark.parametrize("system", ["light", "dark"])
+def test_the_boxes_on_a_page_keep_their_colors_and_shapes_in_a_contrast_theme(browser, settings, store, monkeypatch, system):
+    """A Windows contrast theme (high contrast) draws every edge in the color of its words and drops shadows: a red
+    box (its ring a shadow) looked like a green one, and in a dark theme every edge was white on the white page
+    image. The key details' amber dot (a ring, drawn as a shadow) vanished, the green and red ones took the page's
+    color, and the legend's red swatch lost its ring. They keep their own colors and shapes there: the page's image
+    isn't changed by the theme, and the boxes are drawn on it."""
+    email = scan_to_check(settings, store, monkeypatch)
+    context = browser.new_context(viewport={"width": 1440, "height": 900}, color_scheme=system, forced_colors="active")
+    context.set_default_timeout(15000)
+    page = context.new_page()
+    with serving(web.create_app(settings, store)) as base:
+        _open_page_tab(page, base, email)
+        page.wait_for_selector(".pv-box.check")
+        page.wait_for_selector(".pv-keys:not([hidden])")
+        shown = page.evaluate(FORCED_BOXES)
+    context.close()
+    assert shown["forced"], "a contrast theme"
+    paper, theme = pm.workspace("light"), pm.workspace(system)
+    boxes = shown["boxes"]
+    assert {name: box["edge"] for name, box in boxes.items()} == {name: rgb(paper[f"--paper-{name}"]) for name in boxes}, boxes
+    assert (boxes["ok"]["style"], boxes["check"]["style"], boxes["differs"]["style"]) == ("solid", "dotted", "solid"), boxes
+    assert boxes["ok"]["ring"] == "none" and rgb(paper["--paper-differs"]) in boxes["differs"]["ring"], ("the red one's ring", boxes)
+    assert all(box["fill"] != CLEAR for box in boxes.values()), ("tinted, as on the page without the theme", boxes)
+    swatches = shown["swatches"]
+    assert {"ok", "check", "differs"} <= set(swatches), swatches
+    assert len({swatches[name]["edge"] for name in ("ok", "check", "differs")}) == 3, swatches
+    assert swatches["check"]["style"] == "dotted" and swatches["differs"]["ring"] != "none", swatches
+    dots = shown["dots"]
+    assert dots["ok"]["fill"] == rgb(theme["--ok"]) and dots["ok"]["radius"] == "50%", ("a filled dot", dots)
+    assert dots["check"]["fill"] == CLEAR and rgb(theme["--imp-high"]) in dots["check"]["ring"], ("a ring", dots)
+    assert dots["differs"]["fill"] == rgb(theme["--danger"]) and dots["differs"]["radius"] == "1px", ("a square", dots)
+
+
 OUTLINES = """() => {
   // The box drawn while teaching a field or marking a table is only there while dragging: one made the same way.
   const rubber = document.createElement('div'); rubber.className = 'pv-rubber'; document.querySelector('.pv-sheet').append(rubber);

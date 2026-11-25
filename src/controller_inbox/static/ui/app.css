@@ -1643,10 +1643,15 @@ dialog.consent p { margin: 0 0 10px; line-height: 1.5; }
    colored edges took the background's color, so nothing marked a Critical, High or held email, and a word lost the box
    round it ("Held for fraud" ran into the sender). The edge is drawn in the color of the words there, the same for all
    three (Settings → Appearance says the importance words tell them apart), each tag keeps an outline, and the row
-   picked with j and k keeps one round it. */
+   picked with j and k keeps one round it.
+   The boxes drawn on a page's image keep their own colors and shapes: the theme leaves the image as it is, white
+   paper, and drew every box's edge in the color of its words (white on that paper in a dark theme) without the red
+   box's ring, so a red box looked like a green one. The legend's swatches and the key details' dots keep theirs too,
+   as they match the boxes: the amber dot (a ring) had gone, and the green and red ones took the page's color. */
 @media (forced-colors: active) {
   .item:is(.imp-critical, .imp-high, .is-locked)::before,
   .plain-list li:is(.imp-critical, .imp-high, .is-locked)::before { background: CanvasText; }
   .tag, .chip, .pill { outline: 1px solid CanvasText; outline-offset: -1px; }
   .item.is-sel { outline: 2px solid Highlight; outline-offset: -2px; }
+  .pv-sheet :is(.pv-box, .pv-tbl, .pv-taught, .pv-rubber), .pv-swatch, .pv-dot { forced-color-adjust: none; }
 }
