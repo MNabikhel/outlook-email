@@ -49,6 +49,9 @@ ROOT = version.ROOT
 TITLE = "CloseDesk"
 # The taskbar groups the window under the shortcut that carries the same id (Windows: Company.Product, no version).
 APP_ID = "CloseDesk.CloseDesk"
+# CloseDesk.app's id (shortcut.py makes the app), kept for good: macOS keeps what it remembers about an app (its place
+# in the Dock, what it was allowed) under it.
+BUNDLE_ID = "io.github.mnabikhel.closedesk"
 UPDATE = updates.UPDATE_AND_RESTART
 REBUILD = 76  # launch.py: the environment has to be made again
 # A console program started without this flashes a console window up on Windows (0 elsewhere).
@@ -148,9 +151,27 @@ def log_path() -> Path:
     return app_log.path()
 
 
-def icon_path() -> str | None:
-    """The window's icon, where this copy has one (static/closedesk.ico on Windows, .icns on macOS)."""
-    name = "closedesk.ico" if sys.platform == "win32" else "closedesk.icns"
+def macos_version() -> tuple[int, ...]:
+    """This Mac's macOS, (26, 1) say; (0,) when it can't be told (or this isn't a Mac)."""
+    try:
+        return tuple(int(part) for part in _platform.mac_ver()[0].split(".") if part.isdigit()) or (0,)
+    except (ValueError, AttributeError):
+        return (0,)
+
+
+def mac_icon_name(macos: tuple[int, ...] | None = None) -> str:
+    """CloseDesk's icon for this macOS: macOS 26 rounds an app's icon itself, and puts one with clear edges on a grey
+    tile, so there the square filled to its edges; before 26, the rounded one with clear margins. (CloseDesk.app's own
+    icon, and the window's, are the same one.)"""
+    macos = tuple(macos) if macos else macos_version()
+    return "closedesk-full.icns" if macos[0] >= 26 else "closedesk.icns"
+
+
+def icon_path(*, platform: str | None = None, macos: tuple[int, ...] | None = None) -> str | None:
+    """The window's icon, where this copy has one (static/closedesk.ico on Windows; on macOS the .icns for its
+    version)."""
+    platform = platform or sys.platform
+    name = "closedesk.ico" if platform == "win32" else mac_icon_name(macos) if platform == "darwin" else "closedesk.icns"
     path = ROOT / "src" / "controller_inbox" / "static" / name
     return str(path) if path.is_file() else None
 
@@ -297,6 +318,17 @@ def settle_mac_name(*, platform: str | None = None) -> None:
     except Exception:  # pywebview's part for macOS is missing: there is no window to name
         pass
     os.environ.pop(MAC_APP_PATH, None)
+
+
+def mac_bundle_id() -> str:
+    """macOS: the id of the app this program is to macOS (BUNDLE_ID when it runs as CloseDesk.app). "" when macOS
+    can't be asked."""
+    try:
+        from Foundation import NSBundle
+
+        return str(NSBundle.mainBundle().bundleIdentifier() or "")
+    except Exception:
+        return ""
 
 
 def mac_app_name() -> str:
@@ -642,13 +674,20 @@ class App:
         self.window.events.closed += self.on_closed
         try:
             # Not private: the pages keep their own settings (theme, drafts, what was said) from one start to the next.
-            webview.start(self.supervise, private_mode=False, storage_path=self._storage(), icon=icon_path())
+            webview.start(self.supervise, private_mode=False, storage_path=self._storage(), icon=self._icon())
         except Exception as exc:
             traceback.print_exc()
             if self.fallback is None:
                 self.fallback = ("broken", NO_PART.format(detail=_said(exc)))
         self.stop()
         return self.code
+
+    def _icon(self) -> str | None:
+        """The icon pywebview gives the window's app. None on a Mac where this runs as CloseDesk.app, whose own icon
+        (made for this macOS) the Dock shows already: pywebview's would take its place while CloseDesk is open."""
+        if self.platform == "darwin" and mac_bundle_id() == BUNDLE_ID:
+            return None
+        return icon_path(platform=self.platform)
 
     def _storage(self) -> str | None:
         """Where the window keeps the pages' own settings; None (pywebview's own folder) when it can't be written,
@@ -671,8 +710,10 @@ class App:
     def stop(self) -> None:
         """The window has closed: the CloseDesk it started stops. An update under way is a program of its own and
         finishes by itself (one stopped half way would leave CloseDesk half updated). On a Mac the window's program
-        leaves at once: kept with no window, it would stay in the Dock, where opening CloseDesk again only brings it
-        forward and nothing appears. Elsewhere it waits for the update, but not for good."""
+        leaves at once, waiting for neither: kept with no window, it would stay in the Dock, where opening CloseDesk
+        again only brings it forward and nothing appears. CloseDesk stops by itself once its input ends, and ends in
+        time whatever still runs in it (``cli.leave_within``). Elsewhere the window waits for the update and for
+        CloseDesk to stop, but not for good."""
         with self._lock:
             self.closing = True
             server, update = self.server, self.update
@@ -683,7 +724,17 @@ class App:
                 print("The window was closed during the update: the update finishes first.", flush=True)
                 self._wait_for_update(update)
         if server is not None and server.poll() is None:
-            self._end(server)
+            if self.platform == "darwin":
+                self._let_go(server)
+            else:
+                self._end(server)
+
+    def _let_go(self, server) -> None:
+        """Ask CloseDesk the window started to stop (its input ends), without waiting for it."""
+        try:
+            server.stdin.close()
+        except (OSError, AttributeError, ValueError):
+            pass
 
     def _wait_for_update(self, update) -> int:
         """The update's exit code once it ends; given up on (and ended) past ``update_longest``: something holds it
@@ -701,10 +752,7 @@ class App:
 
     def _end(self, server) -> None:
         """Stop CloseDesk the window started, as Ctrl+C would: its input ends. Ended outright if it doesn't."""
-        try:
-            server.stdin.close()
-        except (OSError, AttributeError, ValueError):
-            pass
+        self._let_go(server)
         try:
             server.wait(STOP_WAIT)
         except subprocess.TimeoutExpired:

@@ -32,7 +32,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import platform as _platform
 import plistlib
 import shlex
 import stat
@@ -45,14 +44,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from controller_inbox import version
-from controller_inbox.app_window import APP_ID
+from controller_inbox.app_window import APP_ID, BUNDLE_ID, mac_icon_name
+from controller_inbox.app_window import macos_version as _macos
 from controller_inbox.app_window import user_dir as _closedesk_dir
 
 NAME = "CloseDesk"
 DIR_ENV = "CLOSEDESK_SHORTCUT_DIR"
-# CloseDesk.app's id, kept for good: macOS keeps what it remembers about an app (its place in the Dock, what it was
-# allowed) under it.
-BUNDLE_ID = "io.github.mnabikhel.closedesk"
 # The link in CloseDesk.app to the Python that runs CloseDesk (launch.py has the same name).
 LINKED_PYTHON = "CloseDesk-python"
 STATIC = Path(__file__).resolve().parent / "static"
@@ -334,13 +331,6 @@ def mac_interpreter(sys_module=None, config_var=None) -> Path | None:
     return path if path.is_file() else None
 
 
-def _macos() -> tuple[int, ...]:
-    try:
-        return tuple(int(part) for part in _platform.mac_ver()[0].split(".") if part.isdigit()) or (0,)
-    except (ValueError, AttributeError):
-        return (0,)
-
-
 def _lsregister(app: Path) -> None:
     """Tell Launch Services about the app now, so Spotlight and the Dock know it (and its new icon) at once. Not one in
     the tests' or the launcher check's folder (``CLOSEDESK_SHORTCUT_DIR``): Spotlight would offer a CloseDesk that is
@@ -366,13 +356,35 @@ def _guarded(root: Path, home: Path) -> str:
     return ""
 
 
+def settings_folders(root: Path) -> list[tuple[str, Path, str]]:
+    """The folders CloseDesk reads and writes that its .env can put outside CloseDesk's folder: (what, where, the
+    setting that names it). A relative one is in CloseDesk's folder, as CloseDesk reads it."""
+    try:
+        from controller_inbox.config import Settings
+
+        settings = Settings()
+        named = [
+            ("CloseDesk's data folder", settings.data_dir, "CONTROLLER_INBOX_DATA_DIR"),
+            ("the mail drop folder", settings.inbox_dir, "CONTROLLER_INBOX_INBOX_DIR"),
+            ("the AP cost codes folder", settings.cost_codes_folder, "CONTROLLER_INBOX_COST_CODES_DIR"),
+        ]
+    except Exception:  # a setting that isn't valid: CloseDesk says so itself as it starts
+        return []
+    found = []
+    for what, folder, setting in named:
+        folder = Path(folder).expanduser()
+        found.append((what, Path(os.path.normpath(folder if folder.is_absolute() else Path(root) / folder)), setting))
+    return found
+
+
 def mac_script(root: Path, *, guarded: str = "") -> str:
     """CloseDesk.app's program. Opened from the Dock or Spotlight there is no Terminal: what it says goes to the app's
-    log (launch.py --app's), and a folder that is gone is said in an alert."""
+    log (launch.py --app's), and a folder that is gone is said in an alert. ``guarded``: which folder macOS guards, and
+    where ("CloseDesk's folder is in your Documents folder"), when one is."""
     if guarded:
         does = (
-            f"# CloseDesk.app: CloseDesk's folder is in {guarded}, which macOS lets an app like this one into only after\n"
-            "# asking, so this opens CloseDesk.command in Terminal (CloseDesk in the browser), as a double-click on it does."
+            f"# CloseDesk.app: {guarded}, which macOS lets an app like this one into only after asking,\n"
+            "# so this opens CloseDesk.command in Terminal (CloseDesk in the browser), as a double-click on it does."
         )
     else:
         does = "# CloseDesk.app: opens CloseDesk in a window of its own (scripts/launch.py --app in CloseDesk's folder)."
@@ -454,7 +466,7 @@ class Mac:
     places_said = {"Applications": "in Applications in your user folder", "CloseDesk's folder": "in CloseDesk's folder"}
     _FIND = object()
 
-    def __init__(self, root, *, apps=None, home=None, macos=None, interpreter=_FIND, register=None) -> None:
+    def __init__(self, root, *, apps=None, home=None, macos=None, interpreter=_FIND, register=None, folders=_FIND) -> None:
         self.root = Path(root)
         self.home = Path(home) if home else Path.home()
         named = os.environ.get(DIR_ENV, "")
@@ -462,7 +474,24 @@ class Mac:
         self.macos = tuple(macos) if macos else _macos()
         self.interpreter = mac_interpreter() if interpreter is Mac._FIND else interpreter
         self.register = register or _lsregister
-        self.guarded = _guarded(self.root, self.home)
+        # Where macOS guards what CloseDesk opens from CloseDesk.app: CloseDesk's folder, or a folder its settings put
+        # elsewhere (the data, the mail drop, the cost codes), which CloseDesk started by the app reads as the app.
+        self.folders = settings_folders(self.root) if folders is Mac._FIND else list(folders)
+        self.guarded, self.guarded_folder = _guarded(self.root, self.home), None
+        for what, folder, setting in [] if self.guarded else self.folders:
+            words = _guarded(folder, self.home)
+            if words:
+                self.guarded, self.guarded_folder = words, (what, folder, setting)
+                break
+
+    def guarded_said(self) -> str:
+        """Which folder macOS guards, and where ("" when none)."""
+        if not self.guarded:
+            return ""
+        if self.guarded_folder is None:
+            return f"CloseDesk's folder is in {self.guarded}"
+        what, folder, _ = self.guarded_folder
+        return f"{what[0].upper()}{what[1:]} ({folder}) is in {self.guarded}"
 
     def places(self) -> list[tuple[str, Path]]:
         places = [("Applications", self.apps / f"{NAME}.app")]
@@ -489,8 +518,7 @@ class Mac:
 
     def icon(self) -> bytes:
         # macOS 26 rounds an app's icon itself, and puts one with clear edges on a grey tile: the full square there.
-        name = "closedesk-full.icns" if self.macos[0] >= 26 else "closedesk.icns"
-        return (STATIC / name).read_bytes()
+        return (STATIC / mac_icon_name(self.macos)).read_bytes()
 
     def put(self, app: Path) -> bool:
         contents = app / "Contents"
@@ -499,7 +527,7 @@ class Mac:
         for name, data, mode in (
             ("Info.plist", plistlib.dumps(info_plist(self.root), sort_keys=True), 0o644),
             ("PkgInfo", b"APPL????", 0o644),
-            (f"MacOS/{NAME}", mac_script(self.root, guarded=self.guarded).encode("utf-8"), 0o755),
+            (f"MacOS/{NAME}", mac_script(self.root, guarded=self.guarded_said()).encode("utf-8"), 0o755),
             (f"Resources/{NAME}.icns", self.icon(), 0o644),
         ):
             changed |= _write(contents / name, data, mode)
@@ -515,11 +543,21 @@ class Mac:
 
     def said(self, done: dict, failed: list, *, explicit: bool) -> Said:
         where = lambda names: _join([self.places_said.get(name, name) for name in names])  # noqa: E731
-        guarded = (
-            f" CloseDesk's folder is in {self.guarded}, which macOS lets an app like this into only after asking, so from "
-            "there it opens CloseDesk in Terminal and your browser, as CloseDesk.command does. For the window, move the "
-            "CloseDesk folder into your home folder and double-click CloseDesk.command once."
-        ) if self.guarded else ""
+        if not self.guarded:
+            guarded = ""
+        elif self.guarded_folder is None:
+            guarded = (
+                f" {self.guarded_said()}, which macOS lets an app like this into only after asking, so from there it "
+                "opens CloseDesk in Terminal and your browser, as CloseDesk.command does. For the window, move the "
+                "CloseDesk folder into your home folder and double-click CloseDesk.command once."
+            )
+        else:
+            guarded = (
+                f" {self.guarded_said()}, which macOS lets an app like this into only after asking, so CloseDesk.app "
+                "opens CloseDesk in Terminal and your browser, as CloseDesk.command does. For the window, move that "
+                f"folder elsewhere in your home folder, change {self.guarded_folder[2]} in the .env file in CloseDesk's "
+                "folder to match, and double-click CloseDesk.command once."
+            )
         window = "" if self.guarded else ": it opens CloseDesk in a window of its own"
         lines = []
         if "Applications" in done["made"]:
@@ -539,7 +577,7 @@ class Mac:
         if done["moved"]:
             lines.append(f"CloseDesk.app {where(done['moved'])} now opens CloseDesk from this folder (CloseDesk's folder was moved).")
         if done["fresh"]:
-            lines.append(f"CloseDesk.app {where(done['fresh'])} was brought up to date.")
+            lines.append(f"CloseDesk.app {where(done['fresh'])} was brought up to date.{guarded}")
         if done["kept"] and explicit:
             if "Applications" in done["kept"]:
                 lines.append("CloseDesk is in Applications in your user folder: find it with Spotlight, or keep it in the Dock.")

@@ -786,6 +786,29 @@ def _run_server(app, *, host: str, port: int) -> None:
         raise SystemExit(3)
 
 
+# How long CloseDesk waits, once its command is done, for what still runs beside it before it ends all the same.
+LEAVE_WAIT = 5
+
+
+def leave_within(code, seconds: float = LEAVE_WAIT) -> None:
+    """Once CloseDesk's command is done: end with ``code`` within ``seconds``, whatever still runs beside it. Python
+    otherwise waits for every such thread as it ends: a reply the local model is still writing, for a page that is gone,
+    kept CloseDesk open unseen for a minute or more after its window closed (in a Mac's Dock, where opening CloseDesk
+    then did nothing), and held up the update or the launcher waiting for it to stop."""
+    code = code if isinstance(code, int) else 0 if code is None else 1
+
+    def leave() -> None:
+        time.sleep(seconds)
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except (AttributeError, OSError, ValueError):
+                pass
+        os._exit(code)
+
+    threading.Thread(target=leave, name="leave-within", daemon=True).start()
+
+
 def _stop_when_input_ends(fd: int, stop) -> None:
     """Read the input ``fd`` (nothing is sent on it) until it ends, then ``stop``. Read beneath Python's own reader of
     it: a thread still waiting inside that one when CloseDesk stops by itself (to update) makes Python end with an

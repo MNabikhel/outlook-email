@@ -600,6 +600,42 @@ def test_in_a_folder_macos_guards_the_app_opens_closedesk_command_in_terminal(wh
     assert "home folder" in said.message, "it says how to get the window: the folder in the home folder"
 
 
+@pytest.mark.parametrize("setting, where", [
+    ("CONTROLLER_INBOX_COST_CODES_DIR", "Library/CloudStorage/OneDrive-Firm/Finance/AP cost codes"),
+    ("CONTROLLER_INBOX_INBOX_DIR", "Documents/CloseDesk inbox"),
+    ("CONTROLLER_INBOX_DATA_DIR", "Desktop/CloseDesk data"),
+])
+def test_a_folder_the_settings_put_where_macos_guards_has_the_app_open_closedesk_command_too(setting, where, tmp_path, monkeypatch):
+    # The .env can put the data, the mail drop or the AP cost codes elsewhere. CloseDesk started by CloseDesk.app reads
+    # them as CloseDesk.app, whose program is a script: macOS asks each time, or says no without a word, and the cost
+    # codes or the mail drop read as empty. Through Terminal they work, as they do for CloseDesk.command.
+    home = tmp_path / "home"
+    root = _closedesk(home / "CloseDesk")
+    monkeypatch.setenv(setting, str(home / where))
+    system = shortcut.Mac(root, apps=home / "Applications", home=home, macos=(15, 0), interpreter=None, register=lambda app: None)
+    said = shortcut.upkeep(system, record=tmp_path / "shortcut.json")
+    script = (home / "Applications" / "CloseDesk.app" / "Contents" / "MacOS" / "CloseDesk").read_text(encoding="utf-8")
+    assert script.rstrip().endswith('exec /usr/bin/open -a Terminal "$ROOT/CloseDesk.command"')
+    assert str(home / where) in said.message and setting in said.message, said.message
+    # Moved out again (the .env changed): the next start gives the app its window back.
+    monkeypatch.setenv(setting, str(home / "CloseDesk folders" / "x"))
+    system = shortcut.Mac(root, apps=home / "Applications", home=home, macos=(15, 0), interpreter=None, register=lambda app: None)
+    shortcut.upkeep(system, record=tmp_path / "shortcut.json")
+    script = (home / "Applications" / "CloseDesk.app" / "Contents" / "MacOS" / "CloseDesk").read_text(encoding="utf-8")
+    assert script.rstrip().endswith("--app")
+
+
+def test_the_folders_the_settings_leave_in_closedesks_folder_are_closedesks_folders(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    root = _closedesk(home / "CloseDesk")
+    for name in ("CONTROLLER_INBOX_COST_CODES_DIR", "CONTROLLER_INBOX_INBOX_DIR", "CONTROLLER_INBOX_DATA_DIR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(root)
+    system = shortcut.Mac(root, apps=home / "Applications", home=home, macos=(15, 0), interpreter=None, register=lambda app: None)
+    assert system.guarded == ""
+    assert {folder for _, folder, _ in system.folders} == {root / "data", root / "inbox", root / "AP cost codes"}
+
+
 def test_a_mac_app_that_is_right_isnt_written_again(mac):
     shortcut.upkeep(mac.system, record=mac.record)
     before = {path: path.lstat().st_mtime_ns for path in mac.app.rglob("*")}

@@ -96,7 +96,10 @@ that made it first. The other computer leaves it as it is and says so; there, op
 **On a Mac, keep the folder in your home folder** (the install line puts it there). From Desktop, Documents, Downloads,
 iCloud Drive, another cloud drive or another disk, macOS would ask before letting CloseDesk.app in, so from there
 CloseDesk.app opens `CloseDesk.command` in Terminal and CloseDesk in your browser instead. Move the folder into your
-home folder and double-click `CloseDesk.command` once, and the window opens from then on.
+home folder and double-click `CloseDesk.command` once, and the window opens from then on. The same goes for the
+folders `.env` can put elsewhere (`CONTROLLER_INBOX_DATA_DIR`, `CONTROLLER_INBOX_INBOX_DIR`,
+`CONTROLLER_INBOX_COST_CODES_DIR`): one of them in Desktop, Documents, Downloads or a cloud drive has CloseDesk.app open
+Terminal too, and the first start says which.
 
 There is no black window with the shortcut, so what CloseDesk says as it starts is written to its log:
 `%LOCALAPPDATA%\CloseDesk\CloseDesk-app.log` on Windows, `~/Library/Logs/CloseDesk/CloseDesk-app.log` on a Mac. When
@@ -212,7 +215,7 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 | Windows: *Python venv launcher is sorry to say ... did not find executable* | The Python CloseDesk was set up with is gone (uninstalled, often after a newer one was installed). Double-click `CloseDesk.bat` once: it sets CloseDesk up again with the Python that is there, and the shortcut works again. |
 | The CloseDesk shortcut says *CloseDesk couldn't open*, or does nothing | What went wrong is in its log: `%LOCALAPPDATA%\CloseDesk\CloseDesk-app.log` (Windows) or `~/Library/Logs/CloseDesk/CloseDesk-app.log` (Mac). Double-clicking `CloseDesk.bat` / `CloseDesk.command` shows the same start in its window, and `--check` says what isn't in order. |
 | The CloseDesk shortcut or the Mac's CloseDesk is gone | It isn't put back once deleted. **Settings → This copy and its check → Add the CloseDesk shortcut again** (Mac: **Add CloseDesk to Applications again**), or `CloseDesk.bat --shortcut` / `CloseDesk.command --shortcut`. |
-| Mac: CloseDesk.app opens Terminal and the browser, not a window | CloseDesk's folder is in Desktop, Documents, Downloads, iCloud Drive, another cloud drive or on another disk, where macOS would ask first. Move it into your home folder and double-click `CloseDesk.command` once. |
+| Mac: CloseDesk.app opens Terminal and the browser, not a window | CloseDesk's folder, or a folder `.env` puts elsewhere (the data, the mail drop, the AP cost codes), is in Desktop, Documents, Downloads, iCloud Drive, another cloud drive or on another disk, where macOS would ask first. Move it into your home folder (and change its line in `.env`), then double-click `CloseDesk.command` once. |
 | Local model: **not running** | Open LM Studio and start the server. CloseDesk loads a model the next time it starts; or choose one in Settings → **Model that answers your questions**. Then click **Process new mail** again. `python -m controller_inbox llm-check` says exactly what is wrong. |
 | "CloseDesk couldn't load … in LM Studio" when it starts | LM Studio couldn't load the model CloseDesk chose (usually not enough memory). The mail is filed without a model meanwhile. Close other apps, or choose a smaller model in Settings → **Model that answers your questions**. |
 | CloseDesk loaded a model I didn't want | It loads one only when none is loaded. Choose another in Settings → **Model that answers your questions** (it is used from then on), or load yours in LM Studio before you start CloseDesk. |

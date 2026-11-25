@@ -885,6 +885,49 @@ def test_what_the_window_starts_isnt_given_the_windows_name_on_a_mac(computer, t
     assert app_window.MAC_APP_PATH not in started[0]
 
 
+def _mac_bundle(monkeypatch, bundle: str) -> None:
+    monkeypatch.setitem(sys.modules, "Foundation", SimpleNamespace(
+        NSBundle=SimpleNamespace(mainBundle=lambda: SimpleNamespace(bundleIdentifier=lambda: bundle))))
+
+
+def _icon_given(computer, tmp_path, *, platform: str):
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = platform
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.person_closes()
+    thread.join(10)
+    return webview.started["icon"]
+
+
+def test_on_a_mac_running_as_closedesk_app_the_dock_keeps_the_apps_own_icon(computer, tmp_path, monkeypatch):
+    # pywebview puts the icon it is given on the Dock for as long as CloseDesk is open. CloseDesk.app's own icon is the
+    # one made for this macOS (filled to its edges on 26, where clear edges get a grey tile): nothing takes its place.
+    _mac_bundle(monkeypatch, app_window.BUNDLE_ID)
+    assert _icon_given(computer, tmp_path, platform="darwin") is None
+
+
+def test_on_a_mac_running_as_python_the_window_gives_the_icon_for_this_macos(computer, tmp_path, monkeypatch):
+    # Started without CloseDesk.app's link (the Dock says Python): the icon pywebview shows is the one for this macOS.
+    _mac_bundle(monkeypatch, "org.python.python")
+    monkeypatch.setattr(app_window, "macos_version", lambda: (26, 1))
+    assert Path(_icon_given(computer, tmp_path, platform="darwin")).name == "closedesk-full.icns"
+    monkeypatch.setattr(app_window, "macos_version", lambda: (15, 6))
+    assert Path(_icon_given(computer, tmp_path, platform="darwin")).name == "closedesk.icns"
+    assert Path(_icon_given(computer, tmp_path, platform="win32")).name == "closedesk.ico"
+
+
+def test_the_window_and_closedesk_app_pick_the_same_icon_for_each_macos():
+    from controller_inbox import shortcut
+
+    for macos, name in (((26, 0), "closedesk-full.icns"), ((27, 2), "closedesk-full.icns"), ((15, 7), "closedesk.icns"), ((12,), "closedesk.icns")):
+        assert Path(app_window.icon_path(platform="darwin", macos=macos)).name == name
+        app = shortcut.Mac(ROOT, apps=ROOT / "nowhere", home=ROOT, macos=macos, interpreter=None, register=lambda app: None)
+        assert app.icon() == Path(app_window.icon_path(platform="darwin", macos=macos)).read_bytes(), macos
+
+
 def test_on_a_mac_the_window_takes_its_name_then_passes_it_on_to_nothing(monkeypatch):
     # macOS reads where the program was started from once, the first time it is asked which app this is: asked here,
     # then the variable goes, so nothing the window runs (an alert, the browser, CloseDesk itself) takes CloseDesk.app's
@@ -1331,6 +1374,78 @@ def test_on_a_mac_a_window_closed_during_an_update_leaves_at_once_and_the_update
     thread.join(10)
     assert not thread.is_alive() and result["code"] == 0
     assert update.poll() is None and not update.terminated, "left to finish"
+
+
+class SlowToStop(FakeProcess):
+    """CloseDesk still finishing something once its input ends (a reply a local model is writing, its page gone)."""
+
+    def _input_ends(self) -> None:
+        self.input_closed = True
+
+
+def _closed_while_closedesk_finishes(computer, tmp_path, monkeypatch, platform):
+    monkeypatch.setattr(app_window, "STOP_WAIT", 0.5)
+    computer.popen = lambda cmd, **options: computer.processes.append(SlowToStop(cmd, **options)) or computer.processes[-1]
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.popen = computer.popen
+    app.platform = platform
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    started = time.monotonic()
+    assert window.person_closes() is True
+    thread.join(10)
+    return computer.servers()[0], time.monotonic() - started, result
+
+
+def test_on_a_mac_a_window_closed_while_closedesk_finishes_something_leaves_at_once(computer, tmp_path, monkeypatch):
+    # Waiting for CloseDesk to stop kept the window's program in the Dock with no window, as CloseDesk.app: opening
+    # CloseDesk meanwhile only brought that one forward, and nothing appeared. CloseDesk stops by itself once its
+    # input ends, and ends itself in time (cli.leave_within).
+    server, took, result = _closed_while_closedesk_finishes(computer, tmp_path, monkeypatch, "darwin")
+    assert result["code"] == 0 and server.input_closed
+    assert took < 0.4 and not server.terminated, "the window waited for CloseDesk to stop"
+
+
+def test_elsewhere_a_window_closed_while_closedesk_finishes_something_waits_then_ends_it(computer, tmp_path, monkeypatch):
+    server, took, result = _closed_while_closedesk_finishes(computer, tmp_path, monkeypatch, "win32")
+    assert result["code"] == 0 and server.input_closed and server.terminated and took >= 0.5
+
+
+def test_closedesk_ends_in_time_whatever_still_runs_beside_it(tmp_path):
+    # A reply the local model is still writing runs in a thread Python waits for as it ends: CloseDesk stayed open,
+    # unseen, until it was done (and the window, the launcher and an update waited on it). It ends within its few
+    # seconds, with its own exit code. Run for real: python -m controller_inbox, with a thread that would hold it.
+    hold = tmp_path / "hold"
+    hold.mkdir()
+    (hold / "sitecustomize.py").write_text(
+        "import threading, time\nthreading.Thread(target=time.sleep, args=(120,), name='a-reply-being-written').start()\n",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(hold), str(ROOT / "src")]),
+           "CONTROLLER_INBOX_DATA_DIR": str(tmp_path / "data"), "CONTROLLER_INBOX_INBOX_DIR": str(tmp_path / "inbox")}
+    # A command that ends as commands do, and one that ends with an error of its own (argparse's: no such command).
+    for args, code in ((["status"], 0), (["no-such-command"], 2)):
+        started = time.monotonic()
+        done = subprocess.run([sys.executable, "-m", "controller_inbox", *args], env=env, cwd=tmp_path, capture_output=True,
+                              text=True, timeout=60)
+        assert time.monotonic() - started < 30, f"a thread still running kept CloseDesk open after {args} was done"
+        assert done.returncode == code, done.stderr
+
+
+def test_leaving_in_time_keeps_the_exit_code(tmp_path):
+    script = tmp_path / "leave.py"
+    script.write_text(
+        "import sys, threading, time\nsys.path.insert(0, sys.argv[1])\nfrom controller_inbox import cli\n"
+        "threading.Thread(target=time.sleep, args=(120,)).start()\nprint('done', flush=True)\n"
+        "cli.leave_within(75, 0.2)\n",
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    done = subprocess.run([sys.executable, str(script), str(ROOT / "src")], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 75 and done.stdout.strip() == "done", done
+    assert time.monotonic() - started < 30
 
 
 def test_an_update_that_never_ends_is_given_up_on_and_closedesk_opens_as_it_is(computer, tmp_path, capsys):

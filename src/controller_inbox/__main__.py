@@ -14,4 +14,12 @@ if __name__ == "__main__":
         if sys.argv[1:2] != ["app"]:
             raise
         raise SystemExit(app_log.cant_open()) from None
-    raise SystemExit(main())
+    try:
+        code = main()
+    except SystemExit as done:
+        code = done.code
+    # Done: what still runs beside it (a reply a model is still writing, its page gone) doesn't keep CloseDesk open.
+    from controller_inbox.cli import leave_within
+
+    leave_within(code)
+    raise SystemExit(code)
