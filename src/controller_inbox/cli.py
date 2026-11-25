@@ -774,20 +774,26 @@ def _run_server(app, *, host: str, port: int) -> None:
     if os.environ.pop(STOP_WITH_PARENT, "") == "1" and sys.stdin is not None:
         # Started by the CloseDesk window, which holds this one's input open: once the window's process ends, however
         # it ends (closed, Cmd+Q, ended in Task Manager), the input ends and CloseDesk stops as Ctrl+C stops it.
-        stream = getattr(sys.stdin, "buffer", sys.stdin)
-        threading.Thread(target=_stop_when_input_ends, args=(stream, stop), name="stop-with-window", daemon=True).start()
+        try:
+            fd = sys.stdin.fileno()
+        except (AttributeError, OSError, ValueError):
+            fd = None
+        if fd is not None:
+            threading.Thread(target=_stop_when_input_ends, args=(fd, stop), name="stop-with-window", daemon=True).start()
     server.run()
     if not server.started and not server.should_exit:
         # The port couldn't be opened (uvicorn has said why): as uvicorn.run does, end with an error.
         raise SystemExit(3)
 
 
-def _stop_when_input_ends(stream, stop) -> None:
-    """Read ``stream`` (nothing is sent on it) until it ends, then ``stop``."""
+def _stop_when_input_ends(fd: int, stop) -> None:
+    """Read the input ``fd`` (nothing is sent on it) until it ends, then ``stop``. Read beneath Python's own reader of
+    it: a thread still waiting inside that one when CloseDesk stops by itself (to update) makes Python end with an
+    error instead of CloseDesk's exit code."""
     try:
-        while stream.read(65536):
+        while os.read(fd, 65536):
             pass
-    except (OSError, ValueError):
+    except OSError:
         pass
     stop()
 

@@ -969,13 +969,15 @@ def test_an_update_that_didnt_finish_says_where_the_app_wrote_why(monkeypatch, t
 def test_closedesk_stops_when_its_input_ends():
     read, write = os.pipe()
     stopped = threading.Event()
-    with os.fdopen(read, "rb") as stream:
-        thread = threading.Thread(target=cli._stop_when_input_ends, args=(stream, stopped.set), daemon=True)
+    try:
+        thread = threading.Thread(target=cli._stop_when_input_ends, args=(read, stopped.set), daemon=True)
         thread.start()
         time.sleep(0.1)
         assert not stopped.is_set()
         os.close(write)
         assert stopped.wait(5)
+    finally:
+        os.close(read)
 
 
 def _free_port() -> int:
@@ -1016,6 +1018,42 @@ def test_a_real_closedesk_started_as_the_window_starts_it_stops_when_the_window_
         if server.poll() is None:
             server.kill()
             server.wait()
+
+
+def test_closedesk_started_by_the_window_that_stops_by_itself_ends_with_its_own_exit_code(tmp_path):
+    # Update now stops CloseDesk with UPDATE (75) for the window to update it, while the window still holds its input
+    # open. A thread left waiting inside Python's own reader of that input made Python end with "could not acquire lock
+    # for <stdin> at interpreter shutdown" (an abort, -6), not 75: the window said "CloseDesk stopped" instead of
+    # updating.
+    import textwrap
+
+    script = tmp_path / "serve.py"
+    script.write_text(textwrap.dedent("""
+        import sys, threading
+        from fastapi import FastAPI
+        from controller_inbox import cli
+
+        app = FastAPI()
+        threading.Timer(1.5, lambda: app.state.stop_server()).start()  # as Update now does
+        cli._run_server(app, host="127.0.0.1", port=int(sys.argv[1]))
+        sys.exit(75)
+    """), encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), app_window.STOP_WITH_PARENT: "1"}
+    server = subprocess.Popen(
+        [sys.executable, str(script), str(_free_port())], cwd=tmp_path, env=env, stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    try:
+        code = server.wait(60)  # its input still open, as the window holds it
+        said = server.stdout.read().decode(errors="replace")
+    finally:
+        if server.poll() is None:
+            server.kill()
+            server.wait()
+        server.stdin.close()
+        server.stdout.close()
+    assert "Fatal Python error" not in said, said
+    assert code == 75, said
 
 
 def test_every_download_link_says_download_so_the_window_saves_it():
