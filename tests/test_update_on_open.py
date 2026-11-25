@@ -333,6 +333,27 @@ def test_the_check_keeps_the_latest_changes_title(download, settings, store):
     assert updates.status(store, settings)["whats_new"] == ""
 
 
+def test_loading_the_sample_mailbox_keeps_what_is_known_of_updates(download, settings, store):
+    # Not now, then Settings → Load sample mailbox: the top bar's Update ready and Setup's "A newer CloseDesk is ready"
+    # were gone until the hourly asking (sync_state lost what the check found), and so was "updated to this version".
+    store.set_state(updates.SEEN_KEY, "c" * 40)
+    updates.note_version(store)  # opened as this version after another: updated to it
+    updates.check(store, settings, now=NOW, ask=github())
+    store.set_state(updates.ASKED_FROM_KEY, MINE)
+    store.set_state(cli.REOPEN_PORT_KEY, "8765")
+    before = updates.status(store, settings)
+    assert before["newer"] is True and before["latest"] == "2026.11.16"
+    store.clear_mail()
+    after = updates.status(store, settings)
+    assert after["newer"] is True and after["message"] == before["message"] and after["whats_new"] == before["whats_new"]
+    for key in (updates.STATE_KEY, updates.SEEN_KEY, updates.UPDATED_KEY, updates.ASKED_FROM_KEY, cli.REOPEN_PORT_KEY):
+        assert store.get_state(key), key
+    # Mail bookkeeping still starts over.
+    store.set_state("outlook_last_sync", NOW.isoformat())
+    store.clear_mail()
+    assert not store.get_state("outlook_last_sync")
+
+
 def test_the_settings_say_closedesk_asks_as_it_opens(download, settings, store):
     note = updates.status(store, settings)["note"]
     assert "When CloseDesk opens, and once a day while it is open" in note and "nothing about your mail is sent" in note
