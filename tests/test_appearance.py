@@ -386,9 +386,13 @@ def test_a_held_email_says_held_for_fraud_wherever_its_importance_is_written(cli
 
 def test_a_digest_saved_before_it_said_which_emails_are_held_says_so_too(client, demo):
     """A digest saved by an earlier version has each email's importance in its "Do not process" box and what came in,
-    but not whether it is held: shown now, the held email said "Critical" there. It is worked out from the email as
-    it is now; the task lists, and the focus rows, which had no importance word then, get none."""
+    but not whether it is held: shown now, the held email said "Critical" there. Its focus rows had neither, so with
+    the box ticked they had no word at all, in both UIs, and on the classic digest a Critical one kept the edge of its
+    reason (the amber of due today, the slate of due later) where Today has the red of Critical. Each is worked out
+    from the email as it is now; the task lists, which have their own priority, get none."""
     import json
+
+    from controller_inbox.models import IMPORTANCE_LABELS
 
     assert client.post("/digest/rebuild", headers=SAME, follow_redirects=False).status_code == 303
     row = demo.latest_digest()
@@ -406,11 +410,23 @@ def test_a_digest_saved_before_it_said_which_emails_are_held_says_so_too(client,
     shown = client.get("/api/digest", headers=PAGE).json()["payload"]
     assert [item["locked"] for item in shown["critical_alerts"]] == [True]
     assert [item["id"] for rows in shown["new_mail"].values() for item in rows if item["locked"]] == [HELD]
-    for name in ("focus", "overdue_actions", "due_today", "due_this_week"):
+    for name in ("overdue_actions", "due_today", "due_this_week"):
         assert not [item for item in shown.get(name) or [] if "locked" in item], name
+    focus = shown["focus"]
+    assert focus and [row["locked"] for row in focus if row["email_id"] == HELD] == [True]
+    for row in focus:
+        email = demo.get_email(row["email_id"])
+        assert (row["importance"], row["importance_label"]) == (email.importance.value, IMPORTANCE_LABELS[email.importance]), row
+    critical = [row["email_id"] for row in focus if row["importance"] == "critical" and not row["locked"]]
+    assert critical, focus
     html = client.get("/digest").text
-    assert _words_on(html, HELD) == [("pill held item-level", "Held for fraud")] * 2, "its box and Needs you"
+    assert _words_on(html, HELD) == [("pill held item-level", "Held for fraud")] * 3, "its box, its focus row and Needs you"
     assert "Critical" not in [word for _cls, word in _words_on(html, HELD)]
+    items = _focus_items(html)
+    assert len(items) == len(focus) and all("item-level" in item for item in items), "a word on each focus row"
+    for email_id in critical:
+        (item,) = [item for item in items if f'href="/inbox/{email_id}"' in item]
+        assert item.split('"', 1)[0].split()[-1] == "imp-critical", ("the edge of Critical", item[:80])
 
 
 def test_a_held_invoice_on_a_digest_saved_before_it_said_so_is_held_in_every_list(client, demo):
