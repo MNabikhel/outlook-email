@@ -184,8 +184,10 @@ def _read_waiting(
                 else " A smaller model answers faster: a 3B to 8B model is plenty. Choose one in Settings → Local model."
             )
     elif none := reader.stats.none_read(settings):
-        # One or two new messages, each failed: too few in a row to stop the run, but the model read none of them.
-        result["note"] = f"Read none: {none.rstrip('.')}."
+        # One or two emails waiting, each failed: too few in a row to stop the run, but the model read none of them.
+        # The page says so in plain words; what the model said goes to the log.
+        result["note"], result["read_none"] = none, True
+        log.warning("The local model read none of the %d emails given to it: %s", reader.stats.failed, reader.stats.last_error)
     return result
 
 
@@ -446,6 +448,8 @@ def _run_overnight(
         "headline": payload["headline"],
         "model": reading["model"],
         "model_note": " ".join(note for note in [reading["note"], *stopped_notes] if note),
+        # The note says the model read none of the mail it was given, so the job box doesn't also say "read 0".
+        "model_read_none": bool(reading.get("read_none")),
         "avg_seconds": round(stats.average_seconds, 1) if stats else 0.0,
         "llm_enabled": bool(reading["model"]),
     }

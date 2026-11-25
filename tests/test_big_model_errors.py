@@ -255,11 +255,18 @@ def test_a_reading_that_runs_out_of_memory_says_so_with_the_advice(loaded, setti
     assert reader.stats.failed == 3, "three emails, then the run stopped"
 
 
-@pytest.mark.parametrize(("given", "said"), [(2, "both messages"), (1, "the one message")])
+@pytest.mark.parametrize(
+    ("given", "said"),
+    [
+        (2, "The local model couldn't read either of the 2 emails waiting for it: it ran out of memory on each. "),
+        (1, "The local model couldn't read the one email waiting for it: it ran out of memory. "),
+    ],
+)
 def test_a_reading_too_short_to_stop_that_read_none_still_says_why(loaded, settings, monkeypatch, given, said):
     """Two new messages (or one) and a model that runs out of memory on each: fewer than the three in a row that stop
     a run, so the run said nothing of it, and the job box was the green of all done: "Processed. The local model read
-    0." with no reason."""
+    0." with no reason. Said in one sentence with no label of its own (the job box puts "Needs a look:" before it), and
+    naming the mail it means: a run with no new files still gives the model the emails earlier runs left waiting."""
     from controller_inbox.overnight import read_queue
 
     settings.llm = None
@@ -270,11 +277,15 @@ def test_a_reading_too_short_to_stop_that_read_none_still_says_why(loaded, setti
     result = read_queue(loaded, settings, limit=given, reader=reader)
     assert reader.stats.failed == given and not reader.stats.read and not reader.stopped
     note = result["note"]
-    assert note.startswith(f"Read none: the local model ran out of memory on {said} it was given. "), note
+    assert note.startswith(said), note
     assert "3B to 8B" in note and "Server error" not in note and "http" not in note and ".." not in note, note
+    assert "Read none" not in note and "message" not in note and result["read_none"], note
 
 
-def test_a_reading_that_read_none_for_another_reason_says_it(loaded, settings, monkeypatch):
+def test_a_reading_that_read_none_for_another_reason_says_it(loaded, settings, monkeypatch, caplog):
+    """A model whose replies CloseDesk can't use: the note said "Read none: both messages it was given failed (reply
+    was not the JSON shape: “I think this is an invoice.”)", the model's own words in front of an accountant. They go
+    to the log; the page says what happens to the mail."""
     from controller_inbox.overnight import read_queue
 
     settings.llm = None
@@ -285,9 +296,13 @@ def test_a_reading_that_read_none_for_another_reason_says_it(loaded, settings, m
         return httpx.Response(200, json={"choices": [{"message": {"content": "I think this is an invoice."}, "finish_reason": "stop"}]})
 
     reader = LocalReader(settings, client=httpx.Client(transport=httpx.MockTransport(unusable)))
-    result = read_queue(loaded, settings, limit=2, reader=reader)
+    with caplog.at_level("WARNING", logger="controller_inbox.overnight"):
+        result = read_queue(loaded, settings, limit=2, reader=reader)
     assert reader.stats.failed == 2 and not reader.stats.read and not reader.stopped
-    assert result["note"].startswith("Read none: both messages it was given failed (reply was not the JSON shape"), result["note"]
+    assert result["note"] == (
+        "The local model couldn't read either of the 2 emails waiting for it. They are tried again on the next run."
+    ), result["note"]
+    assert "JSON" in caplog.text and "I think this is an invoice." in caplog.text, caplog.text
     # One read of the two: the run went on, and the note is for a model that read none.
     calls = []
 
@@ -300,7 +315,19 @@ def test_a_reading_that_read_none_for_another_reason_says_it(loaded, settings, m
 
     reader = LocalReader(settings, client=httpx.Client(transport=httpx.MockTransport(first_fails)))
     result = read_queue(loaded, settings, limit=2, reader=reader)
-    assert reader.stats.read >= 1 and result["note"] == "", result["note"]
+    assert reader.stats.read >= 1 and result["note"] == "" and not result.get("read_none"), result["note"]
+
+
+@pytest.mark.parametrize(("failed", "memory", "said"), [
+    (1, 0, "The local model couldn't read the one email waiting for it. It is tried again on the next run."),
+    (3, 0, "The local model couldn't read any of the 3 emails waiting for it. They are tried again on the next run."),
+    (2, 1, "The local model couldn't read either of the 2 emails waiting for it. They are tried again on the next run."),
+])
+def test_the_note_for_a_reading_that_read_none_fits_how_many(settings, failed, memory, said):
+    stats = local_llm.ReaderStats(failed=failed, memory_failed=memory, last_error="reply was not the JSON shape")
+    assert stats.none_read(settings) == said
+    assert local_llm.ReaderStats(failed=2, read=1).none_read(settings) == ""
+    assert local_llm.ReaderStats(failed=2, stopped_reason="the server went away").none_read(settings) == ""
 
 
 def test_a_reading_that_runs_out_of_memory_with_a_context_closedesk_gave_stops_and_says_where_to_reload_it(loaded, settings, monkeypatch):

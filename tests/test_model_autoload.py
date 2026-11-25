@@ -8,6 +8,7 @@ answers with a click: Load it, or Keep theirs (not asked again).
 
 from __future__ import annotations
 
+import re
 import threading
 
 import httpx
@@ -497,7 +498,8 @@ def test_a_run_of_two_messages_the_model_read_neither_of_needs_a_look(settings, 
     """Two messages for the model, out of memory on each: too few in a row to stop the run, so it said nothing of it,
     and the job box was the green of all done ("Processed. The local model read 0."), with no reason."""
     result = _out_of_memory_run(settings, store, monkeypatch, kind="process", limit=2)
-    assert result["read_by_bionic"] == 0 and result["model_note"].startswith("Read none: the local model ran out of memory on both messages"), result["model_note"]
+    said = "The local model couldn't read either of the 2 emails waiting for it: it ran out of memory on each. "
+    assert result["read_by_bionic"] == 0 and result["model_note"].startswith(said), result["model_note"]
     assert result["model_load"] == {"message": f"Loaded {GEMMA27} in LM Studio.", "failed": False}
     client = TestClient(web.create_app(settings, store))
     job = client.app.state.job
@@ -508,6 +510,12 @@ def test_a_run_of_two_messages_the_model_read_neither_of_needs_a_look(settings, 
         threading.Event().wait(0.02)
     page = client.get("/").text.replace("&#39;", "'")
     assert '<section class="job error">' in page and '<b class="job-flag">Needs a look:</b>' in page and result["model_note"] in page
+    # Said once, with one label: it read "The local model read 0. Loaded … Needs a look: Read none: the local model
+    # ran out of memory on both messages it was given.", three times that the model read nothing, two labels in a row.
+    box = re.search(r'<section class="job error">(.*?)</section>', page, re.S).group(1)
+    box = " ".join(re.sub(r"<[^>]+>", " ", box).split())
+    assert "Needs a look: Read none:" not in box and "Read none" not in box and "read 0" not in box, box
+    assert box.startswith(f"Processed. No new files. Loaded {GEMMA27} in LM Studio. Needs a look: {said}"), box
 
 
 def test_sync_now_says_when_the_model_stopped_reading_the_new_mail(settings, store, monkeypatch):
