@@ -61,6 +61,9 @@ export function createSettings(ctx) {
   let observer = null;
   let root = null; // the page drawn now
   const dirty = new Set(); // sections changed here and not saved yet: drawing again leaves them as they are
+  // A box that saves as it is ticked, by its id, while its save is on its way: drawn as it was ticked. The answer to
+  // the other Colors box's save draws the page again from the colors in use, which this one hasn't changed yet.
+  const asked = new Map();
 
   /** Ask the server for the settings and draw the page from them. ``after``: the change just saved (its id), whose
       line says so if they can't be read. */
@@ -167,7 +170,7 @@ export function createSettings(ctx) {
   }
 
   /** Send a change; draw the page again from what the server says now, with what happened under ``id``. */
-  async function save(id, path, body, button, { busyText = "Saving…", after = null } = {}) {
+  async function save(id, path, body, button, { busyText = "Saving…", after = null, settled = null } = {}) {
     // A box that saves as it is ticked isn't disabled while it does: that would send the keyboard's focus to the page
     // itself (the next Tab going back to the top, a screen reader losing its place). It says it is busy instead, and
     // ignores another tick until this one is saved (busyBox); drawn again, it gets the focus back by its id.
@@ -194,9 +197,14 @@ export function createSettings(ctx) {
       flash = { id, tone: "error", text: error.message };
       unanswered = error.status === 0;
     }
+    if (settled) settled();
     if (!ctx.isShown()) return;
-    if (box) box.removeAttribute("aria-busy");
-    else if (button) {
+    if (box) {
+      box.removeAttribute("aria-busy");
+      // And the box as the page shows it now, when it was drawn again meanwhile.
+      const shown = box.id && root ? $(`#${CSS.escape(box.id)}`, root) : null;
+      if (shown) shown.removeAttribute("aria-busy");
+    } else if (button) {
       button.disabled = false;
       button.textContent = label;
     }
@@ -206,9 +214,22 @@ export function createSettings(ctx) {
     else await load({ keepScroll: true, after: id });
   }
 
-  /** A box that saves the moment it is ticked (see save): a tick while the last one is still being saved is ignored. */
-  function busyBox(props) {
-    return h("input", { type: "checkbox", ...props, onclick: (event) => event.currentTarget.getAttribute("aria-busy") === "true" && event.preventDefault() });
+  /** A box that saves the moment it is ticked (see save): a tick while the last one is still being saved is ignored.
+      ``saveIt(box)`` saves it; until that is answered, the box is drawn as it was ticked (``asked``), and busy. */
+  function busyBox({ id, checked, saveIt }) {
+    const waiting = asked.has(id);
+    return h("input", {
+      type: "checkbox",
+      id,
+      checked: waiting ? asked.get(id) : checked,
+      "aria-busy": waiting ? "true" : null,
+      onclick: (event) => event.currentTarget.getAttribute("aria-busy") === "true" && event.preventDefault(),
+      onchange: (event) => {
+        const box = event.currentTarget;
+        asked.set(id, box.checked);
+        saveIt(box, () => asked.delete(id));
+      },
+    });
   }
 
   /* ---------- Pieces ---------- */
@@ -276,16 +297,17 @@ export function createSettings(ctx) {
     const { theme, railCollapsed, colors, importanceWords } = ctx.appearance();
     const segment = (value, label) => h("button", { type: "button", class: `seg${theme === value ? " on" : ""}`, "aria-pressed": String(theme === value), onclick: () => ctx.setTheme(value) }, label);
     // Saved on the server the moment a box is ticked, like the calendar's box; the page changes colour at once. Each
-    // box shows what the page shows now, which a settings answer still on its way when the page was left can't undo.
+    // box shows what the page shows now, which a settings answer still on its way when the page was left can't undo,
+    // or, while its own save is on its way, what it was ticked to (busyBox).
     const colorBlind = busyBox({
       id: "set-colors",
       checked: colors === "color-blind",
-      onchange: (event) => save("colors", "/api/settings/colors", { colors: event.currentTarget.checked ? "color-blind" : "standard" }, event.currentTarget),
+      saveIt: (box, settled) => save("colors", "/api/settings/colors", { colors: box.checked ? "color-blind" : "standard" }, box, { settled }),
     });
     const words = busyBox({
       id: "set-importance-words",
       checked: importanceWords,
-      onchange: (event) => save("colors", "/api/settings/colors", { importance_words: event.currentTarget.checked }, event.currentTarget),
+      saveIt: (box, settled) => save("colors", "/api/settings/colors", { importance_words: box.checked }, box, { settled }),
     });
     return section(
       "appearance",
@@ -948,7 +970,7 @@ export function createSettings(ctx) {
     const calendar = busyBox({
       id: "set-outlook-calendar",
       checked: o.calendar,
-      onchange: (event) => save("outlook", "/api/settings/outlook/calendar", { on: event.currentTarget.checked }, event.currentTarget),
+      saveIt: (box, settled) => save("outlook", "/api/settings/outlook/calendar", { on: box.checked }, box, { settled }),
     });
     const disconnect = (event) => {
       if (!window.confirm("Stop reading Outlook? The mail CloseDesk copied stays here; connecting again asks again.")) return;

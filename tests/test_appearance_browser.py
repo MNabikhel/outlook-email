@@ -204,6 +204,43 @@ def test_ticking_a_box_with_the_keyboard_keeps_the_focus_on_it(settings, store, 
             page.evaluate("() => { document.querySelector('#set-appearance [data-status=colors]').className = 'set-status'; }")
 
 
+# The save of the colors box (not of the words box) reaches CloseDesk 1.5 s late, as on a computer busy with a run.
+SLOW_COLORS = """(() => { const send = window.fetch;
+  window.fetch = (url, options = {}) => String(url).includes('/api/settings/colors') && options.method === 'POST' && String(options.body).includes('"colors"')
+    ? new Promise((resolve) => setTimeout(resolve, 1500)).then(() => send(url, options)) : send(url, options); })();"""
+# How the colors box looks from the moment it is unticked: every 10 ms, as the page draws it then.
+WATCH_BOX = """() => document.addEventListener('change', (event) => {
+  if (event.target.id !== 'set-colors' || window.seen) return;
+  window.seen = [];
+  setInterval(() => { const box = document.querySelector('#set-colors'); window.seen.push(box ? box.checked : null); }, 10);
+}, true)"""
+
+
+def test_ticking_the_other_colors_box_while_one_is_saving_leaves_the_first_as_ticked(settings, store, page):
+    """Both ticked; "Colors for color blindness" unticked, and "Show Critical, High, Medium or Low" unticked while the
+    first was still being saved: the second's answer drew the page again from the colors in use, which the first
+    hadn't changed yet, so the first box ticked itself again for as long as its save took. Each box shows what was
+    last asked of it until its save is answered."""
+    from controller_inbox import appearance
+
+    appearance.save(store, colors="color-blind", importance_words=True)
+    page.add_init_script(SLOW_COLORS)
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector("#set-colors:checked")
+        page.evaluate(WATCH_BOX)
+        page.click("#set-colors")
+        page.wait_for_timeout(50)
+        page.click("#set-importance-words")
+        page.wait_for_function("() => !document.documentElement.dataset.colors && !document.documentElement.dataset.importanceWords")
+        page.wait_for_function("() => !document.querySelector('#set-appearance [aria-busy]')")
+        page.wait_for_timeout(300)  # the page drawn again after the last answer
+        seen = page.evaluate("() => window.seen")
+        assert seen and True not in seen, ("the colors box ticked itself again", seen.count(True), len(seen))
+        assert page.evaluate("() => [document.querySelector('#set-colors').checked, document.querySelector('#set-importance-words').checked]") == [False, False]
+        assert appearance.current(store) == {"colors": "standard", "importance_words": False}
+
+
 def test_a_tab_left_open_follows_a_change_made_on_the_classic_page(browser, settings, loaded):
     context = _context(browser, "light")
     page = context.new_page()
