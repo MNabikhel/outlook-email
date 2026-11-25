@@ -357,6 +357,24 @@ def test_the_classic_setup_page_ticks_both_and_the_lists_follow(browser, setting
     context.close()
 
 
+BOXES_LINE_UP = """() => [...document.querySelectorAll('#colors .choice')].map((el) => {
+  const r = el.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.right)]; })"""
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_the_classic_colors_boxes_line_up(browser, settings, loaded, width):
+    """Setup → Colors drew each box to the width of its own words, so the two outlines ended in different places."""
+    context = _context(browser, "light")
+    page = context.new_page()
+    page.set_viewport_size({"width": width, "height": 800})
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/settings")
+        edges = page.evaluate(BOXES_LINE_UP)
+        assert len(edges) == 2 and edges[0] == edges[1], edges
+        assert page.evaluate("() => document.documentElement.scrollWidth <= window.innerWidth"), "nothing wider than the screen"
+    context.close()
+
+
 COLORS_ON = "() => [document.documentElement.dataset.colors || null, document.documentElement.dataset.importanceWords || null]"
 
 

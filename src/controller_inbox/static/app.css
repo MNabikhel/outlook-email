@@ -393,7 +393,10 @@ body.chat-window .msg { max-width: min(88%, 760px); }
 .choice { display: flex; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; background: #fff; cursor: pointer; }
 .choice.on, .color-form .choice:has(input:checked) { border-color: var(--navy); box-shadow: inset 0 0 0 1px var(--navy); }
 .choice input { margin: 0; }
-/* Setup → Colors: each box outlined while ticked (the inbox profile's choice is outlined once saved). */
+/* Setup → Colors: each box outlined while ticked (the inbox profile's choice is outlined once saved), one above
+   the other at the same width, with Save under them. */
+.color-form { flex-direction: column; align-items: stretch; }
+.color-form button { align-self: flex-start; }
 .color-form .choice { align-items: flex-start; }
 .color-form .choice input { margin-top: 3px; }
 @media (max-width: 980px) {
