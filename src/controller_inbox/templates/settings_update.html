@@ -10,7 +10,7 @@
   {% else %}
   <h3>Updating CloseDesk</h3>
   <p data-update-line>{{ message }}</p>
-  <p class="muted"><progress aria-label="Updating"></progress></p>
+  <p class="muted"><span class="update-ask-bar" role="progressbar" aria-label="Updating"><span></span></span></p>
   <script>
     // CloseDesk stops, its launcher fetches the newest version, and CloseDesk starts again: Setup is shown when another
     // start of it answers (with the new version, or as it was when the update couldn't be done, however quickly).

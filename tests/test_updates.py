@@ -414,6 +414,8 @@ def test_the_classic_update_button_shows_the_waiting_page(download, settings, st
     page = TestClient(app).post("/settings/update", headers=SAME)
     assert page.status_code == 200 and updates.UPDATING in page.text and "/health" in page.text
     assert stop.calls == 1
+    # The classic pages' own bar, as the question's updating dialog has (not the browser's bright blue <progress>).
+    assert "<progress" not in page.text and 'class="update-ask-bar" role="progressbar"' in page.text
     assert TestClient(app).post("/settings/update", headers={"origin": "http://elsewhere.example"}).status_code == 403
 
 

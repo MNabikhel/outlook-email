@@ -589,4 +589,8 @@ dialog.update-ask p { margin: 0 0 10px; line-height: 1.5; }
 .update-ask-status.wait { color: var(--warn); }
 .update-ask-status.ok { color: var(--green); }
 .update-ask-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
-dialog.update-ask progress { width: 100%; }
+/* Updating CloseDesk: a bar in the pages' own navy on their line colour (the browser's <progress> is bright blue). */
+.update-ask-bar { display: block; height: 4px; margin-top: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.update-ask-bar span { display: block; width: 35%; height: 100%; border-radius: 2px; background: var(--navy); animation: update-ask-go 1.4s ease-in-out infinite; }
+@keyframes update-ask-go { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+@media (prefers-reduced-motion: reduce) { .update-ask-bar span { animation: none; width: 100%; opacity: 0.5; } }

@@ -607,6 +607,8 @@ function focusOpened(id) {
 /* ---------- The reading pane ---------- */
 
 function setReader(node, key = "", { animate = true } = {}) {
+  // CloseDesk is updating: its page stays until CloseDesk is back (and this page loads again).
+  if (S.updating && key !== "updating") return;
   S.shown = key;
   // A Page tab's card is for a box in what is shown now: with that gone, its box can't close it.
   closeTip();
@@ -940,6 +942,7 @@ function showSettings() {
 /* ---------- Rendering what the address says ---------- */
 
 async function sync() {
+  if (S.updating) return; // the updating page stays (setReader), and nothing is fetched from a CloseDesk that is down
   const route = parse();
   const before = S.route;
   S.route = route;
@@ -1178,6 +1181,15 @@ async function poll() {
 function updating(reply) {
   S.updating = true;
   clearTimeout(S.poll);
+  overlays.hide();
+  // Until CloseDesk is back, the rest of the workspace is out of reach (it would only fail: CloseDesk is down), and
+  // nothing in it offers the update or new work: the reading pane says what is happening.
+  $("#ws").dataset.updating = "";
+  for (const part of ["#rail", "#list", "#chat", "#top"]) $(part)?.setAttribute("inert", "");
+  $("#top-update")?.remove();
+  const button = $("#process-btn");
+  button.disabled = true;
+  button.textContent = "Updating…";
   const line = h("p", { class: "lede" }, reply.message);
   setReader(
     h(
@@ -1473,6 +1485,7 @@ let goPending = 0;
 const GO = { t: "/app", m: "/app/calendar", i: "/app/folder/important", n: "/app/folder/informational", r: "/app/folder/reference", a: "/app/all", k: "/app/tasks", f: "/app/fraud", c: "/app/coding", d: "/app/digest", s: "/app/settings" };
 
 document.addEventListener("keydown", (event) => {
+  if (S.updating) return; // nothing to go to or start while CloseDesk is down to update
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
     event.preventDefault();
     if (overlays.isOpen()) overlays.hide();

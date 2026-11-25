@@ -116,11 +116,27 @@ function show(view, updating) {
     } catch (error) {
       state = "asking";
       later.disabled = false;
+      // The keyboard's place stays in the question: Update now, just pressed, can't keep it while it waits.
+      later.focus();
+      if (error.status === 409 && view.meanwhile_message && error.message === view.meanwhile_message) return updatedMeanwhile(error.message);
       const busy = error.status === 409 && error.message === view.busy_message;
       say(error.message, busy ? "wait" : "error");
       if (busy) waitForTheMail();
       else now.disabled = false;
     }
+  }
+
+  // CloseDesk was updated meanwhile (in another tab or window): this page shows the version before. Update now would
+  // only be refused again, so the page is offered to be loaded again instead.
+  function updatedMeanwhile(message) {
+    state = "stale";
+    replace(dialog.querySelector("#update-ask-body"), h("p", null, message));
+    say("");
+    const reload = h("button", { type: "button", class: "btn btn-sm btn-primary", onclick: () => location.reload() }, "Reload the page");
+    now.replaceWith(reload);
+    later.textContent = "Close";
+    later.className = "btn btn-sm ghost";
+    reload.focus();
   }
 
   // Refused while mail is being processed: offered again once that is done.
@@ -135,9 +151,9 @@ function show(view, updating) {
       }
       if (!dialog.isConnected) return;
       if (!found.busy) {
+        // Offered again; the focus stays on Not now, as on a page that loaded again meanwhile.
         now.disabled = false;
         say(view.done_message, "ok");
-        now.focus();
         return;
       }
     }
@@ -147,7 +163,8 @@ function show(view, updating) {
     state = "updating";
     dialog.classList.add("updating");
     const message = h("p", { id: "update-ask-body" }, reply.message || view.updating);
-    replace(dialog, h("h2", { id: "update-ask-title" }, "Updating CloseDesk"), message, h("progress", { "aria-label": "Updating" }));
+    const bar = h("span", { class: "update-ask-bar", role: "progressbar", "aria-label": "Updating" }, h("span"));
+    replace(dialog, h("h2", { id: "update-ask-title" }, "Updating CloseDesk"), message, bar);
     waitForCloseDesk(reply.commit || view.commit, { run: reply.run, onBack: () => location.reload(), onSlow: () => (message.textContent = SLOW) });
   }
 

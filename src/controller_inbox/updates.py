@@ -499,6 +499,8 @@ class Question:
             "held": held,
             "busy_message": BUSY,
             "done_message": DONE,
+            # Update now from a page shown before CloseDesk was updated (another tab): refused so, and not offered again.
+            "meanwhile_message": UPDATED_MEANWHILE,
             "updating": UPDATING,
             # The version the page shows: Update now says it, and is refused once CloseDesk was updated since.
             "commit": version.installed()[0],

@@ -108,6 +108,32 @@ def test_update_now_in_the_workspace_updates_and_opens_the_new_version(download,
         page.wait_for_function("() => (document.querySelector('.rail-version') || {}).textContent === 'CloseDesk 2026.11.16 (bbbbbbb)'", timeout=20000)
 
 
+def test_the_workspace_keeps_saying_it_updates_whatever_is_clicked_meanwhile(download, settings, loaded, page, monkeypatch):
+    # A click on Today (or any folder) while CloseDesk was down replaced "Updating CloseDesk" with a normal-looking
+    # workspace, its top bar still offering "Update ready" and Process new mail, which then failed with the browser's
+    # "Failed to fetch".
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/app/inbox")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Update now')")
+        page.wait_for_selector("#updating")
+        today = page.query_selector("#rail-nav a[href='/app']").bounding_box()
+        page.mouse.click(today["x"] + today["width"] / 2, today["y"] + today["height"] / 2)  # where a person clicks
+        page.evaluate("history.pushState({}, '', '/app/all')")
+        page.go_back()  # the browser's Back, within the workspace
+        page.keyboard.press("g")
+        page.keyboard.press("t")
+        page.wait_for_timeout(500)
+        assert page.query_selector("#reader #updating") is not None, "the updating page stays until CloseDesk is back"
+        assert page.query_selector("#top-update") is None, "nothing offers the update that runs"
+        assert page.is_disabled("#process-btn") and "Updating" in page.inner_text("#process-btn")
+        assert page.query_selector(".toast") is None, "nothing failed: nothing was tried"
+        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        page.wait_for_function("() => (document.querySelector('.rail-version') || {}).textContent === 'CloseDesk 2026.11.16 (bbbbbbb)'", timeout=20000)
+        assert page.query_selector("#updating") is None and page.is_enabled("#process-btn")
+
+
 def test_update_now_on_a_classic_page_updates_and_opens_the_new_version(download, settings, loaded, page, monkeypatch):
     app = opened(settings, loaded, monkeypatch)
     with serving(app) as base:
@@ -117,6 +143,11 @@ def test_update_now_on_a_classic_page_updates_and_opens_the_new_version(download
         page.wait_for_selector("#update-ask.updating")
         assert updates.UPDATING in page.inner_text("#update-ask") and app.state.stop_server.calls == 1
         assert page.query_selector("#update-ask button") is None, "nothing to click while it updates"
+        # In the classic pages' own colours, not the browser's bright blue <progress>.
+        assert page.query_selector("#update-ask progress") is None
+        bar = page.evaluate("getComputedStyle(document.querySelector('#update-ask .update-ask-bar span')).backgroundColor")
+        assert bar == "rgb(27, 54, 93)", bar  # --navy
+        assert page.get_attribute("#update-ask .update-ask-bar", "role") == "progressbar"
         page.keyboard.press("Escape")
         assert page.query_selector("#update-ask.updating[open]") is not None, "it stays up until CloseDesk is back"
         (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
@@ -136,9 +167,13 @@ def test_update_now_waits_while_mail_is_processed_and_is_offered_when_done(downl
             page.wait_for_function(f"() => document.querySelector('#update-ask').innerText.includes({updates.BUSY!r})")
             assert page.is_disabled("#update-ask button:has-text('Update now')")
             assert app.state.stop_server.calls == 0
+            # The keyboard's place stays in the question (Update now, pressed, can't keep it): on Not now.
+            assert page.evaluate("document.activeElement.textContent") == "Not now"
             release.set()
             page.wait_for_function("() => document.querySelector('#update-ask').innerText.includes('The mail is done: CloseDesk can update now.')")
             assert page.is_enabled("#update-ask button:has-text('Update now')")
+            # As on a page loaded again meanwhile: the focus stays on Not now (a key pressed then must not update).
+            assert page.evaluate("document.activeElement.textContent") == "Not now"
             page.click("#update-ask button:has-text('Update now')")
             page.wait_for_selector("#updating")
             assert app.state.stop_server.calls == 1
@@ -283,6 +318,13 @@ def test_update_now_in_a_tab_shown_before_closedesk_was_updated_says_so_and_stop
         page.click("#update-ask button:has-text('Update now')")
         page.wait_for_function(f"() => document.querySelector('#update-ask').innerText.includes({updates.UPDATED_MEANWHILE!r})")
         assert app.state.stop_server.calls == 0
+        # Update now isn't offered again (each press only repeated the refusal): the page is reloaded instead.
+        assert page.query_selector("#update-ask button:has-text('Update now')") is None
+        assert "is out; you have" not in page.inner_text("#update-ask")
+        assert page.evaluate("document.activeElement.textContent") == "Reload the page"
+        with page.expect_navigation():
+            page.click("#update-ask button:has-text('Reload the page')")
+        assert page.url == base + "/inbox"
 
 
 # The classic Today page, while mail is processed ----------------------------------------------------------------------
