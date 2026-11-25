@@ -96,6 +96,43 @@ def test_the_boxes_on_a_page_show_on_its_white_paper_in_dark_mode(settings, stor
     assert rgb(paper["--paper-differs"]) in shown["differsRing"]
 
 
+OUTLINES = """() => {
+  // The box drawn while teaching a field or marking a table is only there while dragging: one made the same way.
+  const rubber = document.createElement('div'); rubber.className = 'pv-rubber'; document.querySelector('.pv-sheet').append(rubber);
+  const out = { taught: getComputedStyle(document.querySelector('.pv-taught')).borderTopColor,
+                rubber: getComputedStyle(rubber).borderTopColor };
+  rubber.remove();
+  return out;
+}"""
+
+
+@pytest.mark.parametrize("colors", ["standard", "color-blind"])
+def test_a_taught_field_and_the_box_being_drawn_show_on_the_white_paper_in_dark_mode(settings, store, page, colors):
+    """A taught field's outline and the box drawn while teaching a field or marking a table took the dark theme's
+    green and blue, pastel on the white page: 1.87:1 and 2.43:1 (1.64:1 with the colors for color blindness)."""
+    from fastapi.testclient import TestClient
+    from msgfactory import PDF
+    from test_page_view import _detailed_invoice
+    from test_teach_and_preview import _teach
+    from test_workspace import _harbor
+
+    from controller_inbox import appearance
+
+    email = _harbor(settings, store, ("HS-10482.pdf", _detailed_invoice(), PDF))
+    app = web.create_app(settings, store)
+    _teach(TestClient(app), email, "total", "1,874.40")
+    appearance.save(store, colors=colors)
+    page.emulate_media(color_scheme="dark")
+    with serving(app) as base:
+        _open_page_tab(page, base, email)
+        page.wait_for_selector(".pv-taught")
+        shown = page.evaluate(OUTLINES)
+    paper = pm.workspace("light", colors)
+    assert shown == {"taught": rgb(paper["--paper-ok"]), "rubber": rgb(paper["--paper-accent"])}, shown
+    seen = {name: round(pm.contrast(hex_of(value), "#ffffff"), 2) for name, value in shown.items()}
+    assert all(ratio >= 3 for ratio in seen.values()), seen
+
+
 EDGES = """() => {
   const edge = (sel) => { const e = document.querySelector(sel); return e ? getComputedStyle(e).borderTopStyle : null; };
   // The outline drawn while marking a table is only there while dragging: one made the same way.

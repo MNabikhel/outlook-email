@@ -214,6 +214,33 @@ def test_every_colour_that_carries_meaning_passes_contrast(ui, colors, theme):
     assert not failing, "\n".join(failing)
 
 
+# What is drawn on a page's image, which is white paper in both themes: in the paper tones, which keep their light
+# colours in dark mode. With the theme's own (var(--ok), var(--accent)) they were pastel on the white page in dark mode.
+PAPER_RULES = [
+    (".pv-taught", "border", "--paper-ok"),  # a field taught on the page
+    (".pv-taught", "background", "--paper-ok"),
+    (".pv-taught-tag", "background", "--paper-ok"),
+    (".pv-rubber", "border", "--paper-accent"),  # the box drawn while teaching a field or marking a table
+    (".pv-rubber", "background", "--paper-accent"),
+]
+
+
+@pytest.mark.parametrize(("colors", "theme"), [(colors, theme) for ui, colors, theme in pm.LOOKS if ui == "workspace"])
+def test_what_is_drawn_on_a_page_is_in_the_paper_tones(colors, theme):
+    """A taught field's outline and the box drawn while marking were in the dark theme's green and blue on the white
+    page: 1.87:1 and 2.43:1 (1.64:1 with the colors for color blindness), under the 3:1 an outline needs."""
+    tokens = pm.tokens_of("workspace", colors, theme)
+    off = {
+        f"{selector} {{ {prop} }}": pm.rule_value(pm.WORKSPACE_CSS, selector, prop)
+        for selector, prop, token in PAPER_RULES
+        if f"var({token})" not in (pm.rule_value(pm.WORKSPACE_CSS, selector, prop) or "")
+    }
+    assert not off, off
+    for selector in (".pv-taught", ".pv-rubber"):
+        edge = pm.rule_colour(pm.WORKSPACE_CSS, selector, "border", tokens)
+        assert pm.contrast(edge, pm.WHITE) >= 3, (selector, edge, round(pm.contrast(edge, pm.WHITE), 2))
+
+
 def test_meaning_colours_live_in_tokens():
     """The colours that switch with the palette are tokens, not written into the rules, so the colors for color
     blindness reach every one of them."""
