@@ -9,6 +9,20 @@ class ApiError extends Error {
   }
 }
 
+// What a request says when CloseDesk doesn't answer at all, instead of the browser's own words ("Failed to fetch").
+const NOT_ANSWERING = "CloseDesk isn't answering. If it has closed, double-click CloseDesk to start it again.";
+
+/** fetch, with plain words when CloseDesk can't be reached (it was stopped, say). A request cancelled on purpose
+    still ends as an AbortError, which callers leave unsaid. */
+async function send(path, options) {
+  try {
+    return await fetch(path, options);
+  } catch (error) {
+    if ((error && error.name === "AbortError") || (options.signal && options.signal.aborted)) throw error;
+    throw new ApiError(NOT_ANSWERING, 0);
+  }
+}
+
 async function handle(response) {
   let data = null;
   try {
@@ -26,19 +40,19 @@ async function handle(response) {
 }
 
 export async function getJSON(path, { signal } = {}) {
-  return handle(await fetch(path, { headers: PAGE, signal, credentials: "same-origin", cache: "no-store" }));
+  return handle(await send(path, { headers: PAGE, signal, credentials: "same-origin", cache: "no-store" }));
 }
 
 /** A picture (a file's page), fetched with the header the server requires, so an <img> can't load it itself. */
 export async function getBlob(path, { signal } = {}) {
-  const response = await fetch(path, { headers: PAGE, signal, credentials: "same-origin", cache: "no-store" });
+  const response = await send(path, { headers: PAGE, signal, credentials: "same-origin", cache: "no-store" });
   if (!response.ok) await handle(response);
   return response.blob();
 }
 
 export async function postJSON(path, body = {}, { signal } = {}) {
   return handle(
-    await fetch(path, {
+    await send(path, {
       method: "POST",
       headers: { ...PAGE, "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -50,7 +64,7 @@ export async function postJSON(path, body = {}, { signal } = {}) {
 
 /** A streamed POST: calls onEvent for each line of newline-delimited JSON. */
 export async function postStream(path, body, onEvent, { signal } = {}) {
-  const response = await fetch(path, {
+  const response = await send(path, {
     method: "POST",
     headers: { ...PAGE, "Content-Type": "application/json" },
     body: JSON.stringify(body),

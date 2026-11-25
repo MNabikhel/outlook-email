@@ -557,3 +557,23 @@ def test_ctrl_k_turns_the_colors_for_color_blindness_on_and_off(settings, store,
             # Settings, open beside it, says so.
             page.wait_for_function("on => { const box = document.querySelector('#set-colors'); return Boolean(box) && box.checked === on; }", arg=on)
             assert appearance.current(store)["colors"] == ("color-blind" if on else "standard")
+
+
+def test_a_save_that_cant_reach_closedesk_says_so_in_plain_words(settings, store, page):
+    """With CloseDesk not answering (stopped, say), the box and Ctrl K said the browser's own "Failed to fetch"."""
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector("#set-colors")
+        page.route("**/api/settings/colors", lambda route: route.abort())
+        page.check("#set-colors")
+        line = "#set-appearance [data-status='colors'].error"
+        page.wait_for_selector(line)
+        said = page.inner_text(line)
+        assert "Failed to fetch" not in said and "CloseDesk isn't answering" in said, said
+        assert not page.is_checked("#set-colors"), "nothing was saved"
+        page.keyboard.press("Control+k")
+        page.fill(".palette input", "color blind")
+        page.wait_for_selector(".pal-item.on:has-text('Turn on colors for color blindness')")
+        page.keyboard.press("Enter")
+        toast = page.wait_for_selector(".toast.error")
+        assert "Failed to fetch" not in toast.inner_text() and "CloseDesk isn't answering" in toast.inner_text()
