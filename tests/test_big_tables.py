@@ -395,7 +395,7 @@ def test_figures_worked_out_from_the_table_are_not_flagged_as_unread(store, sett
         events = list(assistant.answer_stream(store, settings, question, uploads=chats.chat_mail(store, chat)))
         text = "".join(e["text"] for e in events if e["type"] == "delta")
         assert "320,001" in text, text
-        checks = [item for e in events if e["type"] == "check" for item in e["items"]]
+        checks = [item["text"] for e in events if e["type"] == "check" for item in e["items"]]
         assert not [check for check in checks if "320,001" in check], checks
 
 

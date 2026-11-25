@@ -2266,7 +2266,8 @@ def _checked(ws: agent.Workspace, answer: str, *, history, today: str, focus: li
     if result.changed(answer):
         yield {"type": "revise", "text": result.text}
     if result.checks:
-        yield {"type": "check", "items": result.checks}
+        # Each marked as a warning (a figure to check before relying on it) or not (a correction made).
+        yield {"type": "check", "items": answer_check.check_items(result.checks)}
 
 
 def _grounded(ws: agent.Workspace, draft: str, *, history, today: str) -> bool:

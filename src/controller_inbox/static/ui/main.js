@@ -1277,9 +1277,16 @@ function finished(job) {
     }
     return;
   }
-  const read =
-    (typeof result.ingested === "number" ? `Read ${plural(result.ingested, "new file")}.` : "") +
-    (result.files_summarized ? ` Summarized ${plural(result.files_summarized, "file")}.` : "");
+  // Only the drop folder's files are counted: with new mail from Outlook (said next), "No new files." would say nothing
+  // new came in, so a count of none is left out then, or said as the drop folder's when dropped files were already
+  // filed, as in the launcher window (cli.files_read_said). Files already filed are said, so someone who just dropped
+  // them knows why nothing was read.
+  const brought = Boolean((result.outlook && result.outlook.new) || result.graph_synced);
+  const already = result.already_read || 0;
+  const count = result.ingested ? `Read ${plural(result.ingested, "new file")}` : !brought ? "No new files" : already ? "No new files in the drop folder" : "";
+  const files = typeof result.ingested !== "number" || !count ? "" : `${count}${already ? `, ${already} already filed` : ""}.`;
+  const read = [files, result.files_summarized ? `Summarized ${plural(result.files_summarized, "file")}.` : ""].filter(Boolean).join(" ");
+  const processed = read ? `Processed. ${read}` : "Processed.";
   const synced = result.outlook_message ? ` ${result.outlook_message}` : "";
   // The start loaded a model in LM Studio (or couldn't, and says why).
   const load = result.model_load || null;
@@ -1289,10 +1296,10 @@ function finished(job) {
   const stopped = result.model && result.model_note ? ` ${result.model_note}` : "";
   const failed = (result.failed_files || []).length;
   const wrong = Boolean((load && load.failed) || stopped);
-  if (!failed) return toast(`Processed. ${read}${synced}${loaded}${stopped}`, { tone: wrong ? "error" : "ok", ms: load || stopped ? 12000 : 6000 });
+  if (!failed) return toast(`${processed}${synced}${loaded}${stopped}`, { tone: wrong ? "error" : "ok", ms: load || stopped ? 12000 : 6000 });
   // A file that can't be read is moved aside, not retried: say so, and where it went.
   const where = (S.meta && S.meta.failed_folder) || "inbox/failed";
-  toast(`Processed. ${read}${synced}${loaded}${stopped} ${failed === 1 ? "1 file couldn't be read and was" : `${failed} files couldn't be read and were`} moved to ${where}.`, { tone: "error", ms: 12000 });
+  toast(`${processed}${synced}${loaded}${stopped} ${failed === 1 ? "1 file couldn't be read and was" : `${failed} files couldn't be read and were`} moved to ${where}.`, { tone: "error", ms: 12000 });
 }
 
 async function syncOutlook() {

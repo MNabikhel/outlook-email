@@ -169,7 +169,7 @@ def test_figures_from_the_focus_list_and_summaries_are_not_flagged_but_one_only_
     answer = "Invoice 48,500 is overdue by 12 days; the travel line is $1,234 and the deposit was $7,777 [1]."
     events = list(assistant._checked(ws, answer, history=[], today="2026-10-06", focus=focus))
     # A past answer is what the model wrote, not something it read: only its figure is flagged.
-    checks = [item for event in events if event["type"] == "check" for item in event["items"]]
+    checks = [item["text"] for event in events if event["type"] == "check" for item in event["items"]]
     assert [event["type"] for event in events] == ["check"] and len(checks) == 1 and "$7,777" in checks[0], events
 
 
@@ -254,7 +254,7 @@ def test_a_figure_from_an_earlier_answer_is_still_flagged_in_a_follow_up(store, 
         {"role": "assistant", "text": "The Ridgeview total is $12,345.67 [1]."},
     ]
     events = list(assistant._checked(ws, "As I said, the Ridgeview total is $12,345.67 [1].", history=history, today="2026-10-08"))
-    checks = [item for event in events if event["type"] == "check" for item in event["items"]]
+    checks = [item["text"] for event in events if event["type"] == "check" for item in event["items"]]
     assert any("$12,345.67" in item for item in checks), events
 
 
@@ -276,7 +276,7 @@ def test_a_figure_from_an_earlier_answer_is_not_taken_as_checked_against_the_fil
     ws = agent.Workspace(loaded, settings, [email], question="How much do we owe Northwind on INV-10482?", current_id=email.id, past=past)
     answer = "The amount due on INV-10482 is $13,250.00 [1]."
     events = list(assistant._checked(ws, answer, history=[], today="2026-10-20"))
-    checks = [item for event in events if event["type"] == "check" for item in event["items"]]
+    checks = [item["text"] for event in events if event["type"] == "check" for item in event["items"]]
     assert any("13,250.00" in item for item in checks), (
         "the made-up $13,250.00 (the file says $12,850.00) went out unflagged: the earlier answer grounded it"
     )
@@ -291,7 +291,7 @@ def test_a_figure_from_a_note_the_model_wrote_earlier_is_not_taken_as_checked_ag
     ws = agent.Workspace(loaded, settings, [email], question="What is the amount due on Northwind INV-10482?", current_id=email.id)
     answer = "The amount due on INV-10482 is $13,250.00 [1]."
     events = list(assistant._checked(ws, answer, history=[], today="2026-10-20"))
-    checks = [item for event in events if event["type"] == "check" for item in event["items"]]
+    checks = [item["text"] for event in events if event["type"] == "check" for item in event["items"]]
     assert any("13,250.00" in item for item in checks), "a figure only the model's own earlier note has went out unflagged"
 
 
@@ -543,7 +543,7 @@ def test_notes_on_a_replaced_file_do_not_ground_the_new_answer(store, settings, 
     events = list(assistant.answer_stream(store, settings, "What is the marketing total?", uploads=v2))
     assert "$12,500.00" in prompts[0]
     assert "$10,000.00" not in prompts[0], "the replaced file's figure is given to the model as a note"
-    checks = [item for e in events if e["type"] == "check" for item in e["items"]]
+    checks = [item["text"] for e in events if e["type"] == "check" for item in e["items"]]
     assert any("10,000.00" in c for c in checks), f"a figure only in the replaced file isn't flagged: {checks}"
 
 

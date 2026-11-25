@@ -339,6 +339,18 @@ export function createChat({ root, onToggle, visionRead }) {
     if (el && el.isConnected) turnEl(turn, el);
   }
 
+  /** The answer's checks, each marked by the server as a warning or not (answer_check.check_items): a correction made
+   * has the tick, a figure to check before relying on it the warning sign, and the box is amber when any is a warning. */
+  function checksEl(checks) {
+    if (!checks || !checks.length) return null;
+    const warned = checks.some((item) => item.warning);
+    return h(
+      "ul",
+      { class: `msg-check${warned ? " warn" : ""}` },
+      checks.map((item) => h("li", { class: item.warning ? "warn" : "ok" }, icon(item.warning ? "alert" : "ok", 13), h("span", null, item.text)))
+    );
+  }
+
   function turnEl(turn, el) {
     el = el || h("div");
     el.className = `msg ${turn.role === "user" ? "user" : "bot"}${turn.pending ? " pending" : ""}`;
@@ -365,7 +377,7 @@ export function createChat({ root, onToggle, visionRead }) {
       stepsEl(turn),
       thinkingEl(turn),
       answer,
-      turn.checks && turn.checks.length ? h("ul", { class: "msg-check" }, turn.checks.map((item) => h("li", null, icon("ok", 13), h("span", null, item)))) : null,
+      checksEl(turn.checks),
       turn.context ? h("p", { class: "msg-context" }, turn.context, " ", h("a", { href: "/app/settings", dataset: { nav: "" } }, "Settings")) : null,
       visionEl(turn),
       moreTimeEl(turn),

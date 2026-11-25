@@ -474,7 +474,7 @@ def test_a_quick_read_happens_while_the_question_waits(scan, store, settings, mo
     assert not [event for event in events if event["type"] == "vision"]
     assert "Reading balance sheet.pdf with local-model (about 10 seconds)" in [e["text"] for e in events if e["type"] == "step"]
     assert "[Read two ways, by OCR and by the vision model" in asked[-1] and "Line: Accounts Receivable | 2026: 30,250" in asked[-1]
-    checks = [item for event in events if event["type"] == "check" for item in event["items"]]
+    checks = [item["text"] for event in events if event["type"] == "check" for item in event["items"]]
     assert "30,250 was read from the page by the vision model only (OCR read 30,256): check it against the file." in checks
 
 
@@ -1397,7 +1397,7 @@ def test_a_question_about_a_scan_waits_for_the_document_reader(scan, store, sett
     steps = [event["text"] for event in events if event["type"] == "step"]
     assert "Reading balance sheet.pdf, page 1 (1 of 1), with OvisOCR2 (the first page shows how long this computer takes)" in steps
     assert "Shown: the document reader's reading" in asked[-1] and "October 31 2026: 30,250" in asked[-1]
-    assert not [item for event in events if event["type"] == "check" for item in event["items"] if "vision model only" in item]
+    assert not [item for event in events if event["type"] == "check" for item in event["items"] if "vision model only" in item["text"]]
 
 
 def test_a_long_read_with_the_document_reader_is_still_offered(scan, store, settings, reader_server, monkeypatch):

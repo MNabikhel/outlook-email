@@ -39,7 +39,7 @@ from controller_inbox import (
 )
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
-from controller_inbox.cli import DEMO_NOW, export_actions_csv, load_sample, make_digest
+from controller_inbox.cli import DEMO_NOW, export_actions_csv, files_read_said, load_sample, make_digest
 from controller_inbox.clock import (
     AUTO,
     apply_saved_timezone,
@@ -93,6 +93,7 @@ templates.env.filters["shortdt"] = _shortdt
 templates.env.globals["ui_import_map"] = ui_import_map()
 templates.env.globals["coding_choices"] = cost_codes.choices
 templates.env.filters["money"] = lambda value: "" if value is None else f"${value:,.2f}"
+templates.env.filters["files_read"] = files_read_said
 templates.env.filters["label_doc"] = lambda value: DOCUMENT_LABELS.get(
     value if isinstance(value, DocumentType) else DocumentType(value), value
 )
@@ -943,7 +944,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     @app.get("/chats/{chat_id}")
     def chat_show(chat_id: str):
         found = known_chat(chat_id)
-        return JSONResponse({**found, "turns": store.chat_turns(chat_id), "files": chats.file_cards(store, chat_id)})
+        return JSONResponse({**found, "turns": chats.shown_turns(store, chat_id), "files": chats.file_cards(store, chat_id)})
 
     @app.post("/chats/{chat_id}/step-back-closed")
     def chat_step_back_closed(request: Request, chat_id: str):

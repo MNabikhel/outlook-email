@@ -53,7 +53,7 @@
 <section class="job {{ 'error' if load_failed or (job.result.model and job.result.model_note) else 'done' }}">
   <strong>Processed.</strong>
   <span>
-    Read {{ job.result.ingested }} new file{{ '' if job.result.ingested == 1 else 's' }}{% if job.result.already_read %}, {{ job.result.already_read }} already filed{% endif %}.
+    {{ job.result | files_read }}
     {% if job.result.model %}The local model read {{ job.result.read_by_bionic }}{% if job.result.avg_seconds %} (about {{ job.result.avg_seconds }}s each){% endif %}.{% elif not job.result.model_load %}No local model was running, so mail is filed from the script draft.{% endif %}
     {% if job.result.files_summarized %}Summarized {{ job.result.files_summarized }} file{{ '' if job.result.files_summarized == 1 else 's' }}.{% endif %}
     {% if job.result.failed_files %}{{ job.result.failed_files | length }} file(s) could not be read and were moved to <code>inbox/failed</code>.{% endif %}
