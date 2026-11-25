@@ -43,8 +43,9 @@
       }
       function again() {
         fetch('/health', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (h) {
-          // In this page's place: Back doesn't show "Updating CloseDesk" again, with nothing updating.
+          // Another person's CloseDesk on the port: as if nothing answered.
           if (h.app === 'closedesk' && !mine(h)) gone = true;
+          // In this page's place: Back doesn't show "Updating CloseDesk" again, with nothing updating.
           else if (h.app === 'closedesk' && (gone || h.commit !== before || (run && h.run && h.run !== run))) { window.location.replace('/settings#update'); return; }
           slow();
           setTimeout(again, 2000);
