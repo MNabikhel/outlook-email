@@ -242,13 +242,15 @@ class Computer:
         self.updating = False  # an update runs in CloseDesk's folder (launch.py --update, started elsewhere)
         self.free_from: dict[int, int] = {}  # a port taken: the next one free, as cli._port_to_use finds it
         self.picked: list[int] = []  # the ports the window chose again
+        self.popen_server = FakeProcess  # what a CloseDesk the window starts is (SlowToStop: still finishing as it stops)
 
     def pick_port(self, port: int) -> tuple[int, bool]:
         self.picked.append(port)
         return self.free_from.get(port, port), False
 
     def popen(self, cmd, **options) -> FakeProcess:
-        process = FakeProcess(cmd, **options)
+        kind = self.popen_server if "run" in cmd else FakeProcess
+        process = kind(cmd, **options)
         self.processes.append(process)
         if "--update" in cmd and self.update_code is not None:
             process.end(self.update_code)
@@ -289,6 +291,7 @@ def make_app(webview, computer, tmp_path, *, owned=True) -> app_window.App:
     app.other_wait = 0.2
     app.storage = tmp_path / "window"
     app.delegate = lambda fn: fn  # .NET's Func[Type], which Invoke takes on Windows
+    app.asked_mark = tmp_path / "update-asked"
     return app
 
 
@@ -516,6 +519,107 @@ def test_waiting_for_another_update_gives_up_in_time(computer, tmp_path, capsys)
     until(lambda: len(computer.servers()) == 2, what="CloseDesk opened as it is")
     assert "still running" in capsys.readouterr().out
     window.person_closes()
+    thread.join(10)
+
+
+def _closed_as_closedesk_stops_to_update(computer, tmp_path, monkeypatch, platform, *, answer=True):
+    """Update now answered (CloseDesk writes the window's mark), then the window closed while CloseDesk was still
+    stopping: it ends with UPDATE a moment later."""
+    computer.update_code = None
+    computer.popen_server = SlowToStop
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = platform
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    (server,) = computer.servers()
+    assert server.options["env"][updates.WINDOW_ASKED_ENV] == str(app.asked_mark)
+    app.asked_mark.write_text("1", encoding="utf-8")  # stop_to_update: CloseDesk stops once the answer is sent
+    return app, window, server, thread, result
+
+
+def test_closing_just_after_update_now_asks_first(computer, tmp_path, monkeypatch):
+    app, window, server, thread, _ = _closed_as_closedesk_stops_to_update(computer, tmp_path, monkeypatch, "win32")
+    assert window.person_closes(answer=False) is False
+    assert window.asked == [app_window.UPDATING_CLOSE], "closing dropped the update without asking"
+    server.end(updates.UPDATE_AND_RESTART)
+    until(lambda: computer.updates(), what="the update")
+    window.person_closes()
+    computer.updates()[0].end(0)
+    thread.join(10)
+    assert not thread.is_alive()
+
+
+def test_on_a_mac_the_question_says_closedesk_updates_before_the_first_close(computer, tmp_path, monkeypatch):
+    # macOS reads pywebview's question before the closing handler runs: the window has put it there already.
+    app, window, server, thread, _ = _closed_as_closedesk_stops_to_update(computer, tmp_path, monkeypatch, "darwin")
+    window.cocoa = True
+    until(lambda: window.localization["global.quitConfirmation"] == app_window.UPDATING_CLOSE, what="the question")
+    assert window.person_closes(answer=False) is False and window.asked == [app_window.UPDATING_CLOSE]
+    server.end(updates.UPDATE_AND_RESTART)
+    until(lambda: computer.updates())
+    window.person_closes()
+    thread.join(10)
+    assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin"])
+def test_a_window_closed_before_closedesk_has_stopped_to_update_still_runs_the_update(computer, tmp_path, monkeypatch, platform):
+    # Closed (Close, or Cmd+Q) between Update now's answer and CloseDesk's exit code: the update the person asked for
+    # runs all the same, a program of its own, and the next CloseDesk opens as the new version.
+    monkeypatch.setattr(app_window, "STOP_WAIT", 5)
+    app, window, server, thread, result = _closed_as_closedesk_stops_to_update(computer, tmp_path, monkeypatch, platform)
+    assert window.person_closes() is True
+    assert computer.updates() == [] and thread.is_alive(), "the window waits for CloseDesk to stop"
+    time.sleep(0.1)
+    server.end(updates.UPDATE_AND_RESTART)
+    until(lambda: computer.updates(), what="the update the person asked for")
+    (update,) = computer.updates()
+    assert update.cmd == [sys.executable, str(app_window.ROOT / "scripts" / "launch.py"), "--update"]
+    assert update.options["creationflags"] == NO_WINDOW and update.options["start_new_session"] is (os.name != "nt")
+    assert updates.WINDOW_ASKED_ENV not in update.options["env"]
+    if platform == "darwin":
+        thread.join(10)
+        assert not thread.is_alive() and update.poll() is None, "a Mac's window leaves once the update has started"
+    else:
+        time.sleep(0.1)
+        assert thread.is_alive(), "elsewhere the window waits for the update, as it does for one closed while it runs"
+        update.end(0)
+        thread.join(10)
+    assert result["code"] == 0 and len(computer.servers()) == 1, "closed: CloseDesk isn't opened again"
+    assert not app.asked_mark.exists()
+
+
+def test_a_closedesk_that_ended_with_update_as_the_window_closed_is_updated(computer, tmp_path):
+    # No mark (Update now pressed in a browser tab onto the window's CloseDesk), and the window closed: CloseDesk,
+    # asked to stop, ends with UPDATE all the same; the update runs.
+    computer.update_code = None
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "win32"
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    (server,) = computer.servers()
+    server.stdin = SimpleNamespace(close=lambda: server.end(updates.UPDATE_AND_RESTART))
+    window.person_closes()
+    until(lambda: computer.updates(), what="the update")
+    computer.updates()[0].end(0)
+    thread.join(10)
+    assert not thread.is_alive() and len(computer.servers()) == 1
+
+
+def test_a_mark_left_from_before_isnt_taken_for_update_now(computer, tmp_path):
+    # Each CloseDesk the window starts begins without one.
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.asked_mark.write_text("1", encoding="utf-8")
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    assert not app.asked_mark.exists()
+    assert window.person_closes() is True and window.asked == []
     thread.join(10)
 
 

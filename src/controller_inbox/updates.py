@@ -50,6 +50,10 @@ LAUNCHER_ENV = "CLOSEDESK_LAUNCHER"
 # goes to the log named in APP_LOG_ENV (app_window.py).
 APP_ENV = "CLOSEDESK_APP"
 APP_LOG_ENV = "CLOSEDESK_APP_LOG"
+# Set by the CloseDesk window for the CloseDesk it starts: a file written the moment that CloseDesk is to stop to update.
+# It takes a few seconds to stop, and stops answering at once; the window learns from the file, so that closing it
+# meanwhile asks first and the update still runs (app_window.py).
+WINDOW_ASKED_ENV = "CLOSEDESK_UPDATE_ASKED_MARK"
 STATE_KEY = "update_latest"
 CHECK_EVERY = timedelta(days=1)
 # How often the open CloseDesk looks whether a day has passed, and how long it waits after starting.
@@ -355,8 +359,23 @@ def stop_to_update(app_state, job_state: str, *, shown: str = "") -> str:
     # Asked for (from Settings, say): the question isn't put to the page that waits for CloseDesk to stop.
     if question is not None:
         question.answer()
+    _tell_the_window()
     stop()
     return ""
+
+
+def _tell_the_window() -> None:
+    """Started by the CloseDesk window: it is told CloseDesk stops to update, in the file it named (``WINDOW_ASKED_ENV``),
+    before CloseDesk stops answering."""
+    mark = os.environ.get(WINDOW_ASKED_ENV, "")
+    if not mark:
+        return
+    try:
+        os.makedirs(os.path.dirname(mark) or ".", exist_ok=True)
+        with open(mark, "w", encoding="utf-8") as handle:
+            handle.write(f"{os.getpid()}\n")
+    except OSError:  # the window learns from the exit code instead, once CloseDesk has stopped
+        log.warning("Couldn't tell the window CloseDesk stops to update", exc_info=True)
 
 
 def start_checking(store, settings) -> None:

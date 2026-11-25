@@ -732,6 +732,8 @@ class App:
         self.open_url = webbrowser.open
         self.open_launcher = open_launcher
         self.storage = user_dir() / "window"
+        # Written by the CloseDesk this window started the moment it is to stop to update (updates.WINDOW_ASKED_ENV).
+        self.asked_mark = user_dir() / f"update-asked-{os.getpid()}"
         self.delegate = None  # what Invoke takes on Windows (.NET's Func[Type]; the tests give their own)
         self.load_wait, self.up_wait, self.other_wait, self.poll = LOAD_WAIT, UP_WAIT, OTHER_WAIT, 0.25
         self.watch, self.gone_for_good, self.update_longest = WATCH_EVERY, GONE_FOR_GOOD, UPDATE_LONGEST
@@ -795,7 +797,10 @@ class App:
         leaves at once, waiting for neither: kept with no window, it would stay in the Dock, where opening CloseDesk
         again only brings it forward and nothing appears. CloseDesk stops by itself once its input ends, and ends in
         time whatever still runs in it (``cli.leave_within``). Elsewhere the window waits for the update and for
-        CloseDesk to stop, but not for good."""
+        CloseDesk to stop, but not for good.
+
+        Closed after Update now but before CloseDesk had stopped for it (it takes a few seconds), the window waits for
+        CloseDesk to stop, a Mac's too, and then starts the update the person asked for, as a program of its own."""
         with self._lock:
             self.closing = True
             server, update = self.server, self.update
@@ -806,10 +811,35 @@ class App:
                 print("The window was closed during the update: the update finishes first.", flush=True)
                 self._wait_for_update(update)
         if server is not None and server.poll() is None:
-            if self.platform == "darwin":
+            if self.platform == "darwin" and not self._update_asked():
                 self._let_go(server)
             else:
                 self._end(server)
+        if update is None and server is not None and server.poll() == UPDATE:
+            self._update_after_close()
+        self._forget_update_asked()
+
+    def _update_after_close(self) -> None:
+        """CloseDesk the window started stopped to update once the window had closed: the update runs all the same, as
+        a program of its own (waited for as an update the window was closed during is: not on a Mac)."""
+        print("CloseDesk stopped to update after its window was closed: the update runs by itself.", flush=True)
+        self._update_until = time.monotonic() + self.update_longest
+        self.update = self._start_update()
+        if self.platform != "darwin":
+            self._wait_for_update(self.update)
+
+    def _update_asked(self) -> bool:
+        """Whether the CloseDesk this window started said it stops to update (Update now was answered)."""
+        try:
+            return self.asked_mark.is_file()
+        except OSError:
+            return False
+
+    def _forget_update_asked(self) -> None:
+        try:
+            self.asked_mark.unlink(missing_ok=True)
+        except OSError:
+            pass
 
     def _let_go(self, server) -> None:
         """Ask CloseDesk the window started to stop (its input ends), without waiting for it."""
@@ -864,7 +894,8 @@ class App:
         if self.on_purpose or self.closing:
             window.confirm_close = False
             return None
-        if self.updating:
+        if self.updating or (self.owned and self._update_asked()):
+            # Updating, or about to: CloseDesk stops to update (a few seconds) before the update starts.
             words = UPDATING_CLOSE
         elif self.owned and self.working():
             words = BUSY_CLOSE
@@ -962,7 +993,7 @@ class App:
                     self._failed(stopped_page(self.log))
                 return
             self._show_closedesk()
-            code = server.wait()
+            code = self._until_stopped(server)
             if self.closing:
                 return
             if code != UPDATE:
@@ -985,7 +1016,10 @@ class App:
             updates.APP_LOG_ENV: str(self.log),
             STOP_WITH_PARENT: "1",
             EXACT_PORT: "1",
+            # Written the moment it is to stop to update: closing the window meanwhile asks first.
+            updates.WINDOW_ASKED_ENV: str(self.asked_mark),
         })
+        self._forget_update_asked()  # one left from before isn't this CloseDesk's
         env.pop("CLOSEDESK_REOPEN", None)
         if reopen:
             env["CLOSEDESK_REOPEN"] = "1"  # on the port it was on, where the window looks for it
@@ -1004,6 +1038,18 @@ class App:
                 return True
             time.sleep(self.poll)
         return False
+
+    def _until_stopped(self, server) -> int:
+        """CloseDesk shown until it stops: its exit code. Once it says it stops to update, closing the window asks so
+        from then on (macOS reads the question before the closing handler runs)."""
+        told = False
+        while True:
+            try:
+                return server.wait(None if told else self.poll)
+            except subprocess.TimeoutExpired:
+                if self._update_asked():
+                    self._ask_on_close(UPDATING_CLOSE)
+                    told = True
 
     def _watch_other(self) -> bool:
         """The window shows a CloseDesk it didn't start. True when that one has gone for good: it stopped answering, its
@@ -1149,22 +1195,15 @@ class App:
         started again (updated, or as it was when the update didn't finish: its first page says so)."""
         self._ask_on_close(UPDATING_CLOSE)
         self.updating = True
+        self._forget_update_asked()  # acted on here: the window says it is updating from now on
         self._show(updating_page())
         print("Updating CloseDesk...", flush=True)
-        env = _environment(**{updates.APP_ENV: "1", updates.APP_LOG_ENV: str(self.log)})
-        for name in (STOP_WITH_PARENT, "CLOSEDESK_REOPEN"):
-            env.pop(name, None)
         try:
             with self._lock:
                 if self.closing:
                     return False
                 self._update_until = time.monotonic() + self.update_longest
-                # A program of its own, which nothing that ends the window ends (a Mac's window leaves at once when it
-                # is closed meanwhile).
-                self.update = self.popen(
-                    [sys.executable, str(ROOT / "scripts" / "launch.py"), "--update"], cwd=str(ROOT), env=env,
-                    stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, start_new_session=os.name != "nt", **_output(),
-                )
+                self.update = self._start_update()
             code = self._wait_for_update(self.update)
             if code == UPDATE_UNDER_WAY:
                 # Another update runs in the folder (CloseDesk-Update, double-clicked meanwhile): CloseDesk opened now
@@ -1183,6 +1222,17 @@ class App:
         if code and code != UPDATE_UNDER_WAY:
             print(f"The update ended with exit code {code}: CloseDesk opens as it is.", flush=True)
         return not self.closing
+
+    def _start_update(self):
+        """``launch.py --update``: a program of its own, which nothing that ends the window ends (a Mac's window leaves
+        at once when it is closed meanwhile), with no console window."""
+        env = _environment(**{updates.APP_ENV: "1", updates.APP_LOG_ENV: str(self.log)})
+        for name in (STOP_WITH_PARENT, "CLOSEDESK_REOPEN", updates.WINDOW_ASKED_ENV):
+            env.pop(name, None)
+        return self.popen(
+            [sys.executable, str(ROOT / "scripts" / "launch.py"), "--update"], cwd=str(ROOT), env=env,
+            stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, start_new_session=os.name != "nt", **_output(),
+        )
 
     def _wait_for_other_update(self) -> None:
         """Another update runs in CloseDesk's folder: the window keeps saying CloseDesk is updating until that one is

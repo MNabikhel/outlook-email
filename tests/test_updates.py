@@ -351,6 +351,31 @@ def test_the_update_button_stops_closedesk_for_its_launcher(download, settings, 
     assert client.post("/api/update").status_code == 403, "only CloseDesk's own page may ask"
 
 
+def test_closedesk_started_by_the_window_tells_it_at_once_that_it_stops_to_update(download, settings, store, monkeypatch, tmp_path):
+    # CloseDesk takes a few seconds to stop once Update now is answered, and stops answering at once: the window learns
+    # from the file it named (closing it meanwhile asks first, and the update still runs).
+    mark = tmp_path / "window" / "update-asked"
+    monkeypatch.setenv(updates.WINDOW_ASKED_ENV, str(mark))
+    app = web.create_app(settings, store)
+    app.state.stop_server = stop = Stopper()
+    assert TestClient(app).post("/api/update", headers=PAGE).status_code == 200
+    assert stop.calls == 1 and mark.is_file()
+
+
+def test_an_update_refused_tells_the_window_nothing(download, settings, store, monkeypatch, tmp_path):
+    mark = tmp_path / "update-asked"
+    monkeypatch.setenv(updates.WINDOW_ASKED_ENV, str(mark))
+    app = web.create_app(settings, store)
+    app.state.stop_server = Stopper()
+    release = threading.Event()
+    app.state.job.start(lambda progress: release.wait(10))
+    try:
+        assert TestClient(app).post("/api/update", headers=PAGE).status_code == 409
+    finally:
+        release.set()
+    assert not mark.exists()
+
+
 def test_the_update_button_waits_while_mail_is_processed(download, settings, store):
     app = web.create_app(settings, store)
     app.state.stop_server = stop = Stopper()
