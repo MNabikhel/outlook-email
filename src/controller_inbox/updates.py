@@ -263,6 +263,10 @@ def status(store, settings) -> dict[str, Any]:
     if newer and date and latest.get("date") and latest["date"] < date:
         newer = False
     mine, theirs = version.number(date) or commit[:7], version.number(latest.get("date", "")) or newest[:7]
+    # A version number is the day: two from one day are told apart by their commits.
+    same_day = newer and mine == theirs
+    if same_day:
+        mine, theirs = version.short(commit, date), version.short(newest, latest.get("date", ""))
     if not commit:
         note = DEVELOPER
     elif not on:
@@ -280,7 +284,10 @@ def status(store, settings) -> dict[str, Any]:
         "note": note,
         "newer": newer,
         "latest": theirs if newer else "",
-        "message": f"A newer CloseDesk is ready ({theirs}; you have {mine})." if newer else "",
+        "message": (
+            f"A newer CloseDesk is ready: {theirs}; you have {mine}." if same_day
+            else f"A newer CloseDesk is ready ({theirs}; you have {mine})." if newer else ""
+        ),
         "mine": mine,
         "whats_new": latest.get("title", "") if newer else "",
         "launcher": launcher_here(),
@@ -418,15 +425,17 @@ class Question:
                 if time.monotonic() - started > ASK_WAIT_SECONDS:
                     log.info("GitHub answered after the first page stopped waiting: nothing is asked this time.")
                     found = None
+                # Both at once: a page looking in between would read "done, nothing found" and not ask again.
                 with self._lock:
                     self._found = found
-                self._checking = False
+                    self._checking = False
 
         threading.Thread(target=ask, name="update-check-start", daemon=True).start()
 
     def checking(self) -> bool:
         """Whether GitHub is still being asked (the page asks again shortly)."""
-        return self._checking
+        with self._lock:
+            return self._checking
 
     def answer(self) -> None:
         """Not now (or OK): not asked again until CloseDesk opens again."""
@@ -446,7 +455,7 @@ class Question:
             open_ = here and self._begun and not self._answered
             shown = self._found or {}
             held = self._held
-        checking = open_ and self._checking
+            checking = open_ and self._checking
         newer = bool(not checking and shown.get("newer"))
         failed = open_ and self._failed
         return {

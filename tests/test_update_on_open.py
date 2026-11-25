@@ -565,6 +565,51 @@ def test_an_answer_as_closedesk_opened_that_came_after_the_page_stopped_waiting_
     assert question.view(store, settings, "idle")["ask"] is False
 
 
+def test_the_answer_coming_in_as_the_page_asks_is_never_read_as_no_answer(download, settings, store, monkeypatch):
+    # The page stops asking at the first answer that isn't "still checking". Read half before and half after the
+    # asking's answer came in, the question said "nothing to ask, done checking", and that start never asked.
+    monkeypatch.setattr(updates, "_ask_github", github())
+    found = asked_at_start(store, settings)._found
+    question = updates.Question()
+    question._begun, question._checking = True, True
+
+    class AnswerComesInMeanwhile:
+        """The question's lock: the asking's thread stores its answer the moment the page's look lets go of it."""
+
+        pending = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            if AnswerComesInMeanwhile.pending:
+                AnswerComesInMeanwhile.pending = False
+                question._found, question._checking = found, False
+            return False
+
+    question._lock = AnswerComesInMeanwhile()
+    first = question.view(store, settings, "idle")
+    assert first["checking"] or first["ask"], f"read as done with nothing to ask: {first}"
+    assert question.view(store, settings, "idle")["ask"] is True
+
+
+def test_a_newer_version_from_the_same_day_is_told_apart_by_its_commit(download, settings, store, monkeypatch):
+    # A version number is the day: a copy downloaded in the morning and main merged again that afternoon have the same
+    # one, and "CloseDesk 2026.11.13 is out; you have 2026.11.13." reads as no newer version at all.
+    monkeypatch.setattr(updates, "_ask_github", github(date="2026-11-13T16:40:00Z"))
+    question = asked_at_start(store, settings)
+    view = question.view(store, settings, "idle")
+    assert view["ask"] is True
+    assert view["message"] == "CloseDesk 2026.11.13 (bbbbbbb) is out; you have 2026.11.13 (aaaaaaa)."
+    shown = updates.status(store, settings)
+    assert shown["message"] == "A newer CloseDesk is ready: 2026.11.13 (bbbbbbb); you have 2026.11.13 (aaaaaaa)."
+    # From another day, the day says it.
+    monkeypatch.setattr(updates, "_ask_github", github())
+    view = asked_at_start(store, settings).view(store, settings, "idle")
+    assert view["message"] == "CloseDesk 2026.11.16 is out; you have 2026.11.13."
+    assert updates.status(store, settings)["message"] == "A newer CloseDesk is ready (2026.11.16; you have 2026.11.13)."
+
+
 def test_the_question_says_what_the_check_as_closedesk_opened_found(download, settings, store, monkeypatch):
     monkeypatch.setattr(updates, "_ask_github", github())
     question = asked_at_start(store, settings)
