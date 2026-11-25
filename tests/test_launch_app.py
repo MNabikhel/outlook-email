@@ -46,8 +46,11 @@ def launch(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "app_log_path", lambda: tmp_path / "logs" / "CloseDesk-app.log")
     monkeypatch.setattr(module, "NO_WINDOW", NO_WINDOW)
     monkeypatch.setattr(module, "APP_LOGS", True)  # as on Windows and macOS, where the app has no console
+    # (__PYVENV_LAUNCHER__ too, which a Mac's start sets for the window's Python: left set, every Python the tests start
+    # after it looked for its environment there, and couldn't import anything.)
     for name in ("CLOSEDESK_APP", "CLOSEDESK_APP_LOG", "CLOSEDESK_LAUNCHER", "CLOSEDESK_REBUILT", "CLOSEDESK_UPDATE_URL",
-                 "CFProcessPath", "CLOSEDESK_APP_SMOKE", "CLOSEDESK_AFTER_UPDATE"):
+                 "CFProcessPath", "CLOSEDESK_APP_SMOKE", "CLOSEDESK_AFTER_UPDATE", "__PYVENV_LAUNCHER__", "CLOSEDESK_ARCH",
+                 "CLOSEDESK_APP_BUNDLE", "CLOSEDESK_REOPEN"):
         # Set, then removed: what launch.py itself sets in os.environ (--app sets the first three) is undone after the
         # test too, which removing a name that isn't set wouldn't do.
         monkeypatch.setenv(name, "")
