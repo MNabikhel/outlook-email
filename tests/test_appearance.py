@@ -402,6 +402,13 @@ def test_both_setup_pages_say_where_the_importance_words_go(client):
     assert "not its printable page" in words and "the workspace's lists and digest" in words, words
     source = (Path(web.__file__).parent / "static" / "ui" / "settings.js").read_text(encoding="utf-8")
     assert "The two boxes under Colors are saved for CloseDesk on this computer, and the classic pages follow them too." in source
+    # The workspace's said the box writes it on "the daily digest", where the digest's printable page has no words;
+    # and both ended "that edge is the same for all three: this tells them apart", which read as the edge telling
+    # them apart. A held email says it is held either way.
+    help_text = source[source.index('b("Show Critical, High, Medium or Low on each email")') :].split("))", 1)[0]
+    assert "the daily digest (not its printable page)" in help_text and "a held one still says so" in help_text, help_text
+    for said in (help_text, words):
+        assert "tick this to tell them apart" in said and "this tells them apart" not in said, said
 
 
 def _focus_items(html: str) -> list[str]:

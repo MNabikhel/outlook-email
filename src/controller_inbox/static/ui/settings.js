@@ -330,7 +330,7 @@ export function createSettings(ctx) {
           "label",
           { class: "set-check" },
           words,
-          h("span", { class: "set-check-text" }, b("Show Critical, High, Medium or Low on each email"), h("span", null, "Writes it on each email in the lists and the daily digest, or Held for fraud on one held as possible fraud. Without it, only Critical, High and held emails are marked, by a colored edge. With a Windows contrast theme (high contrast) on, that edge is the same for all three: this tells them apart."))
+          h("span", { class: "set-check-text" }, b("Show Critical, High, Medium or Low on each email"), h("span", null, "Writes it on each email in the lists and the daily digest (not its printable page), or Held for fraud on one held as possible fraud. Without it, only Critical, High and held emails are marked, by a colored edge, and a held one still says so. With a Windows contrast theme (high contrast) on, that edge is the same for all three: tick this to tell them apart."))
         ),
         status("colors")
       )
