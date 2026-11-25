@@ -159,8 +159,14 @@ def update_from_settings(folder: Path, archive: Path, *, before: str, after: str
     assert (folder / "docs" / "ONLY-IN-THE-UPDATE.txt").read_text(encoding="utf-8") == archive.stem
 
 
+# Linux's window check (the stand-in window): where the app's words are kept, as its log is on Windows and macOS.
+_LOG: list[Path] = []
+
+
 def app_log() -> Path:
     """Where launch.py --app writes what it says on Windows and macOS (its app_log_path)."""
+    if _LOG:
+        return _LOG[0]
     if WINDOWS:
         return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "CloseDesk" / "CloseDesk-app.log"
     return Path.home() / "Library" / "Logs" / "CloseDesk" / "CloseDesk-app.log"
@@ -356,10 +362,24 @@ DOCK_NAME = f"macOS shows the window as CloseDesk ({BUNDLE_ID})."
 
 
 def env_python(folder: Path, *, windowless: bool = False) -> Path:
-    """The environment's Python; on Windows its pythonw.exe (no console window) when asked for, as the shortcut runs."""
+    """The environment's Python; on Windows its pythonw.exe (no console window) when asked for, as the shortcut runs.
+    (Linux's window check: one that writes to the app's log, as the app does on Windows and macOS.)"""
     if WINDOWS:
         return folder / ".venv" / "Scripts" / ("pythonw.exe" if windowless else "python.exe")
+    if windowless and _LOG:
+        return _LOG[0].with_name("python-to-the-log")
     return folder / ".venv" / "bin" / "python"
+
+
+def stand_in_window(folder: Path, work: Path) -> None:
+    """Linux has no window: the window's check runs with the stand-in pywebview (tests/stand_in_window), everything
+    else for real, and the app's words kept in a log as on Windows and macOS."""
+    _LOG.append(work / "CloseDesk-app.log")
+    python = env_python(folder, windowless=True)
+    python.write_text(f'#!/bin/bash\nexec "{folder / ".venv" / "bin" / "python"}" "$@" >>"{_LOG[0]}" 2>&1\n', encoding="utf-8")
+    python.chmod(0o755)
+    os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, [str(REPO / "tests" / "stand_in_window"), os.environ.get("PYTHONPATH")]))
+    os.environ["CLOSEDESK_STAND_IN_WINDOW"] = "1"
 
 
 def in_env(folder: Path, code: str) -> str:
@@ -695,7 +715,8 @@ def window_check() -> int:
     runs it, onto a CloseDesk already open, and through the shortcut itself as a double-click opens it. Each time
     CloseDesk's page has to load in it, the window closes itself, and CloseDesk stops with it. Then Update now in the
     window: it updates CloseDesk and shows the new version. On a Mac the Dock has to call it CloseDesk (lsappinfo),
-    never Python. On Linux, where there is no window, its start has to say so. Windows
+    never Python. On Linux, where there is no window, its start has to say so, and the rest is checked with a stand-in
+    for the window itself (tests/stand_in_window). Windows
     needs Microsoft Edge WebView2 Runtime (CI installs it first). CLOSEDESK_SMOKE_SHOTS: a folder for the screenshots
     and the app's log."""
     work = Path(tempfile.mkdtemp(prefix="closedesk window "))
@@ -715,8 +736,17 @@ def window_check() -> int:
         said = done.stdout + done.stderr
         assert done.returncode == 2 and "The CloseDesk window is for Windows and macOS" in said, (done.returncode, said)
         print("--- no window on Linux, and its start says so (a person's start opens the browser instead)", flush=True)
+        # The rest of the window, for real, with a stand-in for the window itself.
+        stand_in_window(folder, work)
+        open_window(folder, free_port(), name="the stand-in, as the shortcut starts it")
+        dashboard = start_dashboard(folder)
+        try:
+            open_window(folder, dashboard.port, name="the stand-in, onto a CloseDesk already open", attached=True)
+        finally:
+            stop(dashboard)
+        update_in_window(folder, newer_zip(work, "b" * 40, "newer"), before="a" * 40, after="b" * 40)
         shutil.rmtree(work, ignore_errors=True)
-        print("The CloseDesk window check passed (Linux: no window).", flush=True)
+        print("The CloseDesk window check passed (Linux: no window; the rest of it with a stand-in window).", flush=True)
         return 0
     found = in_env(folder, "from importlib.metadata import version; print(version('pywebview'))")
     print(f"--- the window's part is installed: pywebview {found}", flush=True)
