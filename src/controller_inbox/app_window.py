@@ -55,6 +55,7 @@ APP_ID = "CloseDesk.CloseDesk"
 BUNDLE_ID = "io.github.mnabikhel.closedesk"
 UPDATE = updates.UPDATE_AND_RESTART
 REBUILD = 76  # launch.py: the environment has to be made again
+UPDATE_UNDER_WAY = 77  # launch.py --update: another update runs in the folder (CloseDesk-Update, say), nothing was done
 # A console program started without this flashes a console window up on Windows (0 elsewhere).
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 # CloseDesk started by the window stops when its input ends (cli._run_server).
@@ -1165,6 +1166,10 @@ class App:
                     stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, start_new_session=os.name != "nt", **_output(),
                 )
             code = self._wait_for_update(self.update)
+            if code == UPDATE_UNDER_WAY:
+                # Another update runs in the folder (CloseDesk-Update, double-clicked meanwhile): CloseDesk opened now
+                # would run from a folder that update is about to replace.
+                self._wait_for_other_update()
         finally:
             self.updating = False
             self._ask_on_close(BUSY_CLOSE)
@@ -1175,9 +1180,23 @@ class App:
             self.open_launcher()
             self.close_on_purpose()
             return False
-        if code:
+        if code and code != UPDATE_UNDER_WAY:
             print(f"The update ended with exit code {code}: CloseDesk opens as it is.", flush=True)
         return not self.closing
+
+    def _wait_for_other_update(self) -> None:
+        """Another update runs in CloseDesk's folder: the window keeps saying CloseDesk is updating until that one is
+        done (its mark is gone), as it waits before showing a CloseDesk that is updating; then CloseDesk opens. Not past
+        ``update_longest`` (CloseDesk opens as it is), nor once the window is closed (that update finishes by itself)."""
+        print("Another update runs in CloseDesk's folder (CloseDesk-Update, say): the window waits for it to finish.", flush=True)
+        while not self.closing:
+            if not self.update_running():
+                print("The other update is done: CloseDesk opens.", flush=True)
+                return
+            if time.monotonic() >= self._update_until:
+                print(f"The other update was still running after {self.update_longest / 60:g} minutes: CloseDesk opens as it is.", flush=True)
+                return
+            time.sleep(self.watch)
 
 
 def prepare(args, webview) -> App | None:

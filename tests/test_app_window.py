@@ -456,6 +456,69 @@ def test_closing_during_an_update_asks_and_lets_the_update_finish(computer, tmp_
     assert result["code"] == 0 and len(computer.servers()) == 1, "closed: not opened again after the update"
 
 
+def test_update_now_while_another_update_runs_waits_for_that_one_before_closedesk_opens(computer, tmp_path, capsys):
+    # CloseDesk-Update was double-clicked while the window was open, and is downloading. Update now in the window:
+    # launch.py --update says another update runs (77) and does nothing. CloseDesk opened at once would run from a
+    # folder that update is about to replace: the window says it is updating until that update is done.
+    computer.update_code = app_window.UPDATE_UNDER_WAY
+    computer.updating = True  # the other update's mark, with its program running
+    asked: list[float] = []
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.update_running = lambda: asked.append(time.monotonic()) or computer.updating
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)
+    until(lambda: computer.updates(), what="the update")
+    until(lambda: len(asked) >= 3, what="the window looking whether the other update is done")
+    assert len(computer.servers()) == 1, "CloseDesk started under an update that replaces its folder"
+    assert "Updating CloseDesk" in window.htmls()[-1] and window.shown[-1][0] == "html"
+    assert window.person_closes(answer=False) is False and window.asked == [app_window.UPDATING_CLOSE]
+
+    computer.updating = False  # the other update is done
+    until(lambda: len(computer.servers()) == 2, what="CloseDesk opened again")
+    until(lambda: len(window.urls()) == 2, what="the new version in the window")
+    assert computer.servers()[1].options["env"].get("CLOSEDESK_REOPEN") == "1"
+    assert "Another update" in capsys.readouterr().out
+    window.person_closes()
+    thread.join(10)
+
+
+def test_a_window_closed_while_it_waits_for_another_update_doesnt_open_closedesk(computer, tmp_path):
+    computer.update_code = app_window.UPDATE_UNDER_WAY
+    computer.updating = True
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "win32"
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)
+    until(lambda: computer.updates())
+    time.sleep(0.1)
+    assert window.person_closes() is True
+    thread.join(10)
+    assert not thread.is_alive() and len(computer.servers()) == 1, "the other update finishes by itself"
+
+
+def test_waiting_for_another_update_gives_up_in_time(computer, tmp_path, capsys):
+    # Something holds that update for good: past the longest an update takes, CloseDesk opens as it is.
+    computer.update_code = app_window.UPDATE_UNDER_WAY
+    computer.updating = True
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.update_longest = 0.4
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)
+    until(lambda: len(computer.servers()) == 2, what="CloseDesk opened as it is")
+    assert "still running" in capsys.readouterr().out
+    window.person_closes()
+    thread.join(10)
+
+
 def test_an_update_that_needs_the_environment_made_again_hands_over_to_the_double_click_launcher(computer, tmp_path):
     # The environment can't be made again by a Python running from it: the launcher does it, in its window.
     computer.update_code = 76
