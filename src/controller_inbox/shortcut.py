@@ -490,8 +490,9 @@ def info_plist(root: Path) -> dict:
         "CFBundleVersion": number,
         "LSApplicationCategoryType": "public.app-category.business",
         "LSMinimumSystemVersion": "11.0",
-        # A second double-click brings the open CloseDesk forward.
-        "LSMultipleInstancesProhibited": True,
+        # Not LSMultipleInstancesProhibited: that refuses CloseDesk to anyone else on this Mac (Fast User Switching)
+        # while one person has it open, before CloseDesk can say why. A second click in one session brings the open
+        # CloseDesk forward without it (Launch Services does).
         # Without it the window is blurry on a Retina screen.
         "NSHighResolutionCapable": True,
         "NSPrincipalClass": "NSApplication",

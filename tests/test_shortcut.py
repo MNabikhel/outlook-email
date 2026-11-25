@@ -760,7 +760,11 @@ def test_the_first_launcher_start_puts_closedesk_in_applications(mac):
     assert info["CFBundleExecutable"] == "CloseDesk" and info["CFBundlePackageType"] == "APPL"
     assert info["CFBundleIconFile"] == "CloseDesk.icns"
     assert info["NSHighResolutionCapable"] is True, "without it the window is blurry on a Retina screen"
-    assert info["LSMultipleInstancesProhibited"] is True and info["CloseDeskFolder"] == str(mac.root)
+    assert info["CloseDeskFolder"] == str(mac.root)
+    # Not LSMultipleInstancesProhibited: it refuses CloseDesk to a second person on the Mac (switching users) while the
+    # first has it open, saying nothing CloseDesk can show. A second click in one session brings the open one forward
+    # without it.
+    assert "LSMultipleInstancesProhibited" not in info
     script = mac.app / "Contents" / "MacOS" / "CloseDesk"
     assert script.stat().st_mode & stat.S_IXUSR
     assert (mac.app / "Contents" / "Resources" / "CloseDesk.icns").read_bytes() == (STATIC / "closedesk.icns").read_bytes()
@@ -769,6 +773,17 @@ def test_the_first_launcher_start_puts_closedesk_in_applications(mac):
     assert link.is_symlink() and os.readlink(link) == str(mac.python)
     assert mac.registered == [mac.app], "Launch Services is told, so Spotlight and the Dock know it at once"
     assert mac.app.is_dir() and not mac.app.is_symlink(), "Spotlight doesn't index an app that is a link"
+
+
+def test_an_app_made_refusing_a_second_person_is_put_right_at_the_next_start(mac):
+    # CloseDesk.app as the last version made it: the next start rewrites its Info.plist and tells Launch Services.
+    shortcut.upkeep(mac.system, record=mac.record)
+    info = _plist(mac.app)
+    info["LSMultipleInstancesProhibited"] = True
+    (mac.app / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info, sort_keys=True))
+    mac.registered.clear()
+    assert shortcut.upkeep(mac.system, record=mac.record).ok
+    assert "LSMultipleInstancesProhibited" not in _plist(mac.app) and mac.registered == [mac.app]
 
 
 def test_macos_26_gets_the_icon_filled_to_its_edges(mac):
