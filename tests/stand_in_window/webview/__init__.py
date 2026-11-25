@@ -42,6 +42,9 @@ class Event:
     def wait(self, timeout=None) -> bool:
         return self.flag.wait(timeout)
 
+    def is_set(self) -> bool:
+        return self.flag.is_set()
+
     def clear(self) -> None:
         self.flag.clear()
 

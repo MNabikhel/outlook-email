@@ -2119,6 +2119,24 @@ def test_when_the_window_cant_say_what_it_shows_the_page_says(computer, tmp_path
     thread.join(10)
 
 
+def test_a_page_that_hasnt_loaded_isnt_asked_its_address(computer, tmp_path):
+    # pywebview waits twenty seconds for it first: the window would say nothing of the update meanwhile.
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.js_api.page_ready("/app/today")
+    window.events.loaded.clear()
+    asked: list = []
+    window.get_current_url = lambda: asked.append(1) or URL + "app/settings"
+    computer.servers()[0].end(updates.UPDATE_AND_RESTART)
+    until(lambda: len(window.urls()) == 2)
+    assert asked == [] and window.urls()[-1] == URL + "app/today"
+    window.person_closes()
+    thread.join(10)
+
+
 def test_a_window_onto_another_closedesk_shows_the_page_it_showed_when_that_one_is_back(computer, tmp_path):
     computer.other = True
     webview = FakeWebview()

@@ -1236,7 +1236,12 @@ class App:
         which follows the workspace from page to page; the page's own word when the window can't say. "" when it isn't
         one of this CloseDesk's."""
         try:
-            current = str(self.window.get_current_url() or "")
+            # pywebview waits (20 seconds) for a page that hasn't loaded before it says: the page's word then.
+            loaded = self.window.events.loaded.is_set()
+        except AttributeError:
+            loaded = True
+        try:
+            current = str(self.window.get_current_url() or "") if loaded else ""
         except Exception:
             current = ""
         if not current:
