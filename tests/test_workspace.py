@@ -823,6 +823,31 @@ def test_the_classic_pages_fit_a_phone(browser, serve, store, settings, as_of_no
     page.context.close()
 
 
+def test_classic_setup_fits_a_phone_with_a_long_model_name(browser, serve, store, settings, as_of_now, monkeypatch):
+    """The Local model drop-down took the width of its longest choice ("google/gemma-4-31b (loaded) (likely too big
+    for this computer)", 431px), and the whole Setup page scrolled sideways at 390px."""
+    from test_lm_studio_models import LMStudio, _serve
+
+    from controller_inbox import model_roles
+
+    big = "google/gemma-4-31b"
+    settings.llm = None
+    server = LMStudio(loaded=[big])
+    server.extra = [big]
+    server.sizes = {big: 19 * 1024**3}
+    _serve(monkeypatch, server)
+    monkeypatch.setattr(model_roles, "computer_memory", lambda: 16 * 1024**3)
+    ingest_demo(store, settings, now=as_of_now)
+    base = serve()
+    page = _page(browser, width=390, height=844)
+    page.goto(f"{base}/settings")
+    page.wait_for_selector("#chat-model select")
+    assert f"{big} (loaded) (likely too big for this computer)" in page.inner_text("#chat-model select")
+    wide = page.evaluate("[...document.querySelectorAll('.main *')].filter(e => e.getBoundingClientRect().right > 391).map(e => e.tagName + '.' + e.className)")
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390, wide
+    page.context.close()
+
+
 def test_coming_back_to_the_tab_while_a_status_check_is_out_keeps_one_poll_loop(site, page):
     """A visibilitychange during an in-flight status poll neither sends a second request nor starts a second loop."""
     page.clock.install()

@@ -256,6 +256,9 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .model-state.fallback { background: var(--warn-soft); color: var(--warn); }
 .model-state.off { background: var(--chip); color: var(--muted); }
 .chat-model-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 6px 10px; margin: 0 0 12px; font-size: 13px; }
+/* A long model name ("… (loaded) (likely too big for this computer)") would make the drop-down, and with it the page,
+   wider than a phone: the label may shrink below it, and the drop-down to the label. */
+.chat-model-form label { min-width: 0; max-width: 100%; }
 .chat-model-form select { display: block; margin-top: 3px; max-width: 100%; }
 .chat-model-form p { flex-basis: 100%; margin: 0; }
 /* A model that fits this computer better, suggested once: the user loads it or keeps theirs. */
