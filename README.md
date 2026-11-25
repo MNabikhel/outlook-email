@@ -476,8 +476,10 @@ src/controller_inbox/
   web_common.py     What both share: notices, which files download, same-page checks, finding an attachment
   services.py       What a button does, the same from the classic pages and the workspace
   doctor.py         The self-check: `controller_inbox doctor`, or `CloseDesk --check`
-  version.py        Which version this copy is: its date-based number (2026.11.16) and commit; and whose it is (its
-                    folder's and user's fingerprints, in /health): only your own is shown instead of a second started
+  version.py        Which version this copy is: its date-based number (2026.11.16) and commit, and the one an open
+                    CloseDesk started as (what it says and compares, whatever CloseDesk-Update puts in its folder); and
+                    whose it is (its folder's and user's fingerprints, in /health): only your own is shown instead of a
+                    second started
   updates.py        Whether a newer CloseDesk is out (asked of GitHub as it opens and once a day), the question the
                     first page asks about it, and Settings' Update button
   app_window.py     The CloseDesk window (`launch.py --app`, pywebview): starts CloseDesk and shows it, stops it when
@@ -486,7 +488,8 @@ src/controller_inbox/
                     menu; the menu bar's Undo, Find, Print, zoom and Back with their keys; a find bar; a download saved
                     over a file)
   app_log.py        The app's log, which each of its programs adds to at its end, and the message box when the
-                    window can't even start (standard library only, so it works when a part CloseDesk needs won't load)
+                    window can't even start (standard library only, so it works when a part CloseDesk needs won't load);
+                    the Microsoft Store's Python told apart, whose files in AppData are kept in its own folder
   shortcut.py       The CloseDesk shortcut that opens the window: CloseDesk.lnk on the Desktop and in the Start menu
                     (Windows), CloseDesk.app in Applications (macOS); made the first time a launcher starts CloseDesk,
                     kept pointing at the folder when it moves (the taskbar's pinned copy too, and a CloseDesk.app moved
