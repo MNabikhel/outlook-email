@@ -2,7 +2,9 @@
    newer CloseDesk is out, "Update now" or "Not now". The server keeps the answer for this run (updates.Question), so
    Not now isn't asked again on the next page, only the next time CloseDesk opens. While GitHub is still being asked
    (a few seconds at most) the page asks again shortly; offline, nothing is asked and nothing is in the way. Update
-   now is Settings' Update: refused while mail is being processed, and offered again once that is done. */
+   now is Settings' Update: refused while mail is being processed, and offered again once that is done (also on the
+   page shown next, when the page loads again meanwhile: the server says the update was held back). It says which
+   version the page shows, so a tab left open from before an update can't stop the new CloseDesk for nothing. */
 
 import { $, h, replace } from "./dom.js";
 import { getJSON, postJSON } from "./api.js";
@@ -17,8 +19,9 @@ const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /** CloseDesk has stopped to update: wait for it to answer again (as the new version, or as it was when the update
     couldn't be done), then ``onBack``; ``onSlow`` once if that takes over five minutes. ``before``: the commit that
-    asked, so a quick restart that is missed in between still counts. */
-export function waitForCloseDesk(before, { onBack, onSlow }) {
+    asked, and ``run``: the start of CloseDesk that asked (/health says which answers), so a start again that is quick
+    enough to come between two looks still counts, as the new version or as the same one. */
+export function waitForCloseDesk(before, { run = "", onBack, onSlow }) {
   const started = Date.now();
   let gone = false; // CloseDesk stopped answering: the next answer is the new one
   let slow = false;
@@ -26,13 +29,13 @@ export function waitForCloseDesk(before, { onBack, onSlow }) {
     try {
       const response = await fetch("/health", { cache: "no-store" });
       const health = await response.json();
-      if (health.app === "closedesk" && (gone || health.commit !== before)) return onBack();
+      if (health.app === "closedesk" && (gone || health.commit !== before || (run && health.run && health.run !== run))) return onBack();
     } catch (error) {
       gone = true;
-      if (!slow && Date.now() - started > SLOW_MS) {
-        slow = true;
-        onSlow();
-      }
+    }
+    if (!slow && Date.now() - started > SLOW_MS) {
+      slow = true;
+      onSlow();
     }
     setTimeout(again, 2000);
   };
@@ -101,7 +104,7 @@ function show(view, updating) {
     say("");
     state = "sending";
     try {
-      const reply = await postJSON("/api/update");
+      const reply = await postJSON("/api/update", { commit: view.commit });
       if (updating) {
         state = "handed";
         dialog.close();
@@ -144,10 +147,20 @@ function show(view, updating) {
     dialog.classList.add("updating");
     const message = h("p", { id: "update-ask-body" }, reply.message || view.updating);
     replace(dialog, h("h2", { id: "update-ask-title" }, "Updating CloseDesk"), message, h("progress", { "aria-label": "Updating" }));
-    waitForCloseDesk(reply.commit || view.commit, { onBack: () => location.reload(), onSlow: () => (message.textContent = SLOW) });
+    waitForCloseDesk(reply.commit || view.commit, { run: reply.run, onBack: () => location.reload(), onSlow: () => (message.textContent = SLOW) });
   }
 
   document.body.append(dialog);
   dialog.showModal();
   (now || later).focus();
+  if (now && view.held) {
+    // Update now was refused while mail was processed (here, or on the page before this one loaded again).
+    if (view.busy) {
+      now.disabled = true;
+      say(view.busy_message, "wait");
+      waitForTheMail();
+    } else {
+      say(view.done_message, "ok");
+    }
+  }
 }

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -378,6 +379,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     job = ProcessJob()
     app.state.job = job
+    # This start of CloseDesk (/health says it): a page waiting for CloseDesk to start again after Update now knows a
+    # start that came back as the same version (the update didn't finish) from this one, however quick it was.
+    app.state.run = secrets.token_hex(8)
     # Whether to update, asked on the first page shown each time CloseDesk opens (begun by cli._serve).
     app.state.update_question = updates.Question()
 
@@ -1337,13 +1341,17 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return RedirectResponse("/settings?notice=step-back#context-line", status_code=303)
 
     @app.post("/settings/update")
-    def update_now(request: Request):
+    def update_now(request: Request, commit: str = Form("")):
         """Setup's Update button: CloseDesk stops once this page is sent, its launcher fetches the newest version and
-        starts it again, and the page waits for that, then goes back to Setup."""
-        why = updates.stop_to_update(app.state, job.snapshot()["state"])
+        starts it again, and the page waits for that, then goes back to Setup. ``commit``: the version the page showed
+        (refused once CloseDesk was updated since, in another tab)."""
+        why = updates.stop_to_update(app.state, job.snapshot()["state"], shown=commit)
         if why:
             return render(request, "settings_update.html", page="settings", refused=why, status_code=409)
-        return render(request, "settings_update.html", page="settings", refused="", commit=version.installed()[0], message=updates.UPDATING)
+        return render(
+            request, "settings_update.html", page="settings", refused="", commit=version.installed()[0], run=app.state.run,
+            message=updates.UPDATING,
+        )
 
     @app.post("/settings/shortcut")
     def make_shortcut():
@@ -1384,9 +1392,11 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "emails": store.counts()["emails"],
             "graph": settings.graph_configured,
             "model": model.model if model.active else "",
-            # Which version answers: the page that asked for an update reloads when the new one does.
+            # Which version answers, and which start of it: the page that asked for an update reloads when another
+            # start answers (the new version, or the same one when the update didn't finish).
             "version": version.label(),
             "commit": version.installed()[0],
+            "run": app.state.run,
         }
 
     register_workspace(

@@ -6,7 +6,7 @@
    Downloads first: every download link carries "download", so both engines treat it as one.
 
    In a browser tab there is no bridge, and nothing here does anything. Loaded by both UIs: the workspace (main.js)
-   and the classic pages (classic.js). */
+   and the classic pages (classic.js), which say through ``pageLoaded`` when their page is up. */
 
 const bridge = () => (window.pywebview && window.pywebview.api) || null;
 
@@ -72,7 +72,11 @@ function setUp() {
     outside(href);
     return OPENED;
   };
-  // CloseDesk's page loaded in the window (the window's check in CI waits for this).
+}
+
+/** CloseDesk's page is up in the window: a classic page once its scripts ran, the workspace once it has started
+    (CI's check of the real window waits for this, in both UIs). Nothing in a browser tab. */
+export function pageLoaded() {
   const ready = () => {
     const api = bridge();
     if (api && typeof api.page_ready === "function") {

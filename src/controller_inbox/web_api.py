@@ -1175,13 +1175,17 @@ def register_workspace(
         return settings_state(recheck=bool(recheck))
 
     @api.post("/update")
-    def update_now():
-        """Settings' Update button: CloseDesk stops once this is answered, and its launcher fetches the newest version
-        and starts it again. The page then waits for /health to answer with the new version."""
-        why = updates.stop_to_update(app.state, job.snapshot()["state"])
+    async def update_now(request: Request):
+        """Settings' Update button (or the question's Update now): CloseDesk stops once this is answered, and its
+        launcher fetches the newest version and starts it again. The page then waits for /health to answer from
+        another start (``run``). ``commit`` (optional): the version the page showed; refused once CloseDesk was
+        updated since (a second tab, say)."""
+        data = await json_body(request)
+        shown = str(data.get("commit") or "")
+        why = await run_in_threadpool(updates.stop_to_update, app.state, job.snapshot()["state"], shown=shown)
         if why:
             raise HTTPException(status_code=409, detail=why)
-        return {"ok": True, "message": updates.UPDATING, "commit": version.installed()[0]}
+        return {"ok": True, "message": updates.UPDATING, "commit": version.installed()[0], "run": app.state.run}
 
     @api.get("/update/question")
     def update_question():

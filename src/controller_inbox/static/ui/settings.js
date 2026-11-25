@@ -1061,7 +1061,8 @@ export function createSettings(ctx) {
       button.disabled = true;
       const line = $('[data-status="update"]', root);
       try {
-        const reply = await postJSON("/api/update");
+        // The version this page shows: refused when CloseDesk was updated since (in another tab).
+        const reply = await postJSON("/api/update", { commit: u.commit });
         ctx.updating(reply);
       } catch (error) {
         button.disabled = false;

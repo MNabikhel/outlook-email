@@ -190,3 +190,90 @@ def test_an_update_that_didnt_finish_is_said(download, settings, loaded, page, m
         page.click("#update-ask button:has-text('OK')")
         page.wait_for_selector("#update-ask", state="detached")
         assert answered(page, base + first)["ask"] is False
+
+
+# Waiting for CloseDesk to come back ------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("first", ["/inbox", "/app"])
+def test_an_update_that_fails_at_once_is_said_though_closedesk_was_back_between_two_looks(download, settings, loaded, page, monkeypatch, first):
+    # No internet: the launcher says so and starts CloseDesk again as it was, in about a second and a half, between two
+    # of the page's looks. The page saw neither CloseDesk go nor a new version, and said "Updating CloseDesk" for good.
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + first)
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Update now')")
+        page.wait_for_selector("#updating" if first == "/app" else "#update-ask.updating")
+        # Started again as it was: another start, which asks "CloseDesk wasn't updated".
+        app.state.update_question = asked_at_start(loaded, settings, failed=True)
+        app.state.run = "started-again"
+        page.wait_for_function("() => (document.querySelector('#update-ask[open]') || {}).innerText?.includes(\"CloseDesk wasn't updated\")", timeout=20000)
+
+
+def test_setups_update_page_goes_back_to_setup_once_closedesk_started_again_as_it_was(download, settings, loaded, page, monkeypatch):
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/settings#update")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Not now')")
+        page.click("#update form[action='/settings/update'] button")
+        page.wait_for_selector("[data-update-line]")
+        assert page.inner_text("#update").count("Updating CloseDesk") == 1
+        app.state.run = "started-again"
+        page.wait_for_url(base + "/settings#update", timeout=20000)
+
+
+def test_updating_closedesk_is_said_once(download, settings, loaded, page, monkeypatch):
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/inbox")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Update now')")
+        page.wait_for_selector("#update-ask.updating")
+        assert page.inner_text("#update-ask").count("Updating CloseDesk") == 1
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/app")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Update now')")
+        page.wait_for_selector("#updating")
+        assert page.inner_text("#updating").count("Updating CloseDesk") == 1
+
+
+# Update now from a page shown before CloseDesk was updated -------------------------------------------------------------
+
+
+def test_update_now_in_a_tab_shown_before_closedesk_was_updated_says_so_and_stops_nothing(download, settings, loaded, page, monkeypatch):
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/inbox")
+        page.wait_for_selector(DIALOG)
+        # Updated meanwhile, from another tab: this one still shows the question.
+        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        page.click("#update-ask button:has-text('Update now')")
+        page.wait_for_function(f"() => document.querySelector('#update-ask').innerText.includes({updates.UPDATED_MEANWHILE!r})")
+        assert app.state.stop_server.calls == 0
+
+
+# The classic Today page, while mail is processed ----------------------------------------------------------------------
+
+
+def test_on_the_classic_today_page_the_mail_done_is_said_once_the_page_loaded_again(download, settings, loaded, page, monkeypatch):
+    # The Today page loads again when the mail is done, before the question's own look: asked afresh, it didn't say
+    # the update it had been asked for could be done now.
+    app = opened(settings, loaded, monkeypatch)
+    release = threading.Event()
+    app.state.job.start(lambda progress: release.wait(30) and {"ingested": 0, "already_read": 0})
+    try:
+        with serving(app) as base:
+            page.goto(base + "/")
+            page.wait_for_selector(DIALOG)
+            page.click("#update-ask button:has-text('Update now')")
+            page.wait_for_function(f"() => document.querySelector('#update-ask').innerText.includes({updates.BUSY!r})")
+            release.set()
+            page.wait_for_function("() => (document.querySelector('#update-ask[open]') || {}).innerText?.includes('The mail is done: CloseDesk can update now.')", timeout=20000)
+            assert page.is_enabled("#update-ask button:has-text('Update now')")
+            assert page.query_selector(".job.running") is None, "the page shows the mail it read"
+    finally:
+        release.set()

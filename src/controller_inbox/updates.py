@@ -10,7 +10,9 @@ asking off.
 The asking as CloseDesk opens waits a few seconds at most, behind the page, and its answer is the question the
 first page shown asks (``Question``): "A new version of CloseDesk is ready", with Update now and Not now. It is
 asked once each time CloseDesk opens, only when a launcher started it (it starts the new version), and Not now
-asks again the next time CloseDesk opens. Offline, nothing is asked and nothing is in the way.
+asks again the next time CloseDesk opens. Offline, nothing is asked and nothing is in the way: what a later asking
+finds (the retry a minute on, the daily one) is said in Settings and the top bar, never in a question popping up
+later in the run.
 
 Settings' Update button stops CloseDesk with ``UPDATE_AND_RESTART``. The launcher that started it (CloseDesk.command
 or CloseDesk.bat) then fetches the newest files, as CloseDesk-Update does, and starts CloseDesk again. Started any
@@ -66,8 +68,13 @@ DEVELOPER = "This is a developer's copy (not a download): update it with git. It
 CHECK_OFF = "Looking for newer versions is turned off (CONTROLLER_INBOX_UPDATE_CHECK=false in .env)."
 UNREACHED = "CloseDesk couldn't reach GitHub on {day} to look for a newer version; CloseDesk-Update in its folder still updates it."
 BY_HAND = "To update, close CloseDesk and double-click CloseDesk-Update in its folder: your mail and settings are kept."
-UPDATING = "Updating CloseDesk. It opens again by itself in a minute or two; your mail and settings are kept."
-BUSY = "CloseDesk is working on your mail now (the bar at the top shows it). Update when it has finished."
+UPDATING = "CloseDesk closes, fetches the new version and opens again by itself in a minute or two. Your mail and settings are kept."
+BUSY = "CloseDesk is processing mail now. It can update once that is done."
+# Update now from a page shown before CloseDesk was updated (another tab, another window): the page's version is gone.
+UPDATED_MEANWHILE = (
+    "CloseDesk was updated meanwhile (in another tab or window), so there is nothing to update now. Reload the page to "
+    "see the new version."
+)
 NO_LAUNCHER = (
     "CloseDesk wasn't started by double-clicking it, so it can't start itself again after an update. "
     "Close CloseDesk, then double-click CloseDesk-Update in its folder: your mail and settings are kept."
@@ -258,11 +265,18 @@ def refusal(job_state: str) -> str:
     return ""
 
 
-def stop_to_update(app_state, job_state: str) -> str:
+def stop_to_update(app_state, job_state: str, *, shown: str = "") -> str:
     """Settings' Update button: ask the server to stop once this request is answered, so that the launcher updates
-    CloseDesk and starts it again (``cli._serve`` then returns UPDATE_AND_RESTART). Why it can't ("" when asked)."""
+    CloseDesk and starts it again (``cli._serve`` then returns UPDATE_AND_RESTART). Why it can't ("" when asked).
+    ``shown``: the commit the page that asked showed; another one means CloseDesk was updated since that page loaded."""
+    mine = version.installed()[0]
+    if shown and mine and shown.strip().lower() != mine.lower():
+        return UPDATED_MEANWHILE
+    question = getattr(app_state, "update_question", None)
     why = refusal(job_state)
     if why:
+        if why == BUSY and question is not None:
+            question.hold()
         return why
     stop = getattr(app_state, "stop_server", None)
     if stop is None:  # served some other way than ``cli._serve``: nothing would start it again
@@ -271,10 +285,11 @@ def stop_to_update(app_state, job_state: str) -> str:
     # that started after the page looked holds the update back.
     job = getattr(app_state, "job", None)
     if job is not None and not job.close():
+        if question is not None:
+            question.hold()
         return BUSY
     app_state.update_asked = True
     # Asked for (from Settings, say): the question isn't put to the page that waits for CloseDesk to stop.
-    question = getattr(app_state, "update_question", None)
     if question is not None:
         question.answer()
     stop()
@@ -310,13 +325,22 @@ UNFINISHED_IN_APP = "The update didn't finish, so CloseDesk opened as it was. Yo
 DONE = "The mail is done: CloseDesk can update now."
 # The commit CloseDesk was when it stopped to update: opened again as the same one, the update didn't finish.
 ASKED_FROM_KEY = "update_asked_from"
+# Unless the update found this copy the newest already, and said so in this file in .venv (launch.py's NEWEST_NOTE).
+NEWEST_NOTE = "closedesk-newest.txt"
+# How long the first page waits for the asking as CloseDesk opens (static/ui/update_ask.js asks for half a minute): an
+# answer that comes later is too late for that page, and isn't asked of the next one either.
+ASK_WAIT_SECONDS = 25
 
 
 class Question:
     """Whether to update, asked once each time CloseDesk opens: ``begin`` asks GitHub behind the page as it opens,
     and the first page shown (in either UI) asks the person when a newer version is out, until they answer. Not now
     is asked again only the next time CloseDesk opens (a new Question), not on each page. Asked only when a launcher
-    started CloseDesk, which starts the new version; and said when an update asked for before didn't finish."""
+    started CloseDesk, which starts the new version; and said when an update asked for before didn't finish.
+
+    What is asked is what that asking as CloseDesk opened found, kept here: a newer version found later in the run
+    (the retry after an asking that got no answer, the daily asking) is for Settings and the top bar, not a question
+    on whatever page is opened next."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -324,6 +348,8 @@ class Question:
         self._checking = False
         self._answered = False
         self._failed = False
+        self._found: dict[str, Any] | None = None  # status() once the asking as CloseDesk opened answered, in time
+        self._held = False  # Update now was refused while mail was processed: said done when it is
 
     def begin(self, store, settings, *, failed: bool = False) -> None:
         """CloseDesk is opening: ask GitHub (``START_TIMEOUT_SECONDS`` at most) in the background, so the page opens
@@ -333,13 +359,21 @@ class Question:
         if not asks(settings):
             return
         self._checking = True
+        started = time.monotonic()
 
         def ask() -> None:
+            found = None
             try:
                 check(store, settings, at_start=True)
+                found = status(store, settings)
             except Exception:  # nothing in the way: no question this time
                 log.warning("Looking for a newer CloseDesk as it opened failed", exc_info=True)
             finally:
+                if time.monotonic() - started > ASK_WAIT_SECONDS:
+                    log.info("GitHub answered after the first page stopped waiting: nothing is asked this time.")
+                    found = None
+                with self._lock:
+                    self._found = found
                 self._checking = False
 
         threading.Thread(target=ask, name="update-check-start", daemon=True).start()
@@ -353,14 +387,21 @@ class Question:
         with self._lock:
             self._answered = True
 
+    def hold(self) -> None:
+        """Update now was refused while mail is processed: the page asked next (the classic Today page loads again
+        when the mail is done) says it can update now, once it can."""
+        with self._lock:
+            self._held = True
+
     def view(self, store, settings, job_state: str) -> dict[str, Any]:
         """What the page asks, if anything: ``ask`` when it should, ``checking`` while the answer isn't in yet."""
-        shown = status(store, settings)
         here = launcher_here()
         with self._lock:
             open_ = here and self._begun and not self._answered
+            shown = self._found or {}
+            held = self._held
         checking = open_ and self._checking
-        newer = not checking and shown["newer"]
+        newer = bool(not checking and shown.get("newer"))
         failed = open_ and self._failed
         return {
             "ask": bool(open_ and not checking and (newer or failed)),
@@ -370,15 +411,17 @@ class Question:
             "title": UNFINISHED_TITLE if failed else ASK_TITLE,
             "failed_message": unfinished_message() if failed else "",
             "message": f"CloseDesk {shown['latest']} is out; you have {shown['mine']}." if newer else "",
-            "whats_new": shown["whats_new"] if newer else "",
+            "whats_new": shown.get("whats_new", "") if newer else "",
             "how": ASK_HOW,
-            # Update now while mail is processed is refused with BUSY; DONE says it can be done once that's over.
+            # Update now while mail is processed is refused with BUSY; DONE says it can be done once that's over
+            # (``held``: it was refused so, on this page or one before it).
             "busy": job_state == "running",
+            "held": held,
             "busy_message": BUSY,
             "done_message": DONE,
             "updating": UPDATING,
-            # The page waits for CloseDesk to answer as another version once it stopped to update.
-            "commit": shown["commit"],
+            # The version the page shows: Update now says it, and is refused once CloseDesk was updated since.
+            "commit": version.installed()[0],
         }
 
 
@@ -395,9 +438,22 @@ def remember_update_asked(store) -> None:
 
 def update_unfinished(store) -> bool:
     """Whether CloseDesk stopped to update and opened again as the same version: the update didn't finish (no internet,
-    a file in use, the window closed meanwhile). Read once."""
+    a file in use, the window closed meanwhile). Not when the update found this copy the newest already (it said so in
+    ``NEWEST_NOTE``): nothing went wrong. Read once."""
     before = store.get_state(ASKED_FROM_KEY) or ""
     if before:
         store.set_state(ASKED_FROM_KEY, "")
+    note = version.ROOT / ".venv" / NEWEST_NOTE
+    try:
+        newest = note.read_text(encoding="utf-8").strip().lower()
+    except OSError:
+        newest = ""
+    else:
+        try:
+            note.unlink()
+        except OSError:
+            pass
     mine = version.installed()[0]
-    return bool(before and mine) and before == mine
+    if not (before and mine) or before != mine:
+        return False
+    return newest != mine.lower()

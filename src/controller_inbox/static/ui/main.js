@@ -14,7 +14,7 @@ import { traceView } from "./trace.js";
 import { calendarView, isDay, rangeOf } from "./calendar.js";
 import { SLOW, askOnOpening, waitForCloseDesk } from "./update_ask.js";
 // In the CloseDesk window, what leaves CloseDesk opens where it would from a browser.
-import "./in_window.js";
+import { pageLoaded } from "./in_window.js";
 
 const enc = encodeURIComponent;
 const root = document.documentElement;
@@ -1194,7 +1194,7 @@ function updating(reply) {
     ),
     "updating"
   );
-  waitForCloseDesk(reply.commit || "", { onBack: () => location.reload(), onSlow: () => (line.textContent = SLOW) });
+  waitForCloseDesk(reply.commit || "", { run: reply.run, onBack: () => location.reload(), onSlow: () => (line.textContent = SLOW) });
 }
 
 function refreshData() {
@@ -1603,6 +1603,8 @@ async function boot() {
   await sync();
   S.poll = setTimeout(poll, S.meta.job.state === "running" ? 1500 : 15000);
   document.body.classList.add("ready");
+  // In the CloseDesk window: the workspace is up (CI's check of the real window waits for this).
+  pageLoaded();
   // Each time CloseDesk opens, its first page asks whether to update when a newer version is out.
   askOnOpening({ updating });
 }

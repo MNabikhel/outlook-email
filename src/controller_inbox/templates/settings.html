@@ -255,6 +255,7 @@
   <p class="notice">{{ closedesk.message }}</p>
   {% if closedesk.launcher %}
   <form method="post" action="/settings/update">
+    <input type="hidden" name="commit" value="{{ closedesk.commit }}">
     <button type="submit" {{ 'disabled' if job.state == 'running' else '' }}>Update</button>
   </form>
   <p class="muted">CloseDesk closes, fetches the newest version, and opens again by itself in a minute or two. Your mail and settings are kept.{% if job.state == 'running' %} It can update once the mail being processed now is done.{% endif %}</p>

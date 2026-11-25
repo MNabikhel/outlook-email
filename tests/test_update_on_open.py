@@ -443,3 +443,124 @@ def test_closedesk_remembers_an_update_was_asked_and_says_when_it_didnt_finish(d
     while app.state.update_question.checking():
         time.sleep(0.01)
     assert app.state.update_question.view(store, settings, "idle")["ask"] is False
+
+
+# The question is the opening's: not asked later in the run -------------------------------------------------------------
+
+
+def test_a_newer_version_found_later_in_the_run_isnt_asked_about_on_a_later_page(download, settings, store, monkeypatch):
+    # Offline as CloseDesk opened (the VPN not up yet): nothing asked, as promised. The retry a minute later finds a
+    # newer version: the next page opened, minutes into the work, asked "A new version of CloseDesk is ready".
+    monkeypatch.setattr(updates, "_ask_github", offline)
+    question = asked_at_start(store, settings)
+    assert question.view(store, settings, "idle")["ask"] is False
+    updates.check(store, settings, ask=github())  # the retry (or the daily check of a CloseDesk left open)
+    assert updates.status(store, settings)["newer"] is True, "Settings and the top bar say so"
+    view = question.view(store, settings, "idle")
+    assert view["ask"] is False and view["newer"] is False and view["message"] == ""
+
+
+def test_an_answer_as_closedesk_opened_that_came_after_the_page_stopped_waiting_isnt_asked(download, settings, store, monkeypatch):
+    # The first page waits about half a minute for the answer, then carries on: one that comes later is the retry's.
+    slow = threading.Event()
+    monkeypatch.setattr(updates, "_ask_github", github(hold=slow))
+    monkeypatch.setattr(updates, "ASK_WAIT_SECONDS", 0.2)
+    question = updates.Question()
+    question.begin(store, settings)
+    time.sleep(0.4)
+    slow.set()
+    deadline = time.monotonic() + 10
+    while question.checking():
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    assert question.view(store, settings, "idle")["ask"] is False
+
+
+def test_the_question_says_what_the_check_as_closedesk_opened_found(download, settings, store, monkeypatch):
+    monkeypatch.setattr(updates, "_ask_github", github())
+    question = asked_at_start(store, settings)
+    # The daily check, later in the run, finds this copy the newest after all (main went back): the question asked of
+    # a page reloaded meanwhile is the same one.
+    later = github(sha=MINE, date="2026-11-13T10:00:00Z")
+    updates.check(store, settings, now=datetime.now(timezone.utc) + timedelta(days=2), ask=later)
+    assert later.asked and updates.status(store, settings)["newer"] is False
+    view = question.view(store, settings, "idle")
+    assert view["ask"] is True and view["message"] == "CloseDesk 2026.11.16 is out; you have 2026.11.13."
+
+
+# Update now from a page that is out of date ---------------------------------------------------------------------------
+
+
+def test_update_now_from_a_page_shown_before_closedesk_was_updated_is_refused(download, settings, store, monkeypatch):
+    # Two tabs showed the question; Update now in one updated CloseDesk. Pressed in the other, it stopped the new
+    # CloseDesk for nothing, and its next page said "CloseDesk wasn't updated".
+    app = web.create_app(settings, store)
+    stopped: list = []
+    app.state.stop_server = lambda: stopped.append(1)
+    client = TestClient(app)
+    reply = client.post("/api/update", headers=PAGE, json={"commit": "c" * 40})
+    assert reply.status_code == 409 and reply.json()["detail"] == updates.UPDATED_MEANWHILE and stopped == []
+    assert "Reload" in updates.UPDATED_MEANWHILE
+    classic = client.post("/settings/update", headers={"origin": "http://testserver"}, data={"commit": "c" * 40})
+    assert classic.status_code == 409 and updates.UPDATED_MEANWHILE in classic.text and stopped == []
+    # The page that shows this version: as before.
+    assert client.post("/api/update", headers=PAGE, json={"commit": MINE}).status_code == 200 and stopped == [1]
+
+
+def test_an_update_that_found_this_the_newest_isnt_said_to_have_failed(download, settings, store):
+    updates.remember_update_asked(store)  # CloseDesk stopped to update...
+    (download / ".venv").mkdir()
+    (download / ".venv" / updates.NEWEST_NOTE).write_text(MINE + "\n", encoding="utf-8")  # ...and was the newest
+    assert updates.update_unfinished(store) is False
+    assert not (download / ".venv" / updates.NEWEST_NOTE).exists(), "read once"
+    updates.remember_update_asked(store)
+    assert updates.update_unfinished(store) is True, "an update that didn't say so did fail"
+
+
+# The page waiting for CloseDesk to come back ---------------------------------------------------------------------------
+
+
+def test_each_start_of_closedesk_answers_as_itself(download, settings, store):
+    # A failed update starts CloseDesk again as the same version in about a second and a half: the page polling every
+    # two seconds never saw it go, nor a new version, and said "Updating CloseDesk" for good.
+    first, second = web.create_app(settings, store), web.create_app(settings, store)
+    one, two = TestClient(first).get("/health").json(), TestClient(second).get("/health").json()
+    assert one["run"] and two["run"] and one["run"] != two["run"]
+    first.state.stop_server = lambda: None
+    reply = TestClient(first).post("/api/update", headers=PAGE).json()
+    assert reply["run"] == one["run"], "the page waits for another start than this one"
+    classic = web.create_app(settings, store)
+    classic.state.stop_server = lambda: None
+    page = TestClient(classic).post("/settings/update", headers={"origin": "http://testserver"}).text
+    assert TestClient(classic).get("/health").json()["run"] in page
+
+
+# What the question says --------------------------------------------------------------------------------------------
+
+
+def test_refused_while_mail_is_processed_the_question_remembers_it_was_asked(download, settings, store, monkeypatch):
+    # The classic Today page loads again when the mail is done, before the question's own look: asked afresh, it said
+    # nothing of the update it had been asked for.
+    monkeypatch.setattr(updates, "_ask_github", github())
+    app = web.create_app(settings, store)
+    app.state.update_question = asked_at_start(store, settings)
+    app.state.stop_server = lambda: None
+    client = TestClient(app)
+    assert client.get("/api/update/question", headers=PAGE).json()["held"] is False
+    release = threading.Event()
+    app.state.job.start(lambda progress: release.wait(10))
+    try:
+        assert client.post("/api/update", headers=PAGE).status_code == 409
+        view = client.get("/api/update/question", headers=PAGE).json()
+        assert view["held"] is True and view["busy"] is True
+    finally:
+        release.set()
+
+
+def test_the_words_said_while_mail_is_processed_fit_every_page():
+    # Only the workspace and the classic Today page have the bar at the top.
+    assert "bar" not in updates.BUSY and "processing mail" in updates.BUSY
+
+
+def test_updating_closedesk_is_said_once_under_its_heading():
+    assert "Updating CloseDesk" not in updates.UPDATING and "opens again by itself" in updates.UPDATING

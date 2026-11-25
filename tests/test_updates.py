@@ -293,7 +293,7 @@ def test_the_update_button_waits_while_mail_is_processed(download, settings, sto
         reply = TestClient(app).post("/api/update", headers=PAGE)
         assert reply.status_code == 409 and reply.json()["detail"] == updates.BUSY
         classic = TestClient(app).post("/settings/update", headers=SAME)
-        assert classic.status_code == 409 and "Update when it has finished" in classic.text
+        assert classic.status_code == 409 and updates.BUSY in classic.text
     finally:
         release.set()
     assert stop.calls == 0 and not getattr(app.state, "update_asked", False)

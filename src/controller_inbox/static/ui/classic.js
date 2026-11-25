@@ -7,6 +7,7 @@ import { fileHref, formatAnswer } from "./format.js";
 import { postStream } from "./api.js";
 import { isTyping } from "./dom.js";
 // In the CloseDesk window, what leaves CloseDesk opens where it would from a browser.
-import "./in_window.js";
+import { pageLoaded } from "./in_window.js";
 
 window.CloseDeskShared = { fileHref, formatAnswer, postStream, isTyping };
+pageLoaded();
