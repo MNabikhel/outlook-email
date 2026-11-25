@@ -128,6 +128,12 @@ export function createSettings(ctx) {
         const slot = kept ? $("#set-chat-model", fresh) : null;
         if (slot) slot.replaceWith(kept);
         else if (kept) dirty.delete(id); // no choice to make any more
+        // The lines saying what happened stay the same elements, with new words: a screen reader reads out a change
+        // to one it knows, and often not a new one.
+        for (const line of $$("[data-status]", fresh)) {
+          const was = $(`[data-status="${CSS.escape(line.dataset.status)}"]`, old);
+          if (was) line.replaceWith(sayIn(was, line));
+        }
         old.replaceWith(fresh);
         if (observer) {
           observer.unobserve(old);
@@ -137,17 +143,29 @@ export function createSettings(ctx) {
     }
     // A section left as it was still says what happened to its own change (an error keeps it unsaved).
     const line = flash && root ? $(`[data-status="${flash.id}"]`, root) : null;
-    if (line && dirty.has(SECTION_OF[flash.id] || flash.id)) line.replaceWith(status(flash.id));
+    if (line && dirty.has(SECTION_OF[flash.id] || flash.id)) sayIn(line, status(flash.id));
     if (focused && !(active && active.isConnected)) {
       const again = document.getElementById(focused);
       if (again) again.focus({ preventScroll: true });
     }
   }
 
+  /** ``line`` (a status line on the page) saying what ``fresh`` (one just built) says. */
+  function sayIn(line, fresh) {
+    line.className = fresh.className;
+    line.replaceChildren(...fresh.childNodes);
+    return line;
+  }
+
   /** Send a change; draw the page again from what the server says now, with what happened under ``id``. */
   async function save(id, path, body, button, { busyText = "Saving…", after = null } = {}) {
-    const label = button ? button.textContent : "";
-    if (button) {
+    // A box that saves as it is ticked isn't disabled while it does: that would send the keyboard's focus to the page
+    // itself (the next Tab going back to the top, a screen reader losing its place). It says it is busy instead, and
+    // ignores another tick until this one is saved (busyBox); drawn again, it gets the focus back by its id.
+    const box = button && button.type === "checkbox" ? button : null;
+    const label = button && !box ? button.textContent : "";
+    if (box) box.setAttribute("aria-busy", "true");
+    else if (button) {
       button.disabled = true;
       button.textContent = busyText;
     }
@@ -166,11 +184,17 @@ export function createSettings(ctx) {
       flash = { id, tone: "error", text: error.message };
     }
     if (!ctx.isShown()) return;
-    if (button) {
+    if (box) box.removeAttribute("aria-busy");
+    else if (button) {
       button.disabled = false;
       button.textContent = label;
     }
     await load({ keepScroll: true });
+  }
+
+  /** A box that saves the moment it is ticked (see save): a tick while the last one is still being saved is ignored. */
+  function busyBox(props) {
+    return h("input", { type: "checkbox", ...props, onclick: (event) => event.currentTarget.getAttribute("aria-busy") === "true" && event.preventDefault() });
   }
 
   /* ---------- Pieces ---------- */
@@ -239,14 +263,12 @@ export function createSettings(ctx) {
     const segment = (value, label) => h("button", { type: "button", class: `seg${theme === value ? " on" : ""}`, "aria-pressed": String(theme === value), onclick: () => ctx.setTheme(value) }, label);
     // Saved on the server the moment a box is ticked, like the calendar's box; the page changes colour at once. Each
     // box shows what the page shows now, which a settings answer still on its way when the page was left can't undo.
-    const colorBlind = h("input", {
-      type: "checkbox",
+    const colorBlind = busyBox({
       id: "set-colors",
       checked: colors === "color-blind",
       onchange: (event) => save("colors", "/api/settings/colors", { colors: event.currentTarget.checked ? "color-blind" : "standard" }, event.currentTarget),
     });
-    const words = h("input", {
-      type: "checkbox",
+    const words = busyBox({
       id: "set-importance-words",
       checked: importanceWords,
       onchange: (event) => save("colors", "/api/settings/colors", { importance_words: event.currentTarget.checked }, event.currentTarget),
@@ -909,8 +931,7 @@ export function createSettings(ctx) {
       )
     );
     follow();
-    const calendar = h("input", {
-      type: "checkbox",
+    const calendar = busyBox({
       id: "set-outlook-calendar",
       checked: o.calendar,
       onchange: (event) => save("outlook", "/api/settings/outlook/calendar", { on: event.currentTarget.checked }, event.currentTarget),

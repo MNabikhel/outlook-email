@@ -152,6 +152,31 @@ def test_the_workspace_box_changes_the_colors_at_once_and_the_classic_pages_too(
     context.close()
 
 
+def test_ticking_a_box_with_the_keyboard_keeps_the_focus_on_it(settings, store, page):
+    """Each box saves the moment it is ticked. It was disabled while saving, which sent the focus to the page itself:
+    the next Tab went back to the top of Settings, and a screen reader lost its place. The line saying "Saved" was a
+    new element each time, which a screen reader often doesn't read out; it is the same one, with new words."""
+    from controller_inbox import appearance
+
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector("#set-colors")
+        page.evaluate("() => { document.querySelector('#set-appearance [data-status=colors]').kept = true; }")
+        for box, after, want in (("set-colors", "set-importance-words", {"colors": "color-blind", "importance_words": False}),
+                                 ("set-importance-words", None, {"colors": "color-blind", "importance_words": True})):
+            page.focus(f"#{box}")
+            page.keyboard.press("Space")
+            page.wait_for_function("box => document.querySelector('#' + box).checked && document.querySelector('#set-appearance [data-status=colors].ok')", arg=box)
+            page.wait_for_function("() => !document.querySelector('#set-appearance [aria-busy]')")
+            assert page.evaluate("() => document.activeElement.id") == box
+            assert page.evaluate("() => document.querySelector('#set-appearance [data-status=colors]').kept === true"), "the same line"
+            if after:
+                page.keyboard.press("Tab")
+                assert page.evaluate("() => document.activeElement.id") == after
+            assert appearance.current(store) == want
+            page.evaluate("() => { document.querySelector('#set-appearance [data-status=colors]').className = 'set-status'; }")
+
+
 def test_a_tab_left_open_follows_a_change_made_on_the_classic_page(browser, settings, loaded):
     context = _context(browser, "light")
     page = context.new_page()
