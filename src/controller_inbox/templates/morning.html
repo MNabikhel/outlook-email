@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_level.html" import level %}
+{% from "_level.html" import level, focus_edge %}
 {% block title %}Today · CloseDesk{% endblock %}
 {% block heading %}Today{% endblock %}
 {% block body %}
@@ -47,7 +47,7 @@
   <h2>Your focus today</h2>
   <ol class="focus-list">
     {% for row in payload.focus %}
-    <li class="focus-item {{ row.kind }}" data-email="{{ row.email_id }}">
+    <li class="focus-item {{ row.kind }}{{ focus_edge(row) }}" data-email="{{ row.email_id }}">
       <span class="rank">{{ row.rank }}</span>
       <div class="focus-body">
         <div class="focus-top">

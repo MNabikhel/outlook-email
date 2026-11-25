@@ -404,6 +404,48 @@ def test_classic_today_writes_the_importance_on_each_email_when_asked(browser, s
     context.close()
 
 
+FOCUS_EDGES = """() => [...document.querySelectorAll('.focus-item')].map((li) => {
+  const level = li.querySelector('.item-level');
+  return { title: (li.querySelector('.focus-top a') || {}).textContent || '',
+           kind: [...li.classList].filter((name) => name !== 'focus-item' && !name.startsWith('imp-')).join(' '),
+           level: level ? ['critical', 'high', 'medium', 'low', 'held'].find((name) => level.classList.contains(name)) || '' : '',
+           edge: getComputedStyle(li).borderLeftColor };
+})"""
+
+
+@pytest.mark.parametrize("colors", ["standard", "color-blind"])
+@pytest.mark.parametrize("path", ["/", "/digest"])
+def test_a_critical_email_on_classic_today_has_the_red_edge_whatever_its_reason(browser, settings, loaded, colors, path):
+    """Classic Today gave "Review possible duplicate invoice INV-10482", a Critical email due today, the amber edge of
+    a High one (the edge said the reason, and due today is amber), where the workspace's Today and every list give it
+    the red of Critical. Its edge now says its importance when it is Critical or High, as theirs do; an overdue or held
+    email keeps the red of danger, and the rest the colour of their reason."""
+    from controller_inbox import appearance
+
+    appearance.save(loaded, colors=colors)
+    tokens = pm.classic(colors)
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        if path == "/digest":
+            page.goto(f"{base}/")
+            page.request.post(f"{base}/digest/rebuild", headers={"origin": base})
+        page.goto(f"{base}{path}")
+        rows = page.evaluate(FOCUS_EDGES)
+    context.close()
+    assert [row for row in rows if row["level"] == "critical" and row["kind"] == "due_today"], ("the case seen", rows)
+    for row in rows:
+        edge = hex_of(row["edge"])
+        if row["level"] == "critical":
+            assert edge == tokens["--imp-critical"], (path, colors, row)
+        elif row["level"] == "held" or row["kind"] in ("overdue", "fraud"):
+            assert edge == tokens["--danger"], (path, colors, row)
+        elif row["level"] == "high":
+            assert edge == tokens["--imp-high"], (path, colors, row)
+        elif row["kind"] == "due_today":
+            assert edge == tokens["--imp-high"], (path, colors, row)
+
+
 # The digest's lists of emails (not its tasks, which have their own priority): what needs a phone call, the focus
 # list, and what came in, in each folder.
 DIGEST_EMAILS = {

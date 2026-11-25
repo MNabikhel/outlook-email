@@ -217,10 +217,15 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .focus h2 { font-family: var(--serif); font-size: 20px; font-weight: 600; margin: 0 0 10px; }
 .focus-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .focus-item { display: flex; gap: 14px; align-items: flex-start; background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 12px; padding: 12px 14px; }
-.focus-item.fraud, .focus-item.overdue { border-left-color: var(--danger); }
+/* The edge says why the email is here (due today, due later, to decide), except that a Critical or High email has
+   the edge of its importance, as on every list in both UIs (a Critical email due today had the amber of High), and an
+   overdue or held one the red of danger. The later rule wins. */
 .focus-item.due_today { border-left-color: var(--imp-high); }
 .focus-item.due_soon, .focus-item.due_week { border-left-color: var(--due-later); }
 .focus-item.decide, .focus-item.new_task { border-left-color: var(--navy); }
+.focus-item.imp-high { border-left-color: var(--imp-high); }
+.focus-item.fraud, .focus-item.overdue, .focus-item.is-held { border-left-color: var(--danger); }
+.focus-item.imp-critical { border-left-color: var(--imp-critical); }
 .focus-item .rank { font-family: var(--serif); font-size: 24px; color: var(--navy); min-width: 22px; line-height: 1.1; }
 .focus-body { flex: 1; min-width: 0; }
 .focus-top { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }

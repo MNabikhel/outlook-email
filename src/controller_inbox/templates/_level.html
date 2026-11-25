@@ -4,3 +4,8 @@
 {% macro level(item) -%}
 {% if item.locked %}<span class="pill held item-level">Held for fraud</span>{% elif item.importance_label %}<span class="pill {{ item.importance }} item-level">{{ item.importance_label }}</span>{% endif %}
 {%- endmacro %}
+{# A focus row's edge says its importance when it is Critical or High, and that it is held when it is (static/app.css,
+   .focus-item); else the reason it is listed. #}
+{% macro focus_edge(row) -%}
+{% if row.locked %} is-held{% elif row.importance in ('critical', 'high') %} imp-{{ row.importance }}{% endif %}
+{%- endmacro %}
