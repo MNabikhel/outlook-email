@@ -159,3 +159,29 @@ def test_a_processed_run_that_needs_a_look_says_so_in_words(client):
             break
         threading.Event().wait(0.02)
     assert "Needs a look" not in client.get("/").text, "a run that went well says nothing of the kind"
+
+
+def test_the_help_says_what_the_colors_for_color_blindness_change(client):
+    """The help said the box "swaps the red, orange and green" and that "High and warnings turn yellow". There is no
+    orange in either palette, and High and warnings are the same yellow amber in both, so someone ticking the box to
+    see High change saw nothing happen. What changes is a deeper red and a blue-green done."""
+    from pathlib import Path
+
+    import palette_math as pm
+
+    source = Path(web.__file__).parent
+    page = client.get("/settings").text
+    helps = {
+        "classic": page[page.index('id="colors"') : page.index("</section>", page.index('id="colors"'))],
+        "workspace": (source / "static" / "ui" / "settings.js").read_text(encoding="utf-8"),
+        "README": (Path(__file__).parent.parent / "README.md").read_text(encoding="utf-8"),
+    }
+    for where, text in helps.items():
+        text = text[text.index("Colors for color blindness") :][:400]
+        assert "deeper red" in text and "blue-green" in text, where
+        assert "orange" not in text and "turn yellow" not in text, where
+    # And so they are: in the light theme, Critical and fraud are darker and done turns from green to blue-green.
+    for standard, blind, ok in ((pm.workspace("light"), pm.workspace("light", "color-blind"), "--ok"), (pm.classic(), pm.classic("color-blind"), "--green")):
+        for name in ("--imp-critical", "--danger"):
+            assert pm.oklch(blind[name])[0] < pm.oklch(standard[name])[0] - 5, name
+        assert pm.oklch(standard[ok])[2] < 170 < pm.oklch(blind[ok])[2] < 230

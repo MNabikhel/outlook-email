@@ -36,7 +36,7 @@
   <p>Saved for CloseDesk on this computer: these pages and the workspace both use them.</p>
   <form method="post" action="/settings/colors" class="profile-form color-form">
     <label class="choice"><input type="checkbox" name="colors" value="color-blind" {{ 'checked' if appearance.colors == 'color-blind' }}/>
-      <span><b>Colors for color blindness</b> <small class="muted">Critical and fraud stay red, High and warnings turn yellow, and done turns blue-green.</small></span></label>
+      <span><b>Colors for color blindness</b> <small class="muted">Critical and fraud turn a deeper red, done turns blue-green, and High and warnings stay yellow.</small></span></label>
     <label class="choice"><input type="checkbox" name="importance_words" value="1" {{ 'checked' if appearance.importance_words }}/>
       <span><b>Show Critical, High, Medium or Low on each email</b> <small class="muted">In the workspace's lists. These pages already show it in the Importance column.</small></span></label>
     <button type="submit">Save</button>

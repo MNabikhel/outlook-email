@@ -288,7 +288,7 @@ export function createSettings(ctx) {
           "label",
           { class: "set-check" },
           colorBlind,
-          h("span", { class: "set-check-text" }, b("Colors for color blindness"), h("span", null, "Swaps the red, orange and green for colors that people with color blindness can tell apart: Critical and fraud stay red, High and warnings turn yellow, and done turns blue-green."))
+          h("span", { class: "set-check-text" }, b("Colors for color blindness"), h("span", null, "Uses colors that people with color blindness can tell apart: Critical and fraud turn a deeper red, done turns blue-green, and High and warnings stay yellow."))
         ),
         h(
           "label",

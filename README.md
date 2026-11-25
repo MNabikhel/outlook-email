@@ -80,7 +80,7 @@ A second view of the same mailbox that works like a mail app: nothing reloads as
 - **Ask CloseDesk:** the chat docks on the right and shows its sources, steps and checks as it answers; on an email it asks about that email.
 - **Keys:** `j`/`k` move, `Enter` opens, `e` marks done, `/` filters the list, `c` opens the chat, `Ctrl/Cmd+K` searches mail and jumps anywhere, `?` lists them all.
 - **Light or dark:** follows the computer, or pick one with the moon/sun button or in Settings.
-- **Colors for color blindness:** Settings → Appearance (Setup → Colors on the classic pages) swaps the reds, oranges and greens for colors people with color blindness can tell apart, and can write Critical, High, Medium or Low on each email in the lists. Saved for CloseDesk on this computer.
+- **Colors for color blindness:** Settings → Appearance (Setup → Colors on the classic pages) uses colors people with color blindness can tell apart (Critical and fraud a deeper red, done blue-green, High and warnings yellow as before), and can write Critical, High, Medium or Low on each email in the lists. Saved for CloseDesk on this computer.
 
 Every address is a link you can keep, such as `/app/mail/<id>` for an email or `/app/mail/<id>/file/1?tab=tables` for its first attachment's tables. Everything is served from this computer; nothing is loaded from the internet.
 
