@@ -16,7 +16,8 @@ the rights to install Python would (CLOSEDESK_OWN_PYTHON=1 makes the first start
 
 opens the CloseDesk window itself, for real (CI's window job, on Windows and macOS; see window_check): as the shortcut
 starts it, onto a CloseDesk already open, and through the shortcut as a double-click opens it, each time with
-CloseDesk's page loaded in it and CloseDesk stopped with it; on a Mac the Dock has to call it CloseDesk.
+CloseDesk's page loaded in it and CloseDesk stopped with it, then Update now in it; on a Mac the Dock has to call it
+CloseDesk.
 
 Not a pytest file: it installs for real and takes minutes.
 """
@@ -614,12 +615,87 @@ def double_click(folder: Path, shortcuts: Path) -> list[str]:
     return seen.problems(what)
 
 
+def press_update(port: int) -> str:
+    """Update now, pressed as the page presses it once the mail CloseDesk reads as it opens is read. Its message."""
+    page = {"X-CloseDesk": "1", "Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}"}
+    for _ in range(120):
+        with urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{port}/api/state", headers=page), timeout=10) as reply:
+            if json.load(reply)["job"]["state"] != "running":
+                break
+        time.sleep(1)
+    asked = urllib.request.Request(f"http://127.0.0.1:{port}/api/update", method="POST", data=b"{}", headers=page)
+    try:
+        with urllib.request.urlopen(asked, timeout=30) as reply:
+            said = json.load(reply)
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(f"FAILED: Update now was refused ({exc.code}): {exc.read().decode(errors='replace')}") from None
+    assert said.get("ok") and "opens again by itself" in said["message"], said
+    return said["message"]
+
+
+def update_in_window(folder: Path, archive: Path, *, before: str, after: str) -> None:
+    """Update now in the window, as the question as CloseDesk opens (or Settings) presses it: the window stays up and
+    says CloseDesk is updating while launch.py --update runs (no console window), then shows the new version, which
+    closes the window (the check's) once its page loaded; CloseDesk stops with it."""
+    port = free_port()
+    start = log_size()
+    output: list[str] = []
+    process = subprocess.Popen(
+        [str(env_python(folder, windowless=True)), str(folder / "scripts" / "launch.py"), "--app", "--port", str(port)],
+        cwd=folder, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=not WINDOWS,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0,
+        # Held open until Update now is pressed; the update comes from the ZIP made for it, not GitHub.
+        env={**os.environ, **WINDOW_CHECK, "CLOSEDESK_APP_SMOKE_HOLD": "240", "CLOSEDESK_UPDATE_URL": archive.as_uri()},
+    )
+    reader = threading.Thread(target=lambda: output.extend(line.decode(errors="replace") for line in process.stdout), daemon=True)
+    reader.start()
+    commits: list[str] = []
+    try:
+        deadline = time.monotonic() + 300
+        while SHOWED not in log_since(start):
+            assert process.poll() is None and time.monotonic() < deadline, (
+                f"the window didn't show CloseDesk (exit {process.poll()})\n--- its log\n{log_since(start)[-6000:]}")
+            time.sleep(0.5)
+        answer = health(port)
+        assert answer and answer.get("commit") == before, answer
+        print(f"--- Update now pressed in the window: {press_update(port)}", flush=True)
+        updating = False
+        deadline = time.monotonic() + 600
+        while process.poll() is None and time.monotonic() < deadline:
+            answer = health(port)
+            if answer and answer.get("commit") not in commits:
+                commits.append(answer["commit"])
+            updating = updating or "Updating CloseDesk..." in log_since(start)
+            time.sleep(0.2)
+        if process.poll() is None:
+            raise SystemExit(f"FAILED: the window didn't close after the update\n--- its log\n{log_since(start)[-6000:]}")
+        for _ in range(60):
+            if not listening(port):
+                break
+            time.sleep(0.5)
+        stopped = not listening(port)
+    finally:
+        stop(process)
+        reader.join(timeout=10)
+    log = log_since(start)
+    said = f"--- its log\n{log[-8000:]}\n--- its output\n{''.join(output)[-2000:]}"
+    assert process.returncode == 0, f"the window ended with {process.returncode} after the update\n{said}"
+    assert updating and "CloseDesk was updated" in log, f"the window didn't run the update\n{said}"
+    # (The new version answers only for the moment its page takes to load: its commit is shown when it was caught.)
+    assert log.rindex(SHOWED) > log.index("CloseDesk was updated"), f"the window didn't show the new version\n{said}"
+    assert stopped, f"CloseDesk didn't stop with its window after the update\n{said}"
+    assert (folder / "docs" / "ONLY-IN-THE-UPDATE.txt").read_text(encoding="utf-8") == archive.stem
+    print(f"--- the window updated CloseDesk to {after[:7]}, showed the new version, and closed (versions that answered: "
+          f"{', '.join(commit[:7] for commit in commits)})", flush=True)
+
+
 def window_check() -> int:
     """``--window``: the CloseDesk window, opened for real (CI's window job, on Windows and macOS). Set up by the
     launcher, the shortcut made with ``--shortcut`` and read back, then the window opened three ways: as the shortcut
     runs it, onto a CloseDesk already open, and through the shortcut itself as a double-click opens it. Each time
-    CloseDesk's page has to load in it, the window closes itself, and CloseDesk stops with it. On a Mac the Dock has to
-    call it CloseDesk (lsappinfo), never Python. On Linux, where there is no window, its start has to say so. Windows
+    CloseDesk's page has to load in it, the window closes itself, and CloseDesk stops with it. Then Update now in the
+    window: it updates CloseDesk and shows the new version. On a Mac the Dock has to call it CloseDesk (lsappinfo),
+    never Python. On Linux, where there is no window, its start has to say so. Windows
     needs Microsoft Edge WebView2 Runtime (CI installs it first). CLOSEDESK_SMOKE_SHOTS: a folder for the screenshots
     and the app's log."""
     work = Path(tempfile.mkdtemp(prefix="closedesk window "))
@@ -658,6 +734,7 @@ def window_check() -> int:
         finally:
             stop(dashboard)
         problems += double_click(folder, shortcuts)
+        update_in_window(folder, newer_zip(work, "b" * 40, "newer"), before="a" * 40, after="b" * 40)
     finally:
         keep_log()
         if MAC:
