@@ -73,6 +73,7 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 APP_LOGS = sys.platform in ("win32", "darwin")
 APP_LOG_LIMIT = 2_000_000  # a log grown past this starts afresh (the one before is kept as .old)
 INSTALLING = "CloseDesk is installing what it needs. This takes a minute or two; it opens by itself when it is done."
+UPDATING_NOW = "CloseDesk is being updated just now. Open it again in a minute or two, once the update is done."
 SETUP_FAILED = (
     "CloseDesk couldn't install what it needs. Most often the internet connection (or a company proxy) stopped a "
     "download: try again when it is back. What went wrong is written in {log}."
@@ -520,6 +521,19 @@ def update() -> int:
 # ----------------------------------------------------------------------------------------------------------
 
 
+def update_under_way() -> bool:
+    """Whether an update is putting files in place in this folder now (``update`` keeps its download in a folder
+    named .update-... until it is done). One left behind long ago by an update that was stopped doesn't count."""
+    now = time.time()
+    for folder in ROOT.glob(".update-*"):
+        try:
+            if now - folder.stat().st_mtime < 15 * 60:
+                return True
+        except OSError:
+            pass
+    return False
+
+
 def app(args: list[str]) -> int:
     """``--app``: set up as every start does, silently, then open the CloseDesk window."""
     os.environ[APP_ENV] = "1"
@@ -527,6 +541,11 @@ def app(args: list[str]) -> int:
         os.environ[APP_LOG_ENV] = str(app_log_path())
         use_app_log()
     say(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} CloseDesk opening (the app), in {ROOT}")
+    if update_under_way():
+        # The window was closed during an update, which finishes by itself: started now, CloseDesk would run from a
+        # folder half replaced.
+        tell(UPDATING_NOW)
+        return 0
     if not in_venv():
         return create_environment(["--app", *args])
     code = ensure_packages()

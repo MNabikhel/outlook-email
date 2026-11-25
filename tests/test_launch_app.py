@@ -223,3 +223,22 @@ def test_the_launchers_message_box_and_notice(monkeypatch):
     monkeypatch.setattr(sys, "stdout", buffer)
     module.tell("only said", platform="linux")
     assert "only said" in buffer.getvalue() and len(ran) == 2
+
+
+def test_the_app_doesnt_start_while_an_update_is_putting_files_in_place(launch, monkeypatch):
+    # The window closed during an update leaves the update to finish; opened again meanwhile, CloseDesk would start
+    # from a half-replaced folder. (launch.py --update keeps its download in .update-* until it is done.)
+    import time
+
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    handed: list = []
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: handed.append(cmd) or 0)
+    under_way = launch.ROOT / ".update-k2j3h4"
+    under_way.mkdir()
+    assert launch.main(["--app"]) == 0
+    assert launch.told == [launch.UPDATING_NOW] and handed == []
+    old = time.time() - 3600  # left behind by an update that was stopped long ago
+    os.utime(under_way, (old, old))
+    assert launch.main(["--app"]) == 0
+    assert len(handed) == 1
