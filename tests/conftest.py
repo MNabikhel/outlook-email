@@ -16,6 +16,20 @@ from controller_inbox.pipeline import ingest_demo
 from controller_inbox.store import Store
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _no_shortcut_on_this_computer(tmp_path_factory):
+    """A test that starts CloseDesk as a launcher does (on Windows and macOS in CI) keeps its CloseDesk shortcut in a
+    folder of the test session's, never on the Desktop or in Applications of the computer running it."""
+    name = "CLOSEDESK_SHORTCUT_DIR"
+    before = os.environ.get(name)
+    os.environ[name] = str(tmp_path_factory.mktemp("shortcuts"))
+    yield
+    if before is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = before
+
+
 @pytest.fixture(autouse=True)
 def _isolated_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in list(os.environ):
