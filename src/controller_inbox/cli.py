@@ -428,8 +428,10 @@ def load_sample(store: Store, settings: Settings):
 def _run(settings: Settings, store: Store, args) -> int:
     from controller_inbox.overnight import RunBusy, run_overnight
 
-    from controller_inbox.app_window import WHY_ENV
+    from controller_inbox.app_window import EXACT_PORT, PORT_TAKEN, WHY_ENV
 
+    # Started by the CloseDesk window, on the port it chose and looks at: there, or not at all.
+    exact = os.environ.pop(EXACT_PORT, "") == "1"
     # Opened from the CloseDesk shortcut when its window couldn't open here: why, in this window too.
     why = os.environ.pop(WHY_ENV, "")
     if why:
@@ -473,10 +475,14 @@ def _run(settings: Settings, store: Store, args) -> int:
     reopened = _reopened_port(store) if os.environ.get("CLOSEDESK_REOPEN") else 0
     from controller_inbox import doctor
 
+    wanted = args.port or settings.port
     if reopened and not doctor.listening(host, reopened):
         port, running = reopened, False
     else:
-        port, running = _port_to_use(host, args.port or settings.port)
+        port, running = _port_to_use(host, wanted)
+    if exact and port != wanted:
+        print(f"Port {wanted}, which the CloseDesk window chose, is another program's now: it chooses again.", flush=True)
+        return PORT_TAKEN
     if not port:
         return 1
     url = f"http://{host}:{port}/"
@@ -541,13 +547,18 @@ def _port_to_use(host: str, port: int) -> tuple[int, bool]:
 
     if not doctor.listening(host, port):
         return port, False
-    if doctor.is_closedesk(host, port):
+    found = doctor.closedesk_on(host, port)
+    if found == "mine":
         return port, True
-    other = doctor.free_port(host, port + 1)
+    # Only this folder's CloseDesk, run by this person, is shown: another's (another folder's, or another person's on
+    # a shared computer, who has the same 127.0.0.1) is another program here.
+    other, running = doctor.next_port(host, port)
+    if running:
+        return other, True
     if not other:
         print(f"\nPort {port} and the twenty after it are all in use. Set CONTROLLER_INBOX_PORT in .env to a free port.")
         return 0, False
-    print(f"\nAnother program is using port {port}, so CloseDesk uses {other} this time.")
+    print(f"\n{doctor.ANOTHER[found]} is using port {port}, so CloseDesk uses {other} this time.")
     return other, False
 
 

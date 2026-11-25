@@ -7,6 +7,8 @@ GitHub gives it for the newest version: a commit made at 22:12 at -06:00 on Nove
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,3 +69,38 @@ def label() -> str:
     """"CloseDesk 2026.11.16 (e8926db)", or "CloseDesk, a developer's copy (not a download)"."""
     commit, date = installed()
     return f"CloseDesk {short(commit, date)}" if commit else f"CloseDesk, {DEVELOPER}"
+
+
+def whose() -> dict[str, str]:
+    """Whose CloseDesk this is, as /health says it to a CloseDesk starting on the same computer: {"folder": its
+    folder's fingerprint, "user": the fingerprint of the person running it}. Every person on a shared computer (Remote
+    Desktop, fast user switching) has the same 127.0.0.1, and one computer can have two CloseDesk folders: only one
+    that is this folder's, run by this person, is shown instead of starting this one. Fingerprints, not the folder or
+    the name: any program on the computer can ask."""
+    return {"folder": _fingerprint(os.path.normcase(str(ROOT))), "user": _fingerprint(_person())}
+
+
+def _person() -> str:
+    """Who runs this CloseDesk: the account's number (macOS, Linux), or its domain and name (Windows)."""
+    if os.name != "nt":
+        return f"uid {os.getuid()}"
+    import getpass
+
+    try:
+        name = getpass.getuser()
+    except Exception:  # no name to be found
+        name = os.environ.get("USERPROFILE", "")
+    return f"{os.environ.get('USERDOMAIN', '')}\\{name}".lower()
+
+
+def _fingerprint(text: str) -> str:
+    return hashlib.sha256(f"closedesk\n{text}".encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def is_mine(health: dict) -> bool:
+    """Whether a CloseDesk's /health answer is this folder's CloseDesk, run by this person. An older CloseDesk, which
+    doesn't say whose it is, is taken to be this one, as before."""
+    said = {key: health.get(key) for key in ("folder", "user")}
+    if not any(said.values()):
+        return True
+    return said == whose()

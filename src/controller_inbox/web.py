@@ -1397,6 +1397,9 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "version": version.label(),
             "commit": version.installed()[0],
             "run": app.state.run,
+            # Whose CloseDesk this is (fingerprints of its folder and of the person running it): only this folder's,
+            # run by the same person, is shown instead of a second being started.
+            **version.whose(),
         }
 
     register_workspace(

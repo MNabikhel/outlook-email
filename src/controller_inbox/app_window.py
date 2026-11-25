@@ -6,7 +6,8 @@ window stops that CloseDesk; while mail is being processed or an update runs, it
 window holds its input open, and stops when that ends, so it never outlives the window however the window's process
 ends. Update now (Settings', or the question as CloseDesk opens) keeps the window up: it says CloseDesk is updating
 while ``launch.py --update`` runs, then shows the new version. When a CloseDesk is already open (another window, or
-CloseDesk.bat / CloseDesk.command), the window shows that one, and closing it leaves that one open.
+CloseDesk.bat / CloseDesk.command), the window shows that one, and closing it leaves that one open: only this folder's,
+run by this person (/health says whose it is), never another person's on a shared computer or another folder's.
 
 Where the window can't open (Linux; Windows without Microsoft Edge WebView2 Runtime, where pywebview would use
 Internet Explorer, which can't run CloseDesk; pywebview missing or broken), CloseDesk opens in the browser as before:
@@ -60,6 +61,10 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 STOP_WITH_PARENT = "CLOSEDESK_STOP_WITH_PARENT"
 # Why the window couldn't open, for the launcher's window to say too (cli._run).
 WHY_ENV = "CLOSEDESK_WINDOW_WHY"
+# CloseDesk started by the window opens on the port the window chose, or not at all (``PORT_TAKEN``): on another, the
+# window would never find it.
+EXACT_PORT = "CLOSEDESK_EXACT_PORT"
+PORT_TAKEN = 3
 # "0": the browser, not the window.
 WINDOW_ENV = "CLOSEDESK_WINDOW"
 # CI's check of the real window: seconds to wait for CloseDesk's page to say it loaded, then the window closes itself;
@@ -128,7 +133,7 @@ UPDATE_LONGEST = 30 * 60
 UPDATING_MARK = ".closedesk-updating"
 # How CloseDesk ends when another took its port first: "already open in another window" (0), or the port couldn't be
 # opened (3).
-TAKEN = (0, 3)
+TAKEN = (0, PORT_TAKEN)
 
 # 127.0.0.1 is asked directly, never through a proxy the computer may be set to use.
 _LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -519,13 +524,35 @@ class Bridge:
 # The window, and the CloseDesk in it ---------------------------------------------------------------------------------
 
 
-def _answers(url: str) -> bool:
-    """Whether CloseDesk answers at ``url``."""
+def _health(url: str) -> dict | None:
+    """What CloseDesk's /health at ``url`` says; None when nothing answers there as CloseDesk."""
     try:
         with _LOCAL.open(url + "health", timeout=2) as reply:
-            return json.load(reply).get("app") == "closedesk"
+            body = json.load(reply)
     except (OSError, ValueError, AttributeError):
-        return False
+        return None
+    return body if isinstance(body, dict) and body.get("app") == "closedesk" else None
+
+
+def _answers(url: str) -> bool:
+    """Whether this CloseDesk (this folder's, run by this person) answers at ``url``."""
+    body = _health(url)
+    return body is not None and version.is_mine(body)
+
+
+def _theirs(url: str) -> bool:
+    """Whether another CloseDesk answers at ``url``: another folder's, or another person's on a shared computer (every
+    person on it has the same 127.0.0.1). The window never shows it."""
+    body = _health(url)
+    return body is not None and not version.is_mine(body)
+
+
+def url_for(host: str | None, port: int) -> str:
+    """The address the window shows CloseDesk at: this computer's own when CloseDesk listens on every address."""
+    shown = "127.0.0.1" if host in (None, "0.0.0.0", "", "::") else host
+    if ":" in shown:
+        shown = f"[{shown}]"
+    return f"http://{shown}:{port}/"
 
 
 def _working(url: str) -> bool:
@@ -662,7 +689,9 @@ class App:
         # What runs things on the computer (the tests give their own).
         self.popen = subprocess.Popen
         self.answers = _answers
+        self.theirs = lambda: _theirs(self.url)
         self.port_taken = lambda: _taken(self.url)
+        self.pick_port = self._pick_port
         self.update_running = update_running
         self.working = lambda: _working(self.url)
         self.open_url = webbrowser.open
@@ -857,7 +886,7 @@ class App:
             if named:
                 # "Python" here means the Dock shows the window as Python's (CloseDesk.app's link wasn't used).
                 print(f"macOS shows the window as {named}.", flush=True)
-        reopen = False
+        reopen = chosen_again = False
         while not self.closing:
             if not self.owned:
                 # A CloseDesk this window didn't start: shown, and left open when the window closes. Watched meanwhile:
@@ -867,6 +896,8 @@ class App:
                     return
                 self.owned, reopen = True, False
                 self._show(opening_page())
+                if not self._choose_port():
+                    return
                 continue
             server = self._start_server(reopen=reopen)
             if server is None:
@@ -882,6 +913,11 @@ class App:
                     # one found it there): shown, as one already open is, and left open when the window closes.
                     print("Another CloseDesk opened on the same port meanwhile: the window shows that one.", flush=True)
                     self.owned = False
+                    continue
+                elif server.poll() == PORT_TAKEN and not chosen_again and self._choose_port():
+                    # Another program took the port the window chose as CloseDesk started: once more, on another.
+                    chosen_again = True
+                    print(f"Another program took CloseDesk's port as it started: the window opens it on port {self.port}.", flush=True)
                     continue
                 else:
                     print(f"CloseDesk stopped as it started (exit code {server.poll()}).", flush=True)
@@ -910,6 +946,7 @@ class App:
             updates.APP_ENV: "1",
             updates.APP_LOG_ENV: str(self.log),
             STOP_WITH_PARENT: "1",
+            EXACT_PORT: "1",
         })
         env.pop("CLOSEDESK_REOPEN", None)
         if reopen:
@@ -945,6 +982,10 @@ class App:
                     away = None
                     self._show_closedesk()
                 continue
+            if self.theirs():
+                # Another folder's CloseDesk, or another person's, has the port now: never shown in this window.
+                print("Another CloseDesk (another folder's, or another person's) answers on the port now: the window starts CloseDesk itself.", flush=True)
+                return True
             if self.port_taken():
                 continue  # still there, busy: too slow to answer in time
             if away is None:
@@ -958,14 +999,34 @@ class App:
         return False
 
     def _another_answers(self) -> bool:
+        """Whether this CloseDesk, started by another window (or launcher), answers on the port in time. Another
+        folder's, or another person's, doesn't count."""
         deadline = time.monotonic() + self.other_wait
         while not self.closing:
             if self.answers(self.url):
                 return True
-            if time.monotonic() >= deadline:
+            if self.theirs() or time.monotonic() >= deadline:
                 return False
             time.sleep(self.poll)
         return False
+
+    def _pick_port(self, port: int) -> tuple[int, bool]:
+        from controller_inbox import cli
+
+        return cli._port_to_use(urlsplit(self.url).hostname or "127.0.0.1", port)
+
+    def _choose_port(self) -> bool:
+        """Before the window starts CloseDesk itself in place of one it showed (or once more): the port chosen again,
+        as the shortcut chose it, since the one it had may be another program's now. The CloseDesk found on the way,
+        if any, is shown instead. False (said in the window) when none is free."""
+        port, running = self.pick_port(self.port)
+        if not port:
+            self._failed(_page("CloseDesk can't open", NO_PORT.format(port=self.port)))
+            return False
+        if port != self.port:
+            self.port, self.url = port, url_for(urlsplit(self.url).hostname, port)
+        self.owned = not running
+        return True
 
     def _show(self, html: str) -> None:
         try:
@@ -1072,10 +1133,7 @@ def prepare(args, webview) -> App | None:
     if not port:
         tell(NO_PORT.format(port=wanted))
         return None
-    shown = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
-    if ":" in shown:
-        shown = f"[{shown}]"
-    return App(webview, url=f"http://{shown}:{port}/", port=port, owned=not running, log=log_path(), host=args.host)
+    return App(webview, url=url_for(host, port), port=port, owned=not running, log=log_path(), host=args.host)
 
 
 def _cant_start(exc: BaseException) -> str:

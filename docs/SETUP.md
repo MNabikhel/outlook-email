@@ -69,7 +69,9 @@ done (opened meanwhile, from the shortcut or the double-click files, CloseDesk s
   CloseDesk opens as it was and says so.
 - If CloseDesk is already open (from `CloseDesk.bat` / `CloseDesk.command`, or another window), the shortcut shows
   that one, and closing the window leaves it open. If that one is closed while this window is still open, this window
-  starts CloseDesk again by itself (after waiting a moment, in case it was only updating).
+  starts CloseDesk again by itself (after waiting a moment, in case it was only updating). Only your own CloseDesk,
+  from the same folder, is shown this way: on a computer several people use (Remote Desktop, say), or with a second
+  CloseDesk folder, another one already open is left alone and this one opens on the next free port.
 
 The double-click files work exactly as before: CloseDesk in your browser, with the black window (Terminal on a Mac)
 that you leave open while you use it. Use whichever you like.
@@ -210,7 +212,7 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 | Windows: "No runtime installed that matches 3.12" | An older CloseDesk took the Python install manager's `py` for a Python it could use. Update CloseDesk (`CloseDesk-Update.bat`); this one moves on to the Python you have. |
 | "CloseDesk needs Python 3.11 or newer" | The computer has no Python CloseDesk can use. Install it from python.org and open CloseDesk again; the message also gives the line to run if you can't install it. |
 | Something is off after an update or after moving the folder | Open CloseDesk again: every start checks the set-up and repairs it. `CloseDesk.command --check` (or `CloseDesk.bat --check`) lists what is and isn't in order. Deleting the `.venv` folder makes the next start set everything up afresh; your mail isn't in it. |
-| "Another program is using port 8765" | CloseDesk says so and uses the next free port that time. If the other program is LM Studio's server, set that back to its own port (1234). |
+| "Another program is using port 8765" | CloseDesk says so and uses the next free port that time. If the other program is LM Studio's server, set that back to its own port (1234). "Another CloseDesk" there is another person's (on a shared computer) or another folder's: to keep this one on a port of its own, set `CONTROLLER_INBOX_PORT` in `.env`. |
 | The page does not open | The CloseDesk window (or the black window, with the double-click files) must still be open. Go to [http://127.0.0.1:8765](http://127.0.0.1:8765). |
 | The CloseDesk shortcut opens CloseDesk in the browser, not a window | The window can't open on this computer, and the first time CloseDesk said why: usually Windows without Microsoft Edge WebView2 Runtime, which IT can install (free from Microsoft), or the window's part not installed yet (each start tries again). See "The CloseDesk shortcut and window". |
 | Windows: *Problem with Shortcut*, or the Mac: *CloseDesk can't find its folder* | CloseDesk's folder was moved or renamed. Double-click `CloseDesk.bat` (or `CloseDesk.command`) once in its new place: the shortcut follows it (and is put back if you let Windows delete it). |

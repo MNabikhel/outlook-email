@@ -208,7 +208,14 @@ class Computer:
         self.opened: list[str] = []  # given to the default browser or mail app
         self.launcher: list[str] = []  # the double-click launcher opened, and why
         self.other = False  # a CloseDesk the window didn't start answers on the port
+        self.theirs = False  # another folder's CloseDesk, or another person's, answers on the port
         self.updating = False  # an update runs in CloseDesk's folder (launch.py --update, started elsewhere)
+        self.free_from: dict[int, int] = {}  # a port taken: the next one free, as cli._port_to_use finds it
+        self.picked: list[int] = []  # the ports the window chose again
+
+    def pick_port(self, port: int) -> tuple[int, bool]:
+        self.picked.append(port)
+        return self.free_from.get(port, port), False
 
     def popen(self, cmd, **options) -> FakeProcess:
         process = FakeProcess(cmd, **options)
@@ -243,7 +250,9 @@ def make_app(webview, computer, tmp_path, *, owned=True) -> app_window.App:
     app.open_url = computer.opened.append
     app.open_launcher = lambda why="": computer.launcher.append(why)
     app.update_running = lambda: computer.updating
-    app.port_taken = lambda: computer.answers(URL)
+    app.port_taken = lambda: computer.answers(URL) or computer.theirs
+    app.theirs = lambda: computer.theirs
+    app.pick_port = computer.pick_port
     app.poll = 0.01
     app.watch = 0.01
     app.gone_for_good = 0.3
@@ -1314,6 +1323,104 @@ def test_a_window_onto_another_closedesk_starts_its_own_when_that_one_is_closed(
     assert window.person_closes() is True
     thread.join(10)
     assert result["code"] == 0 and server.input_closed, "it is this window's now: closing it stops it"
+
+
+def test_a_window_onto_closedesk_never_shows_another_persons_or_folders_that_takes_the_port(computer, tmp_path):
+    # The CloseDesk the window showed closed, and another person's (a shared computer) or another folder's opened on
+    # the same port: the window went on showing what that one served, as if it were this one.
+    computer.other = True
+    computer.free_from = {8765: 8766}
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path, owned=False)
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    computer.other, computer.theirs = False, True
+    until(lambda: computer.servers(), what="this CloseDesk started on a port of its own")
+    (server,) = computer.servers()
+    assert server.cmd[server.cmd.index("--port") + 1] == "8766" and app.url == "http://127.0.0.1:8766/"
+    until(lambda: "http://127.0.0.1:8766/" in window.urls(), what="this CloseDesk shown")
+    assert window.urls() == [URL, "http://127.0.0.1:8766/"], "the other one's page was never shown again"
+    assert window.person_closes() is True
+    thread.join(10)
+    assert result["code"] == 0
+
+
+def test_a_window_doesnt_wait_on_another_persons_closedesk_that_took_the_port_as_this_one_started(computer, tmp_path):
+    # Another person's CloseDesk opened on the port between the shortcut choosing it and CloseDesk starting: CloseDesk
+    # ended (the port isn't the window's now), and the window chose another and started it there.
+    def popen(cmd, **options):
+        process = computer.popen(cmd, **options)
+        if len(computer.servers()) == 1:
+            computer.theirs = True
+            process.end(app_window.PORT_TAKEN)
+        return process
+
+    computer.free_from = {8765: 8766}
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.popen = popen
+    app.other_wait = 30
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: len(computer.servers()) == 2, timeout=5, what="CloseDesk started again, on another port")
+    first, second = computer.servers()
+    assert first.options["env"][app_window.EXACT_PORT] == "1"
+    assert second.cmd[second.cmd.index("--port") + 1] == "8766"
+    until(lambda: "http://127.0.0.1:8766/" in window.urls())
+    assert URL not in window.urls()
+    window.person_closes()
+    thread.join(10)
+    assert result["code"] == 0
+
+
+def test_closedesk_started_by_the_window_opens_on_its_port_or_not_at_all(settings, store, monkeypatch, capsys):
+    monkeypatch.setenv(app_window.EXACT_PORT, "1")
+    monkeypatch.setattr(cli, "_port_to_use", lambda host, port: (port + 1, False))
+    served = []
+    monkeypatch.setattr(cli, "_serve", lambda *a, **k: served.append(1) or 0)
+    args = SimpleNamespace(no_serve=False, no_browser=True, limit=0, host="127.0.0.1", port=8765)
+    assert cli._run(settings, store, args) == app_window.PORT_TAKEN and served == []
+    assert app_window.EXACT_PORT not in os.environ
+    monkeypatch.setattr(cli, "_port_to_use", lambda host, port: (port + 1, False))
+    assert cli._run(settings, store, args) == 0 and served == [1], "started another way, it moves on as before"
+
+
+def test_the_window_shows_only_this_folders_closedesk_run_by_this_person(tmp_path):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import json
+
+    from controller_inbox import version
+
+    said: dict = {}
+
+    class Health(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = json.dumps(said).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Health)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/"
+    try:
+        said.update(app="closedesk", **version.whose())
+        assert app_window._answers(url) is True and app_window._theirs(url) is False
+        said.update(user="0" * 16)
+        assert app_window._answers(url) is False and app_window._theirs(url) is True
+        said.update(version.whose(), folder="1" * 16)
+        assert app_window._answers(url) is False and app_window._theirs(url) is True
+        said.clear()
+        said.update(app="something else")
+        assert app_window._answers(url) is False and app_window._theirs(url) is False
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_a_window_onto_another_closedesk_waits_while_that_one_updates(computer, tmp_path):

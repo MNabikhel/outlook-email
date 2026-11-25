@@ -517,7 +517,9 @@ def _fetch(url: str, dest: Path) -> bool:
         cmd = [curl, "-fsSL", "--retry", "2", "--connect-timeout", "30", "--speed-limit", SLOWEST[0], "--speed-time",
                SLOWEST[1], "--max-time", str(max(1, int(DOWNLOAD_LONGEST))), "-o", str(dest), url]
         try:
-            done = subprocess.run(cmd, capture_output=True, text=True, timeout=DOWNLOAD_LONGEST + 60, **_quiet())
+            done = subprocess.run(
+                cmd, capture_output=True, text=True, errors="replace", timeout=DOWNLOAD_LONGEST + 60, **_quiet()
+            )
         except subprocess.TimeoutExpired:
             say(f"The download of {url} took longer than {longest}: it was stopped.")
             return False

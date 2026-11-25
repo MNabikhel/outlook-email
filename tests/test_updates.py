@@ -26,6 +26,7 @@ MINE = "a" * 40
 NEWER = "b" * 40
 SAME = {"origin": "http://testserver"}
 NOW = datetime(2026, 11, 16, 15, 0, tzinfo=timezone.utc)
+REAL_ASK = updates._ask_github
 
 
 def github(sha: str = NEWER, date: str = "2026-11-16T09:12:00Z"):
@@ -69,7 +70,7 @@ def no_github(monkeypatch):
 def test_a_newer_main_is_said_with_both_version_numbers(download, settings, store):
     ask = github()
     found = updates.check(store, settings, now=NOW, ask=ask)
-    assert ask.asked == ["https://api.github.com/repos/MNabikhel/outlook-email/commits/main"]
+    assert ask.asked == ["https://api.github.com/repos/MNabikhel/outlook-email/commits?sha=main&per_page=1"]
     assert found["sha"] == NEWER and found["date"] == "2026-11-16"
     shown = updates.status(store, settings)
     assert shown["newer"] is True and shown["latest"] == "2026.11.16"
@@ -181,6 +182,72 @@ def test_github_is_reached_with_the_computers_own_certificates_when_python_cant(
     monkeypatch.setattr(updates.subprocess, "run", curl)
     assert updates._fetch_json(updates.LATEST_URL) == {"sha": NEWER}
     assert ran and ran[0][0] == "/usr/bin/curl" and updates.LATEST_URL in ran[0]
+
+
+def _curl_as_on_windows(answer: bytes, ran: list):
+    """curl giving GitHub's answer (UTF-8 bytes), with Python's decoding of a program's output as on Windows: text=True
+    reads it in the ANSI code page (cp1252), not UTF-8."""
+    import subprocess
+
+    def curl(cmd, **kwargs):
+        ran.append((cmd, kwargs))
+        if kwargs.get("text") or kwargs.get("encoding") or kwargs.get("universal_newlines"):
+            return subprocess.CompletedProcess(cmd, 0, stdout=answer.decode(kwargs.get("encoding") or "cp1252"), stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=answer, stderr=b"")
+
+    return curl
+
+
+@pytest.mark.parametrize("title", ["Colour-blind settings in Setup \u2192 Colors", "Say \u201cprocessed\u201d \u2190 not \u201cread\u201d"])
+def test_whats_new_comes_whole_through_curl_on_windows(download, settings, store, monkeypatch, title):
+    # The curl fallback read GitHub's UTF-8 answer in Windows' code page: "Setup \u00e2\u2020\u2019 Colors" in the
+    # question, and a \u201d (byte 0x9d) stopped the question altogether, with Settings saying GitHub couldn't be reached.
+    import httpx
+
+    def refused(*_a, **_k):
+        raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] self-signed certificate in certificate chain")
+
+    answer = json.dumps(
+        [{"sha": NEWER, "commit": {"committer": {"date": "2026-11-16T09:12:00Z"}, "message": title}}], ensure_ascii=False
+    ).encode("utf-8")
+    ran: list = []
+    monkeypatch.setattr(httpx, "stream", refused)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/curl" if name == "curl" else None)
+    monkeypatch.setattr(updates.subprocess, "run", _curl_as_on_windows(answer, ran))
+    monkeypatch.setattr(updates, "_ask_github", REAL_ASK)
+    saved = updates.check(store, settings, now=NOW)
+    assert "failed" not in saved and saved["title"] == title
+    assert updates.status(store, settings)["whats_new"] == title
+
+
+def test_github_is_asked_for_the_newest_commit_alone_not_its_changes(monkeypatch):
+    # GitHub's answer for one commit carries every changed file's patch: hundreds of kilobytes for a merge, too much for
+    # the few seconds as CloseDesk opens on a slow link. The list of commits, one long, says the same without them.
+    from urllib.parse import parse_qs, urlsplit
+
+    parts = urlsplit(updates.LATEST_URL)
+    assert parts.path == "/repos/MNabikhel/outlook-email/commits"
+    assert parse_qs(parts.query) == {"sha": ["main"], "per_page": ["1"]}
+    import httpx
+
+    def refused(*_a, **_k):
+        raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED]")
+
+    ran: list = []
+    monkeypatch.setattr(httpx, "stream", refused)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/curl" if name == "curl" else None)
+    monkeypatch.setattr(updates.subprocess, "run", _curl_as_on_windows(b"[]", ran))
+    updates._fetch_json(updates.LATEST_URL, timeout=4)
+    assert "--compressed" in ran[0][0], "curl asks for the answer compressed, as httpx does"
+
+
+def test_githubs_list_of_one_commit_is_read(download, settings, store):
+    def ask(url, **_waits):
+        return [{"sha": NEWER, "commit": {"committer": {"date": "2026-11-16T09:12:00Z"}, "message": "Faster totals"}}]
+
+    saved = updates.check(store, settings, now=NOW, ask=ask)
+    assert saved["sha"] == NEWER and saved["title"] == "Faster totals"
+    assert updates.check(store, settings, now=NOW + timedelta(days=2), ask=lambda url, **_w: [])["failed"] == "1"
 
 
 def test_settings_say_when_github_couldnt_be_reached(download, settings, store):

@@ -39,7 +39,9 @@ from controller_inbox import version
 
 log = logging.getLogger(__name__)
 
-LATEST_URL = "https://api.github.com/repos/MNabikhel/outlook-email/commits/main"
+# The newest commit on main, as GitHub's list of commits one long: its sha, date and message, without what it changed
+# (GitHub's answer for the one commit carries every changed file's patch, hundreds of kilobytes for a merge).
+LATEST_URL = "https://api.github.com/repos/MNabikhel/outlook-email/commits?sha=main&per_page=1"
 # The exit code that asks the launcher to update CloseDesk and start it again (76 is "make the environment again").
 UPDATE_AND_RESTART = 75
 # Set by scripts/launch.py when it starts CloseDesk for a launcher, which acts on UPDATE_AND_RESTART.
@@ -57,7 +59,7 @@ TIMEOUT_SECONDS = 10
 # How long the asking as CloseDesk opens waits for GitHub (and curl after it): the question comes in that time, or not.
 # The whole of the asking, however slowly an answer comes in (a slow link, a proxy that holds it).
 START_TIMEOUT_SECONDS = 4
-# The most an answer that size can be (GitHub's is a few kilobytes): more is not GitHub's answer.
+# The most an answer can be (GitHub's is a few kilobytes): more is not GitHub's answer.
 LONGEST_ANSWER = 2_000_000
 # A console program started without this flashes a console window up in the CloseDesk app on Windows (0 elsewhere).
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -107,7 +109,7 @@ def known(store) -> dict[str, str]:
 HEADERS = {"Accept": "application/vnd.github+json", "User-Agent": "CloseDesk"}
 
 
-def _ask_github(url: str, timeout: float = TIMEOUT_SECONDS) -> dict[str, Any]:
+def _ask_github(url: str, timeout: float = TIMEOUT_SECONDS) -> Any:
     return _fetch_json(url, timeout=timeout)
 
 
@@ -153,7 +155,7 @@ def _get_within(url: str, deadline: float) -> bytes:
     return found["body"]
 
 
-def _fetch_json(url: str, *, timeout: float = TIMEOUT_SECONDS) -> dict[str, Any]:
+def _fetch_json(url: str, *, timeout: float = TIMEOUT_SECONDS) -> Any:
     """GET ``url`` as JSON, in ``timeout`` seconds in all. With Python's own certificates first; when that fails (a
     company proxy that inspects HTTPS signs with a certificate only the computer trusts), with curl, which trusts what
     the computer trusts, as CloseDesk-Update does, in the time that is left (a second at least: a certificate is
@@ -169,15 +171,23 @@ def _fetch_json(url: str, *, timeout: float = TIMEOUT_SECONDS) -> dict[str, Any]
         if not curl or rest < 0.5:
             raise
         left = max(1, math.ceil(rest))
-        cmd = [curl, "-fsSL", "--max-time", str(left)]
+        # Compressed, as httpx asks for it: the answer comes in a fraction of the time on a slow link.
+        cmd = [curl, "-fsSL", "--compressed", "--max-time", str(left)]
         for name, value in HEADERS.items():
             cmd += ["-H", f"{name}: {value}"]
+        # Read as it comes (GitHub's answer is UTF-8): as text, Windows would read it in its own code page, garbling
+        # "→" in what's new and failing outright on "”".
         done = subprocess.run(
-            [*cmd, url], capture_output=True, text=True, timeout=left + 5, stdin=subprocess.DEVNULL, creationflags=NO_WINDOW
+            [*cmd, url], capture_output=True, timeout=left + 5, stdin=subprocess.DEVNULL, creationflags=NO_WINDOW
         )
         if done.returncode != 0:
-            raise OSError(f"{exc}; curl too: {done.stderr.strip() or done.returncode}") from exc
+            raise OSError(f"{exc}; curl too: {_text(done.stderr).strip() or done.returncode}") from exc
         return json.loads(done.stdout)
+
+
+def _text(said) -> str:
+    """What a program wrote, as text: it is UTF-8 here, or close enough to read."""
+    return said.decode("utf-8", "replace") if isinstance(said, bytes) else str(said or "")
 
 
 def check(
@@ -204,6 +214,8 @@ def check(
     try:
         asking = ask or functools.partial(_ask_github, timeout=START_TIMEOUT_SECONDS if at_start else TIMEOUT_SECONDS)
         reply = asking(LATEST_URL)
+        if isinstance(reply, list):  # GitHub's list of commits, one long
+            reply = reply[0] if reply else {}
         sha = str(reply["sha"]).strip().lower()
         date = str(reply["commit"]["committer"]["date"])
         if not re.fullmatch(r"[0-9a-f]{40}", sha) or not version.number(date):
