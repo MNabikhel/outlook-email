@@ -12,7 +12,7 @@ import { createChat } from "./chat.js";
 import { createOverlays } from "./palette.js";
 import { traceView } from "./trace.js";
 import { calendarView, isDay, rangeOf } from "./calendar.js";
-import { SLOW, askOnOpening, waitForCloseDesk } from "./update_ask.js";
+import { OTHER_HERE, SLOW, askOnOpening, isMine, waitForCloseDesk } from "./update_ask.js";
 // In the CloseDesk window, what leaves CloseDesk opens where it would from a browser.
 import { pageLoaded } from "./in_window.js";
 
@@ -618,8 +618,9 @@ function focusOpened(id) {
 /* ---------- The reading pane ---------- */
 
 function setReader(node, key = "", { animate = true } = {}) {
-  // CloseDesk is updating: its page stays until CloseDesk is back (and this page loads again).
-  if (S.updating && key !== "updating") return;
+  // CloseDesk is updating (or another one answers here): its page stays until CloseDesk is back (and this page loads
+  // again).
+  if (S.updating && key !== "updating" && key !== "another-here") return;
   S.shown = key;
   // A Page tab's card is for a box in what is shown now: with that gone, its box can't close it.
   closeTip();
@@ -1166,6 +1167,10 @@ async function poll() {
     const meta = await getJSON("/api/state");
     if (seq !== S.jobSeq) throw new Error("a job started while this was on its way: ask again");
     const before = S.meta;
+    if (before && before.whose && !isMine(meta.whose || {}, before.whose)) {
+      S.polling = false;
+      return anotherHere();
+    }
     S.meta = meta;
     renderTop();
     updateRail(navId());
@@ -1202,6 +1207,7 @@ function updating(reply) {
   button.disabled = true;
   button.textContent = "Updating…";
   const line = h("p", { class: "lede" }, reply.message);
+  const bar = h("div", { class: "job" }, h("span", { class: "spin", "aria-hidden": "true" }), h("span", { class: "job-bar" }, h("span", { class: "indeterminate", style: { width: "30%" } })));
   setReader(
     h(
       "div",
@@ -1212,12 +1218,51 @@ function updating(reply) {
         h("p", { class: "kicker" }, "Update"),
         h("h1", { class: "page-title" }, "Updating CloseDesk"),
         line,
-        h("div", { class: "job" }, h("span", { class: "spin", "aria-hidden": "true" }), h("span", { class: "job-bar" }, h("span", { class: "indeterminate", style: { width: "30%" } })))
+        bar
       )
     ),
     "updating"
   );
-  waitForCloseDesk(reply.commit || "", { run: reply.run, whose: reply.whose, onBack: () => location.reload(), onSlow: () => (line.textContent = SLOW) });
+  waitForCloseDesk(reply.commit || "", {
+    run: reply.run,
+    whose: reply.whose,
+    onBack: () => location.reload(),
+    onSlow: () => (line.textContent = SLOW),
+    // Another CloseDesk at this address: this one opens again at another, in a tab of its own.
+    onOther: () => {
+      line.textContent = reply.other || OTHER_HERE;
+      bar.hidden = true;
+    },
+  });
+}
+
+/** This tab's CloseDesk closed and another one answers at its address (another folder's, or another person's on a
+    shared computer): said, with the rest of the workspace out of reach, rather than that one's mail shown here as if
+    it were this one's. */
+function anotherHere() {
+  S.updating = true; // nothing more is asked of the CloseDesk here
+  clearTimeout(S.poll);
+  overlays.hide();
+  for (const part of ["#rail", "#list", "#chat", "#top"]) $(part)?.setAttribute("inert", "");
+  setReader(
+    h(
+      "div",
+      { class: "page", id: "another-here" },
+      h(
+        "div",
+        { class: "page-inner narrow" },
+        h("p", { class: "kicker" }, "CloseDesk"),
+        h("h1", { class: "page-title" }, "Another CloseDesk is at this address"),
+        h(
+          "p",
+          { class: "lede" },
+          "The CloseDesk this tab showed has closed, and another one answers at its address now: another CloseDesk folder's, or another person's on this computer. Yours opens at an address of its own when it starts. Close this tab, or show the CloseDesk that is here now."
+        ),
+        h("p", null, h("button", { type: "button", class: "btn btn-sm", onclick: () => location.reload() }, "Show the CloseDesk here"))
+      )
+    ),
+    "another-here"
+  );
 }
 
 function refreshData() {

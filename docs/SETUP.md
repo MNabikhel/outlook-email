@@ -127,7 +127,10 @@ the asking gives up after a few seconds. A newer version found later while Close
 later, and once a day) is shown in Settings and the top bar, not asked about in the middle of your work. If an update
 didn't finish, the next start says **CloseDesk wasn't updated** and opens as it was. For a few minutes after a change,
 GitHub can list a newer version before its download has it: then **Update now** finds nothing newer, and CloseDesk
-opens as it was and says **No newer version to download yet**; Update in Settings tries again.
+opens as it was and says **No newer version to download yet**; Update in Settings tries again. If another CloseDesk
+(another folder's, or another person's on the same computer) opens at CloseDesk's address while it updates, the
+page waiting says so, and CloseDesk opens again at another address, in a new tab; a CloseDesk tab left open there
+says **Another CloseDesk is at this address** rather than showing that one.
 
 The top bar also shows a small **Update ready** link, and Settings says **A newer CloseDesk is ready (2026.11.16; you
 have 2026.11.13)** with an **Update** button. After an update, Settings says **CloseDesk was updated to this version on

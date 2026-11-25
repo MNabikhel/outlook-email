@@ -291,6 +291,9 @@ def register_workspace(
             "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
             # This copy's version, and whether a newer one is ready (the top bar's "Update ready").
             "closedesk": {key: update[key] for key in ("label", "newer", "message")},
+            # Whose CloseDesk this is (/health's fingerprints): a tab left open finds another one answering in its place
+            # (this one closed, and another folder's or person's opened at the address).
+            "whose": version.whose(),
             "last_run": format_when(last_run, settings.tz) if last_run else "",
             "tz": settings.tz.key,
             "drop_folder": str(settings.inbox_incoming),
@@ -1189,7 +1192,7 @@ def register_workspace(
             raise HTTPException(status_code=409, detail=why)
         return {
             "ok": True, "message": updates.updating_message(app.state), "commit": version.installed()[0],
-            "run": app.state.run, "whose": version.whose(),
+            "run": app.state.run, "whose": version.whose(), "other": updates.OTHER_HERE,
         }
 
     @api.get("/update/question")

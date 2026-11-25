@@ -14,6 +14,9 @@ const TRIES = 30; // the asking waits a few seconds at most: past this, CloseDes
 const BUSY_MS = 2000; // while the mail being processed holds the update back
 const SLOW_MS = 5 * 60 * 1000;
 export const SLOW = "CloseDesk hasn't opened again yet. Its window says what it is doing; if it has closed, double-click CloseDesk.";
+// updates.OTHER_HERE, for a reply from an older CloseDesk that doesn't carry it.
+export const OTHER_HERE =
+  "Another CloseDesk opened at this address while this one was updating (another CloseDesk folder's, or another person's on this computer), so this one opens again at another address, in a new tab of its own. You can close this one.";
 
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 
@@ -29,21 +32,30 @@ export function isMine(health, whose) {
     couldn't be done), then ``onBack``; ``onSlow`` once if that takes over five minutes. ``before``: the commit that
     asked, and ``run``: the start of CloseDesk that asked (/health says which answers), so a start again that is quick
     enough to come between two looks still counts, as the new version or as the same one. ``whose``: whose CloseDesk
-    it is; another one answering on the port is as if nothing answered. */
-export function waitForCloseDesk(before, { run = "", whose = null, onBack, onSlow }) {
+    it is; another one answering on the port is as if nothing answered, and at two looks in a row ``onOther`` is told
+    once (this one, back, opens at another address). It is looked at still: this one, back here after all, counts. */
+export function waitForCloseDesk(before, { run = "", whose = null, onBack, onSlow, onOther = null }) {
   const started = Date.now();
   let gone = false; // CloseDesk stopped answering: the next answer is the new one
   let slow = false;
+  let others = 0; // looks in a row that found another CloseDesk at this address
   const again = async () => {
     try {
       const response = await fetch("/health", { cache: "no-store" });
       const health = await response.json();
-      if (health.app === "closedesk" && !isMine(health, whose)) gone = true;
-      else if (health.app === "closedesk" && (gone || health.commit !== before || (run && health.run && health.run !== run))) return onBack();
+      if (health.app === "closedesk" && !isMine(health, whose)) {
+        gone = true;
+        others += 1;
+        if (others === 2 && onOther) onOther();
+      } else {
+        others = 0;
+        if (health.app === "closedesk" && (gone || health.commit !== before || (run && health.run && health.run !== run))) return onBack();
+      }
     } catch (error) {
       gone = true;
+      others = 0;
     }
-    if (!slow && Date.now() - started > SLOW_MS) {
+    if (!slow && others < 2 && Date.now() - started > SLOW_MS) {
       slow = true;
       onSlow();
     }
@@ -162,7 +174,7 @@ function show(view, updating) {
   // Update now in this page found CloseDesk stopped, for the update asked for in another: said, and this page waits for
   // CloseDesk to be back (as the new version), then loads again, as the page that asked does.
   function updatingElsewhere() {
-    const reply = { message: view.elsewhere_message, commit: view.commit, run: "", whose: view.whose };
+    const reply = { message: view.elsewhere_message, commit: view.commit, run: "", whose: view.whose, other: view.other_message };
     if (updating) {
       handOver();
       updating(reply);
@@ -202,6 +214,10 @@ function show(view, updating) {
       whose: reply.whose || view.whose,
       onBack: () => location.reload(),
       onSlow: () => (message.textContent = SLOW),
+      onOther: () => {
+        message.textContent = reply.other || view.other_message || OTHER_HERE;
+        bar.hidden = true;
+      },
     });
   }
 

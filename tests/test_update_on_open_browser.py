@@ -464,10 +464,47 @@ def test_the_page_waiting_for_the_update_never_loads_another_persons_closedesk(d
         page.route("**/health", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(theirs)))
         page.wait_for_timeout(5000)  # two of the page's looks, and more
         assert page.url == address and page.query_selector(shown) is not None, "the page loaded another person's CloseDesk"
+        # Said, not left saying it opens again here by itself with its bar going for good: this one opens again at
+        # another address (the launcher opens a new tab there).
+        page.wait_for_function("(said) => document.body.innerText.includes(said)", arg=updates.OTHER_HERE, timeout=10000)
+        assert page.evaluate(
+            "() => [...document.querySelectorAll('.update-ask-bar, #updating .job')].every((bar) => bar.hidden)"
+        ), "the progress bar still goes"
         # This person's, back as the new version: loaded.
         page.unroute("**/health")
         (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
         page.wait_for_function("() => !document.querySelector('#updating, #update-ask.updating, [data-update-line]')", timeout=20000)
+
+
+def test_a_workspace_tab_another_closedesk_now_answers_says_so_instead_of_showing_it(download, settings, loaded, page, monkeypatch):
+    # This CloseDesk closed (to update, say) and another folder's, or another person's, opened at the same address: the
+    # workspace tab left open went on showing that one's mail and version, with nothing said.
+    import json
+
+    app = opened(settings, loaded, monkeypatch)
+    with serving(app) as base:
+        page.goto(base + "/app/all")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Not now')")
+        page.wait_for_selector("#update-ask", state="detached")
+
+        def theirs(route):
+            reply = route.fetch()
+            state = reply.json()
+            state["whose"] = {**state["whose"], "user": "0" * 16}
+            route.fulfill(response=reply, body=json.dumps(state))
+
+        page.route("**/api/state", theirs)
+        with page.expect_response("**/api/state"):
+            page.evaluate("() => document.dispatchEvent(new Event('visibilitychange'))")  # the tab looks again
+        page.wait_for_selector("#another-here")
+        assert "Another CloseDesk is at this address" in page.inner_text("#another-here")
+        assert page.evaluate("() => ['#rail', '#list', '#top'].every((part) => document.querySelector(part).inert)")
+        # Asked for, the CloseDesk that is here now is shown.
+        with page.expect_navigation():
+            page.click("#another-here button:has-text('Show the CloseDesk here')")
+        page.wait_for_selector("#list")
+        assert page.query_selector("#another-here") is None
 
 
 def test_an_older_closedesk_that_doesnt_say_whose_it_is_is_still_taken_for_this_one(download, settings, loaded, page, monkeypatch):

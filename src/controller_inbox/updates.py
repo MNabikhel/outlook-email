@@ -95,6 +95,13 @@ UPDATED_MEANWHILE = (
     "see the new version."
 )
 MEANWHILE_TITLE = "CloseDesk is already updated"
+# The page waiting for CloseDesk to be back finds another CloseDesk at its address (another folder's, or another
+# person's on a shared computer): this one, back, opens at another address, and its launcher opens a tab there.
+OTHER_HERE = (
+    "Another CloseDesk opened at this address while this one was updating (another CloseDesk folder's, or another "
+    "person's on this computer), so this one opens again at another address, in a new tab of its own. You can close "
+    "this one."
+)
 # Update now from a second page while CloseDesk is stopped for an update asked for in another: nothing answers it.
 UPDATING_ELSEWHERE = (
     "CloseDesk is being updated already (Update now was pressed in another tab or window). This page loads again by "
@@ -352,6 +359,8 @@ def status(store, settings) -> dict[str, Any]:
         "later": UPDATE_LATER if current else BY_HAND,
         # Update that nothing answers: CloseDesk has stopped for an update another page asked for.
         "elsewhere": UPDATING_ELSEWHERE,
+        # The page waiting for it finds another CloseDesk at its address.
+        "other_here": OTHER_HERE,
         # Whose CloseDesk this is (/health's fingerprints): the page waiting for it loads only this one again.
         "whose": version.whose(),
     }
@@ -621,6 +630,7 @@ class Question:
             "meanwhile_title": MEANWHILE_TITLE,
             # Update now that nothing answers: CloseDesk has stopped for an update another page asked for.
             "elsewhere_message": UPDATING_ELSEWHERE,
+            "other_message": OTHER_HERE,
             "updating": UPDATING,
             # The version the page shows: Update now says it, and is refused once CloseDesk was updated since.
             "commit": version.installed()[0],

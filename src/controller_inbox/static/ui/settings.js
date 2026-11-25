@@ -1068,7 +1068,7 @@ export function createSettings(ctx) {
       } catch (error) {
         // Nothing answered: CloseDesk has stopped for an update another tab or window asked for. Said, and this page
         // loads again once CloseDesk is back.
-        if (typeof error.status !== "number") return ctx.updating({ message: u.elsewhere, commit: u.commit, run: "", whose: u.whose });
+        if (typeof error.status !== "number") return ctx.updating({ message: u.elsewhere, commit: u.commit, run: "", whose: u.whose, other: u.other_here });
         button.disabled = false;
         if (line) replace(line, icon("alert", 14), h("span", null, error.message));
         if (line) line.className = "set-status error";

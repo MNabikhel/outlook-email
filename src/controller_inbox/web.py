@@ -1358,7 +1358,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             return render(request, "settings_update.html", page="settings", refused=why, status_code=409)
         return render(
             request, "settings_update.html", page="settings", refused="", commit=version.installed()[0], run=app.state.run,
-            whose=version.whose(), updating=True,
+            whose=version.whose(), updating=True, other=updates.OTHER_HERE,
             message=updates.updating_message(app.state),
         )
 
