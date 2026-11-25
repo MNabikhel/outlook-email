@@ -1029,13 +1029,24 @@ def test_closedesk_started_by_the_window_that_stops_by_itself_ends_with_its_own_
 
     script = tmp_path / "serve.py"
     script.write_text(textwrap.dedent("""
-        import sys, threading
+        import socket, sys, threading, time
         from fastapi import FastAPI
         from controller_inbox import cli
 
         app = FastAPI()
-        threading.Timer(1.5, lambda: app.state.stop_server()).start()  # as Update now does
-        cli._run_server(app, host="127.0.0.1", port=int(sys.argv[1]))
+        port = int(sys.argv[1])
+
+        def update_now():  # once CloseDesk is open, as Update now stops it
+            while True:
+                try:
+                    with socket.create_connection(("127.0.0.1", port), timeout=1):
+                        break
+                except OSError:
+                    time.sleep(0.1)
+            app.state.stop_server()
+
+        threading.Thread(target=update_now, daemon=True).start()
+        cli._run_server(app, host="127.0.0.1", port=port)
         sys.exit(75)
     """), encoding="utf-8")
     env = {**os.environ, "PYTHONPATH": str(ROOT / "src"), app_window.STOP_WITH_PARENT: "1"}

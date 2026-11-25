@@ -397,9 +397,15 @@ def test_the_tests_never_reach_the_computers_desktop():
 
 # macOS --------------------------------------------------------------------------------------------------------------
 
+# CloseDesk.app is made on a Mac only: its files' modes, its link to Python and its script (run here with bash) mean
+# nothing on Windows, where CI's pytest runs too. (CI's macOS pytest runs these for real.)
+MAC_FILES = pytest.mark.skipif(os.name == "nt", reason="CloseDesk.app is made on a Mac: file modes, links and bash")
+
 
 @pytest.fixture
 def mac(tmp_path):
+    if os.name == "nt":
+        pytest.skip("CloseDesk.app is made on a Mac: file modes, links and bash")
     root = _closedesk(tmp_path / "home" / "Close Desk's mail")
     python = tmp_path / "Python.framework" / "Versions" / "3.12" / "Resources" / "Python.app" / "Contents" / "MacOS" / "Python"
     python.parent.mkdir(parents=True)
@@ -566,6 +572,7 @@ def test_without_rights_to_applications_the_app_is_made_in_closedesks_folder(mac
     assert shortcut.upkeep(mac.system, record=mac.record).message == "" and mac.registered == []
 
 
+@MAC_FILES
 def test_the_interpreter_linked_is_the_one_that_really_runs(tmp_path):
     # python.org's and Homebrew's Python (a framework): bin/python3.12 only starts Python.app's program, by its own path
     # (the Dock would say Python), so the link is to that program. uv's Python: the real file behind the links.

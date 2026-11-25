@@ -314,6 +314,7 @@ def test_without_closedesk_app_the_window_runs_the_environments_python(launch, m
     assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env and "CFProcessPath" not in env
 
 
+@pytest.mark.skipif(os.name == "nt", reason="CloseDesk.app's link to Python is a Mac's")
 def test_closedesk_apps_python_is_used_only_when_it_is_this_environments(launch, monkeypatch, tmp_path):
     python = tmp_path / "Python.app" / "Contents" / "MacOS" / "Python"
     python.parent.mkdir(parents=True)
