@@ -231,6 +231,9 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .job.done { border-left: 4px solid var(--green); display: block; }
 .job.error { border-left: 4px solid var(--danger); display: block; }
 .job .job-flag { color: var(--danger); }
+/* A finished run's box is a line of text: the space after its headline is the one in the markup, as between its
+   sentences (the margin is for the running box's flex row, where spaces don't show). */
+.job:is(.done, .error) strong { margin-right: 0; }
 .models-table { width: 100%; margin: 4px 0 12px; border-collapse: collapse; font-size: 13px; }
 .models-table caption { text-align: left; font-weight: 600; padding: 0 0 6px; }
 .models-table th, .models-table td { padding: 7px 8px; border-top: 1px solid var(--line); text-align: left; vertical-align: top; }

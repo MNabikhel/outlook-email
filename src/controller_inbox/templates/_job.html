@@ -46,23 +46,27 @@
 {% elif job.state == 'done' and job.result and job.result.kind == 'outlook' %}
 {# Sync now or the automatic sync: what it copied, and whether the model could be loaded to read the new mail. #}
 {% set stopped = job.result.model and job.result.model_note %}
-{% set needs_look = (job.result.outlook and job.result.outlook.note) or (job.result.model_load and job.result.model_load.failed) or stopped %}
-{# One that needs a look says so in words, not only with its red edge; its headline can be the problem itself. #}
-<section class="job {{ 'error' if needs_look else 'done' }}">{% if needs_look %}<b class="job-flag">Needs a look:</b> {% endif %}<strong>{{ job.result.message or 'Outlook synced.' }}</strong>{% if job.result.model_load or stopped %} <span>{% if job.result.model_load %}{{ job.result.model_load.message }}{% endif %}{% if stopped %} {{ job.result.model_note }}{% endif %}</span>{% endif %}</section>
+{% set outlook_failed = job.result.outlook and job.result.outlook.note %}
+{% set load_failed = job.result.model_load and job.result.model_load.failed %}
+{# One that needs a look says so in words, not only with its red edge, just before what needs the look: the headline
+   when Outlook couldn't be read (it says why), else the model's part after what went well. #}
+<section class="job {{ 'error' if outlook_failed or load_failed or stopped else 'done' }}">{% if outlook_failed %}<b class="job-flag">Needs a look:</b> {% endif %}<strong>{{ job.result.message or 'Outlook synced.' }}</strong>{% if job.result.model_load or stopped %} <span>{% if job.result.model_load and not load_failed %}{{ job.result.model_load.message }} {% endif %}{% if (load_failed or stopped) and not outlook_failed %}<b class="job-flag">Needs a look:</b> {% endif %}{% if load_failed %}{{ job.result.model_load.message }} {% endif %}{% if stopped %}{{ job.result.model_note }}{% endif %}</span>{% endif %}</section>
 {% elif job.state == 'done' and job.result %}
 {# A model LM Studio couldn't load, or one that stopped reading partway, is never shown as all done. #}
 {% set load_failed = job.result.model_load and job.result.model_load.failed %}
-{% set needs_look = load_failed or (job.result.model and job.result.model_note) %}
-<section class="job {{ 'error' if needs_look else 'done' }}">
+{% set stopped = job.result.model and job.result.model_note %}
+<section class="job {{ 'error' if load_failed or stopped else 'done' }}">
   <strong>Processed.</strong>
   <span>
-    {% if needs_look %}<b class="job-flag">Needs a look:</b>{% endif %}
     {{ job.result | files_read }}
     {% if job.result.model %}The local model read {{ job.result.read_by_bionic }}{% if job.result.avg_seconds %} (about {{ job.result.avg_seconds }}s each){% endif %}.{% elif not job.result.model_load %}No local model was running, so mail is filed from the script draft.{% endif %}
     {% if job.result.files_summarized %}Summarized {{ job.result.files_summarized }} file{{ '' if job.result.files_summarized == 1 else 's' }}.{% endif %}
     {% if job.result.failed_files %}{{ job.result.failed_files | length }} file(s) could not be read and were moved to <code>inbox/failed</code>.{% endif %}
-    {% if job.result.model_note and job.result.model %}{{ job.result.model_note }}{% endif %}
-    {% if job.result.model_load %}{{ job.result.model_load.message }}{% endif %}
+    {% if job.result.model_load and not load_failed %}{{ job.result.model_load.message }}{% endif %}
+    {# What needs a look comes last, after its words: the rest of the run went as said. #}
+    {% if load_failed or stopped %}<b class="job-flag">Needs a look:</b>{% endif %}
+    {% if stopped %}{{ job.result.model_note }}{% endif %}
+    {% if load_failed %}{{ job.result.model_load.message }}{% endif %}
   </span>
 </section>
 {% elif job.state == 'error' %}

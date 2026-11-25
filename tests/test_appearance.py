@@ -133,32 +133,46 @@ def test_the_classic_setup_page_saves_both(client, demo):
     assert 'value="color-blind" checked' not in page and 'value="1" checked' not in page
 
 
-def test_a_processed_run_that_needs_a_look_says_so_in_words(client):
-    """The classic job box told a run that needs a look from one that went well by its red or green edge alone."""
+def _finished(client, result, about=None) -> str:
+    """The classic Today page's job box once a run that gave ``result`` has finished, as its words."""
     import re
     import threading
 
-    said = "Stopped reading: the local model ran out of memory on three messages in a row. Choose one in Settings."
-    for about, result in (
-        (None, {"ingested": 1, "model": "gemma", "read_by_bionic": 0, "model_note": said}),
-        ({"kind": "outlook"}, {"kind": "outlook", "message": "Outlook synced: 2 new.", "model": "gemma", "model_note": said}),
-    ):
-        job = client.app.state.job
-        assert job.start(lambda progress, result=result: result, about=about)
-        for _ in range(250):
-            if job.snapshot()["state"] != "running":
-                break
-            threading.Event().wait(0.02)
-        section = re.search(r'<section class="job error">(.*?)</section>', client.get("/").text, re.S)[1]
-        words = " ".join(re.sub(r"<[^>]+>", " ", section).split())
-        assert "Needs a look:" in words and said in words, words
-        assert '<b class="job-flag">Needs a look:</b>' in section
-    job.start(lambda progress: {"ingested": 1, "model": "", "read_by_bionic": 0})
+    job = client.app.state.job
+    assert job.start(lambda progress: result, about=about)
     for _ in range(250):
         if job.snapshot()["state"] != "running":
             break
         threading.Event().wait(0.02)
-    assert "Needs a look" not in client.get("/").text, "a run that went well says nothing of the kind"
+    section = re.search(r'<section class="job \w+">(.*?)</section>', client.get("/").text, re.S)[1]
+    return section
+
+
+def test_a_processed_run_that_needs_a_look_says_so_in_words(client):
+    """The classic job box told a run that needs a look from one that went well by its red or green edge alone. The
+    words go just before what needs a look: they were first, in front of "Read 4 new files", which was fine."""
+    import html
+    import re
+
+    said = "Stopped reading: the local model ran out of memory on three messages in a row. Choose one in Settings."
+    loaded = {"message": "Loaded gemma in LM Studio.", "failed": False}
+    failed = {"message": "LM Studio couldn't load gemma: not enough memory.", "failed": True}
+    for about, result, before, problem in (
+        (None, {"ingested": 4, "model": "gemma", "read_by_bionic": 0, "model_note": said, "model_load": loaded},
+         "Processed. Read 4 new files. The local model read 0. Loaded gemma in LM Studio.", said),
+        (None, {"ingested": 4, "model": "", "read_by_bionic": 0, "model_load": failed}, "Processed. Read 4 new files.", failed["message"]),
+        ({"kind": "outlook"}, {"kind": "outlook", "message": "Outlook synced: 2 new.", "model": "gemma", "model_note": said, "model_load": loaded},
+         "Outlook synced: 2 new. Loaded gemma in LM Studio.", said),
+        ({"kind": "outlook"}, {"kind": "outlook", "message": "Outlook couldn't be read this time.", "outlook": {"note": "Outlook couldn't be read this time."}},
+         "", "Outlook couldn't be read this time."),
+    ):
+        section = _finished(client, result, about)
+        words = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", section)).split())
+        assert words == f"{before} Needs a look: {problem}".strip(), words
+        assert section.count('<b class="job-flag">Needs a look:</b>') == 1
+    section = _finished(client, {"ingested": 1, "model": "gemma", "read_by_bionic": 1, "model_load": loaded})
+    assert "Needs a look" not in section, "a run that went well says nothing of the kind"
+    assert "Needs a look" not in client.get("/").text
 
 
 def test_the_help_says_what_the_colors_for_color_blindness_change(client):
