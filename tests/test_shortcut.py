@@ -115,6 +115,62 @@ def test_the_shortcuts_icon_is_a_copy_of_closedesks_kept_in_the_persons_own_fold
     assert windows.links.files[windows.desktop]["icon_index"] == 0
 
 
+def _store_python(windows):
+    """CloseDesk run by the Microsoft Store's Python: what it writes in AppData Windows keeps in that Python's own
+    folder (os.path.realpath says where), seen by it alone."""
+    private = windows.tmp / "LocalAppData" / "Packages" / "PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0" / "LocalCache"
+
+    def realpath(path):
+        path = Path(path)
+        try:
+            return str(private / "Local" / path.relative_to(windows.tmp / "LocalAppData"))
+        except ValueError:
+            return str(path)
+
+    places = dict(windows.places, Taskbar=windows.tmp / "Roaming" / "Taskbar")
+    return shortcut.Windows(
+        windows.root, links=windows.links, folders=lambda: dict(places), icon_dir=windows.tmp / "LocalAppData" / "CloseDesk",
+        store=True, realpath=realpath,
+    ), private
+
+
+def test_with_the_store_python_the_shortcut_shows_closedesks_icon_and_says_there_is_none_in_the_start_menu(windows):
+    # Python from the Microsoft Store (typing python in a Command Prompt offers it; no admin rights needed). The icon
+    # CloseDesk copied to AppData was kept in that Python's own folder, so the Desktop shortcut named a file Explorer
+    # couldn't find and showed Python's icon; the Start menu shortcut went there too, so none appeared in the Start
+    # menu, and CloseDesk said it had added one.
+    system, private = _store_python(windows)
+    said = shortcut.upkeep(system, record=windows.record)
+    assert said.ok and windows.links.written == [windows.desktop], "nothing written where only that Python sees it"
+    icon = Path(windows.links.files[windows.desktop]["icon"])
+    assert icon.is_relative_to(private), "the copy Explorer can read"
+    assert "Added the CloseDesk shortcut on your Desktop" in said.message and "Start menu" in said.message
+    assert shortcut.STORE_START_MENU in said.message and "python.org" in shortcut.STORE_START_MENU
+    # Asked for again (Settings): said again; not at a start with nothing to do.
+    assert shortcut.STORE_START_MENU in shortcut.make(system, record=windows.record).message
+    assert shortcut.upkeep(system, record=windows.record).message == ""
+    assert "Start menu" not in shortcut.offer(platform="win32", store=True)["help"]
+
+
+def test_the_store_python_is_told_by_where_it_is(tmp_path):
+    from controller_inbox import app_log
+
+    store = SimpleNamespace(
+        platform="win32", executable=r"C:\Users\ana\CloseDesk\.venv\Scripts\python.exe",
+        _base_executable=r"C:\Users\ana\AppData\Local\Microsoft\WindowsApps\PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0\python.exe",
+        base_prefix=r"C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0",
+    )
+    assert app_log.store_python(store) is True
+    # python.org's, and the Python install manager's (its runtimes aren't packaged), are not.
+    for base in (r"C:\Users\ana\AppData\Local\Programs\Python\Python312", r"C:\Users\ana\AppData\Local\Python\pythoncore-3.14-64"):
+        other = SimpleNamespace(platform="win32", executable=base + r"\python.exe", _base_executable=base + r"\python.exe", base_prefix=base)
+        assert app_log.store_python(other) is False
+    assert app_log.store_python(SimpleNamespace(platform="darwin", base_prefix="/WindowsApps/")) is False
+    log = tmp_path / "CloseDesk-app.log"
+    assert app_log.shown(log, store=False, realpath=lambda path: "elsewhere") == log
+    assert app_log.shown(log, store=True, realpath=lambda path: str(tmp_path / "private.log")) == tmp_path / "private.log"
+
+
 def test_a_shortcut_that_is_right_is_left_as_it_is(windows):
     # Rewritten at every start, a Desktop that OneDrive keeps in step between two computers fills with conflict copies.
     _upkeep(windows)

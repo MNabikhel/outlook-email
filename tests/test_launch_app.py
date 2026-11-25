@@ -674,6 +674,39 @@ def test_a_window_that_ends_before_it_opens_says_so_in_a_message_box(launch, mon
     assert "couldn't open" in launch.told[0] and str(launch.app_log_path()) in launch.told[0]
 
 
+def test_with_the_store_python_the_message_box_names_the_log_where_explorer_finds_it(launch, monkeypatch, tmp_path):
+    # The Microsoft Store's Python keeps a file it writes in AppData in its own folder: the log named at
+    # %LOCALAPPDATA%\\CloseDesk wasn't there when the person looked.
+    private = tmp_path / "Packages" / "PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0" / "LocalCache" / "CloseDesk-app.log"
+    monkeypatch.setattr(launch, "store_python", lambda: True)
+    assert launch.shown(launch.app_log_path(), realpath=lambda path: str(private)) == private
+    monkeypatch.setattr(launch, "shown", lambda file: private if file == launch.app_log_path() else file)
+    monkeypatch.setattr(launch, "in_venv", lambda: True)
+    monkeypatch.setattr(launch, "ensure_packages", lambda: 0)
+    monkeypatch.setattr(launch, "linked_python", lambda: None)
+    monkeypatch.setattr(launch, "_hand_over", lambda cmd: 1)
+    assert launch.main(["--app"]) == 1
+    assert str(private) in launch.told[0]
+
+
+def test_the_store_python_is_told_by_where_it_is_in_launch_too(launch, monkeypatch):
+    monkeypatch.setattr(launch, "WINDOWS", True)
+    monkeypatch.setattr(launch.sys, "_base_executable", r"C:\Users\ana\AppData\Local\Microsoft\WindowsApps\python.exe", raising=False)
+    assert launch.store_python() is True
+    monkeypatch.setattr(launch.sys, "_base_executable", r"C:\Users\ana\AppData\Local\Programs\Python\Python312\python.exe", raising=False)
+    monkeypatch.setattr(launch.sys, "base_prefix", r"C:\Users\ana\AppData\Local\Programs\Python\Python312")
+    monkeypatch.setattr(launch.sys, "executable", r"C:\Users\ana\CloseDesk\.venv\Scripts\python.exe")
+    assert launch.store_python() is False
+
+
+def test_the_first_start_with_the_store_python_says_what_it_cant_do_and_what_to_install(launch, monkeypatch, capsys):
+    monkeypatch.setattr(launch, "store_python", lambda: True)
+    monkeypatch.setattr(launch.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, "", "stopped here"))
+    assert launch.create_environment([]) == 1
+    said = capsys.readouterr().out
+    assert launch.STORE_PYTHON in said and "python.org" in launch.STORE_PYTHON and "Start menu" in launch.STORE_PYTHON
+
+
 def test_what_the_window_said_itself_isnt_said_again(launch, monkeypatch):
     monkeypatch.setattr(launch, "in_venv", lambda: True)
     monkeypatch.setattr(launch, "ensure_packages", lambda: 0)

@@ -35,7 +35,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from controller_inbox import version
+from controller_inbox import app_log, version
 
 log = logging.getLogger(__name__)
 
@@ -663,7 +663,9 @@ def unfinished_message(store) -> str:
     for (``ASKED_LOG_KEY``), not how this start was opened. The app's log when the window ran it; else how to try
     again, where what stops it is shown (the launcher's window that ran it may be closed by now)."""
     log = store.get_state(ASKED_LOG_KEY) or ""
-    return UNFINISHED_IN_APP.format(log=log) if log else UNFINISHED
+    if not log:
+        return UNFINISHED
+    return UNFINISHED_IN_APP.format(log=app_log.shown(log))
 
 
 def remember_update_asked(store) -> None:

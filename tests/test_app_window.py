@@ -1786,6 +1786,25 @@ def test_an_error_before_the_window_opens_is_said_in_a_message_box(monkeypatch, 
     assert len(told) == 1 and "couldn't open" in told[0] and str(tmp_path / "CloseDesk-app.log") in told[0]
 
 
+def test_with_the_store_python_the_window_names_the_log_where_explorer_finds_it(monkeypatch, tmp_path):
+    # The Microsoft Store's Python keeps what it writes in AppData in its own folder (os.path.realpath says where).
+    from controller_inbox import app_log
+
+    log = tmp_path / "CloseDesk" / "CloseDesk-app.log"
+    private = tmp_path / "Packages" / "PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0" / "LocalCache" / "CloseDesk-app.log"
+    assert app_log.shown(log, store=True, realpath=lambda path: str(private)) == private
+    monkeypatch.setattr(app_log, "shown", lambda file, **_: private if Path(file) == log else Path(file))
+    assert str(private) in app_window.stopped_page(log) and str(private) in app_window.not_open_page(log)
+    monkeypatch.setenv(updates.APP_LOG_ENV, str(log))
+    told: list = []
+    monkeypatch.setattr(app_log, "tell", lambda text, **_: told.append(text))
+    try:
+        raise RuntimeError("a part that won't load")
+    except RuntimeError:
+        app_log.cant_open(platform="win32")
+    assert str(private) in told[0]
+
+
 def test_a_part_of_python_that_wont_load_is_said_before_any_of_closedesk_runs(tmp_path):
     # A company's policy (Smart App Control, WDAC) blocks a compiled part CloseDesk needs: Python ends while importing
     # it, before the window's own code. Said in a message box, with the log that has the details.

@@ -42,6 +42,30 @@ def user_dir() -> Path:
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "CloseDesk"
 
 
+def store_python(sys_module=None) -> bool:
+    """Whether CloseDesk runs on the Microsoft Store's Python (a packaged app: its folder is in WindowsApps, and an
+    environment made with it keeps that as its base). Windows keeps a file that Python writes in AppData to that Python
+    alone, in a folder of its own (``shown``): Explorer, a shortcut, Notepad don't find it where it was written.
+    (launch.py has a copy.)"""
+    sys_module = sys_module or sys
+    if getattr(sys_module, "platform", "") != "win32":
+        return False
+    places = [getattr(sys_module, name, "") for name in ("_base_executable", "base_prefix", "executable")]
+    return any("\\windowsapps\\" in str(place or "").lower() for place in places)
+
+
+def shown(file, *, store: bool | None = None, realpath=os.path.realpath) -> Path:
+    """Where a person finds ``file``, which CloseDesk wrote: with the Microsoft Store's Python, a file written in
+    AppData is in that Python's own folder (%LOCALAPPDATA%\\Packages\\PythonSoftwareFoundation.Python...\\LocalCache),
+    which ``realpath`` says; elsewhere where it was written."""
+    if not (store_python() if store is None else store):
+        return Path(file)
+    try:
+        return Path(realpath(str(file)))
+    except (OSError, ValueError):
+        return Path(file)
+
+
 def path() -> Path:
     """The app's log, as launch.py named it (its app_log_path)."""
     named = os.environ.get(APP_LOG_ENV, "")
@@ -115,5 +139,5 @@ def cant_open(*, platform: str | None = None) -> int:
     except (AttributeError, OSError, ValueError):
         pass
     launcher = "CloseDesk.bat" if platform == "win32" else "CloseDesk.command"
-    tell(CANT_OPEN.format(log=path(), launcher=launcher), platform=platform)
+    tell(CANT_OPEN.format(log=shown(path()), launcher=launcher), platform=platform)
     return SAID

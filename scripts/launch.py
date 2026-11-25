@@ -104,6 +104,14 @@ CANT_OPEN = (
 # How the window's process ends when it has said why it can't open itself (a message box of its own): not said again.
 # (app_window.SAID)
 SAID = 4
+# Said as CloseDesk is set up with the Microsoft Store's Python (``store_python``).
+STORE_PYTHON = (
+    "This Python is the Microsoft Store's. CloseDesk works with it, but Windows keeps what it writes in your AppData "
+    "folder to that Python alone: the CloseDesk shortcut can't be put in your Start menu (the one on your Desktop "
+    "works), and CloseDesk's log is kept in that Python's own folder (in %LOCALAPPDATA%\\Packages). For all of it, "
+    "install Python from python.org (Install for me only needs no admin rights), then delete the .venv folder in "
+    "CloseDesk's folder and double-click CloseDesk.bat again."
+)
 SETUP_FAILED = (
     "CloseDesk couldn't install what it needs. Most often the internet connection (or a company proxy) stopped a "
     "download: try again when it is back. What went wrong is written in {log}."
@@ -383,6 +391,26 @@ def app_mode() -> bool:
     return os.environ.get(APP_ENV) == "1"
 
 
+def store_python() -> bool:
+    """Whether this is the Microsoft Store's Python (controller_inbox.app_log.store_python has the same): what it
+    writes in AppData only it sees, in a folder of its own."""
+    if not WINDOWS:
+        return False
+    places = [getattr(sys, name, "") for name in ("_base_executable", "base_prefix", "executable")]
+    return any("\\windowsapps\\" in str(place or "").lower() for place in places)
+
+
+def shown(file: Path, *, realpath=os.path.realpath) -> Path:
+    """Where a person finds ``file``, which CloseDesk wrote (controller_inbox.app_log.shown): with the Store's
+    Python, a file written in AppData is in that Python's own folder, which ``realpath`` says."""
+    if not store_python():
+        return Path(file)
+    try:
+        return Path(realpath(file))
+    except (OSError, ValueError):
+        return Path(file)
+
+
 def app_log_path() -> Path:
     """The app's log: in this person's own folder, kept through updates and a new environment."""
     if sys.platform == "darwin":
@@ -659,6 +687,8 @@ def create_environment(args: list[str]) -> int:
         say("Setting CloseDesk up again: the Python it was set up with is gone or was changed.")
     else:
         say(f"First run: setting up CloseDesk with Python {version[0]}.{version[1]}.")
+    if store_python():
+        say(STORE_PYTHON)
     shutil.rmtree(VENV, ignore_errors=True)
     made = subprocess.run([sys.executable, "-m", "venv", str(VENV)], cwd=ROOT, capture_output=True, text=True, **_quiet())
     if made.returncode != 0 or not venv_python().exists():
@@ -1071,7 +1101,8 @@ def _after_window(code: int) -> int:
     if code not in (0, SAID, 130):
         say(f"The CloseDesk window's program ended with exit code {code}.")
         if not os.environ.get(SMOKE_ENV):
-            tell(CANT_OPEN.format(log=app_log_path(), launcher="CloseDesk.bat" if WINDOWS else "CloseDesk.command"))
+            launcher = "CloseDesk.bat" if WINDOWS else "CloseDesk.command"
+            tell(CANT_OPEN.format(log=shown(app_log_path()), launcher=launcher))
     return code
 
 

@@ -12,7 +12,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 
-from controller_inbox import version
+from controller_inbox import app_log, version
 
 OK, NOTE, PROBLEM = "ok", "note", "problem"
 # The newest Python CloseDesk's tests run on. A newer one is tried all the same.
@@ -163,9 +163,20 @@ def _port(settings) -> Check:
     )
 
 
+# The Microsoft Store's Python: what it writes in AppData only it sees (app_log.store_python).
+STORE_PYTHON = (
+    "Windows keeps what this Python writes in your AppData folder to it alone: the CloseDesk shortcut can't be put in "
+    "your Start menu, and CloseDesk's log is in this Python's own folder (in %LOCALAPPDATA%\\Packages). Install Python "
+    "from python.org (Install for me only needs no admin rights), delete the .venv folder in CloseDesk's folder and "
+    "double-click CloseDesk.bat again."
+)
+
+
 def _python() -> Check:
     found = sys.version_info[:2]
     text = f"Python {platform.python_version()}"
+    if app_log.store_python():
+        return Check(NOTE, f"{text}, from the Microsoft Store", STORE_PYTHON)
     if found > TESTED_UP_TO:
         return Check(NOTE, f"{text}: newer than CloseDesk has been tried on ({TESTED_UP_TO[0]}.{TESTED_UP_TO[1]})")
     return Check(OK, text)

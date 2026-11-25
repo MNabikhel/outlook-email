@@ -608,3 +608,16 @@ def test_a_start_up_reading_that_fails_says_so_in_the_window(capsys):
     with pytest.raises(OSError):
         cli._read_behind(broken, lambda *_a: None, lambda *_a: None)
     assert "Reading the new mail stopped: the inbox folder can't be read" in capsys.readouterr().out
+
+
+def test_the_check_says_the_store_python_keeps_what_it_writes_to_itself(monkeypatch):
+    # Typing python in a Command Prompt offers the Microsoft Store's: CloseDesk works with it, but its Start menu
+    # shortcut and its log go where only that Python sees them. The check says so, and what to install instead.
+    from controller_inbox import app_log
+
+    monkeypatch.setattr(app_log, "store_python", lambda sys_module=None: True)
+    check = doctor._python()
+    assert check.state == doctor.NOTE and "Microsoft Store" in check.text
+    assert "python.org" in check.todo and "Start menu" in check.todo and ".venv" in check.todo
+    monkeypatch.setattr(app_log, "store_python", lambda sys_module=None: False)
+    assert "Microsoft Store" not in doctor._python().text

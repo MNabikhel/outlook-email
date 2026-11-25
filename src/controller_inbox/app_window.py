@@ -562,11 +562,11 @@ def updating_page() -> str:
 
 
 def stopped_page(log: Path) -> str:
-    return _page("CloseDesk stopped", STOPPED.format(log=log))
+    return _page("CloseDesk stopped", STOPPED.format(log=app_log.shown(log)))
 
 
 def not_open_page(log: Path) -> str:
-    return _page("CloseDesk didn't open", NOT_OPEN.format(log=log))
+    return _page("CloseDesk didn't open", NOT_OPEN.format(log=app_log.shown(log)))
 
 
 # The window as a browser is (Windows) -------------------------------------------------------------------------------
@@ -1497,7 +1497,7 @@ def _cant_start(exc: BaseException) -> str:
                 problems.append(check.text + (f" {check.todo}" if check.todo else ""))
     except Exception:
         pass
-    return CANT_START.format(problems="\n".join(problems) or _said(exc), log=log_path())
+    return CANT_START.format(problems="\n".join(problems) or _said(exc), log=app_log.shown(log_path()))
 
 
 def _leave(code: int) -> None:
@@ -1519,7 +1519,8 @@ def main(args) -> int:
         return _open(args)
     except Exception:
         traceback.print_exc()
-        tell(app_log.CANT_OPEN.format(log=log_path(), launcher="CloseDesk.bat" if sys.platform == "win32" else "CloseDesk.command"))
+        launcher = "CloseDesk.bat" if sys.platform == "win32" else "CloseDesk.command"
+        tell(app_log.CANT_OPEN.format(log=app_log.shown(log_path()), launcher=launcher))
         return SAID
 
 

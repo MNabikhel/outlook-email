@@ -49,7 +49,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from controller_inbox import version
+from controller_inbox import app_log, version
 from controller_inbox.app_window import APP_ID, BUNDLE_ID, mac_icon_name
 # launch.py's word that this start's environment was just made (``upkeep``'s new_environment; cli._serve reads it).
 from controller_inbox.app_window import NEW_ENVIRONMENT_ENV as NEW_ENVIRONMENT_ENV
@@ -139,6 +139,15 @@ def _join(words: list[str]) -> str:
 # Where Windows keeps what is pinned to the taskbar (in the person's roaming AppData): a copy of the shortcut the open
 # window was pinned from, with its folder.
 PINNED = ("Microsoft", "Internet Explorer", "Quick Launch", "User Pinned", "TaskBar")
+# The Microsoft Store's Python (app_log.store_python): Windows keeps what it writes in AppData, the Start menu's folder
+# and the taskbar's among it, to that Python alone. The Desktop isn't in AppData.
+IN_APPDATA = ("Start menu", "Taskbar")
+STORE_START_MENU = (
+    "With the Microsoft Store's Python, CloseDesk can't put its shortcut in your Start menu or keep the one on your "
+    "taskbar (Windows keeps what that Python writes there to itself). To have them, install Python from python.org "
+    "(Install for me only needs no admin rights), delete the .venv folder in CloseDesk's folder and double-click "
+    "CloseDesk.bat again."
+)
 
 
 def known_folders() -> dict[str, Path]:
@@ -259,16 +268,25 @@ class Windows:
     # Made by Windows when the person pins CloseDesk, never by CloseDesk.
     pinned = "Taskbar"
 
-    def __init__(self, root, *, links=None, folders=None, icon_dir=None, icon_source=None) -> None:
+    def __init__(
+        self, root, *, links=None, folders=None, icon_dir=None, icon_source=None, store=None, realpath=os.path.realpath
+    ) -> None:
         self.root = Path(root)
         self.links = links or WinLinks()
         self.folders = folders or known_folders
         self.icon_dir = Path(icon_dir) if icon_dir else user_dir()
         self.icon_source = Path(icon_source) if icon_source else STATIC / "closedesk.ico"
+        # Run by the Microsoft Store's Python (``IN_APPDATA``), and where a file it wrote really is.
+        self.store = app_log.store_python() if store is None else bool(store)
+        self.realpath = realpath
 
     def places(self, saved: dict | None = None) -> list[tuple[str, Path, bool]]:
-        """(name, the shortcut there, whether it is only kept right: never made)."""
-        return [(name, Path(folder) / f"{NAME}.lnk", name == self.pinned) for name, folder in self.folders().items()]
+        """(name, the shortcut there, whether it is only kept right: never made). With the Store's Python, none where
+        only it would see one (``IN_APPDATA``)."""
+        return [
+            (name, Path(folder) / f"{NAME}.lnk", name == self.pinned) for name, folder in self.folders().items()
+            if not (self.store and name in IN_APPDATA)
+        ]
 
     def fallback(self):
         return None
@@ -287,7 +305,8 @@ class Windows:
             "target": str(root / ".venv" / "Scripts" / "pythonw.exe"),
             "arguments": f'"{root / "scripts" / "launch.py"}" --app',
             "folder": str(root),
-            "icon": str(self.icon()),
+            # With the Store's Python, the icon's copy is in that Python's own folder: named where Explorer finds it.
+            "icon": str(app_log.shown(self.icon(), store=self.store, realpath=self.realpath)),
             "icon_index": 0,
             "description": NAME,
             "app_id": APP_ID,
@@ -349,6 +368,8 @@ class Windows:
         ok = any(done[key] for key in ("made", "moved", "back", "fresh", "kept"))
         if failed and not ok:
             lines.append(f"{self.script} in CloseDesk's folder still opens it.")
+        if self.store and (explicit or done["made"]):
+            lines.append(STORE_START_MENU)
         return Said(ok, " ".join(lines))
 
 
@@ -901,14 +922,17 @@ def upkeep_soon(*, new_environment: bool = False) -> threading.Thread:
     return thread
 
 
-def offer(*, platform: str | None = None) -> dict:
-    """What Settings offers: the button that makes the shortcut again, and what it is for."""
+def offer(*, platform: str | None = None, store: bool | None = None) -> dict:
+    """What Settings offers: the button that makes the shortcut again, and what it is for. ``store``: CloseDesk runs on
+    the Microsoft Store's Python, which can't put one in the Start menu."""
     platform = platform or sys.platform
     if platform == "win32":
+        store = app_log.store_python() if store is None else store
+        where = "on your Desktop" if store else "on your Desktop and in your Start menu"
         return {
             "offered": True,
             "label": "Add the CloseDesk shortcut again",
-            "help": "The CloseDesk shortcut on your Desktop and in your Start menu opens CloseDesk in a window of its own. "
+            "help": f"The CloseDesk shortcut {where} opens CloseDesk in a window of its own. "
             "Deleted it, or moved CloseDesk's folder? Add it again here.",
         }
     if platform == "darwin":

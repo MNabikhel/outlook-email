@@ -11,6 +11,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -478,6 +479,19 @@ def test_an_update_that_didnt_finish_is_said_when_closedesk_opens_again(download
     assert view["title"] == "CloseDesk wasn't updated"
     assert view["failed_message"] == updates.UNFINISHED and "opened as it was" in updates.UNFINISHED
     assert "mail and settings are kept" in updates.UNFINISHED
+
+
+def test_an_update_the_window_ran_that_didnt_finish_names_the_log_where_explorer_finds_it(download, settings, store, monkeypatch):
+    # With the Microsoft Store's Python, the app's log in AppData is kept in that Python's own folder.
+    from controller_inbox import app_log
+
+    log = download / "AppData" / "CloseDesk" / "CloseDesk-app.log"
+    private = download / "Packages" / "PythonSoftwareFoundation.Python.3.12_qbz5n2kfra8p0" / "LocalCache" / "CloseDesk-app.log"
+    monkeypatch.setenv(updates.APP_ENV, "1")
+    monkeypatch.setenv(updates.APP_LOG_ENV, str(log))
+    updates.remember_update_asked(store)
+    monkeypatch.setattr(app_log, "shown", lambda file, **_: private if Path(file) == log else Path(file))
+    assert updates.unfinished_message(store) == updates.UNFINISHED_IN_APP.format(log=private)
 
 
 def test_an_update_that_didnt_finish_offers_to_try_again_when_github_still_has_it(download, settings, store, monkeypatch):

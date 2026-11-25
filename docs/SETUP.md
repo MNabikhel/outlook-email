@@ -6,7 +6,7 @@ The longer notes are in [BIONIC_GUIDE.md](BIONIC_GUIDE.md). The picture versions
 
 ## One-time setup
 
-1. **Python 3.11 or newer** must be on the computer (3.12 is the best choice). If it isn't, install it from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH**; *Install for me only* needs no admin rights. CloseDesk uses the Python that is there and never installs one on its own. Where there is none, it stops and says so. (No admin rights on a Mac? See below.)
+1. **Python 3.11 or newer** must be on the computer (3.12 is the best choice). If it isn't, install it from [python.org](https://www.python.org/downloads/). On Windows, tick **Add python.exe to PATH**; *Install for me only* needs no admin rights. (The Python the Microsoft Store offers works too, but Windows keeps what it writes in your AppData folder to it alone: CloseDesk can't put its shortcut in your Start menu, and its log is in that Python's own folder. CloseDesk says so when it is set up with it.) CloseDesk uses the Python that is there and never installs one on its own. Where there is none, it stops and says so. (No admin rights on a Mac? See below.)
 2. **Get CloseDesk.**
    - **Mac:** open **Terminal** (⌘ Space, type *Terminal*, Return), paste this line and press Return:
 
@@ -48,7 +48,9 @@ The first time `CloseDesk.bat` or `CloseDesk.command` opens the dashboard, Close
 window of its own, with its own icon, instead of a browser tab:
 
 - **Windows:** **CloseDesk** on your Desktop and in your Start menu. To keep it on the taskbar, right-click CloseDesk's
-  button there while it is open and choose **Pin to taskbar**.
+  button there while it is open and choose **Pin to taskbar**. With the Microsoft Store's Python there is the Desktop
+  one only, and pinning it doesn't work: install Python from python.org, delete the `.venv` folder in CloseDesk's
+  folder and double-click `CloseDesk.bat` again for the Start menu and the taskbar.
 - **Mac:** **CloseDesk** in Applications in your user folder. Spotlight finds it (⌘ Space, type *CloseDesk*); to keep
   it in the Dock, right-click its Dock icon while it is open and choose **Options → Keep in Dock**. You can move it
   (to the Applications folder everyone shares, say): once it has been opened from there, CloseDesk keeps that one up
@@ -114,7 +116,9 @@ Terminal too, and the first start says which.
 
 There is no black window with the shortcut, so what CloseDesk says as it starts is written to its log:
 `%LOCALAPPDATA%\CloseDesk\CloseDesk-app.log` on Windows, `~/Library/Logs/CloseDesk/CloseDesk-app.log` on a Mac. When
-something goes wrong as it opens, a message says so and names the log.
+something goes wrong as it opens, a message says so and names the log. (With the Microsoft Store's Python, the log is in
+that Python's own folder, `%LOCALAPPDATA%\Packages\PythonSoftwareFoundation.Python.3.x_qbz5n2kfra8p0\LocalCache\Local\CloseDesk`:
+the message names that one.)
 
 ## Updating
 
@@ -230,7 +234,7 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 | The CloseDesk shortcut opens CloseDesk in the browser, not a window | The window can't open on this computer, and the first time CloseDesk said why: usually Windows without Microsoft Edge WebView2 Runtime, which IT can install (free from Microsoft), or the window's part not installed yet (each start tries again). See "The CloseDesk shortcut and window". |
 | Windows: *Problem with Shortcut*, or the Mac: *CloseDesk can't find its folder* | CloseDesk's folder was moved or renamed. Double-click `CloseDesk.bat` (or `CloseDesk.command`) once in its new place: the shortcut follows it (and is put back if you let Windows delete it). |
 | Windows: *Python venv launcher is sorry to say ... did not find executable* | The Python CloseDesk was set up with is gone (uninstalled, often after a newer one was installed). Double-click `CloseDesk.bat` once: it sets CloseDesk up again with the Python that is there, and the shortcut works again. |
-| The CloseDesk shortcut says *CloseDesk couldn't open*, or does nothing | What went wrong is in its log: `%LOCALAPPDATA%\CloseDesk\CloseDesk-app.log` (Windows) or `~/Library/Logs/CloseDesk/CloseDesk-app.log` (Mac). Double-clicking `CloseDesk.bat` / `CloseDesk.command` shows the same start in its window, and `--check` says what isn't in order. |
+| The CloseDesk shortcut says *CloseDesk couldn't open*, or does nothing | What went wrong is in its log, the one the message names: `%LOCALAPPDATA%\CloseDesk\CloseDesk-app.log` (Windows; with the Microsoft Store's Python, in `%LOCALAPPDATA%\Packages\PythonSoftwareFoundation.Python.3.x_qbz5n2kfra8p0\LocalCache\Local\CloseDesk`) or `~/Library/Logs/CloseDesk/CloseDesk-app.log` (Mac). Double-clicking `CloseDesk.bat` / `CloseDesk.command` shows the same start in its window, and `--check` says what isn't in order. |
 | The CloseDesk shortcut or the Mac's CloseDesk is gone | It isn't put back once deleted. **Settings → This copy and its check → Add the CloseDesk shortcut again** (Mac: **Add CloseDesk to Applications again**), or `CloseDesk.bat --shortcut` / `CloseDesk.command --shortcut`. |
 | Mac: CloseDesk.app opens Terminal and the browser, not a window | CloseDesk's folder, or a folder `.env` puts elsewhere (the data, the mail drop, the AP cost codes), is in Desktop, Documents, Downloads, iCloud Drive, another cloud drive or on another disk, where macOS would ask first. Move it into your home folder (and change its line in `.env`), then double-click `CloseDesk.command` once. |
 | Local model: **not running** | Open LM Studio and start the server. CloseDesk loads a model the next time it starts; or choose one in Settings → **Model that answers your questions**. Then click **Process new mail** again. `python -m controller_inbox llm-check` says exactly what is wrong. |
