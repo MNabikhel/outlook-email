@@ -3,6 +3,7 @@
 
 import { h, icon, plural, toast } from "./dom.js";
 import { meetingTime } from "./format.js";
+import { levelTag } from "./lists.js";
 
 const enc = encodeURIComponent;
 const mailLink = (id, text, listKey) => h("a", { href: `/app/mail/${enc(id)}${listKey ? `?in=${enc(listKey)}` : ""}`, dataset: { nav: "" } }, text);
@@ -276,8 +277,10 @@ export function digestView(data) {
   if (!p) {
     return h("div", { class: "page" }, h("div", { class: "page-inner" }, nav, h("h1", { class: "page-title" }, "No digest yet."), h("p", { class: "lede" }, "Process new mail and a digest is saved for the day."), past));
   }
+  // An email says its importance when Settings → Appearance asks for it, as in the lists (a task has none of its own).
   const list = (items, empty, summary = false) =>
     itemList(items || [], empty, (item) => [
+      levelTag(item),
       mailLink(item.email_id || item.id, item.title || item.subject),
       h("small", null, [item.sender || item.priority || "", item.due_label || item.due_date || item.due ? `due ${item.due_label || item.due_date || item.due}` : "", item.amount ? `$${Number(item.amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ""].filter(Boolean).join(" · ")),
       summary && item.summary ? h("p", { class: "muted small" }, item.summary) : null,
@@ -305,7 +308,7 @@ export function digestView(data) {
         ? card(
             "Your focus",
             p.focus.length
-              ? h("ol", { class: "plain-list ranked" }, p.focus.map((row) => h("li", null, h("span", { class: `tag tag-${row.kind}` }, row.label), " ", mailLink(row.email_id, row.title), h("small", null, `${row.sender}${row.more_tasks ? ` · +${row.more_tasks} more` : ""}`))))
+              ? h("ol", { class: "plain-list ranked" }, p.focus.map((row) => h("li", null, h("span", { class: `tag tag-${row.kind}` }, row.label), " ", levelTag(row), " ", mailLink(row.email_id, row.title), h("small", null, `${row.sender}${row.more_tasks ? ` · +${row.more_tasks} more` : ""}`))))
               : h("p", { class: "muted" }, "Nothing needed you.")
           )
         : null,

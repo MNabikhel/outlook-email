@@ -174,7 +174,7 @@ const heldChip = (d) => (d.files ? chip("Files locked", "chip-danger", "lock") :
 // on <html>), so ticking the box needs no list drawn again. Critical and High as the task list's tags; Medium and Low
 // the quiet grey tag. An email held as possible payment fraud has the held edge, not its importance's, and says so:
 // its other chip may say only "Files locked".
-const levelTag = (d) =>
+export const levelTag = (d) =>
   d.locked
     ? h("span", { class: "tag tag-held item-level" }, "Held for fraud")
     : d.importance && d.importance_label

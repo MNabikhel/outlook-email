@@ -348,6 +348,36 @@ def test_classic_today_writes_the_importance_on_each_email_when_asked(browser, s
     context.close()
 
 
+# The digest's lists of emails (not its tasks, which have their own priority): what needs a phone call, the focus
+# list, and what came in, in each folder.
+DIGEST_EMAILS = {
+    "workspace": ".page .card-danger .plain-list li, .page ol.ranked li, .page .cards3 .plain-list li",
+    "classic": ".panel.alert ul.stack li, .focus-item, .split.three ul.stack li",
+}
+DIGEST_LEVELS = """sel => [...document.querySelectorAll(sel)].map((li) => {
+  const tag = li.querySelector('.item-level');
+  return { text: tag ? tag.textContent : null, shown: Boolean(tag) && getComputedStyle(tag).display !== 'none' && tag.getBoundingClientRect().width > 0 };
+})"""
+
+
+@pytest.mark.parametrize("where", ["workspace", "classic"])
+def test_the_digest_writes_the_importance_on_each_email_when_asked(browser, settings, loaded, where):
+    """The digest lists the day's emails, as Today does: with the box ticked, each says its importance there too, in
+    the workspace as on the classic page."""
+    from controller_inbox import appearance
+
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.request.post(f"{base}/digest/rebuild", headers={"origin": base})
+        appearance.save(loaded, importance_words=True)
+        page.goto(f"{base}/app/digest" if where == "workspace" else f"{base}/digest")
+        page.wait_for_selector(DIGEST_EMAILS[where])
+        rows = page.evaluate(DIGEST_LEVELS, DIGEST_EMAILS[where])
+        assert len(rows) >= 10 and all(row["shown"] and row["text"] in WORDS.values() for row in rows), rows
+    context.close()
+
+
 # The longest words Today can show on one row, with a 7-figure amount (a held email keeps its longer "Held for
 # fraud"); then whether anything in a row's first line runs past its text box (on its right, the done button's room).
 FIT = """() => {
