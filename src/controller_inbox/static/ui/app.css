@@ -414,8 +414,11 @@ a.rail-chip:hover { background: var(--surface-3); text-decoration: none; }
 .tag-prio-critical { background: var(--danger-soft); color: var(--danger); }
 .tag-prio-high { background: var(--warn-soft); color: var(--warn); }
 /* The importance in words on each email in the lists (lists.js), shown when Settings → Appearance asks for it. After
-   .tag, so it stays hidden otherwise. Today's first line wraps rather than run into the done button. */
+   .tag, so it stays hidden otherwise. Outlined on the row, in its own colour, where the reason a row is in Today
+   ("Due today", "Overdue") is a filled tag: side by side, "how important" doesn't look like a second "why". Today's
+   first line wraps rather than run into the done button. */
 .item-level { display: none; flex: none; }
+.tag.item-level { background: transparent; box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 55%, transparent); }
 :root[data-importance-words="on"] .item-level { display: inline-flex; }
 :root[data-importance-words="on"] .kind-focus .item-row1 { flex-wrap: wrap; row-gap: 2px; }
 .pill { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11.5px; font-weight: 650; color: var(--on-pill); background: var(--imp-medium); }

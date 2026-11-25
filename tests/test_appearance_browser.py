@@ -218,9 +218,11 @@ LEVELS = """() => [...document.querySelectorAll('.items .item.kind-mail, .items 
   const level = ['critical', 'high', 'medium', 'low'].find((k) => li.classList.contains('imp-' + k)) || '';
   const tag = li.querySelector('.item-level');
   const shown = tag && getComputedStyle(tag).display !== 'none' && tag.getBoundingClientRect().width > 0;
+  const reason = li.querySelector('.item-row1 .tag:not(.item-level)');
   return { key: li.dataset.key, level, text: tag ? tag.textContent : null, shown, classes: tag ? tag.className : '',
-           background: tag ? getComputedStyle(tag).backgroundColor : '', locked: li.classList.contains('is-locked'),
-           held: Boolean(li.querySelector('.chip-danger')) };
+           background: tag ? getComputedStyle(tag).backgroundColor : '', outline: tag ? getComputedStyle(tag).boxShadow : '',
+           color: tag ? getComputedStyle(tag).color : '', reason: reason ? getComputedStyle(reason).backgroundColor : null,
+           locked: li.classList.contains('is-locked'), held: Boolean(li.querySelector('.chip-danger')) };
 })"""
 WORDS = {"critical": "Critical", "high": "High", "medium": "Medium", "low": "Low"}
 
@@ -233,7 +235,7 @@ def test_the_importance_shows_in_words_on_each_email_when_asked(browser, setting
         page.evaluate("() => { window.notReloaded = true; }")
         page.check("#set-importance-words")
         page.wait_for_selector("html[data-importance-words='on']")
-        grey = page.evaluate("() => { const t = document.createElement('span'); t.className = 'tag'; document.body.append(t); const c = getComputedStyle(t).backgroundColor; t.remove(); return c; }")
+        grey = page.evaluate("() => { const t = document.createElement('span'); t.className = 'tag'; document.body.append(t); const c = getComputedStyle(t).color; t.remove(); return c; }")
         seen_levels = set()
         for nav, path in (("today", "/app"), ("folder:important", "/app/folder/important"), ("all", "/app/all")):
             page.click(f".rail-item[data-id='{nav}']")
@@ -245,9 +247,14 @@ def test_the_importance_shows_in_words_on_each_email_when_asked(browser, setting
                 assert row["level"], row
                 assert row["shown"] and row["text"] == WORDS[row["level"]], (path, row)
                 if row["level"] in ("medium", "low"):
-                    assert row["background"] == grey, ("Medium and Low are the quiet grey tag", row)
+                    assert row["color"] == grey, ("Medium and Low are in the quiet grey", row)
                 else:
                     assert f"tag-prio-{row['level']}" in row["classes"]
+                # Outlined on the row, where the reason a row is in Today ("Due today", "Overdue") is a filled tag: side
+                # by side, "how important" and "why it is here" don't look like the same kind of label.
+                assert row["background"] == "rgba(0, 0, 0, 0)" and "inset" in row["outline"], ("outlined", row)
+                if row["reason"] is not None:
+                    assert row["reason"] != "rgba(0, 0, 0, 0)", ("the reason stays a filled tag", row)
                 if row["locked"]:
                     assert row["held"], ("a held email still says it is held", row)
                 seen_levels.add(row["level"])

@@ -392,10 +392,11 @@ ROLES = {
         ("text", Rule(".pill.imp-critical", "color", "--on-pill"), [Rule(".pill.imp-critical", "background")], "Critical pill .pill.imp-critical"),
         ("text", Rule(".pill.imp-high", "color", "--on-pill"), [Rule(".pill.imp-high", "background")], "High pill .pill.imp-high"),
         ("text", Rule(".pill", "color"), [Rule(".pill", "background")], "Medium pill .pill"),
-        # The importance in words on a row (Settings → Appearance), on its own pale fill.
-        ("text", Rule(".tag-prio-critical", "color"), [Rule(".tag-prio-critical", "background")], "Critical on a row .item-level.tag-prio-critical"),
-        ("text", Rule(".tag-prio-high", "color"), [Rule(".tag-prio-high", "background")], "High on a row .item-level.tag-prio-high"),
-        ("text", Rule(".tag", "color"), [Rule(".tag", "background")], "Medium or Low on a row .item-level"),
+        # The importance in words on a row (Settings → Appearance): outlined, on the row itself as it is shown, under
+        # the pointer, or open (.tag.item-level has no fill of its own).
+        ("text", Rule(".tag-prio-critical", "color"), ["--surface", "--surface-2", "--selected"], "Critical on a row .item-level.tag-prio-critical"),
+        ("text", Rule(".tag-prio-high", "color"), ["--surface", "--surface-2", "--selected"], "High on a row .item-level.tag-prio-high"),
+        ("text", Rule(".tag", "color"), ["--surface", "--surface-2", "--selected"], "Medium or Low on a row .item-level"),
         # The card beside a page's box: how sure a reading is, in words on their own pale fill (reader.js).
         ("text", Rule(".pv-tip-tag.ok", "color"), [Rule(".pv-tip-tag.ok", "background")], "a sure reading .pv-tip-tag.ok"),
         ("text", Rule(".pv-tip-tag.check", "color"), [Rule(".pv-tip-tag.check", "background")], "a reading to check .pv-tip-tag.check"),
