@@ -508,6 +508,18 @@ def shown(log: str) -> str:
     return log[log.rindex(SHOWED) + len(SHOWED) :].splitlines()[0]
 
 
+def pages_shown(log: str) -> list[str]:
+    """Every page the window said it showed."""
+    return [line.split(SHOWED, 1)[1].strip() for line in log.splitlines() if SHOWED in line]
+
+
+def both_uis(log: str, what: str) -> None:
+    """The window showed the first page (a classic one: the check's folder has no mail) and the workspace, each with
+    its scripts run in the window's own engine."""
+    pages = pages_shown(log)
+    assert "/app" in pages and any(page != "/app" for page in pages), f"the CloseDesk window ({what}) didn't show both UIs: {pages}"
+
+
 def open_window(folder: Path, port: int, *, name: str, attached: bool = False) -> list[str]:
     """launch.py --app as the shortcut runs it (pythonw on Windows), with the window's check: the real window opens,
     shows CloseDesk's page and closes itself; it ends with 0, and CloseDesk stops with it (``attached`` to a CloseDesk
@@ -549,7 +561,8 @@ def open_window(folder: Path, port: int, *, name: str, attached: bool = False) -
     said = f"--- its log\n{log[-6000:]}\n--- its output\n{''.join(output)[-2000:]}"
     assert process.returncode == 0, f"the CloseDesk window ({name}) ended with {process.returncode}\n{said}"
     assert SHOWED in log, f"the CloseDesk window ({name}) didn't show CloseDesk's page\n{said}"
-    print(f"--- the CloseDesk window ({name}) showed {shown(log)} and closed by itself, exit 0", flush=True)
+    both_uis(log, name)
+    print(f"--- the CloseDesk window ({name}) showed {', '.join(pages_shown(log))} and closed by itself, exit 0", flush=True)
     if attached:
         assert health(port), f"closing the window stopped the CloseDesk it didn't start\n{said}"
         print("--- the CloseDesk that was already open is still open", flush=True)
@@ -565,17 +578,35 @@ def open_window(folder: Path, port: int, *, name: str, attached: bool = False) -
     return problems
 
 
-def end_windows() -> None:
-    """Whatever is left of a CloseDesk window the check opened without being its parent (the double-click's)."""
+def end_windows(folder: Path, shortcuts: Path) -> None:
+    """Whatever is left of a CloseDesk window the check opened without being its parent (the double-click's): only what
+    runs from the check's own folder, never another CloseDesk (or any other Python program) open on this computer."""
     if WINDOWS:
-        subprocess.run(["taskkill", "/F", "/T", "/IM", "pythonw.exe"], capture_output=True)
+        # The programs whose command line names the check's folder (the window's Python runs from its .venv), each with
+        # what it started. The folder is passed in the environment, never written into the script.
+        listing = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:CLOSEDESK_CHECK_FOLDER) }"
+             " | ForEach-Object { $_.ProcessId }"],
+            capture_output=True, text=True, errors="replace", timeout=120, env={**os.environ, "CLOSEDESK_CHECK_FOLDER": str(folder)},
+        )
+        for pid in listing.stdout.split():
+            if pid.isdigit() and int(pid) != os.getpid():
+                subprocess.run(["taskkill", "/F", "/T", "/PID", pid], capture_output=True)
     elif MAC:
+        mine = os.path.realpath(shortcuts) + os.sep
         for app in mac_apps()[0]:
-            if app["bundle"] == BUNDLE_ID and app["pid"]:
+            if app["bundle"] == BUNDLE_ID and app["pid"] and os.path.realpath(app["path"] or "/").startswith(mine):
                 try:
                     os.kill(app["pid"], signal.SIGTERM)
                 except OSError:
                     pass
+
+
+def closedesk_open_here() -> list[dict]:
+    """A Mac: a CloseDesk open already (a real one, not the check's). It has CloseDesk.app's id, so macOS would bring it
+    forward instead of opening the check's."""
+    return [app for app in mac_apps()[0] if app["bundle"] == BUNDLE_ID] if MAC else []
 
 
 def double_click(folder: Path, shortcuts: Path) -> list[str]:
@@ -622,7 +653,7 @@ def double_click(folder: Path, shortcuts: Path) -> list[str]:
             time.sleep(0.5)
     finally:
         if not finished:
-            end_windows()
+            end_windows(folder, shortcuts)
         if shot:
             shot.join(timeout=60)
     log = log_since(start)
@@ -633,7 +664,8 @@ def double_click(folder: Path, shortcuts: Path) -> list[str]:
         # Rosetta (an environment set up for Apple's processor wouldn't load there).
         opened = f"CloseDesk.app opened ({os.uname().machine})"
         assert opened in log, f"macOS didn't run CloseDesk.app as {os.uname().machine}\n--- the log\n{log[-6000:]}"
-    print(f"--- the window of {what} showed {shown(log)}, closed by itself, and CloseDesk stopped with it", flush=True)
+    both_uis(log, what)
+    print(f"--- the window of {what} showed {', '.join(pages_shown(log))}, closed by itself, and CloseDesk stopped with it", flush=True)
     if not MAC:
         return []
     print(f"--- what macOS called it: {seen.seen}", flush=True)
@@ -708,6 +740,7 @@ def update_in_window(folder: Path, archive: Path, *, before: str, after: str) ->
     assert updating and "CloseDesk was updated" in log, f"the window didn't run the update\n{said}"
     # (The new version answers only for the moment its page takes to load: its commit is shown when it was caught.)
     assert log.rindex(SHOWED) > log.index("CloseDesk was updated"), f"the window didn't show the new version\n{said}"
+    both_uis(log[log.index("CloseDesk was updated"):], "the new version")
     assert stopped, f"CloseDesk didn't stop with its window after the update\n{said}"
     assert (folder / "docs" / "ONLY-IN-THE-UPDATE.txt").read_text(encoding="utf-8") == archive.stem
     print(f"--- the window updated CloseDesk to {after[:7]}, showed the new version, and closed (versions that answered: "
@@ -724,6 +757,11 @@ def window_check() -> int:
     for the window itself (tests/stand_in_window). Windows
     needs Microsoft Edge WebView2 Runtime (CI installs it first). CLOSEDESK_SMOKE_SHOTS: a folder for the screenshots
     and the app's log."""
+    open_already = closedesk_open_here()
+    if open_already:
+        print(f"FAILED: CloseDesk is open on this Mac ({open_already}). Close it first: the check opens CloseDesk.app "
+              "itself, and macOS would bring the open one forward instead.", flush=True)
+        return 1
     work = Path(tempfile.mkdtemp(prefix="closedesk window "))
     shortcuts = work / "shortcuts"
     os.environ["CLOSEDESK_SHORTCUT_DIR"] = str(shortcuts)
@@ -754,7 +792,13 @@ def window_check() -> int:
         print("The CloseDesk window check passed (Linux: no window; the rest of it with a stand-in window).", flush=True)
         return 0
     found = in_env(folder, "from importlib.metadata import version; print(version('pywebview'))")
-    print(f"--- the window's part is installed: pywebview {found}", flush=True)
+    runs = in_env(folder, "import sys; print('%d.%d' % sys.version_info[:2])")
+    print(f"--- the window's part is installed: pywebview {found}, on Python {runs}", flush=True)
+    named = os.environ.get("CLOSEDESK_PYTHON", "")
+    if named and not own:
+        wanted = subprocess.run([named, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"], capture_output=True,
+                                text=True, timeout=60).stdout.strip()
+        assert runs == wanted, f"the launcher set CloseDesk up with Python {runs}, not the {wanted} it was given ({named})"
     why = in_env(folder, "from controller_inbox import app_window; print(app_window.why_no_window())")
     assert why == "None", f"the window can't open on this computer: {why}"
     out = run(folder, "--shortcut")

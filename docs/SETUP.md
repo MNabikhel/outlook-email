@@ -57,7 +57,9 @@ nor macOS asks about it. On Linux there is no shortcut: `CloseDesk.command` open
 
 The window is CloseDesk: it reads the new mail and opens the dashboard as the double-click files do, and **closing the
 window closes CloseDesk**. While mail is being processed, or CloseDesk is updating, it asks first (*CloseDesk is still
-processing mail. Close it anyway?*, **Close** or **Keep open**). In the window:
+processing mail. Close it anyway?*): **Close** closes it and **Cancel** keeps it open (on Windows the buttons are
+**OK** and **Cancel**). An update carries on by itself after the window is closed; open CloseDesk again once it is
+done (opened meanwhile, CloseDesk says it is being updated). In the window:
 
 - **Open in mail app** opens your mail app; another website, the printable digest and a file's original open in your
   browser.
@@ -66,7 +68,8 @@ processing mail. Close it anyway?*, **Close** or **Keep open**). In the window:
   **Updating CloseDesk** while the update runs, then opens the new version by itself. If the update can't finish,
   CloseDesk opens as it was and says so.
 - If CloseDesk is already open (from `CloseDesk.bat` / `CloseDesk.command`, or another window), the shortcut shows
-  that one, and closing the window leaves it open.
+  that one, and closing the window leaves it open. If that one is closed while this window is still open, this window
+  starts CloseDesk again by itself (after waiting a moment, in case it was only updating).
 
 The double-click files work exactly as before: CloseDesk in your browser, with the black window (Terminal on a Mac)
 that you leave open while you use it. Use whichever you like.
@@ -106,8 +109,9 @@ your mail is sent. When a newer one is out, the first page CloseDesk shows asks:
 ready**, with the new and the current version, what changed last, and two buttons. **Update now** updates as below;
 **Not now** closes the question and CloseDesk opens as normal, and it asks again the next time you open CloseDesk (not
 on every page). Opening CloseDesk with no internet, or when GitHub is slow, nothing is asked and nothing waits on it:
-the asking gives up after a few seconds. If an update didn't finish, the next start says **CloseDesk wasn't updated**
-and opens as it was.
+the asking gives up after a few seconds. A newer version found later while CloseDesk is open (it asks again a minute
+later, and once a day) is shown in Settings and the top bar, not asked about in the middle of your work. If an update
+didn't finish, the next start says **CloseDesk wasn't updated** and opens as it was.
 
 The top bar also shows a small **Update ready** link, and Settings says **A newer CloseDesk is ready (2026.11.16; you
 have 2026.11.13)** with an **Update** button. To stop the asking, put `CONTROLLER_INBOX_UPDATE_CHECK=false` in the
@@ -201,7 +205,7 @@ Leave LM Studio's server running overnight. In the morning, double-click CloseDe
 | The page does not open | The CloseDesk window (or the black window, with the double-click files) must still be open. Go to [http://127.0.0.1:8765](http://127.0.0.1:8765). |
 | The CloseDesk shortcut opens CloseDesk in the browser, not a window | The window can't open on this computer, and the first time CloseDesk said why: usually Windows without Microsoft Edge WebView2 Runtime, which IT can install (free from Microsoft), or the window's part not installed yet (each start tries again). See "The CloseDesk shortcut and window". |
 | Windows: *Problem with Shortcut*, or the Mac: *CloseDesk can't find its folder* | CloseDesk's folder was moved or renamed. Double-click `CloseDesk.bat` (or `CloseDesk.command`) once in its new place: the shortcut follows it. |
-| The CloseDesk shortcut does nothing, or says CloseDesk couldn't start | What went wrong is in its log: `%LOCALAPPDATA%\CloseDesk\CloseDesk-app.log` (Windows) or `~/Library/Logs/CloseDesk/CloseDesk-app.log` (Mac). Double-clicking `CloseDesk.bat` / `CloseDesk.command` shows the same start in its window, and `--check` says what isn't in order. |
+| The CloseDesk shortcut says *CloseDesk couldn't open*, or does nothing | What went wrong is in its log: `%LOCALAPPDATA%\CloseDesk\CloseDesk-app.log` (Windows) or `~/Library/Logs/CloseDesk/CloseDesk-app.log` (Mac). Double-clicking `CloseDesk.bat` / `CloseDesk.command` shows the same start in its window, and `--check` says what isn't in order. |
 | The CloseDesk shortcut or the Mac's CloseDesk is gone | It isn't put back once deleted. **Settings → This copy and its check → Add the CloseDesk shortcut again** (Mac: **Add CloseDesk to Applications again**), or `CloseDesk.bat --shortcut` / `CloseDesk.command --shortcut`. |
 | Mac: CloseDesk.app opens Terminal and the browser, not a window | CloseDesk's folder is in Desktop, Documents, Downloads, iCloud Drive, another cloud drive or on another disk, where macOS would ask first. Move it into your home folder and double-click `CloseDesk.command` once. |
 | Local model: **not running** | Open LM Studio and start the server. CloseDesk loads a model the next time it starts; or choose one in Settings → **Model that answers your questions**. Then click **Process new mail** again. `python -m controller_inbox llm-check` says exactly what is wrong. |

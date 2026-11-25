@@ -95,22 +95,40 @@ jobs:
   # already open, and through the shortcut itself as a double-click opens it. Each time CloseDesk's page has to load in
   # it, the window closes itself, and CloseDesk stops with it. On a Mac the Dock has to call it CloseDesk (lsappinfo),
   # not Python. On Linux there is no window, and its start has to say so. Screenshots and the app's log are kept.
+  # The launchers take 3.11 to 3.14, whichever the computer has, and the window's parts (pythonnet on Windows, pyobjc on
+  # a Mac) are built for each: the oldest and the newest are opened too, with that Python named to the launcher
+  # (CLOSEDESK_PYTHON; it would find 3.12 first). --get-python's legs download CloseDesk's own 3.12.
   window:
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, macos-latest]
+        python: ["3.12"]
         own_python: ["", "1"]
         include:
+          - os: windows-latest
+            python: "3.11"
+            own_python: ""
+          - os: windows-latest
+            python: "3.14"
+            own_python: ""
+          - os: macos-latest
+            python: "3.11"
+            own_python: ""
+          - os: macos-latest
+            python: "3.14"
+            own_python: ""
           - os: ubuntu-latest
+            python: "3.12"
             own_python: ""
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
+        id: python
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - name: Microsoft Edge WebView2 Runtime
         # The window needs it, and GitHub's Windows Server has none (CloseDesk would open in the browser there).
         if: runner.os == 'Windows'
@@ -136,13 +154,14 @@ jobs:
       - name: The CloseDesk window
         env:
           CLOSEDESK_OWN_PYTHON: ${{ matrix.own_python }}
+          CLOSEDESK_PYTHON: ${{ matrix.python != '3.12' && steps.python.outputs.python-path || '' }}
           CLOSEDESK_SMOKE_SHOTS: ${{ runner.temp }}/closedesk-window
         run: python tests/launcher_smoke.py --window
       - name: Keep the screenshots and the app's log
         if: always() && runner.os != 'Linux'
         uses: actions/upload-artifact@v7
         with:
-          name: window-${{ matrix.os }}${{ matrix.own_python && '-own-python' || '' }}
+          name: window-${{ matrix.os }}-${{ matrix.python }}${{ matrix.own_python && '-own-python' || '' }}
           path: ${{ runner.temp }}/closedesk-window
           if-no-files-found: ignore
 
