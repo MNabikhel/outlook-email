@@ -249,7 +249,7 @@ LEVELS = """() => [...document.querySelectorAll('.items .item.kind-mail, .items 
   return { key: li.dataset.key, level, text: tag ? tag.textContent : null, shown, classes: tag ? tag.className : '',
            background: tag ? getComputedStyle(tag).backgroundColor : '', outline: tag ? getComputedStyle(tag).boxShadow : '',
            color: tag ? getComputedStyle(tag).color : '', reason: reason ? getComputedStyle(reason).backgroundColor : null,
-           locked: li.classList.contains('is-locked'), held: Boolean(li.querySelector('.chip-danger')) };
+           locked: li.classList.contains('is-locked'), held: (li.querySelector('.chip-danger') || {}).textContent || '' };
 })"""
 WORDS = {"critical": "Critical", "high": "High", "medium": "Medium", "low": "Low"}
 
@@ -263,7 +263,7 @@ def test_the_importance_shows_in_words_on_each_email_when_asked(browser, setting
         page.check("#set-importance-words")
         page.wait_for_selector("html[data-importance-words='on']")
         grey = page.evaluate("() => { const t = document.createElement('span'); t.className = 'tag'; document.body.append(t); const c = getComputedStyle(t).color; t.remove(); return c; }")
-        seen_levels = set()
+        seen_levels, held = set(), set()
         for nav, path in (("today", "/app"), ("folder:important", "/app/folder/important"), ("all", "/app/all")):
             page.click(f".rail-item[data-id='{nav}']")
             page.wait_for_url(f"**{path}")
@@ -272,6 +272,12 @@ def test_the_importance_shows_in_words_on_each_email_when_asked(browser, setting
             assert rows, path
             for row in rows:
                 assert row["level"], row
+                if row["locked"]:
+                    # Held as possible payment fraud: its edge is the held one, so its word says that.
+                    assert row["shown"] and row["text"] == "Held for fraud" and "tag-held" in row["classes"], (path, row)
+                    assert row["held"], ("a held email still has its held chip", row)
+                    held.add(row["held"])
+                    continue
                 assert row["shown"] and row["text"] == WORDS[row["level"]], (path, row)
                 if row["level"] in ("medium", "low"):
                     assert row["color"] == grey, ("Medium and Low are in the quiet grey", row)
@@ -282,10 +288,9 @@ def test_the_importance_shows_in_words_on_each_email_when_asked(browser, setting
                 assert row["background"] == "rgba(0, 0, 0, 0)" and "inset" in row["outline"], ("outlined", row)
                 if row["reason"] is not None:
                     assert row["reason"] != "rgba(0, 0, 0, 0)", ("the reason stays a filled tag", row)
-                if row["locked"]:
-                    assert row["held"], ("a held email still says it is held", row)
                 seen_levels.add(row["level"])
         assert {"critical", "high", "medium"} <= seen_levels, seen_levels
+        assert held, "the sample's held emails"
         assert page.evaluate("() => window.notReloaded === true")
         # Unticked: the words go, the colored edge stays.
         page.click(".rail-item[data-id='settings']")
@@ -298,14 +303,31 @@ def test_the_importance_shows_in_words_on_each_email_when_asked(browser, setting
     context.close()
 
 
-# The longest words Today can show on one row, with a 7-figure amount; then whether anything in a row's first line
-# runs past its text box (on its right, the done button's room).
+def test_a_held_email_with_a_file_says_it_is_held_for_fraud_in_words(browser, settings, store, mail):
+    """A bank-change scam with an invoice attached, the usual kind: its chip says "Files locked" (it has a file), and
+    with the importance in words it said "Critical", on an edge the red of Critical. Nothing said held, or fraud."""
+    from controller_inbox import appearance
+
+    appearance.save(store, importance_words=True)
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, store)) as base:
+        for path in ("/app", "/app/folder/important", "/app/all"):
+            page.goto(f"{base}{path}")
+            page.wait_for_selector(".items .item")
+            held = [row for row in page.evaluate(LEVELS) if row["locked"]]
+            assert [(row["text"], row["shown"], row["held"]) for row in held] == [("Held for fraud", True, "Files locked")], (path, held)
+    context.close()
+
+
+# The longest words Today can show on one row, with a 7-figure amount (a held email keeps its longer "Held for
+# fraud"); then whether anything in a row's first line runs past its text box (on its right, the done button's room).
 FIT = """() => {
   for (const li of document.querySelectorAll('.items .item.kind-focus')) {
     const kind = li.querySelector('.item-row1 .tag:not(.item-level)');
     if (kind) kind.textContent = 'New · needs a look';
     const level = li.querySelector('.item-level');
-    if (level) level.textContent = 'Critical';
+    if (level && !li.classList.contains('is-locked')) level.textContent = 'Critical';
     const amount = li.querySelector('.item-amount');
     if (amount) amount.textContent = '$1,234,567.89';
     else { const a = document.createElement('span'); a.className = 'item-amount'; a.textContent = '$1,234,567.89'; li.querySelector('.item-row1').append(a); }

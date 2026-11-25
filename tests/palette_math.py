@@ -403,6 +403,7 @@ ROLES = {
         ("text", Rule(".tag-prio-critical", "color"), ["--surface", "--surface-2", "--selected"], "Critical on a row .item-level.tag-prio-critical"),
         ("text", Rule(".tag-prio-high", "color"), ["--surface", "--surface-2", "--selected"], "High on a row .item-level.tag-prio-high"),
         ("text", Rule(".tag", "color"), ["--surface", "--surface-2", "--selected"], "Medium or Low on a row .item-level"),
+        ("text", Rule(".tag-held", "color"), ["--surface", "--surface-2", "--selected"], "Held for fraud on a row .item-level.tag-held"),
         # The card beside a page's box: how sure a reading is, in words on their own pale fill (reader.js).
         ("text", Rule(".pv-tip-tag.ok", "color"), [Rule(".pv-tip-tag.ok", "background")], "a sure reading .pv-tip-tag.ok"),
         ("text", Rule(".pv-tip-tag.check", "color"), [Rule(".pv-tip-tag.check", "background")], "a reading to check .pv-tip-tag.check"),

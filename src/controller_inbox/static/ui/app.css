@@ -411,7 +411,8 @@ a.rail-chip:hover { background: var(--surface-3); text-decoration: none; }
 .tag-ok, .tag-coding-confirmed { background: var(--ok-soft); color: var(--ok); }
 .tag-coding-suggested { background: var(--accent-soft); color: var(--accent); }
 .tag-coding-unmatched { background: var(--warn-soft); color: var(--warn); }
-.tag-prio-critical { background: var(--danger-soft); color: var(--danger); }
+/* Held for fraud, said where an email's importance is (lists.js): in the red of the held edge beside it. */
+.tag-prio-critical, .tag-held { background: var(--danger-soft); color: var(--danger); }
 .tag-prio-high { background: var(--warn-soft); color: var(--warn); }
 /* The importance in words on each email in the lists (lists.js), shown when Settings → Appearance asks for it. After
    .tag, so it stays hidden otherwise. Outlined on the row, in its own colour, where the reason a row is in Today
