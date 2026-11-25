@@ -320,6 +320,34 @@ def test_a_held_email_with_a_file_says_it_is_held_for_fraud_in_words(browser, se
     context.close()
 
 
+CLASSIC_LEVELS = """() => [...document.querySelectorAll('.focus-item, .folder-card li:not(.muted)')].map((li) => {
+  const pill = li.querySelector('.item-level');
+  const shown = Boolean(pill) && getComputedStyle(pill).display !== 'none' && pill.getBoundingClientRect().width > 0;
+  return { text: pill ? pill.textContent : null, shown, inside: !pill || pill.getBoundingClientRect().right <= li.getBoundingClientRect().right };
+})"""
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_classic_today_writes_the_importance_on_each_email_when_asked(browser, settings, loaded, width):
+    """Today, the classic home page, had no importance on its emails with the box ticked: only the Inbox and folder
+    lists had it, in their Importance column."""
+    from controller_inbox import appearance
+
+    context = _context(browser, "light")
+    page = context.new_page()
+    page.set_viewport_size({"width": width, "height": 900})
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/")
+        rows = page.evaluate(CLASSIC_LEVELS)
+        assert rows and not [row for row in rows if row["shown"]], rows
+        appearance.save(loaded, importance_words=True)
+        page.reload()
+        rows = page.evaluate(CLASSIC_LEVELS)
+        assert all(row["shown"] and row["text"] in WORDS.values() and row["inside"] for row in rows), rows
+        assert {"Critical", "High"} <= {row["text"] for row in rows}
+    context.close()
+
+
 # The longest words Today can show on one row, with a 7-figure amount (a held email keeps its longer "Held for
 # fraud"); then whether anything in a row's first line runs past its text box (on its right, the done button's room).
 FIT = """() => {

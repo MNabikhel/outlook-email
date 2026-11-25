@@ -1,5 +1,6 @@
-"""How the pages look: the colors for color blindness, and the importance written on each email in the workspace's lists
-(Settings → Appearance in the workspace, Setup → Colors on the classic pages).
+"""How the pages look: the colors for color blindness, and the importance written on each email in the lists (the
+workspace's, and Today and the digest on the classic pages, whose Inbox shows it in a column either way). Settings →
+Appearance in the workspace, Setup → Colors on the classic pages.
 
 Both are saved for CloseDesk on this computer (in the database, with the other Setup choices), not in one browser, so
 the workspace and the classic pages use them alike. The server writes them onto each page's <html> as it sends it, so

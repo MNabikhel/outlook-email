@@ -267,11 +267,12 @@ def test_the_words_help_says_which_emails_have_a_colored_edge():
     assert ".item.imp-medium" not in css and ".item.imp-low" not in css
 
 
-def test_the_importance_words_say_only_the_workspace_changed(client, demo):
+def test_the_importance_words_say_which_lists_changed(client, demo):
     """Ticking only "Show Critical, High, Medium or Low on each email" said "The workspace and the classic pages now
-    look this way", but only the workspace's lists change: the classic pages show the importance in a column anyway."""
+    look this way", but the classic Inbox and folder lists show the importance in a column either way: what changes
+    is the workspace's lists, and Today and the digest on the classic pages."""
     words = web.NOTICES["importance-words"]
-    assert "workspace" in words and "classic" not in words
+    assert "workspace's lists" in words and "Today and the digest" in words
     reply = colors(client, {"importance_words": True})
     assert reply.json()["message"] == words and reply.json()["notice"] == "importance-words"
     assert colors(client, {"importance_words": False}).json()["message"] == words
@@ -294,6 +295,50 @@ def test_the_importance_words_say_only_the_workspace_changed(client, demo):
     from markupsafe import escape
 
     assert str(escape(words)) in client.get("/settings?notice=importance-words").text
+
+
+def test_both_setup_pages_say_where_the_importance_words_go(client):
+    """Classic Setup said the box was for "the workspace's lists. These pages already show it in the Importance
+    column", but the classic home page, Today, and the digest have no such column; and the workspace said the classic
+    pages use the box too, which they didn't. Now Today and the digest do, and both pages say so."""
+    from pathlib import Path
+
+    page = client.get("/settings").text
+    section = page[page.index('id="colors"') : page.index("</section>", page.index('id="colors"'))]
+    words = section[section.index("Show Critical, High, Medium or Low on each email") :]
+    assert "already" not in words and "Today and the digest" in words and "Inbox and folder lists" in words, words
+    source = (Path(web.__file__).parent / "static" / "ui" / "settings.js").read_text(encoding="utf-8")
+    assert "The two boxes under Colors are saved for CloseDesk on this computer, and the classic pages follow them too." in source
+
+
+def _focus_items(html: str) -> list[str]:
+    """Each focus item on a classic page, as written."""
+    items = html.split('<li class="focus-item ')[1:]
+    return [item[: item.index("</li>")] for item in items]
+
+
+def test_classic_today_and_the_digest_write_the_importance_on_each_email(client, demo):
+    """Today, the classic home page, and the digest had no importance on their emails, ticked or not: an accountant
+    who ticked the box and works from Today never saw it. Each email there now carries it as the Inbox's Importance
+    column does (the pill), shown when the box is ticked."""
+    from controller_inbox.models import IMPORTANCE_LABELS
+
+    def levels(html: str) -> list[str]:
+        return [item[item.index('<span class="pill ') :].split(">", 1)[1].split("<", 1)[0] for item in _focus_items(html) if '<span class="pill ' in item]
+
+    today = client.get("/").text
+    rows = client.get("/api/focus", headers=PAGE).json()["focus"]
+    assert len(_focus_items(today)) == len(levels(today)) >= 3, "every email in the focus list"
+    want = [IMPORTANCE_LABELS[demo.get_email(row["email_id"]).importance] for row in rows]
+    assert levels(today)[: len(want)] == want
+    assert 'class="pill critical item-level"' in today and 'class="pill high item-level"' in today
+    # What came in since: each email in the three folder cards.
+    cards = today[today.index('class="panel folder-card') : today.index("</section>", today.index('class="panel folder-card'))]
+    assert cards.count("item-level") == cards.count('<a href="/inbox/'), "each email in the cards"
+    assert client.post("/digest/rebuild", headers=SAME, follow_redirects=False).status_code == 303
+    digest = client.get("/digest").text
+    assert len(_focus_items(digest)) == len(levels(digest)) >= 3
+    assert digest.count("item-level") > len(levels(digest)), "and its other lists of emails"
 
 
 @pytest.mark.parametrize(("notice", "section"), [("colors", "colors"), ("importance-words", "colors"), ("timezone", "timezone")])

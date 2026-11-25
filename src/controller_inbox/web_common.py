@@ -23,8 +23,8 @@ NOTICES = {
     "profile": "Saved. The digest and Today page now use this profile; new mail is sorted with it.",
     "timezone": "Saved. Times and “today” now use this time zone.",
     "colors": "Saved. The workspace and the classic pages on this computer now look this way.",
-    # Only the workspace's lists change: the classic pages show the importance in a column either way.
-    "importance-words": "Saved. The workspace's lists on this computer now look this way.",
+    # Not the classic Inbox and folder lists: they show the importance in a column either way.
+    "importance-words": "Saved. The workspace's lists on this computer, and Today and the digest on the classic pages, now look this way.",
     "context": "Saved. If the model in LM Studio is loaded with less, the next question reloads it with this context.",
     "context-off": "Saved. CloseDesk now uses the model as LM Studio loaded it.",
     "context-reloaded": "Saved.",

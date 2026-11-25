@@ -133,6 +133,10 @@ table.mail tr.high { box-shadow: inset 3px 0 0 var(--imp-high); }
 .pill.high { background: var(--imp-high-fill); color: var(--on-imp-high); }
 .pill.medium { background: var(--imp-medium); }
 .pill.low { background: #dce3d6; }
+/* The importance on each email of Today and the digest, as the Importance column has it: shown when Setup → Colors
+   asks for it (data-importance-words on <html>). */
+.pill.item-level { display: none; }
+:root[data-importance-words="on"] .pill.item-level { display: inline-block; }
 .flags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
 .flag { font-size: 11px; background: #efe7d4; padding: 2px 6px; text-transform: capitalize; }
 .flag.fraud_risk, .flag.do_not_process { background: var(--danger); color: #fff; }

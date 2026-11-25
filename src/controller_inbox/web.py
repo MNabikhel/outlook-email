@@ -1362,7 +1362,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         """Setup → Colors: a box left unticked sends nothing, which is off. The form also says what each box showed
         when the page was drawn, and only a box changed on it is saved: a Setup page left open doesn't undo a change
         made since in the workspace (a form without them, from before, saves both). It sends both boxes, so what it
-        says is for what changed: the importance words alone change only the workspace."""
+        says is for what changed: the importance words alone change only some lists (not the classic Inbox's column)."""
         before = appearance.current(store)
         wanted = "color-blind" if colors == "color-blind" else "standard"
         words = importance_words in ("1", "on")

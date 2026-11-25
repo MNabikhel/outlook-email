@@ -291,7 +291,7 @@ export function createSettings(ctx) {
       "appearance",
       "Appearance",
       "sun",
-      "The theme and side bar are saved in this browser only. Colors are saved for CloseDesk on this computer, so the classic pages use them too.",
+      "The theme and side bar are saved in this browser only. The two boxes under Colors are saved for CloseDesk on this computer, and the classic pages follow them too.",
       h("div", { class: "set-row" }, h("span", { class: "set-row-label" }, "Theme"), h("div", { class: "segs", role: "group", "aria-label": "Theme" }, segment("system", "Match the computer"), segment("light", "Light"), segment("dark", "Dark"))),
       h("div", { class: "set-row" }, h("span", { class: "set-row-label" }, "Side bar"), h("button", { type: "button", class: "btn btn-sm", onclick: ctx.toggleRail }, icon("sidebar", 14), railCollapsed ? "Show labels" : "Collapse to icons")),
       h(
