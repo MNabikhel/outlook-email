@@ -862,3 +862,8 @@ def test_the_app_without_a_browser_only_serves(monkeypatch):
     assert app_window.main(SimpleNamespace(no_browser=True, host=None, port=8813)) == 0
     assert ran == [["run", "--no-browser", "--port", "8813"]]
     assert os.environ.get(updates.LAUNCHER_ENV) is None, "nothing here starts CloseDesk again after an update"
+
+
+def test_a_smoke_wait_that_isnt_a_number_is_no_smoke_check(computer, tmp_path, monkeypatch):
+    monkeypatch.setenv(app_window.SMOKE_ENV, "soon")
+    assert make_app(FakeWebview(), computer, tmp_path).smoke == 0

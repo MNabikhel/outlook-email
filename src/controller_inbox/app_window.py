@@ -485,7 +485,10 @@ class App:
         self.code = 0
         self.ready = threading.Event()  # CloseDesk's page said it loaded
         self.ready_path = ""
-        self.smoke = float(os.environ.get(SMOKE_ENV) or 0)
+        try:
+            self.smoke = float(os.environ.get(SMOKE_ENV) or 0)
+        except ValueError:
+            self.smoke = 0.0
         self._lock = threading.Lock()
         # What runs things on the computer (the tests give their own).
         self.popen = subprocess.Popen
