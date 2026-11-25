@@ -412,11 +412,23 @@ def _md_actions(items: list[dict[str, Any]], empty: str) -> list[str]:
 
 # The tags' and the alert's colors: the classic pages' (static/app.css), written out, as a page pasted into an email
 # can't use their tokens. Shown by CloseDesk with the colors for color blindness chosen, <html> says so
-# (appearance.on_saved_page).
+# (appearance.on_saved_page). Printed as a browser prints unless "Background graphics" is ticked, the fills go, and
+# the white words on them came out pale grey on the paper: in print, the words are the fill's red, with a red edge,
+# and "Due today" keeps an amber edge.
 COLORS_CSS = """    .tag.fraud, .tag.overdue { background:#a8162b; color:#fff; }
     .tag.due_today { background:#d6a31f; color:#1b2416; }
     .alert { background:#a8162b; color:#fff; }
-    html[data-colors="color-blind"] .tag.fraud, html[data-colors="color-blind"] .tag.overdue, html[data-colors="color-blind"] .alert { background:#761630; }"""
+    .alert h2 { color:#fff; border-color: rgba(255,255,255,.4); }
+    html[data-colors="color-blind"] .tag.fraud, html[data-colors="color-blind"] .tag.overdue, html[data-colors="color-blind"] .alert { background:#761630; }
+    @media print {
+      .alert { background:none; color:#1b241b; border:2px solid #a8162b; }
+      .alert h2, .tag.fraud, .tag.overdue { background:none; color:#a8162b; border:1px solid #a8162b; }
+      .alert h2 { border-width:0 0 1px; }
+      .tag.due_today { background:none; border:1px solid #a87800; }
+      html[data-colors="color-blind"] .tag.fraud, html[data-colors="color-blind"] .tag.overdue, html[data-colors="color-blind"] .alert { background:none; border-color:#761630; }
+      html[data-colors="color-blind"] .alert h2, html[data-colors="color-blind"] .tag.fraud, html[data-colors="color-blind"] .tag.overdue { color:#761630; border-color:#761630; }
+      html[data-colors="color-blind"] .tag.due_today { border-color:#aa7a00; }
+    }"""
 
 
 def render_html(payload: dict[str, Any]) -> str:
@@ -504,7 +516,7 @@ def render_html(payload: dict[str, Any]) -> str:
     .empty {{ color:#6a746a; font-style:italic; }}
     .alert {{ padding:4px 14px 10px; margin-top: 16px; }}
 {COLORS_CSS}
-    .alert h2 {{ color:#fff; border-color: rgba(255,255,255,.4); margin-top: 12px; }}
+    .alert h2 {{ margin-top: 12px; }}
     .alert li {{ color:#1b241b; }}
     .stats {{ color:#4c584c; font-family: system-ui, sans-serif; font-size: 13px; }}
   </style>

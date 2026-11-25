@@ -911,6 +911,49 @@ def test_classic_today_and_the_digest_mark_critical_high_and_held_in_every_list(
     assert [(row["email"], row["edge"]) for row in worded] == [(row["email"], row["edge"]) for row in rows], "the edges stay"
 
 
+# Printed, each red heading and tag of the printable digest: its words' colour, its fill and its edge. White on red
+# is how they are on screen.
+PRINTED = """() => [...document.querySelectorAll('.alert h2, .tag.fraud, .tag.overdue, .tag.due_today')].map((el) => {
+  const s = getComputedStyle(el);
+  return { what: el.matches('h2') ? 'alert heading' : el.className, text: el.textContent, color: s.color, fill: s.backgroundColor,
+           edge: s.borderBottomStyle !== 'none' && parseFloat(s.borderBottomWidth) > 0 ? s.borderBottomColor : null,
+           box: getComputedStyle(el.closest('.alert') || el).backgroundColor };
+})"""
+
+
+@pytest.mark.parametrize("colors", ["standard", "color-blind"])
+def test_the_printed_digest_keeps_its_red_words_without_background_graphics(browser, settings, loaded, colors):
+    """Printed as a browser prints by default, without "Background graphics", the printable digest lost its red
+    fills and kept the white words on them: "Do not process — verify by phone" and each "Verify by phone" and
+    "Overdue" tag came out light grey on white, the faintest words on the page. Printed, they are the red words of
+    the colors in use on the paper, with a red edge, and the amber "Due today" tag keeps an amber edge."""
+    from controller_inbox import appearance
+
+    appearance.save(loaded, colors=colors)
+    _a_medium_task_overdue(loaded)
+    tokens = pm.classic(colors)
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.request.post(f"{base}/digest/rebuild", headers={"origin": base})
+        page.goto(f"{base}/digest/2026-09-22.html")
+        on_screen = page.evaluate(PRINTED)
+        page.emulate_media(media="print")
+        printed = page.evaluate(PRINTED)
+    context.close()
+    seen = {row["what"] for row in printed}
+    assert {"alert heading", "tag fraud", "tag overdue", "tag due_today"} <= seen, seen
+    assert all(row["color"] == "rgb(255, 255, 255)" for row in on_screen if row["what"] != "tag due_today"), ("white on red on screen", on_screen)
+    for row in printed:
+        assert row["fill"] == "rgba(0, 0, 0, 0)" and row["box"] in ("rgba(0, 0, 0, 0)", row["fill"]), ("nothing rests on a fill", row)
+        ratio = pm.contrast(hex_of(row["color"]), pm.WHITE)
+        assert ratio >= 4.5, (row, round(ratio, 2))
+        if row["what"] == "tag due_today":
+            assert row["edge"] == rgb(tokens["--imp-high"]), row
+        else:
+            assert row["color"] == row["edge"] == rgb(tokens["--danger"]), row
+
+
 # The longest words Today can show on one row, with a 7-figure amount (a held email keeps its longer "Held for
 # fraud"); then whether anything in a row's first line runs past its text box (on its right, the done button's room).
 FIT = """() => {
