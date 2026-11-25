@@ -40,12 +40,14 @@
   <p>Saved for CloseDesk on this computer: these pages and the workspace both use them.</p>
   <form method="post" action="/settings/colors" class="profile-form color-form">
     {# What the boxes showed when the page was drawn: only a box changed on it is saved, so a page left open doesn't
-       undo a change made since in the workspace. #}
-    <input type="hidden" name="colors_was" value="{{ appearance.colors }}"/>
-    <input type="hidden" name="importance_words_was" value="{{ '1' if appearance.importance_words else '0' }}"/>
-    <label class="choice"><input type="checkbox" name="colors" value="color-blind" {{ 'checked' if appearance.colors == 'color-blind' }}/>
+       undo a change made since in the workspace. autocomplete="off": Back to this page sends it again, as it is now,
+       and the browser would put each box back as it was left (and Firefox the _was fields too), so the page would be
+       in the new colors with its box saying the old, and Save would undo the change. #}
+    <input type="hidden" name="colors_was" value="{{ appearance.colors }}" autocomplete="off"/>
+    <input type="hidden" name="importance_words_was" value="{{ '1' if appearance.importance_words else '0' }}" autocomplete="off"/>
+    <label class="choice"><input type="checkbox" name="colors" value="color-blind" autocomplete="off" {{ 'checked' if appearance.colors == 'color-blind' }}/>
       <span><b>Colors for color blindness</b> <small class="muted">Critical and fraud turn crimson, done turns blue-green, and High and warnings stay amber.</small></span></label>
-    <label class="choice"><input type="checkbox" name="importance_words" value="1" {{ 'checked' if appearance.importance_words }}/>
+    <label class="choice"><input type="checkbox" name="importance_words" value="1" autocomplete="off" {{ 'checked' if appearance.importance_words }}/>
       <span><b>Show Critical, High, Medium or Low on each email</b> <small class="muted">On Today and the digest here (not its printable page), and in the workspace's lists and digest. The Inbox and folder lists here always show it, in their Importance column.</small></span></label>
     <button type="submit">Save</button>
   </form>

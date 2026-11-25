@@ -881,6 +881,46 @@ def test_classic_setup_left_open_keeps_a_change_made_in_the_workspace(browser, s
     context.close()
 
 
+SETUP_BOXES = """() => [...document.querySelectorAll('#colors input[name="colors"], #colors input[name="importance_words"]')]
+  .map((box) => [box.name, box.checked])"""
+
+
+@pytest.mark.parametrize("was", ["off", "on"])
+@pytest.mark.parametrize("changed", ["colors", "importance_words"])
+def test_back_to_classic_setup_shows_the_colors_as_they_are_and_save_keeps_them(browser, settings, loaded, changed, was):
+    """Classic Setup, then the workspace's Settings in the same tab, a box ticked there, and Back. The page came again
+    from CloseDesk with the new colors and its box ticked, but the browser put the box back as it had been left, as it
+    does for a form: the page was in the color-blind colors with its box saying they were off. Save, even with nothing
+    changed, then turned them off again."""
+    from controller_inbox import appearance
+
+    box = {"colors": "#set-colors", "importance_words": "#set-importance-words"}
+    on = {"colors": "color-blind", "importance_words": True}
+    off = {"colors": "standard", "importance_words": False}
+    start = on if was == "on" else off
+    appearance.save(loaded, **start)
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/settings")
+        assert page.evaluate(SETUP_BOXES) == [["colors", was == "on"], ["importance_words", was == "on"]]
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector(box[changed])
+        (page.uncheck if was == "on" else page.check)(box[changed])
+        page.wait_for_selector("#set-appearance [data-status='colors'].ok")
+        want = start | {changed: (off if was == "on" else on)[changed]}
+        assert appearance.current(loaded) == want
+        page.go_back()
+        page.wait_for_url("**/settings")
+        page.wait_for_selector("#colors form")
+        shown = dict(page.evaluate(SETUP_BOXES))
+        assert shown == {"colors": want["colors"] == "color-blind", "importance_words": want["importance_words"]}, shown
+        page.click("#colors button[type='submit']")
+        page.wait_for_url("**/settings?notice=*")
+        assert appearance.current(loaded) == want, "Save with nothing changed on the page keeps what was chosen"
+    context.close()
+
+
 # Shapes and signs as well as colour ----------------------------------------------------------------------------------
 
 ALERT_PATH = "M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01"

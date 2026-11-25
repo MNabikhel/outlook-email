@@ -114,25 +114,46 @@ def test_todays_rows_carry_the_importance_in_words(client, demo):
     assert {row["importance_label"] for row in rows} >= {"Critical", "High"}
 
 
+def _ticked(page: str, name: str) -> bool:
+    """Whether Setup → Colors draws its box ``name`` ticked."""
+    import re
+
+    box = re.search(rf'<input type="checkbox" name="{name}"[^>]*>', page)
+    assert box, name
+    return re.search(r"\bchecked\b", box.group(0)) is not None
+
+
 def test_the_classic_setup_page_saves_both(client, demo):
     """Setup → Colors on the classic pages: a form that works without JavaScript. A box left unticked sends nothing,
     which is off."""
     page = client.get("/settings").text
     assert 'id="colors"' in page and "Colors for color blindness" in page and "Show Critical, High, Medium or Low on each email" in page
-    assert 'name="colors" value="color-blind" checked' not in page
+    assert not _ticked(page, "colors") and not _ticked(page, "importance_words")
 
     saved = client.post("/settings/colors", data={"colors": "color-blind", "importance_words": "1"}, headers=SAME, follow_redirects=False)
     assert saved.status_code == 303 and saved.headers["location"] == "/settings?notice=colors#colors"
     assert appearance.current(demo) == {"colors": "color-blind", "importance_words": True}
     page = client.get("/settings?notice=colors").text
     assert web.NOTICES["colors"] in page
-    assert 'name="colors" value="color-blind" checked' in page and 'name="importance_words" value="1" checked' in page
+    assert _ticked(page, "colors") and _ticked(page, "importance_words")
     assert page.startswith('<!DOCTYPE html>\n<html lang="en" data-colors="color-blind" data-importance-words="on">')
 
     client.post("/settings/colors", data={}, headers=SAME, follow_redirects=False)
     assert appearance.current(demo) == {"colors": "standard", "importance_words": False}
     page = client.get("/settings").text
-    assert 'value="color-blind" checked' not in page and 'value="1" checked' not in page
+    assert not _ticked(page, "colors") and not _ticked(page, "importance_words")
+
+
+def test_back_to_setup_doesnt_put_the_colors_boxes_back_as_they_were_left(client, demo):
+    """Back to Setup sends the page again, as the colors are now, but a browser puts a form's boxes back as they were
+    left (Firefox its hidden fields too): the page showed the new colors with its box saying the old ones, and Save
+    undid the change (tests/test_appearance_browser.py goes through it in Chromium)."""
+    import re
+
+    form = re.search(r'<form method="post" action="/settings/colors".*?</form>', client.get("/settings").text, re.S).group(0)
+    fields = re.findall(r"<input [^>]*>", form)
+    assert len(fields) == 4, fields
+    assert all('autocomplete="off"' in field for field in fields), fields
 
 
 def test_a_setup_page_left_open_saves_only_the_box_changed_on_it(client, demo):
