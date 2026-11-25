@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_level.html" import level, focus_edge %}
+{% from "_level.html" import level, focus_edge, edge_class %}
 {% block title %}Daily digest · CloseDesk{% endblock %}
 {% block heading %}Daily digest{% endblock %}
 {% block body %}
@@ -7,7 +7,7 @@
   {% if items %}
   <ul class="stack">
     {% for item in items %}
-    <li>
+    <li{{ edge_class(item) }}>
       <div>
         {{ level(item) }}
         <a href="/inbox/{{ item.email_id or item.id }}">{{ item.title or item.subject }}</a>

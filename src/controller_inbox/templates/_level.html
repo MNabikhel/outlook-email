@@ -1,11 +1,21 @@
 {# The importance on an email of Today or the digest, shown when Setup → Colors asks for it (static/app.css). An email
    held as possible payment fraud says that instead, as the workspace's lists do: its edge is fraud's, not its
-   importance's. #}
+   importance's, and it says so whether or not the box is ticked (but in the box of emails to verify by phone, only
+   when it is). #}
 {% macro level(item) -%}
 {% if item.locked %}<span class="pill held item-level">Held for fraud</span>{% elif item.importance_label %}<span class="pill {{ item.importance }} item-level">{{ item.importance_label }}</span>{% endif %}
 {%- endmacro %}
-{# A focus row's edge says its importance when it is Critical or High, and that it is held when it is (static/app.css,
-   .focus-item); else the reason it is listed. #}
+{# An email's edge, as in the Inbox: its importance when it is Critical or High, and that it is held when it is (static/
+   app.css, .focus-item and the lists of Today's folder cards and the digest); else none. A task has no importance of
+   its own, so none. #}
+{% macro edge(item) -%}
+{% if item.locked %}is-held{% elif item.importance in ('critical', 'high') %}imp-{{ item.importance }}{% endif %}
+{%- endmacro %}
+{# A focus row's edge, after its other classes: with none, the plain edge every focus row has. #}
 {% macro focus_edge(row) -%}
-{% if row.locked %} is-held{% elif row.importance in ('critical', 'high') %} imp-{{ row.importance }}{% endif %}
+{% set name = edge(row) %}{% if name %} {{ name }}{% endif %}
+{%- endmacro %}
+{# The edge of an email in a list, as the class of its <li>. #}
+{% macro edge_class(item) -%}
+{% set name = edge(item) %}{% if name %} class="{{ name }}"{% endif %}
 {%- endmacro %}

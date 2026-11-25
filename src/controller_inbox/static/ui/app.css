@@ -1037,6 +1037,12 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .plain-list li.imp-critical::before { background: var(--imp-critical); }
 .plain-list li.imp-high::before { background: var(--imp-high); }
 .plain-list li.is-locked::before { background: var(--danger); width: 4px; }
+/* A held one says so in words too, with the importance words or without, as the lists' rows do with their held chip:
+   its red edge is nearly a Critical one's. In the box of emails to verify by phone, which says it, only when the words
+   are asked for. */
+.plain-list .item-level.tag-held { display: inline-flex; }
+.card-danger .plain-list .item-level.tag-held { display: none; }
+:root[data-importance-words="on"] .card-danger .plain-list .item-level.tag-held { display: inline-flex; }
 .doc-nav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .doc-date { font-weight: 650; padding: 0 6px; font-variant-numeric: tabular-nums; }
 .md-copy { white-space: pre-wrap; font: 12px/1.5 var(--mono); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px; max-height: 360px; overflow: auto; }

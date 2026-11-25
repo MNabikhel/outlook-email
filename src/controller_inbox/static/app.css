@@ -142,6 +142,12 @@ table.mail tr.high { box-shadow: inset 3px 0 0 var(--imp-high); }
    The Importance column keeps its filled pills. */
 .pill.item-level { display: none; background: transparent; box-shadow: inset 0 0 0 1px currentColor; }
 :root[data-importance-words="on"] .pill.item-level { display: inline-block; }
+/* A held email says so in words wherever it is listed, whether or not the importance words are asked for, as the
+   Inbox's flags and the workspace's held chip do: its red edge is nearly a Critical one's. In the red box of emails to
+   verify by phone, which says it, only when they are. */
+.pill.item-level.held { display: inline-block; }
+.panel.alert .pill.item-level.held { display: none; }
+:root[data-importance-words="on"] .panel.alert .pill.item-level.held { display: inline-block; }
 .pill.item-level.critical, .pill.item-level.held { color: var(--danger); }
 .pill.item-level.high { color: var(--warn); }
 .pill.item-level.medium { color: var(--navy); }
@@ -245,11 +251,22 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 /* Each subject on one line, cut with "…" at the card's edge; the importance word (Setup → Colors) on a line of its
    own above it, so the subject keeps the card's whole width. */
 .folder-card li a { display: block; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-:root[data-importance-words="on"] .folder-card li .pill.item-level { display: block; width: fit-content; margin-bottom: 2px; }
+:root[data-importance-words="on"] .folder-card li .pill.item-level, .folder-card li .pill.item-level.held { display: block; width: fit-content; margin-bottom: 2px; }
 .folder-card li small { display: block; white-space: normal; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .folder-card .more { display: inline-block; margin-top: 8px; font-size: 13px; }
 .split.three { grid-template-columns: repeat(3, 1fr); }
 .stack .summary { margin: 2px 0 0; font-size: 13px; }
+/* An email in Today's folder cards and the digest's lists has the edge it has in the Inbox and on the focus list: a
+   Critical or High one its importance's, a held one the red of danger (and wider), the others none, with the
+   importance words or without. In the card's margin, so its words start where the others' do. None in the red box of
+   emails to verify by phone, which says it. */
+.folder-card li:is(.imp-critical, .imp-high, .is-held), ul.stack li:is(.imp-critical, .imp-high, .is-held) { position: relative; }
+.folder-card li:is(.imp-critical, .imp-high, .is-held)::before,
+ul.stack li:is(.imp-critical, .imp-high, .is-held)::before { content: ""; position: absolute; left: -10px; top: 0; bottom: 0; width: 3px; border-radius: 2px; }
+.folder-card li.imp-critical::before, ul.stack li.imp-critical::before { background: var(--imp-critical); }
+.folder-card li.imp-high::before, ul.stack li.imp-high::before { background: var(--imp-high); }
+.folder-card li.is-held::before, ul.stack li.is-held::before { background: var(--danger); width: 4px; }
+.panel.alert li:is(.imp-critical, .imp-high, .is-held)::before { content: none; }
 .job { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 14px; border-radius: 12px; margin: 0 0 14px; border: 1px solid var(--line); background: var(--card); }
 .job strong { margin-right: 8px; }
 .job span { color: var(--muted); }
@@ -658,13 +675,14 @@ form.step-back { border: 0; padding: 0; margin-top: 6px; }
 }
 /* A Windows contrast theme (high contrast) puts the computer's own colors on the page and drops fills and shadows: the
    Inbox's edges went, its Importance pills and the tags lost the box round their words, and every row of Today had the
-   same thick edge in the color of the words. A Critical or High email (and on Today a held one) keeps a thick edge, the
-   same for all (Setup → Colors says the importance words tell them apart); the others the thin edge of the box, their
-   words starting where the others' do. */
+   same thick edge in the color of the words. A Critical or High email (and on Today and the digest a held one) keeps a
+   thick edge, the same for all (Setup → Colors says the importance words tell them apart); the others the thin edge of
+   the box, their words starting where the others' do. */
 @media (forced-colors: active) {
   table.mail tr { border-left: 3px solid Canvas; }
   table.mail tr:is(.critical, .high) { border-left-color: CanvasText; }
   .focus-item { border-left-width: 1px; padding-left: 17px; }
   .focus-item:is(.imp-critical, .imp-high, .fraud, .is-held) { border-left-width: 4px; padding-left: 14px; }
+  .folder-card li:is(.imp-critical, .imp-high, .is-held)::before, ul.stack li:is(.imp-critical, .imp-high, .is-held)::before { background: CanvasText; }
   .pill, .tag, .flag { outline: 1px solid CanvasText; outline-offset: -1px; }
 }

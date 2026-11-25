@@ -98,6 +98,13 @@ MEANING_RULES = {
         (".focus-item.is-held", "border-left-color", "--danger"),
         (".focus-item.imp-critical", "border-left-color", "--imp-critical"),
         (".focus-item.imp-high", "border-left-color", "--imp-high"),
+        # Today's folder cards and the digest's lists of emails.
+        (".folder-card li.imp-critical::before", "background", "--imp-critical"),
+        (".folder-card li.imp-high::before", "background", "--imp-high"),
+        (".folder-card li.is-held::before", "background", "--danger"),
+        ("ul.stack li.imp-critical::before", "background", "--imp-critical"),
+        ("ul.stack li.imp-high::before", "background", "--imp-high"),
+        ("ul.stack li.is-held::before", "background", "--danger"),
         (".fraud-panel.high", "border-left-color", "--danger"),
         (".job.error", "border-left", "--danger"),
         (".job .job-flag", "color", "--danger"),

@@ -477,7 +477,10 @@ def test_classic_today_writes_the_importance_on_each_email_when_asked(browser, s
     with serving(web.create_app(settings, loaded)) as base:
         page.goto(f"{base}/")
         rows = page.evaluate(ROW_WORDS, CLASSIC_TODAY)
-        assert rows and not [row for row in rows if row["shown"]], rows
+        # Unticked, only a held email says what it is, as the lists' held chip does (but not in the red box of emails
+        # to verify by phone, which says it): its focus row and its row in Needs you.
+        assert rows and [(row["email"], row["text"]) for row in rows if row["shown"]] == [(HELD, "Held for fraud")] * 2, rows
+        assert not [row for row in page.evaluate(ROW_WORDS, ".panel.alert li") if row["shown"]]
         appearance.save(loaded, importance_words=True)
         page.reload()
         rows = page.evaluate(ROW_WORDS, CLASSIC_TODAY)
@@ -673,11 +676,14 @@ PLAIN_EDGES = """sel => [...document.querySelectorAll(sel)].filter((li) => li.ge
   const link = li.querySelector('a[href^="/app/mail/"]');
   const edge = getComputedStyle(li, '::before'), r = li.getBoundingClientRect();
   const card = li.closest('.card').getBoundingClientRect();
+  const word = li.querySelector('.item-level');
   return { email: link ? decodeURIComponent(link.getAttribute('href').split('?')[0].split('/').pop()) : '',
            edge: edge.content !== 'none' ? edge.backgroundColor : null,
            edgeLeft: r.left + parseFloat(edge.left), edgeRight: r.left + parseFloat(edge.left) + parseFloat(edge.width),
            text: r.left + parseFloat(getComputedStyle(li).paddingLeft), list: li.parentElement.getBoundingClientRect().left,
-           card: card.left + parseFloat(getComputedStyle(li.closest('.card')).borderLeftWidth) };
+           card: card.left + parseFloat(getComputedStyle(li.closest('.card')).borderLeftWidth),
+           inBox: Boolean(li.closest('.card-danger')),
+           word: word && getComputedStyle(word).display !== 'none' && word.getBoundingClientRect().width > 0 ? word.textContent : null };
 })"""
 CODING_ROWS = """() => [...document.querySelectorAll('.items .item.kind-coding')].map((li) => {
   const tag = li.querySelector('.item-level');
@@ -727,6 +733,10 @@ def test_the_digest_and_the_ap_coding_list_mark_critical_high_and_held_as_the_li
             for row in rows:
                 want = _edge_of(loaded, row["email"], colors)
                 assert row["edge"] == want, (path, row, want)
+                # A held email says so in words, its red edge being nearly a Critical one's; but in the box of emails
+                # to verify by phone, which says it, only when the importance words are asked for.
+                held_here = want == rgb(pm.workspace("light", colors)["--danger"]) and not row["inBox"]
+                assert row["word"] == ("Held for fraud" if held_here else None), (path, row)
                 # Each email's words start where the others' do; the edge is in the card's margin, beside them.
                 assert row["text"] == row["list"], (path, row)
                 if want:
@@ -788,6 +798,66 @@ def test_the_fraud_check_list_marks_critical_high_and_held_as_the_lists_do(brows
         assert {email_id: row["words"] for email_id, row in rows.items()} == {
             HELD: ["Blocked"], CAUTIONS[0]: ["Caution", "Critical"], CAUTIONS[1]: ["Caution", "High"]}, rows
     context.close()
+
+
+CLASSIC_LIST_EDGES = """sel => [...document.querySelectorAll(sel)].filter((li) => li.getBoundingClientRect().width > 0).map((li) => {
+  const link = li.querySelector('a[href^="/inbox/"]');
+  const edge = getComputedStyle(li, '::before'), r = li.getBoundingClientRect();
+  const panel = li.closest('.panel'), word = li.querySelector('.pill.item-level');
+  return { email: link ? link.getAttribute('href').split('/').pop() : '', edge: edge.content !== 'none' ? edge.backgroundColor : null,
+           width: edge.width, edgeLeft: r.left + parseFloat(edge.left), edgeRight: r.left + parseFloat(edge.left) + parseFloat(edge.width),
+           text: (li.querySelector('a, .pill') || li).getBoundingClientRect().left, inside: r.left + parseFloat(getComputedStyle(li).paddingLeft),
+           panel: panel.getBoundingClientRect().left + parseFloat(getComputedStyle(panel).borderLeftWidth),
+           word: word && getComputedStyle(word).display !== 'none' ? word.textContent : null };
+})"""
+def _classic_edge_of(store, email_id: str, colors: str) -> str | None:
+    """The edge an email has on the classic pages: a held one the red of danger, a Critical or High one its
+    importance's, the others none."""
+    from controller_inbox import fraud
+
+    email, tokens = store.get_email(email_id), pm.classic(colors)
+    if fraud.attachments_locked(email):
+        return rgb(tokens["--danger"])
+    level = email.importance.value
+    return rgb(tokens[f"--imp-{level}"]) if level in ("critical", "high") else None
+
+
+@pytest.mark.parametrize("colors", ["standard", "color-blind"])
+@pytest.mark.parametrize("path", ["/", "/digest"])
+def test_classic_today_and_the_digest_mark_critical_high_and_held_in_every_list(browser, settings, loaded, colors, path):
+    """Settings says the classic pages follow it, and that without the importance words Critical, High and held
+    emails are marked by a colored edge; but classic Today's folder cards and the classic digest's lists of emails
+    marked none of them, the held wiring email, the CP2000 notice and the Critical duplicate invoice included. They
+    have the Inbox's edges now, in the card's margin; a held email says so in words too, its red edge being nearly a
+    Critical one's. The red box of emails to verify by phone has no edge, and says it."""
+    from controller_inbox import appearance
+
+    appearance.save(loaded, colors=colors)
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.request.post(f"{base}/digest/rebuild", headers={"origin": base})
+        page.goto(f"{base}{path}")
+        rows = page.evaluate(CLASSIC_LIST_EDGES, ".folder-card li:not(.muted)" if path == "/" else ".split.three ul.stack li")
+        box = page.evaluate(CLASSIC_LIST_EDGES, ".panel.alert li")
+        appearance.save(loaded, importance_words=True)
+        page.reload()
+        worded = page.evaluate(CLASSIC_LIST_EDGES, ".folder-card li:not(.muted)" if path == "/" else ".split.three ul.stack li")
+    context.close()
+    assert len(rows) >= 6 and box, (rows, box)
+    marked = {}
+    for row in rows:
+        want = _classic_edge_of(loaded, row["email"], colors)
+        assert row["edge"] == want, (path, row, want)
+        if want:
+            marked[row["email"]] = want
+            assert row["width"] == ("4px" if want == rgb(pm.classic(colors)["--danger"]) else "3px"), row
+            assert row["panel"] < row["edgeLeft"] < row["edgeRight"] < row["inside"], ("in the card's margin", path, row)
+        assert row["word"] == ("Held for fraud" if want == rgb(pm.classic(colors)["--danger"]) else None), (path, row)
+    assert {"demo-bec-wire", "demo-tax", "demo-inv-10482-dup"} <= set(marked), marked
+    assert len({row["inside"] for row in rows}) <= 3, ("each email's words start where the others' do", rows)
+    assert all(row["edge"] is None and row["word"] is None for row in box), ("the box says it", box)
+    assert [(row["email"], row["edge"]) for row in worded] == [(row["email"], row["edge"]) for row in rows], "the edges stay"
 
 
 # The longest words Today can show on one row, with a 7-figure amount (a held email keeps its longer "Held for
@@ -1124,6 +1194,8 @@ def test_windows_high_contrast_still_marks_critical_high_and_held(browser, setti
         page.goto(f"{base}/")
         page.wait_for_selector(".focus-item")
         today = page.evaluate(HC_CLASSIC)["focus"]
+        cards = page.evaluate(CLASSIC_LIST_EDGES, ".folder-card li:not(.muted)")
+        assert [row for row in cards if row["edge"]] and all(row["edge"] in (None, system["text"]) for row in cards), cards
         page.goto(f"{base}/inbox")
         page.wait_for_selector("table.mail tbody tr[data-email]")
         inbox = page.evaluate(HC_CLASSIC)["rows"]

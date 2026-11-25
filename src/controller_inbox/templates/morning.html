@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_level.html" import level, focus_edge %}
+{% from "_level.html" import level, focus_edge, edge_class %}
 {% block title %}Today · CloseDesk{% endblock %}
 {% block heading %}Today{% endblock %}
 {% block body %}
@@ -87,7 +87,7 @@
     <b>{{ rows | length }}</b>
     <ul>
       {% for item in rows[:6] %}
-      <li>
+      <li{{ edge_class(item) }}>
         {{ level(item) }}
         <a href="/inbox/{{ item.id }}" title="{{ item.subject }}">{{ item.subject }}</a>
         {% if item.summary and folder != 'reference' %}<small>{{ item.summary }}</small>{% endif %}

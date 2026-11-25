@@ -433,6 +433,10 @@ ROLES = {
         ("ui", Rule(".focus-item.imp-critical", "border-left-color"), ["--card", "--paper"], "Today's Critical edge .focus-item.imp-critical"),
         ("ui", Rule(".focus-item.imp-high", "border-left-color"), ["--card", "--paper"], "Today's High edge .focus-item.imp-high"),
         ("ui", Rule(".focus-item.is-held", "border-left-color"), ["--card", "--paper"], "Today's held email edge .focus-item.is-held"),
+        # An email in Today's folder cards and the digest's lists, on the card.
+        ("ui", Rule(".folder-card li.imp-critical::before", "background"), ["--card"], "a Critical email's edge in a list .folder-card li, ul.stack li"),
+        ("ui", Rule(".folder-card li.imp-high::before", "background"), ["--card"], "a High email's edge in a list .folder-card li, ul.stack li"),
+        ("ui", Rule(".folder-card li.is-held::before", "background"), ["--card"], "a held email's edge in a list .folder-card li, ul.stack li"),
         ("ui", Rule(".tag.due_week", "box-shadow"), [Rule(".tag.due_week", "background")], "its outlined tag .tag.due_week, .tag.due_soon"),
         ("ui", Rule(".flag.needs_model", "border"), [Rule(".flag.needs_model", "background")], "waiting for the model, dashed .flag.needs_model"),
         ("text", Rule(".tag.caution", "color"), [Rule(".tag.caution", "background")], "a fraud check's Caution .tag.caution"),
