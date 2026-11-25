@@ -243,15 +243,60 @@ def css_block(path: Path, selector: str, media: str = "") -> dict[str, str]:
     return {name: value.strip().lower() for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+?)\s*(?:;|$)", found[0])}
 
 
-def rule_colour(path: Path, selector: str, prop: str, tokens: dict[str, str]) -> str:
-    """The colour a rule written on one line gives ``prop`` (a hex, or a token resolved with ``tokens``)."""
-    for line in path.read_text(encoding="utf-8").split("\n"):
-        if line.lstrip().startswith(selector + " ") or line.lstrip().startswith(selector + "{"):
-            m = re.search(re.escape(prop) + r"\s*:\s*[^;]*?(#[0-9a-fA-F]{3,8}|var\(--[\w-]+\))", line)
-            if m:
-                value = m.group(1).lower()
-                return tokens[value[4:-1]] if value.startswith("var(") else value
-    raise AssertionError(f"no {selector} {{ {prop} }} in {path.name}")
+def _selectors(prelude: str) -> list[str]:
+    """A rule's selector list split at its own commas, not those inside :is(…) or :not(…)."""
+    out, depth, start = [], 0, 0
+    for i, ch in enumerate(prelude):
+        depth += {"(": 1, ")": -1}.get(ch, 0)
+        if ch == "," and not depth:
+            out.append(prelude[start:i].strip())
+            start = i + 1
+    return [*out, prelude[start:].strip()]
+
+
+def rule_value(path: Path, selector: str, prop: str) -> str | None:
+    """What the stylesheet's top-level rules for exactly ``selector`` (alone or in a list) set ``prop`` to, the last
+    one winning as in the browser (``background`` also finds ``background-color``); None when they don't set it. Fails
+    when no rule names the selector, so a renamed one can't skip a check."""
+    css = re.sub(r"/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.S)
+    rules = [body for media, prelude, body in _rules(css) if not media and selector in _selectors(prelude)]
+    assert rules, f"no rule {selector} {{ … }} in {path.name}"
+    value = None
+    for body in rules:
+        for name, said in re.findall(r"(?:^|;)\s*([\w-]+)\s*:\s*([^;]+)", body):
+            if name in (prop, f"{prop}-color"):
+                value = said.strip()
+    return value
+
+
+def rule_colour(path: Path, selector: str, prop: str, tokens: dict[str, str], inherited: str = "") -> str:
+    """The colour the rules for ``selector`` give ``prop``: a hex, or a token resolved with ``tokens``. When they don't
+    set it, ``inherited`` (a token or a colour): what the element takes from its parent or a less specific rule. Fails
+    on a value the check can't read (var(--tone), color-mix(…)), so a rule moved off the tokens isn't passed unseen."""
+    value = rule_value(path, selector, prop)
+    if value is None:
+        assert inherited, f"{selector} sets no {prop} in {path.name}"
+        return colour(tokens, inherited)
+    found = re.search(r"#[0-9a-fA-F]{3,8}\b|var\(--[\w-]+\)", value)
+    assert found and "color-mix" not in value, f"{selector} {{ {prop}: {value} }} in {path.name}: no colour to check"
+    said = found.group(0).lower()
+    if not said.startswith("var("):
+        return said
+    assert said[4:-1] in tokens, f"{selector} {{ {prop}: {value} }} in {path.name}: {said[4:-1]} is set per element, not a token"
+    return tokens[said[4:-1]]
+
+
+class Rule:
+    """A colour read from a rule in the stylesheet, not from a token: ``Rule(".pill.high", "color")`` is the colour
+    the rule gives the High pill's words. ``inherited`` is what shows when no rule for the selector sets it."""
+
+    def __init__(self, selector: str, prop: str, inherited: str = "") -> None:
+        self.selector, self.prop, self.inherited = selector, prop, inherited
+
+    def __str__(self) -> str:
+        return f"{self.selector} {{{self.prop}}}"
+
+    __repr__ = __str__
 
 
 def workspace(theme: str, colors: str = "standard") -> dict[str, str]:
@@ -336,7 +381,8 @@ KEY_PAIRS = {
 WHITE = "#ffffff"
 
 # Where each colour is used: (kind, foreground, backgrounds, where). Text needs 4.5:1; "ui" (an edge, a box, an
-# icon) 3:1. A name starting "--" is a token; anything else is the colour itself.
+# icon) 3:1. A name starting "--" is a token; a Rule is the colour that rule in the stylesheet gives (so a rule that
+# drops its token is checked too); anything else is the colour itself.
 ROLES = {
     "workspace": [
         ("ui", "--imp-critical", ["--surface", "--surface-2", "--selected"], "list edge .item.imp-critical::before"),
@@ -345,6 +391,11 @@ ROLES = {
         ("text", "--on-pill", ["--imp-critical"], "Critical pill .pill.imp-critical"),
         ("text", "--on-imp-high", ["--imp-high-fill"], "High pill .pill.imp-high"),
         ("text", "--on-pill", ["--imp-medium"], "Medium pill .pill"),
+        # The card beside a page's box: how sure a reading is, in words on their own pale fill (reader.js).
+        ("text", Rule(".pv-tip-tag.ok", "color"), [Rule(".pv-tip-tag.ok", "background")], "a sure reading .pv-tip-tag.ok"),
+        ("text", Rule(".pv-tip-tag.check", "color"), [Rule(".pv-tip-tag.check", "background")], "a reading to check .pv-tip-tag.check"),
+        ("text", Rule(".pv-tip-tag.differs", "color"), [Rule(".pv-tip-tag.differs", "background")], "a reading that differs .pv-tip-tag.differs"),
+        ("text", Rule(".pv-tip-tag.fixed", "color"), [Rule(".pv-tip-tag.fixed", "background")], "a fixed reading .pv-tip-tag.fixed"),
         ("text", "--on-danger", ["--danger"], "filled danger .tag-fraud, .btn-danger, .rail-count.danger"),
         ("text", "--danger", ["--surface", "--bg", "--surface-2", "--danger-soft"], "danger words .tag-prio-critical, .chip-danger, .item-when.late, .msg-warn"),
         ("text", "--warn", ["--surface", "--bg", "--surface-2", "--warn-soft"], "warning words .tag-prio-high, .chip-warn, .badge.warn, .warn-text"),
@@ -377,7 +428,13 @@ ROLES = {
 }
 
 
-def colour(tokens: dict[str, str], name: str) -> str:
+SHEETS = {"workspace": WORKSPACE_CSS, "classic": CLASSIC_CSS}
+
+
+def colour(tokens: dict[str, str], name, sheet: Path | None = None) -> str:
+    """A token's colour, a colour as it is, or (a Rule) the colour that rule in ``sheet`` gives."""
+    if isinstance(name, Rule):
+        return rule_colour(sheet, name.selector, name.prop, tokens, name.inherited)
     return tokens[name] if name.startswith("--") else name
 
 
@@ -395,7 +452,7 @@ def role_contrasts(ui: str, tokens: dict[str, str]) -> list[tuple[str, str, str,
     rows = []
     for kind, fg, bgs, where in ROLES[ui]:
         for bg in bgs:
-            rows.append((kind, fg, bg, contrast(colour(tokens, fg), colour(tokens, bg)), 4.5 if kind == "text" else 3.0, where))
+            rows.append((kind, fg, bg, contrast(colour(tokens, fg, SHEETS[ui]), colour(tokens, bg, SHEETS[ui])), 4.5 if kind == "text" else 3.0, where))
     return rows
 
 

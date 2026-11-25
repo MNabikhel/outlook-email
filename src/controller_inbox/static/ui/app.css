@@ -855,6 +855,12 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 .pv-tip-model { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 .pv-tip-text { margin: 3px 0 0; font: 12.5px/1.45 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pv-tip-tag { padding: 0 7px; border-radius: 999px; font-size: 11.5px; font-weight: 650; color: var(--tone); background: color-mix(in srgb, var(--tone) 14%, transparent); border: 1px solid color-mix(in srgb, var(--tone) 40%, transparent); }
+/* How sure a reading is, in words: the text colours on their own pale fills, which read at 4.5:1 or more in every
+   theme and palette. The boxes' edge colours on a tint were too pale (the amber 2.9:1 in the light theme). */
+.pv-tip-tag.ok { color: var(--ok); background: var(--ok-soft); border-color: var(--ok-line); }
+.pv-tip-tag.check { color: var(--warn); background: var(--warn-soft); border-color: var(--warn-line); }
+.pv-tip-tag.differs { color: var(--danger); background: var(--danger-soft); border-color: var(--danger-line); }
+.pv-tip-tag.fixed { color: var(--accent); background: var(--accent-soft); }
 
 /* Page size, what to check next, and the tables on the page. */
 .pv-zoom .seg { font-variant-numeric: tabular-nums; }
