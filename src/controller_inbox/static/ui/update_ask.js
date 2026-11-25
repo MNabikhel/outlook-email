@@ -7,7 +7,7 @@
    version the page shows, so a tab left open from before an update can't stop the new CloseDesk for nothing. */
 
 import { $, h, replace } from "./dom.js";
-import { getJSON, postJSON } from "./api.js";
+import { getJSON, postJSON, unanswered } from "./api.js";
 
 const AGAIN_MS = 1000; // while GitHub is still being asked
 const TRIES = 30; // the asking waits a few seconds at most: past this, CloseDesk opens as normal
@@ -148,8 +148,9 @@ function show(view, updating) {
       // The keyboard's place stays in the question: Update now, just pressed, can't keep it while it waits.
       later.focus();
       if (error.status === 409 && view.meanwhile_message && error.message === view.meanwhile_message) return updatedMeanwhile(error.message);
-      // Nothing answered (no status): CloseDesk has stopped for an update another tab or window asked for.
-      if (typeof error.status !== "number" && view.elsewhere_message) return updatingElsewhere();
+      // Nothing answered (api.js says so with status 0; a bare fetch, with none): CloseDesk has stopped for an update
+      // another tab or window asked for.
+      if (unanswered(error) && view.elsewhere_message) return updatingElsewhere();
       const busy = error.status === 409 && error.message === view.busy_message;
       say(error.message, busy ? "wait" : "error");
       if (busy) waitForTheMail();
