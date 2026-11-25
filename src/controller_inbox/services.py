@@ -94,33 +94,42 @@ def digest_view(store: Store, as_of: date, wanted: str = "", *, history: int = 3
 
 
 def _give_focus_rows_their_importance(store: Store, payload: dict) -> None:
-    """A digest saved before its focus rows said their email's importance, and whether it is held as possible payment
-    fraud: worked out from the email as it is now, so each says its importance (or "Held for fraud") when the
-    importance words are asked for, and a Critical or High one has the edge of its importance, as on Today. A row
+    """Each focus row's email as it is now: whether it is held as possible payment fraud, so one reported as fraud
+    since the digest was saved says "Held for fraud" and has the held edge, as on Today (and one cleared since its
+    importance again); and, on a digest saved before its focus rows said their email's importance, that too, so each
+    says it when the importance words are asked for and a Critical or High one has the edge of its importance. A row
     whose email is gone stays as it was saved."""
-    for row in payload.get("focus") or []:
-        if not isinstance(row, dict) or row.get("importance"):
+    rows = [row for row in payload.get("focus") or [] if isinstance(row, dict)]
+    emails = store.get_emails([str(row.get("email_id") or "") for row in rows])
+    for row in rows:
+        email = emails.get(str(row.get("email_id") or ""))
+        if email is None:
             continue
-        email = store.get_email(str(row.get("email_id") or ""))
-        if email is not None:
+        if not row.get("importance"):
             row["importance"] = email.importance.value
             row["importance_label"] = IMPORTANCE_LABELS.get(email.importance, email.importance.value)
-            row["locked"] = fraud.attachments_locked(email)
+        row["locked"] = fraud.attachments_locked(email)
 
 
 def _say_which_are_held(store: Store, payload: dict) -> None:
-    """A digest saved before its emails said whether each is held as possible payment fraud: worked out from the email
-    as it is now, so where it says an email's importance, a held one says "Held for fraud" instead, as the other pages
-    do. Every list of emails (the "Do not process" box, what came in, Invoices to enter, Cash to apply, Close /
-    reconcile, and any added later): its tasks have no importance word."""
+    """Whether each email of a digest is held as possible payment fraud, worked out from the email as it is now: one
+    reported as fraud since the digest was saved is held on it too, as on every other page (and one cleared since is
+    not), and a digest saved before its emails said so says it. Where it says an email's importance, a held one says
+    "Held for fraud" instead. Every list of emails (the "Do not process" box, what came in, Invoices to enter, Cash to
+    apply, Close / reconcile, and any added later): its tasks have no importance word. An email that is gone keeps
+    what was saved."""
     new_mail = payload.get("new_mail")
     lists = [value for value in payload.values() if isinstance(value, list)]
     if isinstance(new_mail, dict):
         lists += [items for items in new_mail.values() if isinstance(items, list)]
-    for item in (item for items in lists for item in items):
-        if isinstance(item, dict) and "locked" not in item and item.get("importance_label"):
-            email = store.get_email(str(item.get("email_id") or item.get("id") or ""))
-            item["locked"] = email is not None and fraud.attachments_locked(email)
+    items = [item for items in lists for item in items if isinstance(item, dict) and item.get("importance_label")]
+    emails = store.get_emails([str(item.get("email_id") or item.get("id") or "") for item in items])
+    for item in items:
+        email = emails.get(str(item.get("email_id") or item.get("id") or ""))
+        if email is not None:
+            item["locked"] = fraud.attachments_locked(email)
+        else:
+            item.setdefault("locked", False)
 
 
 def coding_rows(store: Store, settings: Settings, status: str, q: str = "") -> tuple[str, list[dict]]:

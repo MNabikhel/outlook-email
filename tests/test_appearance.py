@@ -525,6 +525,42 @@ def test_a_held_invoice_on_a_digest_saved_before_it_said_so_is_held_in_every_lis
 
 
 INVOICE = "demo-inv-10482"  # the sample's AP invoice
+HARBOR = "demo-missing-att"  # the sample's Harbor Packaging invoice, its file missing
+
+
+def _rows_of(payload: dict, email_id: str) -> list[dict]:
+    """Each row of a digest that is this email (not its tasks, which say no importance)."""
+    rows = [item for value in payload.values() if isinstance(value, list) for item in value if isinstance(item, dict)]
+    rows += [item for items in payload["new_mail"].values() for item in items]
+    return [item for item in rows if (item.get("email_id") or item.get("id")) == email_id and item.get("importance_label")]
+
+
+def test_an_email_reported_as_fraud_after_the_digest_was_saved_is_held_on_it(client, demo):
+    """The Harbor Packaging invoice, reported as fraud after the day's digest was saved: the digest kept its amber
+    High edge and the word "High", in both UIs, where Today and every list said "Held for fraud". Whether an email is
+    held was worked out again only on a digest saved before digests said so, so today's was less right than an older
+    one until it was built again. It is worked out from the email as it is now on every digest, as on Today; and one
+    cleared since says its importance again."""
+    assert client.post("/digest/rebuild", headers=SAME, follow_redirects=False).status_code == 303
+    saved = _rows_of(client.get("/api/digest", headers=PAGE).json()["payload"], HARBOR)
+    assert len(saved) >= 2 and not any(item["locked"] for item in saved), saved  # its focus row and Needs you
+    assert not [word for _cls, word in _words_on(client.get("/digest").text, HARBOR) if word == "Held for fraud"]
+
+    reported = client.post(f"/inbox/{HARBOR}/fraud", data={"choice": "fraud"}, headers=SAME, follow_redirects=False)
+    assert reported.status_code == 303, reported.text
+    shown = _rows_of(client.get("/api/digest", headers=PAGE).json()["payload"], HARBOR)
+    assert len(shown) == len(saved) and all(item["locked"] is True for item in shown), shown
+    html = client.get("/digest").text
+    words = _words_on(html, HARBOR)
+    assert len(words) >= 2 and set(words) == {("pill held item-level", "Held for fraud")}, words  # wherever it is listed
+    (item,) = [item for item in _focus_items(html) if f'href="/inbox/{HARBOR}"' in item]
+    assert item.split('"', 1)[0].split()[-1] == "is-held", ("the held edge, not High's", item[:80])
+
+    cleared = client.post(f"/inbox/{HARBOR}/fraud", data={"choice": "safe"}, headers=SAME, follow_redirects=False)
+    assert cleared.status_code == 303, cleared.text
+    shown = _rows_of(client.get("/api/digest", headers=PAGE).json()["payload"], HARBOR)
+    assert shown and not any(item["locked"] for item in shown), shown
+    assert "Held for fraud" not in {word for _cls, word in _words_on(client.get("/digest").text, HARBOR)}
 
 
 @pytest.mark.parametrize(("notice", "section"), [("colors", "colors"), ("importance-words", "colors"), ("timezone", "timezone")])
