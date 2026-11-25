@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_level.html" import level %}
 {% block title %}Daily digest · CloseDesk{% endblock %}
 {% block heading %}Daily digest{% endblock %}
 {% block body %}
@@ -8,7 +9,7 @@
     {% for item in items %}
     <li>
       <div>
-        {% if item.importance_label %}<span class="pill {{ item.importance }} item-level">{{ item.importance_label }}</span>{% endif %}
+        {{ level(item) }}
         <a href="/inbox/{{ item.email_id or item.id }}">{{ item.title or item.subject }}</a>
         <small>
           {{ item.sender or item.priority or '' }}
@@ -65,7 +66,7 @@
     <li class="focus-item {{ row.kind }}">
       <span class="rank">{{ row.rank }}</span>
       <div class="focus-body">
-        <div class="focus-top"><span class="tag {{ row.kind }}">{{ row.label }}</span>{% if row.importance_label %} <span class="pill {{ row.importance }} item-level">{{ row.importance_label }}</span>{% endif %} <a href="/inbox/{{ row.email_id }}">{{ row.title }}</a></div>
+        <div class="focus-top"><span class="tag {{ row.kind }}">{{ row.label }}</span> {{ level(row) }} <a href="/inbox/{{ row.email_id }}">{{ row.title }}</a></div>
         <p>{{ row.summary or row.subject }}</p>
         <small>{{ row.sender }}{% if row.more_tasks %} · +{{ row.more_tasks }} more{% endif %}</small>
       </div>

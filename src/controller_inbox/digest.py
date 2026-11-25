@@ -250,9 +250,11 @@ def _focus_row(email: EmailRecord, kind: str, label: str, score: int, *, action=
         "subject": email.subject,
         "sender": email.sender_name or email.sender_email,
         "email_id": email.id,
-        # The email's importance, written on it on Today and the digest when Setup → Colors asks for it.
+        # The email's importance, written on it on Today and the digest when Setup → Colors asks for it; an email held
+        # as possible payment fraud says that instead, as the lists do.
         "importance": email.importance.value,
         "importance_label": IMPORTANCE_LABELS.get(email.importance, email.importance.value),
+        "locked": attachments_locked(email),
         "action_id": action.id if action else "",
         "due": action.due_date if action else email.extracted.primary_due,
         "amount": email.extracted.primary_amount,
@@ -303,6 +305,7 @@ def _email_card(email: EmailRecord) -> dict[str, Any]:
         "category_label": DOCUMENT_LABELS.get(email.category, email.category.value),
         "importance": email.importance.value,
         "importance_label": IMPORTANCE_LABELS.get(email.importance, email.importance.value),
+        "locked": attachments_locked(email),  # held as possible payment fraud: said instead of its importance
         "score": email.importance_score,
         "flags": email.flags,
         "folder": email.folder,

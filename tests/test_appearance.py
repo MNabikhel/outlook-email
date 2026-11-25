@@ -4,6 +4,8 @@ in them from the start, with no script and no flash."""
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -329,7 +331,7 @@ def test_classic_today_and_the_digest_write_the_importance_on_each_email(client,
     today = client.get("/").text
     rows = client.get("/api/focus", headers=PAGE).json()["focus"]
     assert len(_focus_items(today)) == len(levels(today)) >= 3, "every email in the focus list"
-    want = [IMPORTANCE_LABELS[demo.get_email(row["email_id"]).importance] for row in rows]
+    want = ["Held for fraud" if row["locked"] else IMPORTANCE_LABELS[demo.get_email(row["email_id"]).importance] for row in rows]
     assert levels(today)[: len(want)] == want
     assert 'class="pill critical item-level"' in today and 'class="pill high item-level"' in today
     # What came in since: each email in the three folder cards.
@@ -339,6 +341,42 @@ def test_classic_today_and_the_digest_write_the_importance_on_each_email(client,
     digest = client.get("/digest").text
     assert len(_focus_items(digest)) == len(levels(digest)) >= 3
     assert digest.count("item-level") > len(levels(digest)), "and its other lists of emails"
+
+
+HELD = "demo-bec-wire"  # the sample's wire change, held as possible payment fraud
+
+
+def _words_on(html: str, email_id: str) -> list[tuple[str, str]]:
+    """(class, word) of the importance written on each row of a classic page that links to this email."""
+    out = []
+    for item in re.split(r"<li[\s>]", html)[1:]:
+        item = item[: item.index("</li>")]
+        if f'href="/inbox/{email_id}"' in item and "item-level" in item:
+            start = item.rindex('class="', 0, item.index("item-level"))
+            out.append((item[start + 7 : item.index('"', start + 7)], item[item.index("item-level") :].split(">", 1)[1].split("<", 1)[0]))
+    return out
+
+
+def test_a_held_email_says_held_for_fraud_wherever_its_importance_is_written(client, demo):
+    """With the importance on each email, the email held as possible payment fraud said "Held for fraud" in the
+    workspace's lists, but "Critical" in the workspace's digest and on classic Today and the digest: one email, two
+    words, by page. The digest's rows now say it is held, and every page writes the held word first."""
+    from controller_inbox import fraud
+
+    assert fraud.attachments_locked(demo.get_email(HELD))
+    assert client.post("/digest/rebuild", headers=SAME, follow_redirects=False).status_code == 303
+    payload = client.get("/api/digest", headers=PAGE).json()["payload"]
+    rows = [*payload["focus"], *payload["critical_alerts"], *(row for rows in payload["new_mail"].values() for row in rows)]
+    held = [row for row in rows if (row.get("email_id") or row.get("id")) == HELD]
+    assert len(held) == 3 and all(row["locked"] is True for row in held), held
+    assert not [row for row in rows if row["locked"] and row not in held]
+    # Today's box of emails to verify by phone, in the workspace, from /api/focus.
+    assert [alert["locked"] for alert in client.get("/api/focus", headers=PAGE).json()["alerts"]] == [True]
+    for path in ("/", "/digest"):
+        html = client.get(path).text
+        # Its box to verify by phone, its row in the focus list, and in Needs you: each says held, not its importance.
+        assert _words_on(html, HELD) == [("pill held item-level", "Held for fraud")] * 3, path
+        assert html.count(">Held for fraud<") == 3, path
 
 
 @pytest.mark.parametrize(("notice", "section"), [("colors", "colors"), ("importance-words", "colors"), ("timezone", "timezone")])

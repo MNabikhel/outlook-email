@@ -1,0 +1,6 @@
+{# The importance on an email of Today or the digest, shown when Setup → Colors asks for it (static/app.css). An email
+   held as possible payment fraud says that instead, as the workspace's lists do: its edge is fraud's, not its
+   importance's. #}
+{% macro level(item) -%}
+{% if item.locked %}<span class="pill held item-level">Held for fraud</span>{% elif item.importance_label %}<span class="pill {{ item.importance }} item-level">{{ item.importance_label }}</span>{% endif %}
+{%- endmacro %}

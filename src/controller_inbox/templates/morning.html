@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_level.html" import level %}
 {% block title %}Today · CloseDesk{% endblock %}
 {% block heading %}Today{% endblock %}
 {% block body %}
@@ -33,6 +34,7 @@
   <ul>
     {% for item in payload.critical_alerts %}
     <li>
+      {{ level(item) }}
       <a href="/inbox/{{ item.id }}"><strong>{{ item.subject }}</strong></a>
       <small>{{ item.sender }} · {{ item.summary }}</small>
     </li>
@@ -50,7 +52,7 @@
       <div class="focus-body">
         <div class="focus-top">
           <span class="tag {{ row.kind }}">{{ row.label }}</span>
-          {% if row.importance_label %}<span class="pill {{ row.importance }} item-level">{{ row.importance_label }}</span>{% endif %}
+          {{ level(row) }}
           <a href="/inbox/{{ row.email_id }}">{{ row.title }}</a>
         </div>
         <p>{{ row.summary or row.subject }}</p>
@@ -86,7 +88,7 @@
     <ul>
       {% for item in rows[:6] %}
       <li>
-        {% if item.importance_label %}<span class="pill {{ item.importance }} item-level">{{ item.importance_label }}</span>{% endif %}
+        {{ level(item) }}
         <a href="/inbox/{{ item.id }}">{{ item.subject }}</a>
         {% if item.summary and folder != 'reference' %}<small>{{ item.summary }}</small>{% endif %}
       </li>

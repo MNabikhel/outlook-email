@@ -154,7 +154,8 @@ export function todayBrief(data, meta, actions) {
           "section",
           { class: "card card-danger" },
           h("h2", { class: "rd-h" }, icon("alert", 14), " Do not process — verify by phone"),
-          itemList(data.alerts, "", (item) => [mailLink(item.id, item.subject, "today"), h("small", null, `${item.sender} · ${item.summary || ""}`)])
+          // Each says it is held when Settings → Appearance asks for the importance on each email, as the digest's box does.
+          itemList(data.alerts, "", (item) => [levelTag(item), mailLink(item.id, item.subject, "today"), h("small", null, `${item.sender} · ${item.summary || ""}`)])
         )
       : null,
     meetingsCard(data.meetings_today || []),
