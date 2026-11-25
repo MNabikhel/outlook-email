@@ -114,6 +114,9 @@ MEANING_RULES = {
         (".item.imp-critical::before", "background", "--imp-critical"),
         (".item.imp-high::before", "background", "--imp-high"),
         (".item.is-locked::before", "background", "--danger"),
+        (".plain-list li.imp-critical::before", "background", "--imp-critical"),  # the daily digest's emails
+        (".plain-list li.imp-high::before", "background", "--imp-high"),
+        (".plain-list li.is-locked::before", "background", "--danger"),
         (".pill.imp-critical", "background", "--imp-critical"),
         (".pill.imp-high", "background", "--imp-high-fill"),
         (".tag-prio-critical", "color", "--danger"),
