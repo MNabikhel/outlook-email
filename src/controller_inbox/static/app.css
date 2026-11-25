@@ -167,7 +167,7 @@ table.mail tr.high { box-shadow: inset 3px 0 0 var(--imp-high); }
 .folder-card > span { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
 .folder-card b { display: block; font-family: var(--serif); font-size: 32px; margin: 4px 0 8px; }
 .folder-card ul { list-style: none; padding: 0; margin: 0; }
-.folder-card li { font-size: 14px; padding: 4px 0; border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.folder-card li { font-size: 14px; padding: 4px 0; border-top: 1px solid var(--line); }
 
 .detail-head { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
 .detail-head h2 { font-family: var(--serif); margin: 8px 0 4px; font-size: 28px; }
@@ -242,7 +242,10 @@ details.panel summary { cursor: pointer; font-family: var(--serif); font-size: 1
 .folder-card.important { border-top: 3px solid var(--navy); }
 .folder-card.informational { border-top: 3px solid var(--gold); }
 .folder-card.reference { border-top: 3px solid #b9c2b3; }
-.folder-card li a { color: var(--ink); }
+/* Each subject on one line, cut with "…" at the card's edge; the importance word (Setup → Colors) on a line of its
+   own above it, so the subject keeps the card's whole width. */
+.folder-card li a { display: block; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+:root[data-importance-words="on"] .folder-card li .pill.item-level { display: block; width: fit-content; margin-bottom: 2px; }
 .folder-card li small { display: block; white-space: normal; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .folder-card .more { display: inline-block; margin-top: 8px; font-size: 13px; }
 .split.three { grid-template-columns: repeat(3, 1fr); }

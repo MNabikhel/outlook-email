@@ -89,7 +89,7 @@
       {% for item in rows[:6] %}
       <li>
         {{ level(item) }}
-        <a href="/inbox/{{ item.id }}">{{ item.subject }}</a>
+        <a href="/inbox/{{ item.id }}" title="{{ item.subject }}">{{ item.subject }}</a>
         {% if item.summary and folder != 'reference' %}<small>{{ item.summary }}</small>{% endif %}
       </li>
       {% else %}

@@ -452,6 +452,56 @@ def test_classic_today_writes_the_importance_on_each_email_when_asked(browser, s
     context.close()
 
 
+# How much of each subject a folder card on classic Today shows on its one line: the characters before the edge it is
+# cut at (the card's, or the link's own when it cuts its words itself).
+SUBJECT_SHOWN = """() => [...document.querySelectorAll('.folder-card li:not(.muted)')].map((li) => {
+  const link = li.querySelector('a[href^="/inbox/"]');
+  const words = link.firstChild;
+  let right = li.getBoundingClientRect().right - parseFloat(getComputedStyle(li).paddingRight);
+  if (getComputedStyle(link).overflow !== 'visible') right = Math.min(right, link.getBoundingClientRect().right);
+  const range = document.createRange();
+  let shown = 0;
+  for (; shown < words.length; shown++) {
+    range.setStart(words, shown);
+    range.setEnd(words, shown + 1);
+    if (range.getBoundingClientRect().right > right + 0.5) break;
+  }
+  const tag = li.querySelector('.item-level');
+  return { email: link.getAttribute('href'), subject: words.textContent, shown, title: link.title,
+           tag: tag && getComputedStyle(tag).display !== 'none' ? tag.getBoundingClientRect().right <= right + 0.5 : null };
+})"""
+
+
+@pytest.mark.parametrize("width", [981, 1100, 1280])
+def test_the_importance_word_leaves_the_subject_its_line_in_todays_folder_cards(browser, settings, loaded, width):
+    """Each email in classic Today's "Needs you", "Worth knowing" and "Filed for reference" is one line, cut with "…"
+    at the card's edge, and the word was put at its start: at 981px wide the held email went from 27 characters of
+    its subject to 10 ("HELD FOR FRAUD  Urgent: …"), and the Critical ones from about 25 to 15. The word has a line
+    of its own, above the subject."""
+    from controller_inbox import appearance
+
+    context = _context(browser, "light")
+    page = context.new_page()
+    page.set_viewport_size({"width": width, "height": 900})
+    with serving(web.create_app(settings, loaded)) as base:
+        page.goto(f"{base}/")
+        without = page.evaluate(SUBJECT_SHOWN)
+        appearance.save(loaded, importance_words=True)
+        page.reload()
+        shown = page.evaluate(SUBJECT_SHOWN)
+    context.close()
+    assert len(shown) == len(without) >= 6 and [row["email"] for row in shown] == [row["email"] for row in without]
+    assert [row for row in without if row["shown"] < len(row["subject"])], ("some subjects are cut", width, without)
+    cut = {
+        row["subject"]: (before["shown"], row["shown"])
+        for row, before in zip(shown, without, strict=True)
+        if row["shown"] < before["shown"] - 2
+    }
+    assert not cut, (width, cut)
+    assert all(row["tag"] is True for row in shown), ("each word shown, inside the card", shown)
+    assert all(row["title"] == row["subject"] for row in shown), "the whole subject under the pointer"
+
+
 MODEL_FLAGS = """() => [...document.querySelectorAll('table.mail tbody tr')].map((tr) => {
   const cell = tr.querySelector('a.subj').closest('td');
   const above = [...cell.children].filter((el) => el.matches('.summary, .why, .flags:not(.model-flags), a.subj')).pop();
