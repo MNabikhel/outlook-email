@@ -128,6 +128,9 @@ def main(argv: list[str] | None = None) -> int:
     trust.add_argument("--note", default="")
 
     sub.add_parser("doctor", help="Say what is and isn't in order on this computer, and what to do about it.")
+    sub.add_parser(
+        "shortcut", help="Add the CloseDesk shortcut again (Windows: Desktop and Start menu; macOS: Applications)."
+    )
 
     from controller_inbox.tools import TOOL_NAMES
 
@@ -143,6 +146,12 @@ def main(argv: list[str] | None = None) -> int:
         from controller_inbox import doctor
 
         return doctor.main()
+    if args.cmd == "shortcut":
+        from controller_inbox import shortcut
+
+        said = shortcut.make()
+        print(said.message)
+        return 0 if said.ok else 1
     if args.cmd == "app":
         # Before the settings are read: the window has no console, so it says itself when they stop CloseDesk.
         from controller_inbox import app_window
@@ -717,6 +726,12 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None,
 
     app.state.update_question.begin(store, settings, failed=updates.update_unfinished(store))
     updates.start_checking(store, settings)
+    if updates.launcher_here():
+        # Started by a launcher (or the window): the CloseDesk shortcut is made the first time, and kept right after
+        # that (shortcut.py), beside the start.
+        from controller_inbox import shortcut
+
+        shortcut.upkeep_soon()
     _run_server(app, host=host or settings.host, port=port or settings.port)
     # Settings' Update button (or the question's) stopped it: the launcher updates CloseDesk and starts it again.
     if getattr(app.state, "update_asked", False):

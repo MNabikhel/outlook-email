@@ -331,7 +331,11 @@ def _macos() -> tuple[int, ...]:
 
 
 def _lsregister(app: Path) -> None:
-    """Tell Launch Services about the app now, so Spotlight and the Dock know it (and its new icon) at once."""
+    """Tell Launch Services about the app now, so Spotlight and the Dock know it (and its new icon) at once. Not one in
+    the tests' or the launcher check's folder (``CLOSEDESK_SHORTCUT_DIR``): Spotlight would offer a CloseDesk that is
+    gone once they end."""
+    if os.environ.get(DIR_ENV):
+        return
     try:
         subprocess.run([LSREGISTER, "-f", str(app)], stdin=subprocess.DEVNULL, capture_output=True, timeout=60)
     except (OSError, subprocess.SubprocessError):

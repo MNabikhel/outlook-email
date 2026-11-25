@@ -606,6 +606,49 @@ def test_upkeep_in_the_background_never_stops_closedesk(monkeypatch, capsys):
     assert not thread.is_alive()
 
 
+# From CloseDesk's start, and asked for -------------------------------------------------------------------------------
+
+
+def _start_closedesk(settings, store, monkeypatch) -> list:
+    """cli._serve with the server faked; what it asked of the shortcut."""
+    from controller_inbox import cli, updates
+
+    def refuse(url, timeout=None):
+        raise OSError("no GitHub in the tests")
+
+    monkeypatch.setattr(updates, "_ask_github", refuse)
+    monkeypatch.setattr(updates, "start_checking", lambda *a: None)
+    monkeypatch.setattr(cli, "_link_stored_mail", lambda *a: None)
+    monkeypatch.setattr(cli, "_run_server", lambda app, *, host, port: None)
+    kept: list = []
+    monkeypatch.setattr(shortcut, "upkeep_soon", lambda: kept.append("kept"))
+    assert cli._serve(settings, store, host="127.0.0.1", port=8765) == 0
+    return kept
+
+
+def test_closedesk_started_by_a_launcher_keeps_the_shortcut(settings, store, monkeypatch):
+    # Every launcher start: the double-click launchers and the window (which starts CloseDesk as they do).
+    monkeypatch.setenv("CLOSEDESK_LAUNCHER", "1")
+    assert _start_closedesk(settings, store, monkeypatch) == ["kept"]
+
+
+def test_closedesk_started_by_hand_leaves_the_shortcut_alone(settings, store, monkeypatch):
+    # A developer's python -m controller_inbox run, or the tests: no shortcut made for a folder that may be anywhere.
+    monkeypatch.setenv("CLOSEDESK_LAUNCHER", "")
+    monkeypatch.delenv("CLOSEDESK_LAUNCHER")
+    assert _start_closedesk(settings, store, monkeypatch) == []
+
+
+def test_the_shortcut_command_makes_it_again_and_says_so(monkeypatch, capsys):
+    from controller_inbox import cli
+
+    monkeypatch.setattr(shortcut, "make", lambda *a, **k: shortcut.Said(True, "Added the CloseDesk shortcut on your Desktop."))
+    assert cli.main(["shortcut"]) == 0
+    assert "Added the CloseDesk shortcut" in capsys.readouterr().out
+    monkeypatch.setattr(shortcut, "make", lambda *a, **k: shortcut.Said(False, "CloseDesk couldn't put its shortcut on your Desktop."))
+    assert cli.main(["shortcut"]) == 1
+
+
 # The real thing, on Windows (CI) -------------------------------------------------------------------------------------
 
 
@@ -639,3 +682,15 @@ def test_the_window_takes_the_shortcuts_taskbar_id_on_windows():
         assert found.value == "CloseDesk.CloseDesk"
     finally:
         ctypes.windll.ole32.CoTaskMemFree(found)
+
+
+def test_an_app_in_the_tests_folder_isnt_registered_with_launch_services(monkeypatch, tmp_path):
+    # Spotlight would offer a CloseDesk.app that is gone once the tests (or the launcher check) end.
+    ran: list = []
+    monkeypatch.setattr(shortcut.subprocess, "run", lambda cmd, **options: ran.append(cmd))
+    monkeypatch.setenv(shortcut.DIR_ENV, str(tmp_path))
+    shortcut._lsregister(tmp_path / "CloseDesk.app")
+    assert ran == []
+    monkeypatch.delenv(shortcut.DIR_ENV)
+    shortcut._lsregister(tmp_path / "CloseDesk.app")
+    assert ran == [[shortcut.LSREGISTER, "-f", str(tmp_path / "CloseDesk.app")]]
