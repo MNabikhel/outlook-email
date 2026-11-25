@@ -43,7 +43,8 @@ def launch(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "app_log_path", lambda: tmp_path / "logs" / "CloseDesk-app.log")
     monkeypatch.setattr(module, "NO_WINDOW", NO_WINDOW)
     monkeypatch.setattr(module, "APP_LOGS", True)  # as on Windows and macOS, where the app has no console
-    for name in ("CLOSEDESK_APP", "CLOSEDESK_APP_LOG", "CLOSEDESK_LAUNCHER", "CLOSEDESK_REBUILT", "CLOSEDESK_UPDATE_URL"):
+    for name in ("CLOSEDESK_APP", "CLOSEDESK_APP_LOG", "CLOSEDESK_LAUNCHER", "CLOSEDESK_REBUILT", "CLOSEDESK_UPDATE_URL",
+                 "CLOSEDESK_APP_SMOKE"):
         # Set, then removed: what launch.py itself sets in os.environ (--app sets the first three) is undone after the
         # test too, which removing a name that isn't set wouldn't do.
         monkeypatch.setenv(name, "")
@@ -342,6 +343,23 @@ def test_a_python_that_doesnt_run_as_closedesk_app_isnt_used(launch, monkeypatch
     launch.main(["--app"])
     (cmd, env), = handed
     assert cmd[0] == str(launch.app_python()) and "__PYVENV_LAUNCHER__" not in env
+
+
+def test_in_the_window_check_nothing_waits_for_a_click(monkeypatch):
+    # CI's check of the real window (CLOSEDESK_APP_SMOKE): what would be a message box is in the log only, or the check
+    # would wait for a click no one makes.
+    spec = importlib.util.spec_from_file_location("launch_smoke_tell", ROOT / "scripts" / "launch.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("CLOSEDESK_APP_SMOKE", "60")
+    ran: list = []
+    monkeypatch.setattr(module.subprocess, "run", lambda cmd, **options: ran.append(cmd))
+    monkeypatch.setattr(module.subprocess, "Popen", lambda cmd, **options: ran.append(cmd))
+    buffer = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buffer)
+    module.tell("CloseDesk couldn't install what it needs", platform="darwin")
+    module.notice("Installing", platform="darwin")
+    assert ran == [] and "couldn't install" in buffer.getvalue() and "Installing" in buffer.getvalue()
 
 
 def test_the_try_runs_python_through_the_link_as_the_window_would(launch, monkeypatch, tmp_path):

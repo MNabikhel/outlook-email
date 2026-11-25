@@ -58,8 +58,13 @@ STOP_WITH_PARENT = "CLOSEDESK_STOP_WITH_PARENT"
 WHY_ENV = "CLOSEDESK_WINDOW_WHY"
 # "0": the browser, not the window.
 WINDOW_ENV = "CLOSEDESK_WINDOW"
-# CI's check of the real window: seconds to wait for CloseDesk's page to say it loaded, then the window closes itself.
+# CI's check of the real window: seconds to wait for CloseDesk's page to say it loaded, then the window closes itself;
+# and seconds it stays open after that, for the check to look at it from outside (what macOS calls it, a screenshot).
+# In the check, a window that can't open fails it (exit code 2) instead of opening the browser, and nothing waits for a
+# click: what would be a message box is in the log only.
 SMOKE_ENV = "CLOSEDESK_APP_SMOKE"
+SMOKE_HOLD_ENV = "CLOSEDESK_APP_SMOKE_HOLD"
+DIDNT_OPEN = 2
 
 SIZE = (1280, 860)
 MIN_SIZE = (720, 520)
@@ -266,13 +271,33 @@ def why_no_window(*, platform: str | None = None, environ=None, registry=None) -
     return None
 
 
+def mac_app_name() -> str:
+    """macOS: the name the Dock and the menu bar give this program, with its app's id ("CloseDesk
+    (io.github.mnabikhel.closedesk)" when it runs as CloseDesk.app; "Python (org.python.python)" when not). "" when
+    macOS can't be asked."""
+    try:
+        from AppKit import NSRunningApplication
+
+        current = NSRunningApplication.currentApplication()
+        return f"{current.localizedName()} ({current.bundleIdentifier()})"
+    except Exception:
+        return ""
+
+
 # The browser instead ------------------------------------------------------------------------------------------------
+
+
+def _in_check() -> bool:
+    """Whether this is CI's check of the real window (``CLOSEDESK_APP_SMOKE``)."""
+    return bool(os.environ.get(SMOKE_ENV))
 
 
 def tell(text: str, *, platform: str | None = None) -> None:
     """Say ``text`` where a person sees it with no console: a message box (Windows), an alert (macOS). Also logged."""
     platform = platform or sys.platform
     print(text, flush=True)
+    if _in_check():
+        return  # no one is there to close it
     try:
         if platform == "win32":
             import ctypes
@@ -356,6 +381,9 @@ def browser_instead(fallback: tuple[str, str], args, *, platform: str | None = N
     key, words = fallback
     platform = platform or sys.platform
     print(words, flush=True)
+    if _in_check():
+        print("This is the check of the CloseDesk window, and the window didn't open.", flush=True)
+        return DIDNT_OPEN
     if platform not in ("win32", "darwin") or _console():
         return run_here(args)  # Linux (a developer's), or a terminal
     if key != "off" and not _said_before(key):
@@ -469,6 +497,14 @@ def _said(exc: BaseException) -> str:
     return " ".join(f"{type(exc).__name__}: {exc}".split())[:200]
 
 
+def _seconds(name: str) -> float:
+    """A number of seconds from the environment; 0 when it isn't one."""
+    try:
+        return max(0.0, float(os.environ.get(name) or 0))
+    except ValueError:
+        return 0.0
+
+
 class App:
     """One CloseDesk window, with the CloseDesk it started (``owned``) or found already open at ``url``."""
 
@@ -485,10 +521,9 @@ class App:
         self.code = 0
         self.ready = threading.Event()  # CloseDesk's page said it loaded
         self.ready_path = ""
-        try:
-            self.smoke = float(os.environ.get(SMOKE_ENV) or 0)
-        except ValueError:
-            self.smoke = 0.0
+        self.smoke = _seconds(SMOKE_ENV)
+        self.smoke_hold = _seconds(SMOKE_HOLD_ENV)
+        self.platform = sys.platform
         self._lock = threading.Lock()
         # What runs things on the computer (the tests give their own).
         self.popen = subprocess.Popen
@@ -631,6 +666,11 @@ class App:
             self.fallback = ("blank", BLANK)
             self.close_on_purpose()
             return
+        if self.platform == "darwin":
+            named = mac_app_name()
+            if named:
+                # "Python" here means the Dock shows the window as Python's (CloseDesk.app's link wasn't used).
+                print(f"macOS shows the window as {named}.", flush=True)
         if not self.owned:
             self._show_closedesk()
             return
@@ -722,6 +762,12 @@ class App:
         if self.ready.wait(self.smoke):
             print(f"The CloseDesk window showed {self.ready_path}", flush=True)
             self.code = 0
+            # Kept open a while for the check to look at it; closed meanwhile, it isn't closed again.
+            until = time.monotonic() + self.smoke_hold
+            while not self.closing and time.monotonic() < until:
+                time.sleep(min(self.poll, 0.25))
+            if self.closing:
+                return
         else:
             print(f"The CloseDesk window didn't show CloseDesk's page within {self.smoke:g} seconds.", flush=True)
             self.code = 1

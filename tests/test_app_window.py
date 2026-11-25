@@ -225,7 +225,7 @@ class Computer:
 @pytest.fixture
 def computer(monkeypatch):
     monkeypatch.setattr(app_window, "NO_WINDOW", NO_WINDOW)
-    for name in ("CLOSEDESK_REOPEN", app_window.SMOKE_ENV):
+    for name in ("CLOSEDESK_REOPEN", app_window.SMOKE_ENV, app_window.SMOKE_HOLD_ENV):
         monkeypatch.delenv(name, raising=False)
     return Computer()
 
@@ -710,6 +710,101 @@ def test_in_the_smoke_check_a_page_that_never_says_it_loaded_fails(computer, tmp
     assert result["code"] == 1
 
 
+def test_in_the_smoke_check_the_window_stays_open_as_long_as_asked_once_the_page_loaded(computer, tmp_path, monkeypatch):
+    # CI looks at the open window from outside before it closes: what macOS calls it (lsappinfo), a screenshot.
+    monkeypatch.setenv(app_window.SMOKE_ENV, "5")
+    monkeypatch.setenv(app_window.SMOKE_HOLD_ENV, "0.5")
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    ready = time.monotonic()
+    window.js_api.page_ready("/app")
+    until(window.gone.is_set, what="the window closed")
+    assert time.monotonic() - ready >= 0.45
+    thread.join(10)
+    assert result["code"] == 0 and window.closed_by == "CloseDesk" and computer.servers()[0].input_closed
+
+
+def test_in_the_smoke_check_a_window_closed_while_it_is_held_open_is_not_closed_again(computer, tmp_path, monkeypatch):
+    monkeypatch.setenv(app_window.SMOKE_ENV, "5")
+    monkeypatch.setenv(app_window.SMOKE_HOLD_ENV, "30")
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.js_api.page_ready("/app")
+    time.sleep(0.1)
+    window.person_closes()
+    thread.join(10)
+    assert not thread.is_alive() and window.closed_by == "person"
+
+
+def test_in_the_smoke_check_a_window_that_cant_open_fails_and_says_why(monkeypatch, tmp_path, capsys):
+    # CI checks the window itself: the browser instead (and a message box no one is there to close) would hide that it
+    # didn't open, and keep the check waiting.
+    monkeypatch.setenv(app_window.SMOKE_ENV, "60")
+    monkeypatch.setattr(app_window, "tell", lambda text, **_: pytest.fail("no message box in the check"))
+    monkeypatch.setattr(app_window, "open_launcher", lambda why="", **_: pytest.fail("no browser in the check"))
+    monkeypatch.setattr(app_window, "run_here", lambda *a, **k: pytest.fail("no browser in the check"))
+    monkeypatch.setattr(app_window, "user_dir", lambda: tmp_path)
+    monkeypatch.setattr(app_window, "_console", lambda: False)
+    for platform in ("win32", "darwin", "linux"):
+        reason = ("webview2", app_window.NO_WEBVIEW2)
+        assert app_window.browser_instead(reason, SimpleNamespace(host=None, port=None), platform=platform) == 2
+    assert app_window.NO_WEBVIEW2 in capsys.readouterr().out
+
+
+def test_in_the_smoke_check_nothing_waits_for_a_click(monkeypatch, capsys):
+    monkeypatch.setenv(app_window.SMOKE_ENV, "60")
+    monkeypatch.setattr(app_window.subprocess, "run", lambda *a, **k: pytest.fail("no alert in the check"))
+    app_window.tell("CloseDesk can't start yet", platform="darwin")
+    assert "CloseDesk can't start yet" in capsys.readouterr().out, "still in the log"
+
+
+# What macOS calls the window (the Dock, the menu bar) -------------------------------------------------------------------
+
+
+def fake_appkit(name="CloseDesk", bundle="io.github.mnabikhel.closedesk"):
+    current = SimpleNamespace(localizedName=lambda: name, bundleIdentifier=lambda: bundle)
+    return SimpleNamespace(NSRunningApplication=SimpleNamespace(currentApplication=lambda: current))
+
+
+def test_on_a_mac_the_log_says_what_the_dock_calls_the_window(computer, tmp_path, monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "AppKit", fake_appkit())
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "darwin"
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.person_closes()
+    thread.join(10)
+    assert "macOS shows the window as CloseDesk (io.github.mnabikhel.closedesk)." in capsys.readouterr().out
+
+
+def test_the_name_macos_gives_the_window_is_said_as_it_is_or_not_at_all(monkeypatch):
+    monkeypatch.setitem(sys.modules, "AppKit", fake_appkit("Python", "org.python.python"))
+    assert app_window.mac_app_name() == "Python (org.python.python)"
+    monkeypatch.setitem(sys.modules, "AppKit", None)  # import fails
+    assert app_window.mac_app_name() == ""
+
+
+def test_elsewhere_nothing_is_asked_of_macos(computer, tmp_path, monkeypatch, capsys):
+    monkeypatch.setitem(sys.modules, "AppKit", fake_appkit())
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    app.platform = "win32"
+    thread, _ = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.person_closes()
+    thread.join(10)
+    assert "macOS shows" not in capsys.readouterr().out
+
+
 # The window's size, the log, the taskbar ------------------------------------------------------------------------------
 
 
@@ -868,7 +963,9 @@ def test_the_app_without_a_browser_only_serves(monkeypatch):
 
 def test_a_smoke_wait_that_isnt_a_number_is_no_smoke_check(computer, tmp_path, monkeypatch):
     monkeypatch.setenv(app_window.SMOKE_ENV, "soon")
-    assert make_app(FakeWebview(), computer, tmp_path).smoke == 0
+    monkeypatch.setenv(app_window.SMOKE_HOLD_ENV, "a while")
+    app = make_app(FakeWebview(), computer, tmp_path)
+    assert app.smoke == 0 and app.smoke_hold == 0
 
 
 def test_a_storage_folder_that_cant_be_made_leaves_the_window_its_default(computer, tmp_path):

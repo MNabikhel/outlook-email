@@ -85,6 +85,8 @@ SETUP_FAILED = (
 # link in it to the Python that runs CloseDesk.
 DIR_ENV = "CLOSEDESK_SHORTCUT_DIR"
 LINKED_PYTHON = "CloseDesk-python"
+# CI's check of the real window (app_window's SMOKE_ENV): no message box waits there for a click no one makes.
+SMOKE_ENV = "CLOSEDESK_APP_SMOKE"
 
 REPO = "MNabikhel/outlook-email"
 BRANCH = "main"
@@ -229,6 +231,8 @@ def tell(text: str, *, platform: str = "") -> None:
     """Say ``text`` where a person sees it with no console: a message box (Windows), an alert (macOS). Also logged."""
     say(text)
     platform = platform or sys.platform
+    if os.environ.get(SMOKE_ENV):
+        return
     try:
         if platform == "win32":
             import ctypes
@@ -250,6 +254,8 @@ def notice(text: str, *, platform: str = "") -> None:
     message box on Windows that stays until it is closed."""
     say(text)
     platform = platform or sys.platform
+    if os.environ.get(SMOKE_ENV):
+        return
     try:
         if platform == "win32":
             import ctypes
