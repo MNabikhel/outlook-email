@@ -21,7 +21,7 @@
       {% if q %}<a class="ghost" href="/inbox/{{ email.id }}/files/{{ n }}">Show all</a>{% endif %}
     </form>
     {% if viewable and not locked %}<a class="ghost" href="/inbox/{{ email.id }}/files/{{ n }}/view" target="_blank" rel="noopener">Open original</a>{% endif %}
-    {% if downloadable and not locked %}<a class="ghost" href="/inbox/{{ email.id }}/files/{{ n }}/download">Download original</a>{% endif %}
+    {% if downloadable and not locked %}<a class="ghost" href="/inbox/{{ email.id }}/files/{{ n }}/download" download>Download original</a>{% endif %}
     {% if parts and not locked and email.source != 'chat' %}
     <button type="button" data-action="ask-file" data-mode="summary" data-id="{{ email.id }}" data-file="{{ att.filename }}">Summarize</button>
     <button type="button" class="ghost" data-action="ask-file" data-id="{{ email.id }}" data-file="{{ att.filename }}">Ask about this file</button>

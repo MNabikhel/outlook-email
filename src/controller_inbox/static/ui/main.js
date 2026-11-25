@@ -13,6 +13,8 @@ import { createOverlays } from "./palette.js";
 import { traceView } from "./trace.js";
 import { calendarView, isDay, rangeOf } from "./calendar.js";
 import { SLOW, askOnOpening, waitForCloseDesk } from "./update_ask.js";
+// In the CloseDesk window, what leaves CloseDesk opens where it would from a browser.
+import "./in_window.js";
 
 const enc = encodeURIComponent;
 const root = document.documentElement;

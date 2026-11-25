@@ -113,15 +113,27 @@
   const refusal = (response, data) =>
     typeof data.detail === "string" && data.detail ? data.detail : `That didn't work (the server said ${response.status}).`;
 
+  /* A download as a link with "download" is one: the page stays, and the CloseDesk window saves it (going to it
+     instead, the macOS window would show a file it can show, with no way back). */
+  function saveFrom(href) {
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = "";
+    link.hidden = true;
+    document.body.append(link);
+    link.click();
+    link.remove();
+  }
+
   async function openOriginal(id) {
     try {
       const response = await fetch(`/inbox/${encodeURIComponent(id)}/open`, { method: "POST", headers: JSON_HEADERS });
       const data = (await response.json().catch(() => null)) || {};
       if (!response.ok) return toast(refusal(response, data), 6000);
       toast(data.message || "Opening…");
-      if (!data.ok && data.download) location.href = data.download;
+      if (!data.ok && data.download) saveFrom(data.download);
     } catch (error) {
-      location.href = `/inbox/${encodeURIComponent(id)}/original`;
+      saveFrom(`/inbox/${encodeURIComponent(id)}/original`);
     }
   }
 

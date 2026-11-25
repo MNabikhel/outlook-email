@@ -1,7 +1,7 @@
 /* The reading pane: one email (header, why it was flagged, what was read from it, tasks, files, coding,
    fraud check), and an attachment's Page, Tables and Text views. */
 
-import { h, icon, replace, toast, plural, isTyping, keepTabIn, $ } from "./dom.js";
+import { h, icon, replace, toast, plural, isTyping, keepTabIn, saveFrom, $ } from "./dom.js";
 import { getJSON, getBlob, postJSON, mailPath, filePath } from "./api.js";
 import { previewPane, thumb } from "./preview.js";
 
@@ -226,7 +226,7 @@ function attachments(d, ctx) {
             tables ? h("a", { class: `btn btn-sm${file.show ? "" : " btn-primary"}`, href: ctx.fileUrl(file.n, "tables"), dataset: { nav: "" } }, icon("table", 14), "Tables") : null,
             file.has_text ? h("a", { class: "btn btn-sm", href: ctx.fileUrl(file.n, "text"), dataset: { nav: "" } }, icon("text", 14), "Text") : null,
             file.view ? h("a", { class: "btn btn-sm", href: `${base}/view`, target: "_blank", rel: "noopener" }, icon("external", 14), "Open") : null,
-            file.download ? h("a", { class: "btn btn-sm", href: `${base}/download` }, icon("download", 14), "Download") : null,
+            file.download ? h("a", { class: "btn btn-sm", href: `${base}/download`, download: true }, icon("download", 14), "Download") : null,
             file.blocked_type ? h("span", { class: "muted small", title: "Programs, scripts and macro files only open from Outlook" }, "Opens from Outlook") : null,
             file.has_text
               ? h("button", { type: "button", class: "btn btn-sm", onclick: () => ctx.ask(`Summarize the attachment "${file.name}": what it is, the key figures, and anything I need to act on.`, d.id) }, "Summarize")
@@ -484,11 +484,11 @@ async function openOriginal(d) {
   try {
     const data = await postJSON(`${mailPath(d.id)}/open`);
     toast(data.message || "Opening…");
-    if (!data.ok && data.download) location.href = `${mailPath(d.id)}/original`;
+    if (!data.ok && data.download) saveFrom(`${mailPath(d.id)}/original`);
   } catch (error) {
     // The server answered with a refusal (it carries a status): say so. No answer at all: download the copy.
     if (error.status) return toast(error.message, { tone: "error" });
-    location.href = `${mailPath(d.id)}/original`;
+    saveFrom(`${mailPath(d.id)}/original`);
   }
 }
 
@@ -1582,7 +1582,7 @@ export function fileView(data, tab, ctx) {
       h("a", { class: "btn btn-quiet", href: ctx.emailUrl(), dataset: { nav: "" }, title: "Back to the email (Esc)" }, icon("back", 15), h("span", { class: "trunc" }, email.subject)),
       h("span", { class: "rd-bar-gap" }),
       file.view ? h("a", { class: "btn btn-quiet", href: `${base}/view`, target: "_blank", rel: "noopener" }, icon("external", 15), "Original") : null,
-      file.download ? h("a", { class: "btn btn-quiet", href: `${base}/download` }, icon("download", 15), "Download") : null,
+      file.download ? h("a", { class: "btn btn-quiet", href: `${base}/download`, download: true }, icon("download", 15), "Download") : null,
       btn("Ask about this file", { class: "btn-quiet", onclick: () => ctx.prefill(`About "${file.name}": `, email.id) }, "chat")
     ),
     h(

@@ -224,7 +224,7 @@ export function fraudView(data) {
           row.email_id ? mailLink(row.email_id, row.subject || "(no subject)", "fraud") : h("b", null, row.sender_email),
           h("small", null, [row.when, row.level ? `${row.level} ${row.score}` : "", row.note].filter(Boolean).join(" · ")),
         ]),
-        h("p", { class: "small" }, h("a", { href: "/fraud" }, "Manage trusted and reported domains"), " · ", h("a", { href: "/fraud/log.csv" }, "Download the log (CSV)"))
+        h("p", { class: "small" }, h("a", { href: "/fraud" }, "Manage trusted and reported domains"), " · ", h("a", { href: "/fraud/log.csv", download: true }, "Download the log (CSV)"))
       )
     )
   );

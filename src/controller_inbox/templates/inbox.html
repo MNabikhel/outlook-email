@@ -24,7 +24,7 @@
   {% if showing_done %}<a class="ghost" href="/folder/{{ folder_name }}">Back to open mail</a>
   {% elif done_count %}<a class="ghost" href="/folder/{{ folder_name }}?done=1">Show {{ done_count }} done</a>{% endif %}
   {% endif %}
-  <a class="ghost" href="/export/actions.csv">Export actions CSV</a>
+  <a class="ghost" href="/export/actions.csv" download>Export actions CSV</a>
 </section>
 
 <section class="table-wrap">

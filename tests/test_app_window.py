@@ -801,3 +801,25 @@ def test_a_real_closedesk_started_as_the_window_starts_it_stops_when_the_window_
         if server.poll() is None:
             server.kill()
             server.wait()
+
+
+def test_every_download_link_says_download_so_the_window_saves_it():
+    # WebKit (the macOS window) shows a CSV, or another file it can show, in the window itself unless its link says
+    # "download", and the window has no back button to return to CloseDesk. WebView2 saves either way.
+    import re
+
+    package = app_window.ROOT / "src" / "controller_inbox"
+    missing, navigated = [], []
+    for path in [*sorted((package / "templates").glob("*.html")), *sorted((package / "static").rglob("*.js"))]:
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            route = re.search(r"(/download\b|/original\b|\.csv\b)", line)
+            if not route:
+                continue
+            if re.search(r"<a\b", line) and not re.search(r"\sdownload[\s>=]", line):
+                missing.append(f"{path.name}:{n}")
+            if 'h("a"' in line and "download: true" not in line:
+                missing.append(f"{path.name}:{n}")
+            if re.search(r"location\.href\s*=", line):
+                navigated.append(f"{path.name}:{n}")
+    assert missing == [], "a download link without download"
+    assert navigated == [], "a download by going to it: the window would show it instead (use a download link)"
