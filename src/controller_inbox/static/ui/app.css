@@ -813,13 +813,14 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 :is(.pv-box, .pv-swatch, .pv-tip-tag).differs { --tone: var(--danger); }
 :is(.pv-box, .pv-swatch, .pv-tip-tag).fixed { --tone: var(--accent); }
 /* The boxes are drawn on the page, which is white paper in dark mode too, so they keep the light theme's colours
-   (the legend and the card beside the page keep the theme's). An amber box has a dashed edge and a red one a heavier
-   edge, so they differ by more than their colour. */
+   (the legend and the card beside the page keep the theme's). An amber box has a dotted edge and a red one a heavier
+   edge, so they differ by more than their colour. Not dashed: on this page a dashed outline is a table (its outline,
+   its chip above the page and the one drawn to mark a table), and the words above the page say so. */
 .pv-box.ok { --tone: var(--paper-ok); }
-.pv-box.check { --tone: var(--paper-check); border-style: dashed; }
+.pv-box.check { --tone: var(--paper-check); border-style: dotted; border-width: 2px; margin: -2.5px 0 0 -2.5px; }
 .pv-box.differs { --tone: var(--paper-differs); box-shadow: 0 0 0 1px var(--tone); }
 .pv-box.fixed { --tone: var(--paper-accent); }
-.pv-swatch.check { border-style: dashed; }
+.pv-swatch.check { border-style: dotted; border-width: 2px; }
 .pv-swatch.differs { box-shadow: 0 0 0 1px var(--tone); }
 .pv-tip {
   position: fixed; z-index: 60;
@@ -906,7 +907,7 @@ mark { background: color-mix(in srgb, var(--imp-high) 35%, transparent); color: 
 .pv-field-value { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .pv-field-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pv-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--tone, var(--faint)); }
-/* Green a filled dot, amber a ring and red a square, as the boxes on the page are solid, dashed and ringed. */
+/* Green a filled dot, amber a ring and red a square, as the boxes on the page are solid, dotted and ringed. */
 .pv-dot.ok { --tone: var(--ok); }
 .pv-dot.check { --tone: var(--imp-high); background: transparent; box-shadow: inset 0 0 0 2px var(--tone); }
 .pv-dot.differs { --tone: var(--danger); border-radius: 1px; }

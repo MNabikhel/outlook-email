@@ -76,7 +76,7 @@ BOXES = """() => {
 @pytest.mark.parametrize("colors", ["standard", "color-blind"])
 def test_the_boxes_on_a_page_show_on_its_white_paper_in_dark_mode(settings, store, page, monkeypatch, colors):
     """The page is white paper in both themes, but its boxes took the dark theme's pastel colours: an amber box was
-    1.95:1 on the white page. They keep the light colours, and an amber box has a dashed edge and a red one a ring."""
+    1.95:1 on the white page. They keep the light colours, and an amber box has a dotted edge and a red one a ring."""
     from controller_inbox import appearance
 
     email = scan_to_check(settings, store, monkeypatch)
@@ -92,8 +92,35 @@ def test_the_boxes_on_a_page_show_on_its_white_paper_in_dark_mode(settings, stor
     paper = pm.workspace("light", colors)
     assert shown["check"] == rgb(paper["--paper-check"]) and shown["differs"] == rgb(paper["--paper-differs"])
     assert shown["ok"] == rgb(paper["--paper-ok"])
-    assert shown["checkStyle"] == "dashed" and shown["okStyle"] == "solid"
+    assert shown["checkStyle"] == "dotted" and shown["okStyle"] == "solid"
     assert rgb(paper["--paper-differs"]) in shown["differsRing"]
+
+
+EDGES = """() => {
+  const edge = (sel) => { const e = document.querySelector(sel); return e ? getComputedStyle(e).borderTopStyle : null; };
+  // The outline drawn while marking a table is only there while dragging: one made the same way.
+  const rubber = document.createElement('div'); rubber.className = 'pv-rubber'; document.querySelector('.pv-sheet').append(rubber);
+  const out = { check: edge('.pv-box.check'), swatch: edge('.pv-swatch.check'), table: edge('.pv-tbl'),
+                chip: edge('.pv-chip'), rubber: edge('.pv-rubber'), about: document.querySelector('.pv-about').textContent };
+  rubber.remove();
+  return out;
+}"""
+
+
+def test_an_amber_box_on_a_page_isnt_drawn_the_way_a_table_is(settings, store, page, monkeypatch):
+    """Above the page it says "Dashed outlines are tables: click one to see it as a table", and the tables, their
+    chips and the outline drawn to mark one are dashed; but the amber boxes were given a dashed edge too, to tell them
+    from the green ones by more than colour. Someone who can't tell the amber from the blue was told an amber box was a
+    table."""
+    email = scan_to_check(settings, store, monkeypatch)
+    with serving(web.create_app(settings, store)) as base:
+        _open_page_tab(page, base, email)
+        page.wait_for_selector(".pv-box.check")
+        page.wait_for_selector(".pv-tbl")
+        shown = page.evaluate(EDGES)
+    assert "Dashed outlines are tables" in shown["about"], shown["about"]
+    assert shown["table"] == shown["chip"] == shown["rubber"] == "dashed", shown
+    assert shown["check"] not in ("dashed", "solid") and shown["swatch"] == shown["check"], shown
 
 
 # The two settings ----------------------------------------------------------------------------------------------------
