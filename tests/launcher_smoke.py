@@ -425,9 +425,12 @@ def from_network_share(folder: Path) -> None:
     """CloseDesk.bat opened by the name Windows gives a mapped network drive (\\\\server\\share\\...), as the shortcut
     and the window open it where the window can't open: cmd can't be in such a folder, so CloseDesk.bat has to lend
     it a drive letter (pushd), and give it back as it ends. Here this computer's own C: drive, as a network share.
-    (The environment was made under C:\\, so this start puts the folder right for its new name first.)"""
+    (The environment was made under C:\\, so this start puts the folder right for its new name first.) By this
+    computer's name, as a real share has a server's: not "localhost", which a file: URL drops (file://localhost/C$/...
+    is read as /C$/..., no folder at all), so uv and pip couldn't install from it, where they can from \\\\server\\share."""
     local = folder.resolve()
-    share = Path(f"\\\\localhost\\{local.drive[0]}$") / local.relative_to(local.anchor)
+    server = os.environ.get("COMPUTERNAME") or socket.gethostname()
+    share = Path(f"\\\\{server}\\{local.drive[0]}$") / local.relative_to(local.anchor)
     if not share.is_dir():
         raise SystemExit(f"FAILED: this computer's C: drive can't be reached as the network share {share}")
     before = drive_letters()
