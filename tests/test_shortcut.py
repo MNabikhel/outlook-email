@@ -566,10 +566,21 @@ def test_the_apps_script_says_when_the_folder_is_gone(mac, tmp_path):
     shortcut.upkeep(mac.system, record=mac.record)
     script = (mac.app / "Contents" / "MacOS" / "CloseDesk").read_text(encoding="utf-8")
     assert "can't find its folder" in script and "CloseDesk.command" in script
+    # Run with a stand-in for macOS's alert that says what it was asked: the real one would wait for a click (on CI's
+    # Mac, for the rest of the job).
+    told = tmp_path / "alert.txt"
+    alert = tmp_path / "osascript"
+    alert.write_text(f'#!/bin/bash\nprintf "%s\\n" "$@" > "{told}"\n', encoding="utf-8")
+    alert.chmod(0o755)
+    assert script.count("/usr/bin/osascript") == 1
+    stood_in = tmp_path / "CloseDesk-script"
+    stood_in.write_text(script.replace("/usr/bin/osascript", str(alert)), encoding="utf-8")
     os.rename(mac.root, tmp_path / "gone")
-    done = subprocess.run(["/bin/bash", str(mac.app / "Contents" / "MacOS" / "CloseDesk")], env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},
+    done = subprocess.run(["/bin/bash", str(stood_in)], env={"HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"},
                           capture_output=True, text=True, timeout=30)
     assert done.returncode == 1
+    said = told.read_text(encoding="utf-8")
+    assert "CloseDesk can't find its folder" in said and str(mac.root) in said and "CloseDesk.command" in said
 
 
 def test_without_its_environment_the_app_sets_closedesk_up_in_terminal(mac):

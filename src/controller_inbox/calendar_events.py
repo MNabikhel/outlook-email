@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 from time import monotonic
 from dataclasses import asdict, dataclass, field
 from functools import cache
@@ -907,6 +908,9 @@ def follow_hold(store, settings, email, *, now: datetime | None = None) -> None:
 
 
 CATCH_UP_KEY = "invites_catch_up"  # how far reading the invitations of mail stored before meetings were kept got
+# The start's reading of new mail and the linking of stored mail beside it both catch up: one at a time, the second
+# finding it done.
+_catching_up = threading.Lock()
 
 
 def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int = 200, limit: int = 20_000) -> int:
@@ -914,15 +918,26 @@ def catch_up_invites(store, settings, *, now: datetime | None = None, batch: int
     kept of the email (as ``refresh_invites`` reads them), ``batch`` emails at a time, resuming where it stopped. Mail
     with an invitation (an .ics file, or a meeting request it was read from) and no meeting saved is read; held mail
     keeps only which meeting it named. Returns how many emails were looked at."""
-    from controller_inbox.fraud import attachments_locked
-
     if store.get_state(CATCH_UP_KEY) == "done":
         return 0
+    with _catching_up:
+        return _catch_up_invites(store, settings, now=now, batch=batch, limit=limit)
+
+
+def _catch_up_invites(store, settings, *, now: datetime | None, batch: int, limit: int) -> int:
+    from controller_inbox.fraud import attachments_locked
+
     now = now or datetime.now(timezone.utc)
     stamp = now.astimezone(timezone.utc).isoformat(timespec="seconds")
     looked = 0
     while looked < limit:
-        after = int(store.get_state(CATCH_UP_KEY) or 0)
+        got = store.get_state(CATCH_UP_KEY) or "0"
+        if got == "done":  # by another CloseDesk meanwhile (the overnight run's, say)
+            break
+        try:
+            after = int(got)
+        except ValueError:
+            after = 0
         rows = store.emails_without_meetings(after, batch=batch)
         if not rows:
             store.set_state(CATCH_UP_KEY, "done")

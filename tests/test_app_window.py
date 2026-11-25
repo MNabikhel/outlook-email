@@ -710,6 +710,22 @@ def test_in_the_smoke_check_the_window_closes_itself_once_the_page_says_it_loade
     assert "The CloseDesk window showed /app" in capsys.readouterr().out
 
 
+def test_in_the_smoke_check_the_window_says_which_port_its_page_came_from(computer, tmp_path, monkeypatch, capsys):
+    # CI's check of a window onto a CloseDesk already open has to tell that one from a second the window started.
+    monkeypatch.setenv(app_window.SMOKE_ENV, "5")
+    webview = FakeWebview()
+    app = make_app(webview, computer, tmp_path)
+    thread, result = running(app)
+    window = window_of(webview)
+    until(lambda: URL in window.urls())
+    window.js_api.page_ready("/app", "8765")
+    thread.join(10)
+    assert result["code"] == 0
+    assert "The CloseDesk window showed /app (port 8765)\n" in capsys.readouterr().out
+    script = (ROOT / "src" / "controller_inbox" / "static" / "ui" / "in_window.js").read_text(encoding="utf-8")
+    assert "page_ready(window.location.pathname, window.location.port)" in script
+
+
 def test_in_the_smoke_check_a_page_that_never_says_it_loaded_fails(computer, tmp_path, monkeypatch):
     monkeypatch.setenv(app_window.SMOKE_ENV, "0.2")
     webview = FakeWebview()
@@ -1214,18 +1230,51 @@ def test_a_part_of_python_that_wont_load_is_said_before_any_of_closedesk_runs(tm
         'raise ImportError("DLL load failed while importing _pydantic_core: An Application Control policy has blocked this file.")\n',
         encoding="utf-8")
     log = tmp_path / "CloseDesk-app.log"
+    # As in CI's check of the window: what would be a message box (an alert on a Mac) is in the log only, since no one
+    # is at this computer to close it. (The box itself: the next test.)
     env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path / "blocked"), str(ROOT / "src")]),
-           updates.APP_ENV: "1", updates.APP_LOG_ENV: str(log)}
-    env.pop(app_window.SMOKE_ENV, None)
+           updates.APP_ENV: "1", updates.APP_LOG_ENV: str(log), app_window.SMOKE_ENV: "1"}
+
+    def logged(since: int = 0) -> str:
+        return log.read_bytes()[since:].decode("utf-8", errors="replace") if log.exists() else ""
+
     done = subprocess.run([sys.executable, "-m", "controller_inbox", "app"], cwd=tmp_path, env=env, capture_output=True,
                           text=True, timeout=120)
-    said = done.stdout + done.stderr
+    # On Windows the app's program writes to its log, not its output (app_log.write_at_end).
+    said = done.stdout + done.stderr + logged()
     assert done.returncode == app_window.SAID, said
     assert "CloseDesk couldn't open" in said and str(log) in said and "Application Control policy" in said
     # Anything else isn't the window's to say: as before.
+    before = len(log.read_bytes()) if log.exists() else 0
     done = subprocess.run([sys.executable, "-m", "controller_inbox", "doctor"], cwd=tmp_path, env=env, capture_output=True,
                           text=True, timeout=120)
-    assert done.returncode == 1 and "CloseDesk couldn't open" not in done.stdout + done.stderr
+    assert done.returncode == 1 and "CloseDesk couldn't open" not in done.stdout + done.stderr + logged(before)
+
+
+def test_what_stops_the_window_loading_is_said_in_windows_message_box_or_a_macs_alert(monkeypatch, capsys):
+    # The box itself, with Windows' and macOS's parts standing in: the words as they are, named CloseDesk.
+    import ctypes
+
+    from controller_inbox import app_log
+
+    monkeypatch.delenv(app_window.SMOKE_ENV, raising=False)
+    boxes: list = []
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(user32=SimpleNamespace(
+        MessageBoxW=lambda owner, text, title, kind: boxes.append((text, title)) or 1)), raising=False)
+    assert app_log.cant_open(platform="win32") == app_window.SAID
+    (text, title), = boxes
+    assert title == "CloseDesk" and "CloseDesk couldn't open" in text and "CloseDesk.bat" in text
+    alerts: list = []
+    monkeypatch.setattr(app_log.subprocess, "run", lambda cmd, **kwargs: alerts.append(cmd))
+    assert app_log.cant_open(platform="darwin") == app_window.SAID
+    (cmd,) = alerts
+    assert cmd[0] == "/usr/bin/osascript" and "CloseDesk.command" in cmd[-1], "the words passed as they are, never into the script"
+    # In CI's check of the window, neither: nobody would close it.
+    monkeypatch.setenv(app_window.SMOKE_ENV, "1")
+    app_log.cant_open(platform="win32")
+    app_log.cant_open(platform="darwin")
+    assert len(boxes) == 1 and len(alerts) == 1
+    assert capsys.readouterr().out.count("CloseDesk couldn't open") == 4, "said in the log every time"
 
 
 # The app's log: two CloseDesk windows write at its end, never over each other's lines --------------------------------

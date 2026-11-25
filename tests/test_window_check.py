@@ -152,3 +152,20 @@ def test_the_check_has_the_window_show_both_uis():
         except AssertionError:
             continue
         raise AssertionError(f"one page passed: {only!r}")
+
+
+def test_a_window_onto_a_closedesk_already_open_has_to_show_that_one():
+    # The window started a second CloseDesk on the next port (the open one too slow to answer its /health in time) and
+    # showed it: exit 0, both pages, the first CloseDesk still open. The check passed, though the window never showed
+    # the CloseDesk that was open. What the page itself says it was loaded from tells them apart.
+    module = smoke()
+    log = "x\nThe CloseDesk window showed / (port 8765)\nThe CloseDesk window showed /app (port 8765)\n"
+    assert module.pages_shown(log) == ["/", "/app"] and module.ports_shown(log) == {"8765"}
+    module.showed_only(log, 8765, "the window")
+    second = "Another program is using port 8765, so CloseDesk uses 8766 this time.\n" + log.replace("8765", "8766")
+    for wrong in (log.replace("/app (port 8765)", "/app (port 8766)"), second, "Opening http://127.0.0.1:8766/\n" + log):
+        try:
+            module.showed_only(wrong, 8765, "the window")
+        except AssertionError:
+            continue
+        raise AssertionError(f"passed: {wrong!r}")

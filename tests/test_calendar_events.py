@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 import re
+import threading
 
 from controller_inbox import calendar_events as cal
 
@@ -720,6 +721,45 @@ def test_invitations_already_in_the_mailbox_reach_the_calendar_after_an_update(s
         conn.execute("DELETE FROM meetings")
     cli._link_stored_mail(settings, store)  # what CloseDesk starts in the background after an update
     assert [m["uid"] for m in store.meetings_between("2026-10-01", "2026-10-31")] == ["old1"]
+
+
+def test_two_catch_ups_at_once_on_a_first_start_dont_trip_over_each_other(settings, store, monkeypatch):
+    # The start's reading of new mail and the linking of stored mail beside it both catch the invitations up. One said
+    # "done" between the other's look at it and its reading of how far it got: a traceback in the launcher's window
+    # ("invalid literal for int() with base 10: 'done'").
+    settings.ensure_data_dir()
+    real = store.get_state
+    looks: list = []
+
+    def other_finishes_meanwhile(key):
+        found = real(key)
+        if key == cal.CATCH_UP_KEY and not looks:
+            looks.append(found)
+            store.set_state(cal.CATCH_UP_KEY, "done")  # the other one, just after this look
+        return found
+
+    monkeypatch.setattr(store, "get_state", other_finishes_meanwhile)
+    assert cal.catch_up_invites(store, settings, now=NOW) == 0
+    assert real(cal.CATCH_UP_KEY) == "done"
+    # And at the same moment, for real: one catches up, the other waits for it and finds it done.
+    monkeypatch.setattr(store, "get_state", real)
+    store.set_state(cal.CATCH_UP_KEY, "")
+    read: list = []
+    monkeypatch.setattr(store, "emails_without_meetings", lambda after, batch: read.append(after) or ([] if read[1:] else [(1, "gone")]))
+    errors: list = []
+
+    def catch_up():
+        try:
+            cal.catch_up_invites(store, settings, now=NOW)
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=catch_up) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+    assert errors == [] and real(cal.CATCH_UP_KEY) == "done" and read == [0, 1], read
 
 
 def test_a_cancelled_meeting_shows_its_title_without_canceled_and_a_moved_week_still_repeats():

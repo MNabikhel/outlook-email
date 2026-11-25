@@ -68,7 +68,7 @@ class Window:
         def load() -> None:
             try:
                 with _LOCAL.open(url, timeout=30) as reply:
-                    path = urlsplit(reply.geturl()).path
+                    path, port = urlsplit(reply.geturl()).path, str(urlsplit(reply.geturl()).port or "")
                     reply.read()
             except OSError as exc:
                 print(f"[stand-in window] couldn't load {url}: {exc}", flush=True)
@@ -76,7 +76,7 @@ class Window:
             print(f"[stand-in window] loaded {path}", flush=True)
             self.events.loaded.set()
             time.sleep(0.3)
-            self.js_api.page_ready(path)
+            self.js_api.page_ready(path, port)
 
         threading.Thread(target=load, daemon=True).start()
 

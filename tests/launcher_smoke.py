@@ -538,7 +538,20 @@ def shown(log: str) -> str:
 
 def pages_shown(log: str) -> list[str]:
     """Every page the window said it showed."""
-    return [line.split(SHOWED, 1)[1].strip() for line in log.splitlines() if SHOWED in line]
+    return [(line.split(SHOWED, 1)[1].split() or [""])[0] for line in log.splitlines() if SHOWED in line]
+
+
+def ports_shown(log: str) -> set[str]:
+    """The ports the pages the window showed said they came from ("The CloseDesk window showed /app (port 8765)")."""
+    return {found.group(1) for line in log.splitlines() if SHOWED in line for found in [re.search(r"\(port (\d+)\)", line)] if found}
+
+
+def showed_only(log: str, port: int, what: str) -> None:
+    """The window showed the CloseDesk on ``port`` and started none of its own (a second one, on the next port, would
+    pass every other look: exit 0, both pages, the first one still open)."""
+    assert ports_shown(log) == {str(port)}, f"the CloseDesk window ({what}) showed pages from {sorted(ports_shown(log))}, not {port}\n{log[-3000:]}"
+    for started in ("Another program is using port", "Opening http"):
+        assert started not in log, f"the CloseDesk window ({what}) started a CloseDesk of its own\n{log[-3000:]}"
 
 
 def both_uis(log: str, what: str) -> None:
@@ -592,8 +605,9 @@ def open_window(folder: Path, port: int, *, name: str, attached: bool = False) -
     both_uis(log, name)
     print(f"--- the CloseDesk window ({name}) showed {', '.join(pages_shown(log))} and closed by itself, exit 0", flush=True)
     if attached:
+        showed_only(log, port, name)
         assert health(port), f"closing the window stopped the CloseDesk it didn't start\n{said}"
-        print("--- the CloseDesk that was already open is still open", flush=True)
+        print(f"--- the window showed the CloseDesk already open (port {port}), and that one is still open", flush=True)
     else:
         assert stopped, f"CloseDesk didn't stop with its window (port {port} still answered)\n{said}"
         print("--- CloseDesk stopped with its window", flush=True)

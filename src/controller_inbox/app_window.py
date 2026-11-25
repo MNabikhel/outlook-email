@@ -511,9 +511,9 @@ class Bridge:
         self._app.open_url(url)
         return True
 
-    def page_ready(self, path: str = "") -> None:
-        """CloseDesk's page loaded in the window (CI's check of the real window waits for this)."""
-        self._app.page_ready(str(path or "")[:200])
+    def page_ready(self, path: str = "", port: str = "") -> None:
+        """CloseDesk's page loaded in the window (CI's check of the real window waits for this), from ``port``."""
+        self._app.page_ready(str(path or "")[:200], "".join(ch for ch in str(port or "")[:10] if ch.isdigit()))
 
 
 # The window, and the CloseDesk in it ---------------------------------------------------------------------------------
@@ -654,6 +654,7 @@ class App:
         self.code = 0
         self.ready = threading.Event()  # CloseDesk's page said it loaded
         self.ready_path = ""
+        self.ready_port = ""  # the port the page says it came from (CI's check: the CloseDesk it was to show)
         self.smoke = _seconds(SMOKE_ENV)
         self.smoke_hold = _seconds(SMOKE_HOLD_ENV)
         self.platform = sys.platform
@@ -831,8 +832,8 @@ class App:
         except Exception as exc:
             print(f"Couldn't close the window: {_said(exc)}", flush=True)
 
-    def page_ready(self, path: str) -> None:
-        self.ready_path = path
+    def page_ready(self, path: str, port: str = "") -> None:
+        self.ready_path, self.ready_port = path, port
         self.ready.set()
 
     # Beside the window (pywebview runs this in a thread of its own once the window is there) ---------------------
@@ -1013,7 +1014,8 @@ class App:
     def _check_shows(self) -> bool:
         """In the window's check: whether the page loaded in it says it loaded, in time."""
         if self.ready.wait(self.smoke):
-            print(f"The CloseDesk window showed {self.ready_path}", flush=True)
+            port = f" (port {self.ready_port})" if self.ready_port else ""
+            print(f"The CloseDesk window showed {self.ready_path}{port}", flush=True)
             return True
         print(f"The CloseDesk window didn't show CloseDesk's page within {self.smoke:g} seconds.", flush=True)
         return False

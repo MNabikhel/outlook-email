@@ -81,7 +81,8 @@ export function pageLoaded() {
     const api = bridge();
     if (api && typeof api.page_ready === "function") {
       try {
-        const said = api.page_ready(window.location.pathname);
+        // With the port it came from: CI's check of a window onto a CloseDesk already open sees it showed that one.
+        const said = api.page_ready(window.location.pathname, window.location.port);
         if (said && typeof said.catch === "function") said.catch(() => {});
       } catch (error) {
         /* not the window after all */
