@@ -325,6 +325,8 @@ def status(store, settings) -> dict[str, Any]:
         "by_hand": BY_HAND,
         # Update that nothing answers: CloseDesk has stopped for an update another page asked for.
         "elsewhere": UPDATING_ELSEWHERE,
+        # Whose CloseDesk this is (/health's fingerprints): the page waiting for it loads only this one again.
+        "whose": version.whose(),
     }
 
 
@@ -564,6 +566,9 @@ class Question:
             "updating": UPDATING,
             # The version the page shows: Update now says it, and is refused once CloseDesk was updated since.
             "commit": version.installed()[0],
+            # Whose CloseDesk this is (/health's fingerprints): the page waiting for it loads only this one again,
+            # never another person's that opened on the port meanwhile (a shared computer).
+            "whose": version.whose(),
         }
 
 

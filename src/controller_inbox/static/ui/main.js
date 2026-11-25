@@ -1206,7 +1206,7 @@ function updating(reply) {
     ),
     "updating"
   );
-  waitForCloseDesk(reply.commit || "", { run: reply.run, onBack: () => location.reload(), onSlow: () => (line.textContent = SLOW) });
+  waitForCloseDesk(reply.commit || "", { run: reply.run, whose: reply.whose, onBack: () => location.reload(), onSlow: () => (line.textContent = SLOW) });
 }
 
 function refreshData() {

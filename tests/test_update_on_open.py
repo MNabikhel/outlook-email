@@ -825,6 +825,25 @@ def test_each_start_of_closedesk_answers_as_itself(download, settings, store):
     assert TestClient(classic).get("/health").json()["run"] in page
 
 
+def test_the_page_waiting_is_told_whose_closedesk_to_wait_for(download, settings, store):
+    # A shared computer: another person's CloseDesk can open on the port while this one updates. The page waiting is
+    # told this one's fingerprints (as /health says them), in every way it comes to wait.
+    from controller_inbox import version
+
+    app = web.create_app(settings, store)
+    app.state.stop_server = lambda: None
+    client = TestClient(app)
+    mine = {key: client.get("/health").json()[key] for key in ("folder", "user")}
+    assert mine == version.whose()
+    assert client.post("/api/update", headers=PAGE).json()["whose"] == mine
+    assert client.get("/api/update/question", headers=PAGE).json()["whose"] == mine
+    assert client.get("/api/settings", headers=PAGE).json()["update"]["whose"] == mine
+    classic = web.create_app(settings, store)
+    classic.state.stop_server = lambda: None
+    page = TestClient(classic).post("/settings/update", headers={"origin": "http://testserver"}).text
+    assert mine["folder"] in page and mine["user"] in page
+
+
 # What the question says --------------------------------------------------------------------------------------------
 
 

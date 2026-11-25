@@ -17,11 +17,20 @@ export const SLOW = "CloseDesk hasn't opened again yet. Its window says what it 
 
 const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 
+/** Whether /health's answer is this CloseDesk (``whose``: its folder's and its person's fingerprints), not another
+    person's that opened on the port meanwhile (a shared computer) or another folder's. An older CloseDesk, which
+    doesn't say whose it is, is taken for this one (as version.is_mine does). */
+export function isMine(health, whose) {
+  if (!whose || (!health.folder && !health.user)) return true;
+  return health.folder === whose.folder && health.user === whose.user;
+}
+
 /** CloseDesk has stopped to update: wait for it to answer again (as the new version, or as it was when the update
     couldn't be done), then ``onBack``; ``onSlow`` once if that takes over five minutes. ``before``: the commit that
     asked, and ``run``: the start of CloseDesk that asked (/health says which answers), so a start again that is quick
-    enough to come between two looks still counts, as the new version or as the same one. */
-export function waitForCloseDesk(before, { run = "", onBack, onSlow }) {
+    enough to come between two looks still counts, as the new version or as the same one. ``whose``: whose CloseDesk
+    it is; another one answering on the port is as if nothing answered. */
+export function waitForCloseDesk(before, { run = "", whose = null, onBack, onSlow }) {
   const started = Date.now();
   let gone = false; // CloseDesk stopped answering: the next answer is the new one
   let slow = false;
@@ -29,7 +38,8 @@ export function waitForCloseDesk(before, { run = "", onBack, onSlow }) {
     try {
       const response = await fetch("/health", { cache: "no-store" });
       const health = await response.json();
-      if (health.app === "closedesk" && (gone || health.commit !== before || (run && health.run && health.run !== run))) return onBack();
+      if (health.app === "closedesk" && !isMine(health, whose)) gone = true;
+      else if (health.app === "closedesk" && (gone || health.commit !== before || (run && health.run && health.run !== run))) return onBack();
     } catch (error) {
       gone = true;
     }
@@ -145,7 +155,7 @@ function show(view, updating) {
   // Update now in this page found CloseDesk stopped, for the update asked for in another: said, and this page waits for
   // CloseDesk to be back (as the new version), then loads again, as the page that asked does.
   function updatingElsewhere() {
-    const reply = { message: view.elsewhere_message, commit: view.commit, run: "" };
+    const reply = { message: view.elsewhere_message, commit: view.commit, run: "", whose: view.whose };
     if (updating) {
       state = "handed";
       dialog.close();
@@ -181,7 +191,12 @@ function show(view, updating) {
     const message = h("p", { id: "update-ask-body" }, reply.message || view.updating);
     const bar = h("span", { class: "update-ask-bar", role: "progressbar", "aria-label": "Updating" }, h("span"));
     replace(dialog, h("h2", { id: "update-ask-title" }, "Updating CloseDesk"), message, bar);
-    waitForCloseDesk(reply.commit || view.commit, { run: reply.run, onBack: () => location.reload(), onSlow: () => (message.textContent = SLOW) });
+    waitForCloseDesk(reply.commit || view.commit, {
+      run: reply.run,
+      whose: reply.whose || view.whose,
+      onBack: () => location.reload(),
+      onSlow: () => (message.textContent = SLOW),
+    });
   }
 
   document.body.append(dialog);

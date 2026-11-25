@@ -377,6 +377,56 @@ def test_settings_update_while_closedesk_updates_from_another_tab_says_so(downlo
         assert "Failed to fetch" not in page.inner_text("body")
 
 
+# Another person's CloseDesk on the port meanwhile -----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("first", ["/inbox", "/app", "/settings"])
+def test_the_page_waiting_for_the_update_never_loads_another_persons_closedesk(download, settings, loaded, page, monkeypatch, first):
+    # A shared computer (Remote Desktop): this person's CloseDesk stopped to update, and another person's opened on the
+    # same port meanwhile. Its /health said "closedesk", and the page waiting loaded that one: this person's browser
+    # showed someone else's mail. Only this folder's CloseDesk, run by this person, is CloseDesk back.
+    import json
+
+    from controller_inbox import version
+
+    app = opened(settings, loaded, monkeypatch)
+    theirs = {"ok": True, "app": "closedesk", "commit": NEWER, "run": "theirs", **version.whose(), "user": "0" * 16}
+    with serving(app) as base:
+        page.goto(base + first)
+        page.wait_for_selector(DIALOG)
+        if first == "/settings":
+            page.click("#update-ask button:has-text('Not now')")
+            page.wait_for_selector("#update-ask", state="detached")
+            page.click("#update form[action='/settings/update'] button")
+            shown = "[data-update-line]"
+        else:
+            page.click("#update-ask button:has-text('Update now')")
+            shown = "#updating" if first == "/app" else "#update-ask.updating"
+        page.wait_for_selector(shown)
+        address = page.url
+        page.route("**/health", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(theirs)))
+        page.wait_for_timeout(5000)  # two of the page's looks, and more
+        assert page.url == address and page.query_selector(shown) is not None, "the page loaded another person's CloseDesk"
+        # This person's, back as the new version: loaded.
+        page.unroute("**/health")
+        (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        page.wait_for_function("() => !document.querySelector('#updating, #update-ask.updating, [data-update-line]')", timeout=20000)
+
+
+def test_an_older_closedesk_that_doesnt_say_whose_it_is_is_still_taken_for_this_one(download, settings, loaded, page, monkeypatch):
+    import json
+
+    app = opened(settings, loaded, monkeypatch)
+    older = {"ok": True, "app": "closedesk", "commit": NEWER, "run": "older"}
+    with serving(app) as base:
+        page.goto(base + "/inbox")
+        page.wait_for_selector(DIALOG)
+        page.click("#update-ask button:has-text('Update now')")
+        page.wait_for_selector("#update-ask.updating")
+        page.route("**/health", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(older)))
+        page.wait_for_function("() => !document.querySelector('#update-ask.updating')", timeout=20000)
+
+
 # The classic rail -------------------------------------------------------------------------------------------------------
 
 
