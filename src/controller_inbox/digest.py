@@ -404,6 +404,15 @@ def _md_actions(items: list[dict[str, Any]], empty: str) -> list[str]:
     return [f"- **{item['title']}** — due {item['due_label'] or item['due_date']} · {item['subject']}" for item in items]
 
 
+# The tags' and the alert's colors: the classic pages' (static/app.css), written out, as a page pasted into an email
+# can't use their tokens. Shown by CloseDesk with the colors for color blindness chosen, <html> says so
+# (appearance.on_saved_page).
+COLORS_CSS = """    .tag.fraud, .tag.overdue { background:#a8162b; color:#fff; }
+    .tag.due_today { background:#d6a31f; color:#1b2416; }
+    .alert { background:#a8162b; color:#fff; }
+    html[data-colors="color-blind"] .tag.fraud, html[data-colors="color-blind"] .tag.overdue, html[data-colors="color-blind"] .alert { background:#761630; }"""
+
+
 def render_html(payload: dict[str, Any]) -> str:
     """Self-contained page: open it in a browser, print it, or paste it into an email."""
     k = payload["kpis"]
@@ -486,13 +495,9 @@ def render_html(payload: dict[str, Any]) -> str:
     .rank {{ font-size: 20px; min-width: 26px; color:#1f5130; }}
     .tag {{ display:inline-block; margin-left:8px; font-style:normal; font-size:12px; font-family: system-ui, sans-serif;
             padding:1px 8px; border-radius: 10px; background:#e7efe5; color:#1f5130; }}
-    .tag.fraud, .tag.overdue {{ background:#a8162b; color:#fff; }}
-    .tag.due_today {{ background:#d6a31f; color:#1b2416; }}
     .empty {{ color:#6a746a; font-style:italic; }}
-    .alert {{ background:#a8162b; color:#fff; padding:4px 14px 10px; margin-top: 16px; }}
-    /* The classic pages' colors (static/app.css), written out: a page pasted into an email can't use their tokens.
-       Shown by CloseDesk with the colors for color blindness chosen, <html> says so (appearance.on_saved_page). */
-    html[data-colors="color-blind"] .tag.fraud, html[data-colors="color-blind"] .tag.overdue, html[data-colors="color-blind"] .alert {{ background:#761630; }}
+    .alert {{ padding:4px 14px 10px; margin-top: 16px; }}
+{COLORS_CSS}
     .alert h2 {{ color:#fff; border-color: rgba(255,255,255,.4); margin-top: 12px; }}
     .alert li {{ color:#1b241b; }}
     .stats {{ color:#4c584c; font-family: system-ui, sans-serif; font-size: 13px; }}
@@ -517,6 +522,17 @@ def render_html(payload: dict[str, Any]) -> str:
 </body>
 </html>
 """
+
+
+def page_to_show(row: dict[str, Any]) -> str:
+    """A saved digest's page as CloseDesk shows it now: drawn again from what it saved, so one saved by an earlier
+    version is in today's colors too, not the ones written into its page then. One this version can't draw again
+    (saved in another shape) is its page as saved, with today's colors after its own, which win."""
+    try:
+        payload = row["payload"]
+        return render_html(json.loads(payload) if isinstance(payload, str) else payload)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return row["html"].replace("</head>", f"  <style>\n{COLORS_CSS}\n  </style>\n</head>", 1)
 
 
 def _utc_stamp(value: datetime) -> str:

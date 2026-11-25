@@ -54,7 +54,7 @@ from controller_inbox.clock import (
     zone_option,
 )
 from controller_inbox.config import PROFILES, Settings
-from controller_inbox.digest import write_digest_files
+from controller_inbox.digest import page_to_show, write_digest_files
 from controller_inbox.local_llm import check_model, set_min_context, use_chat_model
 from controller_inbox.models import DOCUMENT_LABELS, FOLDER_LABELS, IMPORTANCE_LABELS, DocumentType, Importance
 from controller_inbox.profile import active_profile, set_profile
@@ -1138,8 +1138,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         row = store.get_digest(period)
         if not row:
             raise HTTPException(status_code=404, detail=f"No digest saved for {period}")
-        # In the colors chosen in Setup, as the other pages are; the file saved for printing keeps the standard ones.
-        return HTMLResponse(appearance.on_saved_page(row["html"], appearance.current(store)), headers={"Cache-Control": "no-store"})
+        # In the colors chosen in Setup, as the other pages are, and in today's colors even when it was saved by an
+        # earlier version; the file saved for printing keeps the standard ones.
+        shown = page_to_show(row)
+        return HTMLResponse(appearance.on_saved_page(shown, appearance.current(store)), headers={"Cache-Control": "no-store"})
 
     @app.get("/digests", response_class=HTMLResponse)
     def digests_page(request: Request):

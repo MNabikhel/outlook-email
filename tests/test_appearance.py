@@ -295,10 +295,62 @@ def test_classic_pages_are_never_kept_and_say_the_colors_in_use(client, demo):
 
 
 def _digest_css(html: str, tmp_path):
-    """The printable digest's own stylesheet, as a file palette_math can read."""
+    """The printable digest's stylesheets, in their order, as one file palette_math can read (the last rule wins)."""
+    import re
+
     css = tmp_path / "digest.css"
-    css.write_text(html[html.index("<style>") + len("<style>") : html.index("</style>")], encoding="utf-8")
+    css.write_text("\n".join(re.findall(r"<style>(.*?)</style>", html, re.S)), encoding="utf-8")
     return css
+
+
+# The colours a digest saved before this version wrote into its page.
+EARLIER_COLORS = """
+    body { font-family: Georgia, serif; background:#f4f1ea; color:#1b241b; margin:0; }
+    .tag { display:inline-block; padding:1px 8px; border-radius: 10px; background:#e7efe5; color:#1f5130; }
+    .tag.fraud, .tag.overdue { background:#9b2335; color:#fff; }
+    .tag.due_today { background:#b8651b; color:#fff; }
+    .alert { background:#9b2335; color:#fff; padding:4px 14px 10px; margin-top: 16px; }
+"""
+
+
+@pytest.mark.parametrize("payload", ["as saved", "in a shape this version can't draw"])
+def test_a_digest_saved_before_this_version_shows_in_the_colors_now(client, demo, settings, as_of_now, tmp_path, payload):
+    """A digest saved by an earlier version kept the old crimson, and white words on the orange "Due today" at
+    4.27:1, in its own stylesheet, whatever colors were chosen: only digests written since followed them. Shown
+    again, a saved digest is drawn again from what it saved; one this version can't draw again keeps its page as
+    saved, with the colors in use now after its own."""
+    import json
+    import re
+    from datetime import date
+
+    import palette_math as pm
+    from controller_inbox.digest import build_digest
+
+    period = "2026-09-22"
+    build_digest(demo, as_of=date(2026, 9, 22), generated_at=as_of_now, tz=settings.tz)
+    row = demo.get_digest(period)
+    earlier = re.sub(r"<style>.*?</style>", f"<style>{EARLIER_COLORS}</style>", row["html"], count=1, flags=re.S)
+    earlier = earlier.replace("<h1>", '<h1 data-saved="earlier">', 1)
+    kept = json.loads(row["payload"]) if payload == "as saved" else {"date": period}
+    demo.save_digest(period, row["generated_at"], row["markdown"], earlier, kept)
+
+    standard, blind = pm.classic(), pm.classic("color-blind")
+    for colors in ("standard", "color-blind"):
+        appearance.save(demo, colors=colors)
+        shown = client.get(f"/digest/{period}.html").text
+        assert shown.startswith('<!DOCTYPE html>\n<html lang="en"' + (' data-colors="color-blind">' if colors == "color-blind" else ">"))
+        css = _digest_css(shown, tmp_path)
+        for selector in (".tag.overdue", ".tag.fraud", ".alert"):
+            assert pm.rule_colour(css, selector, "background", {}) == standard["--danger"], (colors, selector)
+            assert pm.rule_colour(css, f'html[data-colors="color-blind"] {selector}', "background", {}) == blind["--danger"]
+        assert pm.rule_colour(css, ".tag.due_today", "background", {}) == standard["--imp-high-fill"]
+        assert pm.rule_colour(css, ".tag.due_today", "color", {}) == standard["--on-imp-high"]
+        if payload == "as saved":
+            assert "#b8651b" not in shown and "#9b2335" not in shown, "drawn again"
+            assert 'data-saved="earlier"' not in shown and "Do not process" in shown
+        else:
+            assert 'data-saved="earlier"' in shown, "the page as it was saved"
+    assert '<html lang="en">' in demo.get_digest(period)["html"], "what was saved is left as it was"
 
 
 def test_the_printable_digest_uses_the_true_red_and_follows_the_colors(client, demo, settings, as_of_now, tmp_path):
