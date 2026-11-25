@@ -1156,6 +1156,7 @@ def test_back_to_the_page_the_update_button_sent_doesnt_ask_for_the_update_again
             page.wait_for_selector("[data-update-line]")
             # CloseDesk answers again, as the newer version: the page goes on to Setup by itself.
             archival.write_text(f"commit: {'b' * 40}\ndate: 2026-11-16\n", encoding="utf-8")
+            version.remember_running()  # as the new version does when it opens: it answers as the version it started as
             page.wait_for_url("**/settings#update", timeout=15000)
             page.go_back()
             assert page.url == f"{base}/settings", "back to Setup as it was before Update, not to the page Update sent"

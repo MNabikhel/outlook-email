@@ -4,7 +4,7 @@
    server says now, with a line under the change saying what happened. */
 
 import { $, $$, h, icon, plural, replace, skeletonReader } from "./dom.js";
-import { getJSON, inSentence, postJSON } from "./api.js";
+import { getJSON, inSentence, postJSON, unanswered } from "./api.js";
 
 const SHORTCUTS = [
   ["j / k", "Next / previous in the list"],
@@ -1126,23 +1126,40 @@ export function createSettings(ctx) {
       updateNotice(),
       h("p", { class: "set-help" }, "Every start checks the set-up and puts right what isn't; the same check runs here."),
       actions("about", h("button", { type: "button", class: "btn btn-sm", onclick: check }, "Check the set-up")),
-      list
+      list,
+      shortcutOffer(a.shortcut)
     );
+  }
+
+  /** The CloseDesk shortcut (Windows: Desktop and Start menu; macOS: Applications), made again when asked: deleted,
+      or CloseDesk's folder moved. Not on Linux. */
+  function shortcutOffer(offer) {
+    if (!offer || !offer.offered) return null;
+    const add = (event) => save("shortcut", "/api/settings/shortcut", {}, event.currentTarget, { busyText: "Adding…" });
+    return [
+      h("p", { class: "set-help" }, offer.help),
+      actions("shortcut", h("button", { type: "button", class: "btn btn-sm", onclick: add }, offer.label)),
+    ];
   }
 
   /** Whether a newer CloseDesk is ready, with its Update button when a launcher started this one (it starts the
       new one), else how to update by hand; and what the daily check for one does. */
   function updateNotice() {
     const u = data.update || {};
-    const busy = data.job && data.job.state === "running";
+    // Mail the person asked to be processed holds the update back; what CloseDesk reads by itself doesn't.
+    const busy = Boolean(u.waits);
     const update = async (event) => {
       const button = event.currentTarget;
       button.disabled = true;
       const line = $('[data-status="update"]', root);
       try {
-        const reply = await postJSON("/api/update");
+        // The version this page shows: refused when CloseDesk was updated since (in another tab).
+        const reply = await postJSON("/api/update", { commit: u.commit });
         ctx.updating(reply);
       } catch (error) {
+        // Nothing answered: CloseDesk has stopped for an update another tab or window asked for. Said, and this page
+        // loads again once CloseDesk is back.
+        if (unanswered(error)) return ctx.updating({ message: u.elsewhere, commit: u.commit, run: "", whose: u.whose, other: u.other_here });
         button.disabled = false;
         if (line) replace(line, icon("alert", 14), h("span", null, error.message));
         if (line) line.className = "set-status error";
@@ -1163,7 +1180,7 @@ export function createSettings(ctx) {
           ]
         : u.developer
           ? null
-          : h("p", { class: "set-help" }, u.by_hand),
+          : [u.current ? h("p", null, u.current) : null, h("p", { class: "set-help" }, u.later)],
       h("p", { class: "set-help" }, u.note)
     );
   }

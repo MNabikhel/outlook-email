@@ -72,6 +72,9 @@ code { font-size: 0.92em; background: var(--chip); padding: 0.05em 0.35em; }
 .close-chip span { display: block; font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: #c9d0c4; }
 .close-chip b { font-family: var(--serif); font-size: 28px; color: #e6c57a; }
 .mode { font-size: 12px; color: #9aa593; }
+/* A link on the rail's navy (Update ready): the rail's gold, not the pages' navy. */
+.rail .mode a { color: #e6c57a; text-decoration: underline; text-underline-offset: 2px; }
+.rail .mode a:hover { color: #fff; }
 .workspace-link { display: block; margin-top: 8px; font-size: 12px; color: #e6c57a; }
 
 .main { padding: 22px 28px 64px; height: 100vh; overflow: auto; }
@@ -686,3 +689,24 @@ form.step-back { border: 0; padding: 0; margin-top: 6px; }
   .folder-card li:is(.imp-critical, .imp-high, .is-held)::before, ul.stack li:is(.imp-critical, .imp-high, .is-held)::before { background: CanvasText; }
   .pill, .tag, .flag { outline: 1px solid CanvasText; outline-offset: -1px; }
 }
+
+/* The update question as CloseDesk opens (static/ui/update_ask.js, shared with the workspace). */
+dialog.update-ask { max-width: min(480px, calc(100vw - 32px)); padding: 20px 22px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--ink); box-shadow: 0 18px 50px rgba(18, 36, 63, 0.3); }
+dialog.update-ask::backdrop { background: rgba(18, 36, 63, 0.45); }
+dialog.update-ask h2 { margin: 0 0 8px; font-family: var(--serif); font-size: 21px; color: var(--navy); }
+dialog.update-ask p { margin: 0 0 10px; line-height: 1.5; }
+.update-ask-help { color: var(--muted); font-size: 13px; }
+.update-ask-failed { background: #f3ecda; border-left: 3px solid var(--gold); padding: 8px 10px; }
+.update-ask-status { font-size: 13px; }
+/* Setup's update page while CloseDesk updates: the rest of the page is out of reach (inert), and looks it. */
+body[data-updating] :is(.rail, .top, .chat-fab) { opacity: 0.55; }
+.update-ask-status:empty { display: none; }
+.update-ask-status.error { color: var(--danger); }
+.update-ask-status.wait { color: var(--warn); }
+.update-ask-status.ok { color: var(--green); }
+.update-ask-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+/* Updating CloseDesk: a bar in the pages' own navy on their line colour (the browser's <progress> is bright blue). */
+.update-ask-bar { display: block; height: 4px; margin-top: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.update-ask-bar span { display: block; width: 35%; height: 100%; border-radius: 2px; background: var(--navy); animation: update-ask-go 1.4s ease-in-out infinite; }
+@keyframes update-ask-go { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
+@media (prefers-reduced-motion: reduce) { .update-ask-bar span { animation: none; width: 100%; opacity: 0.5; } }

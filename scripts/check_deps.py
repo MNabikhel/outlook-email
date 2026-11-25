@@ -22,16 +22,16 @@ except ImportError:  # pragma: no cover - depends on what is installed
     except ImportError:
         Requirement = None
 
-# The extras CloseDesk.bat and CloseDesk.command install when they can.
-LAUNCHER_EXTRAS = ("ocr", "tables")
+# The extras CloseDesk.bat and CloseDesk.command install when they can (the window's only on Windows and macOS).
+LAUNCHER_EXTRAS = ("ocr", "tables", "window")
 
 
-def applies(requirement: str) -> bool:
-    """Fallback without ``packaging``: only ``sys_platform == '...'`` and ``python_version < '...'`` markers are
-    used in pyproject.toml."""
+def applies(requirement: str, *, platform: str | None = None) -> bool:
+    """Fallback without ``packaging``: only ``sys_platform == '...'`` (one, or several joined by ``or``) and
+    ``python_version < '...'`` markers are used in pyproject.toml."""
     marker = requirement.partition(";")[2]
-    platform = re.search(r"sys_platform\s*==\s*['\"]([^'\"]+)['\"]", marker)
-    if platform is not None and platform.group(1) != sys.platform:
+    platforms = re.findall(r"sys_platform\s*==\s*['\"]([^'\"]+)['\"]", marker)
+    if platforms and (platform or sys.platform) not in platforms:
         return False
     below = re.search(r"python_version\s*<\s*['\"](\d+)\.(\d+)['\"]", marker)
     return below is None or sys.version_info[:2] < (int(below.group(1)), int(below.group(2)))

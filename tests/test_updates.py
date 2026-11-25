@@ -26,13 +26,14 @@ MINE = "a" * 40
 NEWER = "b" * 40
 SAME = {"origin": "http://testserver"}
 NOW = datetime(2026, 11, 16, 15, 0, tzinfo=timezone.utc)
+REAL_ASK = updates._ask_github
 
 
 def github(sha: str = NEWER, date: str = "2026-11-16T09:12:00Z"):
     """GitHub's answer for main, and the URLs it was asked."""
     asked: list[str] = []
 
-    def ask(url: str) -> dict:
+    def ask(url: str, **_waits) -> dict:
         asked.append(url)
         return {"sha": sha, "commit": {"committer": {"date": date}, "message": "anything"}}
 
@@ -55,7 +56,7 @@ def download(tmp_path, monkeypatch):
 def no_github(monkeypatch):
     """Nothing here asks the real GitHub."""
 
-    def refuse(url):
+    def refuse(url, **_waits):
         raise AssertionError(f"a test asked the real GitHub: {url}")
 
     monkeypatch.setattr(updates, "_ask_github", refuse)
@@ -69,7 +70,7 @@ def no_github(monkeypatch):
 def test_a_newer_main_is_said_with_both_version_numbers(download, settings, store):
     ask = github()
     found = updates.check(store, settings, now=NOW, ask=ask)
-    assert ask.asked == ["https://api.github.com/repos/MNabikhel/outlook-email/commits/main"]
+    assert ask.asked == ["https://api.github.com/repos/MNabikhel/outlook-email/commits?sha=main&per_page=1"]
     assert found["sha"] == NEWER and found["date"] == "2026-11-16"
     shown = updates.status(store, settings)
     assert shown["newer"] is True and shown["latest"] == "2026.11.16"
@@ -176,11 +177,79 @@ def test_github_is_reached_with_the_computers_own_certificates_when_python_cant(
         ran.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"sha": NEWER}), stderr="")
 
-    monkeypatch.setattr(httpx, "get", refused)
+    monkeypatch.setattr(httpx, "stream", refused)
     monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/curl" if name == "curl" else None)
     monkeypatch.setattr(updates.subprocess, "run", curl)
     assert updates._fetch_json(updates.LATEST_URL) == {"sha": NEWER}
     assert ran and ran[0][0] == "/usr/bin/curl" and updates.LATEST_URL in ran[0]
+
+
+def _curl_as_on_windows(answer: bytes, ran: list):
+    """curl giving GitHub's answer (UTF-8 bytes), with Python's decoding of a program's output as on Windows: text=True
+    reads it in the ANSI code page (cp1252), not UTF-8."""
+    import subprocess
+
+    def curl(cmd, **kwargs):
+        ran.append((cmd, kwargs))
+        if kwargs.get("text") or kwargs.get("encoding") or kwargs.get("universal_newlines"):
+            return subprocess.CompletedProcess(cmd, 0, stdout=answer.decode(kwargs.get("encoding") or "cp1252"), stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout=answer, stderr=b"")
+
+    return curl
+
+
+@pytest.mark.parametrize("title", ["Colour-blind settings in Setup \u2192 Colors", "Say \u201cprocessed\u201d \u2190 not \u201cread\u201d"])
+def test_whats_new_comes_whole_through_curl_on_windows(download, settings, store, monkeypatch, title):
+    # The curl fallback read GitHub's UTF-8 answer in Windows' code page: "Setup \u00e2\u2020\u2019 Colors" in the
+    # question, and a \u201d (byte 0x9d) stopped the question altogether, with Settings saying GitHub couldn't be reached.
+    import httpx
+
+    def refused(*_a, **_k):
+        raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] self-signed certificate in certificate chain")
+
+    answer = json.dumps(
+        [{"sha": NEWER, "commit": {"committer": {"date": "2026-11-16T09:12:00Z"}, "message": title}}], ensure_ascii=False
+    ).encode("utf-8")
+    ran: list = []
+    monkeypatch.setattr(httpx, "stream", refused)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/curl" if name == "curl" else None)
+    monkeypatch.setattr(updates.subprocess, "run", _curl_as_on_windows(answer, ran))
+    monkeypatch.setattr(updates, "_ask_github", REAL_ASK)
+    saved = updates.check(store, settings, now=NOW)
+    assert "failed" not in saved and saved["title"] == title
+    assert updates.status(store, settings)["whats_new"] == title
+
+
+def test_github_is_asked_for_the_newest_commit_alone_not_its_changes(monkeypatch):
+    # GitHub's answer for one commit carries every changed file's patch: hundreds of kilobytes for a merge, too much for
+    # the few seconds as CloseDesk opens on a slow link. The list of commits, one long, says the same without them.
+    from urllib.parse import parse_qs, urlsplit
+
+    parts = urlsplit(updates.LATEST_URL)
+    assert parts.path == "/repos/MNabikhel/outlook-email/commits"
+    assert parse_qs(parts.query) == {"sha": ["main"], "per_page": ["1"]}
+    import httpx
+
+    def refused(*_a, **_k):
+        raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED]")
+
+    ran: list = []
+    monkeypatch.setattr(httpx, "stream", refused)
+    monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/curl" if name == "curl" else None)
+    monkeypatch.setattr(updates.subprocess, "run", _curl_as_on_windows(b"[]", ran))
+    updates._fetch_json(updates.LATEST_URL, timeout=4)
+    # The answer is a few kilobytes. A Windows curl from before Microsoft's June 2024 update has no zlib, and refuses
+    # --compressed before asking anything: on a PC behind a proxy that re-signs HTTPS, the one asking that works.
+    assert "--compressed" not in ran[0][0]
+
+
+def test_githubs_list_of_one_commit_is_read(download, settings, store):
+    def ask(url, **_waits):
+        return [{"sha": NEWER, "commit": {"committer": {"date": "2026-11-16T09:12:00Z"}, "message": "Faster totals"}}]
+
+    saved = updates.check(store, settings, now=NOW, ask=ask)
+    assert saved["sha"] == NEWER and saved["title"] == "Faster totals"
+    assert updates.check(store, settings, now=NOW + timedelta(days=2), ask=lambda url, **_w: [])["failed"] == "1"
 
 
 def test_settings_say_when_github_couldnt_be_reached(download, settings, store):
@@ -219,15 +288,16 @@ def test_the_open_closedesk_asks_by_itself(download, settings, store, monkeypatc
     monkeypatch.setattr(updates, "_ask_github", ask)
     monkeypatch.setattr(updates, "FIRST_TICK_SECONDS", 0)
     updates.start_checking(store, settings)
+    # Waited for until the answer is kept, not only asked for: the check keeps it a moment after GitHub answers.
     deadline = time.monotonic() + 10
-    while not ask.asked and time.monotonic() < deadline:
+    while not updates.status(store, settings)["newer"] and time.monotonic() < deadline:
         time.sleep(0.02)
     assert ask.asked and updates.status(store, settings)["newer"] is True
 
 
 def test_the_settings_say_what_the_check_does_in_plain_words(download, settings, store):
     note = updates.status(store, settings)["note"]
-    assert "Once a day" in note and "nothing about your mail is sent" in note and "CONTROLLER_INBOX_UPDATE_CHECK=false" in note
+    assert "When CloseDesk opens, and once a day" in note and "nothing about your mail is sent" in note and "CONTROLLER_INBOX_UPDATE_CHECK=false" in note
 
 
 # What the pages show -----------------------------------------------------------------------------------------
@@ -251,7 +321,7 @@ def test_the_classic_setup_page_shows_the_notice_and_the_button(download, settin
     client = TestClient(web.create_app(settings, store))
     page = client.get("/settings").text
     assert "CloseDesk 2026.11.13 (aaaaaaa)" in page and "A newer CloseDesk" not in page
-    assert "Once a day" in page
+    assert "When CloseDesk opens, and once a day" in page
     updates.check(store, settings, now=NOW, ask=github())
     page = client.get("/settings").text
     assert "A newer CloseDesk is ready (2026.11.16; you have 2026.11.13)." in page
@@ -284,6 +354,31 @@ def test_the_update_button_stops_closedesk_for_its_launcher(download, settings, 
     assert client.post("/api/update").status_code == 403, "only CloseDesk's own page may ask"
 
 
+def test_closedesk_started_by_the_window_tells_it_at_once_that_it_stops_to_update(download, settings, store, monkeypatch, tmp_path):
+    # CloseDesk takes a few seconds to stop once Update now is answered, and stops answering at once: the window learns
+    # from the file it named (closing it meanwhile asks first, and the update still runs).
+    mark = tmp_path / "window" / "update-asked"
+    monkeypatch.setenv(updates.WINDOW_ASKED_ENV, str(mark))
+    app = web.create_app(settings, store)
+    app.state.stop_server = stop = Stopper()
+    assert TestClient(app).post("/api/update", headers=PAGE).status_code == 200
+    assert stop.calls == 1 and mark.is_file()
+
+
+def test_an_update_refused_tells_the_window_nothing(download, settings, store, monkeypatch, tmp_path):
+    mark = tmp_path / "update-asked"
+    monkeypatch.setenv(updates.WINDOW_ASKED_ENV, str(mark))
+    app = web.create_app(settings, store)
+    app.state.stop_server = Stopper()
+    release = threading.Event()
+    app.state.job.start(lambda progress: release.wait(10))
+    try:
+        assert TestClient(app).post("/api/update", headers=PAGE).status_code == 409
+    finally:
+        release.set()
+    assert not mark.exists()
+
+
 def test_the_update_button_waits_while_mail_is_processed(download, settings, store):
     app = web.create_app(settings, store)
     app.state.stop_server = stop = Stopper()
@@ -293,7 +388,7 @@ def test_the_update_button_waits_while_mail_is_processed(download, settings, sto
         reply = TestClient(app).post("/api/update", headers=PAGE)
         assert reply.status_code == 409 and reply.json()["detail"] == updates.BUSY
         classic = TestClient(app).post("/settings/update", headers=SAME)
-        assert classic.status_code == 409 and "Update when it has finished" in classic.text
+        assert classic.status_code == 409 and updates.BUSY in classic.text
     finally:
         release.set()
     assert stop.calls == 0 and not getattr(app.state, "update_asked", False)
@@ -347,6 +442,8 @@ def test_the_classic_update_button_shows_the_waiting_page(download, settings, st
     page = TestClient(app).post("/settings/update", headers=SAME)
     assert page.status_code == 200 and updates.UPDATING in page.text and "/health" in page.text
     assert stop.calls == 1
+    # The classic pages' own bar, as the question's updating dialog has (not the browser's bright blue <progress>).
+    assert "<progress" not in page.text and 'class="update-ask-bar" role="progressbar"' in page.text
     assert TestClient(app).post("/settings/update", headers={"origin": "http://elsewhere.example"}).status_code == 403
 
 
@@ -495,7 +592,37 @@ def test_the_windows_launcher_updates_and_starts_again_from_one_block_read_whole
     for block in blocks:
         lines = [line.strip() for line in block.splitlines()]
         # The update replaces this file: the start of the new one, and the end, are in the block cmd has read already.
-        assert lines[0] == r"call %PY% scripts\launch.py --update" and lines[1].startswith('call "%~f0"') and lines[2] == "exit /b"
+        # (The drive letter a network folder was lent goes back first: the new file lends itself its own.)
+        assert lines[0] == r"call %PY% scripts\launch.py --update" and lines[1] == "popd"
+        assert lines[2].startswith('call "%~f0"') and lines[3] == "exit /b"
+
+
+# Subroutines, reached with call: their exit /b goes back to the line that called them, not out of the file.
+BAT_SUBROUTINES = {":try", ":find_python", ":get_uv", ":managed"}
+
+
+def test_the_windows_launcher_works_from_a_folder_on_a_network_share():
+    # cmd can't be in a folder on a network share (\\server\share): "cd /d" there fails, and the launcher would run in
+    # C:\Windows, where there is no CloseDesk. Windows names a mapped drive (H:) so to the shortcut and the window, which
+    # open CloseDesk.bat by that name when the window can't open. pushd lends the folder a drive letter instead.
+    text = (ROOT / "CloseDesk.bat").read_bytes().decode("ascii")
+    lines = text.split("\r\n")
+    code = [line.strip() for line in lines if line.strip() and not line.strip().lower().startswith("rem")]
+    assert not any(line.lower().startswith("cd ") for line in code), "cd can't go into a folder on a network share"
+    assert 'pushd "%~dp0"' in code and code.index('pushd "%~dp0"') < code.index("set /a TRIES=0")
+    # Every way out of the file gives the drive letter back (popd), or a letter is used up at each start.
+    section, ways_out = "", []
+    for at, line in enumerate(code):
+        if line.startswith(":") and " " not in line:
+            section = line
+        if "exit /b" in line and section not in BAT_SUBROUTINES:
+            ways_out.append(at)
+            before = " ".join(code[max(0, at - 3) : at]) + " " + line.split("exit /b")[0]
+            assert "popd" in before, f"{line!r} (after {section or 'the start'}) leaves without popd"
+    assert len(ways_out) >= 9, ways_out
+    # CloseDesk-Update.bat doesn't go into the folder itself: it runs CloseDesk.bat by its whole path, which does.
+    update = (ROOT / "CloseDesk-Update.bat").read_bytes().decode("ascii")
+    assert "cd /d" not in update and 'call "%~dp0CloseDesk.bat" --update' in update
 
 
 @pytest.mark.browser
@@ -518,5 +645,6 @@ def test_the_workspace_says_an_update_is_ready_and_waits_for_the_new_version(dow
         assert updates.UPDATING in page.inner_text("#updating") and stop.calls == 1
         # The launcher has put the new version in place and started it: the page loads again by itself.
         (download / ".git_archival.txt").write_text(f"commit: {NEWER}\ndate: 2026-11-16\n", encoding="utf-8")
+        version.remember_running()  # the CloseDesk answering is the new one
         page.wait_for_function("() => (document.querySelector('.rail-version') || {}).textContent === 'CloseDesk 2026.11.16 (bbbbbbb)'", timeout=20000)
         assert page.query_selector("#top-update") is None, "this copy is main's now"

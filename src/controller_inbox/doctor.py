@@ -12,7 +12,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 
-from controller_inbox import version
+from controller_inbox import app_log, version
 
 OK, NOTE, PROBLEM = "ok", "note", "problem"
 # The newest Python CloseDesk's tests run on. A newer one is tried all the same.
@@ -36,18 +36,28 @@ def listening(host: str, port: int) -> bool:
         return False
 
 
-def is_closedesk(host: str, port: int) -> bool:
-    """Whether what answers on the port is a CloseDesk dashboard."""
+def closedesk_on(host: str, port: int) -> str:
+    """What answers on the port: "mine" (this folder's CloseDesk, run by this person), "other" (another CloseDesk:
+    another folder's, or another person's on a shared computer), or "" (no CloseDesk)."""
     import httpx
 
     target = "127.0.0.1" if host in ("0.0.0.0", "", "::") else host
     try:
-        reply = httpx.get(f"http://{target}:{port}/health", timeout=3.0)
+        # Asked directly, never through a proxy the computer is set to use: Windows' Internet Options proxy reaches
+        # Python without its list of addresses to skip, and the proxy would answer for CloseDesk.
+        reply = httpx.get(f"http://{target}:{port}/health", timeout=3.0, trust_env=False)
         body = reply.json()
     except (httpx.HTTPError, ValueError):
-        return False
+        return ""
     # "app" since this check was added; an older CloseDesk still running answers with these three.
-    return isinstance(body, dict) and (body.get("app") == "closedesk" or {"ok", "emails", "graph"} <= set(body))
+    if not (isinstance(body, dict) and (body.get("app") == "closedesk" or {"ok", "emails", "graph"} <= set(body))):
+        return ""
+    return "mine" if version.is_mine(body) else "other"
+
+
+def is_closedesk(host: str, port: int) -> bool:
+    """Whether what answers on the port is this CloseDesk's dashboard (this folder's, run by this person)."""
+    return closedesk_on(host, port) == "mine"
 
 
 def free_port(host: str, port: int, *, span: int = 20) -> int:
@@ -56,6 +66,22 @@ def free_port(host: str, port: int, *, span: int = 20) -> int:
         if not listening(host, candidate):
             return candidate
     return 0
+
+
+def next_port(host: str, port: int, *, span: int = 20) -> tuple[int, bool]:
+    """``port`` is another program's: (the next one free, False), or (the next one this CloseDesk already answers on,
+    True: it moved there before, and is shown rather than started again). (0, False) when the next ``span`` + 1 are
+    all another's."""
+    for candidate in range(port + 1, port + span + 2):
+        if not listening(host, candidate):
+            return candidate, False
+        if is_closedesk(host, candidate):
+            return candidate, True
+    return 0, False
+
+
+# What answers on CloseDesk's port, as it is said ("Another program is using port 8765").
+ANOTHER = {"other": "Another CloseDesk (another folder's, or another person's on this computer)", "": "Another program"}
 
 
 def _settings() -> tuple[object | None, Check]:
@@ -116,11 +142,20 @@ def _port(settings) -> Check:
     host, port = settings.host, settings.port
     if not listening(host, port):
         return Check(OK, f"Dashboard: will open at http://{host}:{port}/")
-    if is_closedesk(host, port):
+    found = closedesk_on(host, port)
+    if found == "mine":
         return Check(NOTE, f"Dashboard: CloseDesk is already running at http://{host}:{port}/")
-    other = free_port(host, port + 1)
+    other, running = next_port(host, port)
+    if running:
+        return Check(NOTE, f"Dashboard: CloseDesk is already running at http://{host}:{other}/ (port {port} is another program's)")
     if not other:
         return Check(PROBLEM, f"Dashboard: port {port} and the twenty after it are all in use", "Set CONTROLLER_INBOX_PORT in .env to a free port.")
+    if found == "other":
+        return Check(
+            NOTE,
+            f"Dashboard: {ANOTHER['other'][0].lower()}{ANOTHER['other'][1:]} uses port {port}, so this one will use {other}",
+            f"To keep this one on a port of its own, set CONTROLLER_INBOX_PORT={other} in .env.",
+        )
     return Check(
         NOTE,
         f"Dashboard: another program uses port {port}, so CloseDesk will use {other}",
@@ -128,9 +163,20 @@ def _port(settings) -> Check:
     )
 
 
+# The Microsoft Store's Python: what it writes in AppData only it sees (app_log.store_python).
+STORE_PYTHON = (
+    "Windows keeps what this Python writes in your AppData folder to it alone: the CloseDesk shortcut can't be put in "
+    "your Start menu, and CloseDesk's log is in this Python's own folder (in %LOCALAPPDATA%\\Packages). Install Python "
+    "from python.org (Install for me only needs no admin rights), delete the .venv folder in CloseDesk's folder and "
+    "double-click CloseDesk.bat again."
+)
+
+
 def _python() -> Check:
     found = sys.version_info[:2]
     text = f"Python {platform.python_version()}"
+    if app_log.store_python():
+        return Check(NOTE, f"{text}, from the Microsoft Store", STORE_PYTHON)
     if found > TESTED_UP_TO:
         return Check(NOTE, f"{text}: newer than CloseDesk has been tried on ({TESTED_UP_TO[0]}.{TESTED_UP_TO[1]})")
     return Check(OK, text)

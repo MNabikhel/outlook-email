@@ -26,6 +26,15 @@ export function h(tag, attrs, ...children) {
   return el;
 }
 
+/** Download ``href`` as a link with "download" would: the page stays where it is, and the CloseDesk window saves it
+    (going to it instead, the macOS window would show a file it can show, and has no back button). */
+export function saveFrom(href) {
+  const link = h("a", { href, download: true, hidden: true });
+  document.body.append(link);
+  link.click();
+  link.remove();
+}
+
 export function append(el, children) {
   for (const child of [children].flat(Infinity)) {
     if (child === null || child === undefined || child === false || child === "") continue;

@@ -3,30 +3,67 @@
 {% block heading %}Setup{% endblock %}
 {% block body %}
 <section class="panel" id="update">
-  <h3>Update CloseDesk</h3>
   {% if refused %}
+  <h3>Update CloseDesk</h3>
   <p class="notice">{{ refused }}</p>
   <p><a href="/settings#update">Back to Setup</a></p>
   {% else %}
+  <h3>Updating CloseDesk</h3>
   <p data-update-line>{{ message }}</p>
-  <p class="muted"><progress aria-label="Updating"></progress></p>
+  <p class="muted"><span class="update-ask-bar" role="progressbar" aria-label="Updating" data-update-bar><span></span></span></p>
   <script>
-    // CloseDesk stops, its launcher fetches the newest version, and CloseDesk starts again: Setup is shown when it
-    // answers again (with the new version, or as it was when the update couldn't be done), in this page's place, so
-    // Back goes to the page before Update, not to this one.
+    // CloseDesk stops, its launcher fetches the newest version, and CloseDesk starts again: Setup is shown when another
+    // start of it answers (with the new version, or as it was when the update couldn't be done, however quickly), in this
+    // page's place, so Back goes to the page before Update, not to this one. Only this CloseDesk counts, never another
+    // person's that opened on the port meanwhile (a shared computer); an older one, which doesn't say whose it is, is
+    // taken for this one.
     (function () {
       var before = {{ commit | tojson }};
+      var run = {{ run | tojson }};
+      var whose = {{ whose | tojson }};
+      function mine(h) { return (!h.folder && !h.user) || (h.folder === whose.folder && h.user === whose.user); }
+      // Until CloseDesk is back, the rest of the page is out of reach (as the workspace's updating page keeps it): it
+      // would only fail, CloseDesk being down, and a click there would leave this page for the browser's "can't be
+      // reached", which nothing brings back once CloseDesk is.
+      // (The chat and the preview come after this script in the page: once it has all loaded.)
+      document.body.setAttribute('data-updating', '');
+      function outOfReach() {
+        ['.rail', '.top', '#drawer', '#drawer-backdrop', '#chat', '#chat-toggle'].forEach(function (part) {
+          var found = document.querySelector(part);
+          if (found) found.inert = true;
+        });
+      }
+      outOfReach();
+      document.addEventListener('DOMContentLoaded', outOfReach);
       var gone = false;
       var started = Date.now();
+      // Another CloseDesk at this address, at two looks in a row: said (this one opens again at another address, in a
+      // tab of its own), and the bar stops. Looked at still: this one, back here after all, is shown.
+      var others = 0;
+      function another() {
+        others += 1;
+        if (others !== 2) return;
+        document.querySelector('[data-update-line]').textContent = {{ other | tojson }};
+        document.querySelector('[data-update-bar]').hidden = true;
+      }
+      function slow() {
+        if (others < 2 && Date.now() - started > 5 * 60 * 1000) {
+          document.querySelector('[data-update-line]').textContent = "CloseDesk hasn't opened again yet. Its window says what it is doing; if it has closed, double-click CloseDesk.";
+        }
+      }
       function again() {
         fetch('/health', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (h) {
-          if (h.app === 'closedesk' && (gone || h.commit !== before)) { window.location.replace('/settings#update'); return; }
+          // Another person's CloseDesk on the port (or another folder's): as if nothing answered, and said (another()).
+          if (h.app === 'closedesk' && !mine(h)) { gone = true; another(); setTimeout(again, 2000); return; }
+          others = 0;
+          // In this page's place: Back doesn't show "Updating CloseDesk" again, with nothing updating.
+          if (h.app === 'closedesk' && (gone || h.commit !== before || (run && h.run && h.run !== run))) { window.location.replace('/settings#update'); return; }
+          slow();
           setTimeout(again, 2000);
         }).catch(function () {
           gone = true;
-          if (Date.now() - started > 5 * 60 * 1000) {
-            document.querySelector('[data-update-line]').textContent = "CloseDesk hasn't opened again yet. Its window says what it is doing; if it has closed, double-click CloseDesk.";
-          }
+          others = 0;
+          slow();
           setTimeout(again, 2000);
         });
       }

@@ -12,6 +12,9 @@ import { createChat } from "./chat.js";
 import { createOverlays } from "./palette.js";
 import { traceView } from "./trace.js";
 import { calendarView, isDay, rangeOf } from "./calendar.js";
+import { OTHER_HERE, SLOW, askOnOpening, isMine, waitForCloseDesk } from "./update_ask.js";
+// In the CloseDesk window, what leaves CloseDesk opens where it would from a browser.
+import { pageLoaded } from "./in_window.js";
 
 const enc = encodeURIComponent;
 const root = document.documentElement;
@@ -170,6 +173,21 @@ function toggleRail() {
 
 /* ---------- The top bar ---------- */
 
+/* Where the top bar's buttons would be pushed past its edge (a narrow window, the chat open beside it), its parts give
+   way in turn, each only while it is still too tight (app.css): the search box, to its icon alone; the date's second
+   half and the sample chip; "Update ready", to "Update…"; and last the date and that, cut short. */
+const TIGHT = ["data-tight", "data-tight-date", "data-tight-update", "data-tight-cut"];
+
+function fitTop() {
+  const top = $("#top");
+  if (!top) return;
+  for (const name of TIGHT) top.removeAttribute(name);
+  for (const name of TIGHT) {
+    if (top.scrollWidth <= top.clientWidth + 1) return;
+    top.setAttribute(name, "");
+  }
+}
+
 function renderTop() {
   const meta = S.meta;
   if (!meta) return;
@@ -179,15 +197,23 @@ function renderTop() {
     h("span", { class: "muted" }, meta.finance ? ` · ${plural(meta.days_to_close, "day")} to month-end` : ` · ${plural(meta.counts.emails, "email")} sorted`),
     meta.is_sample ? h("span", { class: "chip faint sample" }, "sample mailbox") : null
   );
-  // A newer CloseDesk is ready: a small link to Settings, where its Update button is.
+  // A newer CloseDesk is ready: a small link to Settings, where its Update button is ("Update…" where the top bar is
+  // tight: heard whole all the same).
   const ready = Boolean(meta.closedesk && meta.closedesk.newer);
   let notice = $("#top-update");
   if (ready && !notice) {
-    notice = h("a", { id: "top-update", class: "top-update", href: "/app/settings#set-about", dataset: { nav: "" } }, "Update ready");
-    $(".top-tools").prepend(notice);
+    notice = h(
+      "a",
+      { id: "top-update", class: "top-update", href: "/app/settings#set-about", dataset: { nav: "" }, "aria-label": "Update ready" },
+      "Update",
+      h("span", { class: "top-update-more" }, " ready")
+    );
+    $(".top-tools").before(notice);
   } else if (!ready && notice) {
     notice.remove();
   }
+  // The date, the link or the progress may have changed width.
+  fitTop();
   if (ready) notice.title = meta.closedesk.message;
   const job = meta.job;
   const running = job.state === "running";
@@ -240,6 +266,7 @@ function renderTop() {
         )
       : null
   );
+  fitTop();
 }
 
 async function stopJob(event) {
@@ -636,6 +663,9 @@ function focusOpened(id) {
 /* ---------- The reading pane ---------- */
 
 function setReader(node, key = "", { animate = true } = {}) {
+  // CloseDesk is updating (or another one answers here): its page stays until CloseDesk is back (and this page loads
+  // again).
+  if (S.updating && key !== "updating" && key !== "another-here") return;
   S.shown = key;
   // A Page tab's card is for a box in what is shown now: with that gone, its box can't close it.
   closeTip();
@@ -976,6 +1006,7 @@ function showSettings() {
 /* ---------- Rendering what the address says ---------- */
 
 async function sync() {
+  if (S.updating) return; // the updating page stays (setReader), and nothing is fetched from a CloseDesk that is down
   const route = parse();
   const before = S.route;
   S.route = route;
@@ -1197,6 +1228,10 @@ async function poll() {
     const meta = await getJSON("/api/state");
     if (seq !== S.jobSeq) throw new Error("a job started while this was on its way: ask again");
     const before = S.meta;
+    if (before && before.whose && !isMine(meta.whose || {}, before.whose)) {
+      S.polling = false;
+      return anotherHere();
+    }
     S.meta = meta;
     if (lookSeq === S.lookSeq) applyAppearance(meta.appearance);
     renderTop();
@@ -1218,13 +1253,23 @@ async function poll() {
 
 /* ---------- Updating ---------- */
 
-/** Settings' Update button was answered: CloseDesk stops, its launcher fetches the newest version and starts it
-    again. Say so, and load the page again once CloseDesk answers (with the new version, or as it was when the
-    update couldn't be done). */
+/** Settings' Update button (or the question as CloseDesk opened) was answered: CloseDesk stops, its launcher
+    fetches the newest version and starts it again. Say so, and load the page again once CloseDesk answers (with the
+    new version, or as it was when the update couldn't be done). */
 function updating(reply) {
   S.updating = true;
   clearTimeout(S.poll);
+  overlays.hide();
+  // Until CloseDesk is back, the rest of the workspace is out of reach (it would only fail: CloseDesk is down), and
+  // nothing in it offers the update or new work: the reading pane says what is happening.
+  $("#ws").dataset.updating = "";
+  for (const part of ["#rail", "#list", "#chat", "#top"]) $(part)?.setAttribute("inert", "");
+  $("#top-update")?.remove();
+  const button = $("#process-btn");
+  button.disabled = true;
+  button.textContent = "Updating…";
   const line = h("p", { class: "lede" }, reply.message);
+  const bar = h("div", { class: "job" }, h("span", { class: "spin", "aria-hidden": "true" }), h("span", { class: "job-bar" }, h("span", { class: "indeterminate", style: { width: "30%" } })));
   setReader(
     h(
       "div",
@@ -1235,26 +1280,51 @@ function updating(reply) {
         h("p", { class: "kicker" }, "Update"),
         h("h1", { class: "page-title" }, "Updating CloseDesk"),
         line,
-        h("div", { class: "job" }, h("span", { class: "spin", "aria-hidden": "true" }), h("span", { class: "job-bar" }, h("span", { class: "indeterminate", style: { width: "30%" } })))
+        bar
       )
     ),
     "updating"
   );
-  const before = reply.commit || "";
-  const started = Date.now();
-  let gone = false; // CloseDesk stopped answering: the next answer is the new one
-  const again = async () => {
-    try {
-      const response = await fetch("/health", { cache: "no-store" });
-      const health = await response.json();
-      if (health.app === "closedesk" && (gone || health.commit !== before)) return location.reload();
-    } catch (error) {
-      gone = true;
-      if (Date.now() - started > 5 * 60 * 1000) line.textContent = "CloseDesk hasn't opened again yet. Its window says what it is doing; if it has closed, double-click CloseDesk.";
-    }
-    setTimeout(again, 2000);
-  };
-  setTimeout(again, 2000);
+  waitForCloseDesk(reply.commit || "", {
+    run: reply.run,
+    whose: reply.whose,
+    onBack: () => location.reload(),
+    onSlow: () => (line.textContent = SLOW),
+    // Another CloseDesk at this address: this one opens again at another, in a tab of its own.
+    onOther: () => {
+      line.textContent = reply.other || OTHER_HERE;
+      bar.hidden = true;
+    },
+  });
+}
+
+/** This tab's CloseDesk closed and another one answers at its address (another folder's, or another person's on a
+    shared computer): said, with the rest of the workspace out of reach, rather than that one's mail shown here as if
+    it were this one's. */
+function anotherHere() {
+  S.updating = true; // nothing more is asked of the CloseDesk here
+  clearTimeout(S.poll);
+  overlays.hide();
+  for (const part of ["#rail", "#list", "#chat", "#top"]) $(part)?.setAttribute("inert", "");
+  setReader(
+    h(
+      "div",
+      { class: "page", id: "another-here" },
+      h(
+        "div",
+        { class: "page-inner narrow" },
+        h("p", { class: "kicker" }, "CloseDesk"),
+        h("h1", { class: "page-title" }, "Another CloseDesk is at this address"),
+        h(
+          "p",
+          { class: "lede" },
+          "The CloseDesk this tab showed has closed, and another one answers at its address now: another CloseDesk folder's, or another person's on this computer. Yours opens at an address of its own when it starts. Close this tab, or show the CloseDesk that is here now."
+        ),
+        h("p", null, h("button", { type: "button", class: "btn btn-sm", onclick: () => location.reload() }, "Show the CloseDesk here"))
+      )
+    ),
+    "another-here"
+  );
 }
 
 function refreshData() {
@@ -1534,6 +1604,7 @@ let goPending = 0;
 const GO = { t: "/app", m: "/app/calendar", i: "/app/folder/important", n: "/app/folder/informational", r: "/app/folder/reference", a: "/app/all", k: "/app/tasks", f: "/app/fraud", c: "/app/coding", d: "/app/digest", s: "/app/settings" };
 
 document.addEventListener("keydown", (event) => {
+  if (S.updating) return; // nothing to go to or start while CloseDesk is down to update
   if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
     event.preventDefault();
     if (overlays.isOpen()) overlays.hide();
@@ -1658,6 +1729,8 @@ async function boot() {
     return;
   }
   renderTop();
+  // The top bar's width changes with the window and with the chat beside it.
+  if (typeof ResizeObserver === "function") new ResizeObserver(() => fitTop()).observe($("#top"));
   toldOnOpening(S.meta.job);
   updateRail("");
   chat.setModel(S.meta.model);
@@ -1665,6 +1738,10 @@ async function boot() {
   await sync();
   S.poll = setTimeout(poll, S.meta.job.state === "running" ? 1500 : 15000);
   document.body.classList.add("ready");
+  // In the CloseDesk window: the workspace is up (CI's check of the real window waits for this).
+  pageLoaded();
+  // Each time CloseDesk opens, its first page asks whether to update when a newer version is out.
+  askOnOpening({ updating });
 }
 
 boot();

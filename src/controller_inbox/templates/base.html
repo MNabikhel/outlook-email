@@ -47,7 +47,8 @@
         <p class="mode">{{ 'Outlook connected' if graph_configured else 'Drop folder' }}{{ ' · sample mailbox' if is_sample else '' }}</p>
         <a class="workspace-link" href="/app">Open the new workspace →</a>
         {% if closedesk is defined %}
-        <p class="mode">{% if closedesk.newer %}<a href="/settings#update">Update ready</a> · {% endif %}{{ closedesk.label }}</p>
+        {# Not on the page that says CloseDesk is updating: nothing offers the update that runs. #}
+        <p class="mode">{% if closedesk.newer and not updating %}<a href="/settings#update">Update ready</a> · {% endif %}{{ closedesk.label }}</p>
         {% endif %}
       </div>
     </aside>
@@ -95,5 +96,7 @@
   {% include "_chat.html" %}
   <div class="toast" id="toast" role="status" hidden></div>
   {% include "_scripts.html" %}
+  {# Each time CloseDesk opens, its first page asks whether to update when a newer version is out (static/ui/update_ask.js). #}
+  <script type="module">import { askOnOpening } from "/static/ui/update_ask.js"; askOnOpening();</script>
 </body>
 </html>

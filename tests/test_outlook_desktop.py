@@ -176,11 +176,22 @@ def test_the_read_only_check_catches_what_isnt_a_read():
     assert _not_read_only("def f(self):\n    self._folders = []\n    self._by_path['x'] = 1\n    for self.path in []:\n        pass\n") == []
 
 
+# Files that use pywin32 for something other than Outlook, and the parts of it they may use: the CloseDesk shortcut
+# (shortcut.py), which writes Windows' own shortcut files through the Windows shell.
+NOT_OUTLOOK = {"shortcut.py": {"win32com.shell", "win32com.propsys"}}
+
+
 def test_only_the_reader_talks_to_outlook():
     # The read-only checks above read outlook_desktop.py: any other file reaching Outlook would escape them.
     package = SOURCE.parent
     users = sorted(path.name for path in package.rglob("*.py") if re.search(r"\bwin32com\b", path.read_text(encoding="utf-8")))
-    assert users == ["outlook_desktop.py"], users
+    assert [name for name in users if name not in NOT_OUTLOOK] == ["outlook_desktop.py"], users
+    for name, allowed in NOT_OUTLOOK.items():
+        source = (package / name).read_text(encoding="utf-8")
+        # Only the shell's parts, and only a shell link made: nothing that could open Outlook.
+        assert set(re.findall(r"\bwin32com\.\w+", source)) <= allowed, name
+        assert set(re.findall(r"CoCreateInstance\(\s*([\w.]+)", source)) <= {"shell.CLSID_ShellLink"}, name
+        assert not re.search(r"Dispatch|GetActiveObject|GetObject|Outlook|win32com\.client", source), name
 
 
 # OutlookSession's own handles on Outlook's objects: reached from another file, a write there

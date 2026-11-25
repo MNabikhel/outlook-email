@@ -285,7 +285,17 @@ a.rail-chip:hover { background: var(--surface-3); text-decoration: none; }
 .rail-chip.close b { font-size: 15px; color: var(--gold); font-variant-numeric: tabular-nums; min-width: 18px; text-align: center; }
 .rail-classic { font-size: 12.5px; }
 .rail-version { padding: 2px 10px 0; font-size: 11px; color: var(--faint); white-space: nowrap; }
-.top-update { font-size: 12.5px; color: var(--accent); white-space: nowrap; padding: 0 4px; }
+/* Beside the top bar's buttons, not among them. Where they would be pushed past its edge (a narrow window, the chat open
+   beside it), the top bar's parts give way in turn (main.js fitTop): the search box first, to its icon alone; then the
+   date's second half and the sample chip; then "Update ready", to "Update…" (a whole word); and last the date and
+   that, cut short. */
+.top-update { font-size: 12.5px; color: var(--accent); white-space: nowrap; padding: 0 4px; margin-right: -6px; min-width: 0; overflow: hidden; text-overflow: ellipsis; flex: none; }
+.top[data-tight] .palette-btn { min-width: 0; width: 32px; padding: 0; justify-content: center; flex: none; }
+.top[data-tight] :is(.palette-text, .palette-kbd) { display: none; }
+.top[data-tight-date] .top-date :is(.muted, .sample) { display: none; }
+.top[data-tight-update] .top-update-more { display: none; }
+.top[data-tight-update] .top-update::after { content: "…"; }
+.top[data-tight-cut] :is(.top-update, .top-date) { flex: 0 1 auto; }
 .set-update { display: flex; flex-direction: column; gap: 8px; }
 :root[data-rail="collapsed"] .rail-label,
 :root[data-rail="collapsed"] .brand-name,
@@ -1406,6 +1416,12 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
   .top-date .muted { display: none; }
 }
 
+/* A phone's width: the search button is its icon alone, so that the top bar's other buttons (and "Update ready")
+   stay on screen. */
+@media (max-width: 640px) {
+  .palette-btn { min-width: 0; width: 32px; padding: 0; justify-content: center; flex: none; }
+}
+
 @media (max-width: 1180px) {
   :root[data-chat="open"] .ws { grid-template-columns: var(--rail-w) var(--list-w) minmax(0, 1fr) 0; }
   .chat { position: fixed; top: 0; right: 0; bottom: 0; z-index: 40; width: min(420px, 100vw); box-shadow: var(--shadow-2); }
@@ -1538,14 +1554,28 @@ a.kpi:hover { border-color: var(--border-strong); text-decoration: none; }
 .set-more { margin-top: 12px; }
 .set-more > summary { cursor: pointer; color: var(--text-2); font-size: 13px; padding: 4px 0; }
 .set-more[open] > summary { margin-bottom: 8px; }
-dialog.consent { max-width: min(480px, calc(100vw - 32px)); padding: 20px 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: 0 18px 50px rgba(0, 0, 0, 0.25); }
-dialog.consent::backdrop { background: rgba(15, 20, 28, 0.45); }
-dialog.consent h2 { margin: 0 0 8px; font-size: 18px; }
-dialog.consent p { margin: 0 0 10px; line-height: 1.5; }
+/* CloseDesk is updating: what can't be used until it is back is dimmed (and inert). */
+.ws[data-updating] > :is(.rail, .list-pane, .top, .chat) { opacity: 0.55; }
+dialog.consent, dialog.update-ask { max-width: min(480px, calc(100vw - 32px)); padding: 20px 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--text); box-shadow: 0 18px 50px rgba(0, 0, 0, 0.25); }
+dialog.consent::backdrop, dialog.update-ask::backdrop { background: rgba(15, 20, 28, 0.45); }
+dialog.consent h2, dialog.update-ask h2 { margin: 0 0 8px; font-size: 18px; }
+dialog.consent p, dialog.update-ask p { margin: 0 0 10px; line-height: 1.5; }
 .consent-list { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 6px; font-size: 13.5px; }
 .consent-list li { display: flex; gap: 8px; align-items: flex-start; }
 .consent-list svg { flex: none; margin-top: 3px; }
 .consent-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+/* The update question as CloseDesk opens (update_ask.js). */
+.update-ask-help { color: var(--muted); font-size: 13px; }
+.update-ask-failed { padding: 8px 10px; border: 1px solid var(--warn-line); border-radius: var(--radius-sm); background: var(--warn-soft); color: var(--text); }
+dialog.update-ask .update-ask-status { font-size: 13px; }
+.update-ask-status:empty { display: none; }
+.update-ask-status.error { color: var(--danger); }
+.update-ask-status.wait { color: var(--warn); }
+.update-ask-status.ok { color: var(--ok); }
+.update-ask-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.update-ask-bar { display: block; height: 4px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+.update-ask-bar span { display: block; width: 30%; height: 100%; border-radius: 2px; background: var(--accent); animation: slide 1.2s ease-in-out infinite; }
+dialog.update-ask progress { width: 100%; }
 
 /* The calendar (/app/calendar): day, week and month, and a meeting beside it. */
 .cal { display: flex; flex-direction: column; min-height: 100%; }

@@ -30,7 +30,7 @@ from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
     agent, appearance, calendar_events, cost_codes, documents, fixes, fraud, link_judge, links, local_llm, model_choice, model_fit, model_roles, ocr, outlook_desktop, outlook_sync, page_details, page_view,
-    semantic, services, table_lookup, updates, version, vision,
+    semantic, services, shortcut, table_lookup, updates, version, vision,
 )
 from controller_inbox.extract import extraction_failed
 from controller_inbox.local_llm import check_model
@@ -300,6 +300,9 @@ def register_workspace(
             "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
             # This copy's version, and whether a newer one is ready (the top bar's "Update ready").
             "closedesk": {key: update[key] for key in ("label", "newer", "message")},
+            # Whose CloseDesk this is (/health's fingerprints): a tab left open finds another one answering in its place
+            # (this one closed, and another folder's or person's opened at the address).
+            "whose": version.whose(),
             "last_run": format_when(last_run, settings.tz) if last_run else "",
             "tz": settings.tz.key,
             "drop_folder": str(settings.inbox_incoming),
@@ -1178,8 +1181,13 @@ def register_workspace(
                 "can_load": not (counts["emails"] and store.real_mail_count()),
             },
             "job": {**snapshot, "stage_label": STAGES.get(snapshot["stage"], snapshot["stage"])},
-            "about": {"version": version.label(), "python": platform.python_version(), "folder": str(version.ROOT)},
-            "update": updates.status(store, settings),
+            "about": {
+                "version": version.label(), "python": platform.python_version(), "folder": str(version.ROOT),
+                # "Add the CloseDesk shortcut again" (Windows and macOS).
+                "shortcut": shortcut.offer(),
+            },
+            # "waits": Update now waits for the mail being processed (not for what CloseDesk reads by itself).
+            "update": {**updates.status(store, settings), "waits": updates.state_for_update(snapshot) == "running"},
         }
 
     def saved(notice: str, **extra) -> dict[str, Any]:
@@ -1193,13 +1201,45 @@ def register_workspace(
         return settings_state(recheck=bool(recheck))
 
     @api.post("/update")
-    def update_now():
-        """Settings' Update button: CloseDesk stops once this is answered, and its launcher fetches the newest version
-        and starts it again. The page then waits for /health to answer with the new version."""
-        why = updates.stop_to_update(app.state, job.snapshot()["state"])
+    async def update_now(request: Request):
+        """Settings' Update button (or the question's Update now): CloseDesk stops once this is answered, and its
+        launcher fetches the newest version and starts it again. The page then waits for /health to answer from
+        another start (``run``) of this CloseDesk (``whose``: never another person's that opened on the port
+        meanwhile). ``commit`` (optional): the version the page showed; refused once CloseDesk was updated since (a
+        second tab, say)."""
+        data = await json_body(request)
+        shown = str(data.get("commit") or "")
+        why = await run_in_threadpool(updates.stop_to_update, app.state, updates.state_for_update(job.snapshot()), shown=shown)
         if why:
             raise HTTPException(status_code=409, detail=why)
-        return {"ok": True, "message": updates.UPDATING, "commit": version.installed()[0]}
+        return {
+            "ok": True, "message": updates.updating_message(app.state), "commit": version.running()[0],
+            "run": app.state.run, "whose": version.whose(), "other": updates.OTHER_HERE,
+        }
+
+    @api.get("/update/question")
+    def update_question():
+        """The question the first page shown asks each time CloseDesk opens (updates.Question): whether a newer
+        version is out and can be updated to now, and while GitHub is still being asked, to ask again shortly."""
+        return app.state.update_question.view(store, settings, updates.state_for_update(job.snapshot()))
+
+    @api.post("/update/question")
+    async def update_question_answer(request: Request):
+        """Not now: not asked again until CloseDesk opens again. (Update now is POST /api/update.)"""
+        data = await json_body(request)
+        if data.get("answer") != "not-now":
+            raise HTTPException(status_code=400, detail="Answer not-now, or update with /api/update.")
+        app.state.update_question.answer()
+        return {"ok": True}
+
+    @api.post("/settings/shortcut")
+    def settings_shortcut():
+        """Settings' "Add the CloseDesk shortcut again": made again, opening this folder's CloseDesk (shortcut.py),
+        whether it was deleted, moved or never made."""
+        said = shortcut.make()
+        if not said.ok:
+            raise HTTPException(status_code=409, detail=said.message)
+        return {"ok": True, "message": said.message}
 
     @api.get("/settings/check")
     def settings_check():

@@ -342,6 +342,149 @@ def test_a_free_port_is_used_as_it_is():
     assert cli._port_to_use("127.0.0.1", port) == (port, False)
 
 
+@pytest.fixture
+def computers_proxy(monkeypatch):
+    """A proxy set for the whole computer, as many company PCs have in Windows' Internet Options: Python reads it from
+    the registry without the list of addresses to go to directly (no NO_PROXY). It answers every request with 502, as
+    a company proxy asked for 127.0.0.1 does, and keeps what it was asked."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    asked: list[str] = []
+
+    class Proxy(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 (http.server's name)
+            asked.append(self.path)
+            self.send_response(502)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    for name in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    for name in ("HTTP_PROXY", "http_proxy"):
+        monkeypatch.setenv(name, f"http://127.0.0.1:{proxy.server_port}")
+    try:
+        yield asked
+    finally:
+        proxy.shutdown()
+        proxy.server_close()
+
+
+def test_a_closedesk_already_open_is_found_on_a_computer_set_to_use_a_proxy(settings, store, computers_proxy, capsys):
+    # The proxy answered for 127.0.0.1 instead of CloseDesk: the shortcut started a second CloseDesk on the next port.
+    with serving(web.create_app(settings, store)) as base:
+        port = int(base.rsplit(":", 1)[1])
+        assert cli._port_to_use("127.0.0.1", port) == (port, True)
+    assert computers_proxy == [], "127.0.0.1 is asked directly, never through the proxy"
+    assert "Another program" not in capsys.readouterr().out
+
+
+class _Health:
+    """A CloseDesk-like /health on a port of its own, saying whose it is (``body``)."""
+
+    def __init__(self, body: dict) -> None:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+
+        said = json.dumps(body).encode()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(200 if self.path == "/health" else 404)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(said)))
+                self.end_headers()
+                self.wfile.write(said)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self.server.server_port
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def test_health_says_whose_closedesk_answers_without_saying_who_or_where(settings, store):
+    from fastapi.testclient import TestClient
+
+    body = TestClient(web.create_app(settings, store)).get("/health").json()
+    assert body["folder"] == version.whose()["folder"] and body["user"] == version.whose()["user"]
+    assert str(version.ROOT) not in json.dumps(body) and len(body["folder"]) == len(body["user"]) == 16
+
+
+@pytest.mark.parametrize("who", ["folder", "user"])
+def test_another_folders_or_another_persons_closedesk_on_the_port_isnt_shown_this_one_opens_on_the_next(who, capsys):
+    # A shared Windows computer (Remote Desktop, Citrix, fast user switching) shares 127.0.0.1: the shortcut showed
+    # another person's CloseDesk, their mail and all. Or, on one computer, the shortcut for one CloseDesk folder showed
+    # another folder's.
+    theirs = {**version.whose(), who: "0" * 16}
+    other = _Health({"ok": True, "app": "closedesk", "emails": 3, "graph": False, **theirs})
+    try:
+        assert doctor.is_closedesk("127.0.0.1", other.port) is False
+        port, running = cli._port_to_use("127.0.0.1", other.port)
+    finally:
+        other.close()
+    assert running is False and port > other.port
+    assert "Another CloseDesk" in capsys.readouterr().out
+
+
+def test_this_closedesk_found_on_the_port_it_moved_to_is_shown_not_started_again(settings, store):
+    # Another program had the port, so CloseDesk opened on the next one: started again, it found the port taken and
+    # moved on past its own, opening a second CloseDesk.
+    with socket.socket() as other:
+        other.bind(("127.0.0.1", 0))
+        other.listen(8)
+        taken = other.getsockname()[1]
+        sock = socket.socket()
+        try:
+            sock.bind(("127.0.0.1", taken + 1))
+        except OSError:
+            pytest.skip("the port after the one taken is in use here")
+        import threading
+
+        import uvicorn
+
+        server = uvicorn.Server(uvicorn.Config(web.create_app(settings, store), log_level="warning", lifespan="off"))
+        thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 20
+            while not server.started:
+                assert time.monotonic() < deadline
+                time.sleep(0.02)
+            assert cli._port_to_use("127.0.0.1", taken) == (taken + 1, True)
+        finally:
+            server.should_exit = True
+            thread.join(10)
+            sock.close()
+
+
+def test_the_check_says_when_another_closedesk_has_the_port(monkeypatch):
+    theirs = _Health({"ok": True, "app": "closedesk", "emails": 3, "graph": False, **version.whose(), "user": "0" * 16})
+    try:
+        check = doctor._port(type("S", (), {"host": "127.0.0.1", "port": theirs.port})())
+    finally:
+        theirs.close()
+    assert check.state == doctor.NOTE and "another CloseDesk" in check.text and "already running" not in check.text
+
+
+def test_an_older_closedesk_that_doesnt_say_whose_it_is_is_still_shown():
+    older = _Health({"ok": True, "app": "closedesk", "emails": 3, "graph": False})
+    try:
+        assert cli._port_to_use("127.0.0.1", older.port) == (older.port, True)
+    finally:
+        older.close()
+
+
 def test_the_setup_state_is_kept_as_json(launch):
     launch.ensure_packages()
     state = json.loads(launch.STATE.read_text(encoding="utf-8"))
@@ -465,3 +608,28 @@ def test_a_start_up_reading_that_fails_says_so_in_the_window(capsys):
     with pytest.raises(OSError):
         cli._read_behind(broken, lambda *_a: None, lambda *_a: None)
     assert "Reading the new mail stopped: the inbox folder can't be read" in capsys.readouterr().out
+
+
+def test_the_check_says_the_store_python_keeps_what_it_writes_to_itself(monkeypatch):
+    # Typing python in a Command Prompt offers the Microsoft Store's: CloseDesk works with it, but its Start menu
+    # shortcut and its log go where only that Python sees them. The check says so, and what to install instead.
+    from controller_inbox import app_log
+
+    monkeypatch.setattr(app_log, "store_python", lambda sys_module=None: True)
+    check = doctor._python()
+    assert check.state == doctor.NOTE and "Microsoft Store" in check.text
+    assert "python.org" in check.todo and "Start menu" in check.todo and ".venv" in check.todo
+    monkeypatch.setattr(app_log, "store_python", lambda sys_module=None: False)
+    assert "Microsoft Store" not in doctor._python().text
+
+
+def test_closedesk_bat_gives_back_the_update_s_exit_code():
+    """CloseDesk.bat --update gives back what launch.py --update ended with (77: another update runs). A bare
+    ``exit /b`` at the end of its block gave ``cmd /c`` the last command's own code, 0, so a second update at the same
+    time looked as if it had worked (CI's Windows launcher check)."""
+    text = (ROOT / "CloseDesk.bat").read_text(encoding="utf-8")
+    blocks = [part.split("\n)", 1)[0] for part in text.split('"--update" (')[1:]]
+    assert len(blocks) == 2, "the start and the start after --get-python"
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip() and not line.strip().startswith("rem")]
+        assert lines[-2:] == ["setlocal EnableDelayedExpansion", "exit /b !CODE!"], lines

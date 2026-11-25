@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -35,7 +36,8 @@ from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
 
 from controller_inbox import (
-    agent, appearance, chats, cost_codes, documents, fraud, local_llm, model_choice, model_fit, model_roles, ocr, semantic, services, updates, version, vision,
+    agent, appearance, chats, cost_codes, documents, fraud, local_llm, model_choice, model_fit, model_roles, ocr, semantic, services,
+    shortcut, updates, version, vision,
 )
 from controller_inbox.actions import local_today
 from controller_inbox.assistant import answer_stream, draft_reply
@@ -331,13 +333,18 @@ class ProcessJob:
                 "can_stop": running and handle is not None and not handle.done,
             }
 
-    def close(self) -> bool:
-        """No job starts after this (CloseDesk stops to update). False, and nothing closed, while one is running."""
+    def close(self, *, stopping_automatic: bool = False) -> bool:
+        """No job starts after this (CloseDesk stops to update). False, and nothing closed, while one is running;
+        ``stopping_automatic``: one CloseDesk started by itself (its reading as it opens, the automatic Outlook sync) is
+        asked to stop instead (``request_stop``), and what it hasn't finished is picked up when CloseDesk opens again."""
         with self._lock:
-            if self.state == "running":
+            running = self.state == "running"
+            if running and not (stopping_automatic and (self.about or {}).get("auto")):
                 return False
             self._closed = True
-            return True
+        if running:
+            self.request_stop()
+        return True
 
     def start(self, target, *, about: dict | None = None) -> bool:
         with self._lock:
@@ -388,6 +395,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     job = ProcessJob()
     app.state.job = job
+    # This start of CloseDesk (/health says it): a page waiting for CloseDesk to start again after Update now knows a
+    # start that came back as the same version (the update didn't finish) from this one, however quick it was.
+    app.state.run = secrets.token_hex(8)
+    # The version this CloseDesk starts as, which it is until it is closed, whatever CloseDesk-Update puts in its
+    # folder meanwhile: what its pages, /health and Update now say and compare (version.running).
+    version.remember_running()
+    # Whether to update, asked on the first page shown each time CloseDesk opens (begun by cli._serve).
+    app.state.update_question = updates.Question()
 
     def board_date(sample: bool | None = None):
         """Today, or the sample's date when only the sample mailbox is loaded (``sample``: whether it is, when
@@ -405,6 +420,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         sample = store.only_sample()
         counts = store.counts()
         profile = active_profile(settings, store)
+        base_job = job.snapshot()
         base = {
             "request": request,
             "settings": settings,
@@ -413,7 +429,7 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             **services.today_fields(board_date(sample), sample=sample),
             "graph_configured": settings.graph_configured,
             "model": check_model(settings),
-            "job": job.snapshot(),
+            "job": base_job,
             "inbox_incoming": str(settings.inbox_incoming),
             "inbox_attachments": str(settings.inbox_attachments),
             "inbox_failed": str(settings.inbox_failed),
@@ -434,6 +450,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "coding_counts": store.coding_counts(),
             "closedesk": updates.status(store, settings),
             "appearance": appearance.current(store),
+            # Update waits for mail the person asked to be processed, not for what CloseDesk reads by itself.
+            "update_waits": updates.state_for_update(base_job) == "running",
         }
         base["llm_enabled"] = base["model"].active
         base.update(extra)
@@ -1165,6 +1183,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
     wait_problem = {"said": ""}
     # What Setup's "Reload with ..." did, or why it didn't, for the page it goes back to.
     step_back_said = {"said": ""}
+    # What "Add the CloseDesk shortcut again" did, or why it couldn't, shown beside it.
+    shortcut_said = {"said": "", "ok": True}
 
     @app.get("/settings", response_class=HTMLResponse)
     def settings_page(request: Request, recheck: int = 0):
@@ -1188,6 +1208,8 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             model_fit=model_fit.describe(store, settings, model),
             wait_problem=wait_problem["said"] if request.query_params.get("notice") == "model-wait-refused" else "",
             step_back_said=step_back_said["said"] if request.query_params.get("notice") in ("step-back", "step-back-refused") else "",
+            shortcut=shortcut.offer(),
+            shortcut_said=shortcut_said if request.query_params.get("notice") == "shortcut" else None,
             vision_setup=vision_setup(model),
             search=semantic.coverage(store, settings),
             timezone_choice=settings.timezone,
@@ -1351,13 +1373,25 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
         return RedirectResponse("/settings?notice=step-back#context-line", status_code=303)
 
     @app.post("/settings/update")
-    def update_now(request: Request):
+    def update_now(request: Request, commit: str = Form("")):
         """Setup's Update button: CloseDesk stops once this page is sent, its launcher fetches the newest version and
-        starts it again, and the page waits for that, then goes back to Setup."""
-        why = updates.stop_to_update(app.state, job.snapshot()["state"])
+        starts it again, and the page waits for that, then goes back to Setup. ``commit``: the version the page showed
+        (refused once CloseDesk was updated since, in another tab)."""
+        why = updates.stop_to_update(app.state, updates.state_for_update(job.snapshot()), shown=commit)
         if why:
             return render(request, "settings_update.html", page="settings", refused=why, status_code=409)
-        return render(request, "settings_update.html", page="settings", refused="", commit=version.installed()[0], message=updates.UPDATING)
+        return render(
+            request, "settings_update.html", page="settings", refused="", commit=version.running()[0], run=app.state.run,
+            whose=version.whose(), updating=True, other=updates.OTHER_HERE,
+            message=updates.updating_message(app.state),
+        )
+
+    @app.post("/settings/shortcut")
+    def make_shortcut():
+        """Setup's "Add the CloseDesk shortcut again" (shortcut.py): what it did is said beside the button."""
+        said = shortcut.make()
+        shortcut_said.update(said=said.message, ok=said.ok)
+        return RedirectResponse("/settings?notice=shortcut#update", status_code=303)
 
     @app.post("/settings/colors")
     def save_colors(colors: str = Form(""), importance_words: str = Form(""), colors_was: str = Form(""), importance_words_was: str = Form("")):
@@ -1408,9 +1442,14 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
             "emails": store.counts()["emails"],
             "graph": settings.graph_configured,
             "model": model.model if model.active else "",
-            # Which version answers: the page that asked for an update reloads when the new one does.
+            # Which version answers, and which start of it: the page that asked for an update reloads when another
+            # start answers (the new version, or the same one when the update didn't finish).
             "version": version.label(),
-            "commit": version.installed()[0],
+            "commit": version.running()[0],
+            "run": app.state.run,
+            # Whose CloseDesk this is (fingerprints of its folder and of the person running it): only this folder's,
+            # run by the same person, is shown instead of a second being started.
+            **version.whose(),
         }
 
     register_workspace(

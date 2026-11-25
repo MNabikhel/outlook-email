@@ -2,7 +2,7 @@
 
 Your Outlook inbox, sorted into one short page every morning, on your own laptop.
 
-Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get a ranked list of what needs you, a one-line summary of everything else, and a chat box for questions about your mail. It works for any inbox; the finance profile adds month-end and close tracking. A local AI model is optional. Without one, everything still works.
+Drag emails out of Outlook into a folder and open **CloseDesk**. You get a ranked list of what needs you, a one-line summary of everything else, and a chat box for questions about your mail. It works for any inbox; the finance profile adds month-end and close tracking. A local AI model is optional. Without one, everything still works.
 
 ## Quick start
 
@@ -16,7 +16,7 @@ Drag emails out of Outlook into a folder and double-click **CloseDesk**. You get
 
      It puts CloseDesk in a `CloseDesk` folder in your home folder and starts it. Downloaded this way, macOS doesn't ask an administrator to approve it.
    - **Windows:** green **Code** button → **Download ZIP**, unzip it somewhere permanent (for example `Documents`), and double-click **`CloseDesk.bat`**. If Windows shows "Windows protected your PC", click **More info → Run anyway**.
-3. **The first start sets itself up** in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around. From then on, double-click `CloseDesk.command` (Mac) or `CloseDesk.bat` (Windows): every start checks the set-up and puts right what isn't, so after an update, or after moving the folder, you just open it. When a newer version is out, Settings says so and its **Update** button fetches it and opens CloseDesk again; **`CloseDesk-Update`** does the same from the folder. Both keep your mail and settings.
+3. **The first start sets itself up** in a minute or two and opens the dashboard. Click **Load sample mailbox** to look around. It also adds a **CloseDesk** shortcut, with CloseDesk's icon, that opens CloseDesk in a window of its own: on your Desktop and in the Start menu (Windows), in Applications (Mac: Spotlight finds it, and it can be kept in the Dock). Closing that window closes CloseDesk. `CloseDesk.command` (Mac) and `CloseDesk.bat` (Windows) still work as before, in your browser. Every start checks the set-up and puts right what isn't, so after an update you just open it. After moving the folder, double-click `CloseDesk.bat` / `CloseDesk.command` once in its new place: that start points the shortcut there, and puts it back if Windows deleted it ([the shortcut and window](docs/SETUP.md#the-closedesk-shortcut-and-window)). When a newer version is out, CloseDesk asks as it opens (**Update now** or **Not now**), Settings says so too, and either Update fetches it and opens CloseDesk again; **`CloseDesk-Update`** does the same from the folder. Both keep your mail and settings.
 4. **Add your mail:** on Windows with classic Outlook, open **Settings → Sync inbox** and click **Connect to Outlook**. After you agree, it copies your mail and attachments (and your calendar, if you like) and keeps them up to date, and never changes anything in Outlook. Otherwise drag emails from Outlook into the `inbox/incoming` folder and click **Process new mail**. ([New Outlook, web, and Mac](docs/SETUP.md#every-morning))
 5. **Optional local AI:** in [LM Studio](https://lmstudio.ai/), download a chat model (a 3B–8B instruct model is plenty; a bigger one works if the computer has the memory) and start the server (Developer tab → **Start server**). CloseDesk finds it on its own, and loads a model itself when none is loaded.
 
@@ -49,7 +49,7 @@ More detail: [how it works, in slides](docs/CloseDesk-how-it-works.pptx) and the
 ## The everyday loop
 
 1. Drag yesterday's mail from Outlook into `inbox/incoming/` (`.msg` from classic Outlook, `.eml` from new Outlook, the web, or Mac).
-2. Double-click `CloseDesk.bat` (Windows) or `CloseDesk.command` (Mac/Linux). The first run creates `.venv` and installs everything; later runs check it and install whatever an update added.
+2. Open CloseDesk with its shortcut (the window), or double-click `CloseDesk.bat` (Windows) or `CloseDesk.command` (Mac/Linux) for the browser. The first run creates `.venv` and installs everything; later runs check it and install whatever an update added.
 3. The dashboard opens on **Today**:
    - **Do not process — verify by phone** when someone asks to change payment details;
    - **Your focus today** — a ranked list (fraud, overdue, due today, due soon, new decisions), one row per email, with **Done** buttons;
@@ -478,18 +478,41 @@ src/controller_inbox/
   appearance.py     How the pages look: the colors for color blindness and the importance on each email, Settings → Appearance
   services.py       What a button does, the same from the classic pages and the workspace
   doctor.py         The self-check: `controller_inbox doctor`, or `CloseDesk --check`
-  version.py        Which version this copy is: its date-based number (2026.11.16) and commit
-  updates.py        Whether a newer CloseDesk is out (asked of GitHub once a day), and Settings' Update button
+  version.py        Which version this copy is: its date-based number (2026.11.16) and commit, and the one an open
+                    CloseDesk started as (what it says and compares, whatever CloseDesk-Update puts in its folder); and
+                    whose it is (its folder's and user's fingerprints, in /health): only your own is shown instead of a
+                    second started
+  updates.py        Whether a newer CloseDesk is out (asked of GitHub as it opens and once a day), the question the
+                    first page asks about it, and Settings' Update button
+  app_window.py     The CloseDesk window (`launch.py --app`, pywebview): starts CloseDesk and shows it, stops it when
+                    closed, stays up through an update, and opens the browser instead where it can't open
+  mac_window.py     The window on a Mac: what pywebview's Cocoa window takes from WebKit, put back (its right-click
+                    menu; the menu bar's Undo, Find, Print, zoom and Back with their keys; a find bar; a download saved
+                    over a file)
+  app_log.py        The app's log, which each of its programs adds to at its end, and the message box when the
+                    window can't even start (standard library only, so it works when a part CloseDesk needs won't load);
+                    the Microsoft Store's Python told apart, whose files in AppData are kept in its own folder
+  shortcut.py       The CloseDesk shortcut that opens the window: CloseDesk.lnk on the Desktop and in the Start menu
+                    (Windows), CloseDesk.app in Applications (macOS); made the first time a launcher starts CloseDesk,
+                    kept pointing at the folder when it moves (the taskbar's pinned copy too, and a CloseDesk.app moved
+                    elsewhere), and made again from Settings
   templates/        The classic pages
   static/app.js     Open-in-place preview, chat box, search shortcut (answers formatted by static/ui/format.js)
-  static/ui/        The workspace's scripts and styles (no build step, no CDN)
+  static/ui/        The workspace's scripts and styles (no build step, no CDN); update_ask.js, the update question
+                    as CloseDesk opens, and in_window.js, what leaves CloseDesk from its window, are the classic pages' too
+  static/closedesk.* CloseDesk's icon: .ico (Windows), .icns (macOS; -full for macOS 26), .png; and static/icon.svg
 CloseDesk.bat / CloseDesk.command   Double-click launchers: find the computer's Python, then run launch.py (--get-python downloads one, only when asked); after Settings' Update button, update and start again
 CloseDesk-Update.bat / .command     Double-click to fetch the newest version (mail and settings are kept)
-scripts/launch.py                   Every start: check the set-up, install what is missing, start; also --check and --update
+scripts/launch.py                   Every start: check the set-up, install what is missing, start; also --check, --update,
+                                    --app (the same set-up with no console, then the CloseDesk window) and --shortcut
+                                    (the CloseDesk shortcut made again)
+scripts/build_icon.py               Draws CloseDesk's icon and writes the files made from it (static/closedesk.*, icon.svg)
 scripts/check_deps.py               The package checks launch.py uses
 scripts/install.sh                  The one-line install for a Mac's Terminal
 scripts/overnight.bat / .sh         For Task Scheduler / cron
 tests/                              pytest suite (conftest.py holds the shared fixtures, helpers.py the helpers)
+tests/launcher_smoke.py             The launchers run as a person runs them (CI); --window opens the real CloseDesk window
+tests/stand_in_window/              A stand-in for pywebview, for the window's check on Linux, where no window opens
 ```
 
 Data lives in `data/closedesk.db` (gitignored). Tokens live in `data/msal_token_cache.bin`.
@@ -504,11 +527,24 @@ ruff check src tests scripts          # lint (pyflakes and syntax errors), as CI
 ```
 
 The launchers are tested as a person runs them, by `python tests/launcher_smoke.py`: it unpacks a copy of the
-checkout, sets it up from nothing, starts it twice, renames the folder, checks the dashboard answers, and runs an
-update. CI runs it on macOS, Windows and Linux, with the machine's Python and with `--get-python`
-(`CLOSEDESK_OWN_PYTHON=1`). The unit tests of the same code are in `tests/test_launch.py`.
+checkout, sets it up from nothing, starts it twice, renames the folder, checks the dashboard answers, makes the
+CloseDesk shortcut and reads it back, and runs an update. CI runs it on macOS, Windows and Linux, with the machine's
+Python and with `--get-python` (`CLOSEDESK_OWN_PYTHON=1`). The unit tests of the same code are in `tests/test_launch.py`,
+`tests/test_launch_app.py`, `tests/test_app_window.py`, `tests/test_mac_window.py` and `tests/test_shortcut.py`
+(pywebview, Windows' shell and the Mac's parts are fakes there).
 
-Some 47 tests drive the pages in a real Chromium through Playwright. They are marked `browser`, and need the
+`python tests/launcher_smoke.py --window` opens the real CloseDesk window (CI's window job, on Windows, after installing
+Microsoft Edge WebView2 Runtime, and on macOS, with Python 3.11, 3.12 and 3.14): as the shortcut starts it, onto a
+CloseDesk already open, through the shortcut itself as a double-click opens it, and with Update now pressed in it. Each
+time CloseDesk's first page and the workspace have to load in the window, the window closes itself
+(`CLOSEDESK_APP_SMOKE`), and CloseDesk stops with it. On Windows the window has to say its right-click menu and the
+browser's keys are on (read back from WebView2); on a Mac the Dock has to call it CloseDesk (`lsappinfo`), and its
+right-click menu, the menu bar's keys (each answered), the find bar Find shows and zooming have to be on (read back
+from the window). On Linux
+it checks the same with a stand-in for the window (`tests/stand_in_window`). Screenshots and the app's log are kept with
+CI's run. It closes only what it opened, and on a Mac it won't run while a CloseDesk is open.
+
+Some 180 tests drive the pages in a real Chromium through Playwright. They are marked `browser`, and need the
 `browser` extra and Playwright's Chromium:
 
 ```bash
@@ -527,6 +563,6 @@ The suite classifies the demo mailbox end-to-end (including the fraud wire and d
 - Mail is processed on the machine that runs CloseDesk and stored in local SQLite.
 - Routing / account / IBAN values are redacted in stored bodies; only last-4 is kept for matching.
 - Outlook and Microsoft 365 are only read: CloseDesk asks Microsoft only to sign in and read mail, and never changes, files, flags or sends anything in the mailbox.
-- Once a day, while CloseDesk is open, a downloaded copy asks `api.github.com` for the newest version's number (one request; nothing about your mail is in it), so Settings can say when an update is out. `CONTROLLER_INBOX_UPDATE_CHECK=false` in `.env` turns it off.
+- When CloseDesk opens, and once a day while it is open, a downloaded copy asks `api.github.com` for the newest version's number (one request; nothing about your mail is in it), so its first page can ask whether to update and Settings can say when an update is out. `CONTROLLER_INBOX_UPDATE_CHECK=false` in `.env` turns it off.
 - There is no cloud AI in the default path. The model, when used, runs on the laptop, and so do the chat box and reply drafts. Ask CloseDesk conversations, and the files you add to them, are saved in the same local SQLite database and listed under **Past conversations** (the clock button in the chat box); delete one there (trash icon) to remove it and its files. The fraud rules are deterministic so a $48,500 “new account” email cannot be quietly labeled “FYI”, whatever the model says. The chat's tools only read; attachment text is given to the model as data, never as instructions, and files from fraud-flagged mail are never given to it. Dashboard forms refuse posts from other websites.
 - The dashboard has no login. It listens on `127.0.0.1` (this computer only) unless you set `CONTROLLER_INBOX_HOST`; on any other address it prints a warning, answers only to this computer's own names and addresses plus any listed in `CONTROLLER_INBOX_ALLOWED_HOSTS` (comma-separated), and anyone who can reach it can read your mail.

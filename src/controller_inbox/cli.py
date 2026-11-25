@@ -84,6 +84,11 @@ def main(argv: list[str] | None = None) -> int:
     digest.add_argument("--history", action="store_true", help="List saved digests instead of building one.")
     digest.add_argument("--json", action="store_true", help="Print JSON instead of markdown.")
 
+    window = sub.add_parser("app", help="Open CloseDesk in a window of its own (what the CloseDesk shortcut runs).")
+    window.add_argument("--host", default=None)
+    window.add_argument("--port", type=int, default=None)
+    window.add_argument("--no-browser", action="store_true", help="No window and no browser: only serve (for checks).")
+
     serve = sub.add_parser("serve", help="Open the local CloseDesk dashboard.")
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
@@ -123,6 +128,9 @@ def main(argv: list[str] | None = None) -> int:
     trust.add_argument("--note", default="")
 
     sub.add_parser("doctor", help="Say what is and isn't in order on this computer, and what to do about it.")
+    sub.add_parser(
+        "shortcut", help="Add the CloseDesk shortcut again (Windows: Desktop and Start menu; macOS: Applications)."
+    )
 
     from controller_inbox.tools import TOOL_NAMES
 
@@ -138,6 +146,17 @@ def main(argv: list[str] | None = None) -> int:
         from controller_inbox import doctor
 
         return doctor.main()
+    if args.cmd == "shortcut":
+        from controller_inbox import shortcut
+
+        said = shortcut.make()
+        print(said.message)
+        return 0 if said.ok else 1
+    if args.cmd == "app":
+        # Before the settings are read: the window has no console, so it says itself when they stop CloseDesk.
+        from controller_inbox import app_window
+
+        return app_window.main(args)
     try:
         settings = load_settings()
         store = Store(settings.db_path)
@@ -409,6 +428,14 @@ def load_sample(store: Store, settings: Settings):
 def _run(settings: Settings, store: Store, args) -> int:
     from controller_inbox.overnight import RunBusy, run_overnight
 
+    from controller_inbox.app_window import EXACT_PORT, PORT_TAKEN, WHY_ENV
+
+    # Started by the CloseDesk window, on the port it chose and looks at: there, or not at all.
+    exact = os.environ.pop(EXACT_PORT, "") == "1"
+    # Opened from the CloseDesk shortcut when its window couldn't open here: why, in this window too.
+    why = os.environ.pop(WHY_ENV, "")
+    if why:
+        print(why + "\n")
     print(f"CloseDesk — reading {settings.inbox_incoming}")
 
     def progress(stage: str, done: int, total: int, note: str) -> None:
@@ -448,10 +475,14 @@ def _run(settings: Settings, store: Store, args) -> int:
     reopened = _reopened_port(store) if os.environ.get("CLOSEDESK_REOPEN") else 0
     from controller_inbox import doctor
 
+    wanted = args.port or settings.port
     if reopened and not doctor.listening(host, reopened):
         port, running = reopened, False
     else:
-        port, running = _port_to_use(host, args.port or settings.port)
+        port, running = _port_to_use(host, wanted)
+    if exact and port != wanted:
+        print(f"Port {wanted}, which the CloseDesk window chose, is another program's now: it chooses again.", flush=True)
+        return PORT_TAKEN
     if not port:
         return 1
     url = f"http://{host}:{port}/"
@@ -516,13 +547,18 @@ def _port_to_use(host: str, port: int) -> tuple[int, bool]:
 
     if not doctor.listening(host, port):
         return port, False
-    if doctor.is_closedesk(host, port):
+    found = doctor.closedesk_on(host, port)
+    if found == "mine":
         return port, True
-    other = doctor.free_port(host, port + 1)
+    # Only this folder's CloseDesk, run by this person, is shown: another's (another folder's, or another person's on
+    # a shared computer, who has the same 127.0.0.1) is another program here.
+    other, running = doctor.next_port(host, port)
+    if running:
+        return other, True
     if not other:
         print(f"\nPort {port} and the twenty after it are all in use. Set CONTROLLER_INBOX_PORT in .env to a free port.")
         return 0, False
-    print(f"\nAnother program is using port {port}, so CloseDesk uses {other} this time.")
+    print(f"\n{doctor.ANOTHER[found]} is using port {port}, so CloseDesk uses {other} this time.")
     return other, False
 
 
@@ -695,14 +731,26 @@ def _serve(settings: Settings, store: Store, host: str | None, port: int | None,
             "Use CONTROLLER_INBOX_HOST=127.0.0.1 to keep it on this computer only.\n",
             flush=True,
         )
-    # Once a day at most, while it is open: whether a newer CloseDesk is out (updates.py).
+    # As it opens, and once a day at most while it is open: whether a newer CloseDesk is out (updates.py). The answer
+    # as it opens is the question the first page asks, with whether an update asked for before didn't finish.
     from controller_inbox import updates
 
+    after = updates.after_update(store)
+    app.state.update_question.begin(store, settings, failed=after == "failed", newest=after == "newest")
     updates.start_checking(store, settings)
+    from controller_inbox import shortcut
+
+    # Said by launch.py for this start only: what this CloseDesk starts isn't told it again.
+    new_environment = os.environ.pop(shortcut.NEW_ENVIRONMENT_ENV, "") == "1"
+    if updates.launcher_here():
+        # Started by a launcher (or the window): the CloseDesk shortcut is made the first time, and kept right after
+        # that (shortcut.py), beside the start.
+        shortcut.upkeep_soon(new_environment=new_environment)
     _run_server(app, host=host or settings.host, port=port or settings.port)
-    # Settings' Update button stopped it: the launcher updates CloseDesk and starts it again.
+    # Settings' Update button (or the question's) stopped it: the launcher updates CloseDesk and starts it again.
     if getattr(app.state, "update_asked", False):
         _remember_port(store, port or settings.port)
+        updates.remember_update_asked(store)
         print("\nCloseDesk stops now to update, and opens again by itself when the update is done.", flush=True)
         return updates.UPDATE_AND_RESTART
     return 0
@@ -735,10 +783,56 @@ def _run_server(app, *, host: str, port: int) -> None:
         server.should_exit = True
 
     app.state.stop_server = stop
+    from controller_inbox.app_window import STOP_WITH_PARENT
+
+    if os.environ.pop(STOP_WITH_PARENT, "") == "1" and sys.stdin is not None:
+        # Started by the CloseDesk window, which holds this one's input open: once the window's process ends, however
+        # it ends (closed, Cmd+Q, ended in Task Manager), the input ends and CloseDesk stops as Ctrl+C stops it.
+        try:
+            fd = sys.stdin.fileno()
+        except (AttributeError, OSError, ValueError):
+            fd = None
+        if fd is not None:
+            threading.Thread(target=_stop_when_input_ends, args=(fd, stop), name="stop-with-window", daemon=True).start()
     server.run()
     if not server.started and not server.should_exit:
         # The port couldn't be opened (uvicorn has said why): as uvicorn.run does, end with an error.
         raise SystemExit(3)
+
+
+# How long CloseDesk waits, once its command is done, for what still runs beside it before it ends all the same.
+LEAVE_WAIT = 5
+
+
+def leave_within(code, seconds: float = LEAVE_WAIT) -> None:
+    """Once CloseDesk's command is done: end with ``code`` within ``seconds``, whatever still runs beside it. Python
+    otherwise waits for every such thread as it ends: a reply the local model is still writing, for a page that is gone,
+    kept CloseDesk open unseen for a minute or more after its window closed (in a Mac's Dock, where opening CloseDesk
+    then did nothing), and held up the update or the launcher waiting for it to stop."""
+    code = code if isinstance(code, int) else 0 if code is None else 1
+
+    def leave() -> None:
+        time.sleep(seconds)
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except (AttributeError, OSError, ValueError):
+                pass
+        os._exit(code)
+
+    threading.Thread(target=leave, name="leave-within", daemon=True).start()
+
+
+def _stop_when_input_ends(fd: int, stop) -> None:
+    """Read the input ``fd`` (nothing is sent on it) until it ends, then ``stop``. Read beneath Python's own reader of
+    it: a thread still waiting inside that one when CloseDesk stops by itself (to update) makes Python end with an
+    error instead of CloseDesk's exit code."""
+    try:
+        while os.read(fd, 65536):
+            pass
+    except OSError:
+        pass
+    stop()
 
 
 def _link_stored_mail(settings: Settings, store: Store) -> None:

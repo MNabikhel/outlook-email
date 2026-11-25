@@ -48,6 +48,13 @@ ocr = [
 ]
 # A second reader for the tables in a PDF's text (camelot_tables.py). Optional: without it, PDFs are read as before.
 tables = ["camelot-py>=2.0,<3"]
+# The CloseDesk window (app_window.py), on Windows and macOS only. Optional: without it CloseDesk opens in the browser.
+# 6.2 gives the window its icon; 7 changes what CloseDesk relies on (the closing handler, the page's bridge). pyobjc,
+# pywebview's on macOS, is kept below a version not yet tried.
+window = [
+  "pywebview>=6.2.1,<7; sys_platform == 'win32' or sys_platform == 'darwin'",
+  "pyobjc-core>=9,<14; sys_platform == 'darwin'",
+]
 
 [project.scripts]
 controller-inbox = "controller_inbox.cli:main"
@@ -80,3 +87,5 @@ select = ["E9", "F"]
 [tool.ruff.lint.per-file-ignores]
 # Uses the fixtures it imports from test_teach_and_preview by name, which pyflakes reads as redefinitions.
 "tests/test_teach_edges.py" = ["F811"]
+# Uses the download fixture it imports from test_update_on_open, likewise.
+"tests/test_update_on_open_browser.py" = ["F811"]

@@ -276,16 +276,45 @@
   <p class="notice">{{ closedesk.message }}</p>
   {% if closedesk.launcher %}
   <form method="post" action="/settings/update">
-    <button type="submit" {{ 'disabled' if job.state == 'running' else '' }}>Update</button>
+    <input type="hidden" name="commit" value="{{ closedesk.commit }}">
+    <button type="submit" {{ 'disabled' if update_waits else '' }}>Update</button>
   </form>
-  <p class="muted">CloseDesk closes, fetches the newest version, and opens again by itself in a minute or two. Your mail and settings are kept.{% if job.state == 'running' %} It can update once the mail being processed now is done.{% endif %}</p>
+  <p class="muted">CloseDesk closes, fetches the newest version, and opens again by itself in a minute or two. Your mail and settings are kept.{% if update_waits %} <span data-update-waits>It can update once the mail being processed now is done.</span>{% endif %}</p>
+  {% if update_waits %}
+  <script>
+    // The mail being processed holds the update back: Update is offered once that is done, without the page loading
+    // again (this page has no look at the mail of its own).
+    (function wait() {
+      setTimeout(function () {
+        fetch('/api/update/question', { headers: { 'X-CloseDesk': '1' }, cache: 'no-store' }).then(function (r) {
+          if (!r.ok) throw new Error(r.status);
+          return r.json();
+        }).then(function (q) {
+          if (q.busy) return wait();
+          var button = document.querySelector('#update form[action="/settings/update"] button');
+          if (button) button.disabled = false;
+          var said = document.querySelector('[data-update-waits]');
+          if (said) said.textContent = q.done_message;
+        }).catch(wait);
+      }, 2000);
+    })();
+  </script>
+  {% endif %}
   {% else %}
   <p>{{ closedesk.by_hand }}</p>
   {% endif %}
   {% elif not closedesk.developer %}
-  <p class="muted">{{ closedesk.by_hand }}</p>
+  {% if closedesk.current %}<p>{{ closedesk.current }}</p>{% endif %}
+  <p class="muted">{{ closedesk.later }}</p>
   {% endif %}
   <p class="muted">{{ closedesk.note }}</p>
+  {% if shortcut.offered %}
+  <form method="post" action="/settings/shortcut">
+    <button type="submit">{{ shortcut.label }}</button>
+  </form>
+  <p class="muted">{{ shortcut.help }}</p>
+  {% if shortcut_said and shortcut_said.said %}<p class="{{ 'notice' if shortcut_said.ok else 'warn-box' }}" role="status">{{ shortcut_said.said }}</p>{% endif %}
+  {% endif %}
 </section>
 <section class="split">
   <article class="panel">

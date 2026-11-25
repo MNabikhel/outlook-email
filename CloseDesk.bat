@@ -11,10 +11,14 @@ rem
 rem   CloseDesk.bat               start CloseDesk
 rem   CloseDesk.bat --check       say what is and isn't in order, without starting it
 rem   CloseDesk.bat --update      fetch the newest CloseDesk (mail and settings are kept)
+rem   CloseDesk.bat --shortcut    add the CloseDesk shortcut (Desktop and Start menu) again
 rem   CloseDesk.bat --get-python  only when asked: download a Python for CloseDesk alone into your user
 rem                               folder (no admin rights; nothing is installed on the computer), and use it
 setlocal EnableExtensions
-cd /d "%~dp0"
+rem Into CloseDesk's folder. With pushd, not cd: cmd can't work in a folder on a network share (\\server\share, which
+rem is how Windows names a mapped drive such as H: to CloseDesk's shortcut and window), and pushd lends it a drive
+rem letter meanwhile. Every way out of this file gives the letter back (popd).
+pushd "%~dp0"
 
 rem Where --get-python keeps the one tool it downloads (uv, which fetches Python): in your own folder.
 set "TOOLS=%LOCALAPPDATA%\CloseDesk"
@@ -50,18 +54,24 @@ echo.
 echo The download didn't work. Check the internet connection and try again.
 echo Nothing was changed, except that CloseDesk will set itself up again on its next start.
 pause
+popd
 exit /b 1
 
 :start
 if defined UV set "CLOSEDESK_UV=%UV%"
 if defined GETPY goto :start_plain
 rem An update replaces this file while it runs, so that one is run from a block read whole beforehand. With
-rem call, a Python that is a .bat file comes back here too.
+rem call, a Python that is a .bat file comes back here too. (In a block, the exit code is kept with call set and
+rem given back after popd as a number: a bare exit /b gives cmd /c the last command's own code, not this one. The
+rem block was read before CODE was set, so it is read with delayed expansion.)
 if /i "%~1"=="--update" (
   call %PY% scripts\launch.py %*
+  call set "CODE=%%ERRORLEVEL%%"
   echo.
   pause
-  exit /b
+  popd
+  setlocal EnableDelayedExpansion
+  exit /b !CODE!
 )
 call %PY% scripts\launch.py %*
 goto :ran
@@ -70,21 +80,26 @@ rem After --get-python: the rest of the line is passed on, without it.
 :start_plain
 if /i "%~2"=="--update" (
   call %PY% scripts\launch.py %2 %3 %4 %5 %6 %7 %8 %9
+  call set "CODE=%%ERRORLEVEL%%"
   echo.
   pause
-  exit /b
+  popd
+  setlocal EnableDelayedExpansion
+  exit /b !CODE!
 )
 call %PY% scripts\launch.py %2 %3 %4 %5 %6 %7 %8 %9
 
 :ran
 set "CODE=%ERRORLEVEL%"
-if "%CODE%"=="0" exit /b 0
-if "%CODE%"=="130" exit /b 0
+if "%CODE%"=="0" (popd & exit /b 0)
+if "%CODE%"=="130" (popd & exit /b 0)
 rem 75: Settings' Update button. CloseDesk stopped so that its newest version can be fetched and started.
 if "%CODE%"=="75" goto :update_and_reopen
 rem 76: launch.py says the environment is beyond repair; it is made again, once.
 if "%CODE%"=="76" set "CLOSEDESK_REBUILT=1"
 if "%CODE%"=="76" goto :remake
+rem 77: an update runs in this folder now; launch.py said so, and nothing was started.
+if "%CODE%"=="77" goto :updating
 goto :fail
 
 :remake
@@ -95,18 +110,21 @@ rem Settings' Update button: fetch the newest CloseDesk (mail and settings are k
 rem The update replaces this file while it runs, and cmd reads a .bat from the disk as it goes, so the update
 rem and the start of the new file are one block, read whole before it runs. The environment is there now and
 rem stays, so the new start is without --get-python. The page that asked for the update is still open and
-rem reloads itself, so no second one is opened (CLOSEDESK_REOPEN).
+rem reloads itself, so no second one is opened (CLOSEDESK_REOPEN). The new file goes into the folder itself (popd
+rem first: it lends itself a drive letter of its own where it needs one).
 :update_and_reopen
 if exist ".venv\Scripts\python.exe" set PY=".venv\Scripts\python.exe"
 set "CLOSEDESK_REOPEN=1"
 echo.
 if defined GETPY (
   call %PY% scripts\launch.py --update
+  popd
   call "%~f0" %2 %3 %4 %5 %6 %7 %8 %9
   exit /b
 )
 (
   call %PY% scripts\launch.py --update
+  popd
   call "%~f0" %*
   exit /b
 )
@@ -190,16 +208,25 @@ echo with nothing installed on the computer. Run this in a Command Prompt:
 echo.
 echo   "%~f0" --get-python
 pause
+popd
 exit /b 1
 
 :gave_up
 echo.
 echo CloseDesk couldn't finish setting up. Double-click it again; if this repeats, run: CloseDesk.bat --check
 pause
+popd
 exit /b 1
 
 :fail
 echo.
 echo CloseDesk stopped. The message above says why.
 pause
+popd
 exit /b 1
+
+:updating
+echo.
+pause
+popd
+exit /b 77

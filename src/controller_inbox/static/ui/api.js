@@ -19,6 +19,12 @@ export function inSentence(error, sentence) {
   return error && error.status === 0 ? error.message : sentence(error ? error.message : "");
 }
 
+/** True when ``error`` is a request CloseDesk didn't answer at all (stopped, say, for an update): status 0 from here,
+    or no status from a bare fetch. */
+export function unanswered(error) {
+  return Boolean(error) && (typeof error.status !== "number" || error.status === 0);
+}
+
 /** fetch, with plain words when CloseDesk can't be reached (it was stopped, say). A request cancelled on purpose
     still ends as an AbortError, which callers leave unsaid. */
 async function send(path, options) {

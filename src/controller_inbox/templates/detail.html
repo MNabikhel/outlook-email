@@ -117,7 +117,7 @@
           {% if locked %}
           <span class="muted small">Download locked</span>
           {% elif card.downloadable %}
-          <a class="ghost" href="/inbox/{{ email.id }}/files/{{ card.n }}/download">Download</a>
+          <a class="ghost" href="/inbox/{{ email.id }}/files/{{ card.n }}/download" download>Download</a>
           {% elif card.blocked_type %}
           <span class="muted small" title="Programs, scripts, and macro files only open from Outlook">Open from Outlook</span>
           {% endif %}

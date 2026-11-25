@@ -351,7 +351,8 @@ CREATE INDEX IF NOT EXISTS idx_att_hash ON attachments(sha256);
 """
 
 
-# Setup choices kept in sync_state. Loading the sample mailbox keeps these; everything else there is mail bookkeeping.
+# Setup choices kept in sync_state, and what is known of this copy. Loading the sample mailbox keeps these; everything
+# else there is mail bookkeeping.
 SETTING_KEYS = frozenset(
     {
         "timezone", "profile", "min_context_tokens", "vision_mode", "vision_model",
@@ -362,6 +363,10 @@ SETTING_KEYS = frozenset(
         "outlook_folder_list", "outlook_account",
         # Settings → Sync inbox: what the user agreed to
         "outlook_consent", "outlook_calendar",
+        # Updates (updates.py, cli.py): the newer version GitHub lists, when CloseDesk was updated to this one, and an
+        # update asked for (the top bar's Update ready and Setup's "A newer CloseDesk is ready" go on saying so)
+        "update_latest", "version_seen", "version_updated", "update_asked_from", "update_asked_log",
+        "update_reopen_port",
     }
 )
 
@@ -487,8 +492,8 @@ class Store:
     def clear_mail(self) -> int:
         """Remove every email and what was worked out from it, for loading the sample mailbox.
 
-        Kept: Setup choices (time zone, profile, context size), the fraud trust list, and Ask CloseDesk
-        conversations with their files. Mail bookkeeping (sync cursors, last run) starts over.
+        Kept: Setup choices (time zone, profile, context size), what is known of updates, the fraud trust list, and
+        Ask CloseDesk conversations with their files. Mail bookkeeping (sync cursors, last run) starts over.
         """
         with self.connect() as conn:
             removed = conn.execute("SELECT COUNT(*) AS n FROM emails").fetchone()["n"]
