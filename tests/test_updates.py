@@ -238,7 +238,9 @@ def test_github_is_asked_for_the_newest_commit_alone_not_its_changes(monkeypatch
     monkeypatch.setattr(updates.shutil, "which", lambda name: "/usr/bin/curl" if name == "curl" else None)
     monkeypatch.setattr(updates.subprocess, "run", _curl_as_on_windows(b"[]", ran))
     updates._fetch_json(updates.LATEST_URL, timeout=4)
-    assert "--compressed" in ran[0][0], "curl asks for the answer compressed, as httpx does"
+    # The answer is a few kilobytes. A Windows curl from before Microsoft's June 2024 update has no zlib, and refuses
+    # --compressed before asking anything: on a PC behind a proxy that re-signs HTTPS, the one asking that works.
+    assert "--compressed" not in ran[0][0]
 
 
 def test_githubs_list_of_one_commit_is_read(download, settings, store):

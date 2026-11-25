@@ -175,8 +175,9 @@ def _fetch_json(url: str, *, timeout: float = TIMEOUT_SECONDS) -> Any:
         if not curl or rest < 0.5:
             raise
         left = max(1, math.ceil(rest))
-        # Compressed, as httpx asks for it: the answer comes in a fraction of the time on a slow link.
-        cmd = [curl, "-fsSL", "--compressed", "--max-time", str(left)]
+        # Not --compressed: the answer is a few kilobytes, and Windows' own curl from before its June 2024 update has no
+        # zlib and refuses the option before asking anything.
+        cmd = [curl, "-fsSL", "--max-time", str(left)]
         for name, value in HEADERS.items():
             cmd += ["-H", f"{name}: {value}"]
         # Read as it comes (GitHub's answer is UTF-8): as text, Windows would read it in its own code page, garbling
