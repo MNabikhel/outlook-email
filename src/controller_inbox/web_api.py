@@ -153,6 +153,17 @@ def _category(email_category) -> dict[str, str]:
     return {"category": email_category.value, "category_label": DOCUMENT_LABELS.get(email_category, email_category.value)}
 
 
+def _importance(email: EmailRecord | None) -> dict[str, Any]:
+    """An email's importance, in words too, and whether it is held as possible payment fraud (said instead)."""
+    if email is None:
+        return {"importance": "", "importance_label": "", "locked": False}
+    return {
+        "importance": email.importance.value,
+        "importance_label": IMPORTANCE_LABELS.get(email.importance, email.importance.value),
+        "locked": fraud.attachments_locked(email),
+    }
+
+
 def mail_card(email: EmailRecord, tz, today: date, *, done: bool | None = None) -> dict[str, Any]:
     """One row of a mail list: enough to read it at a glance, nothing from its files."""
     return {
@@ -163,8 +174,7 @@ def mail_card(email: EmailRecord, tz, today: date, *, done: bool | None = None) 
         "received_at": email.received_at,
         "when": short_when(email.received_at, tz, today),
         "when_full": format_when(email.received_at, tz),
-        "importance": email.importance.value,
-        "importance_label": IMPORTANCE_LABELS.get(email.importance, email.importance.value),
+        **_importance(email),
         "score": email.importance_score,
         **_category(email.category),
         "folder": email.folder,
@@ -177,7 +187,6 @@ def mail_card(email: EmailRecord, tz, today: date, *, done: bool | None = None) 
         "due": email.extracted.primary_due or "",
         "files": len(email.attachments),
         "open_tasks": sum(1 for action in email.actions if action.status == ActionStatus.OPEN),
-        "locked": fraud.attachments_locked(email),
         "caution": "payment_caution" in email.flags,
         "model_status": email.model_status,
         "done": done,
@@ -983,6 +992,9 @@ def register_workspace(
         status, rows = services.coding_rows(store, settings, status, q[:200])
         today = board_date()
         book = cost_codes.load(settings)
+        # Each invoice's importance, and whether it is held as possible payment fraud (a coding confirmed before it was
+        # held stays listed): its edge, and its word when Settings → Appearance asks, as in the mail lists.
+        emails = store.get_emails([row["email_id"] for row in rows])
         return {
             "status": status,
             "counts": store.coding_counts(),
@@ -998,6 +1010,7 @@ def register_workspace(
                     "amount_label": _money(row["extracted"].primary_amount),
                     "codes": [{"code": item.get("code", ""), "description": item.get("description", "")} for item in row["codes"]],
                     "status": row["status"],
+                    **_importance(emails.get(row["email_id"])),
                 }
                 for row in rows
             ],

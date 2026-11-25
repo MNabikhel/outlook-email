@@ -114,6 +114,29 @@ def test_todays_rows_carry_the_importance_in_words(client, demo):
     assert {row["importance_label"] for row in rows} >= {"Critical", "High"}
 
 
+def test_the_ap_coding_rows_carry_the_importance_and_whether_held(client, demo):
+    """Settings says the importance is written on each email in the lists, and that without it Critical, High and held
+    emails have a colored edge; but the AP coding list's rows had neither (its duplicate invoice is Critical). A
+    coding confirmed before its email was held as possible payment fraud stays listed: it says it is held."""
+    from controller_inbox import fraud
+    from controller_inbox.models import IMPORTANCE_LABELS
+
+    rows = client.get("/api/coding?status=all", headers=PAGE).json()["items"]
+    assert rows
+    for row in rows:
+        email = demo.get_email(row["id"])
+        assert (row["importance"], row["importance_label"]) == (email.importance.value, IMPORTANCE_LABELS[email.importance]), row
+        assert row["locked"] is fraud.attachments_locked(email) is False, row
+    assert "critical" in {row["importance"] for row in rows}
+
+    email = demo.get_email(rows[0]["id"])
+    demo.save_cost_coding(email.id, status="confirmed", codes=[{"code": "6100", "description": "Supplies"}])
+    email.flags.append("fraud_risk")
+    demo.upsert_email(email)
+    rows = client.get("/api/coding?status=all", headers=PAGE).json()["items"]
+    assert [row["locked"] for row in rows if row["id"] == email.id] == [True], rows
+
+
 def _ticked(page: str, name: str) -> bool:
     """Whether Setup → Colors draws its box ``name`` ticked."""
     import re

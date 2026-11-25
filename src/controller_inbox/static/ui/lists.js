@@ -183,6 +183,10 @@ export const levelTag = (d) =>
       ? h("span", { class: `tag tag-prio-${d.importance} item-level` }, d.importance_label)
       : null;
 
+// The edge of an email listed in a card (the daily digest, Today's emails to verify by phone), as in the lists: a
+// held one the red of danger, a Critical or High one its importance's, the others none (app.css, .plain-list).
+export const edgeClass = (d) => (d.locked ? "is-locked" : d.importance === "critical" || d.importance === "high" ? `imp-${d.importance}` : "");
+
 function mailRow(d) {
   return [
     h("div", { class: "item-row1" }, levelTag(d), h("span", { class: "item-from" }, d.sender || "(unknown sender)"), h("time", { class: "item-when", title: d.when_full }, d.when)),
@@ -260,6 +264,7 @@ function codingRow(d) {
       "div",
       { class: "item-row1" },
       h("span", { class: `tag tag-coding-${d.status}` }, CODING_STATE[d.status] || d.status),
+      levelTag(d),
       h("span", { class: "item-when" }, d.when)
     ),
     h("div", { class: "item-subj" }, d.subject),

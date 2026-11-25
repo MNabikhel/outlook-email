@@ -667,6 +667,87 @@ def test_the_digest_writes_the_importance_on_each_email_when_asked(browser, sett
     context.close()
 
 
+# Each email of the digest (and of Today's box of emails to verify by phone): its edge, where it is drawn, and where
+# its words start.
+PLAIN_EDGES = """sel => [...document.querySelectorAll(sel)].filter((li) => li.getBoundingClientRect().width > 0).map((li) => {
+  const link = li.querySelector('a[href^="/app/mail/"]');
+  const edge = getComputedStyle(li, '::before'), r = li.getBoundingClientRect();
+  const card = li.closest('.card').getBoundingClientRect();
+  return { email: link ? decodeURIComponent(link.getAttribute('href').split('?')[0].split('/').pop()) : '',
+           edge: edge.content !== 'none' ? edge.backgroundColor : null,
+           edgeLeft: r.left + parseFloat(edge.left), edgeRight: r.left + parseFloat(edge.left) + parseFloat(edge.width),
+           text: r.left + parseFloat(getComputedStyle(li).paddingLeft), list: li.parentElement.getBoundingClientRect().left,
+           card: card.left + parseFloat(getComputedStyle(li.closest('.card')).borderLeftWidth) };
+})"""
+CODING_ROWS = """() => [...document.querySelectorAll('.items .item.kind-coding')].map((li) => {
+  const tag = li.querySelector('.item-level');
+  return { email: li.dataset.key.split(':').pop(), edge: getComputedStyle(li, '::before').backgroundColor,
+           word: tag && getComputedStyle(tag).display !== 'none' ? tag.textContent : null };
+})"""
+
+
+def _edge_of(store, email_id: str, colors: str) -> str | None:
+    """The edge an email has in the lists: a held one the red of danger, a Critical or High one its importance's, the
+    others none."""
+    from controller_inbox import fraud
+
+    email, tokens = store.get_email(email_id), pm.workspace("light", colors)
+    if fraud.attachments_locked(email):
+        return rgb(tokens["--danger"])
+    level = email.importance.value
+    return rgb(tokens[f"--imp-{level}"]) if level in ("critical", "high") else None
+
+
+@pytest.mark.parametrize("colors", ["standard", "color-blind"])
+def test_the_digest_and_the_ap_coding_list_mark_critical_high_and_held_as_the_lists_do(browser, settings, loaded, colors):
+    """Settings says that without the importance words only Critical, High and held emails are marked, by a colored
+    edge, and with them each email in the lists and the daily digest says its importance. The workspace's digest
+    marked nothing without the words, and the AP coding list's rows had neither edge nor word: its duplicate invoice is
+    Critical."""
+    from controller_inbox import appearance
+
+    coded = loaded.cost_codings(status=None)
+    held = loaded.get_email(coded[-1]["email_id"])
+    loaded.save_cost_coding(held.id, status="confirmed", codes=[{"code": "6100", "description": "Supplies"}])
+    held.flags.append("fraud_risk")  # held after its coding was confirmed: it stays on the list
+    loaded.upsert_email(held)
+    appearance.save(loaded, colors=colors)
+    context = _context(browser, "light")
+    page = context.new_page()
+    with serving(web.create_app(settings, loaded)) as base:
+        page.request.post(f"{base}/digest/rebuild", headers={"origin": base})
+        for path, sel in (("/app/digest", DIGEST_EMAILS["workspace"]), ("/app", ".card-danger .plain-list li")):
+            page.goto(f"{base}{path}")
+            page.wait_for_selector(f"{sel}:visible")  # Today draws its box twice: a phone shows it above the list
+            rows = page.evaluate(PLAIN_EDGES, sel)
+            assert rows, path
+            marked = 0
+            for row in rows:
+                want = _edge_of(loaded, row["email"], colors)
+                assert row["edge"] == want, (path, row, want)
+                # Each email's words start where the others' do; the edge is in the card's margin, beside them.
+                assert row["text"] == row["list"], (path, row)
+                if want:
+                    marked += 1
+                    assert row["card"] < row["edgeLeft"] < row["edgeRight"] < row["text"], (path, row)
+            assert marked, path
+        page.goto(f"{base}/app/coding?status=all")
+        page.wait_for_selector(".items .item.kind-coding")
+        rows = page.evaluate(CODING_ROWS)
+        assert {row["email"] for row in rows} == {item["email_id"] for item in coded}, rows
+        for row in rows:
+            assert row["edge"] == (_edge_of(loaded, row["email"], colors) or "rgba(0, 0, 0, 0)"), row
+            assert row["word"] is None, row
+        assert "critical" in {loaded.get_email(row["email"]).importance.value for row in rows}
+        appearance.save(loaded, importance_words=True)
+        page.reload()
+        page.wait_for_selector(".items .item.kind-coding .item-level")
+        for row in page.evaluate(CODING_ROWS):
+            email = loaded.get_email(row["email"])
+            assert row["word"] == ("Held for fraud" if email.id == held.id else WORDS[email.importance.value]), row
+    context.close()
+
+
 # The longest words Today can show on one row, with a 7-figure amount (a held email keeps its longer "Held for
 # fraud"); then whether anything in a row's first line runs past its text box (on its right, the done button's room).
 FIT = """() => {
@@ -678,6 +759,11 @@ FIT = """() => {
     const amount = li.querySelector('.item-amount');
     if (amount) amount.textContent = '$1,234,567.89';
     else { const a = document.createElement('span'); a.className = 'item-amount'; a.textContent = '$1,234,567.89'; li.querySelector('.item-row1').append(a); }
+  }
+  // An AP invoice held after its coding was confirmed says "Held for fraud", beside the longest coding state.
+  for (const li of document.querySelectorAll('.items .item.kind-coding')) {
+    li.querySelector('.item-row1 .tag:not(.item-level)').textContent = 'No code found';
+    li.querySelector('.item-level').textContent = 'Held for fraud';
   }
   const out = [];
   for (const li of document.querySelectorAll('.items .item')) {
@@ -703,7 +789,7 @@ def test_the_words_fit_each_row_at_every_width(browser, settings, loaded, width)
     page = context.new_page()
     with serving(web.create_app(settings, loaded)) as base:
         problems = {}
-        for path in ("/app", "/app/folder/important", "/app/all"):
+        for path in ("/app", "/app/folder/important", "/app/all", "/app/coding?status=all"):
             page.goto(f"{base}{path}")
             page.wait_for_selector(".items .item .item-level")
             problems[path] = page.evaluate(FIT)

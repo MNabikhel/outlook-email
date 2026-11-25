@@ -3,7 +3,7 @@
 
 import { h, icon, plural, toast } from "./dom.js";
 import { meetingTime } from "./format.js";
-import { levelTag } from "./lists.js";
+import { edgeClass, levelTag } from "./lists.js";
 
 const enc = encodeURIComponent;
 const mailLink = (id, text, listKey) => h("a", { href: `/app/mail/${enc(id)}${listKey ? `?in=${enc(listKey)}` : ""}`, dataset: { nav: "" } }, text);
@@ -17,8 +17,9 @@ function card(title, ...children) {
   return h("section", { class: "card" }, title ? h("h2", { class: "rd-h" }, title) : null, ...children);
 }
 
+// Each email has the edge it has in the lists (a task, with no importance of its own, none).
 function itemList(items, empty, render) {
-  return items.length ? h("ul", { class: "plain-list" }, items.map((item) => h("li", null, render(item)))) : h("p", { class: "muted" }, empty);
+  return items.length ? h("ul", { class: "plain-list" }, items.map((item) => h("li", { class: edgeClass(item) || null }, render(item)))) : h("p", { class: "muted" }, empty);
 }
 
 export function emptyReader(text, hints = true) {
@@ -309,7 +310,7 @@ export function digestView(data) {
         ? card(
             "Your focus",
             p.focus.length
-              ? h("ol", { class: "plain-list ranked" }, p.focus.map((row) => h("li", null, h("span", { class: `tag tag-${row.kind}` }, row.label), " ", levelTag(row), " ", mailLink(row.email_id, row.title), h("small", null, `${row.sender}${row.more_tasks ? ` · +${row.more_tasks} more` : ""}`))))
+              ? h("ol", { class: "plain-list ranked" }, p.focus.map((row) => h("li", { class: edgeClass(row) || null }, h("span", { class: `tag tag-${row.kind}` }, row.label), " ", levelTag(row), " ", mailLink(row.email_id, row.title), h("small", null, `${row.sender}${row.more_tasks ? ` · +${row.more_tasks} more` : ""}`))))
               : h("p", { class: "muted" }, "Nothing needed you.")
           )
         : null,
