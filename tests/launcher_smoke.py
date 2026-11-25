@@ -11,6 +11,13 @@ starts it again), a deleted shortcut left deleted until launch.py --shortcut, an
 after it moved. CI runs this on macOS, Windows and Linux, once with the Python
 the machine has (nothing may be downloaded) and once asking CloseDesk to download its own, as a person without
 the rights to install Python would (CLOSEDESK_OWN_PYTHON=1 makes the first start ``--get-python``).
+
+    python tests/launcher_smoke.py --window
+
+opens the CloseDesk window itself, for real (CI's window job, on Windows and macOS; see window_check): as the shortcut
+starts it, onto a CloseDesk already open, and through the shortcut as a double-click opens it, each time with
+CloseDesk's page loaded in it and CloseDesk stopped with it; on a Mac the Dock has to call it CloseDesk.
+
 Not a pytest file: it installs for real and takes minutes.
 """
 
@@ -20,6 +27,7 @@ import io
 import json
 import os
 import plistlib
+import re
 import shutil
 import signal
 import socket
@@ -277,6 +285,7 @@ def start_dashboard(folder: Path) -> subprocess.Popen:
         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0,
         env={**os.environ, "CONTROLLER_INBOX_UPDATE_CHECK": "false"},
     )
+    process.port = port
     for _ in range(300):
         answer = health(port)
         if answer and answer.get("app") == "closedesk":
@@ -332,11 +341,342 @@ def install_manager_py(work: Path, folder: Path) -> None:
     assert "No runtime installed" not in out and "Everything CloseDesk needs is in order." in out, out
 
 
+# The CloseDesk window itself (--window) ----------------------------------------------------------------------------
+
+MAC = sys.platform == "darwin"
+BUNDLE_ID = "io.github.mnabikhel.closedesk"  # CloseDesk.app's (shortcut.BUNDLE_ID)
+LSREGISTER = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+# The window's check (app_window): it closes itself once CloseDesk's page says it loaded, after staying open a while for
+# this check to look at it; a window that can't open fails the check instead of opening the browser, and nothing waits
+# for a click. No asking GitHub: whether an update is out isn't what is checked here.
+WINDOW_CHECK = {"CLOSEDESK_APP_SMOKE": "120", "CLOSEDESK_APP_SMOKE_HOLD": "10", "CONTROLLER_INBOX_UPDATE_CHECK": "false"}
+SHOWED = "The CloseDesk window showed "
+DOCK_NAME = f"macOS shows the window as CloseDesk ({BUNDLE_ID})."
+
+
+def env_python(folder: Path, *, windowless: bool = False) -> Path:
+    """The environment's Python; on Windows its pythonw.exe (no console window) when asked for, as the shortcut runs."""
+    if WINDOWS:
+        return folder / ".venv" / "Scripts" / ("pythonw.exe" if windowless else "python.exe")
+    return folder / ".venv" / "bin" / "python"
+
+
+def in_env(folder: Path, code: str) -> str:
+    """What ``code`` prints, run by the environment CloseDesk made."""
+    done = subprocess.run(
+        [str(env_python(folder)), "-c", code], cwd=folder, capture_output=True, text=True, errors="replace", timeout=180,
+        env={**os.environ, "CONTROLLER_INBOX_UPDATE_CHECK": "false"},
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    return done.stdout.strip().splitlines()[-1] if done.stdout.strip() else ""
+
+
+def log_size() -> int:
+    try:
+        return app_log().stat().st_size
+    except OSError:
+        return 0
+
+
+def log_since(start: int) -> str:
+    """What the app wrote in its log after ``start`` (all of it when the log was started afresh meanwhile)."""
+    try:
+        data = app_log().read_bytes()
+    except OSError:
+        return ""
+    return data[start if start <= len(data) else 0 :].decode("utf-8", errors="replace")
+
+
+def listening(port: int) -> bool:
+    """Whether anything takes connections on ``port`` (CloseDesk, still there)."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+def parse_apps(listing: str) -> list[dict]:
+    """The apps in ``lsappinfo list``'s output: each one's name (what the Dock and the menu bar say), app id, pid and
+    folder. A block starts with its number and its name in quotes: `` 3) "CloseDesk" ASN:0x0-0x1d01d:``."""
+    apps = []
+    for block in re.split(r"\n(?=[ \t]*\d+\)[ \t]+\")", "\n" + listing):
+        head = re.match(r'\s*\d+\)\s+"([^"]*)"', block)
+        if not head:
+            continue
+        bundle = re.search(r'bundleID="([^"]*)"', block)
+        pid = re.search(r"\bpid\s*=\s*(\d+)", block)
+        path = re.search(r'bundle path="([^"]*)"', block)
+        apps.append({
+            "name": head.group(1), "bundle": bundle.group(1) if bundle else "", "pid": int(pid.group(1)) if pid else 0,
+            "path": path.group(1) if path else "",
+        })
+    return apps
+
+
+def mac_apps() -> tuple[list[dict], str]:
+    """The apps macOS has running now (what the Dock shows), and lsappinfo's own words."""
+    try:
+        done = subprocess.run(["/usr/bin/lsappinfo", "list"], capture_output=True, text=True, errors="replace", timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [], f"lsappinfo couldn't be run: {exc}"
+    return parse_apps(done.stdout), done.stdout
+
+
+class Sightings:
+    """What macOS called the window while it was open (lsappinfo): every name it was given, and any Python beside it."""
+
+    def __init__(self) -> None:
+        self.seen: list[dict] = []
+        self.pythons: list[dict] = []
+        self.listing = ""
+
+    def look(self, *, pid: int = 0) -> None:
+        apps, self.listing = mac_apps()
+        for app in apps:
+            mine = app["pid"] == pid if pid else app["bundle"] == BUNDLE_ID
+            if mine and app not in self.seen:
+                self.seen.append(app)
+            if app["name"] == "Python" and app not in self.pythons:
+                self.pythons.append(app)
+
+    def problems(self, what: str) -> list[str]:
+        if not self.seen:
+            return [f"{what}: lsappinfo never listed the window. Its last listing:\n{self.listing[-3000:]}"]
+        problems = [
+            f"{what}: macOS called the window {app['name']!r} ({app['bundle'] or 'no app id'}), not CloseDesk"
+            for app in self.seen if app["name"] != "CloseDesk" or app["bundle"] != BUNDLE_ID
+        ]
+        return problems + [f"{what}: the Dock showed a Python too: {app}" for app in self.pythons]
+
+
+def screenshot(folder: Path, name: str) -> threading.Thread | None:
+    """The screen now, kept with the check's results (CLOSEDESK_SMOKE_SHOTS) when it can be taken: taken beside the
+    check, which goes on looking at the window meanwhile."""
+    shots = os.environ.get("CLOSEDESK_SMOKE_SHOTS", "")
+    if not shots:
+        return None
+    Path(shots).mkdir(parents=True, exist_ok=True)
+    target = Path(shots) / f"{name.replace(' ', '-')}.png"
+
+    def take() -> None:
+        try:
+            subprocess.run(
+                [str(env_python(folder)), "-c", "import sys; from PIL import ImageGrab; ImageGrab.grab().save(sys.argv[1])",
+                 str(target)], capture_output=True, timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        print(f"--- screenshot: {target}" if target.exists() else f"--- no screenshot could be taken ({name})", flush=True)
+
+    thread = threading.Thread(target=take, daemon=True)
+    thread.start()
+    return thread
+
+
+def keep_log() -> None:
+    """The app's log, kept with the check's results (CLOSEDESK_SMOKE_SHOTS)."""
+    shots = os.environ.get("CLOSEDESK_SMOKE_SHOTS", "")
+    if shots and app_log().exists():
+        Path(shots).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(app_log(), Path(shots) / app_log().name)
+
+
+def shown(log: str) -> str:
+    """The page the window said it showed."""
+    return log[log.rindex(SHOWED) + len(SHOWED) :].splitlines()[0]
+
+
+def open_window(folder: Path, port: int, *, name: str, attached: bool = False) -> list[str]:
+    """launch.py --app as the shortcut runs it (pythonw on Windows), with the window's check: the real window opens,
+    shows CloseDesk's page and closes itself; it ends with 0, and CloseDesk stops with it (``attached`` to a CloseDesk
+    already open: that one stays open). On a Mac what macOS called the window is given back, any problem with it said,
+    so the other starts are checked and shown too."""
+    start = log_size()
+    output: list[str] = []
+    process = subprocess.Popen(
+        [str(env_python(folder, windowless=True)), str(folder / "scripts" / "launch.py"), "--app", "--port", str(port)],
+        cwd=folder, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=not WINDOWS,
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0, env={**os.environ, **WINDOW_CHECK},
+    )
+    reader = threading.Thread(target=lambda: output.extend(line.decode(errors="replace") for line in process.stdout), daemon=True)
+    reader.start()
+    seen = Sightings()
+    shot = None
+    try:
+        deadline = time.monotonic() + 300
+        while process.poll() is None and time.monotonic() < deadline:
+            if MAC:
+                seen.look(pid=process.pid)  # exec keeps the pid: launch.py becomes the window's Python
+            if shot is None and SHOWED in log_since(start):
+                shot = screenshot(folder, name) or False
+            time.sleep(0.5)
+        if process.poll() is None:
+            raise SystemExit(f"FAILED: the CloseDesk window ({name}) didn't close by itself\n--- its log\n{log_since(start)[-6000:]}")
+        # Whether CloseDesk stopped with the window is seen before anything left over is stopped below.
+        for _ in range(60):
+            if attached or not listening(port):
+                break
+            time.sleep(0.5)
+        stopped = not listening(port)
+    finally:
+        stop(process)
+        reader.join(timeout=10)
+        if shot:
+            shot.join(timeout=60)
+    log = log_since(start)
+    said = f"--- its log\n{log[-6000:]}\n--- its output\n{''.join(output)[-2000:]}"
+    assert process.returncode == 0, f"the CloseDesk window ({name}) ended with {process.returncode}\n{said}"
+    assert SHOWED in log, f"the CloseDesk window ({name}) didn't show CloseDesk's page\n{said}"
+    print(f"--- the CloseDesk window ({name}) showed {shown(log)} and closed by itself, exit 0", flush=True)
+    if attached:
+        assert health(port), f"closing the window stopped the CloseDesk it didn't start\n{said}"
+        print("--- the CloseDesk that was already open is still open", flush=True)
+    else:
+        assert stopped, f"CloseDesk didn't stop with its window (port {port} still answered)\n{said}"
+        print("--- CloseDesk stopped with its window", flush=True)
+    if not MAC:
+        return []
+    print(f"--- what macOS called the window: {seen.seen}", flush=True)
+    problems = seen.problems(name)
+    if DOCK_NAME not in log:
+        problems.append(f"{name}: the window's log doesn't say {DOCK_NAME!r}:\n{log[-3000:]}")
+    return problems
+
+
+def end_windows() -> None:
+    """Whatever is left of a CloseDesk window the check opened without being its parent (the double-click's)."""
+    if WINDOWS:
+        subprocess.run(["taskkill", "/F", "/T", "/IM", "pythonw.exe"], capture_output=True)
+    elif MAC:
+        for app in mac_apps()[0]:
+            if app["bundle"] == BUNDLE_ID and app["pid"]:
+                try:
+                    os.kill(app["pid"], signal.SIGTERM)
+                except OSError:
+                    pass
+
+
+def double_click(folder: Path, shortcuts: Path) -> list[str]:
+    """The CloseDesk shortcut opened as a double-click opens it (Windows' shell on CloseDesk.lnk; macOS's open on
+    CloseDesk.app, as the Dock and Spotlight do), with the window's check: the window shows CloseDesk's page and closes
+    itself, and CloseDesk stops with it. A shortcut has no options: the port and the check go in the environment."""
+    port = free_port()
+    check = {**WINDOW_CHECK, "CONTROLLER_INBOX_PORT": str(port), "CLOSEDESK_SHORTCUT_DIR": str(shortcuts)}
+    start = log_size()
+    if WINDOWS:
+        place = shortcuts / "Desktop" / "CloseDesk.lnk"
+        before = {key: os.environ.get(key) for key in check}
+        os.environ.update(check)  # what Windows' shell starts from here has this program's environment
+        try:
+            os.startfile(str(place))  # noqa: S606 (the double-click)
+        finally:
+            for key, value in before.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+    else:
+        place = shortcuts / "CloseDesk.app"
+        cmd = ["/usr/bin/open"]
+        for key, value in check.items():
+            cmd += ["--env", f"{key}={value}"]
+        done = subprocess.run([*cmd, str(place)], capture_output=True, text=True, errors="replace", timeout=120)
+        assert done.returncode == 0, f"macOS couldn't open {place}: {done.stdout}{done.stderr}"
+    what = f"{place.name} opened as a double-click opens it"
+    seen = Sightings()
+    shot = None
+    up = finished = False
+    try:
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            if MAC:
+                seen.look()
+            up = up or bool(health(port))
+            if shot is None and SHOWED in log_since(start):
+                shot = screenshot(folder, "double-click") or False
+            if shot is not None and not listening(port):
+                finished = True
+                break
+            time.sleep(0.5)
+    finally:
+        if not finished:
+            end_windows()
+        if shot:
+            shot.join(timeout=60)
+    log = log_since(start)
+    assert finished, (f"the window of {what} didn't show CloseDesk's page and close by itself (CloseDesk answered on "
+                      f"port {port}: {up})\n--- the log\n{log[-6000:]}")
+    print(f"--- the window of {what} showed {shown(log)}, closed by itself, and CloseDesk stopped with it", flush=True)
+    if not MAC:
+        return []
+    print(f"--- what macOS called it: {seen.seen}", flush=True)
+    return seen.problems(what)
+
+
+def window_check() -> int:
+    """``--window``: the CloseDesk window, opened for real (CI's window job, on Windows and macOS). Set up by the
+    launcher, the shortcut made with ``--shortcut`` and read back, then the window opened three ways: as the shortcut
+    runs it, onto a CloseDesk already open, and through the shortcut itself as a double-click opens it. Each time
+    CloseDesk's page has to load in it, the window closes itself, and CloseDesk stops with it. On a Mac the Dock has to
+    call it CloseDesk (lsappinfo), never Python. On Linux, where there is no window, its start has to say so. Windows
+    needs Microsoft Edge WebView2 Runtime (CI installs it first). CLOSEDESK_SMOKE_SHOTS: a folder for the screenshots
+    and the app's log."""
+    work = Path(tempfile.mkdtemp(prefix="closedesk window "))
+    shortcuts = work / "shortcuts"
+    os.environ["CLOSEDESK_SHORTCUT_DIR"] = str(shortcuts)
+    folder = work / "Close Desk"
+    export(folder, commit="a" * 40)
+    own = bool(os.environ.get("CLOSEDESK_OWN_PYTHON"))
+    print(f"The CloseDesk window check in {folder} (own Python: {'yes' if own else 'no'})", flush=True)
+    out = run(folder, "--get-python", "--check") if own else run(folder, "--check")
+    assert "Everything CloseDesk needs is in order." in out, out
+    if not (WINDOWS or MAC):
+        done = subprocess.run(
+            [str(env_python(folder)), str(folder / "scripts" / "launch.py"), "--app"], cwd=folder, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, errors="replace", timeout=300, env={**os.environ, **WINDOW_CHECK},
+        )
+        said = done.stdout + done.stderr
+        assert done.returncode == 2 and "The CloseDesk window is for Windows and macOS" in said, (done.returncode, said)
+        print("--- no window on Linux, and its start says so (a person's start opens the browser instead)", flush=True)
+        shutil.rmtree(work, ignore_errors=True)
+        print("The CloseDesk window check passed (Linux: no window).", flush=True)
+        return 0
+    found = in_env(folder, "from importlib.metadata import version; print(version('pywebview'))")
+    print(f"--- the window's part is installed: pywebview {found}", flush=True)
+    why = in_env(folder, "from controller_inbox import app_window; print(app_window.why_no_window())")
+    assert why == "None", f"the window can't open on this computer: {why}"
+    out = run(folder, "--shortcut")
+    assert "couldn't" not in out, out
+    wait_for_shortcuts(folder, shortcuts, wait=5)
+    problems: list[str] = []
+    try:
+        problems += open_window(folder, free_port(), name="as the shortcut starts it")
+        dashboard = start_dashboard(folder)
+        try:
+            problems += open_window(folder, dashboard.port, name="onto a CloseDesk already open", attached=True)
+        finally:
+            stop(dashboard)
+        problems += double_click(folder, shortcuts)
+    finally:
+        keep_log()
+        if MAC:
+            subprocess.run([LSREGISTER, "-u", str(shortcuts / "CloseDesk.app")], capture_output=True)
+    if problems:
+        print("\n".join(["", "FAILED: the Dock doesn't say CloseDesk:", *problems]), flush=True)
+        return 1
+    shutil.rmtree(work, ignore_errors=True)
+    print("The CloseDesk window check passed.", flush=True)
+    return 0
+
+
 def main() -> int:
     # The launcher's window text can hold characters a Windows console's code page lacks ("—" read back as "\ufffd"):
     # printed as "?", not a crash of the test after CloseDesk did its part.
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(errors="replace")
+    if "--window" in sys.argv[1:]:
+        return window_check()
     work = Path(tempfile.mkdtemp(prefix="closedesk smoke "))
     # The CloseDesk shortcut goes here, not on this computer's Desktop or in its Applications.
     shortcuts = work / "shortcuts"

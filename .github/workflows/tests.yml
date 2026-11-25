@@ -90,6 +90,58 @@ jobs:
           CLOSEDESK_OWN_PYTHON: ${{ matrix.own_python }}
         run: python tests/launcher_smoke.py
 
+  # The CloseDesk window itself (launch.py --app, what the CloseDesk shortcut runs), opened for real: set up by the
+  # launcher, the shortcut made and read back, then the window opened as the shortcut starts it, onto a CloseDesk
+  # already open, and through the shortcut itself as a double-click opens it. Each time CloseDesk's page has to load in
+  # it, the window closes itself, and CloseDesk stops with it. On a Mac the Dock has to call it CloseDesk (lsappinfo),
+  # not Python. On Linux there is no window, and its start has to say so. Screenshots and the app's log are kept.
+  window:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        own_python: ["", "1"]
+        include:
+          - os: ubuntu-latest
+            own_python: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Microsoft Edge WebView2 Runtime
+        # The window needs it, and GitHub's Windows Server has none (CloseDesk would open in the browser there).
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $found = ''
+          foreach ($key in 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+                           'HKCU:\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}') {
+            $pv = (Get-ItemProperty -Path $key -Name pv -ErrorAction SilentlyContinue).pv
+            if ($pv -and $pv -ne '0.0.0.0') { $found = $pv }
+          }
+          if ($found) {
+            "WebView2 Runtime $found is on this computer"
+          } else {
+            "No WebView2 Runtime on this computer: installing it"
+            choco install webview2-runtime --ignore-checksums -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: The CloseDesk window
+        env:
+          CLOSEDESK_OWN_PYTHON: ${{ matrix.own_python }}
+          CLOSEDESK_SMOKE_SHOTS: ${{ runner.temp }}/closedesk-window
+        run: python tests/launcher_smoke.py --window
+      - name: Keep the screenshots and the app's log
+        if: always() && runner.os != 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: window-${{ matrix.os }}${{ matrix.own_python && '-own-python' || '' }}
+          path: ${{ runner.temp }}/closedesk-window
+          if-no-files-found: ignore
+
   browser:
     runs-on: ubuntu-latest
     timeout-minutes: 30
