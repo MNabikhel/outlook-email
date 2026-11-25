@@ -476,7 +476,8 @@ src/controller_inbox/
   web_common.py     What both share: notices, which files download, same-page checks, finding an attachment
   services.py       What a button does, the same from the classic pages and the workspace
   doctor.py         The self-check: `controller_inbox doctor`, or `CloseDesk --check`
-  version.py        Which version this copy is: its date-based number (2026.11.16) and commit
+  version.py        Which version this copy is: its date-based number (2026.11.16) and commit; and whose it is (its
+                    folder's and user's fingerprints, in /health): only your own is shown instead of a second started
   updates.py        Whether a newer CloseDesk is out (asked of GitHub as it opens and once a day), the question the
                     first page asks about it, and Settings' Update button
   app_window.py     The CloseDesk window (`launch.py --app`, pywebview): starts CloseDesk and shows it, stops it when
