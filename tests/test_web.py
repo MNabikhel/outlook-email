@@ -628,7 +628,9 @@ def test_an_answer_the_browser_left_is_saved_and_the_model_stops(settings: Setti
     assert len(written) < 300
     asked, answer = loaded.chat_turns(chat_id)
     assert asked["text"] == "What needs a reply?" and answer["role"] == "assistant"
-    assert answer["text"].startswith("part0 part1 part2 ")
+    # The three parts the browser had (the answer kept is trimmed, so no space after the third when the model stopped
+    # straight after it; on a quicker or slower machine it may have written more first).
+    assert answer["text"].startswith("part0 part1 part2")
     assert answer["text"].endswith("(Stopped: the page closed before the answer finished.)")
     assert answer["failed"], "an answer cut short isn't learned from"
 
