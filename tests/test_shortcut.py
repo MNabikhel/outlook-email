@@ -383,6 +383,21 @@ def test_a_second_copy_started_once_doesnt_stop_the_shortcut_following_the_first
     assert said.ok and "moved" in said.message, said.message
 
 
+def test_a_second_copy_started_once_with_a_shortcut_it_cant_read_leaves_the_record_to_the_first(windows, tmp_path):
+    # The Desktop one online only (OneDrive not running) at the copy's start: it may well be the first folder's too.
+    _upkeep(windows)
+    other, system = _copy(windows, tmp_path)
+    windows.links.unreadable[windows.desktop] = ComError(-2147024514, "The cloud file provider is not running.", None, None)
+    shortcut.upkeep(system, record=windows.record)
+    windows.links.unreadable.clear()
+    import shutil
+
+    shutil.rmtree(windows.root)
+    shortcut.upkeep(system, record=windows.record)
+    for path in (windows.desktop, windows.start):
+        assert windows.links.files[path]["folder"] == str(other), path
+
+
 def test_a_second_copy_started_once_doesnt_stop_the_shortcut_following_the_first_when_it_moves(windows, tmp_path):
     _upkeep(windows)
     _, system = _copy(windows, tmp_path)

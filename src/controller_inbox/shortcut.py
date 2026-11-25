@@ -833,7 +833,9 @@ def _tend(system, *, explicit: bool, record: Path, new_environment: bool = False
     # This start's folder has no shortcut of its own while the folder this computer's shortcuts open is another
     # CloseDesk, still there (a second copy, a new download beside the old one): they are still that folder's, and
     # follow it when it moves or is deleted. Recorded as this folder's, they would be taken for another computer's.
-    another_copy = not mine and not explicit and bool(known) and not _same(known, system.root) and _closedesk_at(known)
+    # (One that couldn't be read may well be that folder's too.)
+    own = any(done[key] for key in ("made", "moved", "back", "fresh", "kept", "fallback"))
+    another_copy = not own and not explicit and bool(known) and not _same(known, system.root) and _closedesk_at(known)
     # Recorded once one is made, or another computer's was found (said once: from then on it is left as it is quietly);
     # again when the folder moved, or when where this computer has its shortcuts changed (one deleted, say).
     if not another_copy and (
