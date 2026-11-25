@@ -414,9 +414,24 @@ def test_dots_differ_by_shape_as_well_as_colour(settings, store, page):
     assert shown["differs"]["radius"] == "1px", "a square"
     # No model running: a hollow ring, and words on hover; running, a filled dot.
     assert shown["chat"]["background"] == clear and "inset" in shown["chat"]["shadow"]
-    assert shown["chatTitle"] == "No local model running"
+    assert shown["chatTitle"] == "Ask CloseDesk: no local model running"
     assert shown["chatLive"]["background"] != clear and shown["chatLive"]["shadow"] == "none"
-    assert fab["background"] == clear and "inset" in fab["shadow"] and fab["title"] == "No local model running"
+    assert fab["background"] == clear and "inset" in fab["shadow"] and fab["title"] == "Ask CloseDesk: no local model running"
+
+
+@pytest.mark.parametrize("width", [1280, 390])
+def test_ask_closedesk_keeps_its_name_at_every_width(settings, store, page, width):
+    """On a narrow window the button shows only its icon, and the model's words on hover became its name: a screen
+    reader said "No local model running, button" for the button that opens the chat, and the tooltip didn't say what
+    the button does."""
+    page.set_viewport_size({"width": width, "height": 844})
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/app/settings")
+        page.wait_for_function("() => document.querySelector('#chat-btn').title !== ''")  # after the first status check
+        named = page.get_by_role("button", name="Ask CloseDesk", exact=True)
+        assert named.count() == 1 and named.get_attribute("id") == "chat-btn"
+        assert page.get_by_role("button", name="No local model running").count() == 0
+        assert named.get_attribute("title").startswith("Ask CloseDesk"), "what the button does, on hover too"
 
 
 MONTH_DOTS = """() => {

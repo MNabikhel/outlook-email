@@ -1171,11 +1171,12 @@ function doneSelected() {
 
 /* ---------- Live status ---------- */
 
-/** The dot on Ask CloseDesk: filled while a local model runs, a ring when none does, and words on hover. */
+/** The dot on Ask CloseDesk: filled while a local model runs, a ring when none does, and words on hover. They start
+    with what the button does: on a narrow window it shows only its icon. Its name stays "Ask CloseDesk" (app.html). */
 function modelDot(model) {
   const button = $("#chat-btn");
   button.classList.toggle("live", model.active);
-  button.title = model.active ? "Local model running" : "No local model running";
+  button.title = model.active ? "Ask CloseDesk: local model running" : "Ask CloseDesk: no local model running";
 }
 
 async function poll() {
