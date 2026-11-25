@@ -62,7 +62,9 @@ export function createSettings(ctx) {
   let root = null; // the page drawn now
   const dirty = new Set(); // sections changed here and not saved yet: drawing again leaves them as they are
 
-  async function load({ recheck = false, keepScroll = false } = {}) {
+  /** Ask the server for the settings and draw the page from them. ``after``: the change just saved (its id), whose
+      line says so if they can't be read. */
+  async function load({ recheck = false, keepScroll = false, after = "" } = {}) {
     const mine = ++token;
     try {
       const fresh = await getJSON(`/api/settings${recheck ? "?recheck=1" : ""}`);
@@ -72,7 +74,11 @@ export function createSettings(ctx) {
     } catch (error) {
       if (mine !== token || !ctx.isShown()) return;
       if (data) {
-        flash = { id: "model", tone: "error", text: `Couldn't read the settings again (${error.message}).` };
+        const again = `Couldn't read the settings again (${error.message}).`;
+        // After a change, said under it: after what saving it said, or instead of nothing when it couldn't be saved
+        // (that is what matters, and it says why).
+        if (!after || !flash || flash.id !== after) flash = { id: "model", tone: "error", text: again };
+        else if (flash.tone === "ok") flash = { id: after, tone: "error", text: `${flash.text} ${again}` };
         draw({ keepScroll: true });
       } else {
         ctx.show(errorPage(error.message), {});
@@ -174,6 +180,7 @@ export function createSettings(ctx) {
       line.className = "set-status";
       line.textContent = "";
     }
+    let unanswered = false;
     try {
       const reply = await postJSON(path, body);
       dirty.delete(SECTION_OF[id] || id);
@@ -182,6 +189,7 @@ export function createSettings(ctx) {
       ctx.changed(reply);
     } catch (error) {
       flash = { id, tone: "error", text: error.message };
+      unanswered = error.status === 0;
     }
     if (!ctx.isShown()) return;
     if (box) box.removeAttribute("aria-busy");
@@ -189,7 +197,10 @@ export function createSettings(ctx) {
       button.disabled = false;
       button.textContent = label;
     }
-    await load({ keepScroll: true });
+    // CloseDesk didn't answer: asking it for the settings again would only fail too. Drawn again from what the page
+    // has, which nothing changed, with the line under this change saying so.
+    if (unanswered) draw({ keepScroll: true });
+    else await load({ keepScroll: true, after: id });
   }
 
   /** A box that saves the moment it is ticked (see save): a tick while the last one is still being saved is ignored. */

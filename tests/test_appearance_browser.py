@@ -612,21 +612,51 @@ def test_ctrl_k_turns_the_colors_for_color_blindness_on_and_off(settings, store,
             assert appearance.current(store)["colors"] == ("color-blind" if on else "standard")
 
 
-def test_a_save_that_cant_reach_closedesk_says_so_in_plain_words(settings, store, page):
-    """With CloseDesk not answering (stopped, say), the box and Ctrl K said the browser's own "Failed to fetch"."""
+@pytest.mark.parametrize("stopped", ["only the save fails", "nothing answers"])
+def test_a_save_that_cant_reach_closedesk_says_so_in_plain_words(settings, store, page, stopped):
+    """With CloseDesk not answering (stopped, say), the box and Ctrl K said the browser's own "Failed to fetch". With
+    nothing answering at all, the page then asked for the settings again, which failed too, and that message took the
+    save's place: under Model and status, out of sight, with nothing said beside the box."""
+    from controller_inbox import appearance
+
+    appearance.save(store, colors="color-blind")
     with serving(web.create_app(settings, store)) as base:
         page.goto(f"{base}/app/settings")
         page.wait_for_selector("#set-colors")
-        page.route("**/api/settings/colors", lambda route: route.abort())
-        page.check("#set-colors")
-        line = "#set-appearance [data-status='colors'].error"
-        page.wait_for_selector(line)
-        said = page.inner_text(line)
-        assert "Failed to fetch" not in said and "CloseDesk isn't answering" in said, said
-        assert not page.is_checked("#set-colors"), "nothing was saved"
+        page.route("**/api/settings/colors" if stopped == "only the save fails" else "**/api/**", lambda route: route.abort())
+        line = "#set-appearance [data-status='colors']"
+        for box in ("#set-colors", "#set-importance-words"):
+            was = page.is_checked(box)
+            page.evaluate("sel => { const l = document.querySelector(sel); l.className = 'set-status'; l.replaceChildren(); }", line)
+            page.click(box)
+            page.wait_for_selector(f"{line}.error")
+            said = page.inner_text(line)
+            assert "Failed to fetch" not in said and "CloseDesk isn't answering" in said, said
+            page.wait_for_function("() => !document.querySelector('#set-appearance [aria-busy]')")
+            assert page.is_checked(box) == was, "nothing was saved"
+            assert page.inner_text("#set-model [data-status='model']") == "", "said beside the box, not elsewhere"
+        assert appearance.current(store) == {"colors": "color-blind", "importance_words": False}
         page.keyboard.press("Control+k")
         page.fill(".palette input", "color blind")
-        page.wait_for_selector(".pal-item.on:has-text('Turn on colors for color blindness')")
+        page.wait_for_selector(".pal-item.on:has-text('Turn off colors for color blindness')")
         page.keyboard.press("Enter")
         toast = page.wait_for_selector(".toast.error")
         assert "Failed to fetch" not in toast.inner_text() and "CloseDesk isn't answering" in toast.inner_text()
+
+
+def test_a_save_whose_page_cant_be_read_again_says_both_under_the_box(settings, store, page):
+    """Saved, and then the settings couldn't be read again: the message for that replaced "Saved" and went under
+    Model and status, out of sight."""
+    from controller_inbox import appearance
+
+    with serving(web.create_app(settings, store)) as base:
+        page.goto(f"{base}/app/settings")
+        page.wait_for_selector("#set-colors")
+        page.route("**/api/settings", lambda route: route.abort() if route.request.method == "GET" else route.continue_())
+        page.click("#set-colors")
+        line = "#set-appearance [data-status='colors']"
+        page.wait_for_selector(f"{line}.error")
+        said = page.inner_text(line)
+        assert said.startswith(web.NOTICES["colors"]) and "Couldn't read the settings again (CloseDesk isn't answering." in said, said
+        assert page.is_checked("#set-colors") and appearance.current(store)["colors"] == "color-blind"
+        assert page.inner_text("#set-model [data-status='model']") == ""
