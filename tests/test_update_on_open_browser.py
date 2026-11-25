@@ -501,10 +501,15 @@ def test_the_classic_rails_update_ready_can_be_read(download, settings, loaded, 
         assert page.evaluate(CONTRAST, link) >= 4.5
 
 
-@pytest.mark.parametrize("width", [320, 390, 560, 720])
-def test_the_workspaces_update_ready_leaves_the_top_bar_on_screen(download, settings, loaded, page, monkeypatch, width):
+@pytest.mark.parametrize(
+    "width, chat, whole",
+    [(320, False, False), (390, False, True), (560, False, True), (720, False, True), (1280, False, True),
+     (1280, True, True), (1181, True, False)],
+)
+def test_the_workspaces_update_ready_leaves_the_top_bar_on_screen(download, settings, loaded, page, monkeypatch, width, chat, whole):
     # At a phone's width (390px) "Update ready" pushed the help button and Ask CloseDesk past the right edge, and the
-    # page scrolled sideways.
+    # page scrolled sideways; so it did beside the open chat just wider than the chat's own window (1181px). Shortened
+    # ("Update…") only where it would.
     app = opened(settings, loaded, monkeypatch)
     with serving(app) as base:
         page.set_viewport_size({"width": width, "height": 800})
@@ -513,6 +518,12 @@ def test_the_workspaces_update_ready_leaves_the_top_bar_on_screen(download, sett
         page.click("#update-ask button:has-text('Not now')")
         page.wait_for_selector("#update-ask", state="detached")
         page.wait_for_selector("#top-update")
+        if chat:
+            page.click("#chat-btn")
+            page.wait_for_selector("#chat:not([hidden])")
+            page.wait_for_timeout(300)
+        cut = page.evaluate("(() => { const e = document.querySelector('#top-update'); return e.scrollWidth > e.clientWidth; })()")
+        assert cut is not whole, "said whole where it fits, shortened only where it doesn't"
         found = page.evaluate("""() => {
           const right = (sel) => document.querySelector(sel).getBoundingClientRect().right;
           return {

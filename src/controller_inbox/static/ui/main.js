@@ -172,6 +172,15 @@ function toggleRail() {
 
 /* ---------- The top bar ---------- */
 
+/** Whether the top bar's buttons would be pushed past its edge (a narrow window, the chat open beside it), the search
+    box having given way as far as it goes: then the date and "Update ready" are shortened ("Update…") too. */
+function fitTop() {
+  const top = $("#top");
+  if (!top) return;
+  top.removeAttribute("data-tight");
+  if (top.scrollWidth > top.clientWidth + 1) top.setAttribute("data-tight", "");
+}
+
 function renderTop() {
   const meta = S.meta;
   if (!meta) return;
@@ -186,9 +195,11 @@ function renderTop() {
   let notice = $("#top-update");
   if (ready && !notice) {
     notice = h("a", { id: "top-update", class: "top-update", href: "/app/settings#set-about", dataset: { nav: "" } }, "Update ready");
-    $(".top-tools").prepend(notice);
+    $(".top-tools").before(notice);
+    fitTop();
   } else if (!ready && notice) {
     notice.remove();
+    fitTop();
   }
   if (ready) notice.title = meta.closedesk.message;
   const job = meta.job;
@@ -1610,6 +1621,8 @@ async function boot() {
     return;
   }
   renderTop();
+  // The top bar's width changes with the window and with the chat beside it.
+  if (typeof ResizeObserver === "function") new ResizeObserver(() => fitTop()).observe($("#top"));
   toldOnOpening(S.meta.job);
   updateRail("");
   chat.setModel(S.meta.model);
