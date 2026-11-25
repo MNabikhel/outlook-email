@@ -635,10 +635,17 @@ def ports_shown(log: str) -> set[str]:
     return {found.group(1) for line in log.splitlines() if SHOWED in line for found in [re.search(r"\(port (\d+)\)", line)] if found}
 
 
+def showed_port(log: str, port: int, what: str) -> None:
+    """Every page the window showed came from the CloseDesk on ``port``, the one the check watches: one shown from
+    another (the window given another port) would leave ``port`` free from the start, and "CloseDesk stopped with it"
+    would be read there for nothing."""
+    assert ports_shown(log) == {str(port)}, f"the CloseDesk window ({what}) showed pages from {sorted(ports_shown(log))}, not {port}\n{log[-3000:]}"
+
+
 def showed_only(log: str, port: int, what: str) -> None:
     """The window showed the CloseDesk on ``port`` and started none of its own (a second one, on the next port, would
     pass every other look: exit 0, both pages, the first one still open)."""
-    assert ports_shown(log) == {str(port)}, f"the CloseDesk window ({what}) showed pages from {sorted(ports_shown(log))}, not {port}\n{log[-3000:]}"
+    showed_port(log, port, what)
     for started in (" is using port ", "Opening http"):
         assert started not in log, f"the CloseDesk window ({what}) started a CloseDesk of its own\n{log[-3000:]}"
 
@@ -720,6 +727,7 @@ def open_window(folder: Path, port: int, *, name: str, attached: bool = False) -
         assert health(port), f"closing the window stopped the CloseDesk it didn't start\n{said}"
         print(f"--- the window showed the CloseDesk already open (port {port}), and that one is still open", flush=True)
     else:
+        showed_port(log, port, name)
         assert stopped, f"CloseDesk didn't stop with its window (port {port} still answered)\n{said}"
         print("--- CloseDesk stopped with its window", flush=True)
     if not MAC:
@@ -805,6 +813,9 @@ def double_click(folder: Path, shortcuts: Path) -> list[str]:
             up = up or bool(health(port))
             if shot is None and SHOWED in log_since(start):
                 shot = screenshot(folder, "double-click") or False
+            shown = ports_shown(log_since(start))
+            if shown and shown != {str(port)}:
+                break  # the window showed a CloseDesk on another port: the check's is never the one that stops
             if shot is not None and not listening(port):
                 finished = True
                 break
@@ -815,6 +826,8 @@ def double_click(folder: Path, shortcuts: Path) -> list[str]:
         if shot:
             shot.join(timeout=60)
     log = log_since(start)
+    if ports_shown(log):
+        showed_port(log, port, what)
     assert finished, (f"the window of {what} didn't show CloseDesk's page and close by itself (CloseDesk answered on "
                       f"port {port}: {up})\n--- the log\n{log[-6000:]}")
     # How the window's program ended, which nothing else sees here (Windows' shell and macOS's open started it): its
@@ -825,6 +838,9 @@ def double_click(folder: Path, shortcuts: Path) -> list[str]:
         time.sleep(0.5)
         log = log_since(start)
     closed_well(log, what)
+    # The CloseDesk that stopped is the one the window showed: on the check's port, where it answered meanwhile.
+    showed_port(log, port, what)
+    assert up, f"CloseDesk never answered on port {port}, which the window of {what} was given\n--- the log\n{log[-6000:]}"
     if MAC:
         # Started by macOS from the Dock or Spotlight, CloseDesk.app runs on the Mac's own kind of processor, not under
         # Rosetta (an environment set up for Apple's processor wouldn't load there).

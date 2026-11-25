@@ -201,3 +201,73 @@ def test_the_double_clicked_window_has_to_close_without_an_error():
             continue
         raise AssertionError(f"passed: {log!r}")
     assert module.window_closed(good.replace(closed, "")) is None
+
+
+def _window_log(port: int) -> str:
+    from controller_inbox import app_window
+
+    return (f"The CloseDesk window showed / (port {port})\nThe CloseDesk window showed /app (port {port})\n"
+            f"{app_window.CLOSED.format(code=0)}\n")
+
+
+def _double_clicked(monkeypatch, *, log: str, answers: bool):
+    """The check's double-click leg, with what it starts and reads faked: the window's log says ``log``, and CloseDesk
+    answers on the check's port while the window is open only when ``answers``."""
+    module = smoke()
+    monkeypatch.setattr(module, "MAC", False)
+    monkeypatch.setattr(module, "WINDOWS", False)
+    monkeypatch.setattr(module, "free_port", lambda: 9100)
+    monkeypatch.setattr(module.subprocess, "run", lambda *a, **k: type("Done", (), {"returncode": 0, "stdout": "", "stderr": ""})())
+    monkeypatch.setattr(module, "log_size", lambda: 0)
+    monkeypatch.setattr(module, "log_since", lambda start: log)
+    monkeypatch.setattr(module, "screenshot", lambda *a: None)
+    monkeypatch.setattr(module, "end_windows", lambda *a: None)
+    looks = iter([True, False])
+    monkeypatch.setattr(module, "listening", lambda port: next(looks, False) if answers else False)
+    monkeypatch.setattr(module, "health", lambda port: {"app": "closedesk"} if answers else None)
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
+    return module
+
+
+def test_the_double_clicked_window_has_to_show_closedesk_on_the_checks_port(monkeypatch, tmp_path):
+    # The double-clicked window opened its CloseDesk on 8765, not the check's port: the check saw that port free from
+    # the start, read both pages and the close in the log, and passed "CloseDesk stopped with it".
+    module = _double_clicked(monkeypatch, log=_window_log(9100), answers=True)
+    assert module.double_click(tmp_path, tmp_path / "shortcuts") == []
+    for log, answers in ((_window_log(8765), False), (_window_log(9100), False), (_window_log(8765), True)):
+        module = _double_clicked(monkeypatch, log=log, answers=answers)
+        try:
+            module.double_click(tmp_path, tmp_path / "shortcuts")
+        except (AssertionError, SystemExit):
+            continue
+        raise AssertionError(f"passed with CloseDesk answering {answers} and the log {log!r}")
+
+
+def test_the_window_the_check_starts_has_to_show_closedesk_on_the_port_it_watches(monkeypatch, tmp_path):
+    # As the shortcut starts it: "CloseDesk stopped with its window" is read on the port it was given, so the pages have
+    # to have come from that one.
+    def started(log: str):
+        module = smoke()
+        monkeypatch.setattr(module, "MAC", False)
+        monkeypatch.setattr(module, "WINDOWS", False)
+
+        class Ended:
+            pid, returncode, stdout = 1, 0, []
+
+            def poll(self):
+                return 0
+
+        monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: Ended())
+        monkeypatch.setattr(module, "stop", lambda process: None)
+        monkeypatch.setattr(module, "log_size", lambda: 0)
+        monkeypatch.setattr(module, "log_since", lambda start: log)
+        monkeypatch.setattr(module, "screenshot", lambda *a: None)
+        monkeypatch.setattr(module, "listening", lambda port: False)
+        return module
+
+    assert started(_window_log(9100)).open_window(tmp_path, 9100, name="the window") == []
+    try:
+        started(_window_log(8765)).open_window(tmp_path, 9100, name="the window")
+    except AssertionError:
+        return
+    raise AssertionError("passed with the pages from another port than the one watched")
