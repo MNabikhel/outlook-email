@@ -469,7 +469,37 @@ def test_the_windows_launcher_updates_and_starts_again_from_one_block_read_whole
     for block in blocks:
         lines = [line.strip() for line in block.splitlines()]
         # The update replaces this file: the start of the new one, and the end, are in the block cmd has read already.
-        assert lines[0] == r"call %PY% scripts\launch.py --update" and lines[1].startswith('call "%~f0"') and lines[2] == "exit /b"
+        # (The drive letter a network folder was lent goes back first: the new file lends itself its own.)
+        assert lines[0] == r"call %PY% scripts\launch.py --update" and lines[1] == "popd"
+        assert lines[2].startswith('call "%~f0"') and lines[3] == "exit /b"
+
+
+# Subroutines, reached with call: their exit /b goes back to the line that called them, not out of the file.
+BAT_SUBROUTINES = {":try", ":find_python", ":get_uv", ":managed"}
+
+
+def test_the_windows_launcher_works_from_a_folder_on_a_network_share():
+    # cmd can't be in a folder on a network share (\\server\share): "cd /d" there fails, and the launcher would run in
+    # C:\Windows, where there is no CloseDesk. Windows names a mapped drive (H:) so to the shortcut and the window, which
+    # open CloseDesk.bat by that name when the window can't open. pushd lends the folder a drive letter instead.
+    text = (ROOT / "CloseDesk.bat").read_bytes().decode("ascii")
+    lines = text.split("\r\n")
+    code = [line.strip() for line in lines if line.strip() and not line.strip().lower().startswith("rem")]
+    assert not any(line.lower().startswith("cd ") for line in code), "cd can't go into a folder on a network share"
+    assert 'pushd "%~dp0"' in code and code.index('pushd "%~dp0"') < code.index("set /a TRIES=0")
+    # Every way out of the file gives the drive letter back (popd), or a letter is used up at each start.
+    section, ways_out = "", []
+    for at, line in enumerate(code):
+        if line.startswith(":") and " " not in line:
+            section = line
+        if "exit /b" in line and section not in BAT_SUBROUTINES:
+            ways_out.append(at)
+            before = " ".join(code[max(0, at - 3) : at]) + " " + line.split("exit /b")[0]
+            assert "popd" in before, f"{line!r} (after {section or 'the start'}) leaves without popd"
+    assert len(ways_out) >= 9, ways_out
+    # CloseDesk-Update.bat doesn't go into the folder itself: it runs CloseDesk.bat by its whole path, which does.
+    update = (ROOT / "CloseDesk-Update.bat").read_bytes().decode("ascii")
+    assert "cd /d" not in update and 'call "%~dp0CloseDesk.bat" --update' in update
 
 
 @pytest.mark.browser

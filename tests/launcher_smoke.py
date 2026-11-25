@@ -324,6 +324,34 @@ def stop(process: subprocess.Popen) -> None:
         process.kill()
 
 
+def drive_letters() -> set[str]:
+    """The drive letters Windows has now (a network folder pushd lent a letter to among them)."""
+    return {letter for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.exists(f"{letter}:\\")}
+
+
+def from_network_share(folder: Path) -> None:
+    """CloseDesk.bat opened by the name Windows gives a mapped network drive (\\\\server\\share\\...), as the shortcut
+    and the window open it where the window can't open: cmd can't be in such a folder, so CloseDesk.bat has to lend
+    it a drive letter (pushd), and give it back as it ends. Here this computer's own C: drive, as a network share.
+    (The environment was made under C:\\, so this start puts the folder right for its new name first.)"""
+    local = folder.resolve()
+    share = Path(f"\\\\localhost\\{local.drive[0]}$") / local.relative_to(local.anchor)
+    if not share.is_dir():
+        raise SystemExit(f"FAILED: this computer's C: drive can't be reached as the network share {share}")
+    before = drive_letters()
+    # Started in that folder, as Windows starts it from the shortcut: cmd says it can't be in it, and works elsewhere.
+    done = subprocess.run(
+        ["cmd", "/c", str(share / "CloseDesk.bat"), "--check"], cwd=share, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, errors="replace", timeout=1500,
+    )
+    print(f"--- CloseDesk.bat --check from {share}: exit {done.returncode}\n{done.stdout}", flush=True)
+    assert done.returncode == 0 and "Everything CloseDesk needs is in order." in done.stdout, done.stdout
+    assert "can't open file" not in done.stdout, done.stdout
+    left = drive_letters() - before
+    assert not left, f"CloseDesk.bat didn't give back the drive letter it lent the network folder: {sorted(left)}"
+    print(f"--- CloseDesk.bat works from a network share ({share}), and gave back the drive letter it used", flush=True)
+
+
 def install_manager_py(work: Path, folder: Path) -> None:
     """Windows' Python install manager has its own py.exe, which ends below 0 for a version it hasn't got. The
     launcher took that for a Python that runs and stopped on "No runtime installed that matches 3.12". A py.exe
@@ -951,6 +979,8 @@ def main() -> int:
     finally:
         stop(process)
 
+    if WINDOWS:
+        from_network_share(folder)
     if WINDOWS and not own:
         install_manager_py(work, folder)
 
